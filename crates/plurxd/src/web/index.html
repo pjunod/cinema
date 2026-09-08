@@ -8027,6 +8027,13 @@ function qualityLabel(){
 }
 
 async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttempt, retryIntent){
+  // Live TV holds a physical tuner and, since the dock, keeps holding it on
+  // every other route. Starting a film used to be the moment it was released
+  // (the route change stopped it); now the dock survives, so two pictures
+  // play at once and the tuner is held behind a modal with no way to reach
+  // its Stop button. `watchLiveTv` closes an open film for the same reason —
+  // this is the missing half of that pair.
+  if(typeof LIVE_TV_LEASE!=="undefined"&&(LIVE_TV_LEASE.current||LIVE_TV.starting)) stopLiveTv().catch(()=>{});
   const openAttempt=reservedOpenAttempt||PLAY_OPEN_GATE.begin("open");
   const openIsCurrent=()=>PLAY_OPEN_GATE.current(openAttempt);
   const predecessor=PLAYER?.mediaPredecessor||PLAYER;
@@ -13665,7 +13672,7 @@ function playbackPanel(settings){
 }
 // Live TV owns its own media element and capability. It never enters PLAYER,
 // file progress, playback-control, watched state, autoskip, or Trakt.
-const LIVE_TV={channels:[],serial:0,hls:null,timer:null,polling:false,lastChannel:null,cleanupMarker:null,unplayedSince:null,lastPosition:0};
+const LIVE_TV={channels:[],serial:0,hls:null,timer:null,polling:false,lastChannel:null,cleanupMarker:null,unplayedSince:null,lastPosition:0,starting:null};
 function liveTvNow(){
   return performance.now();
 }
@@ -13770,6 +13777,16 @@ async function viewLiveTv(generation=PAGE_RENDER_GENERATION){
   // The guide is the second read and never gates the first: the page is
   // usable, and a channel is tunable, before it answers.
   loadLiveTvGuide(generation,route);
+  // Everything on this page is a statement about the present tense — the red
+  // now line, every progress bar, "18 min left", which programme is "on now".
+  // Without a tick they were all frozen at first paint, so a page left open
+  // kept insisting a programme that ended an hour ago was still on. A minute
+  // is the resolution the page actually displays; it repaints from state and
+  // fetches nothing.
+  setPageTimer(()=>{
+    if(location.hash!==route) return;
+    renderLiveTvChannels();
+  },60000,generation);
 }
 function liveTvHost(){
   return document.getElementById("live-tv-host");
@@ -13842,7 +13859,10 @@ function liveTvSetMode(mode){
 // the existing watchdogs.
 function liveTvLeaveRoute(){
   const host=liveTvHost(); if(!host) return;
-  if(LIVE_TV_LEASE.current){ liveTvSetMode("dock"); return; }
+  // `LIVE_TV.starting` matters as much as a current lease: during the start
+  // POST there is no `current` yet, and hiding the host here left a tuner
+  // about to be granted with nowhere to appear and no Stop control.
+  if(LIVE_TV_LEASE.current||LIVE_TV.starting){ liveTvSetMode("dock"); return; }
   host.hidden=true;
 }
 function liveTvInPip(){
@@ -13949,10 +13969,22 @@ function liveTvListMarkup(visible,selected){
     </div>
   </div>`;
 }
+function liveTvGridWindow(){
+  const slot=liveTvSlotSeconds(), now=liveTvNowSeconds();
+  const start=Math.floor(now/slot)*slot;
+  return {start,end:start+8*slot};
+}
+/// The layout the grid is currently drawn from. A click handler must resolve
+/// its cell through this, not through the guide document: the two arrays are
+/// different lengths whenever the server sends backfill, which it always does.
+function liveTvGridLayout(){
+  const visible=liveTvVisible();
+  return PlurxLiveTv.gridLayout(LIVE_TV.guide,visible,liveTvGridWindow(),liveTvNowSeconds(),
+    liveTvSlotSeconds(),liveTvPxPerSlot());
+}
 function liveTvGridMarkup(visible,selected){
   const slot=liveTvSlotSeconds(), px=liveTvPxPerSlot(), now=liveTvNowSeconds();
-  const start=Math.floor(now/slot)*slot;
-  const window={start,end:start+8*slot};
+  const window=liveTvGridWindow();
   const layout=PlurxLiveTv.gridLayout(LIVE_TV.guide,visible,window,now,slot,px);
   const times=PlurxLiveTv.gridSlots(window,slot).map(at=>
     `<div class="t" style="width:${px}px">${esc(liveTvClock(at))}</div>`).join("");
@@ -13993,6 +14025,23 @@ function renderLiveTvChannels(){
   const visible=liveTvVisible();
   const selected=liveTvChannelById(LIVE_TV.selected)||null;
   mount.innerHTML=liveTvView()==="grid"?liveTvGridMarkup(visible,selected):liveTvListMarkup(visible,selected);
+  // The toolbar carries the state of both switches and the channel count, and
+  // it was painted once at first render — so pressing List/Grid or
+  // All/Favorites changed the body while the control kept showing, to a
+  // sighted user and to a screen reader alike, the option that was NOT chosen.
+  const head=document.getElementById("live-tv-toolbar");
+  if(head){
+    // Repainting replaces the search field, and this runs on every keystroke,
+    // so carry the caret across or typing loses focus after one character.
+    const active=document.activeElement;
+    const searching=active&&active.id==="live-tv-search";
+    const caret=searching?active.selectionStart:null;
+    head.innerHTML=liveTvToolbar();
+    if(searching){
+      const next=document.getElementById("live-tv-search");
+      if(next){ next.focus(); try{ next.setSelectionRange(caret,caret); }catch(_){} }
+    }
+  }
   liveTvWireSlot();
   liveTvPaint();
 }
@@ -14019,9 +14068,14 @@ function liveTvSelect(id){
 }
 function liveTvGridCell(channelId,index,airing){
   if(airing){ liveTvSelect(channelId); return; }
-  const source=(LIVE_TV.guide&&LIVE_TV.guide.channels||[]).find(entry=>entry.id===channelId);
-  const row=source&&source.programmes?source.programmes[index]:null;
-  liveTvPopover(row,channelId);
+  // Index into the SAME array the cell came from. `gridLayout` clips to the
+  // drawn window while the server deliberately ships an hour of backfill, so
+  // indexing the unclipped `programmes` was reliably off by however many
+  // finished rows the server sent — every popover showed the wrong programme.
+  const layout=liveTvGridLayout();
+  const row=layout&&layout.rows?layout.rows.find(entry=>entry.channel&&entry.channel.id===channelId):null;
+  const cell=row&&row.cells?row.cells[index]:null;
+  liveTvPopover(cell?cell.programme:null,channelId);
 }
 // A future cell gets details and no actions. There is no DVR behind this, so
 // offering "record" or "remind me" would be offering something that does not
@@ -14127,15 +14181,40 @@ function liveTvGuideSheet(){
 function liveTvInputState(){
   const host=liveTvHost();
   if(!host||host.hidden) return null;
-  if(host.dataset.mode!=="full") return "page";
-  return host.classList.contains("idle")?"hidden":"overlay";
+  if(host.dataset.mode==="full") return host.classList.contains("idle")?"hidden":"overlay";
+  // The contract's `page` state is "inline on the Live TV page". A dock on
+  // some other route is not that, and treating it as `page` claimed Space
+  // application-wide: every button a keyboard user reached anywhere in the app
+  // went dead while a session was docked, and the film player fought the dock
+  // over the same key. Off the route and out of fullscreen, Live TV owns no
+  // keys at all — its own controls are still clickable and focusable.
+  if(location.hash!=="#/live-tv") return null;
+  // A modal owns the keyboard while it is open, exactly as handlePlayerKeydown
+  // requires for the finite player.
+  const modal=document.getElementById("modal");
+  if(modal&&!modal.hidden) return null;
+  return "page";
+}
+/// True where a key press is the element's own activation, not ours to take.
+/// `preventDefault` on Space over a focused button suppresses the activation
+/// click the browser would synthesise, which is how the overlay's own Mute,
+/// PiP, Guide and Exit buttons became unusable by keyboard.
+function liveTvTargetOwnsKey(target,key){
+  if(!target||!target.closest) return false;
+  if(key!=="Enter"&&key!==" ") return false;
+  return !!target.closest("button,a[href],select,textarea,input,summary,[role=button],[role=option],[contenteditable=''],[contenteditable=true]");
 }
 function liveTvInputSurface(){
   return window.matchMedia&&window.matchMedia("(pointer:coarse)").matches?"touch":"desktop";
 }
 function liveTvChangeChannel(delta){
   const visible=liveTvVisible();
-  const id=PlurxLiveTv.adjacentChannel(visible,LIVE_TV.selected,delta);
+  // Step from where the held key has already got to, not from the channel
+  // still on screen. Reading `selected` on every repeat made ten presses
+  // resolve to the one adjacent channel: the coalesce was right, the
+  // accumulator was missing, and surfing by holding the key was impossible.
+  const from=LIVE_TV.pendingChannel||LIVE_TV.preview||LIVE_TV.selected;
+  const id=PlurxLiveTv.adjacentChannel(visible,from,delta);
   if(!id) return;
   // Coalesce: a held key must be one tuner start, not ten. The contract's
   // 350 ms of stillness is the whole guardrail against a channel-surf storm.
@@ -14143,6 +14222,7 @@ function liveTvChangeChannel(delta){
   clearTimeout(LIVE_TV.channelTimer);
   LIVE_TV.channelTimer=setTimeout(()=>{
     const pending=LIVE_TV.pendingChannel; LIVE_TV.pendingChannel=null;
+    LIVE_TV.preview=null;
     if(pending) liveTvSelect(pending);
   },PlaybackPolicy.liveContractTiming("channel_coalesce_ms"));
   LIVE_TV.preview=id; liveTvPaint();
@@ -14180,6 +14260,7 @@ function liveTvKeydown(event){
   const state=liveTvInputState();
   if(state===null) return;
   if(event.target&&/^(INPUT|TEXTAREA|SELECT)$/.test(event.target.tagName)) return;
+  if(liveTvTargetOwnsKey(event.target,event.key)) return;
   const hotkey=PlaybackPolicy.liveHotkey(event.key);
   if(hotkey&&state!=="page"){
     event.preventDefault();
@@ -14272,24 +14353,39 @@ async function watchLiveTv(index){
   const channel=LIVE_TV.channels[index];
   if(!channel||PlurxLiveTv.channelView(channel).disabled||location.hash!=="#/live-tv") return;
   const serial=++LIVE_TV.serial, generation=PAGE_RENDER_GENERATION;
-  const current=()=>serial===LIVE_TV.serial&&generation===PAGE_RENDER_GENERATION&&location.hash==="#/live-tv";
+  // Two different questions, and conflating them is what stopped the tuner
+  // watchdog the moment the picture docked. `owned` asks "is this still the
+  // session I started" — the only thing the keepalive, the status poll and the
+  // 30-second no-progress release should ever depend on, because they own a
+  // physical tuner and the tuner does not care which route is showing.
+  // `onPage` additionally asks whether this render is still the one on screen,
+  // and gates writes into page DOM that no longer exists.
+  const owned=()=>serial===LIVE_TV.serial;
+  const onPage=()=>owned()&&generation===PAGE_RENDER_GENERATION&&location.hash==="#/live-tv";
+  const current=onPage;
   detachLiveTvMedia();
   if(PLAYER&&PLAYER.fileId) closePlayer();
   LIVE_TV.lastChannel=index; liveTvMessage(`Starting ${channel.guide_number} · ${channel.guide_name}…`);
+  LIVE_TV.starting=serial;
   try{
     const info=await LIVE_TV_LEASE.start(channel.id);
-    if(!info||!current()) return;
+    // Deliberately `owned`, not `onPage`. Navigating away during the ~45 s
+    // start window used to abandon the reply: the lease landed with no media,
+    // no poll and no keepalive attached, and the tuner was held with nothing
+    // on screen able to release it. A start that completes is always wired up;
+    // if the route moved on, it is wired up into the dock.
+    if(!info||!owned()) return;
     const video=document.getElementById("live-tv-video");
     LIVE_TV.unplayedSince=liveTvNow(); LIVE_TV.lastPosition=0; LIVE_TV.lastFrames=0;
     LIVE_TV.selected=channel.id;
-    liveTvShowHost();
+    if(onPage()) liveTvShowHost(); else liveTvSetMode("dock");
     // Ignore the wire URL: the capability only grants same-origin live resources.
     const playlist=API+`/live-tv/sessions/${encodeURIComponent(info.session_id)}/index.m3u8`;
-    const play=()=>{ if(current()) video.play().then(()=>{ if(current()) liveTvMessage("Playing live"); }).catch(()=>{ if(current()) liveTvMessage("Ready — press Play live within 30 seconds to start audio and video."); }); };
+    const play=()=>{ if(owned()) video.play().then(()=>{ if(owned()) liveTvMessage("Playing live"); }).catch(()=>{ if(owned()) liveTvMessage("Ready — press Play live within 30 seconds to start audio and video."); }); };
     const failed=async error=>{
-      if(!current()) return;
+      if(!owned()) return;
       try{ await LIVE_TV_LEASE.status(); }catch(typed){ error=typed; }
-      if(!current()) return;
+      if(!owned()) return;
       liveTvFailure(error);
       stopLiveTv().catch(()=>liveTvMessage("Stream stopped. Owner cleanup is unconfirmed; retry Stop before opening another channel."));
     };
@@ -14305,7 +14401,7 @@ async function watchLiveTv(index){
       video.src=playlist; play();
     }else{ await failed({code:"codec_unsupported"}); return; }
     LIVE_TV.timer=setInterval(async()=>{
-      if(!current()||LIVE_TV.polling) return;
+      if(!owned()||LIVE_TV.polling) return;
       LIVE_TV.polling=true;
       try{
         // Decoded frames, not position. A live-window slide, a gap jump or a
@@ -14333,7 +14429,8 @@ async function watchLiveTv(index){
       }catch(e){ await failed(e); }
       finally{ LIVE_TV.polling=false; }
     },10000);
-  }catch(e){ if(current()) liveTvFailure(e); }
+  }catch(e){ if(onPage()) liveTvFailure(e); }
+  finally{ if(LIVE_TV.starting===serial) LIVE_TV.starting=null; }
 }
 function resumeLiveTv(){
   const video=document.getElementById("live-tv-video");
@@ -14422,6 +14519,16 @@ function developerPanel(settings){
       ${setCardFoot("saveExperimental")}`);
   return `${setHead("Developer","Switches that are off on purpose — previews, unfinished halves, and anything that costs more than it looks. Nothing here is needed for ordinary playback.")}${transportRecovery}${liveTvSettingsCard(settings)}${liveTvGuideCard(settings)}${preview}${prepared}${experimental}`;
 }
+// The unsaved state of the guide panel. `null` means "no edit yet, show what
+// is saved"; a value means the operator has chosen something the server has
+// not been told about.
+const LIVE_TV_GUIDE_DRAFT={source:null,url:null,checked:null};
+function liveTvGuideSourceDraft(value){
+  const url=document.getElementById("ltgurl");
+  if(url) LIVE_TV_GUIDE_DRAFT.url=url.value;
+  LIVE_TV_GUIDE_DRAFT.source=value;
+  renderSettings();
+}
 function liveTvGuideCard(s){
   // The guide's own enable section. Everything here is advisory: it says what
   // has to be true for a source to work and whether it is true right now, and
@@ -14430,30 +14537,47 @@ function liveTvGuideCard(s){
   // and changes no playback — a wrong setting leaves the rows blank, nothing
   // more. (Keep this comment inside the body: a leading comment lands in the
   // previous function's slice in tests/web/settings-sections.test.js.)
-  const source=s.live_tv_guide_source||"off";
+  // The dropdown edits a draft, not the saved settings. `onchange` repaints
+  // this panel from `SETTINGS_DATA`, so reading the saved value here snapped
+  // the control straight back and the XMLTV URL field — which only exists
+  // while the draft says xmltv — could never be reached at all.
+  const source=(LIVE_TV_GUIDE_DRAFT.source!==null?LIVE_TV_GUIDE_DRAFT.source:s.live_tv_guide_source)||"off";
   const on=source!=="off";
   const pill=on?`<span class="pill acc">${source==="xmltv"?"XMLTV":"HDHomeRun guide"}</span>`:`<span class="pill">Off</span>`;
   const opt=(value,label)=>`<option value="${value}"${source===value?' selected':''}>${label}</option>`;
+  // The panel said "Checking…" forever because nothing ever checked. Do it
+  // once per settings render — not on every draft keystroke, since readiness
+  // builds a guide document on the owner.
+  const renderId=typeof PAGE_RENDER_GENERATION==="undefined"?null:PAGE_RENDER_GENERATION;
+  if(renderId!==null&&LIVE_TV_GUIDE_DRAFT.checked!==renderId){
+    LIVE_TV_GUIDE_DRAFT.checked=renderId;
+    queueMicrotask(()=>{ const mount=document.getElementById("ltgready"); if(mount&&mount.isConnected) checkLiveTvGuide(); });
+  }
   return setCard(`${cardHead("Programme guide","What is on each channel now and next. Read-only: no recording, no reminders, no scheduling.",pill)}
     <div class="hint"><b>This is the first outbound internet request the tuner owner makes on your behalf</b>, which is why it is off until you turn it on. The HDHomeRun guide reads your device's <code>DeviceAuth</code> fresh at each refresh, sends it to <code>api.hdhomerun.com</code> over TLS, and forgets it — plurx never stores, logs or relays that credential, and only the owner node ever holds it. XMLTV fetches the one URL you give and nothing else.</div>
     <div class="setfields">
-      <div><label for="ltgsrc">Source</label><select id="ltgsrc" onchange="renderSettings()">${opt("off","Off")}${opt("hdhomerun","HDHomeRun guide")}${opt("xmltv","XMLTV")}</select></div>
-      ${source==="xmltv"?`<div style="flex:1 1 340px"><label for="ltgurl">XMLTV URL</label><input id="ltgurl" value="${esc(s.live_tv_xmltv_url||"")}" placeholder="https://example/guide.xml.gz" maxlength="1024"><div class="hint">Plain or gzipped. Matched to your lineup by display name, then LCN, then callsign.</div></div>`:""}
+      <div><label for="ltgsrc">Source</label><select id="ltgsrc" onchange="liveTvGuideSourceDraft(this.value)">${opt("off","Off")}${opt("hdhomerun","HDHomeRun guide")}${opt("xmltv","XMLTV")}</select></div>
+      ${source==="xmltv"?`<div style="flex:1 1 340px"><label for="ltgurl">XMLTV URL</label><input id="ltgurl" value="${esc(LIVE_TV_GUIDE_DRAFT.url!==null?LIVE_TV_GUIDE_DRAFT.url:(s.live_tv_xmltv_url||""))}" placeholder="https://example/guide.xml.gz" maxlength="1024"><div class="hint">Plain or gzipped. Matched to your lineup by display name, then LCN, then callsign.</div></div>`:""}
       <div><label for="ltghours">Look ahead</label><select id="ltghours">${[4,8,12,24,48,72].map(n=>`<option value="${n}"${n===Number(s.live_tv_guide_hours)?' selected':''}>${n} hours</option>`).join("")}</select></div>
     </div>
     <h2 class="section">What must be true to enable it safely</h2>
     <div id="ltgready" aria-live="polite"><p class="muted">Checking…</p></div>
     <div class="err" id="ltgerr" role="alert"></div>
+
     ${setCardFoot("saveLiveTvGuide")}
     <div class="row"><button class="ghost sm" onclick="checkLiveTvGuide(this)">Check the guide</button><button class="ghost sm" onclick="refreshLiveTvGuide(this)">Refresh now</button><a href="#/live-tv">Browse channels</a></div>`,{id:"live-tv-guide-settings"});
 }
 async function saveLiveTvGuide(button){
   const source=document.getElementById("ltgsrc").value;
   const url=document.getElementById("ltgurl");
-  return liveTvSettingsWrite({live_tv_config_generation:SETTINGS.live_tv_config_generation,
+  const saved=await liveTvSettingsWrite({live_tv_config_generation:SETTINGS.live_tv_config_generation,
     live_tv_guide_source:source,
     live_tv_xmltv_url:url?url.value.trim():(SETTINGS.live_tv_xmltv_url||""),
-    live_tv_guide_hours:Number(document.getElementById("ltghours").value)},button);
+    live_tv_guide_hours:Number(document.getElementById("ltghours").value)},button,"ltgerr");
+  // Only a save that landed retires the draft; a refused one keeps what the
+  // operator typed so they can correct it rather than retype it.
+  if(saved){ LIVE_TV_GUIDE_DRAFT.source=null; LIVE_TV_GUIDE_DRAFT.url=null; }
+  return saved;
 }
 function liveTvGuideReadyView(r){
   // Advisory rendering: a red row is a sentence, never a disabled Save.
@@ -14505,21 +14629,26 @@ function liveTvSettingsCard(s){
     <div class="row"><button class="ghost sm" onclick="checkLiveTvReadiness(this)">Check saved configuration</button><button id="ltenable" class="${enabled?'ghost':'primary'} sm" onclick="setLiveTvEnabled(${!enabled},this)">${enabled?"Disable Live TV":"Enable Live TV"}</button><a href="#/live-tv">Browse channels</a></div>
     ${barrier?`<div class="card"><h3>Previous owner cleanup required</h3><p>Owner <strong>${esc(s.live_tv_transition_from_owner_node_id)}</strong> has not confirmed cleanup before generation ${esc(s.live_tv_transition_drain_before)}. Save again to retry authenticated cleanup. An unreachable node is not proof that its tuner streams stopped.</p><label class="tog" for="ltfenced"><span>I have stopped or powered off the previous owner and prevented it from restarting until it can synchronize the current configuration.</span><input id="ltfenced" type="checkbox"></label><button class="ghost sm" onclick="recoverLiveTvOwner(this)">Confirm physical fencing — keep Live TV disabled</button></div>`:""}`,{id:"live-tv-settings"});
 }
-async function liveTvSettingsWrite(body,button){
-  if(!ME||!ME.is_admin) return;
+async function liveTvSettingsWrite(body,button,errorId){
+  if(!ME||!ME.is_admin) return false;
   const generation=PAGE_RENDER_GENERATION;
   if(button) button.disabled=true;
-  const error=document.getElementById("lterr"); if(error) error.textContent="";
+  // The caller names its own error slot: a failed guide save was reporting
+  // itself under the tuner card, which is a different card about a different
+  // setting.
+  const error=document.getElementById(errorId||"lterr"); if(error) error.textContent="";
   try{
     const result=await api("/settings",{method:"PUT",body,signal:AbortSignal.timeout(45000)});
     if(settingsCurrent(generation,"developer")){
       cacheSettings(result); renderSettings(); toast("Live TV settings saved");
     }
+    return true;
   }catch(e){
     if(settingsCurrent(generation,"developer")){
       if(error) error.textContent=e.code==="settings_conflict"?"The configuration changed elsewhere. Reload this section before trying again.":e.message;
       if(button) button.disabled=false;
     }
+    return false;
   }
 }
 async function saveLiveTvSettings(button){

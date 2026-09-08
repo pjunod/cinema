@@ -254,6 +254,10 @@
       const programmes = source && Array.isArray(source.programmes) ? source.programmes : [];
       const cells = [];
       for (const row of programmes) {
+        // Total over a malformed guide, exactly as programmeAt is. The guide
+        // host is untrusted, and one bad row used to take the whole grid
+        // render down with a TypeError.
+        if (!row || typeof row.start !== "number" || typeof row.end !== "number") continue;
         const start = Math.max(row.start, window.start);
         const end = Math.min(row.end, window.end);
         if (!(end > start)) continue;
@@ -320,8 +324,20 @@
   function guideEnds(guide, channelId, window) {
     const channel = guideChannel(guide, channelId);
     const rows = channel && channel.programmes ? channel.programmes : [];
-    if (rows.length === 0) return window ? window.start : null;
-    const end = rows[rows.length - 1].end;
+    // No rows is not "the guide ends here" — it is a channel the guide says
+    // nothing about, which happens for every channel when the source is off.
+    // Answering window.start drew "Guide data ends 3:00 PM" on every row of an
+    // empty grid, which is a statement the page had no basis for.
+    if (rows.length === 0) return null;
+    // Take the furthest end rather than the last row's: the contract sorts
+    // programmes by start, which does not make the final end the maximum, and
+    // a feed that is out of order should not shorten the guide.
+    let end = null;
+    for (const row of rows) {
+      if (!row || typeof row.end !== "number") continue;
+      if (end === null || row.end > end) end = row.end;
+    }
+    if (end === null) return null;
     return window && end >= window.end ? null : end;
   }
 

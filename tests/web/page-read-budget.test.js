@@ -683,6 +683,7 @@ test("Live TV issues exactly two authoritative reads, and the guide never gates 
      function liveTvChannelById(){ return null; }
      function liveTvToolbar(){ return ""; }
      function renderLiveTvChannels(){}
+     function setPageTimer(){}
      function liveTvMessage(){} function liveTvFailure(){}
      ${shippedTopLevelSource("viewLiveTv")};
      ${shippedTopLevelSource("loadLiveTvGuide")};
@@ -700,19 +701,28 @@ test("Live TV docks on leaving the route instead of tearing the stream down", ()
   const leave = shippedTopLevelSource("liveTvLeaveRoute");
   const host = { hidden: false, dataset: { mode: "slot" }, style: {} };
   const modes = [];
-  const make = (playing) => new Function(
-    "document", "LIVE_TV_LEASE", "liveTvSetMode",
+  const make = (playing, starting) => new Function(
+    "document", "LIVE_TV_LEASE", "LIVE_TV", "liveTvSetMode",
     `function liveTvHost(){ return document.getElementById("live-tv-host"); }
      ${leave} return liveTvLeaveRoute;`,
   )({ getElementById: () => host }, { current: playing ? { session_id: "cap" } : null },
-    (mode) => modes.push(mode));
+    { starting: starting ? 1 : null }, (mode) => modes.push(mode));
 
-  make(true)();
+  make(true, false)();
   assert.deepEqual(modes, ["dock"], "a playing stream follows the viewer off the route");
   assert.equal(host.hidden, false);
 
-  make(false)();
-  assert.deepEqual(modes, ["dock"], "nothing playing means nothing to dock");
+  // A start still in flight has no lease yet and must dock all the same: the
+  // tuner it is about to be granted needs somewhere to appear and a Stop.
+  modes.length = 0;
+  host.hidden = false;
+  make(false, true)();
+  assert.deepEqual(modes, ["dock"], "a tuner about to be granted is not abandoned");
+  assert.equal(host.hidden, false);
+
+  modes.length = 0;
+  make(false, false)();
+  assert.deepEqual(modes, [], "nothing playing and nothing starting means nothing to dock");
   assert.equal(host.hidden, true);
 
   // And the router calls it instead of stopping, which is the whole change.
