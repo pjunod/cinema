@@ -1,9 +1,10 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M0–M3f, M4, M5a, M5b, the M5a census repair and M5c1 merged into
-the effort; M5c2 complete, M5c3 next · **Updated:** 2026-09-08 ·
-**Integration branch:** `effort/decoder-selection-recovery` · **Next task
-base:** effort head `67216de972c1e39f1ef6aefb2541cf542619cb0c`
+**Status:** M0–M3f, M4, M5a, M5b, the M5a census repair, M5c1, M5c2, M5c3 and
+M7a merged into the effort, and current `main` merged in ahead of promotion;
+M5 complete, M7 next · **Updated:** 2026-09-08 · **Integration branch:**
+`effort/decoder-selection-recovery` · **Next task base:** effort head
+`08086371180ae9ae89063ec0946e42bb355a8d60`
 
 The effort was created from Forgejo `main` at
 `4a6a0268bd314ad5587cb3037f12ebd992c0074e`. The original M0 research baseline was `main` at
@@ -2681,6 +2682,111 @@ produced under the restriction is a different artifact from the one produced
 without it, and the cache must not serve one for the other. It also changes
 `TranscodeResourceEstimate::of`, because forcing software decode can rewrite
 the renderer — so admission has to be re-asked, not adjusted.
+
+## M5c3, merged: the budget is spent, and a second recovery is refused
+
+Slices three and four landed together as [#156](http://192.168.4.7:3000/noirr/plurx/pulls/156),
+because separating them ships a reserve with no settle — a row left `reserved`
+withholds every later alternate for that playback, and the schema never deletes
+one.
+
+Where the budget is spent, and where it is asked about, are deliberately not
+the same place. The alternate carries the ledger and nothing else does: the
+colour-safe retry answers "this encode route stopped" rather than "this source
+did not decode", and `PrepublicationCopyRetry` has no field to carry one at
+all, which is how the copy path is excluded — structurally, rather than by a
+check a later edit could forget. A copy attempt's diagnostic identity is
+`copy:<session>` rather than a plan digest, so the store would refuse its
+reservation anyway; being unable to write the call is better than finding out
+at the store, in the middle of a recovery.
+
+The *asking* happens at session start, because the actor chooses between the
+two frozen recipes and cannot ask the store: it is synchronous and holds no
+handle. So "has this playback already used its one automatic recovery" is
+answered where a store and the identity are both in hand, by not giving the
+actor an alternate to name. A reopen of a playback that already recovered then
+reaches M5c1's permanent verdict on its first qualified fault — the honest
+terminal answer this effort exists to produce — instead of being told to retry
+and then failing at install. A row in any state withholds; so does an
+unreadable budget, because an unreadable budget is not an unspent one.
+
+That read grants nothing. The grant is the conditional insert the executor
+makes, before `begin_child_replacement` — the point after which the session has
+no producer until a new one is installed. Reserving after the predecessor was
+terminated would turn "this playback already recovered" into "this playback has
+nothing playing".
+
+Settlement is on both ways out and neither returns the budget: `Installed` when
+the alternate is running, `Exhausted` when the transaction failed, because a
+recovery that was reserved and then failed to install has been attempted.
+
+**Two known gaps, both fail-closed and both recorded rather than papered over.**
+A cancelled executor leaves a `reserved` row nothing settles, so that playback
+gets no further automatic recovery; the alternative is a refund. And a session
+with no durable identity — a legacy process-local start, a relayed worker
+start, a session predating the epoch column — keeps the in-process one-shot it
+has always had, because withholding recovery from those would be a regression
+rather than a fix.
+
+The review that shaped slice two is worth keeping. `bool` collapsed six store
+outcomes into one fact, and the two a caller must not confuse are `Spent` and
+`Mismatched`: a live reservation read as a spent budget abandons a `reserved`
+row that nothing will ever settle, and a spent budget read as a live one hands
+out the second recovery the ledger exists to make impossible. `reserve` now
+answers `Held`, `Spent`, `Mismatched` or `Unavailable`, and `settle` answers
+`Settled`, `NotOurs`, `Absent` or `Conflicting`. `NotOurs` in particular is not
+a tidier `None`: the store fences settlement on the reserving incarnation so a
+stale holder cannot write an outcome over the real owner's, and rendering that
+fence as "there was nothing to settle" is what makes a split brain invisible to
+whoever has to find it.
+
+## The effort has merged current `main`, ahead of promotion
+
+[#164](http://192.168.4.7:3000/noirr/plurx/pulls/164), Paul's call, so the
+divergence is closed rather than met at the promotion gate.
+
+The M6 Android client had merged *into this effort* as #118, #129, #131 and
+#134, which was a mistake — the Android half of M6 has nothing to do with
+decoder selection, and the Apple and web halves of the same brief went straight
+to `main`. It was then ported to `main` as #136 and #140 and reconciled against
+`main`'s restructured seek path, capture-ownership fencing and reporter
+wrapper. Reviewing that reconciliation as a *change* rather than as a move
+found three defects that existed only in the copy on this branch: a teardown
+acknowledgement discarded by the line after it was sent, a committed
+replacement dropping the listener that settles a seek, and a reopen dropping
+the acknowledgement of the preparation it had just abandoned. All three are
+silent, and every test on this branch passed with them in. So all seven Android
+files, the wire-conformance test and `tests/client-fixes.toml` took `main`'s
+bytes; the five client-fix anchor rows for this branch's own Android commits
+were appended back, because those commits are reachable from here and
+`history-check` requires them.
+
+**The merge found a collision neither branch could see alone.** Both had
+independently appended a v48 and a v49 to the SQLite migration list, and a 28
+and a 29 to the Hiqlite chain. Both lists are positional and append-only, so
+two branches cannot both hold a version, and the pair already on `main` is the
+pair that cannot move: `main`'s desired-selection row and pointer fence keep
+48/49 and 28/29, and this effort's producer-recovery ledger and recovery epoch
+became **v50/v51 and 30/31**. The Hiqlite sources moved with them, the v43
+downgrade fixture winds all four back newest-first with `main`'s
+trigger-before-table ordering preserved, and `DROPPED_BY_THE_FIXTURE` carries
+both parents' entries. Left unmerged until promotion day, this would have been
+a broken migration chain discovered at the worst moment.
+
+Every count both parents moved is now read off the merged tree rather than
+carried from either — the replicated store's transaction-boundary assertion,
+the Store method inventory, and eight symbol counts in the rolling-producer
+ownership ledger. Both parents' review comments are kept in full: what each
+established about an owner is still true, and only the totals were ever
+parent-specific.
+
+`ProducerDecisionReason` went 14 → 16 here and 14 → 19 on `main`, so **21** on
+the merge, with **four** permanent rather than three: `main`'s `EngineChanged`,
+a verdict about this process, joins this effort's `SourceDecodeFailed` and the
+two long-standing verdicts about the source. `yields_to_decode_evidence` now
+names `main`'s five VOD plan reasons among its exclusions — a decode fault
+latched under one of them is evidence about a plan this node is no longer
+running.
 
 ## M7a — the enable section, and the prerequisite that is not met
 
