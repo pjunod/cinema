@@ -20,11 +20,62 @@ canonical_directory() {
 
 docker_root_raw=$(docker info --format '{{.DockerRootDir}}') \
   || die "cannot read the Docker root directory"
-docker_root=$(canonical_directory "$docker_root_raw") \
-  || die "cannot resolve Docker root directory: $docker_root_raw"
+# The Docker root is root:root 0710 on a stock engine, so a runner that is in
+# the `docker` group can talk to the daemon and still not enter its directory.
+# `gha-mbp-linux-arm-01` proved it: `cannot resolve Docker root directory:
+# /var/lib/docker`, and the package lane failed after its build had succeeded.
+#
+# Failing there would be the wrong trade. The budget is the bound that matters
+# and BuildKit enforces it without anyone reading the filesystem; only the
+# free-space reserve needs `df`, and a reserve that cannot be measured is
+# reported as unmeasured rather than guessed or fatal.
+if docker_root=$(canonical_directory "$docker_root_raw"); then
+  filesystem_readable=true
+else
+  filesystem_readable=false
+  docker_root=$docker_root_raw
+fi
 
 read_disk() {
   df -Pk "$docker_root" | awk 'NR == 2 { print $2, $4 }'
+}
+
+# buildx changed what `Size` means in its JSON. It was a byte count; on 0.30.1,
+# which is what this fleet runs, it is a human-readable string --
+# `"Size":"8.192kB"` -- and the old byte-count check rejected every record with
+# `BuildKit returned an invalid disk-usage size`, which is how the arm64 package
+# lane failed after its build had succeeded. Nothing caught it because this
+# script had never run: the step is skipped unless the builder is named, and
+# until now no builder ever was.
+#
+# So both spellings are read, and the units are buildx's own -- decimal for kB
+# through TB, binary only for the explicit KiB/MiB/GiB forms.
+size_to_bytes() {
+  local raw factor value
+  raw=$1
+  if [[ "$raw" =~ ^[0-9]+$ ]]; then
+    printf '%s' "$raw"
+    return
+  fi
+  [[ "$raw" =~ ^([0-9]+(\.[0-9]+)?)[[:space:]]*([kKMGTP]?i?B)$ ]] \
+    || die "BuildKit returned an invalid disk-usage size: $raw"
+  value=${BASH_REMATCH[1]}
+  case "${BASH_REMATCH[3]}" in
+    B) factor=1 ;;
+    kB|KB) factor=1000 ;;
+    MB) factor=1000000 ;;
+    GB) factor=1000000000 ;;
+    TB) factor=1000000000000 ;;
+    PB) factor=1000000000000000 ;;
+    KiB) factor=1024 ;;
+    MiB) factor=1048576 ;;
+    GiB) factor=1073741824 ;;
+    TiB) factor=1099511627776 ;;
+    PiB) factor=1125899906842624 ;;
+    *) die "BuildKit returned an unrecognized disk-usage unit: $raw" ;;
+  esac
+  awk -v value="$value" -v factor="$factor" \
+    'BEGIN { printf "%.0f", (value * factor) }'
 }
 
 read_builder_bytes() {
@@ -36,38 +87,70 @@ read_builder_bytes() {
     [ -n "$line" ] || continue
     case "$line" in
       *'"Size":"'*) size=${line#*'"Size":"'}; size=${size%%\"*} ;;
+      *'"Size":'*) size=${line#*'"Size":'}; size=${size%%,*}; size=${size%\}} ;;
       *) die "BuildKit returned an unrecognized disk-usage record" ;;
     esac
-    [[ "$size" =~ ^[0-9]+$ ]] \
-      || die "BuildKit returned an invalid disk-usage size"
+    size=$(size_to_bytes "$size")
     total=$((total + size))
   done <<< "$usage_json"
   echo "$total"
 }
 
-read -r filesystem_kb before_available_kb < <(read_disk)
-[[ "$filesystem_kb" =~ ^[1-9][0-9]*$ ]] \
-  || die "cannot determine the Docker filesystem size"
-[[ "$before_available_kb" =~ ^[0-9]+$ ]] \
-  || die "cannot determine free space on the Docker filesystem"
+if [ "$filesystem_readable" = true ]; then
+  read -r filesystem_kb before_available_kb < <(read_disk)
+  [[ "$filesystem_kb" =~ ^[1-9][0-9]*$ ]] \
+    || die "cannot determine the Docker filesystem size"
+  [[ "$before_available_kb" =~ ^[0-9]+$ ]] \
+    || die "cannot determine free space on the Docker filesystem"
+else
+  filesystem_kb=0
+  before_available_kb=0
+fi
 
-absolute_floor_kb=$((100 * 1024 * 1024))
+# The floor is a share of the filesystem, never a fixed size.
+#
+# It used to be a flat 100 GiB, with 20 % taking over on larger disks. The
+# runner fleet is not all large disks: the Incus guests carrying
+# `gha-m6-general-01`, `gha-nuc1-general-01` and their siblings are 78-97 GB
+# volumes, so a 100 GiB floor is larger than the entire filesystem and
+# `healthy` can never become true there. The pruner would delete every cache
+# it is permitted to delete and then fail the job regardless -- the worst of
+# both outcomes, no cache and no build.
+#
+# 20 % of the filesystem is the rule. The 10 GiB minimum stops a very small
+# runner from calling two spare gigabytes a reserve, and is itself capped at a
+# quarter of the filesystem so it can never become unsatisfiable the way the
+# flat 100 GiB was.
 percent_floor_kb=$(((filesystem_kb + 4) / 5))
-floor_kb=$absolute_floor_kb
-if [ "$percent_floor_kb" -gt "$floor_kb" ]; then
-  floor_kb=$percent_floor_kb
+minimum_floor_kb=$((10 * 1024 * 1024))
+quarter_floor_kb=$(((filesystem_kb + 3) / 4))
+if [ "$minimum_floor_kb" -gt "$quarter_floor_kb" ]; then
+  minimum_floor_kb=$quarter_floor_kb
+fi
+floor_kb=$percent_floor_kb
+if [ "$minimum_floor_kb" -gt "$floor_kb" ]; then
+  floor_kb=$minimum_floor_kb
 fi
 floor_bytes=$((floor_kb * 1024))
 budget_bytes=$((budget_gb * 1024 * 1024 * 1024))
 before_bytes=$(read_builder_bytes)
 
-docker buildx prune --builder "$builder_name" --force \
-  --max-used-space "$budget_bytes" --min-free-space "$floor_bytes"
+if [ "$filesystem_readable" = true ]; then
+  docker buildx prune --builder "$builder_name" --force \
+    --max-used-space "$budget_bytes" --min-free-space "$floor_bytes"
+else
+  docker buildx prune --builder "$builder_name" --force \
+    --max-used-space "$budget_bytes"
+fi
 
 after_bytes=$(read_builder_bytes)
-read -r _ after_available_kb < <(read_disk)
-[[ "$after_available_kb" =~ ^[0-9]+$ ]] \
-  || die "cannot determine post-prune Docker filesystem free space"
+if [ "$filesystem_readable" = true ]; then
+  read -r _ after_available_kb < <(read_disk)
+  [[ "$after_available_kb" =~ ^[0-9]+$ ]] \
+    || die "cannot determine post-prune Docker filesystem free space"
+else
+  after_available_kb=0
+fi
 
 {
   echo "### BuildKit cache"
@@ -75,12 +158,20 @@ read -r _ after_available_kb < <(read_disk)
   echo "- builder: \`$builder_name\`"
   echo "- Docker root: \`$docker_root\`"
   echo "- budget: ${budget_gb} GiB"
-  echo "- filesystem floor: ${floor_kb} KiB"
-  echo "- before: $((before_bytes / 1024 / 1024)) MiB cache, $((before_available_kb / 1024 / 1024)) GiB free"
-  echo "- after: $((after_bytes / 1024 / 1024)) MiB cache, $((after_available_kb / 1024 / 1024)) GiB free"
+  if [ "$filesystem_readable" = true ]; then
+    echo "- filesystem floor: ${floor_kb} KiB"
+    echo "- before: $((before_bytes / 1024 / 1024)) MiB cache, $((before_available_kb / 1024 / 1024)) GiB free"
+    echo "- after: $((after_bytes / 1024 / 1024)) MiB cache, $((after_available_kb / 1024 / 1024)) GiB free"
+  else
+    echo "- filesystem floor: not enforced — the Docker root is not readable by this user"
+    echo "- before: $((before_bytes / 1024 / 1024)) MiB cache"
+    echo "- after: $((after_bytes / 1024 / 1024)) MiB cache"
+  fi
 } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
 [ "$after_bytes" -le "$budget_bytes" ] \
   || die "BuildKit cache remains over its ${budget_gb} GiB budget"
-[ "$after_available_kb" -ge "$floor_kb" ] \
-  || die "Docker filesystem remains below its required reserve"
+if [ "$filesystem_readable" = true ]; then
+  [ "$after_available_kb" -ge "$floor_kb" ] \
+    || die "Docker filesystem remains below its required reserve"
+fi

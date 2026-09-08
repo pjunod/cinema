@@ -238,12 +238,23 @@ test("Playback saves per card, and each card writes only its own fields", () => 
 test("Developer is where the switches that cost something live", () => {
   const panel = new Function(
     "setHead", "setCard", "cardHead", "togRow", "setCardFoot", "esc",
-    `${shippedSource("liveTvSettingsCard")}${shippedSource("liveTvGuideCard")}${shippedSource("developerPanel")} return developerPanel;`,
+    // Joined with newlines, never bare interpolation: `shippedSource` here
+    // stops at the next `\nfunction `, so a fragment can end inside a trailing
+    // `//` comment and swallow whatever follows it.
+    [
+      shippedSource("preparedHandoffEnabled"), shippedSource("liveTvSettingsCard"),
+      shippedSource("liveTvGuideCard"),
+      shippedSource("developerPanel"), "return developerPanel;",
+    ].join("\n"),
   )(
     (title, sub) => `HEAD:${title}|${sub}`,
     (body) => `CARD[${body}]`,
     (title, sub) => `CARDHEAD:${title}|${sub || ""}`,
-    (id, label, note) => `TOG:${id}|${label}|${note}`,
+    // Every argument, because the last two are the switch's state and the
+    // handler that makes it do anything — a stub that drops them lets an inert
+    // control pass as a working one.
+    (id, label, note, checked, attrs) =>
+      `TOG:${id}|${label}|${note}|checked=${!!checked}|${attrs || ""}`,
     (fn) => `FOOT:${fn}`,
     esc,
   );
@@ -263,6 +274,29 @@ test("Developer is where the switches that cost something live", () => {
   assert.match(html, /twenty consecutive commits/);
   assert.match(html, /Android and web remain unqualified/);
   assert.match(html, /no separate hidden server flag/);
+  // The prepared card says what has to be true *and whether it is*, because
+  // a requirement an operator cannot check is a requirement they will skip.
+  // None of it gates the toggle: the switch is in the card above and this one
+  // has no input at all.
+  assert.match(html, /What must be true first, and whether it is/);
+  assert.match(html, /The server primes the successor it stages/);
+  assert.match(html, /503 media_owner_transition/);
+  assert.match(html, /nothing on this card prevents you enabling it now/);
+  // The card is advisory AND it carries the switch. Those are not in tension:
+  // the list says what enabling costs and whether each part is true, and
+  // nothing in it disables the control. A page that refuses to let an operator
+  // turn something on tells them less than one that says what will happen.
+  const preparedCard = html
+    .slice(html.indexOf("Enable prepared quality handoff"))
+    .split("Experimental delivery")[0];
+  assert.match(preparedCard, /TOG:pdp\|/, "the prepared card carries the enable switch");
+  assert.doesNotMatch(preparedCard, /FOOT:/,
+    "…and no save: the switch is this browser's, not a server setting");
+  assert.doesNotMatch(preparedCard, /disabled/,
+    "nothing in the readiness list disables it");
+  const off = panel({ playback_control_protocol_v1: false, hls_typeless_sliding: false });
+  assert.match(html, /The control endpoint is advertised<small>[\s\S]*?<span class="pill" style="color:var\(--good\)/);
+  assert.match(off, /The control endpoint is advertised<small>[\s\S]*?<span class="pill warn">not met<\/span>/);
   assert.match(html, /Enable cluster transport recovery/);
   assert.match(html, /there is no hidden production feature flag/);
   assert.match(html, /Keep a ready voter majority/);
@@ -273,6 +307,23 @@ test("Developer is where the switches that cost something live", () => {
   // transport is always compiled and automatic; this must not imply a gate.
   assert.match(html, /compiled in and activates automatically/);
   assert.doesNotMatch(html, /special build/);
+  // The switch has to be wired to something. A control that renders and does
+  // nothing is worse than no control: it reports a capability to the operator
+  // that the server never hears about.
+  assert.match(html, /TOG:pdp\|[^|]*\|[^|]*\|checked=false\|onchange="setPreparedHandoff\(this\.checked\)"/,
+    "the prepared-handoff switch reflects the stored state and sets it");
+  assert.match(html, /dual_player_preparation/,
+    "…and says which field it sets, because that is the whole of Gate A");
+  assert.match(html, /Nothing above blocks this switch/);
+  // Readiness pills, counted rather than matched, because "not met" contains
+  // "met": an assertion that only looks for the word cannot tell a met row from
+  // an unmet one, and would pass with the two renderings swapped.
+  const pills = html.match(/>(met|not met|partly met)<\/span>/g) || [];
+  const counted = (word) => pills.filter((pill) => pill === `>${word}</span>`).length;
+  assert.ok(counted("not met") >= 2,
+    "the unmet requirements say so beside the switch — the staged route has no worker");
+  assert.ok(counted("met") >= 2, "…and the ones this page checked and found true say that");
+  assert.ok(counted("partly met") >= 1, "…and a half-answered one is not rounded either way");
   assert.match(html, /HDHomeRun Live TV/);
   assert.match(html, /Save the configuration, check readiness, then enable/);
   // Readiness is advice, not a gate (2026-09-07). The card has to say so where

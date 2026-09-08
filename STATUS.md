@@ -1,8 +1,398 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-09-07 · Kept current by the working agent in the same
+**Updated:** 2026-09-08 · Kept current by the working agent in the same
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
+
+## Phase 3 is buildable today, and the first answer to that question was wrong
+
+**Documentation only, and a decision taken in Paul's absence — overrule it
+freely, the reasoning is written down so that is cheap.**
+`M6-SERVER-PRIME-HANDOFF.md` §5 asked whether to hold server-side priming for
+D6 or narrow `PREPARED_AXIS_SETS` to copy-only transitions. This session
+answered "hold for D6", an adversarial review checked the premise against the
+code rather than the prose, and it does not survive.
+
+**There is an admitted, receipted, copy-only transition, and the VOD engine
+serves it today.** `candidate_request` has three arms that leave a `Copy`
+predecessor a `Copy` — `Auto`, `Original`, and a `Manual` ask at the source
+height — and `EffectiveSelection` maps `Copy` to codec `source` on both sides,
+so no `DeliveryMethod` crossing occurs. A direct-playing session toggling
+between Auto and Original therefore crosses `{ResolutionOrBitrate}` **alone**:
+in the axis table, receipted by M5.5 on Apple at 20/20, and yielding a `Copy`
+candidate that `try_create_with_release_fence` serves, so the
+`vod_transcode_unavailable` refusal never fires. The module's own test asserts
+it returns `Prepare { ResolutionOrBitrate }`. It is a transition a viewer
+makes.
+
+So **phase 3 should be built now and proven against that**, with no new
+hardware receipt and no change to the axis table. What stays blocked on D6 is
+priming for the transition the fleet actually produces — a copy dropping to a
+transcoded rung — and building the copy-to-copy case does not front-run it: it
+means D6 lands into working machinery instead of an unbuilt phase.
+
+**How the first answer went wrong, recorded because the shape recurs.** It
+enumerated the copy-only transitions as *"`{AudioTrackOrOffset}` and a subtitle
+burn removal"* and concluded that neither has a receipt. The handoff's own
+option 2, four paragraphs above, says *"audio track, source-height
+**Original**"* — and the item quietly dropped is the one carrying the receipt.
+The substituted example is unreachable besides: `try_create_with_release_fence`
+refuses `subtitle_burn.is_some()` independently of D6, so a VOD session with a
+burn cannot exist to transition out of. **Swapping an example for the one on
+the list is how a false premise reads as true**, and it is the same family as
+the guards that could not fail: the reasoning looked careful and checked
+nothing.
+
+## The axis receipt said do not widen, and the fleet widened anyway — correctly
+
+**Documentation only.** `docs/playback-control/M6-AXIS-CASE-RESULTS.md` carries
+a live verdict — *"do not widen `PREPARED_AXIS`"*, *"do not build §3.4 on this
+evidence"* — and `PREPARED_AXIS_SETS` on `main` contains exactly the pair it
+refuses. The code is right, and nothing said so.
+
+**There were two runs on 2026-09-03 and that report is the first one.** It used
+a 30 Mbit/s shaping proxy against an 18.183 Mbit/s predecessor: 1.65x headroom,
+below the 2.0x floor `headroom_refusal` enforces, so it measured a transition
+the server would have declined anyway. The re-run on a 40 Mbit/s link, 2.20x,
+came back 20/20 clean, and `0cb370ac` admitted the pair on that. A dated
+correction now heads the file, its title and status line say superseded, and
+`docs/README.md`'s row says so too — that index is how a reader arrives.
+
+**Two things the correction is careful not to claim.** The throughput floor is
+why the run does not bear on *admission*; it is not a root cause for the eight
+failures. §8 of that report declines to name one and §4's receipts point
+elsewhere — failure tracks the commit boundary rather than the link, and every
+failed row records `Pred stalls 0`. And **the receipt for the run that admitted
+the pair is not in the folder**: it exists only in `0cb370ac`'s commit message.
+The axis table is receipt-driven by design, so that is a gap, named rather than
+filled by someone who was not there.
+
+## A prepared commit hands the viewer a session that is refused from its first request
+
+**Merged into `main` as `4c93ef29`, 2026-09-08, from
+[its pull request](http://192.168.4.7:3000/noirr/plurx/pulls/137).
+Documentation and one test comment; no runtime change.** Found while writing
+the plan for M6's missing server phase, and it is about code that has been
+merged for days rather than anything new.
+
+`commit_media_session_preparation` advances the playback pointer to the
+successor and deliberately does not publish it — the same split an activation
+makes, and the store contract is right to make it. What an activation also has
+is the caller that finishes the job: `settle_activation_predecessor` completes
+its successor's handoff once the exact predecessor accepts terminal control. A
+commit has no equivalent, so a committed successor stays at
+`MEDIA_SESSION_PUBLICATION_BLOCKED` — and **is refused on both planes from its
+very first request**, because `classify_durable_route` answers
+`OwnerTransition` for any non-zero fence and `control_owner_refusal` refuses
+control on the same predicate. The pointer moves and the viewer gets nothing.
+
+**The obvious fix is a regression, and that was established by building it.**
+The publication was written as a caller on the commit path; the whole daemon
+suite passed, clippy and rustfmt were clean, and an adversarial pass found what
+the suite could not. A committed successor has no local worker, because nothing
+primes one. Moving the row off the sentinel puts it into
+`owned_media_sessions`, and the lease loop renews only sessions that are
+*live*: `take_stale_settlement_candidates` selects exactly the inventory rows
+that are not, and `end_media_session_if_owner` ends them `replaced` **and
+deletes the playback pointer in the same transaction**. Publishing a workerless
+successor would have traded a stalled pointer for a deleted one, seconds after
+the commit instead of minutes. The sentinel was the only thing keeping the row
+out of that sweep.
+
+So the code change was withdrawn and the finding kept where it will be read:
+`preparation_executor_commits_a_staged_successor` keeps its sentinel assertion
+and now carries the whole mechanism, including the instruction not to "fix" it
+by publishing. Two further requirements the same review established are in the
+plan: `PredecessorAcknowledged` may not be asserted on a retired row while the
+predecessor's worker is still serving admitted bodies, and a publication that
+retries against the Store has to fit inside the client's four-second exchange
+budget.
+
+`docs/playback-control/M6-SERVER-PRIME-HANDOFF.md` carries the phase this was
+found under, and **the decision it waits on**: ~~the only transition M6 admits
+produces a `Transcode` recipe, and the VOD engine refuses every non-`Copy` kind
+until the D6 device measurement lands. Priming cannot be built against the
+transition the fleet actually produces. Hold it for D6, or narrow the axis set
+to copy-only and prove the transaction on those.~~ **That premise is false and
+the strike-through is deliberate — it is what this entry said, and what
+`M6-SERVER-PRIME-HANDOFF.md` §5 said, until a review checked it against the
+code. Answered 2026-09-08 and neither of those:** there is already an admitted, receipted, copy-only
+transition the engine serves, so phase 3 can be built now without narrowing
+anything. See the entry at the top of this page.
+
+## The third client speaks the protocol, on a platform the server will not use it for
+
+**Merged into `main` as `b266341e`, 2026-09-08, from
+[its pull request](http://192.168.4.7:3000/noirr/plurx/pulls/136). With it,
+all three client halves of M6 are on `main`.** The work was built on
+`effort/decoder-selection-recovery`, where it merged as four pull requests,
+and reconciled here against `main`'s restructured seek path, control session
+and reporter. It was reviewed adversarially as a *change* rather than as a
+move, which is the reason it is worth a line: none of the three defects the
+review found is in the feature — all three are in the seam, in pairings that
+existed on neither branch. `./gradlew testDebugUnitTest :app:assembleDebug
+:app:lintDebug` — the non-Docker equivalent of `make android-test` and `make
+android` — green, 519 tests, 0 failures, 0 errors.
+
+**What it deliberately did not do, and this matters more than the port.**
+Android's `dual_player_preparation` is `false` and stays `false`. M5.5
+measured the tunneled Google TV at 0/3 on the same-codec case, both
+`PREPARED_AXIS_SETS` rows *are* same-codec, and Gate A is a hardware claim
+frozen per platform in protocol v1 — so the server will not stage a successor
+for an Android viewer, and this code does not run. It is written, tested and
+dark, against the day a measured device class earns the literal. The lab
+re-run on the tunneled Google TV was not taken; no lab access from that
+session. See
+[M6-ANDROID-CLIENT-STATUS.md](docs/playback-control/M6-ANDROID-CLIENT-STATUS.md).
+
+**If `effort/decoder-selection-recovery` is promoted later, its four Android
+commits are now duplicates** — rebase them away rather than merging them
+twice.
+
+## Apple viewers were paying for encoders nobody told them about
+
+**Merged into `main` as `9c5e1f9b`, 2026-09-08, from
+[its pull request](http://192.168.4.7:3000/noirr/plurx/pulls/122). Not
+deployed, and not yet on any physical device.**
+Apple is the only platform whose `dual_player_preparation` is `true`,
+measured on an iPhone 17 Pro Max and an Apple TV 4K at 20/20 on both cases.
+So the server has been staging real successors for Apple viewers all along —
+minting an incarnation, taking the actor's one preparation slot, writing a
+durable row — and then refusing to mention them, because no shipped client
+ever named `prepare_replacement` in `supported_actions`. `prepared_successor`
+resolved to `NotRequested`, the client was told `{"type":"none"}`, the
+`suppressed` counter moved, and 330 seconds later the deadline reaped a
+successor nobody had heard of.
+
+Apple now declares the action and drives the whole transaction: a second
+`AVPlayer` that is muted, never on a layer and never asked to play, primed to
+the viewer's film position through the successor's own `media_origin_ms`;
+`metadata_ready` and `buffer_ready` as it gets there; the item handed to the
+authoritative player so the layer, Picture in Picture, the time observer and
+every KVO survive the switch; and `committed` carrying the wall clock of the
+successor's own first qualifying frame, taken from the item's video output
+against the film position the switch happened at rather than from a timer.
+Every exit frees the second pipeline and settles the staging — a seek, a
+second quality change, an audio change, backgrounding, the player ending —
+because a staging left to the deadline costs that session its only
+preparation for the rest of its life.
+
+**The finding that changed the shape of the work.** The contract this was
+built from says the server half is finished. It is finished as a transaction
+and not as a stream: `stage_prepared_successor`'s own comment says
+"**Stage only** … nothing produced yet", the third of its eight phases —
+*reserve and prime* — is not implemented, and the staged row carries the
+blocked publication sentinel, so `classify_durable_route` answers
+`OwnerTransition` and **a GET of the successor's playlist is answered `503
+media_owner_transition` on every request until the pointer moves.** Commit
+does not publish it either. A client built from the sequence diagram would
+therefore build a second pipeline that can never become playable and pay for
+finding that out on *every* quality change. So a successor that dies before
+it was ever playable is taken as evidence about this playback rather than
+this attempt, and the asking stops for the rest of it: the viewer pays once,
+nothing configures it, and the day the priming phase lands this client uses
+it with no change at all. The same rule is now written into the contract for
+web and Android, and the contract's §1 is corrected — the code wins.
+
+Also here: the contract and its three per-platform briefs, which lived only
+on an effort branch 381 commits behind `main`, move into
+`docs/playback-control/`; the caller handoff's claim that Apple and Android
+send `observed_download_bps` as null is corrected, because both fill it now;
+and Settings → Developer's prepared-handoff card says, per requirement,
+whether it is currently met — advisory, gating nothing.
+
+An adversarial review of the branch found nine defects and all nine are
+fixed. Three were the kind only a reviewer finds: a commit that reported
+`failed` for a successor already on screen — which would have told the
+server to abort the session the viewer was watching, and fired on every
+quality change made while paused; a commit that settled *whatever staging
+was current* rather than the one it was called for, which the server would
+have accepted and used to move the pointer to a session nothing displayed;
+and a `.alreadySettled` replay that silently swallowed the viewer's tap and
+changed nothing at all. The switch is now a critical section nothing may
+build on top of, every settlement is named, and the successor's alignment
+seek waits for an item that can honour it instead of being dropped on an
+item one statement old.
+
+The review also caught the branch excluding VOD on the strength of a
+contract paragraph that `main` had already contradicted: `f2fecc98`
+populates `delivered_bps` for VOD and says in as many words that its absence
+"is what made preparation unreachable on the primary presentation". The
+exclusion would have disabled this on the presentation the server had just
+enabled it for. Both documents and the Rust doc comment that caused it are
+corrected.
+
+**Not proven here:** a directed replacement on real hardware and the
+fallback interruption Apple has never measured. Both are operator steps; the
+prompt for them is in the pull request. `make apple-build` and
+`make apple-test` are green on Xcode 26.6 — 900 cases across the iOS and
+tvOS destinations.
+
+**One thing this branch got wrong, recorded with the evidence because the
+reasoning is the tempting kind.** `web layout and accessibility` was red on
+`main`, and this PR's log carried a Playwright `TargetClosedError` that
+matched the one in main's. That match was taken as proof the redness was not
+this branch's. The same log also carried `DRIFT 54 structural facts differ
+from tests/ui-structure.golden` — the Developer card's advisory rows are DOM
+facts and the golden had to move with them — so the merge here happened
+without the golden it needed, and `main` stayed red on that lane until the
+web half carried both cards' facts in `37ce1e87`.
+
+The lesson is sharper than "a job can fail twice", and the job logs are what
+sharpen it. Counted across the runs of that lane retained when this was
+written (tasks 3351 to 3723), `TargetClosedError` appears **six** times in the
+runs that **succeeded** (3404, 3497, 3531) and **four** times in the ones that
+failed (3351, 3368, 3451, 3478, 3723) — it is asyncio teardown noise, printed
+by passing runs, and nothing has ever failed on it. Every failure of that lane
+was a golden `DRIFT`, including the redness on `main` that was being matched
+against: `37ce1e87`'s own message says so.
+So the signature was never a failure signature. **Before treating a red lane
+as somebody else's, find the line that actually failed the job** — the
+`Error`/`FAILED`/`DRIFT` the runner exits on — and check whether it names a
+surface this branch touched. Matching an error string that also appears in
+green runs proves nothing at all.
+
+## The CI fleet filled up because the bound was behind a flag nobody set
+
+**Merged into `main`; the last of it is `5b30eb92`.** Runners kept running
+out of disk. The failure never says so: a runner that fills mid-link reports
+`ld terminated with signal 7 [Bus error]`, which is what a miscompile looks
+like, and the real `No space left on device` is hundreds of lines further down.
+
+A Forgejo runner serves `actions/cache` out of its own `cache.dir`, and
+`forgejo-runner` 13.1.0 has **no eviction for it at all** — its own
+`generate-config` offers `enabled`, `dir`, `host`, `proxy_port` and the shared
+secrets, and nothing else. Everything written there is permanent. This
+repository already owned a bounded alternative for both consumers that write
+there — an LRU Cargo cache under a 30 G budget, a named BuildKit builder pruned
+to 50 G — and both were gated on `persistent-eligible: true` *and*
+`CI_EXECUTION_MODE` in {shadow, accelerated}. The variable has never been set
+on this repository. So the condition was false on every job ever run, every job
+took the unbounded branch, and nothing in the fleet was bounded by anything.
+
+Measured 2026-09-07 on `gha-m6-general-01`: 118 cache entries, 41 G, every one
+created in the previous three days — about 13 G/day on a 78 G disk, which fills
+a runner guest in a week. Fleet-wide the cache servers held ~167 G, and nynuc
+carried another 101 G of Docker images (4 of 131 in use) and 58 G of BuildKit
+cache. ~340 G was reclaimed by hand the same day: Docker build cache and
+dangling images on nynuc, m6 and nuc4, and the cache servers of the five idle
+runner guests reset index-and-blobs together while each was stopped.
+
+The branch removes both gates — where a cache lives follows the runner, not a
+rollout flag — and fixes a second defect the flag had been hiding: the pruners'
+reserve was a flat 100 GiB, which is larger than the 78-97 GB Incus guests, so
+`healthy` could never become true there and the pruner would have deleted every
+cache it was permitted to and failed the job anyway. It is 20 % of the
+filesystem now, with a floor that cannot exceed a quarter of it. What a job
+still cannot bound, it reports: `scripts/ci-runner-cache-audit` writes the
+cache server's size and entry count into every Cargo lane's summary and warns
+by runner name past 20 G, because deleting from that directory means stopping
+the runner and a job cannot stop the runner it is running on.
+
+That last part is `deploy/runner-janitor/`: a script, a systemd unit, an hourly
+timer and a one-command installer, on the same numbers — 20 G budget, 20 %
+reserve, graceful stop before any delete. It never resets a working runner,
+never leaves one stopped, and refuses any `cache.dir` that is not one; each of
+those is mutation-proven. Installed and running hourly on nynuc, rogg16, every reachable
+Incus runner guest, and the Lima VM that carries `gha-mbp-linux-arm-01` — which
+was holding 24G of its own and gave all of it back on the first pass.
+`deploy/runner-janitor/macos/` is the launchd equivalent for
+`gha-mba-apple-01`, the one runner with no systemd, and it is installed and
+verified there: it read the runner's label and config out of the launchd plist,
+unloaded the daemon, reset a 4 G cache and loaded it again, and the runner was
+back `idle` in Forgejo twenty seconds later. **The cache is bounded fleet-wide.**
+
+**The band between two bounds, found and closed 2026-09-08.**
+`gha-nuc4-general-01` refused two jobs in a row — tasks 3753 and 3780 — with
+`::error::gha-nuc4-general-01 is out of disk: 18G available at
+/opt/forgejo-runner/_work/<hash>/hostexecutor, need 25G`, identical to the
+gigabyte across both. **Not because anything pinned the job there** — that
+was this session's assumption and it is wrong: eight runners carry the
+`general` label, and `gha-m6-general-02` ran the same lane green with 42 G
+free. A runner that refuses in fifteen seconds returns to idle immediately and
+is therefore first in line for the next job, so **a full runner starves the
+pool precisely because it fails fast**. That is worth its own fix — the
+preflight could hold the slot on refusal so healthy runners win the race — and
+it is named here rather than built at the end of a long session. The janitor reported that runner healthy the
+whole time, and by its own rule it was: **the preflight refuses a job below
+25 G and the janitor reserved 20 % of the filesystem, 15.6 G on a 78 GB guest.**
+Between those two figures is a band where the fleet turns work away and the
+janitor reclaims nothing, and 18 G is inside it. Two bounds, both satisfied,
+nobody minding the gap.
+
+The reserve is now `max(20 % of the filesystem, the preflight's own number)`.
+A demand the filesystem cannot meet is **reported and then ignored** rather
+than chased: capping it to half the disk was tried first and is worse than
+doing nothing, because `min(25 G, half)` *is* half on every volume under
+50 GiB — the smallest hosts would carry the most aggressive reserve this
+script has ever kept and prune hourly forever after a figure the same message
+calls unreachable. A host that cannot free enough for a lane is a placement
+problem. That keeps the lesson of the original bug in this same function: a
+fixed 100 GiB reserve on a 78 GB guest could never be satisfied, so the pruner
+deleted everything it was permitted to and failed anyway.
+
+The janitor is installed standalone per host and cannot read the workflow at
+run time, so contract tests hold the figures level instead of an import.
+**Two of those guards were decorations and the review caught both** — which is
+the more useful part of this entry. The first read the `"${DISK_GB:-25}"`
+fallback in the step body, and `action.yml` sets `DISK_GB` unconditionally, so
+that literal can never fire and the test stayed green while the governing
+default moved; it reads `inputs.disk-gb`'s own default now, proven by mutating
+it. The second was a "said once per pass" flag set inside a function that is
+only ever called as `$(...)` — a command substitution is a subshell, so the
+flag never reached the parent, and the assertion counting the message passed
+because the fixture had one runner and no Docker. The reporting moved to the
+parent shell and the fixture grew a second runner; the sample receipt in
+`docs/ci/RUNNER-DISK.md` has said `"instances":4` all along, so one runner was
+never the case to test against.
+
+**The band is closed for the default bar and not for every lane:** `disk-gb`
+is per-lane and `vod_web` asks for 45 G, which raising `REQUIRED_GB` cannot
+cover because 45 G is over half a 78 GB guest. That lane is named as a known
+exception, counted rather than merely named — a second lane copying `45` was
+the likeliest way another one appears — and the scan no longer misses a value
+hidden behind a trailing comment.
+
+**And the loop that reported success while achieving nothing.** The janitor can
+free the cache and Docker; the OS, the toolchains and the 30 G Cargo cache are
+not its to take. A host whose freeable bytes are smaller than its gap was being
+stopped, wiped cold and left short every hour, with `done:` reporting a
+successful reset each time. Free space is re-read after a reset now, the
+shortfall is said out loud, and `short_after` is in the receipt — gated on a
+reset having actually happened, because `reset: 0, short_after: 1` would have
+described a runner that was merely busy and sent an operator to re-provision a
+machine that is fine. `demand_dropped` counts the filesystems running on the
+percentage rule instead of the reserve configured for them, Docker's own volume
+included: that path was silent, and it is the one that runs
+`docker image prune -af`. A bound that silently cannot be met is the failure
+this whole entry is about, and the janitor had two more of its own.
+
+**A wrong fix was built first, and the way it was wrong is the lesson.** The
+error message names a path under `_work`, so `_work` was taken to be the full
+directory and a reaper for it was written — script, tests, mutations, the lot.
+An adversarial review checked the premise instead of the code: `18G available
+at .../hostexecutor` is `df` on the **filesystem**, not a size of that
+directory, and the preflight's own diagnostic in the same log lists the whole
+checkout at about 58 MB (`20M docs`, `19M crates`, `4.6M brand`). The reaper
+was withdrawn. What it would have deleted was never the problem, and it could
+not have fired anyway — it sat behind the same 20 % reserve that had already
+read healthy at 18 G. The measurement is now in `docs/ci/RUNNER-DISK.md` and in
+the janitor's own header, next to the instruction to measure `_work` before
+writing anything that deletes from it.
+
+**Two things the same review found in code that was already merged.** A failed
+`rm -rf` — `EBUSY` on a leftover mount, `EACCES` on another uid's file — aborted
+the shell under `set -e` before the restart, and a `RETURN` trap does not run
+on shell exit, so the janitor could take a runner out of the fleet with nothing
+left to bring it back; the operations doc had listed "a failed delete still
+ends with the runner up" as a tested invariant, and it never was. It is now.
+And the macOS janitor's quiet window — its stricter half of the idle check, and
+the only thing standing between a wrong answer and a SIGKILLed Xcode build —
+had never been executed by the suite at all, because the fixture had no `_work`
+for it to look at. It has a mutation-proven test now, and a faked `stat`,
+because BSD `stat -f '%m'` prints an epoch second while GNU `stat` reads `-f`
+as `--file-system` and answers a `File: ...` block that bash then evaluates
+arithmetically.
 
 ## Settings put the operator on the login page, and the cause was a tombstone
 
@@ -55,8 +445,8 @@ that dies mid-tick must still end it.
 
 ## A deploy that refused itself over an unmaintainable pair
 
-**PR [#37](http://192.168.4.7:3000/noirr/plurx/pulls/37) — open against
-`main`.** `make
+**PR [#37](http://192.168.4.7:3000/noirr/plurx/pulls/37) merged as
+`c661d387`.** `make
 docker-up` on nynuc refused to change a container: the health start period was
 the tracked five minutes, and `/srv/plurx/plurx.toml` sets
 `install_snapshot_timeout_secs = 1200`, which with the three named startup

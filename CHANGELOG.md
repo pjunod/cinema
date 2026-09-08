@@ -10,6 +10,30 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- **CI runners stop filling up, because every cache path is bounded now.** A
+  Forgejo runner serves `actions/cache` from a directory of its own, and
+  `forgejo-runner` 13.1.0 evicts nothing from it — no size cap, no TTL, no
+  garbage collection, as its own `generate-config` shows. This repository had
+  a complete bounded alternative for both the Cargo cache and BuildKit state,
+  and both were gated on `persistent-eligible: true` together with
+  `CI_EXECUTION_MODE` being `shadow` or `accelerated`. That variable has never
+  been set here, so the condition was false on every job, every job took the
+  unbounded branch, and the fleet accumulated ~167 G of cache blobs nothing
+  would ever delete: 118 entries and 41 G on `gha-m6-general-01` alone, all
+  three days old, on a 78 G disk. Runners then failed jobs the way a full
+  runner does — `ld terminated with signal 7 [Bus error]`, which reads as a
+  miscompile. A bound a configuration variable can switch off is not a bound,
+  so the inputs are gone: a self-hosted runner takes the bounded runner-local
+  Cargo cache and the named BuildKit builder, always, and a hosted runner takes
+  the hosted service, which evicts on its own. The reserve those pruners keep
+  free is now a share of the filesystem rather than a flat 100 GiB, which on
+  the 78-97 GB runner guests was larger than the whole volume and could never
+  be satisfied — so the pruner deleted every cache it was allowed to and failed
+  the job regardless. What no job can bound is reported instead of guessed:
+  `scripts/ci-runner-cache-audit` prints the cache server's size and entry
+  count into every Cargo lane's summary and warns, by runner name, past 20 G.
+  [docs/ci/RUNNER-DISK.md](docs/ci/RUNNER-DISK.md) is the operator's copy.
+
 - **A Compose deploy no longer refuses over a number nobody was told to
   maintain.** The readiness grace and the snapshot deadline are one budget, and
   the preflight has always refused a grace too short to cover it. But the
@@ -72,6 +96,35 @@ bump may break compatibility and a **patch** bump never does.
   without a sentence. `tests/web/cluster-membership.test.js` joins the
   `web-check` target as well as the validation runner's `web-membership`
   check, so a web change reaches it without knowing its name.
+
+### Added
+
+- **A janitor that bounds the one CI cache no job can reach.**
+  `deploy/runner-janitor/` installs a script, a systemd unit and an hourly
+  timer on a runner host with one command. Each pass reads every
+  `forgejo-runner*.service`'s own `config.yml` for its `cache.dir` and, when
+  that directory is over a 20 G budget or its filesystem is under the 20 %
+  reserve, stops the runner, deletes the directory whole, and starts the runner
+  again — whole, because `bolt.db` is the only thing that knows which blob
+  belongs to which key, and removing a blob without its row promises the next
+  job an entry it cannot download. Docker is pruned only if the disk is still
+  short, and only of stopped containers, images unused for two weeks and build
+  cache over a week old, because the named `plurx-<runner>` builders are kept
+  warm deliberately. It never resets a runner that is working (idle is "the
+  unit's cgroup holds nothing but the daemon", which needs no API token), never
+  leaves a runner stopped (the restart is on a `RETURN` trap), and refuses any
+  `cache.dir` that is not a runner root ending in `cache` and holding
+  `bolt.db`. Every pass writes what it decided to the journal and to
+  `/var/lib/plurx-ci-janitor/last-run.json`, with `over_budget` and `reset`
+  counted separately so a runner that is never idle enough to reset is visible
+  instead of silently skipped. All three invariants are mutation-proven in
+  `tests/operations/test_ci_janitor.py`. `deploy/runner-janitor/macos/` is the
+  same thing for the Apple runner, which has no systemd — and where the idle
+  check is not a courtesy but the whole safety mechanism, because
+  `launchctl bootout` does not drain a running job the way `systemctl stop`
+  does, so it additionally requires the work root to have been quiet for two
+  minutes. Verified on the machine: unload, reset, load, and the runner back
+  `idle` in Forgejo twenty seconds later.
 
 ### Changed
 

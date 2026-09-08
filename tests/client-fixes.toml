@@ -863,3 +863,34 @@ source_anchor = "private var mayRelease: Bool { !pictureInPicture.isActive && !p
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "testTheLiveSurfaceAllowsPictureInPictureAndReleasesOnlyWhenItIsNotActive"
 
+[[fixes]]
+id = "apple.prepared-successor-that-cannot-be-primed"
+commits = ["a9b4933f"]
+source = "clients/apple/Sources/PreparedReplacement.swift"
+source_anchor = "private(set) var canOfferPreparation = true"
+test = "clients/apple/Tests/PreparedReplacementTests.swift"
+test_anchor = "testASuccessorThatNeverBecomesPlayableStopsTheAskingForThisPlayer"
+
+[[fixes]]
+id = "apple.commit-carries-the-compared-origin"
+commits = ["c7cf38bd"]
+source = "clients/apple/Sources/PlaybackControlReporter.swift"
+source_anchor = "var committedMediaOriginMs: Int? = nil"
+test = "clients/apple/Tests/PreparedReplacementTests.swift"
+test_anchor = "testACommitEchoesTheOffersOriginRatherThanRecomputingIt"
+
+[[fixes]]
+id = "apple.prepared-switch-is-a-critical-section"
+commits = ["594daea1"]
+source = "clients/apple/Sources/PreparedReplacement.swift"
+source_anchor = "mutating func noteSwitching(_ action: PreparedReplacementAction) -> Bool"
+test = "clients/apple/Tests/PreparedReplacementTests.swift"
+test_anchor = "testACommitSettlesTheStagingItWasCalledForRatherThanWhateverIsCurrent"
+
+[[fixes]]
+id = "android.settled-reporter-keeps-its-last-word"
+commits = ["0cf61d93"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackControlReporter.kt"
+source_anchor = "val newest = if (settled) pending else newestCapture(pending)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "a teardown outlives the source that handed it over"

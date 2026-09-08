@@ -52,7 +52,6 @@ class SettingsStore(private val context: Context) {
         val PLAYBACK_INFO_MODE = stringPreferencesKey("playback_info_mode")
         val OFFLINE_QUALITY = stringPreferencesKey("offline_quality")
         val OFFLINE_NETWORK = stringPreferencesKey("offline_network")
-
         /**
          * Live TV's browse view. Deliberately not part of ViewerPreferences:
          * that record is written as one transaction by the settings screen,
@@ -60,6 +59,7 @@ class SettingsStore(private val context: Context) {
          * eleven unrelated preferences to record itself.
          */
         val LIVE_TV_VIEW = stringPreferencesKey("live_tv_view")
+        val PREPARED_REPLACEMENT = booleanPreferencesKey("prepared_replacement")
     }
 
     val flow: Flow<Saved> = context.dataStore.data.map { p ->
@@ -83,6 +83,7 @@ class SettingsStore(private val context: Context) {
                 playbackInfoMode = p[Keys.PLAYBACK_INFO_MODE] ?: "standard",
                 offlineQuality = OfflineQuality.fromStorage(p[Keys.OFFLINE_QUALITY]),
                 offlineNetwork = OfflineNetwork.fromStorage(p[Keys.OFFLINE_NETWORK]),
+                preparedReplacement = p[Keys.PREPARED_REPLACEMENT] ?: false,
             ),
         )
     }
@@ -174,6 +175,7 @@ class SettingsStore(private val context: Context) {
             p[Keys.PLAYBACK_INFO_MODE] = value.playbackInfoMode
             p[Keys.OFFLINE_QUALITY] = value.offlineQuality.storageValue
             p[Keys.OFFLINE_NETWORK] = value.offlineNetwork.storageValue
+            p[Keys.PREPARED_REPLACEMENT] = value.preparedReplacement
         }
     }
 }

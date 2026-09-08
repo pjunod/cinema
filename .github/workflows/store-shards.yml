@@ -73,8 +73,6 @@ jobs:
         uses: ./.github/actions/buildx-cache
         with:
           lane: cluster-store-shard-${{ matrix.shard_index }}
-          execution-mode: ${{ inputs.execution-mode }}
-          persistent-eligible: "true"
       - name: Build the exact Store test binary
         id: build_store_binary
         continue-on-error: true

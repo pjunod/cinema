@@ -91,7 +91,6 @@ jobs:
         uses: ./.github/actions/cargo-cache
         with:
           lane: effort-rust
-          execution-mode: ${{ needs.scope.outputs.execution_mode }}
       - name: Compile every Rust target without executing tests
         run: |
           make effort-rust-check

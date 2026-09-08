@@ -40,3 +40,7 @@ __pycache__/
 # Project swarm configuration is source; ad-hoc nested clones are not.
 swarm/*/
 crates/*/pipe:1
+
+# Agent scratch: a `tomllib` shim for hosts on python 3.10. Committed by
+# accident in `378167bc` and removed since; ignored so it cannot happen again.
+.pyshim/

@@ -127,4 +127,14 @@ data class ViewerPreferences(
     val playbackInfoMode: String = "standard",
     val offlineQuality: OfflineQuality = OfflineQuality.Standard,
     val offlineNetwork: OfflineNetwork = OfflineNetwork.WifiOnly,
+    /**
+     * Settings -> Developer -> "Prepared replacement": whether this device
+     * tells the server it can hold two live decode pipelines, which is what
+     * lets a quality change hand over without an interruption.
+     *
+     * Off by default, because the measurement behind it is per device class and
+     * the protocol field is per platform. The Developer screen lists what was
+     * measured and whether this device meets it; none of it blocks the switch.
+     */
+    val preparedReplacement: Boolean = false,
 )

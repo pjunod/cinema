@@ -190,10 +190,7 @@ class ControlRequestWireCase(unittest.TestCase):
 
     def test_the_request_itself(self) -> None:
         rust = rust_struct_fields(self.rust, "ControlRequestV1")
-        # The server accepts an acknowledgement M2 clients never send: they
-        # consume no action, so they have nothing to acknowledge.
-        rust.discard("acknowledgement")
-        # And it accepts an intent envelope no client sends yet. The field is
+        # It accepts an intent envelope no client sends yet. The field is
         # optional precisely so every deployed client keeps working without it,
         # and teaching the two ports to build one is §4's client-adapter work,
         # not something to fake here by declaring a field neither of them can
@@ -205,46 +202,120 @@ class ControlRequestWireCase(unittest.TestCase):
         # the Swift and Kotlin requests, and the test starts comparing it
         # again.
         rust.discard("intent")
-        self.assertSameWire(
-            "ControlRequestV1",
-            rust,
-            swift_coding_keys(self.apple, "ControlRequest"),
-            kotlin_fields(self.android, "ControlRequest"),
-        )
-
-    def test_the_acknowledgement_is_server_only_until_a_client_models_it(self) -> None:
-        """A struct no port declares is a parity hole nothing else would catch.
-
-        `ActionAcknowledgement` is the one request field with no client model:
-        M2 clients consume no action, so they have nothing to acknowledge, and
-        `test_the_request_itself` discards it for that reason. That discard is
-        correct today and silently wrong the moment a client gains the type —
-        the server could add, rename or retype a field and no test in this file
-        would notice, because the struct is outside every comparison.
-
-        So this asserts the premise rather than the parity. When it fails, the
-        fix is not to relax it: promote the pair to a real `assertSameWire`
-        beside the others, which is the check the discard has been standing in
-        for.
-        """
-        declared = {
-            "Apple": re.search(r"struct\s+ActionAcknowledgement\b", self.apple),
-            "Android": re.search(
-                r"(data\s+)?class\s+ActionAcknowledgement\b", self.android
-            ),
-        }
-        modelled = sorted(port for port, hit in declared.items() if hit)
+        # `acknowledgement` was discarded per-port while only Apple consumed
+        # `prepare` and Android had nothing to acknowledge. Android consumes it
+        # now, so the last discard comes out here — as the comment that stood
+        # in this place said it would — and both ports are compared against the
+        # same server struct with nothing set aside but `intent`.
         self.assertEqual(
-            modelled,
-            [],
-            "ActionAcknowledgement is now modelled by "
-            + ", ".join(modelled)
-            + " while this file still discards it from the request comparison. "
-            "Add an assertSameWire for it rather than widening the discard: "
-            "the server requires committed_media_origin_ms and "
-            "first_frame_unix_ms on a commit, and a port that spells either "
-            "differently is refused at validation with no other test to say so.",
+            swift_coding_keys(self.apple, "ControlRequest"),
+            rust,
+            "ControlRequestV1: Apple and the server disagree "
+            f"(apple-only {sorted(swift_coding_keys(self.apple, 'ControlRequest') - rust)}, "
+            f"server-only {sorted(rust - swift_coding_keys(self.apple, 'ControlRequest'))})",
         )
+        self.assertEqual(
+            kotlin_fields(self.android, "ControlRequest"),
+            rust,
+            "ControlRequestV1: Android and the server disagree "
+            f"(android-only {sorted(kotlin_fields(self.android, 'ControlRequest') - rust)}, "
+            f"server-only {sorted(rust - kotlin_fields(self.android, 'ControlRequest'))})",
+        )
+
+    def test_the_acknowledgement(self) -> None:
+        """The one request field a port gains only when it can act on one.
+
+        This was a premise rather than a parity check while no client modelled
+        `ActionAcknowledgement`: `test_the_request_itself` discarded the field,
+        so the struct sat outside every comparison and the server could have
+        added, renamed or retyped one silently. Apple models it now, so the
+        premise is promoted to the check it was standing in for.
+
+        It compares whichever ports have the type rather than waiting for all
+        of them. A port that is late is not a reason to stop checking the one
+        that is early, and the field that would break first is the one with no
+        other test to catch it: the server requires
+        `committed_media_origin_ms` *and* `first_frame_unix_ms` on a commit,
+        compares the origin against the staged successor's own, and refuses a
+        mismatch — so a port that spells either differently has every commit
+        refused at validation with nothing to say why.
+        """
+        rust = rust_struct_fields(self.rust, "ActionAcknowledgement")
+        self.assertIn("committed_media_origin_ms", rust)
+        self.assertIn("first_frame_unix_ms", rust)
+        modelled = 0
+        if re.search(r"struct\s+ActionAcknowledgement\b", self.apple):
+            modelled += 1
+            swift = swift_coding_keys(self.apple, "ActionAcknowledgement")
+            self.assertEqual(
+                swift,
+                rust,
+                "ActionAcknowledgement: Apple and the server disagree "
+                f"(apple-only {sorted(swift - rust)}, server-only {sorted(rust - swift)})",
+            )
+        if re.search(r"(data\s+)?class\s+ActionAcknowledgement\b", self.android):
+            modelled += 1
+            kotlin = kotlin_fields(self.android, "ActionAcknowledgement")
+            self.assertEqual(
+                kotlin,
+                rust,
+                "ActionAcknowledgement: Android and the server disagree "
+                f"(android-only {sorted(kotlin - rust)}, server-only {sorted(rust - kotlin)})",
+            )
+        self.assertGreater(
+            modelled,
+            0,
+            "no port models ActionAcknowledgement any more, so the request "
+            "comparison's discard is unguarded again — restore the premise "
+            "test rather than deleting this one",
+        )
+
+    def test_a_port_that_prepares_spells_the_declared_name_the_server_matches(self) -> None:
+        """`prepare_replacement` is declared; `prepare` is what arrives.
+
+        Every other action's declared name equals its wire tag. This one does
+        not, and both ways of confusing them fail silently: a port that
+        declares `prepare` is never offered anything, because `accepts()` is a
+        literal comparison, and a port that switches on `prepare_replacement`
+        never fires. So a port that declares the action at all must spell it
+        the server's way, and must not declare the tag.
+        """
+        declared = re.search(
+            r'PREPARE_REPLACEMENT_ACTION[^=]*=\s*"([^"]+)"', self.rust
+        )
+        self.assertIsNotNone(declared, "the server no longer names the prepared action")
+        name = declared.group(1)
+        self.assertEqual(name, "prepare_replacement")
+        tag = re.search(
+            r"fn vocabulary_name\(&self\).*?Self::Prepare \{ \.\. \} => Some\(([A-Z_]+)\)",
+            self.rust,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(tag, "the server no longer maps Prepare to a declared name")
+        self.assertEqual(tag.group(1), "PREPARE_REPLACEMENT_ACTION")
+        for label, source, pattern in (
+            ("web", self.web, r"SUPPORTED_ACTIONS\s*=\s*Object\.freeze\(\[([^\]]*)\]"),
+            ("apple", self.apple, r"supportedActions\s*=\s*\[([^\]]*)\]"),
+            ("android", self.android, r"SUPPORTED_ACTIONS\s*=\s*listOf\(([^)]*)\)"),
+        ):
+            found = re.search(pattern, source)
+            self.assertIsNotNone(found, f"{label} no longer declares an action vocabulary")
+            body = found.group(1)
+            declared_names = set(re.findall(r'"([^"]+)"', body))
+            self.assertNotIn(
+                "prepare",
+                declared_names,
+                f"{label} declares the wire tag instead of the action name, which "
+                "is never matched and fails completely silently",
+            )
+            if name in declared_names or "prepareReplacementAction" in body:
+                # A port that prepares must consume the tag, not the name.
+                self.assertRegex(
+                    source,
+                    r'"prepare"',
+                    f"{label} declares {name} but never handles the `prepare` tag it "
+                    "actually receives",
+                )
 
     def test_the_selection(self) -> None:
         self.assertSameWire(

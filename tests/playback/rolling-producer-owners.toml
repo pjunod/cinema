@@ -680,7 +680,17 @@ expected_occurrences = 21
 [[module_symbols]]
 id = "m4-exact-owner-epoch-end"
 pattern = "end_media_session_if_owner"
-expected_occurrences = 1
+# 1 -> 2, and the addition is a doc comment rather than a call — the same
+# shape as the arming entry below. M6's commit test names this as the thing
+# that deletes the playback pointer, because publishing a committed successor
+# looks like the obvious fix for "the pointer advanced and the viewer has no
+# stream" and is not: a committed successor has no local worker, so moving it
+# off the publication sentinel puts it in `owned_media_sessions`, the lease
+# loop renews only live sessions, and the stale-settlement sweep reaches it
+# and ends it here — deleting `media_playback_pointers` in the same
+# transaction. The comment exists so the next person does not write that
+# caller; no new caller, and the settlement path is untouched.
+expected_occurrences = 2
 
 [[module_symbols]]
 id = "m4-exact-activation-handoff-store"
