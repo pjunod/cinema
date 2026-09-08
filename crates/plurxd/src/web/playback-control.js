@@ -9,6 +9,8 @@
   const MIN_EXCHANGE_MS = 250;
   const MAX_EXCHANGE_MS = 60_000;
   const EXCHANGE_DEADLINE_MS = 6_000;
+  const PREPARATION_TTL_MS = 330_000;
+  const MAX_MEDIA_MILLIS = 366 * 24 * 60 * 60 * 1_000;
   const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
   // The actions this client will accept from the server, and the only ones the
@@ -16,7 +18,9 @@
   // is not a protocol error; it is not yet a promise to act on it. Recovery
   // authority still belongs to this client's own timers until the milestone
   // that moves it.
-  const SUPPORTED_ACTIONS = Object.freeze(["hold", "retry_resource", "terminal"]);
+  const SUPPORTED_ACTIONS = Object.freeze([
+    "hold", "retry_resource", "terminal", "prepare_replacement",
+  ]);
 
   function defaultNow() {
     if (typeof performance === "object" && typeof performance.now === "function") {
@@ -61,7 +65,28 @@
       && Number.isFinite(value.playback_rate)
       && value.playback_rate >= 0
       && !!value.selection
-      && !!value.capabilities;
+      && !!value.capabilities
+      && validAcknowledgement(value.acknowledgement)
+      && !(value.demand === "end" && value.acknowledgement
+        && value.acknowledgement.state === "committed");
+  }
+
+  function validAcknowledgement(value) {
+    if (value == null) return true;
+    if (!value || typeof value !== "object" || !UUID_RE.test(value.action_id)
+        || !["metadata_ready", "buffer_ready", "committed", "failed", "aborted"]
+          .includes(value.state)) return false;
+    const buffered = value.buffered_through_ms;
+    const origin = value.committed_media_origin_ms;
+    const firstFrame = value.first_frame_unix_ms;
+    if (buffered != null && (!Number.isSafeInteger(buffered)
+        || buffered < 0 || buffered > MAX_MEDIA_MILLIS)) return false;
+    if (origin != null && (!Number.isSafeInteger(origin)
+        || origin < 0 || origin > MAX_MEDIA_MILLIS)) return false;
+    if (firstFrame != null && (!Number.isSafeInteger(firstFrame) || firstFrame <= 0)) return false;
+    if (value.state === "buffer_ready" && buffered == null) return false;
+    if (value.state === "committed" && (origin == null || firstFrame == null)) return false;
+    return true;
   }
 
   function boundedObservation(value) {
@@ -149,7 +174,254 @@
         && action.after_ms > 0
         && action.after_ms <= MAX_EXCHANGE_MS;
     }
+    if (action.type === "prepare") return validPrepareAction(action);
     return false;
+  }
+
+  function validPrepareAction(action) {
+    if (!action || typeof action !== "object" || !UUID_RE.test(action.action_id)
+        || !UUID_RE.test(action.session_id) || typeof action.playlist_url !== "string"
+        || action.playlist_url.length > 512 || !Number.isSafeInteger(action.media_origin_ms)
+        || action.media_origin_ms < 0 || action.media_origin_ms > MAX_MEDIA_MILLIS) return false;
+    const path = action.playlist_url.split(/[?#]/, 1)[0];
+    const root = `/api/v1/hls/${action.session_id}/`;
+    if (path !== root + "index.m3u8" && path !== root + "master.m3u8") return false;
+    const selection = action.effective_selection;
+    if (!selection || typeof selection !== "object"
+        || Object.keys(selection).length !== 7
+        || typeof selection.quality_auto !== "boolean"
+        || !Number.isSafeInteger(selection.height) || selection.height < 0 || selection.height > 2160
+        || (selection.audio_track !== null && (!Number.isSafeInteger(selection.audio_track)
+          || selection.audio_track < 0 || selection.audio_track > 1024))
+        || (selection.subtitle_burn !== null && (!Number.isSafeInteger(selection.subtitle_burn)
+          || selection.subtitle_burn < 0 || selection.subtitle_burn > 1024))
+        || !Number.isSafeInteger(selection.audio_offset_ms)
+        || selection.audio_offset_ms < -15_000 || selection.audio_offset_ms > 15_000
+        || !["source", "server_selected"].includes(selection.codec)
+        || (selection.dynamic_range !== null
+          && !["dolby_vision", "hdr10", "hlg", "sdr"].includes(selection.dynamic_range))) {
+      return false;
+    }
+    return true;
+  }
+
+  function sameJson(left, right) {
+    try { return JSON.stringify(left) === JSON.stringify(right); } catch (_) { return false; }
+  }
+
+  // The protocol state for a prepared successor. This deliberately owns no
+  // media element: the server does not produce the staged playlist yet. The
+  // later two-player work can attach one resource and drive the readiness
+  // methods without changing the exchange or teardown rules implemented here.
+  class Preparation {
+    constructor(options) {
+      const value = options || {};
+      this.now = typeof value.now === "function" ? value.now : defaultNow;
+      this.active = null;
+      this.ignoredActionId = null;
+      this.lastOutcome = null;
+    }
+
+    adopt(action, request) {
+      if (!validPrepareAction(action)) return false;
+      const receivedAt = this.now();
+      this.active = {
+        offer: immutableCopy(action),
+        requestedSelection: immutableCopy(request && request.selection),
+        receivedAt,
+        expiresAt: receivedAt + PREPARATION_TTL_MS,
+        progress: null,
+        acknowledgement: null,
+        resource: null,
+        release: null,
+      };
+      this.ignoredActionId = null;
+      this.lastOutcome = "offered";
+      return true;
+    }
+
+    attachResource(actionId, resource, release) {
+      if (!this.active || this.active.offer.action_id !== actionId
+          || this.active.resource !== null || typeof release !== "function") return false;
+      this.active.resource = resource;
+      this.active.release = release;
+      return true;
+    }
+
+    releaseResource(reason) {
+      const current = this.active;
+      if (!current || current.resource === null) return;
+      const resource = current.resource;
+      const release = current.release;
+      current.resource = null;
+      current.release = null;
+      try { release(resource, reason, current.offer); } catch (_) {}
+    }
+
+    drop(reason, ignore) {
+      if (!this.active) return false;
+      if (ignore) this.ignoredActionId = this.active.offer.action_id;
+      this.releaseResource(reason);
+      this.active = null;
+      this.lastOutcome = reason;
+      return true;
+    }
+
+    expired() {
+      return !!this.active && this.now() >= this.active.expiresAt;
+    }
+
+    acknowledgement(demand) {
+      if (!this.active) return null;
+      if (this.expired()) {
+        this.drop("expired", true);
+        return null;
+      }
+      const acknowledgement = this.active.acknowledgement;
+      if (demand === "end" && acknowledgement && acknowledgement.state === "committed") {
+        return null;
+      }
+      return acknowledgement;
+    }
+
+    advance(state, fields, currentSelection) {
+      if (!this.active || this.expired()) {
+        if (this.active) this.drop("expired", true);
+        return false;
+      }
+      const current = this.active;
+      const value = fields || {};
+      if (state === "metadata_ready") {
+        if (current.progress !== null && current.progress !== "metadata_ready") return false;
+      } else if (state === "buffer_ready") {
+        if (current.progress !== "metadata_ready" && current.progress !== "buffer_ready") return false;
+        if (!Number.isSafeInteger(value.bufferedThroughMs)
+            || value.bufferedThroughMs < 0 || value.bufferedThroughMs > MAX_MEDIA_MILLIS) return false;
+      } else if (state === "committed") {
+        if (current.progress !== "buffer_ready") return false;
+        if (!Number.isSafeInteger(value.firstFrameUnixMs) || value.firstFrameUnixMs <= 0) return false;
+        if (!sameJson(current.requestedSelection, currentSelection)) {
+          this.releaseResource("selection_changed");
+          current.progress = "aborted";
+          current.acknowledgement = immutableCopy({
+            action_id: current.offer.action_id,
+            state: "aborted",
+            buffered_through_ms: null,
+            committed_media_origin_ms: null,
+            first_frame_unix_ms: null,
+          });
+          this.lastOutcome = "selection_changed";
+          return true;
+        }
+      } else if (state !== "failed" && state !== "aborted") {
+        return false;
+      }
+      const acknowledgement = {
+        action_id: current.offer.action_id,
+        state,
+        buffered_through_ms: state === "buffer_ready" ? value.bufferedThroughMs : null,
+        committed_media_origin_ms: state === "committed" ? current.offer.media_origin_ms : null,
+        first_frame_unix_ms: state === "committed" ? value.firstFrameUnixMs : null,
+      };
+      if (!validAcknowledgement(acknowledgement)) return false;
+      current.acknowledgement = immutableCopy(acknowledgement);
+      if (state === "failed" || state === "aborted") this.releaseResource(state);
+      return true;
+    }
+
+    settle(request, response, error) {
+      const acknowledgement = request && request.acknowledgement;
+      if (error) {
+        const retryable = (error.status === 425 && error.code === "owner_transition")
+          || (error.status === 429 && error.code === "control_rate_limited")
+          || (error.status === 503 && error.code === "control_unavailable")
+          || error.status === 408 || error.status === 0 || !Number.isFinite(error.status);
+        if (retryable) return "retrying";
+        const rejectedCommit = error.status === 409 && error.code === "stale_control"
+          && acknowledgement && acknowledgement.state === "committed"
+          && this.active && acknowledgement.action_id === this.active.offer.action_id
+          && error.generation === request.generation
+          && error.controlEpoch === request.control_epoch;
+        if (rejectedCommit) {
+          this.drop("commit_rejected", false);
+          return "commit_rejected";
+        }
+        this.drop(String(error.code || "exchange_failed"), false);
+        return "failed";
+      }
+
+      const action = response && response.action;
+      if (action && action.type === "prepare") {
+        if (this.ignoredActionId === action.action_id) return "ignored";
+        if (this.expired()) {
+          this.drop("expired", true);
+          return "expired";
+        }
+        if (!this.active) return this.adopt(action, request) ? "offered" : "invalid";
+        if (this.active.offer.action_id !== action.action_id) {
+          this.drop("replaced", false);
+          return this.adopt(action, request) ? "replaced" : "invalid";
+        }
+        if (!sameJson(this.active.offer, action)) {
+          this.drop("invalid_repeat", true);
+          return "invalid";
+        }
+        if (acknowledgement && acknowledgement.action_id === action.action_id) {
+          if (acknowledgement.state === "committed") {
+            this.releaseResource("commit_discarded");
+            this.active.progress = "aborted";
+            this.active.acknowledgement = immutableCopy({
+              action_id: action.action_id,
+              state: "aborted",
+              buffered_through_ms: null,
+              committed_media_origin_ms: null,
+              first_frame_unix_ms: null,
+            });
+            this.lastOutcome = "commit_discarded";
+            return "commit_discarded";
+          }
+          if (["metadata_ready", "buffer_ready"].includes(acknowledgement.state)) {
+            this.active.progress = acknowledgement.state;
+            this.active.acknowledgement = null;
+          }
+        }
+        return "repeated";
+      }
+
+      this.ignoredActionId = null;
+      if (!this.active) return "none";
+      if (acknowledgement && acknowledgement.action_id === this.active.offer.action_id) {
+        if (acknowledgement.state === "committed") {
+          this.drop("committed", false);
+          return "committed";
+        }
+        if (acknowledgement.state === "failed" || acknowledgement.state === "aborted") {
+          const outcome = acknowledgement.state;
+          this.drop(outcome, false);
+          return outcome;
+        }
+      }
+      this.drop("withdrawn", false);
+      return "withdrawn";
+    }
+
+    stop(reason) {
+      this.drop(reason || "stopped", false);
+      this.ignoredActionId = null;
+    }
+
+    status() {
+      const current = this.active;
+      return {
+        active: !!current,
+        offer: current ? current.offer : null,
+        progress: current ? current.progress : null,
+        acknowledgement: current ? current.acknowledgement : null,
+        expires_at_ms: current ? current.expiresAt : null,
+        ignored_action_id: this.ignoredActionId,
+        last_outcome: this.lastOutcome,
+      };
+    }
   }
 
   class Reporter {
@@ -340,12 +612,26 @@
             && reportedError.name === "PlaybackControlProtocolError";
           const ownerChanged = status === 409 && reportedError.code === "owner_changed"
             && this.resetForOwner(reportedError);
+          const staleGeneration = status === 409 && reportedError.code === "stale_control"
+            && reportedError.generation !== request.generation
+            && this.resetForOwner(reportedError);
+          // A rejected commit has already torn the staged successor down. It
+          // is the one stale-control answer this reporter can recover from:
+          // the request shape proves which transaction was rejected, while
+          // the immutable sequence/client fences make their own failures bugs.
+          const preparationRejected = status === 409 && reportedError.code === "stale_control"
+            && request.acknowledgement && request.acknowledgement.state === "committed"
+            && reportedError.generation === request.generation
+            && reportedError.controlEpoch === request.control_epoch;
           const retryableControl = (status === 425 && reportedError.code === "owner_transition")
             || (status === 429 && reportedError.code === "control_rate_limited")
             || (status === 503 && reportedError.code === "control_unavailable");
           const retryableTransport = status === 408 || status === 0 || !Number.isFinite(status);
-          if (ownerChanged) {
+          if (ownerChanged || staleGeneration) {
             this.nextAllowedAt = this.now() + retryDelay(reportedError, MIN_EXCHANGE_MS);
+          } else if (preparationRejected) {
+            this.retryRequest = null;
+            this.retryCapture = null;
           } else if (!terminalProtocolError && (retryableControl || retryableTransport)) {
             this.retryRequest = request;
             this.retryCapture = requestCapture;
@@ -441,5 +727,8 @@
     }
   }
 
-  return Object.freeze({ PROTOCOL, Reporter, capture, sameIntent, validBootstrap, validResponse });
+  return Object.freeze({
+    PROTOCOL, Preparation, Reporter, capture, sameIntent, validBootstrap, validResponse,
+    validPrepareAction,
+  });
 });

@@ -6905,7 +6905,8 @@ function playbackControlSnapshot(v,p){
       ? (pendingSeek?pendingSeek.targetMs:positionMs) : null,
     observed_download_bps:Number.isFinite(bps)&&bps>0?Math.round(bps):null,
     selection:playbackControlSelection(p),capabilities:playbackControlCapabilities(),
-    observation,acknowledgement:null};
+    observation,acknowledgement:p.controlPreparation
+      ?p.controlPreparation.acknowledgement(demand):null};
 }
 async function sendPlaybackControl(url,body,signal){
   const response=await fetch(url,{method:"POST",signal,
@@ -6926,7 +6927,32 @@ async function sendPlaybackControl(url,body,signal){
 }
 function stopPlaybackControl(p){
   if(p&&p.controlReporter){ p.controlReporter.stop(); p.controlReporter=null; }
+  if(p&&p.controlPreparation){ p.controlPreparation.stop("control_stopped"); p.controlPreparation=null; }
   clearPlaybackControlWaiters(p);
+}
+// Readiness callbacks for the future two-player seam. The message adapter is
+// live now, but no second media element is created until the server gives the
+// staged successor a producer and a post-commit control bootstrap.
+function advancePlaybackPreparation(p,state,fields){
+  if(!p||!p.controlPreparation) return false;
+  const advanced=p.controlPreparation.advance(state,fields,playbackControlSelection(p));
+  if(advanced&&p.controlReporter&&!p.controlReporter.stopped) p.controlReporter.notify();
+  return advanced;
+}
+function playbackPreparationMetadataReady(p){
+  return advancePlaybackPreparation(p,"metadata_ready",{});
+}
+function playbackPreparationBufferReady(p,bufferedThroughMs){
+  return advancePlaybackPreparation(p,"buffer_ready",{bufferedThroughMs});
+}
+function commitPlaybackPreparation(p,firstFrameUnixMs){
+  return advancePlaybackPreparation(p,"committed",{firstFrameUnixMs});
+}
+function failPlaybackPreparation(p){
+  return advancePlaybackPreparation(p,"failed",{});
+}
+function abortPlaybackPreparation(p){
+  return advancePlaybackPreparation(p,"aborted",{});
 }
 function notifyPlaybackControl(renderOverride,observationOverride){
   if(!playbackOwnsAttachedMedia(PLAYER))return null;
@@ -6982,6 +7008,7 @@ function controlVerdictText(message){
 // retires it and every ask that was waiting on the previous action epoch.
 function supersedePlaybackControlIntent(p){
   if(!p) return 0;
+  if(typeof abortPlaybackPreparation==="function") abortPlaybackPreparation(p);
   p.controlIntentGeneration=(p.controlIntentGeneration||0)+1;
   p.controlVerdict=null;
   p.controlVerdictExpiresAt=null;
@@ -7166,6 +7193,8 @@ function startPlaybackControl(v,p,bootstrap){
     const attachment=p.mediaAttachment;
     const owner=Object.freeze({lifecycleId:CONTROL_CLIENT_ID,
       attachmentGeneration:startPlaybackControl.captureGeneration=(startPlaybackControl.captureGeneration||0)+1});
+    const preparation=new PlurxPlaybackControl.Preparation();
+    p.controlPreparation=preparation;
     const capture=()=>p.mediaAttachment===attachment&&playbackOwnsAttachedMedia(p)
       ?PlurxPlaybackControl.capture(playbackControlSnapshot(v,p),p.controlIntentGeneration||0,owner):null;
     const reporter=new PlurxPlaybackControl.Reporter({bootstrap,
@@ -7177,6 +7206,15 @@ function startPlaybackControl(v,p,bootstrap){
           ||p.mediaAttachment!==attachment||captured.owner.lifecycleId!==owner.lifecycleId
           ||captured.owner.attachmentGeneration!==owner.attachmentGeneration) return;
         p.controlLastRequest=request;
+        const preparationOutcome=preparation.settle(request,response,error);
+        if(preparationOutcome==="invalid") reporter.stop();
+        // A commit returning the same offer is a successful HTTP exchange but
+        // a discarded acknowledgement. Queue `aborted` to release the staged
+        // server slot; waiting for an error would wait forever.
+        if(preparationOutcome==="commit_discarded") reporter.notify();
+        // The commit response still describes the predecessor and provides no
+        // successor control bootstrap. Stop at the documented server seam.
+        if(preparationOutcome==="committed") reporter.stop();
         settlePlaybackControlWaiters(p,request,response,error);
         if(captured.intentGeneration===(p.controlIntentGeneration||0)&&response&&response.delivery
           &&subtitleReadinessRetryTransition(p,response.delivery)){
@@ -7216,6 +7254,7 @@ function startPlaybackControl(v,p,bootstrap){
     reporter.start();
     return reporter;
   }catch(error){
+    if(p.controlPreparation){ p.controlPreparation.stop("start_failed"); p.controlPreparation=null; }
     p.controlLastError={at:Date.now(),message:String(error&&error.message||error)};
     return null;
   }
