@@ -4,7 +4,8 @@
 **Brief:** [`M6-ANDROID-CLIENT-BUILD.md`](M6-ANDROID-CLIENT-BUILD.md).
 **Contract:** [`M6-CLIENT-REPLACEMENT-CONTRACT.md`](M6-CLIENT-REPLACEMENT-CONTRACT.md).
 **Branch:** `agent/m6-android-prepared-replacement`, cut from
-`effort/decoder-selection-recovery` at `bc9d4100`, opened back into that effort.
+`effort/decoder-selection-recovery` at `bc9d4100`, **merged as `9047181f`** into
+that effort on 2026-09-08 (PR #118), with current effort merged in first.
 **Scope:** `clients/android` only. Web and Apple are being built in parallel by
 separate sessions against the same contract.
 
@@ -223,6 +224,35 @@ prepared handoffs are enabled and still never fire, this is the second thing to
 look at after the VOD `delivered_bps` gap. The window predates this milestone
 and lives in `MediaOrigin.kt`; fixing it is a change to what every session
 reports, not to this path.
+
+---
+
+## What the repository's own gates wanted, and why
+
+Recorded because the next client milestone will meet all three.
+
+- **`decoder-selection-m0-inventory.toml` anchors the Android capability
+  surface on the vocabulary literal.** Changing the vocabulary moves the
+  anchor, and the anchor must match exactly once. Its obligation moved with it.
+- **A corrective client commit needs a `tests/client-fixes.toml` row** naming
+  the production symbol it changed and the test that rejects its regression —
+  not merely a test edit riding the same patch. Two rows here, one per `fix(`
+  commit. Note that a subject containing a word like "stale" is read as
+  corrective whatever its type prefix, so a docs commit can trip it.
+- **`test_control_wire_conformance` pins the four ports' field names
+  together**, and it discarded `acknowledgement` from every set with the
+  comment that no client sends one. That stops being true here, so the field is
+  now pinned against the vocabulary that decides it: a port declaring
+  `prepare_replacement` must carry it, one that does not must not. All four
+  states of "which ports have landed M6" pass, which is what lets web and Apple
+  land independently. The Android vocabulary spells its names literally rather
+  than through the constant, because that check reads source and cannot resolve
+  a symbol.
+
+And one that is not a gate: **the effort branch moves under you.** The base
+gained four commits between the branch being cut and CI running, and the
+preflight was testing the merge. Fetch and merge the current base before
+concluding a failure is yours.
 
 ---
 

@@ -1,8 +1,90 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-09-05 · Kept current by the working agent in the same
+**Updated:** 2026-09-08 · Kept current by the working agent in the same
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
+
+## The Android client can hand a film over on a second player, and the device decides
+
+**PR [#118](http://192.168.4.7:3000/noirr/plurx/pulls/118) — merged as
+`9047181f` into `effort/decoder-selection-recovery`, 2026-09-08.** The Android
+half of M6, the prepared replacement: Android declares `prepare_replacement`,
+accepts a `prepare` action, stands up a second ExoPlayer on the successor's
+playlist, aligns it to the incumbent's film position, reports readiness,
+switches, and commits — with `failed` and `aborted` on every path that gives
+up, falling back to the existing reopen in place. Details, decisions and the
+review record: [`docs/M6-ANDROID-CLIENT-STATUS.md`](docs/M6-ANDROID-CLIENT-STATUS.md).
+
+The finding it did not act on is the one worth carrying. `dual_player_preparation`
+is a hardware claim, and M5.5 measured it per **device class**: both phones
+passed same-codec dual preparation 20 of 20, and the tunneled Google TV failed
+that same case 0 of 3 — and same-codec is the only kind of change the server
+ever prepares. Protocol v1 freezes the field per *platform*, so a `true` would
+authorise priming a second pipeline on the device with the measured failure and
+a `false` throws away two phones that passed. Nothing here edited that literal.
+The default is unchanged and a new test pins it; the value is read from a
+switch in Settings -> Developer, listed beside what M5.5 found and whether this
+device meets it, advisory and never gating. The narrowest honest statement the
+frozen field leaves available is that the person holding the device decides.
+
+Even switched on it fires on nothing today: `delivered_bps` is `None` on every
+VOD session and the throughput floor needs both numbers, so a prepared handoff
+can only reach a live or live-recovery session. Closing that is server work.
+
+Four adversarial review passes; three found real defects and the third found
+the sharpest one — a cancelled coroutine did not unwind out of an exchange, so
+it ran its whole failure tail and armed a five-second replay of the request it
+was being replaced by, which silently made the teardown hand-off a no-op in
+exactly the case it existed for. Every defect that survived a pass lived in
+`Controller`, the one file the JVM unit lane cannot construct; two of its
+decisions moved out in response. `./gradlew testDebugUnitTest
+:app:assembleDebug :app:lintDebug` green, 442 tests. The effort CI lanes —
+preflight, validation scope, Rust compile, Android compile and the development
+gate — all green before the merge.
+
+## The Android client can hand a film over on a second player, and the device decides
+
+**PR [#118](http://192.168.4.7:3000/noirr/plurx/pulls/118) — merged as
+`9047181f` into `effort/decoder-selection-recovery`, 2026-09-08.** The Android
+half of M6, the prepared replacement: Android declares `prepare_replacement`,
+accepts a `prepare` action, stands up a second ExoPlayer on the successor's
+playlist, aligns it to the incumbent's film position, reports readiness,
+switches, and commits — with `failed` and `aborted` on every path that gives
+up, falling back to the existing reopen in place. Details, decisions and the
+review record: [`docs/M6-ANDROID-CLIENT-STATUS.md`](docs/M6-ANDROID-CLIENT-STATUS.md).
+
+The finding it did not act on is the one worth carrying.
+`dual_player_preparation` is a hardware claim, and M5.5 measured it per **device
+class**: both phones passed same-codec dual preparation 20 of 20, and the
+tunneled Google TV failed that same case 0 of 3 — and same-codec is the only
+kind of change the server ever prepares. Protocol v1 freezes the field per
+*platform*, so a `true` would authorise priming a second pipeline on the device
+with the measured failure and a `false` throws away two phones that passed.
+Nothing here edited that literal. The default is unchanged and a new test pins
+it; the value is read from a switch in Settings -> Developer, listed beside what
+M5.5 found and whether this device meets it, advisory and never gating. The
+narrowest honest statement the frozen field leaves available is that the person
+holding the device decides.
+
+Even switched on it fires on nothing today: `delivered_bps` is `None` on every
+VOD session and the throughput floor needs both numbers, so a prepared handoff
+can only reach a live or live-recovery session. Closing that is server work.
+
+Four adversarial review passes; three found real defects and the third found
+the sharpest one — a cancelled coroutine did not unwind out of an exchange, so
+it ran its whole failure tail and armed a five-second replay of the request it
+was being replaced by, silently making the teardown hand-off a no-op in exactly
+the case it existed for. Every defect that survived a pass lived in
+`Controller`, the one file the JVM unit lane cannot construct; two of its
+decisions moved out in response. `./gradlew testDebugUnitTest :app:assembleDebug
+:app:lintDebug` green, 442 tests. Every effort CI lane green before the merge.
+
+**One operational note worth keeping.** The merge commit was created and the
+effort branch was then observed back at its pre-merge head, with the merge
+reachable from nothing — a concurrent push landed over it. It was restored by
+fast-forwarding the branch to the merge commit, which already carried the other
+session's work as a parent. Worth checking `git log` on the effort branch after
+any merge into it while several sessions are pushing.
 
 ## A deploy that refused itself over an unmaintainable pair
 
