@@ -493,6 +493,17 @@ it is not pidfd-grade containment against hostile PID churn. Windows uses
 bounded `taskkill /T /F`, and every launch error, nonzero, timed-out, or
 incomplete result likewise aborts instead of producing a timeout verdict.
 
+The final fallback also kills the still-owned root process group, never just
+the shell PID. This matters when the census itself fails after the initial
+`SIGSTOP`: killing only the shell abandons any stopped same-group child under
+PID 1. The root group is safe to address here because `_run_shell` created it
+as a new session and its unreaped live leader still owns that numeric identity.
+The Linux-only regression injects this exact census failure, binds fixture
+identities through `/proc` start ticks and pidfds, and requires the child PID
+to be gone or non-executable before the test returns. The nynuc incident and its
+process-to-run correlation are recorded in
+[NYNUC-RUNNER-ORPHANED-PROCESSES.md](ci/NYNUC-RUNNER-ORPHANED-PROCESSES.md).
+
 This is ownership for trusted validation checks, not containment for hostile
 code. A check may create process groups and sessions, but every live child
 session must retain a parent in the check tree. Checks must not double-fork,

@@ -693,9 +693,15 @@ def _terminate_process_tree(
         signal_errors = [f"kill stage: {error}"]
     if (cleanup_error is not None or signal_errors) and process.poll() is None:
         try:
-            process.kill()
+            # The shell is the still-owned leader of a fresh session and
+            # process group until it is reaped. Killing only that PID abandons
+            # any already-stopped same-group child under PID 1. The group ID
+            # cannot be reused while this live leader still owns it, so this
+            # fallback remains identity-safe even when the process census that
+            # normally validates every descendant has failed.
+            os.killpg(root_group, signal.SIGKILL)
         except OSError as error:
-            signal_errors.append(f"direct shell kill: {error}")
+            signal_errors.append(f"owned root-group kill: {error}")
     reap_error = _reap_owned_process(process, cleanup_deadline)
     if cleanup_error is not None:
         raise RuntimeError(
