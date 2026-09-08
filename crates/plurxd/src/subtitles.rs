@@ -939,13 +939,14 @@ pub(crate) async fn ensure_burn_file(
                     "-fs",
                     &(MAX_BURN_BYTES + 1).to_string(),
                 ])
-                .arg(tmp)
+                .arg("pipe:1")
                 .stdin(std::process::Stdio::null());
-            let (status, diagnostics) = crate::ffmpeg::BoundedDiagnosticChild::spawn(&mut command)
-                .map_err(|error| format!("starting burn-track extraction: {error}"))?
-                .output()
-                .await
-                .map_err(|error| format!("waiting for burn-track extraction: {error}"))?;
+            let (status, diagnostics) =
+                crate::ffmpeg::BoundedDiagnosticChild::spawn_piped_output(&mut command)
+                    .map_err(|error| format!("starting burn-track extraction: {error}"))?
+                    .output_to_bounded_file(&tmp, MAX_BURN_BYTES)
+                    .await
+                    .map_err(|error| format!("waiting for burn-track extraction: {error}"))?;
             if !status.success() {
                 return Err(format!(
                     "burn-track extraction failed: {}",

@@ -53,6 +53,9 @@ async fn encoded_fixture(base: &Path) -> (MediaFile, Arc<crate::vodencode::Encod
         executable: crate::ffmpeg::EncodedExecutable::capture()
             .await
             .expect("frozen encoder"),
+        engine: crate::ffmpeg::EncodedEngine::capture(false)
+            .await
+            .expect("frozen engine"),
         admissions: crate::admission::Admissions::new(),
         store: Arc::new(SqliteStore::open_in_memory().expect("capacity policy")),
         queued: StdMutex::new(None),
@@ -72,6 +75,32 @@ async fn fetched_bytes(serve: &Arc<VodServe>, session: &str, name: &str) -> Vec<
         .expect("read served file");
     assert_eq!(bytes.len() as u64, ready.len);
     bytes
+}
+
+#[tokio::test]
+async fn encoded_identity_never_shares_a_renderer_across_processes() {
+    let base = crate::test_tempdir().expect("process-isolated identity");
+    let (file, mut encoding) = encoded_fixture(base.path()).await;
+    let dependency = base.path().join("driver");
+    tokio::fs::write(&dependency, b"same renderer inputs")
+        .await
+        .expect("driver identity");
+    let mutable = Arc::get_mut(&mut encoding).expect("unique recipe");
+    mutable.engine = crate::ffmpeg::EncodedEngine::capture_test_objects(
+        std::slice::from_ref(&dependency),
+        "node-a-process",
+    )
+    .await
+    .expect("first process");
+    let first = mutable.identity(&file, 96.0);
+    mutable.engine = crate::ffmpeg::EncodedEngine::capture_test_objects(
+        std::slice::from_ref(&dependency),
+        "node-b-process",
+    )
+    .await
+    .expect("other process");
+    let other = mutable.identity(&file, 96.0);
+    assert_ne!(first, other, "different nodes must never share encoded bytes");
 }
 
 #[tokio::test]
@@ -216,6 +245,9 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
         executable: crate::ffmpeg::EncodedExecutable::capture()
             .await
             .expect("encoder"),
+        engine: crate::ffmpeg::EncodedEngine::capture(false)
+            .await
+            .expect("engine"),
         admissions: encoding.admissions.clone(),
         store: Arc::clone(&encoding.store),
         queued: StdMutex::new(None),
@@ -556,6 +588,75 @@ async fn encoded_vod_burn_sidecar_cannot_reuse_replaced_source_captions() {
     std::io::Read::read_to_end(&mut new, &mut bytes).expect("new sidecar");
     assert!(bytes.windows(5).any(|window| window == b"BRAVO"));
     assert!(!bytes.windows(5).any(|window| window == b"ALPHA"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn burn_extractor_physically_caps_oversized_matroska_attachment() {
+    const CAP: u64 = 64 * 1024 * 1024;
+    let base = crate::test_tempdir().expect("oversized burn attachment");
+    let attachment = base.path().join("oversized-font.bin");
+    std::fs::File::create(&attachment)
+        .expect("attachment")
+        .set_len(CAP + 1024 * 1024)
+        .expect("sparse attachment");
+    let captions = base.path().join("caption.srt");
+    tokio::fs::write(
+        &captions,
+        "1\n00:00:00,000 --> 00:00:04,000\nCAP TEST\n\n",
+    )
+    .await
+    .expect("caption");
+    let source = base.path().join("oversized.mkv");
+    let output = tokio::process::Command::new(ffmpeg_bin())
+        .args(["-hide_banner", "-loglevel", "error", "-i"])
+        .arg(testfixtures::source("h264"))
+        .arg("-i")
+        .arg(&captions)
+        .args([
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:s:0",
+            "-c",
+            "copy",
+            "-attach",
+        ])
+        .arg(&attachment)
+        .args([
+            "-metadata:s:t",
+            "mimetype=application/octet-stream",
+            "-metadata:s:t",
+            "filename=oversized-font.bin",
+        ])
+        .arg(&source)
+        .kill_on_drop(true)
+        .output()
+        .await
+        .expect("mux oversized attachment");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut file = media_file_at(source, 6_000);
+    let metadata = std::fs::metadata(&file.path).expect("source metadata");
+    file.size = metadata.len() as i64;
+    file.mtime = metadata
+        .modified()
+        .expect("mtime")
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("unix mtime")
+        .as_secs() as i64;
+    let cache = base.path().join("subtitles");
+    let error = crate::subtitles::ensure_burn_file(&cache, &file, 0, None)
+        .await
+        .expect_err("oversized attachment must be stopped before publication");
+    assert!(error.contains("disk bound"), "{error}");
+    for entry in std::fs::read_dir(&cache).expect("cache directory") {
+        let metadata = entry.expect("cache entry").metadata().expect("metadata");
+        assert!(metadata.len() <= CAP, "temporary output crossed the cap");
+    }
 }
 
 #[tokio::test]

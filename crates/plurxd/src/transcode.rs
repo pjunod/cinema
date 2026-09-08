@@ -13817,6 +13817,31 @@ impl TranscodeManager {
             .get_file_probe_json(file.id)
             .await
             .map_err(|error| error.to_string())?;
+        let held_probe = crate::ffmpeg::held_source_probe_json(&source.handle)
+            .await
+            .map_err(|error| {
+                vod_refusal_error(
+                    "vod_source_rescan_required",
+                    format!("the held source could not be verified against its scan: {error}"),
+                )
+            })?;
+        let probe_matches = probe
+            .as_deref()
+            .map(|stored| crate::ffmpeg::probes_describe_same_input(stored, &held_probe))
+            .transpose()
+            .map_err(|error| {
+                vod_refusal_error(
+                    "vod_source_rescan_required",
+                    format!("the stored source probe cannot be verified: {error}"),
+                )
+            })?
+            .unwrap_or(false);
+        if !probe_matches {
+            return Err(vod_refusal_error(
+                "vod_source_rescan_required",
+                "the source no longer matches its stored probe; rescan it before playback",
+            ));
+        }
         let grid = crate::vodencode::frame_grid(probe.as_deref()).ok_or_else(|| {
             vod_refusal_error(
                 "vod_frame_cadence_unknown",
@@ -13866,6 +13891,17 @@ impl TranscodeManager {
         } else {
             None
         };
+        let engine = crate::ffmpeg::EncodedEngine::capture(
+            options
+                .subtitle_burn
+                .as_ref()
+                .is_some_and(|burn| !burn.bitmap),
+        )
+        .await
+        .map_err(|error| vod_refusal_error("vod_engine_unattested", error))?;
+        if !source.unchanged() {
+            return Err("source changed while attesting the encoded engine".into());
+        }
         Ok(Some(Arc::new(crate::vodencode::Encoding {
             source_object_version,
             encoder,
@@ -13875,6 +13911,7 @@ impl TranscodeManager {
             subtitle_digest,
             ffmpeg_build: crate::ffmpeg::ffmpeg_build().await,
             executable: crate::ffmpeg::EncodedExecutable::capture().await?,
+            engine,
             admissions: self.admissions.clone(),
             store: Arc::clone(&self.store),
             queued: std::sync::Mutex::new(None),

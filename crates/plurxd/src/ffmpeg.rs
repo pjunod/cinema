@@ -9,7 +9,7 @@
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 use plurx_core::domain::MediaFile;
 use plurx_core::transcode::{
@@ -97,12 +97,14 @@ pub(crate) async fn drain_diagnostics(mut input: impl AsyncRead + Unpin) -> Stri
 /// detached diagnostic reader. Used by whole-track burn extraction.
 pub(crate) struct BoundedDiagnosticChild {
     child: Option<tokio::process::Child>,
+    stdout: Option<tokio::process::ChildStdout>,
     stderr: Option<tokio::process::ChildStderr>,
     #[cfg(test)]
     reaped: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 impl BoundedDiagnosticChild {
+    #[cfg(test)]
     pub fn spawn(command: &mut tokio::process::Command) -> std::io::Result<Self> {
         let mut child = command
             .stdout(std::process::Stdio::null())
@@ -112,12 +114,34 @@ impl BoundedDiagnosticChild {
         let stderr = child.stderr.take();
         Ok(Self {
             child: Some(child),
+            stdout: None,
             stderr,
             #[cfg(test)]
             reaped: None,
         })
     }
 
+    /// Spawn a child whose media output is owned by the daemon. The caller
+    /// must consume it with [`Self::output_to_bounded_file`]; no subprocess
+    /// ever receives a cache pathname it can grow past the enforced bound.
+    pub fn spawn_piped_output(command: &mut tokio::process::Command) -> std::io::Result<Self> {
+        let mut child = command
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()?;
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        Ok(Self {
+            child: Some(child),
+            stdout,
+            stderr,
+            #[cfg(test)]
+            reaped: None,
+        })
+    }
+
+    #[cfg(test)]
     pub async fn output(mut self) -> std::io::Result<(std::process::ExitStatus, String)> {
         let stderr = self
             .stderr
@@ -130,6 +154,74 @@ impl BoundedDiagnosticChild {
         #[cfg(test)]
         if let Some(reaped) = self.reaped.take() {
             let _ = reaped.send(());
+        }
+        Ok((status, diagnostics))
+    }
+
+    /// Copy stdout into a newly-created file and stop the exact producer as
+    /// soon as it attempts to exceed `max_bytes`. At most `max_bytes` reach
+    /// disk; stderr is drained concurrently and the child is reaped before an
+    /// error is returned.
+    pub async fn output_to_bounded_file(
+        mut self,
+        path: &std::path::Path,
+        max_bytes: u64,
+    ) -> std::io::Result<(std::process::ExitStatus, String)> {
+        let mut stdout = self
+            .stdout
+            .take()
+            .ok_or_else(|| std::io::Error::other("extractor stdout was not piped"))?;
+        let stderr = self
+            .stderr
+            .take()
+            .ok_or_else(|| std::io::Error::other("extractor stderr was not piped"))?;
+        let diagnostics = tokio::spawn(drain_diagnostics(stderr));
+        let mut output = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .await?;
+        let mut total = 0_u64;
+        let mut buffer = [0_u8; 64 * 1024];
+        let exceeded = loop {
+            let read = stdout.read(&mut buffer).await?;
+            if read == 0 {
+                break false;
+            }
+            let remaining = max_bytes.saturating_sub(total);
+            let accepted = usize::try_from(remaining.min(read as u64)).unwrap_or(read);
+            if accepted > 0 {
+                output.write_all(&buffer[..accepted]).await?;
+                total += accepted as u64;
+            }
+            if accepted < read {
+                break true;
+            }
+        };
+        output.flush().await?;
+        if exceeded {
+            if let Some(child) = self.child.as_mut() {
+                let _ = child.start_kill();
+            }
+        }
+        let status = self
+            .child
+            .as_mut()
+            .expect("owned extraction child")
+            .wait()
+            .await?;
+        self.child.take();
+        let diagnostics = diagnostics
+            .await
+            .map_err(|error| std::io::Error::other(format!("diagnostic reader failed: {error}")))?;
+        #[cfg(test)]
+        if let Some(reaped) = self.reaped.take() {
+            let _ = reaped.send(());
+        }
+        if exceeded {
+            return Err(std::io::Error::other(format!(
+                "extractor output exceeded its disk bound of {max_bytes} bytes"
+            )));
         }
         Ok((status, diagnostics))
     }
@@ -204,6 +296,54 @@ pub async fn ffmpeg_build() -> String {
     format!("{bin} ({version})")
 }
 
+/// Probe the exact source capability retained by a recipe preparer. Comparing
+/// this document with the scanner's document prevents a same-size,
+/// same-second pathname replacement from pairing fresh bytes with stale
+/// geometry, tracks, cadence, or color facts.
+pub(crate) async fn held_source_probe_json(source: &std::fs::File) -> Result<String, String> {
+    #[cfg(not(unix))]
+    {
+        let _ = source;
+        return Err("descriptor-bound source probing is unavailable on this platform".to_owned());
+    }
+    #[cfg(unix)]
+    {
+        let mut command = tokio::process::Command::new(ffprobe_bin());
+        inherit_file_descriptors(&mut command, &[(source, 3)]);
+        command.args([
+            "-v",
+            "error",
+            "-print_format",
+            "json",
+            "-show_format",
+            "-show_streams",
+            "-show_chapters",
+            "/dev/fd/3",
+        ]);
+        let output = bounded_command_output(command).await?;
+        String::from_utf8(output.stdout)
+            .map_err(|error| format!("ffprobe returned non-UTF-8 JSON: {error}"))
+    }
+}
+
+fn normalized_probe_document(raw: &str) -> Result<Vec<u8>, String> {
+    let mut value: serde_json::Value =
+        serde_json::from_str(raw).map_err(|error| format!("invalid ffprobe JSON: {error}"))?;
+    if let Some(format) = value
+        .get_mut("format")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        // The scan used the library pathname; the attested probe deliberately
+        // used /dev/fd/3. The spelling is not a media fact.
+        format.remove("filename");
+    }
+    serde_json::to_vec(&value).map_err(|error| error.to_string())
+}
+
+pub(crate) fn probes_describe_same_input(stored: &str, held: &str) -> Result<bool, String> {
+    Ok(normalized_probe_document(stored)? == normalized_probe_document(held)?)
+}
+
 /// Which pacing flags this ffmpeg understands. `-readrate` landed in 5.1 and
 /// `-readrate_initial_burst` in 6.1; passing either to an older build is a hard
 /// exit, not a warning, so probe rather than assume. Probed once per process.
@@ -228,6 +368,9 @@ static HDR10_PASSTHROUGH: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::c
 static HDR10_PASSTHROUGH_QSV: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
 static FRAGMENT_INDEX_ENGINE: tokio::sync::OnceCell<FragmentIndexEngine> =
     tokio::sync::OnceCell::const_new();
+static FONT_RENDER_ENGINE: tokio::sync::OnceCell<FragmentIndexEngine> =
+    tokio::sync::OnceCell::const_new();
+static ENCODED_PROCESS_IDENTITY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 const ENGINE_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Runaway guard for what a probe subprocess may hand back, not a correctness
@@ -248,6 +391,78 @@ struct FragmentIndexEngine {
     digest: String,
     objects: Vec<(std::path::PathBuf, String)>,
     usable: bool,
+}
+
+/// The complete process-local renderer identity retained by an encoded VOD
+/// recipe. The random process component deliberately prevents durable cache
+/// reuse across nodes or daemon restarts: hardware/driver behavior cannot be
+/// proven byte-identical merely because the selected encoder has the same
+/// name. Within one daemon, every loaded dependency and (for text burn) every
+/// active Fontconfig rule and discoverable font file is still rechecked
+/// before spawning and publication.
+#[derive(Debug, Clone)]
+pub(crate) struct EncodedEngine {
+    pub digest: String,
+    objects: Vec<(std::path::PathBuf, String)>,
+}
+
+impl EncodedEngine {
+    pub async fn capture(text_burn: bool) -> Result<Self, String> {
+        let media = FRAGMENT_INDEX_ENGINE
+            .get_or_init(fragment_index_engine_inner)
+            .await;
+        if !media.usable || !engine_objects_are_current(&media.objects) {
+            return Err("the encoder dependency closure could not be attested".to_owned());
+        }
+        let process = ENCODED_PROCESS_IDENTITY.get_or_init(|| uuid::Uuid::new_v4().to_string());
+        let mut digest = Sha256::new();
+        digest.update(b"plurx/encoded-vod/engine-v1\0");
+        digest.update(media.digest.as_bytes());
+        digest.update(process.as_bytes());
+        let mut objects = media.objects.clone();
+        if text_burn {
+            let fonts = FONT_RENDER_ENGINE
+                .get_or_init(font_render_engine_inner)
+                .await;
+            if !fonts.usable || !engine_objects_are_current(&fonts.objects) {
+                return Err(
+                    "Fontconfig rules and resolved font files could not be attested".to_owned(),
+                );
+            }
+            digest.update(fonts.digest.as_bytes());
+            objects.extend(fonts.objects.clone());
+        }
+        objects.sort_by(|left, right| left.0.cmp(&right.0));
+        objects.dedup_by(|left, right| left.0 == right.0 && left.1 == right.1);
+        Ok(Self {
+            digest: hex::encode(digest.finalize()),
+            objects,
+        })
+    }
+
+    pub fn is_current(&self) -> bool {
+        engine_objects_are_current(&self.objects)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn capture_test_objects(
+        paths: &[std::path::PathBuf],
+        process: &str,
+    ) -> Result<Self, String> {
+        let mut digest = Sha256::new();
+        digest.update(b"plurx/encoded-vod/test-engine\0");
+        digest.update(process.as_bytes());
+        let mut objects = Vec::new();
+        for path in paths {
+            let (object_digest, version) = hash_engine_object(path).await?;
+            digest.update(object_digest);
+            objects.push((path.clone(), version));
+        }
+        Ok(Self {
+            digest: hex::encode(digest.finalize()),
+            objects,
+        })
+    }
 }
 
 /// Digest the executable bytes and its complete self/dependency reports once
@@ -352,6 +567,105 @@ async fn fragment_index_engine_inner() -> FragmentIndexEngine {
         match hash_engine_object(&path).await {
             Ok((object_digest, version)) => {
                 object_digests.push(object_digest);
+                objects.push((path, version));
+            }
+            Err(error) => {
+                #[cfg(target_os = "macos")]
+                if dyld_shared_cache_path(&path) {
+                    // Current macOS stores system dylibs in the dyld shared
+                    // cache rather than at the install names printed by
+                    // `otool`. Those bytes cannot be opened individually;
+                    // the install name and reported dylib version are already
+                    // in the normalized dependency report, while the encoded
+                    // identity is additionally process-local so an OS update
+                    // can never resurrect this key after restart.
+                    digest.update(b"dyld-shared-cache\0");
+                    digest.update(path.as_os_str().as_encoded_bytes());
+                    continue;
+                }
+                #[cfg(not(target_os = "macos"))]
+                let _ = &path;
+                usable = false;
+                digest.update(error.as_bytes());
+            }
+        }
+    }
+    object_digests.sort();
+    for object_digest in object_digests {
+        digest.update((object_digest.len() as u64).to_be_bytes());
+        digest.update(object_digest);
+    }
+    FragmentIndexEngine {
+        digest: hex::encode(digest.finalize()),
+        objects,
+        usable,
+    }
+}
+
+async fn font_render_engine_inner() -> FragmentIndexEngine {
+    let mut digest = Sha256::new();
+    digest.update(b"plurx/font-render/engine-v1\0");
+    let mut usable = true;
+    let mut paths = Vec::new();
+
+    let mut font_list = tokio::process::Command::new("fc-list");
+    font_list.arg("--format=%{file}\n");
+    match bounded_command_output(font_list).await {
+        Ok(output) => {
+            digest.update((output.stdout.len() as u64).to_be_bytes());
+            digest.update(&output.stdout);
+            paths.extend(
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .map(str::trim)
+                    .filter(|path| path.starts_with('/'))
+                    .map(std::path::PathBuf::from),
+            );
+        }
+        Err(error) => {
+            usable = false;
+            digest.update(error.as_bytes());
+        }
+    }
+
+    let configuration = tokio::process::Command::new("fc-conflist");
+    match bounded_command_output(configuration).await {
+        Ok(output) => {
+            digest.update((output.stdout.len() as u64).to_be_bytes());
+            digest.update(&output.stdout);
+            paths.extend(
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .filter_map(|line| line.strip_prefix("+ "))
+                    .filter_map(|line| line.split_once(": ").map(|(path, _)| path))
+                    .filter(|path| path.starts_with('/'))
+                    .map(std::path::PathBuf::from),
+            );
+        }
+        Err(error) => {
+            usable = false;
+            digest.update(error.as_bytes());
+        }
+    }
+
+    paths.sort();
+    paths.dedup();
+    if paths.is_empty() {
+        usable = false;
+        digest.update(b"no font inputs discovered");
+    }
+    let mut objects = Vec::new();
+    let mut object_digests = Vec::new();
+    for path in paths {
+        match std::fs::metadata(&path)
+            .map_err(|error| format!("stat {}: {error}", path.display()))
+            .and_then(|metadata| engine_object_version(&metadata))
+        {
+            Ok(version) => {
+                let mut identity = Sha256::new();
+                identity.update(path.as_os_str().as_encoded_bytes());
+                identity.update(version.as_bytes());
+                object_digests.push(identity.finalize().to_vec());
                 objects.push((path, version));
             }
             Err(error) => {
@@ -527,10 +841,20 @@ fn dependency_paths_from_report(report: &[u8]) -> Result<Vec<std::path::PathBuf>
             if !candidate.starts_with('/') {
                 return Err(format!("unresolved ffmpeg dependency: {candidate}"));
             }
-            std::fs::canonicalize(candidate)
-                .map_err(|error| format!("resolve dependency {candidate}: {error}"))
+            let path = std::path::PathBuf::from(candidate);
+            if dyld_shared_cache_path(&path) {
+                Ok(path)
+            } else {
+                std::fs::canonicalize(candidate)
+                    .map_err(|error| format!("resolve dependency {candidate}: {error}"))
+            }
         })
         .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn dyld_shared_cache_path(path: &std::path::Path) -> bool {
+    path.starts_with("/System/Library/") || path.starts_with("/usr/lib/")
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -1285,6 +1609,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn encoded_engine_refuses_dependency_replacement_and_isolates_processes() {
+        let base = crate::test_tempdir().expect("engine closure");
+        let dependency = base.path().join("libcodec");
+        tokio::fs::write(&dependency, b"codec-a")
+            .await
+            .expect("dependency");
+        let first =
+            EncodedEngine::capture_test_objects(std::slice::from_ref(&dependency), "process-a")
+                .await
+                .expect("first engine");
+        let other_process =
+            EncodedEngine::capture_test_objects(std::slice::from_ref(&dependency), "process-b")
+                .await
+                .expect("other process");
+        assert_ne!(first.digest, other_process.digest);
+        assert!(first.is_current());
+
+        let replacement = base.path().join("replacement");
+        tokio::fs::write(&replacement, b"codec-b")
+            .await
+            .expect("replacement dependency");
+        std::fs::rename(replacement, dependency).expect("replace dependency");
+        assert!(!first.is_current());
+    }
+
+    #[tokio::test]
+    async fn text_renderer_attests_active_font_rules_and_files() {
+        plurx_core::testfixtures::require_ffmpeg();
+        let engine = EncodedEngine::capture(true)
+            .await
+            .expect("text renderer attestation");
+        assert!(engine.is_current());
+    }
+
+    #[test]
+    fn held_probe_comparison_ignores_only_the_descriptor_spelling() {
+        let scanned = r#"{"streams":[{"codec_type":"video","width":1920}],"format":{"filename":"/media/a.mkv","duration":"60.0"}}"#;
+        let held = r#"{"streams":[{"codec_type":"video","width":1920}],"format":{"filename":"/dev/fd/3","duration":"60.0"}}"#;
+        assert!(probes_describe_same_input(scanned, held).expect("compare probes"));
+        let replacement = held.replace("1920", "1280");
+        assert!(!probes_describe_same_input(scanned, &replacement).expect("detect stale probe"));
+    }
+
+    #[tokio::test]
     async fn producer_diagnostics_drain_but_retain_only_the_bounded_tail() {
         let input = [vec![b'x'; 24 * 1024], b"terminal filter error".to_vec()].concat();
         let tail = drain_diagnostics(input.as_slice()).await;
@@ -1311,6 +1679,35 @@ mod tests {
         assert_eq!(tail.len(), 8 * 1024);
         assert!(tail.ends_with("terminal extractor error"));
         reaped_rx.await.expect("nonzero exit still reaped");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bounded_output_kills_and_reaps_at_the_physical_disk_cap() {
+        let base = crate::test_tempdir().expect("bounded output");
+        let output = base.path().join("sidecar");
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "i=0; while [ $i -lt 1024 ]; do printf '0123456789abcdef'; printf 'extracting' >&2; i=$((i + 1)); done; sleep 30",
+        ]);
+        let mut owner =
+            BoundedDiagnosticChild::spawn_piped_output(&mut command).expect("piped child");
+        let (reaped_tx, reaped_rx) = tokio::sync::oneshot::channel();
+        owner.reaped = Some(reaped_tx);
+        let error = tokio::time::timeout(
+            Duration::from_secs(5),
+            owner.output_to_bounded_file(&output, 4_096),
+        )
+        .await
+        .expect("cap must stop the child")
+        .expect_err("oversized output");
+        assert!(error.to_string().contains("disk bound"), "{error}");
+        assert_eq!(
+            std::fs::metadata(output).expect("bounded file").len(),
+            4_096
+        );
+        reaped_rx.await.expect("oversized child reaped");
     }
 
     #[cfg(unix)]

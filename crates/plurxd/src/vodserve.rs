@@ -6440,7 +6440,7 @@ async fn recipe_engine_is_current(recipe: &Recipe) -> bool {
     if recipe
         .encoding
         .as_ref()
-        .is_some_and(|encoding| !encoding.executable.is_current())
+        .is_some_and(|encoding| !encoding.executable.is_current() || !encoding.engine.is_current())
     {
         return false;
     }

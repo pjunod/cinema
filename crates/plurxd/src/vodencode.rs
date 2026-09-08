@@ -20,6 +20,7 @@ pub(crate) struct Encoding {
     pub subtitle_digest: Option<String>,
     pub ffmpeg_build: String,
     pub executable: crate::ffmpeg::EncodedExecutable,
+    pub engine: crate::ffmpeg::EncodedEngine,
     pub admissions: Admissions,
     pub store: Arc<dyn plurx_core::store::Store>,
     pub queued: Mutex<Option<LiveWait>>,
@@ -149,6 +150,7 @@ impl Encoding {
         hash.update(self.source_object_version.as_bytes());
         hash.update(self.ffmpeg_build.as_bytes());
         hash.update(self.executable.digest.as_bytes());
+        hash.update(self.engine.digest.as_bytes());
         for argument in self.args(file, 0.0, duration_seconds) {
             hash.update((argument.len() as u64).to_le_bytes());
             hash.update(argument.as_bytes());
