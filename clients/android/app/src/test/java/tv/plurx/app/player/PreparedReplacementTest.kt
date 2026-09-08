@@ -96,6 +96,13 @@ class PreparedActionDecodingTest {
         assertFalse(PlaybackControl.SUPPORTED_ACTIONS.contains("prepare"))
         assertEquals("prepare", PlaybackControl.PREPARE_ACTION_TYPE)
         assertEquals("prepare_replacement", PlaybackControl.PREPARE_REPLACEMENT_ACTION)
+        // The vocabulary spells its names literally so the cross-client
+        // conformance check can read them out of the source; this is what stops
+        // the literal and the constant drifting apart once it does.
+        assertTrue(
+            PlaybackControl.SUPPORTED_ACTIONS
+                .contains(PlaybackControl.PREPARE_REPLACEMENT_ACTION),
+        )
     }
 
     @Test

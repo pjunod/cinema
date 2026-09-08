@@ -47,6 +47,12 @@ object PlaybackControl {
      *
      * `crates/plurxd/src/playback_control.rs:53` and its
      * `ControlAction::vocabulary_name()` at `:1730` are the two sides.
+     *
+     * [SUPPORTED_ACTIONS] spells these literally rather than referring to the
+     * constants: `tests/validation/test_control_wire_conformance.py` reads that
+     * list out of the source of all four ports and cannot resolve a symbol, and
+     * a vocabulary the cross-client check cannot read is a vocabulary nothing
+     * pins. A test asserts the two spellings agree.
      */
     const val PREPARE_REPLACEMENT_ACTION = "prepare_replacement"
     const val PREPARE_ACTION_TYPE = "prepare"
@@ -64,7 +70,7 @@ object PlaybackControl {
      * read always answers `Absent` while `dual_player_preparation` is false.
      */
     val SUPPORTED_ACTIONS =
-        listOf("hold", "retry_resource", "terminal", PREPARE_REPLACEMENT_ACTION)
+        listOf("hold", "retry_resource", "terminal", "prepare_replacement")
     const val MIN_EXCHANGE_MS = 250L
     const val MAX_EXCHANGE_MS = 60_000L
     const val EXCHANGE_DEADLINE_MS = 6_000L
