@@ -209,8 +209,39 @@ watch progress. Actual rendered frames renew its no-progress budget: Media3's
 can move backward while healthy. A token-free durable marker preserves start
 and cleanup uncertainty across process death and profile changes. Fourteen
 focused `LiveTvTest` cases cover these contracts; physical decode and remote
-navigation remain separate acceptance evidence. DRM, DVR, rewind, captions and
-guide scheduling are deliberately unsupported in the first profile.
+navigation remain separate acceptance evidence. DRM, DVR, rewind and captions
+are deliberately unsupported.
+
+**Build 74 adds the programme guide.** Channel rows carry the programme on now,
+a bar running to its end and what is next; a phone or tablet can switch to a
+half-hour grid with a red now line; search matches the number, the callsign and
+the programme on now. The guide is read-only: a future cell opens details and
+offers nothing else, because there is no recording and no scheduling behind it.
+Every guide state is *rendered* — off, empty, stale or erroring all leave a
+working screen and a tunable channel, because the lineup and the session start
+never consult guide state and never wait on a guide fetch. The reducers are
+pure functions in `LiveTvGuide.kt`, checked by `LiveTvGuideTest` against
+`tests/playback/live-tv-guide-cases.json`, which the web and Apple suites read
+too.
+
+**Picture-in-picture, and the release rule it forced.** Entering PiP drives this
+activity to `ON_STOP`, and the old rule released the tuner there — which would
+have killed the exact case PiP exists for. Both teardown paths, the
+`DisposableEffect` and the `ON_STOP` effect, now go through
+`LiveTvPlayer.stopUnlessRetained()`, and the controller owns the predicate
+because the screen is precisely the thing that is going away when it matters.
+An ordinary back-out, with no PiP, still releases the tuner immediately. The
+guide refresh runs on the controller's own scope beside the heartbeat rather
+than in a `LaunchedEffect`, for the same reason.
+
+**One input table for the ten-foot overlay.** `LiveTvInputPolicy` transcribes
+the `live` section of `tests/playback/player-input-contract.json`, and
+`LiveTvInputPolicyTest` walks every cell against the fixture. The 2026-09-02
+rulings hold: a direction on a hidden overlay only reveals it, and the channel
+list is preview-then-commit. There is no half-hour grid on Android TV — a
+focus-navigable grid is a milestone of its own on each ten-foot platform, and
+until then the television gets the list, which the focus engine already
+handles.
 
 ### Live TV
 
