@@ -1,4 +1,7 @@
-use plurx_core::domain::{AudioStream, DolbyVisionFacts, MediaFile};
+use plurx_core::domain::{
+    AudioStream, ContinuationDecodeRestriction, DecodeRestrictionError, DolbyVisionFacts,
+    MediaFile, CONTINUATION_DECODE_RESTRICTION_VERSION,
+};
 use plurx_core::transcode::{
     hls_args, resolve_transcode, ArtifactQualification, AttemptRestrictions, CapabilityStatus,
     DecodeBackend, DecodeCacheIdentity, DecodeCapabilities, DecodeCapability,
@@ -2458,4 +2461,86 @@ fn how_well_a_node_knows_its_decoder_does_not_move_the_artifact_identity() {
         "a qualified inventory is not a qualified artifact contract"
     );
     assert_eq!(legacy.artifact_namespace(), UNQUALIFIED_ARTIFACT_NAMESPACE);
+}
+
+// ---------------------------------------------------------------------------
+// M5c2 — turning a durable continuation record into a selection input
+// ---------------------------------------------------------------------------
+
+fn continuation_restriction(failed: &str, required: &str) -> ContinuationDecodeRestriction {
+    ContinuationDecodeRestriction {
+        version: CONTINUATION_DECODE_RESTRICTION_VERSION,
+        source_revision_digest: "a".repeat(64),
+        input_video_stream: 0,
+        input_codec: "hevc".to_owned(),
+        failed_backend: failed.to_owned(),
+        required_backend: required.to_owned(),
+        policy_revision: 1,
+    }
+}
+
+#[test]
+fn every_backend_name_survives_the_round_trip_and_nothing_else_parses() {
+    // `name` is what a durable record stores and `parse` is what reads it
+    // back, so the two are one contract. A backend added on one side and not
+    // the other is a restriction that writes cleanly and reads as a stranger.
+    for backend in [
+        DecodeBackend::Software,
+        DecodeBackend::VideoToolbox,
+        DecodeBackend::Cuda,
+        DecodeBackend::Qsv,
+        DecodeBackend::Vaapi,
+    ] {
+        assert_eq!(DecodeBackend::parse(backend.name()), Some(backend));
+    }
+    // No default, no nearest match, no leniency about spelling. Each of these
+    // is a way a name could be "almost" right, and each has to be nothing.
+    for name in [
+        "",
+        " software",
+        "software ",
+        "Software",
+        "SOFTWARE",
+        "vt",
+        "banana",
+    ] {
+        assert_eq!(DecodeBackend::parse(name), None, "{name:?} must not parse");
+    }
+}
+
+#[test]
+fn a_continuation_record_names_the_successor_outright() {
+    let restriction = continuation_restriction("videotoolbox", "software");
+    let restrictions =
+        AttemptRestrictions::for_continuation(&restriction).expect("a readable restriction");
+    assert_eq!(
+        restrictions,
+        AttemptRestrictions::requiring(DecodeBackend::Software),
+        "the required form is the branch resolution reads first, and it names \
+         the successor rather than leaving preference order to pick what is left"
+    );
+}
+
+#[test]
+fn an_unreadable_continuation_record_is_a_refusal_and_never_an_absence() {
+    // The whole point of the restriction is that a source which failed on
+    // hardware does not get hardware again. Reading an unknown name as "no
+    // restriction" restores automatic selection and reproduces the failure,
+    // silently, on every later continuation.
+    assert_eq!(
+        AttemptRestrictions::for_continuation(&continuation_restriction("videotoolbox", "banana")),
+        Err(DecodeRestrictionError::InvalidField("required_backend")),
+    );
+    // And the less obvious half: a record whose *failed* backend this build
+    // does not know was written by a build that knew something this one does
+    // not. Honouring half of it is a guess.
+    assert_eq!(
+        AttemptRestrictions::for_continuation(&continuation_restriction("banana", "software")),
+        Err(DecodeRestrictionError::InvalidField("failed_backend")),
+    );
+    // `validate` refuses a record that requires what just failed, so the
+    // conversion never has to. This asserts that division stays true.
+    assert!(continuation_restriction("software", "software")
+        .encode()
+        .is_err());
 }

@@ -122,6 +122,37 @@ impl DecodeBackend {
             Self::Vaapi => "vaapi",
         }
     }
+
+    /// The exact inverse of [`Self::name`], and no more than that.
+    ///
+    /// A durable continuation restriction stores backend names as strings, so
+    /// something has to turn one back into a backend. `None` is the only
+    /// answer for a name this build does not know — never a default, never the
+    /// nearest match. A restriction written by a build with a decoder family
+    /// this one has never heard of is unreadable, and the rule its own
+    /// documentation states is that an unreadable restriction is a refusal
+    /// rather than an absent one: falling back to automatic selection would
+    /// restore hardware decoding for a source that already failed on hardware,
+    /// which is the loop the restriction exists to stop.
+    ///
+    /// Deliberately not `FromStr`. The names are a stored wire vocabulary
+    /// rather than a user-facing spelling, and a trait implementation invites
+    /// `"Software".parse()` and `" software".parse()` to be expected to work.
+    pub fn parse(name: &str) -> Option<Self> {
+        // Written as a match over the variants rather than over the strings so
+        // that a new backend fails to compile here instead of silently
+        // becoming unparseable — which would read, at every call site, as a
+        // restriction written by a stranger.
+        [
+            Self::Software,
+            Self::VideoToolbox,
+            Self::Cuda,
+            Self::Qsv,
+            Self::Vaapi,
+        ]
+        .into_iter()
+        .find(|backend| backend.name() == name)
+    }
 }
 
 impl DecodeEvidence {
@@ -1560,6 +1591,49 @@ impl AttemptRestrictions {
             excluded: BTreeSet::new(),
             required: Some(backend),
         }
+    }
+
+    /// The restriction a durable continuation record asks for.
+    ///
+    /// [`ContinuationDecodeRestriction`] stores both backends as strings and
+    /// its own validation deliberately does not check that either names a real
+    /// decoder — it checks length, and that the required backend differs from
+    /// the failed one, because "require the backend that just failed" is a
+    /// loop rather than a restriction. Turning the record into a selection
+    /// input is where the names have to mean something, so it is where an
+    /// unreadable one is refused.
+    ///
+    /// Refuses on **either** name. The required one is obvious: it is the
+    /// answer. The failed one is refused too, and that is the less obvious
+    /// half — a record naming a decoder family this build has never heard of
+    /// was written by a build that knew something this one does not, and
+    /// honouring half of it is a guess. `InvalidField` is reused rather than a
+    /// new error added, because the field names are exactly what a reader
+    /// needs and the store already surfaces this error shape for this record.
+    ///
+    /// **This does not check that the restriction applies to the plan.** A
+    /// record carries `source_revision_digest`, `input_video_stream` and
+    /// `input_codec` precisely so a caller can refuse to apply one written
+    /// about a different source or a different stream, and that comparison
+    /// belongs at the call site, which is the only place those facts are
+    /// known. A caller that skips it restricts the wrong thing.
+    pub fn for_continuation(
+        restriction: &crate::domain::ContinuationDecodeRestriction,
+    ) -> Result<Self, crate::domain::DecodeRestrictionError> {
+        if DecodeBackend::parse(&restriction.failed_backend).is_none() {
+            return Err(crate::domain::DecodeRestrictionError::InvalidField(
+                "failed_backend",
+            ));
+        }
+        let required = DecodeBackend::parse(&restriction.required_backend).ok_or(
+            crate::domain::DecodeRestrictionError::InvalidField("required_backend"),
+        )?;
+        // `requiring` rather than `excluding(failed)`: the required form is
+        // the branch `resolve_transcode` reads first, and it names the
+        // successor outright instead of leaving preference order to decide
+        // what is left. An exclusion would also permit a third backend that
+        // nobody measured.
+        Ok(Self::requiring(required))
     }
 
     fn permits(&self, backend: DecodeBackend) -> bool {
