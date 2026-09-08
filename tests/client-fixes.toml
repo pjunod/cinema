@@ -820,3 +820,11 @@ source = "clients/apple/Sources/PlaybackControlReporter.swift"
 source_anchor = "var committedMediaOriginMs: Int? = nil"
 test = "clients/apple/Tests/PreparedReplacementTests.swift"
 test_anchor = "testACommitEchoesTheOffersOriginRatherThanRecomputingIt"
+
+[[fixes]]
+id = "apple.prepared-switch-is-a-critical-section"
+commits = ["594daea1"]
+source = "clients/apple/Sources/PreparedReplacement.swift"
+source_anchor = "mutating func noteSwitching(_ action: PreparedReplacementAction) -> Bool"
+test = "clients/apple/Tests/PreparedReplacementTests.swift"
+test_anchor = "testACommitSettlesTheStagingItWasCalledForRatherThanWhateverIsCurrent"
