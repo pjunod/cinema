@@ -52,6 +52,35 @@ until the D6 device measurement lands. Priming cannot be built against the
 transition the fleet actually produces. Hold it for D6, or narrow the axis set
 to copy-only and prove the transaction on those — that choice is Paul's.
 
+## The third client speaks the protocol, on a platform the server will not use it for
+
+**Merged into `main` as `b266341e`, 2026-09-08, from
+[its pull request](http://192.168.4.7:3000/noirr/plurx/pulls/136). With it,
+all three client halves of M6 are on `main`.** The work was built on
+`effort/decoder-selection-recovery`, where it merged as four pull requests,
+and reconciled here against `main`'s restructured seek path, control session
+and reporter. It was reviewed adversarially as a *change* rather than as a
+move, which is the reason it is worth a line: all three defects the review
+found lived only in the seam, in code that existed on neither branch before
+the reconciliation. `./gradlew testDebugUnitTest :app:assembleDebug
+:app:lintDebug` — the non-Docker equivalent of `make android-test` and `make
+android` — green, 519 tests, 0 failures, 0 errors.
+
+**What it deliberately did not do, and this matters more than the port.**
+Android's `dual_player_preparation` is `false` and stays `false`. M5.5
+measured the tunneled Google TV at 0/3 on the same-codec case, both
+`PREPARED_AXIS_SETS` rows *are* same-codec, and Gate A is a hardware claim
+frozen per platform in protocol v1 — so the server will not stage a successor
+for an Android viewer, and this code does not run. It is written, tested and
+dark, against the day a measured device class earns the literal. The lab
+re-run on the tunneled Google TV was not taken; no lab access from that
+session. See
+[M6-ANDROID-CLIENT-STATUS.md](docs/playback-control/M6-ANDROID-CLIENT-STATUS.md).
+
+**If `effort/decoder-selection-recovery` is promoted later, its four Android
+commits are now duplicates** — rebase them away rather than merging them
+twice.
+
 ## Apple viewers were paying for encoders nobody told them about
 
 **Merged into `main` as `9c5e1f9b`, 2026-09-08, from
@@ -131,17 +160,28 @@ prompt for them is in the pull request. `make apple-build` and
 `make apple-test` are green on Xcode 26.6 — 900 cases across the iOS and
 tvOS destinations.
 
-**One thing this branch got wrong, recorded because the next person will be
-tempted the same way.** `web layout and accessibility` was already red on
-`main` with a Playwright `TargetClosedError`, and this PR's log carried the
-byte-identical error. That match was taken as proof the lane's redness was
-not this branch's — but the same log also carried `DRIFT 54 structural facts
-differ from tests/ui-structure.golden`: the Developer card's advisory rows
-are DOM facts, and the golden had to move with them. A job can fail twice,
-and matching the *known* signature only proves the known fault is still
-there. `main` stayed red on that lane until the web half carried both cards'
-facts in `37ce1e87`. It is green now, and both halves are covered — but the
-merge here should not have happened without regenerating the golden.
+**One thing this branch got wrong, recorded with the evidence because the
+reasoning is the tempting kind.** `web layout and accessibility` was red on
+`main`, and this PR's log carried a Playwright `TargetClosedError` that
+matched the one in main's. That match was taken as proof the redness was not
+this branch's. The same log also carried `DRIFT 54 structural facts differ
+from tests/ui-structure.golden` — the Developer card's advisory rows are DOM
+facts and the golden had to move with them — so the merge here happened
+without the golden it needed, and `main` stayed red on that lane until the
+web half carried both cards' facts in `37ce1e87`.
+
+The lesson is sharper than "a job can fail twice", and the job logs are what
+sharpen it. Counted across every retained run of that lane, `TargetClosedError`
+appears **six** times in the runs that **succeeded** (tasks 3404, 3497, 3531)
+and **four** times in the ones that failed (3351, 3368, 3451, 3478) — it is
+asyncio teardown noise, printed by passing runs, and nothing has ever failed
+on it. Every failure of that lane was a golden `DRIFT`, including the redness
+on `main` that was being matched against: `37ce1e87`'s own message says so.
+So the signature was never a failure signature. **Before treating a red lane
+as somebody else's, find the line that actually failed the job** — the
+`Error`/`FAILED`/`DRIFT` the runner exits on — and check whether it names a
+surface this branch touched. Matching an error string that also appears in
+green runs proves nothing at all.
 
 ## The CI fleet filled up because the bound was behind a flag nobody set
 
@@ -247,8 +287,8 @@ that dies mid-tick must still end it.
 
 ## A deploy that refused itself over an unmaintainable pair
 
-**PR [#37](http://192.168.4.7:3000/noirr/plurx/pulls/37) — open against
-`main`.** `make
+**PR [#37](http://192.168.4.7:3000/noirr/plurx/pulls/37) merged as
+`c661d387`.** `make
 docker-up` on nynuc refused to change a container: the health start period was
 the tracked five minutes, and `/srv/plurx/plurx.toml` sets
 `install_snapshot_timeout_secs = 1200`, which with the three named startup

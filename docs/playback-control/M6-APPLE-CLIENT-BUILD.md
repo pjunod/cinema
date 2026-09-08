@@ -361,11 +361,20 @@ make apple-test    # generate, build-for-testing, test-without-building, per des
 4. **One directed replacement on real hardware**, preserving position, pause
    state, tracks and grade — the exit criterion in
    `DECODER_SELECTION_AND_RECOVERY_PLAN.md` §12.7. A simulator does not
-   discharge this; the whole capability is a hardware claim. **Run it on a live
-   or live-recovery session**, never on a VOD title — §2's `delivered_bps` gap
-   means VOD cannot reach the preparation path at all.
+   discharge this; the whole capability is a hardware claim.
    `observed_download_bps` must be non-null in the captured request body, or
    the run proves nothing.
+
+   > **Correction, 2026-09-08 — the "never on a VOD title" instruction this
+   > item carried is struck.** It read *"Run it on a live or live-recovery
+   > session, never on a VOD title — §2's `delivered_bps` gap means VOD cannot
+   > reach the preparation path at all"*, and §2's own correction above
+   > retires exactly that premise: `f2fecc98` populates `delivered_bps` for
+   > VOD, so VOD reaches the preparation path. This was the last uncorrected
+   > instance of the claim in the tree, and it was the one an operator would
+   > have read, because §8 is the acceptance. **Either presentation
+   > discharges this item.** A live or live-recovery session is still the
+   > richer case and is preferred where one is available.
 5. **The fallback interruption measured on at least one Apple device**, with
    the number written into `PLAYBACK-CONTROL-STATUS.md`. It is currently
    unmeasured and this milestone is the first thing to exercise it.
