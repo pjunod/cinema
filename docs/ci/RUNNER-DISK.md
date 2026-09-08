@@ -169,6 +169,43 @@ it again upgrades the script in place. The ARM runner is a Lima VM on a Mac and
 runs systemd, so this is the right installer for it too:
 `limactl shell plurx-ci-arm -- sudo bash …`.
 
+**On a host with no checkout**, `deploy/runner-janitor/bootstrap` fetches the
+four files from the forge and runs the same installer — **and it needs a token,
+which is not optional**:
+
+```bash
+sudo PLURX_TOKEN=<forgejo token> bash -euc 'f=$(mktemp); curl -fsSL \
+  -H "Authorization: token $PLURX_TOKEN" \
+  http://192.168.4.7:3000/noirr/plurx/raw/branch/main/deploy/runner-janitor/bootstrap \
+  -o "$f"; bash "$f"; rm -f "$f"'
+```
+
+**The shape of that command matters as much as the header.**
+`bash -c "$(curl …)"` expands the substitution in the *calling* shell, where
+`PLURX_TOKEN` is not set — a `sudo VAR=x` assignment applies only to the
+command sudo runs. The header goes out empty, the forge answers 404, `--fail`
+makes curl exit 22, the substitution yields nothing, and `bash -c ""` exits 0:
+a silent no-op that reports success, holding a perfectly valid token. That
+version was written, reviewed and published here before this one, which is why
+`test_the_documented_bootstrap_command_works` now extracts this very code block
+from this file and runs it.
+
+`noirr/plurx` is private: every raw URL answers 404 to an anonymous request and
+200 with that header. The bootstrap shipped without it, so the one-command
+install it documented could never have worked on any host — it was published,
+handed to an operator, and failed on first use with
+`curl: (22) ... 404` followed by `bash: /dev/fd/63: Bad file descriptor`, which
+names neither the private repository nor the missing credential. The check that
+was supposed to guard it asserted the URL *string* was present in the file,
+which it was, correctly, the whole time. `test_the_bootstrap_can_actually_fetch`
+now runs the fetch loop against a fake forge that refuses unauthenticated
+requests, and against a missing file, because without `--fail` curl writes the
+404 body to the destination and exits 0, so the installer is chmod +x'd and
+exec'd as root over whatever the forge said. This forge answers `Not found.`,
+eleven bytes with no shebang, so that exec fails — but "the install silently
+did nothing" is the outcome either way, and nothing about the next endpoint is
+promised.
+
 **The Apple runner has its own**, in
 [`deploy/runner-janitor/macos/`](../../deploy/runner-janitor/macos/): same
 numbers, same three invariants, launchd instead of systemd.
@@ -272,7 +309,14 @@ about it.
 
 `gha-nuc4-general-01` sat in that band on 2026-09-08: two jobs refused with
 `18G available … need 25G`, identical to the gigabyte across both, because the
-job's labels pin it to that guest and a re-push lands on the same disk. So the
+job kept landing there. **Not because anything pinned it** — eight runners
+carry the `general` label, and `gha-m6-general-02` ran the same lane green with
+42 G free the same afternoon. A runner that refuses in fifteen seconds returns
+to idle immediately and is therefore first in line for the next job, so a full
+runner takes a disproportionate share of the queue and fails all of it —
+**it starves the pool precisely because it fails fast.** Worth its own fix: the
+preflight could hold the slot on refusal so healthy runners win the race.
+So the
 reserve is now `max(20 % of the filesystem, REQUIRED_GB)`.
 
 A demand **larger than half the filesystem** is reported and then ignored — it

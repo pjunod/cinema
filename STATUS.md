@@ -306,8 +306,14 @@ back `idle` in Forgejo twenty seconds later. **The cache is bounded fleet-wide.*
 `gha-nuc4-general-01` refused two jobs in a row — tasks 3753 and 3780 — with
 `::error::gha-nuc4-general-01 is out of disk: 18G available at
 /opt/forgejo-runner/_work/<hash>/hostexecutor, need 25G`, identical to the
-gigabyte across both, because the job's labels pin it to that guest and a
-re-push lands on the same disk. The janitor reported that runner healthy the
+gigabyte across both. **Not because anything pinned the job there** — that
+was this session's assumption and it is wrong: eight runners carry the
+`general` label, and `gha-m6-general-02` ran the same lane green with 42 G
+free. A runner that refuses in fifteen seconds returns to idle immediately and
+is therefore first in line for the next job, so **a full runner starves the
+pool precisely because it fails fast**. That is worth its own fix — the
+preflight could hold the slot on refusal so healthy runners win the race — and
+it is named here rather than built at the end of a long session. The janitor reported that runner healthy the
 whole time, and by its own rule it was: **the preflight refuses a job below
 25 G and the janitor reserved 20 % of the filesystem, 15.6 G on a 78 GB guest.**
 Between those two figures is a band where the fleet turns work away and the
