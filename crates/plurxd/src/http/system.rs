@@ -1689,8 +1689,10 @@ pub struct SettingsDto {
     /// showed. The hardware cap is the more consequential of the two: it is
     /// what a start is refused against, and it is also what a predecessor
     /// holds for the length of its drain, so an operator who cannot see it
-    /// cannot tell a saturated encoder from a refused one. `hw_slots_max` on
-    /// System reports the same number, read-only; this is the control.
+    /// cannot tell a saturated encoder from a refused one. [`SystemDto`]
+    /// carries the same cap beside the count in use, but only over the API —
+    /// no page renders that pair today, so this is the only place an operator
+    /// meets the number.
     pub transcode_max_hw_sessions: i64,
     pub transcode_software_pool_threads: i64,
     /// App-managed offline preparation has a separate reservation budget from
@@ -2074,6 +2076,10 @@ pub struct UpdateSettings {
     /// above the encoders a node has admits sessions that then fail at
     /// `ffmpeg`, and a software pool wider than the machine turns one stream's
     /// stall into every stream's.
+    ///
+    /// The bounds are wide on purpose. A control must be able to write back
+    /// every value its own page can display, and the DTO reports what is
+    /// stored rather than what this API would have accepted.
     pub transcode_max_hw_sessions: Option<i64>,
     pub transcode_software_pool_threads: Option<i64>,
     pub offline_enabled: Option<bool>,
@@ -2544,39 +2550,39 @@ pub async fn update_settings(
             Some(Some(parsed))
         }
     };
-    // Encoder capacity. The two bounds differ at zero, and deliberately.
+    // Encoder capacity. Both bounds accept zero, because both readers do, and
+    // the bound a control writes must not be narrower than the bound its own
+    // page can display.
     //
-    // Zero hardware sessions is a supported answer — `max_hw_sessions` says
-    // so at its own definition, for a box whose GPU is doing something else —
-    // and software encoding still serves every start. Zero software threads
-    // is not the same shape at all: `try_admit_software` admits nothing
-    // against a budget of zero, so on a node with no hardware encoder it
-    // refuses every session, and the setting that reads like "unlimited"
-    // would mean "no playback". A stored zero there is still *reported*, so
-    // the page tells the truth about a node that already has one; it is
-    // simply not a value this API will write.
+    // An earlier draft refused a zero software pool on the theory that
+    // `try_admit_software` admits nothing against a budget of zero. It does
+    // not: `SwPool::try_take` short-circuits the budget check while the pool
+    // is empty, deliberately and with its own comment saying why — on a
+    // two-core box every session is over budget, and refusing all of them
+    // would turn the budget into a ban. A zero budget therefore degrades to
+    // one saturating session at a time, which is a poor setting and not a
+    // broken one. Refusing to write it had a worse consequence than the value
+    // it was guarding against: the DTO reports a stored value verbatim and
+    // the page sends the whole card on every save, so any node that already
+    // held a zero could not save *any* streaming setting until an operator
+    // noticed a control they had not touched.
     //
     // The ceilings are generous rather than derived from this node's CPU
     // count: a container's visible cores are not the operator's licence, and
     // a number that refuses to save is worse than one that is optimistic.
-    for (label, value, min, max) in [
-        (
-            "transcode_max_hw_sessions",
-            req.transcode_max_hw_sessions,
-            0_i64,
-            64_i64,
-        ),
+    // They are also wide enough that no value this DTO can plausibly report
+    // is unsavable, which is the same rule as the floor.
+    for (label, value) in [
+        ("transcode_max_hw_sessions", req.transcode_max_hw_sessions),
         (
             "transcode_software_pool_threads",
             req.transcode_software_pool_threads,
-            1_i64,
-            256_i64,
         ),
     ] {
         if let Some(value) = value {
-            if !(min..=max).contains(&value) {
+            if !(0..=1_024).contains(&value) {
                 return Err(ApiError::BadRequest(format!(
-                    "{label} must be between {min} and {max}"
+                    "{label} must be between 0 and 1024"
                 )));
             }
         }
@@ -3047,33 +3053,49 @@ pub async fn update_settings(
             .put_setting(keys::PLAYBACK_AUTO_ABR, if enabled { "1" } else { "0" })
             .await?;
     }
+    // The offline card's four fields land together or not at all. They were
+    // four separate writes, which for the budgets is merely untidy and for the
+    // switch is not: it is the one whose write is followed by `cancel_all`, so
+    // a store error between the budgets and the switch leaves a node that
+    // accepted the new ceilings and kept preparing against the old answer.
+    // `put_settings` exists for exactly this.
+    let mut offline_values: Vec<(&'static str, String)> = Vec::with_capacity(4);
     for (key, _, value) in offline_gb_settings {
         if let Some(gb) = value {
-            state.store.put_setting(key, &gb.to_string()).await?;
+            offline_values.push((key, gb.to_string()));
         }
     }
     if let Some(rows) = req.offline_max_rows_per_user {
-        state
-            .store
-            .put_setting(keys::OFFLINE_MAX_ROWS_PER_USER, &rows.to_string())
-            .await?;
-    }
-    for (key, value) in [
-        (keys::MAX_HW_SESSIONS, req.transcode_max_hw_sessions),
-        (keys::SW_POOL_THREADS, req.transcode_software_pool_threads),
-    ] {
-        if let Some(value) = value {
-            state.store.put_setting(key, &value.to_string()).await?;
-        }
+        offline_values.push((keys::OFFLINE_MAX_ROWS_PER_USER, rows.to_string()));
     }
     if let Some(on) = req.offline_enabled {
-        state
-            .store
-            .put_setting(keys::OFFLINE_ENABLED, if on { "1" } else { "0" })
-            .await?;
-        if !on {
+        offline_values.push((keys::OFFLINE_ENABLED, if on { "1" } else { "0" }.to_owned()));
+    }
+    if !offline_values.is_empty() {
+        let borrowed = offline_values
+            .iter()
+            .map(|(key, value)| (*key, value.as_str()))
+            .collect::<Vec<_>>();
+        state.store.put_settings(&borrowed).await?;
+        // Only after the switch is durably off. Cancelling first would stop
+        // work the store might then refuse to record the reason for.
+        if req.offline_enabled == Some(false) {
             state.offline.cancel_all().await;
         }
+    }
+    let capacity_values = [
+        (keys::MAX_HW_SESSIONS, req.transcode_max_hw_sessions),
+        (keys::SW_POOL_THREADS, req.transcode_software_pool_threads),
+    ]
+    .into_iter()
+    .filter_map(|(key, value)| value.map(|value| (key, value.to_string())))
+    .collect::<Vec<_>>();
+    if !capacity_values.is_empty() {
+        let borrowed = capacity_values
+            .iter()
+            .map(|(key, value)| (*key, value.as_str()))
+            .collect::<Vec<_>>();
+        state.store.put_settings(&borrowed).await?;
     }
     if let Some(on) = req.scan_on_startup {
         state

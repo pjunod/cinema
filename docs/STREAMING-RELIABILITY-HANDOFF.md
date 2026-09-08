@@ -799,18 +799,36 @@ that changed product behaviour with no visible control:
   #141 found in the overlay switch was here too — the DTO, the preparer and
   the offline API each ran their own negated `matches!`, none trimming or
   folding case, so a hand-written ` OFF ` read as *enabled* at all three. One
-  `stored_switch` now, asserted at every reader in the same test.
+  `stored_switch` now. Two of the three readers are reachable from a request
+  and are asserted together in `http/mod.rs`; the preparer is pinned where it
+  lives, in `offline.rs`, because its only existing test stored lowercase
+  `off` — a value the old parser also read as disabled — so that reader could
+  have been left behind with the suite green.
 - ~~`SW_POOL_THREADS`~~ and ~~`MAX_HW_SESSIONS`~~ — **done.** Both are fields
-  on the settings DTO and selects in Playback → Streaming. Two things worth
-  knowing if you touch them: the DTO reads them exactly the way
-  `TranscodeManager::num_setting` does, *including a stored zero*, because a
-  zero hardware cap is a supported answer and coercing it to the default would
-  make the page claim capacity the node will never admit; and the API refuses
-  to write a zero software pool, because `try_admit_software` admits nothing
-  against a budget of zero, so on a node with no hardware encoder that setting
-  means "no playback" while reading like "unlimited". The round-trip test ends
-  at `TranscodeManager`, not at the DTO — the expensive half of moving a
-  switch is always the reader.
+  on the settings DTO and selects in Playback → Streaming. The round-trip test
+  ends at `TranscodeManager`, not at the DTO, because the expensive half of
+  moving a switch is always the reader. Three things the adversarial pass on
+  that PR established, each of which had been guessed wrong first:
+  - **A stored zero is reported and writable on both keys**, because both
+    readers honour it. The first draft refused a zero software pool on the
+    theory that `try_admit_software` admits nothing against a budget of zero.
+    It does not — `SwPool::try_take` grants unconditionally while the pool is
+    empty, deliberately, so a two-core box is not banned by its own budget.
+    Worse, refusing it made the *whole Streaming card* unsavable on any node
+    that already held a zero, because the DTO reports a stored value verbatim
+    and the page sent the card whole. **A control must be able to write back
+    every value its own page can display.**
+  - **A zero hardware cap is not a software-only mode**, and must not be
+    offered as one. `admit_live` still takes the hardware branch whenever the
+    node has an encoder, so every start queues for a slot that never frees,
+    waits out the full five-second admission window and only then falls back —
+    and a 4K HEVC HDR stream, which software cannot keep up with, is refused
+    outright with "all 0 hardware transcode slots are in use". The mechanism
+    for software-only is `keys::HWACCEL`.
+  - **The software default is per-node and the setting is replicated.** The
+    page therefore sends either capacity field only when an operator actually
+    moved it; a card that always wrote them would give a 4-core node a 16-core
+    machine's budget from an edit about the buffer limit.
   **`LIBRARY_DV_DISK_CONVERT` is not one of these** — it has a
   dedicated API in `http/dv_disk.rs` and a per-library select in the web UI
   (`dvModeSelect`). It was listed here in a first draft and is recorded as a

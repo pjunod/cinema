@@ -199,13 +199,17 @@ test("a card's Save wakes on a change and sleeps again once saved", () => {
 
 test("Playback saves per card, and each card writes only its own fields", () => {
   const writes = {};
-  const run = (fn, ids) => new Function(
+  // The two capacity selects hold numbers and Streaming compares them against
+  // what was loaded, so they need a numeric stub and a SETTINGS to differ
+  // from. Everything else is still the flat "v".
+  const NUMERIC = { phw: "6", psw: "12" };
+  const run = (fn, ids, settings) => new Function(
     "api", "document", "cacheSettings", "toast", "setCardSaved", "SERVER", "SETTINGS",
-    `${shippedSource(fn)} return ${fn};`,
+    `${shippedSource("capacityIfChanged")} ${shippedSource(fn)} return ${fn};`,
   )(
     async (path, opts) => { writes[fn] = { path, body: opts.body }; return {}; },
-    { getElementById: (id) => { assert.ok(ids.includes(id), `${fn} reads ${id}`); return { value: "v", checked: true, textContent: "" }; } },
-    (v) => v, () => {}, () => {}, {}, {},
+    { getElementById: (id) => { assert.ok(ids.includes(id), `${fn} reads ${id}`); return { value: NUMERIC[id] || "v", checked: true, textContent: "" }; } },
+    (v) => v, () => {}, () => {}, {}, settings || {},
   );
   const defaults = ["pal", "psl", "psm", "perr"];
   // The two switches that are off on purpose moved to Developer, so Streaming
@@ -234,6 +238,22 @@ test("Playback saves per card, and each card writes only its own fields", () => 
     assert.equal(writes.savePlaybackDefaults.path, "/settings");
     assert.equal(writes.saveStreaming.path, "/settings");
     assert.equal(writes.saveDeveloper.path, "/settings");
+  }).then(() => {
+    // Encoder capacity is written only when the operator moved it. Both of
+    // its defaults are derived from whichever node answered — the software
+    // one is that node's core count — and the settings store is shared, so a
+    // card that always wrote them would pin one machine's hardware on the
+    // whole cluster from an edit about the buffer limit.
+    delete writes.saveStreaming;
+    return run("saveStreaming", streaming, {
+      transcode_max_hw_sessions: 6,
+      transcode_software_pool_threads: 12,
+    })({ disabled: false });
+  }).then(() => {
+    const written = Object.keys(writes.saveStreaming.body);
+    assert.ok(written.length, "the rest of the card still saves");
+    for (const field of ["transcode_max_hw_sessions", "transcode_software_pool_threads"])
+      assert.ok(!written.includes(field), `${field} was written without being changed`);
   });
 });
 

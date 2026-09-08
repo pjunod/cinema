@@ -1255,6 +1255,42 @@ mod tests {
         task.abort();
     }
 
+    /// The preparer reads the stored switch the same way the settings page and
+    /// the offline API read it.
+    ///
+    /// This is the third of three readers, and it was the one nothing covered:
+    /// the test above stores lowercase `off`, which the hand-written
+    /// `matches!` this reader used to carry also read as disabled, so that
+    /// reader could have been left behind entirely and the suite would still
+    /// have been green. Case and surrounding whitespace are the whole point —
+    /// they are what the three copies disagreed about — so they are what this
+    /// asserts.
+    #[tokio::test(start_paused = true)]
+    async fn the_preparer_reads_the_stored_switch_the_way_every_other_reader_does() {
+        let fixture = seeded_fixture().await;
+        for (stored, expected) in [
+            ("0", false),
+            ("false", false),
+            (" OFF ", false),
+            ("No", false),
+            ("True", true),
+            ("1", true),
+            ("ON", true),
+            ("", true),
+        ] {
+            fixture
+                .store
+                .put_setting(keys::OFFLINE_ENABLED, stored)
+                .await
+                .expect("store the switch");
+            assert_eq!(
+                fixture.manager.enabled().await,
+                expected,
+                "the preparer reads {stored:?} as {expected}"
+            );
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn queue_marks_a_changed_source_failed_and_keeps_the_typed_reason() {
         let fixture = seeded_fixture().await;

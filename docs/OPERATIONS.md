@@ -3180,13 +3180,26 @@ decision, in three parts.
 | Buffer limit | `playback.hls_ahead_max_secs` | 180 s | How far ahead of the client the session may get before it pauses itself |
 | *(no dropdown)* | `playback.hls_ahead_max_bytes` | 2 GB | The same limit in bytes, per session — 180 s is a few hundred megabytes at a transcode rung and over a gigabyte of 4K copy, so time alone is not a disk bound |
 | *(no dropdown)* | `playback.hls_scratch_max_bytes` | 8 GB | Ceiling across *every* live session. A per-session cap bounds one runaway; it says nothing about four healthy 4K streams between them |
-| *(no dropdown)* | `transcode.max_hw_sessions` | 2 | Concurrent transcodes on the hardware encoder. An iGPU has one video-processing block, and a third 4K session on it does not run a third as fast — it drags all three under realtime. `0` disables hardware transcoding entirely (useful when the GPU is doing something else). Raise it on a card with more than one encode chip |
-| *(no dropdown)* | `transcode.software_pool_threads` | cores − 1 | Encoder threads the software CPU pool may hand out at once. Software sessions used to pick their own thread counts and could oversubscribe every core between them; each session now reserves a weight (which is also its explicit x264 `-threads`) and joins only if it fits. The lone session on an otherwise-empty pool always starts, whatever its weight — a budget must never be a ban. Lower it on a box whose CPU has other jobs |
+| Hardware encoders | `transcode.max_hw_sessions` | 2 | Concurrent transcodes on the hardware encoder. An iGPU has one video-processing block, and a third 4K session on it does not run a third as fast — it drags all three under realtime. `0` disables hardware transcoding entirely (useful when the GPU is doing something else). Raise it on a card with more than one encode chip |
+| Software encoder threads | `transcode.software_pool_threads` | cores − 1 | Encoder threads the software CPU pool may hand out at once. Software sessions used to pick their own thread counts and could oversubscribe every core between them; each session now reserves a weight (which is also its explicit x264 `-threads`) and joins only if it fits. The lone session on an otherwise-empty pool always starts, whatever its weight — a budget must never be a ban. Lower it on a box whose CPU has other jobs |
 
-These have no dropdown because they are safety limits rather than
-preferences — the right value is a property of the disk or the silicon, not a
-taste — but all are settable through `PUT /api/v1/settings` when the defaults
-don't suit the hardware.
+The two byte ceilings have no dropdown because they are safety limits rather
+than preferences — the right value is a property of the disk, not a taste — but
+they are settable through `PUT /api/v1/settings` when the defaults don't suit
+the hardware. The two encoder-capacity rows gained dropdowns on 2026-09-08,
+under **Encoder capacity** in the same card.
+
+Two things about those two are worth knowing before changing them. The hardware
+row's `0` is honoured by the reader and is *not* a graceful software-only mode:
+every hardware-preferred start still queues for a slot that will never free,
+waits out the five-second admission window, and only then falls back to
+software — and a 4K HEVC HDR stream, which software cannot keep up with, is
+refused outright with a message reading "all 0 hardware transcode slots are in
+use". To stop using the hardware encoder, set the encoder preference itself.
+And the software row's default is derived per node while the setting is
+replicated, so the page sends it only when an operator actually changes it;
+saving it from a 16-core machine would otherwise give a 4-core node the same
+budget.
 
 **How to read it:** the head start is the single number that decides whether a
 4K stream survives a network hiccup ten seconds in. Until 2026-07-28 the copy
@@ -3943,7 +3956,8 @@ consume `cache_max_gb`. Give whichever root holds that tree enough local space
 for both budgets; unlike session scratch, this cache must survive a daemon
 restart and must not live on tmpfs.
 
-The authenticated settings API exposes four operator controls:
+Settings → Maintenance → **Offline downloads** carries all four of these,
+and so does the authenticated settings API:
 
 | Field | Default | Meaning |
 |---|---:|---|

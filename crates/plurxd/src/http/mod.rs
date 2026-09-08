@@ -1720,13 +1720,17 @@ mod tests {
     /// `TranscodeManager`, which is what actually refuses a start, rather than
     /// at the DTO that reports it.
     ///
-    /// Zero is asserted on both keys and means different things on each. The
-    /// hardware cap honours a stored zero — a node whose GPU is doing
-    /// something else — so the DTO must report zero rather than the default,
-    /// or the page would claim capacity the node will never admit. The
-    /// software pool refuses to *store* one, because `try_admit_software`
-    /// admits nothing against a budget of zero and a node with no hardware
-    /// encoder would then refuse every session.
+    /// Zero is asserted on both keys, and it is a stored value rather than a
+    /// refused one on each. Both readers honour it, so the DTO reports it
+    /// rather than the default — a page that answered `2` for a node running
+    /// `0` would claim capacity that node will never admit — and the API
+    /// accepts it, because a control that cannot write back a value its own
+    /// page displays makes the whole card unsavable for the node that has one.
+    ///
+    /// An earlier draft refused a zero software pool on the theory that
+    /// `try_admit_software` admits nothing against a budget of zero. It does
+    /// not: `SwPool::try_take` grants unconditionally while the pool is empty,
+    /// on purpose, so that a two-core box is not banned by its own budget.
     #[tokio::test]
     async fn encoder_capacity_is_settable_and_the_admission_path_reads_what_was_saved() {
         let (app, state) = test_app_with_state();
@@ -1768,29 +1772,34 @@ mod tests {
             "System's read-only pair reports the same cap the control writes"
         );
 
-        // Zero hardware encoders is a supported answer, and has to survive
-        // the round trip in both directions.
-        let (status, off) = call(
-            &app,
-            put(
-                "/api/v1/settings",
-                Some(&admin),
-                json!({ "transcode_max_hw_sessions": 0 }),
-            ),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{off}");
-        assert_eq!(
-            off["transcode_max_hw_sessions"], 0,
-            "a deliberate zero must read back as zero, not as the default"
-        );
+        // Zero survives the round trip on both keys, in both directions. The
+        // reader honours it either way, so a DTO that answered the default
+        // here would describe a node that does not exist, and an API that
+        // refused it would leave the node that has one unable to save
+        // anything else on the same card.
+        for field in [
+            "transcode_max_hw_sessions",
+            "transcode_software_pool_threads",
+        ] {
+            let (status, off) = call(
+                &app,
+                put("/api/v1/settings", Some(&admin), json!({ field: 0 })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{field}: {off}");
+            assert_eq!(
+                off[field], 0,
+                "{field}: a deliberate zero must read back as zero, not as the default"
+            );
+        }
         assert_eq!(state.transcode.max_hw_sessions().await, 0);
+        assert_eq!(state.transcode.software_budget().await, 0);
 
         for (field, value) in [
             ("transcode_max_hw_sessions", -1),
-            ("transcode_max_hw_sessions", 65),
-            ("transcode_software_pool_threads", 0),
-            ("transcode_software_pool_threads", 257),
+            ("transcode_max_hw_sessions", 1_025),
+            ("transcode_software_pool_threads", -1),
+            ("transcode_software_pool_threads", 1_025),
         ] {
             let (status, body) = call(
                 &app,
@@ -1804,20 +1813,31 @@ mod tests {
             );
         }
         assert_eq!(
-            state.transcode.software_budget().await,
-            12,
-            "a refused write leaves the running budget alone"
+            state.transcode.max_hw_sessions().await,
+            0,
+            "a refused write leaves the running capacity alone"
         );
     }
 
-    /// One parser owns the stored offline switch, and it is the same one at
-    /// every reader.
+    /// One parser owns the stored offline switch, at the two readers reachable
+    /// through HTTP.
     ///
     /// Three copies of a negated `matches!` existed — the settings DTO, the
-    /// preparer, and the offline API boundary — and none of them trimmed or
-    /// folded case, so a value written by hand or by an older client could
-    /// read as *enabled* at all three while saying `OFF`. That is the defect
-    /// #141 found in the subtitle overlay switch, in a different file.
+    /// offline API boundary, and the background preparer — and none of them
+    /// trimmed or folded case, so a value written by hand or by an older
+    /// client could read as *enabled* at all three while saying `OFF`. That is
+    /// the defect #141 found in the subtitle overlay switch, in three more
+    /// files.
+    ///
+    /// This test covers the first two. The preparer is not reachable from a
+    /// request, so it is pinned where it lives, by
+    /// `the_preparer_reads_the_stored_switch_the_way_every_other_reader_does`
+    /// in `offline.rs` — deliberately, and not as a matter of convenience: an
+    /// adversarial review found the first version of this change claiming all
+    /// three readers here while touching two, and the preparer's only existing
+    /// test stored lowercase `off`, which the old parser also read as
+    /// disabled. That reader could have been left behind entirely with the
+    /// suite green.
     #[tokio::test]
     async fn a_stored_offline_switch_reads_the_same_way_wherever_it_is_read() {
         let (app, state) = test_app_with_state();
