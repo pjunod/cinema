@@ -110,6 +110,12 @@ final class PlaybackControlSession {
     private var reporter: PlaybackControlReporter?
     private var observe: (() -> PlayerControlObservation?)?
     private var activeGeneration: Int?
+    /// How a value the reporter's actor produced reaches `@MainActor`.
+    ///
+    /// Named for its first caller and now shared by every return-path
+    /// callback, because they all need exactly the same thing: a hop that a
+    /// test can hold still. Nothing here assumes main-actor isolation — see
+    /// `PlaybackControlLatestCapture` for what that assumption cost.
     private let scheduleSubtitleReady: @Sendable (
         @escaping @MainActor @Sendable () -> Void
     ) -> Void
@@ -156,6 +162,20 @@ final class PlaybackControlSession {
 
     var isReporting: Bool { reporter != nil }
 
+    /// A reporter that exists *and* will exchange again.
+    ///
+    /// `askForAction` returns immediately on a stopped reporter without
+    /// publishing anything, which is right for the ask and wrong for a caller
+    /// that was relying on it to report the viewer's intent. A caller that
+    /// checks this first knows whether the ask is a substitute for
+    /// `reportIntent` or merely a wait that will never publish.
+    var isActivelyReporting: Bool {
+        get async {
+            guard let reporter else { return false }
+            return await !reporter.stopped
+        }
+    }
+
     /// Where this playback sits in the control ordering, for a create that
     /// wants to be ordered against the settled destination.
     ///
@@ -178,7 +198,18 @@ final class PlaybackControlSession {
         bootstrap: ControlBootstrap,
         transport: PlaybackControlTransport,
         observe: @escaping () -> PlayerControlObservation?,
-        onSubtitleReady: @escaping @MainActor @Sendable () -> Void = {}
+        onSubtitleReady: @escaping @MainActor @Sendable () -> Void = {},
+        // The prepared-handoff return path. A `prepare` reaches the player
+        // already proven whole — the reporter refuses a malformed one as a
+        // protocol violation before this is called — so the player never has
+        // to ask whether a field is present.
+        onPreparedReplacement: @escaping @MainActor @Sendable (PreparedReplacementAction)
+            -> Void = { _ in },
+        // An exchange carrying this settlement came back. Until it does, the
+        // player keeps the same acknowledgement on every snapshot, which is
+        // what makes a commit impossible to lose to coalescing.
+        onAcknowledgementDelivered: @escaping @MainActor @Sendable (ActionAcknowledgement)
+            -> Void = { _ in }
     ) {
         end()
         // A generation, not a reset. A verdict outlives the session it was
@@ -242,6 +273,26 @@ final class PlaybackControlSession {
                               subtitleReadiness.record(exchange.response?.delivery?.subtitleReadiness)
                         else { return }
                         onSubtitleReady()
+                    }
+                }
+                if let delivered = exchange.request.acknowledgement,
+                   exchange.response != nil {
+                    scheduleSubtitleReady { [weak self] in
+                        guard self?.activeGeneration == generation else { return }
+                        onAcknowledgementDelivered(delivered)
+                    }
+                }
+                if let action = exchange.response?.action,
+                   let prepared = PreparedReplacementAction(action) {
+                    scheduleSubtitleReady { [weak self] in
+                        // The staging may have become irrelevant while this
+                        // hop was queued — a reopen, a new title, an end. The
+                        // generation check is the same one every other
+                        // callback in this closure makes, for the same reason.
+                        guard self?.activeGeneration == generation,
+                              exchange.capture.hasSameIntent(as: latest.load())
+                        else { return }
+                        onPreparedReplacement(prepared)
                     }
                 }
                 guard let action = exchange.response?.action,
