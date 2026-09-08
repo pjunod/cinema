@@ -722,6 +722,131 @@ class JanitorContractCase(unittest.TestCase):
         self.assertIn("raw/branch/$REF/deploy/runner-janitor", bootstrap)
         self.assertIn('exec "$work/install"', bootstrap)
 
+    def test_the_bootstrap_can_actually_fetch(self):
+        """A string in a file is not a fetch, and that distinction cost a day.
+
+        `noirr/plurx` is private: every raw URL answers 404 to an anonymous
+        request and 200 with an `Authorization: token` header. The bootstrap
+        used a bare `curl`, so the one-command install documented at the top of
+        that file could never have worked on any host. It was published, handed
+        to an operator, and failed on first use with `curl: (22) ... 404` and
+        `bash: /dev/fd/63: Bad file descriptor`, which names neither the private
+        repository nor the missing credential.
+
+        The check that was supposed to catch this asserted the URL *string*
+        appeared in the file — which it did, correctly, the whole time. This one
+        runs the bootstrap against a fake forge that refuses unauthenticated
+        requests, so it fails if the header is ever dropped again.
+        """
+        fixture = Path(self._directory.name) / "bootstrap"
+        forge = fixture / "forge/noirr/plurx/raw/branch/main/deploy/runner-janitor"
+        forge.mkdir(parents=True)
+        for name in (
+            "plurx-ci-janitor",
+            "plurx-ci-janitor.service",
+            "plurx-ci-janitor.timer",
+        ):
+            (forge / name).write_text(f"# {name}\n", encoding="utf-8")
+        # The installer the bootstrap execs, replaced by something that only
+        # records that it ran with the four files beside it.
+        (forge / "install").write_text(
+            '#!/bin/sh\nls "$(dirname -- "$0")" | sort > "$FIXTURE_INSTALLED"\n',
+            encoding="utf-8",
+        )
+
+        bin_dir = fixture / "bin"
+        bin_dir.mkdir()
+        # A forge that answers 404 unless the token header is present, which is
+        # the only property of the real one this test depends on.
+        (bin_dir / "curl").write_text(
+            "#!/bin/sh\n"
+            "auth=no; url=; out=; fail=no\n"
+            "while [ $# -gt 0 ]; do\n"
+            '  case "$1" in\n'
+            '    -H) case "$2" in "Authorization: token "?*) auth=yes ;; esac; shift 2 ;;\n'
+            '    -o) out=$2; shift 2 ;;\n'
+            '    -*f*) fail=yes; shift ;;\n'
+            '    -*) shift ;;\n'
+            '    *) url=$1; shift ;;\n'
+            "  esac\n"
+            "done\n"
+            'if [ "$auth" != yes ]; then\n'
+            '  echo "curl: (22) The requested URL returned error: 404" >&2\n'
+            "  exit 22\n"
+            "fi\n"
+            # A missing file models the other half of the real failure: without
+            # `--fail`, curl writes the 404 body to the destination and exits
+            # 0, so `install` would run an HTML error page as a shell script.
+            'src=${url#file://}\n'
+            'if [ ! -f "$src" ]; then\n'
+            '  if [ "$fail" = yes ]; then\n'
+            '    echo "curl: (22) The requested URL returned error: 404" >&2\n'
+            "    exit 22\n"
+            "  fi\n"
+            '  printf \'404 page not found\\n\' > "$out"\n'
+            "  exit 0\n"
+            "fi\n"
+            'cp "$src" "$out"\n',
+            encoding="utf-8",
+        )
+        (bin_dir / "curl").chmod(0o755)
+        # `id -u` must answer 0 without this test running as root.
+        (bin_dir / "id").write_text("#!/bin/sh\necho 0\n", encoding="utf-8")
+        (bin_dir / "id").chmod(0o755)
+
+        installed = fixture / "installed.txt"
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "PATH": f"{bin_dir}{os.pathsep}{environment['PATH']}",
+                "PLURX_FORGE": f"file://{fixture / 'forge'}",
+                "FIXTURE_INSTALLED": str(installed),
+                # The bootstrap's own `mktemp -d` lands here rather than in
+                # whatever the ambient TMPDIR is, so the test is hermetic and
+                # does not fail on a host whose /tmp is full.
+                "TMPDIR": str(fixture),
+            }
+        )
+        bootstrap_path = str(ROOT / "deploy/runner-janitor/bootstrap")
+
+        # No token: refused before anything is fetched, and it says why.
+        without = subprocess.run(
+            ["bash", bootstrap_path], env=environment, capture_output=True, text=True
+        )
+        self.assertEqual(without.returncode, 2, without.stdout)
+        self.assertIn("PLURX_TOKEN is required", without.stderr)
+        self.assertIn("private", without.stderr)
+        self.assertFalse(installed.exists())
+
+        # With one: all four files land and the installer runs beside them.
+        environment["PLURX_TOKEN"] = "fixture-token"
+        with_token = subprocess.run(
+            ["bash", bootstrap_path], env=environment, capture_output=True, text=True
+        )
+        self.assertEqual(with_token.returncode, 0, with_token.stderr)
+        self.assertEqual(
+            installed.read_text(encoding="utf-8").split(),
+            [
+                "install",
+                "plurx-ci-janitor",
+                "plurx-ci-janitor.service",
+                "plurx-ci-janitor.timer",
+            ],
+        )
+
+        # And the other half of the same failure: a file that is not there.
+        # Without `--fail`, curl writes the 404 body to the destination and
+        # exits 0, so the bootstrap would hand `install` an HTML error page and
+        # run it as a shell script. It must abort instead.
+        installed.unlink()
+        (forge / "plurx-ci-janitor.timer").unlink()
+        missing = subprocess.run(
+            ["bash", bootstrap_path], env=environment, capture_output=True, text=True
+        )
+        self.assertEqual(missing.returncode, 1, missing.stdout)
+        self.assertIn("could not fetch plurx-ci-janitor.timer", missing.stderr)
+        self.assertFalse(installed.exists())
+
 
 class MacosJanitorContractCase(unittest.TestCase):
     """The Apple runner has no systemd, and launchd will not wait for a job.

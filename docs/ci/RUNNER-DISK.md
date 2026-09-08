@@ -169,6 +169,29 @@ it again upgrades the script in place. The ARM runner is a Lima VM on a Mac and
 runs systemd, so this is the right installer for it too:
 `limactl shell plurx-ci-arm -- sudo bash …`.
 
+**On a host with no checkout**, `deploy/runner-janitor/bootstrap` fetches the
+four files from the forge and runs the same installer — **and it needs a token,
+which is not optional**:
+
+```bash
+sudo PLURX_TOKEN=<forgejo token> bash -c "$(curl -fsSL \
+  -H "Authorization: token $PLURX_TOKEN" \
+  http://192.168.4.7:3000/noirr/plurx/raw/branch/main/deploy/runner-janitor/bootstrap)"
+```
+
+`noirr/plurx` is private: every raw URL answers 404 to an anonymous request and
+200 with that header. The bootstrap shipped without it, so the one-command
+install it documented could never have worked on any host — it was published,
+handed to an operator, and failed on first use with
+`curl: (22) ... 404` followed by `bash: /dev/fd/63: Bad file descriptor`, which
+names neither the private repository nor the missing credential. The check that
+was supposed to guard it asserted the URL *string* was present in the file,
+which it was, correctly, the whole time. `test_the_bootstrap_can_actually_fetch`
+now runs the fetch loop against a fake forge that refuses unauthenticated
+requests, and against a missing file, because without `--fail` curl writes the
+404 body to the destination and the installer runs an HTML error page as a
+shell script.
+
 **The Apple runner has its own**, in
 [`deploy/runner-janitor/macos/`](../../deploy/runner-janitor/macos/): same
 numbers, same three invariants, launchd instead of systemd.

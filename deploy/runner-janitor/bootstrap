@@ -1,24 +1,52 @@
 #!/usr/bin/env bash
 # Install the runner janitor on a host with no checkout of this repository.
 #
-#   sudo bash <(curl -fsSL http://192.168.4.7:3000/noirr/plurx/raw/branch/main/deploy/runner-janitor/bootstrap)
+#   sudo PLURX_TOKEN=<forgejo token> bash -c "$(curl -fsSL \
+#     -H "Authorization: token $PLURX_TOKEN" \
+#     http://192.168.4.7:3000/noirr/plurx/raw/branch/main/deploy/runner-janitor/bootstrap)"
 #
 # One command, because a fleet fix that takes four is a fleet fix that gets
 # applied to two hosts. It fetches the janitor, its unit and its timer from the
 # forge into a temporary directory and runs the ordinary installer, which is
 # the same one a checkout would run.
+#
+# THE TOKEN IS NOT OPTIONAL, and that is the whole reason this file changed.
+# `noirr/plurx` is a private repository: every raw URL below answers 404 to an
+# anonymous request and 200 with an `Authorization: token` header. So the
+# documented one-liner could never have worked, on any host, ever -- it was
+# published, handed to an operator, and failed on first use with
+# `curl: (22) ... 404` followed by `bash: /dev/fd/63: Bad file descriptor`,
+# which names neither the repository nor the missing credential.
+#
+# The test that was supposed to guard this asserted the URL *string* appeared
+# in this file. A string is not a fetch. `test_the_bootstrap_can_actually_fetch`
+# runs the loop below against a fake forge that refuses unauthenticated
+# requests, which is the only version of this check that can fail.
 set -euo pipefail
 
 FORGE=${PLURX_FORGE:-http://192.168.4.7:3000}
 REF=${PLURX_REF:-main}
+TOKEN=${PLURX_TOKEN:-}
 base="$FORGE/noirr/plurx/raw/branch/$REF/deploy/runner-janitor"
 
 [ "$(id -u)" -eq 0 ] || { echo "bootstrap: run me as root" >&2; exit 1; }
+[ -n "$TOKEN" ] || {
+  echo "bootstrap: PLURX_TOKEN is required — noirr/plurx is private and every" >&2
+  echo "           raw URL answers 404 without it. Read the token from" >&2
+  echo "           ~/code/plurx-agent/forgejo_token on a host that has it." >&2
+  exit 2
+}
 
 work=$(mktemp -d)
 trap 'rm -rf -- "$work"' EXIT
 for name in plurx-ci-janitor plurx-ci-janitor.service plurx-ci-janitor.timer install; do
-  curl -fsSL "$base/$name" -o "$work/$name"
+  # `--fail` matters as much as the header: without it a 404 body is written to
+  # the destination and `install` runs an HTML error page as a shell script.
+  curl -fsSL -H "Authorization: token $TOKEN" "$base/$name" -o "$work/$name" || {
+    echo "bootstrap: could not fetch $name from $base" >&2
+    echo "           a 404 here usually means the token is wrong or expired." >&2
+    exit 1
+  }
 done
 chmod +x "$work/plurx-ci-janitor" "$work/install"
 exec "$work/install"
