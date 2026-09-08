@@ -2,7 +2,7 @@
 
 **Status:** M0–M3f, M4, M5a, M5b, the M5a census repair, M5c1, M5c2, M5c3 and
 M7a merged into the effort, and current `main` merged in ahead of promotion;
-M5 complete, M7 next · **Updated:** 2026-09-08 · **Integration branch:**
+M5 complete, M7b specified and next · **Updated:** 2026-09-08 · **Integration branch:**
 `effort/decoder-selection-recovery` · **Next task base:** effort head
 `08086371180ae9ae89063ec0946e42bb355a8d60`
 
@@ -2787,6 +2787,127 @@ two long-standing verdicts about the source. `yields_to_decode_evidence` now
 names `main`'s five VOD plan reasons among its exclusions — a decode fault
 latched under one of them is evidence about a plan this node is no longer
 running.
+
+## M7b specification — the hardware decoder contract, measured before it is written
+
+M7a established that the recovery this effort built cannot fire on any node:
+only a software-decode plan names its decoder, so only a software-decode plan
+can latch a qualified fault, and only a *hardware*-decode plan has an alternate
+to be given. This is the milestone that closes it. It is specified before it is
+built because the obvious implementation is wrong, and the measurement that
+proves it wrong takes two minutes and was worth taking first.
+
+### What was measured
+
+On the local Apple validation toolchain — Homebrew `ffmpeg version 9.0.1`,
+VideoToolbox the only advertised hwaccel. **This is toolchain evidence, not
+fleet evidence**; what it establishes is a property of FFmpeg's diagnostics
+rather than of any deployed node, which is exactly the property the design
+turns on.
+
+A 320×240 `testsrc` clip, encoded once with `libx264` and once with `libx265`,
+decoded twice each — plain, and under `-hwaccel videotoolbox`:
+
+| decode | context line FFmpeg prints |
+|---|---|
+| h264, software | `[vist#0:0/h264 @ …] [dec:h264 @ …]` |
+| h264, VideoToolbox | `[vist#0:0/h264 @ …] [dec:h264 @ …]` |
+| hevc, software | `[dec:hevc @ …]` |
+| hevc, VideoToolbox | `[dec:hevc @ …]` |
+
+**The lines are identical.** The accelerated decode and the software decode of
+the same codec print the same decoder name, because on this backend FFmpeg opens
+the same decoder and attaches an accelerator to it rather than selecting a
+differently-named one. The only in-band evidence that the accelerator was used
+at all is a separate line:
+
+```
+Selecting decoder 'h264' because of requested hwaccel method videotoolbox
+```
+
+corroborated by `Reinit context to 320x240, pix_fmt: videotoolbox_vld`.
+
+A request for an hwaccel this build does not have failed loudly rather than
+falling back quietly — `Device creation failed: -12`, non-zero exit. That is
+this build's behaviour with these flags and is **not** relied on below.
+
+### What that means, and the mistake it rules out
+
+The contract key cannot be the decoder name. `contract_for(input_codec,
+decoder, stderr_mode)` would match a contract qualified against software `h264`
+to a VideoToolbox decode of `h264`, because the two are the same string. A
+grammar qualified for one decode path and applied to another is precisely the
+substitution M3a rejected one layer up, and its failure mode is the worst one
+available: a grammar that matches nothing certifies every stream as clean, so a
+node would report healthy decodes for a path nobody ever qualified — and, under
+the qualified artifact identity, cache those results as reusable.
+
+So the coverage key gains the backend, and the measurement gains a positive
+proof that the backend was used.
+
+### The design
+
+1. **`DecodeBackend` joins the contract's coverage key.** `ObservedBuild` gains
+   a `decode_backend` field and `covers_build` compares it. A contract written
+   before this milestone covers `software` and continues to mean exactly what it
+   meant; nothing silently widens.
+
+2. **The inventory measures per `(codec, backend)`, not per codec.**
+   `measure_selected_decoders` becomes `measure_selected_decoders_for`, run once
+   per advertised hwaccel plus once for software, against the same probe clip it
+   already builds. A pair is recorded **only** when the stderr carries
+   `Selecting decoder '<name>' because of requested hwaccel method <backend>`
+   for that exact backend. Exit status is not the test and neither is the
+   absence of an error: FFmpeg is documented to fall back to software in some
+   configurations, and a silent fallback recorded as a hardware measurement is
+   how a software grammar gets qualified as a hardware one. Absent evidence is
+   an unmeasured pair, which is the same thing a caller already does with an
+   unmeasured codec.
+
+3. **`DiagnosticObservation::resolve` drops its software-only early return.** It
+   keeps every other refusal. The plan must still *name* the decoder for its
+   backend — which now comes from the measured inventory for
+   `(input_codec, backend)` rather than from `software_decoder()` — and a
+   contract must still cover the build, the codec, the decoder and now the
+   backend. A plan whose pair was never measured gets no grammar, exactly as
+   today.
+
+4. **`ResolvedTranscode` exposes the measured decoder for its own backend.**
+   `software_decoder()` becomes one case of `named_decoder()`. The plan digest
+   does not change: the decoder name is already an input to the plan for
+   software, and adding it for hardware changes the digest of every hardware
+   plan — so this milestone reads the name at observation time from the
+   process-wide inventory rather than baking it into the plan. **That is a
+   deliberate trade and it has a cost**: two nodes with different measured
+   inventories can observe the same plan differently. They can already, for
+   contracts; this widens it to backends, and the artifact identity already
+   carries the qualification namespace that separates them.
+
+### What can be built here, and what cannot
+
+Everything above is buildable and testable without a single piece of hardware,
+because the parser has the two stderr shapes to work against and the refusals
+are the interesting half. The unit tests take the exact strings recorded here.
+
+What cannot be built here is the evidence: a contract qualified against a
+hardware decoder is a claim about a real binary on a real backend, and it is
+written only after a qualifying host has produced the diagnostic capture. This
+milestone makes such a contract *expressible and enforceable*; it does not
+write one. Until one exists, `covered_decoders` stays empty for every hardware
+pair and the Settings card keeps saying so — and the tripwire assertion in
+`tests/web/settings-sections.test.js` is what fails when that stops being true.
+
+### Non-goals
+
+- **Do not emit an explicit `-c:v <codec>_qsv` on the input side to make the
+  name appear.** It would change the shipping command, and the command is an
+  input to the plan digest — renaming every cached transcode on every node for
+  a diagnostic convenience.
+- **Do not infer the backend from `pix_fmt`.** It corroborates; it is not the
+  statement. A filter graph can produce that pixel format without the decode
+  having used the accelerator.
+- **Do not treat a clean exit as proof of acceleration.** That is the silent
+  fallback, and it is the whole reason for the positive-evidence rule.
 
 ## M7a — the enable section, and the prerequisite that is not met
 
