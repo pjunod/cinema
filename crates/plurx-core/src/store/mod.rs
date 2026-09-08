@@ -330,16 +330,72 @@ macro_rules! media_session_drain_deadline_column {
     };
 }
 
-/// The drain deadline column, for the replicated migration's one statement.
+/// Refuse to move a draining session's ownership.
+///
+/// Application SQL already excludes a non-null deadline from both halves of
+/// takeover — the expired-route inventory and the CAS. That fences *this*
+/// binary and does nothing at all about an older one, because an older binary
+/// simply does not emit the predicate. Schema compatibility is checked when a
+/// database is opened and never again, so during a rolling upgrade every node
+/// still running the previous binary keeps issuing takeover SQL from before
+/// this column existed, against a store that already has it.
+///
+/// What that costs without the trigger is the exact failure the whole drain
+/// design was rewritten to avoid. A new-binary owner dies mid-drain, its lease
+/// lapses, and an old-binary node adopts the predecessor — a stream the
+/// pointer no longer names — starts an encoder for it, and then renews it
+/// every three seconds for as long as that node lives. Nothing on the old node
+/// ends it, because nothing on the old node knows it is draining. An immortal
+/// predecessor holding an encoder, an admission permit and a shared-cache
+/// generation, arriving through the upgrade door.
+///
+/// `RAISE(IGNORE)` rather than `RAISE(ABORT)`, which is the opposite of the
+/// pointer fence above and for a reason. Takeover's CAS already checks that it
+/// updated exactly one row and rolls the whole transaction back when it did
+/// not — that is how it handles losing a race to another survivor. Making the
+/// update affect no rows therefore lands the old binary in a path it already
+/// implements correctly, and it lands there quietly, once per attempt, instead
+/// of raising an error it would log and retry forever. The pointer fence
+/// chose `ABORT` because its old writer had no such check and would have
+/// believed it succeeded.
+///
+/// Guarded on the ownership columns only. The owner renews the lease on this
+/// row every three seconds for the whole drain, deliberately, and the sweep
+/// and the owner's own end both write `state` — none of those move ownership,
+/// and none of them may be fenced.
+macro_rules! media_session_drain_ownership_fence_trigger {
+    () => {
+        "CREATE TRIGGER IF NOT EXISTS media_sessions_drain_ownership_fence_au
+    BEFORE UPDATE OF owner_node_id, owner_epoch ON media_sessions
+    WHEN OLD.drain_deadline_ms IS NOT NULL
+     AND (NEW.owner_node_id IS NOT OLD.owner_node_id
+          OR NEW.owner_epoch IS NOT OLD.owner_epoch)
+    BEGIN
+      SELECT RAISE(IGNORE);
+    END;"
+    };
+}
+
+/// The drain deadline column, for the replicated migration's first statement.
 pub(crate) const MEDIA_SESSION_DRAIN_DEADLINE_COLUMN: &str =
     media_session_drain_deadline_column!();
 
-/// The same column as a SQLite migration entry, which is run as a batch
-/// wrapped in `BEGIN` and `COMMIT` and therefore needs the separator the
-/// replicated backend must not have. One macro, two spellings, so the two
-/// backends cannot end up adding different columns.
-pub(crate) const MEDIA_SESSION_DRAIN_DEADLINE_SCHEMA: &str =
-    concat!(media_session_drain_deadline_column!(), ";");
+/// The ownership fence on its own, for the replicated migration and install.
+pub(crate) const MEDIA_SESSION_DRAIN_OWNERSHIP_FENCE_TRIGGER: &str =
+    media_session_drain_ownership_fence_trigger!();
+
+/// Column and fence as one SQLite migration, applied in one transaction.
+///
+/// One step, for the reason the pointer fence above spells out: a database
+/// holding the column without the trigger accepts exactly the writes the
+/// trigger exists to refuse, and that database is the middle of every rolling
+/// upgrade. The trigger cannot be created before the column exists, so they
+/// cannot be two steps.
+pub(crate) const MEDIA_SESSION_DRAIN_DEADLINE_SCHEMA: &str = concat!(
+    media_session_drain_deadline_column!(),
+    ";\n",
+    media_session_drain_ownership_fence_trigger!(),
+);
 
 const MEDIA_SESSION_PUBLICATION_CLAIM_TRIGGER_SCHEMA: &str =
     "CREATE TRIGGER IF NOT EXISTS media_session_publication_claim_au

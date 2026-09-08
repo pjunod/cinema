@@ -10,7 +10,8 @@ use crate::domain::{
     MediaSessionProjectionCompletion, MediaSessionRenewal, MediaSessionRequestClaim,
     MediaSessionRoute, MediaSessionStagedGeneration, MediaSessionTakeover,
     MediaSessionTakeoverCursor, MediaSessionTerminalAck, OwnedMediaSessionLease,
-    MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS, MEDIA_SESSION_PUBLICATION_BLOCKED,
+    MEDIA_SESSION_DRAIN_MS, MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS,
+    MEDIA_SESSION_PUBLICATION_BLOCKED,
 };
 use crate::error::StoreError;
 use crate::store::MediaSessionStore;
@@ -2077,36 +2078,33 @@ impl MediaSessionStore for SqliteStore {
                     route_from_row,
                 )
                 .optional()?;
-            // The same retirement an activation performs, against an exact
-            // named incarnation rather than whatever the pointer held. That
-            // difference is the one the two backends disagreed about, and it
-            // is settled here by not consulting the pointer at all.
+            // The predecessor is not retired here. It is given a deadline and
+            // otherwise left exactly as it was: state, cause, publication
+            // readiness, lease, pins and `job_leases` all untouched, so it
+            // keeps renewing and keeps serving the client that has not
+            // finished switching yet.
+            //
+            // Retiring it in this transaction is what the three withdrawn
+            // attempts were trying to stop doing, and each of them tried to
+            // bound the resulting drain through something that already meant
+            // something else — the playback pointer, which the viewer deletes
+            // by closing the tab, or the session lease, which the owner's loop
+            // reads as liveness. The deadline is the fact itself, written
+            // down, and the owner acts on it from its own three-second tick.
+            //
+            // Only a row that is still active takes a deadline. A predecessor
+            // some other writer already ended is finished, and giving a
+            // finished row a drain deadline would ask the sweep to end it a
+            // second time under a cause it did not earn.
             tx.execute(
                 "UPDATE media_sessions
-                    SET state = 'ended', terminal_reason = 'superseded',
-                        lease_expires_at_ms = ?1, publication_ready_at_ms = ?3,
-                        updated_at_ms = ?1
-                  WHERE incarnation_id = ?2 AND state != 'ended'",
+                    SET drain_deadline_ms = ?1, updated_at_ms = ?2
+                  WHERE incarnation_id = ?3 AND state != 'ended'
+                    AND drain_deadline_ms IS NULL",
                 params![
+                    now_ms.saturating_add(MEDIA_SESSION_DRAIN_MS),
                     now_ms,
                     staged.expected_predecessor_incarnation_id,
-                    MEDIA_SESSION_PUBLICATION_BLOCKED,
-                ],
-            )?;
-            tx.execute(
-                "DELETE FROM cache_consumer_pins
-                  WHERE consumer_kind = 'media_session' AND consumer_id = ?1",
-                params![staged.expected_predecessor_incarnation_id],
-            )?;
-            tx.execute(
-                "UPDATE job_leases
-                    SET expires_at_ms = CASE
-                          WHEN expires_at_ms < ?1 THEN expires_at_ms ELSE ?1 END,
-                        revision = revision + 1, updated_at_ms = ?1
-                  WHERE resource = ?2 AND revision < 9223372036854775807",
-                params![
-                    now_ms,
-                    format!("session:{}", staged.expected_predecessor_incarnation_id),
                 ],
             )?;
             // The successor stops being a candidate and starts being a
@@ -2626,6 +2624,61 @@ impl MediaSessionStore for SqliteStore {
         let acknowledgement = acknowledgement.clone();
         self.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
+            // A session may need a receipt more than once.
+            //
+            // The table holds one row per `session_id`, and until the drain
+            // that was enough: the commit transaction wrote the predecessor's
+            // commit receipt and ended the row in the same breath, so no
+            // second receipted exchange could ever reach it. A draining
+            // predecessor stays live and answers `demand: end` when the
+            // viewer closes the player, and `INSERT OR IGNORE` loses that
+            // receipt to the commit's — silently, which the caller reads as
+            // "not durably committed" and answers with a 503 the client
+            // retries every 500 ms for the rest of the window.
+            //
+            // Replace the stored receipt when the incoming one supersedes it
+            // on the client's own monotone sequence. That is what the row has
+            // always meant — the retained reply for this session's most
+            // recent receipted exchange — and a client that has moved past a
+            // sequence will never ask for that reply again. A repeat of the
+            // stored exchange has an equal sequence, so it does not update and
+            // still reads back exact, which is the replay path unchanged.
+            //
+            // A lower sequence, including one from a second client instance
+            // starting its own numbering, is left to lose exactly as it does
+            // today rather than being allowed to clobber a newer reply.
+            //
+            // `state = 'active'`, not `IN ('active', 'ended')` like the insert
+            // below. Once a session is settled its retained receipt *is* the
+            // terminal reply, and the replay window has to outlive the
+            // settlement — a later sequence arriving after that is a client
+            // talking to a stream that is over, and it is refused. The only
+            // thing this opens is a receipt on a session that is still live,
+            // which before the drain could not have one.
+            tx.execute(
+                "UPDATE media_session_terminal_acks
+                    SET incarnation_id = ?1, owner_node_id = ?3, owner_epoch = ?4,
+                        client_instance_id = ?5, sequence = ?6,
+                        request_fingerprint = ?7, response_json = ?8,
+                        expires_at_ms = ?9, updated_at_ms = ?10
+                  WHERE session_id = ?2 AND sequence < ?6
+                    AND EXISTS (SELECT 1 FROM media_sessions
+                      WHERE incarnation_id = ?1 AND session_id = ?2
+                        AND owner_node_id = ?3 AND owner_epoch = ?4
+                        AND state = 'active')",
+                params![
+                    acknowledgement.incarnation_id.as_str(),
+                    acknowledgement.session_id.as_str(),
+                    acknowledgement.owner_node_id.as_str(),
+                    acknowledgement.owner_epoch,
+                    acknowledgement.client_instance_id.as_str(),
+                    acknowledgement.sequence,
+                    acknowledgement.request_fingerprint.as_str(),
+                    acknowledgement.response_json.as_str(),
+                    acknowledgement.expires_at_ms,
+                    acknowledgement.updated_at_ms,
+                ],
+            )?;
             tx.execute(
                 "INSERT OR IGNORE INTO media_session_terminal_acks
                     (incarnation_id, session_id, owner_node_id, owner_epoch,
@@ -2945,6 +2998,14 @@ impl MediaSessionStore for SqliteStore {
                 "SELECT {ROUTE_COLS} FROM media_sessions
                   WHERE state = 'active' AND lease_expires_at_ms <= ?1
                     AND publication_ready_at_ms != ?6
+                    -- A draining predecessor is not work to inherit. Its
+                    -- successor is already the pointer's current incarnation
+                    -- and is being served by whoever owns it; adopting the
+                    -- predecessor would put a second node behind a stream the
+                    -- client has been told to leave. The sweep ends it
+                    -- instead. Durable rather than inferred from the pointer,
+                    -- which is exactly the case a dead owner cannot rely on.
+                    AND drain_deadline_ms IS NULL
                     AND NOT EXISTS (SELECT 1 FROM media_session_requests request
                       WHERE request.user_id = media_sessions.user_id
                         AND request.incarnation_id = media_sessions.incarnation_id
@@ -2991,6 +3052,11 @@ impl MediaSessionStore for SqliteStore {
                             AND owner_epoch = ?3 AND state = 'active'
                             AND lease_expires_at_ms <= ?4
                             AND publication_ready_at_ms != ?6
+                            -- Never adopt a draining predecessor; the sweep
+                            -- ends it. The CAS carries this as well as the
+                            -- inventory above because the inventory is a read
+                            -- and the drain can begin between the two.
+                            AND drain_deadline_ms IS NULL
                             AND NOT EXISTS (SELECT 1 FROM media_session_requests request
                               WHERE request.user_id = session.user_id
                                 AND request.incarnation_id = session.incarnation_id
@@ -3057,6 +3123,7 @@ impl MediaSessionStore for SqliteStore {
                     AND state = 'active' AND lease_expires_at_ms = ?8
                     AND lease_expires_at_ms <= ?4
                     AND publication_ready_at_ms != ?10
+                    AND drain_deadline_ms IS NULL
                     AND NOT EXISTS (SELECT 1 FROM media_session_requests request
                       WHERE request.user_id = media_sessions.user_id
                         AND request.incarnation_id = media_sessions.incarnation_id
@@ -3369,6 +3436,29 @@ impl MediaSessionStore for SqliteStore {
                      ORDER BY staged.deadline_ms, staged.staged_incarnation_id LIMIT ?2)",
                 params![now_ms, MAINTENANCE_BATCH, MEDIA_SESSION_PUBLICATION_BLOCKED],
             )?;
+            // The cross-node backstop for a drain. The owner ends its own
+            // draining rows on the three-second tick it already runs, so this
+            // is only reached when that node stopped running — and then
+            // nothing else would end the row, because takeover refuses a
+            // draining predecessor and the generic retirement below waits
+            // `TAKEOVER_RECOVERY_MS` past a lease the dead owner is no longer
+            // renewing. Five minutes is the backstop's interval, not the
+            // drain's bound.
+            //
+            // `superseded` because that is what happened: the successor took
+            // the pointer. The same cause the owner's own end writes, so a
+            // client cannot tell which of the two got there first.
+            tx.execute(
+                "UPDATE media_sessions SET state = 'ended', terminal_reason = 'superseded',
+                        lease_expires_at_ms = ?1, publication_ready_at_ms = ?3,
+                        updated_at_ms = ?1
+                  WHERE incarnation_id IN (
+                    SELECT incarnation_id FROM media_sessions
+                     WHERE state = 'active' AND drain_deadline_ms IS NOT NULL
+                       AND drain_deadline_ms <= ?1
+                     ORDER BY drain_deadline_ms, incarnation_id LIMIT ?2)",
+                params![now_ms, MAINTENANCE_BATCH, MEDIA_SESSION_PUBLICATION_BLOCKED],
+            )?;
             tx.execute(
                 "UPDATE media_sessions SET state = 'ended', terminal_reason = 'replaced', lease_expires_at_ms = ?1,
                         publication_ready_at_ms = ?4, updated_at_ms = ?1
@@ -3514,7 +3604,8 @@ impl MediaSessionStore for SqliteStore {
         let owner_node_id = owner_node_id.to_owned();
         self.with_read(move |conn| {
             let mut statement = conn.prepare(
-                "SELECT incarnation_id, session_id, owner_epoch, lease_expires_at_ms
+                "SELECT incarnation_id, session_id, owner_epoch, lease_expires_at_ms,
+                        drain_deadline_ms
                    FROM media_sessions
                   WHERE owner_node_id = ?1 AND state = 'active'
                     AND lease_expires_at_ms > ?2
@@ -3541,6 +3632,7 @@ impl MediaSessionStore for SqliteStore {
                             session_id: row.get(1)?,
                             owner_epoch: row.get(2)?,
                             lease_expires_at_ms: row.get(3)?,
+                            drain_deadline_ms: row.get(4)?,
                         })
                     },
                 )?

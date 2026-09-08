@@ -2178,13 +2178,17 @@ impl HiqliteAuthStore {
                 }
                 SchemaMigrationAction::MigrateFrom(DRAIN_DEADLINE_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
-                    // One nullable column and nothing else. Null is "not
-                    // draining", so every row already in this table is
-                    // correct the instant the column exists, and a binary
-                    // from before it neither writes nor reads the value.
+                    // One nullable column and the trigger that keeps a binary
+                    // from before it out of a draining row's ownership. Null
+                    // is "not draining", so every row already in this table
+                    // is correct the instant the column exists.
                     let mut statements = vec![
                         (
                             super::MEDIA_SESSION_DRAIN_DEADLINE_COLUMN.to_owned(),
+                            params!(),
+                        ),
+                        (
+                            super::MEDIA_SESSION_DRAIN_OWNERSHIP_FENCE_TRIGGER.to_owned(),
                             params!(),
                         ),
                         (

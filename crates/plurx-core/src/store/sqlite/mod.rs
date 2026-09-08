@@ -3766,6 +3766,93 @@ mod tests {
             .expect("inspect the drain deadline column"));
     }
 
+    /// A binary that predates the drain cannot take a draining session over.
+    ///
+    /// The application SQL in both backends excludes a non-null deadline from
+    /// takeover, and that fences this binary only. Compatibility is checked
+    /// when a database is opened and never again, so every node still running
+    /// the previous binary during a rolling upgrade keeps issuing takeover
+    /// SQL from before the column existed. This runs exactly that statement —
+    /// the v49-era CAS, with no drain predicate in it — against a draining
+    /// row, and the trigger is the only thing in its path.
+    ///
+    /// `RAISE(IGNORE)`, so the statement reports zero rows changed rather
+    /// than raising. That is the answer the old binary already knows how to
+    /// read: its takeover checks for exactly one row and rolls back when it
+    /// does not get it, which is how it loses a race to another survivor.
+    #[test]
+    fn a_draining_session_refuses_the_ownership_move_an_older_binary_would_make() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("plurx.db");
+        SqliteStore::open(&db).expect("install current schema");
+        let conn = Connection::open(&db).expect("raw open");
+        conn.execute(
+            "INSERT INTO media_sessions (
+                 incarnation_id, session_id, user_id, playback_id,
+                 request_fingerprint, owner_node_id, owner_epoch,
+                 lease_expires_at_ms, state, recipe_json, response_json,
+                 updated_at_ms, drain_deadline_ms)
+             VALUES ('inc-drain', 'sess-drain', 3, 'playback-drain', 'fingerprint',
+                     'node-a', 4, 5000, 'active', '{}', '{}', 4000, 9000)",
+            [],
+        )
+        .expect("seed a draining session");
+
+        // The pre-v50 takeover CAS, verbatim in the shape that matters: it
+        // names the owner and epoch it expects and says nothing about a drain.
+        let moved = conn
+            .execute(
+                "UPDATE media_sessions
+                    SET owner_node_id = 'node-b', owner_epoch = 5,
+                        lease_expires_at_ms = 20000,
+                        discontinuity_sequence = discontinuity_sequence + 1,
+                        updated_at_ms = 10000
+                  WHERE incarnation_id = 'inc-drain' AND owner_node_id = 'node-a'
+                    AND owner_epoch = 4 AND state = 'active'",
+                [],
+            )
+            .expect("the old statement runs; it simply changes nothing");
+        assert_eq!(
+            moved, 0,
+            "an ownership move on a draining session must affect no rows"
+        );
+        let (owner, epoch, state): (String, i64, String) = conn
+            .query_row(
+                "SELECT owner_node_id, owner_epoch, state FROM media_sessions
+                  WHERE incarnation_id = 'inc-drain'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read the row back");
+        assert_eq!((owner.as_str(), epoch), ("node-a", 4), "ownership is intact");
+        assert_eq!(state, "active", "and nothing else about the row moved");
+
+        // The owner keeps renewing this row for the whole drain, and the
+        // sweep and the owner's own end both write `state`. Fencing any of
+        // those would break the drain rather than protect it.
+        assert_eq!(
+            conn.execute(
+                "UPDATE media_sessions SET lease_expires_at_ms = 30000, updated_at_ms = 11000
+                  WHERE incarnation_id = 'inc-drain'",
+                [],
+            )
+            .expect("renew a draining session"),
+            1,
+            "renewal is untouched"
+        );
+        assert_eq!(
+            conn.execute(
+                "UPDATE media_sessions SET state = 'ended', terminal_reason = 'superseded',
+                        updated_at_ms = 12000
+                  WHERE incarnation_id = 'inc-drain'",
+                [],
+            )
+            .expect("end a draining session"),
+            1,
+            "ending it is untouched"
+        );
+    }
+
     #[test]
     fn v32_upgrades_through_analysis_indexes_terminal_reason_and_publication_fence() {
         let dir = tempfile::tempdir().expect("tempdir");

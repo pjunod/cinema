@@ -1124,6 +1124,26 @@ pub struct MediaSessionPreparationCommit {
 /// Persisted sentinel for a committed successor whose safety boundary has not
 /// yet been based on replicated commit observation.
 pub const MEDIA_SESSION_PUBLICATION_BLOCKED: i64 = i64::MAX;
+
+/// How long a superseded predecessor is kept serving after the commit.
+///
+/// The window only has to outlast a client that is switching and has not yet
+/// said so. A client that answers `Switched` ends the predecessor immediately
+/// through the same call, so this is the bound for the client that is slow,
+/// paused mid-request, or gone — not the ordinary case.
+///
+/// Ten seconds is a full control round trip plus one stalled segment fetch.
+/// Longer buys nothing a `Switched` does not already buy, and costs real
+/// hardware: an encoder and one of `DEFAULT_MAX_HW_SESSIONS` admission
+/// permits are held for the whole window, per switching viewer.
+///
+/// Deliberately not coupled to the session lease. The predecessor keeps
+/// renewing for the whole drain — its lease, its `job_leases` fence and its
+/// `cache_consumer_pins` all ride the renewal it has always had — which is
+/// what makes this a plain deadline rather than a second meaning layered onto
+/// the lease. Three attempts at layering it are written up in
+/// `docs/STREAMING-RELIABILITY-HANDOFF.md` §4.
+pub const MEDIA_SESSION_DRAIN_MS: i64 = 10_000;
 /// Minimum observation-to-publication interval accepted by the durable Store
 /// contract: 62 seconds of pre-header work, 300 seconds of body lifetime, and
 /// a 10-second scheduling margin.
@@ -1229,6 +1249,14 @@ pub struct OwnedMediaSessionLease {
     pub session_id: String,
     pub owner_epoch: i64,
     pub lease_expires_at_ms: i64,
+    /// When this session stops being kept alive on purpose, or `None` when it
+    /// is not draining — which is every ordinary session.
+    ///
+    /// Carried on the owner inventory rather than read separately because the
+    /// owner is the one that has to act on it, on the tick it already runs,
+    /// and a second read per tick per session is a cost the whole point of
+    /// this inventory is to avoid.
+    pub drain_deadline_ms: Option<i64>,
 }
 
 /// Versioned, bounded filter attached to a queue row.

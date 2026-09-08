@@ -2966,13 +2966,41 @@ async fn media_session_commit_advances_the_exact_expected_pointer_once() {
         assert_eq!(commit.route.state, "active", "{backend}");
         let predecessor_route = commit
             .predecessor
-            .unwrap_or_else(|| panic!("{backend}: commit reports the retired predecessor"));
-        assert_eq!(predecessor_route.state, "ended", "{backend}");
+            .unwrap_or_else(|| panic!("{backend}: commit reports the draining predecessor"));
         assert_eq!(
-            predecessor_route.terminal_reason.as_deref(),
-            Some("superseded"),
-            "{backend}: the same retirement an activation performs, against an \
-             exact named incarnation rather than whatever the pointer held"
+            predecessor_route.state, "active",
+            "{backend}: the predecessor keeps serving the client that has not \
+             finished switching; retiring it here is what the drain replaced"
+        );
+        assert_eq!(
+            predecessor_route.terminal_reason, None,
+            "{backend}: nothing has decided a terminal cause for it yet"
+        );
+
+        // The drain is a fact on the row, not a rule inferred from the
+        // pointer or the lease. The owner reads it from the inventory it
+        // already walks every three seconds.
+        let owned = store
+            .owned_media_sessions("staged-node", 2_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: owner inventory: {error}"));
+        let draining = owned
+            .iter()
+            .find(|lease| lease.incarnation_id == predecessor)
+            .unwrap_or_else(|| {
+                panic!("{backend}: a draining predecessor is still owned and still renewable")
+            });
+        assert_eq!(
+            draining.drain_deadline_ms,
+            Some(3_000 + plurx_core::domain::MEDIA_SESSION_DRAIN_MS),
+            "{backend}: the deadline is the commit's own clock plus the window"
+        );
+        assert!(
+            owned
+                .iter()
+                .all(|lease| lease.incarnation_id == predecessor
+                    || lease.drain_deadline_ms.is_none()),
+            "{backend}: exactly one row is draining, and it is the predecessor"
         );
 
         let current = store
@@ -3004,6 +3032,53 @@ async fn media_session_commit_advances_the_exact_expected_pointer_once() {
         assert_eq!(
             replay.route.updated_at_ms, current.updated_at_ms,
             "{backend}: a replay must not touch the row it reads back"
+        );
+
+        // Nobody may adopt a draining predecessor. Its successor is already
+        // the pointer's current incarnation, so a second node behind it would
+        // be a second node serving a stream the client has been told to leave.
+        let lapsed = 3_000 + plurx_core::domain::MEDIA_SESSION_DRAIN_MS;
+        assert!(
+            store
+                .expired_media_sessions(1_000_000, None, 16)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: takeover inventory: {error}"))
+                .iter()
+                .all(|route| route.incarnation_id != predecessor),
+            "{backend}: a draining predecessor is not work to inherit"
+        );
+
+        // The cross-node backstop. The owner ends its own draining rows on
+        // the tick it already runs; this is what happens when that node
+        // stopped running, and it writes the same cause.
+        store
+            .maintain_media_sessions(lapsed)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: maintenance: {error}"));
+        let drained = store
+            .media_session_route_by_incarnation(predecessor)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: predecessor after the sweep: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the row is ended, not deleted"));
+        assert_eq!(drained.state, "ended", "{backend}");
+        assert_eq!(
+            drained.terminal_reason.as_deref(),
+            Some("superseded"),
+            "{backend}: the cause the successor taking the pointer earned, and \
+             the same one the owner's own end writes"
+        );
+        let successor = store
+            .media_session_route_for_playback(user.id, playback)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: route after the sweep: {error}"))
+            .unwrap_or_else(|| {
+                panic!("{backend}: ending the predecessor must not take the successor's pointer")
+            });
+        assert_eq!(successor.incarnation_id, staged, "{backend}");
+        assert_eq!(
+            successor.state, "active",
+            "{backend}: the successor is not draining, so the same sweep that \
+             ended the predecessor leaves it alone"
         );
     })
     .await;
@@ -3465,6 +3540,59 @@ async fn media_session_commit_atomically_retains_its_control_receipt() {
                 .unwrap_or_else(|error| panic!("{backend}: mismatched replay: {error}"))
                 .is_none(),
             "{backend}: pointer equality cannot replay a different response receipt"
+        );
+
+        // The viewer closes the player during the drain. That is an ordinary
+        // `demand: end`, it is receipted like every other terminal exchange,
+        // and the commit receipt is already sitting on this session's one row.
+        //
+        // Until the drain, this could not happen: the commit ended the
+        // predecessor in its own transaction, so no second receipted exchange
+        // ever reached it. Now one can, and a write that quietly lost to the
+        // commit receipt would be read back as "not durably committed" — a
+        // 503 the client retries twice a second until the receipt expires.
+        let terminal = MediaSessionTerminalAck {
+            sequence: receipt.sequence + 1,
+            request_fingerprint: "f".repeat(64),
+            response_json: "{\"action\":\"end\"}".to_owned(),
+            updated_at_ms: 4_000,
+            ..receipt.clone()
+        };
+        assert!(
+            store
+                .record_media_session_terminal_ack(&terminal)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: terminal receipt: {error}")),
+            "{backend}: a later exchange on a draining predecessor gets its receipt"
+        );
+        assert_eq!(
+            store
+                .media_session_terminal_ack(&terminal.session_id, 4_001)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: terminal read: {error}")),
+            Some(terminal.clone()),
+            "{backend}: the retained reply is the most recent receipted exchange"
+        );
+        assert_eq!(
+            store
+                .media_session_route_by_incarnation(predecessor)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: predecessor read: {error}"))
+                .map(|route| route.state),
+            Some("ended".to_owned()),
+            "{backend}: the terminal exchange ends the drain early, which is the \
+             whole point of the client saying so"
+        );
+
+        // A repeat of an exchange the client has already moved past does not
+        // clobber the newer reply. It reads back non-exact, exactly as it
+        // does today, rather than winning on arrival order.
+        assert!(
+            !store
+                .record_media_session_terminal_ack(&receipt)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: stale receipt: {error}")),
+            "{backend}: a lower sequence cannot replace a newer retained reply"
         );
     })
     .await;

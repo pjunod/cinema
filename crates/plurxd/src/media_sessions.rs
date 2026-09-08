@@ -3641,7 +3641,16 @@ pub(crate) async fn lease_loop(state: AppState) {
                 ),
             );
         }
-        let active = lease_tick_active(&routes, &live);
+        // A drain ends on the tick the owner already runs. No timer, no
+        // spawned task: the deadline is on the row, so a restart of this
+        // process picks the drain up where it left it, and a node that never
+        // comes back leaves it to the maintenance sweep instead.
+        let drain_now_ms = unix_ms();
+        let drained = lease_tick_drained(&routes, &live, drain_now_ms)
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let active = lease_tick_active(&routes, &live, drain_now_ms);
         let active_session_ids = active
             .iter()
             .map(|route| route.session_id.clone())
@@ -3707,6 +3716,51 @@ pub(crate) async fn lease_loop(state: AppState) {
         .collect::<Vec<_>>()
         .await;
         let mut cleanup = Vec::new();
+        for lease in &drained {
+            // End the row first, then reap the worker through the same path
+            // every other terminal takes. Order matters: `fence_and_reap`'s
+            // VOD arm re-reads the route and only emits a typed terminal
+            // cause when it finds the row already `ended`, which is what
+            // gives the client its `410 session_ended` instead of a retry.
+            //
+            // The lease boundary comes from this tick's inventory and the
+            // route was left out of the renewal batch above, so nothing this
+            // node did between the two can defeat the CAS. Anything that
+            // *does* defeat it — a takeover, a delete, the sweep on another
+            // node — has already ended or moved the row, and the reap below
+            // reads whatever it actually finds.
+            let end = plurx_core::domain::MediaSessionEnd {
+                incarnation_id: lease.incarnation_id.clone(),
+                session_id: lease.session_id.clone(),
+                expected_owner_node_id: state.node_id.clone(),
+                expected_owner_epoch: lease.owner_epoch,
+                expected_lease_expires_at_ms: lease.lease_expires_at_ms,
+                terminal_reason: "superseded".to_owned(),
+                now_ms: unix_ms(),
+            };
+            match tokio::time::timeout(
+                LEASE_RENEWAL_DEADLINE,
+                state.store.end_media_session_if_owner(&end),
+            )
+            .await
+            {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => {
+                    tracing::debug!(%error, "draining media session could not be ended");
+                }
+                Err(_) => {
+                    tracing::debug!("draining media session end timed out");
+                }
+            }
+            cleanup.push((
+                lease.incarnation_id.clone(),
+                lease.session_id.clone(),
+                lease.owner_epoch,
+                vod_capabilities.contains(&lease.session_id),
+                "drain window elapsed",
+            ));
+            known.remove(&lease.incarnation_id);
+        }
         for (chunk, renewal_now_ms, outcome, vod_capabilities) in renewal_outcomes {
             match outcome {
                 Ok(Ok(renewed)) => {
@@ -4947,11 +5001,44 @@ fn lease_tick_live(renewable_session_ids: Vec<String>) -> HashSet<String> {
 fn lease_tick_active<'a>(
     routes: &'a [OwnedMediaSessionLease],
     live: &HashSet<String>,
+    now_ms: i64,
 ) -> Vec<&'a OwnedMediaSessionLease> {
     let settling = settlement_protected_ids();
     routes
         .iter()
         .filter(|route| live.contains(&route.session_id) && !settling.contains(&route.session_id))
+        // A route whose drain window has closed is ended by this same tick,
+        // below. Renewing it first would move the lease boundary the end has
+        // to name, and it is about to stop existing anyway. Excluding it here
+        // touches nothing else: a route left out of this list is simply not
+        // renewed this tick — it is still in the owner inventory, so the
+        // missing-from-inventory reaper does not see it either.
+        .filter(|route| !drain_window_closed(route, now_ms))
+        .collect()
+}
+
+/// Whether this owned route is draining and its deadline has passed.
+///
+/// `None` is not draining, which is every ordinary session. The comparison is
+/// against the tick's own clock rather than the deadline's origin, because the
+/// node that wrote the deadline may not be this one.
+fn drain_window_closed(route: &OwnedMediaSessionLease, now_ms: i64) -> bool {
+    route
+        .drain_deadline_ms
+        .is_some_and(|deadline_ms| deadline_ms <= now_ms)
+}
+
+/// The owned routes whose drain window has closed, in inventory order.
+fn lease_tick_drained<'a>(
+    routes: &'a [OwnedMediaSessionLease],
+    live: &HashSet<String>,
+    now_ms: i64,
+) -> Vec<&'a OwnedMediaSessionLease> {
+    let settling = settlement_protected_ids();
+    routes
+        .iter()
+        .filter(|route| live.contains(&route.session_id) && !settling.contains(&route.session_id))
+        .filter(|route| drain_window_closed(route, now_ms))
         .collect()
 }
 
@@ -5290,6 +5377,7 @@ mod tests {
             session_id: session_id.to_owned(),
             owner_epoch: 1,
             lease_expires_at_ms: unix_ms().saturating_add(10_000),
+            drain_deadline_ms: None,
         }
     }
 
@@ -6773,7 +6861,7 @@ mod tests {
         assert!(live.contains("session-settling"), "{live:?}");
         assert!(live.contains("session-live"), "{live:?}");
         assert!(!live.contains("session-gone"), "{live:?}");
-        let ids = lease_tick_active(&routes, &live)
+        let ids = lease_tick_active(&routes, &live, unix_ms())
             .iter()
             .map(|route| route.session_id.as_str())
             .collect::<Vec<_>>();
@@ -6811,7 +6899,7 @@ mod tests {
             "an overlapping attempt's guard must not release the winner's protection"
         );
         assert!(
-            lease_tick_active(&routes, &live)
+            lease_tick_active(&routes, &live, unix_ms())
                 .iter()
                 .all(|route| route.session_id != "session-settling"),
             "the settling route is still excluded while any holder remains"
@@ -6824,7 +6912,7 @@ mod tests {
             "session-live".to_owned(),
             "session-settling".to_owned(),
         ]);
-        let ids = lease_tick_active(&routes, &live)
+        let ids = lease_tick_active(&routes, &live, unix_ms())
             .iter()
             .map(|route| route.session_id.as_str())
             .collect::<Vec<_>>();

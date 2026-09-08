@@ -16030,7 +16030,14 @@ mod tests {
             .await
             .expect("predecessor route")
             .expect("the predecessor remains readable");
-        assert_ne!(predecessor.state, "active");
+        // Still serving, on purpose. The commit gives it a drain deadline
+        // instead of retiring it, so a client that has not finished switching
+        // keeps getting media until its owner's next tick past the deadline.
+        assert_eq!(predecessor.state, "active");
+        assert_eq!(
+            predecessor.terminal_reason, None,
+            "nothing has decided a terminal cause for the predecessor yet"
+        );
         assert!(fixture
             .state
             .store
@@ -16931,16 +16938,17 @@ mod tests {
             .expect("committed route")
             .expect("the successor is now current");
         assert_eq!(committed.incarnation_id, staged.staged_incarnation_id);
-        let retired_predecessor = fixture
+        let draining_predecessor = fixture
             .state
             .store
             .media_session_route(&session_id)
             .await
             .expect("predecessor route after acknowledgement")
-            .expect("the predecessor remains as a terminal route");
-        assert_ne!(
-            retired_predecessor.state, "active",
-            "pointer advancement retires the predecessor"
+            .expect("the predecessor remains readable");
+        assert_eq!(
+            draining_predecessor.state, "active",
+            "pointer advancement no longer retires the predecessor: it starts a drain, \
+             and the predecessor keeps serving until its owner's tick passes the deadline"
         );
         assert!(
             fixture
@@ -17079,14 +17087,17 @@ mod tests {
             committed_before_retry.incarnation_id, staged.staged_incarnation_id,
             "the timed-out request's detached task, not the retry, must advance the pointer"
         );
-        let retired_predecessor = fixture
+        let draining_predecessor = fixture
             .state
             .store
             .media_session_route(&session_id)
             .await
             .expect("predecessor after detached settlement")
-            .expect("the predecessor remains as a terminal route");
-        assert_ne!(retired_predecessor.state, "active");
+            .expect("the predecessor remains readable");
+        assert_eq!(
+            draining_predecessor.state, "active",
+            "the detached settlement starts the predecessor's drain rather than retiring it"
+        );
         let retained_receipt = fixture
             .state
             .store

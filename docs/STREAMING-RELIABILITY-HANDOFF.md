@@ -433,11 +433,18 @@ a settled contract instead of three guesses.
      below says the maintenance sweep bounds the drain. It cannot:
      `renew_media_sessions` consults no pointer, and neither does
      `owned_media_sessions`, which is what feeds the owner's lease loop. The
-     old commit hid the predecessor from all of these at once by setting the
-     blocked publication sentinel — **that sentinel, not `state = 'ended'`, was
-     doing the work.** So the owner keeps offering the predecessor, reads an
-     omitted renewal as `cluster lease lost`, and fences and kills the worker
-     on its next three-second tick, while the store still says `active`.
+     old commit hid the predecessor from all of these at once, and it did so
+     three times over: `state = 'ended'`, a lease collapsed to `now`, and the
+     blocked publication sentinel. **Every one of those four readers filters
+     `state = 'active'`, so any one of the three would have hidden the row —
+     and the withdrawn attempt cleared none of them.** (An earlier version of
+     this paragraph credited the sentinel alone. That is wrong, and it is
+     wrong in a way that matters: `begin_removal_attempt_sql`, named below as
+     a third pointer-free reader, has no sentinel predicate at all, so for
+     that reader `state = 'ended'` was doing all of the work.) So the owner
+     keeps offering the predecessor, reads an omitted renewal as `cluster
+     lease lost`, and fences and kills the worker on its next three-second
+     tick, while the store still says `active`.
   2. **Clamping the renewal only delays it by about eight seconds.** Make the
      renewal succeed at an unmoving value and the loop still drops the route
      from its batch at `ceiling - LEASE_RENEWAL_MIN_REMAINING_MS` (4 s) and
@@ -445,9 +452,11 @@ a settled contract instead of three guesses.
      prepared switch then emits the split-brain log line and metric. And after
      that reap the row is a zombie: `fence_and_reap_sessions`'s VOD arm handles
      `ended` and missing, so an `active` route falls through it writing no
-     terminal and stopping nothing, and the row sits with a lapsed lease until
-     the maintenance sweep — `now - 60 s` on a five-minute tick, so up to six
-     minutes.
+     terminal and stopping no worker. (It does begin a publication fence
+     before the match, so the viewer stops receiving media immediately — the
+     zombie is the row and the encoder behind it, not the delivery.) The row
+     then sits with a lapsed lease until the maintenance sweep — `now - 60 s`
+     on a five-minute tick, so up to six minutes.
   3. **"Absence of a pointer row renews normally" makes the session
      immortal.** That rule is needed because a session mid-creation has no
      pointer yet. But `end_media_session` *deletes* the pointer row, which is
@@ -503,27 +512,68 @@ a settled contract instead of three guesses.
   batch early, so the worker lives the whole window; (3) the drain does not
   depend on a pointer row existing, so deleting the pointer changes nothing.
 
-  **Two things this design must still be held to.** The drain window has to be
-  shorter than the `cache_consumer_pins` TTL, because a draining predecessor's
-  pins are renewed by no statement that survives the commit. And a `Switched`
-  that arrives after the deadline has already ended the row must be idempotent,
-  not an error — `end_media_session_if_owner`'s CAS answers that, but the
-  acknowledgement path has to treat "already ended" as success.
+  **Things this design must still be held to.**
+
+  - ~~The drain window has to be shorter than the `cache_consumer_pins` TTL,
+    because a draining predecessor's pins are renewed by no statement that
+    survives the commit.~~ **Withdrawn — this was carried over from the
+    withdrawn design and is not true of this one.** `renew_media_sessions`
+    renews the pins of every session whose lease update succeeded, in the same
+    call, and this design keeps the predecessor `active`, unsentineled and
+    renewing for the whole drain. Its pins ride the renewal it has always had.
+    The constraint was real only where renewal was refused or clamped. Do not
+    add a pin-renew path for the drain, and do not expect the sweep to collect
+    a generation it cannot.
+  - A `Switched` that arrives after the deadline has already ended the row
+    must be idempotent, not an error — `end_media_session_if_owner`'s CAS
+    answers that, but the acknowledgement path has to treat "already ended" as
+    success.
+  - **The predecessor can now need a second receipt, and the table holds one
+    per session.** `media_session_terminal_acks` is `session_id PRIMARY KEY`,
+    and the commit transaction writes the commit receipt under the
+    *predecessor's* session id. Today that is harmless because the same
+    transaction ends the predecessor, so no second receipted exchange can
+    reach it. A draining predecessor stays live and answers the `demand: end`
+    every shipped reporter sends when the viewer closes the player: the write
+    loses to the commit receipt, the caller reads that as "not durably
+    committed", and the client gets a `503 control_unavailable` it retries
+    twice a second for the rest of the window. The retained reply has to
+    become the most recent receipted exchange rather than the first one.
+  - **An old binary must not be able to take a draining session over, and SQL
+    predicates cannot make that true.** Compatibility is checked when a store
+    is opened and never again, so during a rolling upgrade every node still
+    running the previous binary keeps issuing takeover SQL that has no drain
+    predicate in it. A new-binary owner that dies mid-drain is then adopted by
+    an old-binary node, which starts an encoder for a stream the pointer no
+    longer names and renews it forever — failure 3 arriving through the
+    upgrade door. This needs a trigger, the way the v49 pointer fence did, and
+    the trigger has to ship in the same migration step as the column.
 
   Step 2 then replaces "after the window" with "when `Switched` arrives, or the
-  window lapses", which is the same call at a different trigger. **Land step 1
-  and step 2 together.** Step 1 alone makes the product worse for the window it
-  opens: today a superseded predecessor answers a clean terminal `410
-  session_ended`, and a half-built drain replaces that with a retry or a
-  `owner_lost` for a client that has no `Switched` to send.
+  window lapses", which is the same call at a different trigger.
 
-  **Two things to settle before the candidate worker lands.**
+  ~~**Land step 1 and step 2 together.** Step 1 alone makes the product worse
+  for the window it opens: today a superseded predecessor answers a clean
+  terminal `410 session_ended`, and a half-built drain replaces that with a
+  retry or a `owner_lost` for a client that has no `Switched` to send.~~
+  **Withdrawn — that was a property of the lease-bounded drain, not of this
+  one.** Nothing in the request path consults the pointer: `control_inner` and
+  the manifest and segment paths all resolve authority from the row named by
+  the URL, so a draining predecessor answers *normally* for the window and
+  then, when the owner ends it with cause `superseded`, answers the same clean
+  `410 session_ended` it answers today — just later. `owner_lost` and the
+  retry came from fencing the worker while the row still said `active`, which
+  is what this design stopped doing. Step 1 is shippable on its own; step 2 is
+  what stops every switch paying the full window when the client has already
+  moved.
+
+  **To settle before the candidate worker lands.**
   `DEFAULT_MAX_HW_SESSIONS` is 2 and an admission permit is held for a
   session's whole life, so prepare-plus-drain with a real successor costs two
   of two per viewer — the first real cutover on a two-slot node refuses its own
-  successor. And a drained predecessor's `cache_consumer_pins` are not renewed
-  by any statement that survives the commit, so the drain window has to be
-  shorter than the pin TTL or the generation it is reading can be swept.
+  successor. This is the strongest argument for step 2: without a `Switched`,
+  every switch holds the second permit for the whole window whether the client
+  needed it or not.
 
   **Landed from that work, because it is correct on its own:**
   `preparation_ack_replay` no longer gates on `state = 'ended' AND
