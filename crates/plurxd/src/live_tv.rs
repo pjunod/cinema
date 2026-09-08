@@ -6249,6 +6249,163 @@ exec /bin/cat >/dev/null
             .is_err());
     }
 
+    #[test]
+    fn xmltv_text_survives_entities_and_cdata_because_real_grabbers_emit_both() {
+        let lineup = guide_lineup();
+        let body = br#"<tv>
+          <channel id="c1"><display-name>7.1</display-name></channel>
+          <programme start="20260907200000 -0400" stop="20260907203000 -0400" channel="c1">
+            <title>Tom &amp; Jerry</title>
+            <sub-title><![CDATA[Cat & Mouse: "the chase"]]></sub-title>
+            <desc>Fast &lt;and&gt; loud &#8212; very.</desc>
+            <episode-num system="onscreen">S00E05</episode-num>
+          </programme>
+        </tv>"#;
+        let channels = guide::parse_xmltv(body, &lineup).expect("xmltv document");
+        let row = &channels[0].programmes[0];
+        assert_eq!(
+            row.title, "Tom & Jerry",
+            "an entity is its own event; reading only text events truncated the title at it"
+        );
+        assert_eq!(
+            row.episode_title.as_deref(),
+            Some("Cat & Mouse: \"the chase\""),
+            "CDATA is character data too, and was being dropped entirely"
+        );
+        assert_eq!(row.synopsis.as_deref(), Some("Fast <and> loud — very."));
+        assert_eq!(
+            row.episode.as_deref(),
+            Some("S0E5"),
+            "S00E05 is how every source spells a special; trimming zeros first dropped it"
+        );
+    }
+
+    #[test]
+    fn text_bounds_are_the_bytes_the_contract_states_not_characters() {
+        // The contract's limits are byte limits, and the guide host is
+        // untrusted: 256 CJK characters is 768 bytes.
+        let wide = "\u{6f22}".repeat(400);
+        let bounded = guide::bounded_text(Some(wide), 256).expect("some text survives");
+        assert!(bounded.len() <= 256, "bounded by bytes, not characters");
+        assert!(
+            bounded.chars().all(|c| c == '\u{6f22}'),
+            "and never split mid-character"
+        );
+    }
+
+    #[test]
+    fn a_guide_far_over_the_cap_is_trimmed_rather_than_emptied() {
+        // Headroom that scaled with the overshoot asked to drop nine times the
+        // cap's worth of rows and returned an empty grid — the one outcome the
+        // clip exists to prevent.
+        let huge = guide_with(200, 120, 700);
+        let clipped = huge.clipped(&GuideWindow {
+            start: 0,
+            end: i64::from(u32::MAX),
+        });
+        let encoded = serde_json::to_vec(&clipped).expect("json").len();
+        assert!(encoded <= guide::MAX_GUIDE_RESPONSE_BYTES);
+        assert_eq!(
+            clipped.channels.len(),
+            200,
+            "channels are never dropped, only the furthest-out programmes"
+        );
+        assert!(
+            clipped.total_programmes() > 0,
+            "a guide well over the cap still answers with a readable grid"
+        );
+    }
+
+    #[test]
+    fn an_xmltv_url_may_reach_the_lan_but_not_this_machine_or_link_local_space() {
+        // The LAN is the point: the plan's own acceptance puts the XMLTV
+        // document on another node.
+        for allowed in [
+            "http://192.168.4.7:8080/guide.xml",
+            "http://10.1.2.3/xmltv.gz",
+            "https://guide.example.com/xmltv.xml",
+            "http://[2001:db8::5]/g.xml",
+        ] {
+            assert!(
+                validate_xmltv_url(allowed).is_ok(),
+                "{allowed} is a destination an operator legitimately has"
+            );
+        }
+        // Admin of plurx must not widen into reading this node's own
+        // unauthenticated internal listeners, or cloud metadata.
+        for refused in [
+            "http://127.0.0.1:3000/_internal/v1/live-tv/snapshot",
+            "http://127.1/x.xml",
+            "http://0.0.0.0/x.xml",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://[::1]/x.xml",
+            "http://[::ffff:127.0.0.1]/x.xml",
+            "http://[fe80::1]/x.xml",
+            "http://255.255.255.255/x.xml",
+            "http://239.1.1.1/x.xml",
+        ] {
+            assert!(
+                validate_xmltv_url(refused).is_err(),
+                "{refused} points at this machine or at link-local space"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_name_that_resolves_to_loopback_is_refused_at_fetch_time() {
+        // The literal check cannot see through a name, so the fetch resolves
+        // first and refuses on the answer.
+        let url = validate_xmltv_url("http://localhost:8080/guide.xml").expect("a name parses");
+        let error = resolve_permitted_addrs(&url)
+            .await
+            .expect_err("localhost is this machine");
+        assert!(matches!(error, LiveTvError::InvalidConfig(_)));
+
+        // A literal needs no resolution and pins nothing.
+        let literal = validate_xmltv_url("http://192.168.4.7/guide.xml").expect("a literal parses");
+        assert!(resolve_permitted_addrs(&literal)
+            .await
+            .expect("a permitted literal")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_refresh_with_no_cached_lineup_refuses_rather_than_storing_an_empty_guide() {
+        let root = crate::test_tempdir().expect("scratch root");
+        let manager = test_manager(root.path());
+        seed_test_config(manager.as_ref()).await;
+        let mut config = manager.config().await.expect("config");
+        config.guide_source = GuideSource::Xmltv;
+        config.xmltv_url = "http://192.168.4.7/guide.xml".to_owned();
+        config.owner_node_id = manager.node_id.clone();
+
+        // A good guide is cached and the lineup cache is cold — the state a
+        // freshly restarted owner is in before anyone opens Live TV.
+        manager
+            .guide_cache
+            .store(config.generation, &Ok(guide_with(2, 2, 8)))
+            .await;
+
+        let error = manager
+            .refresh_guide(&config, false)
+            .await
+            .expect_err("a cold lineup is not something to fetch against");
+        assert!(
+            format!("{error}").contains("lineup"),
+            "the operator is told what is missing, not that the source failed"
+        );
+
+        // And crucially the good guide survived: fetching anyway matched
+        // nothing and stored the empty result over it.
+        let window = GuideWindow {
+            start: 0,
+            end: i64::from(u32::MAX),
+        };
+        let served = manager.guide_cache.read(&config, window).await;
+        assert_eq!(served.channels.len(), 2);
+        assert_eq!(served.matched_channels, 2);
+    }
+
     #[tokio::test]
     async fn a_guide_never_carries_deviceauth_into_anything_that_leaves_the_owner() {
         let root = crate::test_tempdir().expect("scratch root");
@@ -6258,8 +6415,32 @@ exec /bin/cat >/dev/null
         config.guide_source = GuideSource::HdHomeRun;
 
         let secret = "SECRET-DEVICE-AUTH-VALUE";
-        let mut guide = guide_with(1, 1, 8);
-        guide.channels[0].programmes[0].title = "City Beat".into();
+
+        // The credential is genuinely in flight on the real request path.
+        // Asserting that first is what makes every absence below mean
+        // something: a test that only searched a guide the secret was never
+        // put into would pass with every credential precaution deleted.
+        let request = guide::guide_request_url(secret, Some("7.1"), Some(1_789_000_800))
+            .expect("guide request url");
+        assert!(
+            request.as_str().contains(secret),
+            "the credential really is a query parameter of the outbound fetch"
+        );
+
+        // And the guide under test is what that credentialed fetch produced,
+        // parsed by the shipping parser, rather than a hand-built value.
+        let lineup = guide_lineup();
+        let body = br#"[
+          {"GuideNumber":"7.1","GuideName":"WABC","Affiliate":"ABC",
+           "Guide":[{"StartTime":1789000800,"EndTime":1789002600,"Title":"City Beat",
+                     "Synopsis":"A rebuild."}]}
+        ]"#;
+        let channels =
+            guide::parse_hdhomerun_guide(body, &guide_by_number(&lineup)).expect("guide document");
+        let mut guide = guide_with(0, 0, 0);
+        guide.matched_channels = channels.len();
+        guide.lineup_channels = lineup.len();
+        guide.channels = channels;
         manager
             .guide_cache
             .store(config.generation, &Ok(guide))
@@ -6284,6 +6465,46 @@ exec /bin/cat >/dev/null
         assert!(settings
             .values()
             .all(|value| !value.contains(secret) && !value.contains("DeviceAuth")));
+
+        // The relay is the one path that copies a guide off this node, so it
+        // must be clean for the same reason — asserted on the value the relay
+        // actually holds, not on a copy of it.
+        manager
+            .remember_relayed_guide(config.generation, served.clone())
+            .await;
+        let relayed = manager
+            .relayed_guide(config.generation)
+            .await
+            .expect("relayed guide");
+        let relayed_json = serde_json::to_string(&relayed).expect("relay json");
+        assert!(!relayed_json.contains(secret));
+        assert!(!relayed_json.contains("DeviceAuth"));
+
+        // Failure copy is the other way a URL escapes. Every message the fetch
+        // path can produce is a fixed sentence, so a failed refresh recorded
+        // against this generation says nothing about the request it made.
+        manager
+            .guide_cache
+            .store(
+                config.generation,
+                &Err(LiveTvError::DeviceUnavailable(
+                    "HDHomeRun device request failed".to_owned(),
+                )),
+            )
+            .await;
+        let after_failure = manager
+            .local_guide(
+                &config,
+                GuideWindow {
+                    start: 0,
+                    end: i64::from(u32::MAX),
+                },
+            )
+            .await;
+        let failure_json = serde_json::to_string(&after_failure).expect("failure json");
+        assert!(!failure_json.contains(secret));
+        assert!(!failure_json.contains("DeviceAuth"));
+        assert!(!failure_json.contains("api.hdhomerun.com"));
     }
 
     #[tokio::test]
