@@ -184,6 +184,24 @@ pub struct DiagnosticContract {
     pub stderr_mode: String,
     pub input_codec: String,
     pub decoder: String,
+    /// The decode backend this contract was qualified on, spelled as
+    /// [`plurx_core::transcode::DecodeBackend::name`] spells it — the same
+    /// string FFmpeg takes for `-hwaccel`, and not the serde spelling, which
+    /// differs for VideoToolbox and of which only one parses.
+    ///
+    /// Defaulted to `software`, so every contract written before this field
+    /// existed keeps meaning exactly what it meant. Nothing silently widens.
+    ///
+    /// It is part of the coverage key because the decoder name is not enough,
+    /// and that is measured rather than assumed: on FFmpeg 9.0.1 a
+    /// VideoToolbox decode of h264 and a software decode of h264 both print
+    /// `[dec:h264 @ …]`, because that backend attaches an accelerator to the
+    /// same decoder rather than selecting a differently-named one. A contract
+    /// keyed on the name alone would answer for a decode path nobody
+    /// qualified — and a grammar that matches nothing certifies every stream
+    /// as clean.
+    #[serde(default = "software_backend")]
+    pub decode_backend: String,
     pub require_context_addresses: bool,
     /// The literal prefix that opens a primary record on this build.
     ///
@@ -255,6 +273,20 @@ pub struct ObservedBuild<'a> {
     /// looking for `[dec:h264 @` sees nothing at all in a `[dec:h264_qsv @`
     /// stream — silently, which is the failure mode that matters.
     pub decoder: &'a str,
+    /// The backend that decode ran on, because the name above cannot carry it.
+    ///
+    /// Some backends substitute a differently-named decoder and the name is
+    /// enough; VideoToolbox does not, and prints the software decoder's name
+    /// with an accelerator attached. Without this field those two are the same
+    /// observation, and one contract would answer for both.
+    pub decode_backend: &'a str,
+}
+
+/// The backend every contract written before the key existed was qualified on.
+fn software_backend() -> String {
+    plurx_core::transcode::DecodeBackend::Software
+        .name()
+        .to_owned()
 }
 
 /// The retained contract table, as it appears on disk.
@@ -392,6 +424,7 @@ impl DiagnosticContract {
             && self.stderr_mode == build.stderr_mode
             && self.input_codec == build.input_codec
             && self.decoder == build.decoder
+            && self.decode_backend == build.decode_backend
     }
 }
 
@@ -1303,7 +1336,13 @@ impl DiagnosticPolicy {
     /// and wrong for anything reporting *why*. Two covering contracts is a
     /// fixable mistake with a different fix from having none, and an operator
     /// told to capture a contract they already have twice will make it worse.
-    pub fn covering_contracts(&self, input_codec: &str, decoder: &str, stderr_mode: &str) -> usize {
+    pub fn covering_contracts(
+        &self,
+        input_codec: &str,
+        decoder: &str,
+        decode_backend: &str,
+        stderr_mode: &str,
+    ) -> usize {
         let Some(build) = self.build.as_ref() else {
             return 0;
         };
@@ -1314,6 +1353,7 @@ impl DiagnosticPolicy {
             stderr_mode,
             input_codec,
             decoder,
+            decode_backend,
         };
         self.contracts
             .iter()
@@ -1325,6 +1365,7 @@ impl DiagnosticPolicy {
         &self,
         input_codec: &str,
         decoder: &str,
+        decode_backend: &str,
         stderr_mode: &str,
     ) -> Option<&DiagnosticContract> {
         let build = self.build.as_ref()?;
@@ -1335,6 +1376,7 @@ impl DiagnosticPolicy {
             stderr_mode,
             input_codec,
             decoder,
+            decode_backend,
         };
         let mut covering = self
             .contracts
@@ -1705,6 +1747,7 @@ mod tests {
             stderr_mode: "repeat+level+error".to_owned(),
             input_codec: decoder.to_owned(),
             decoder: decoder.to_owned(),
+            decode_backend: software_backend(),
             require_context_addresses: true,
             primary_message: "Error submitting packet to decoder:".to_owned(),
             subordinate_message: Some("No frame decoded?".to_owned()),
@@ -1725,6 +1768,7 @@ mod tests {
             stderr_mode: &contract.stderr_mode,
             input_codec: &contract.input_codec,
             decoder: &contract.decoder,
+            decode_backend: &contract.decode_backend,
         }
     }
 
@@ -2597,27 +2641,32 @@ mod tests {
     fn a_policy_covers_the_build_it_measured_and_nothing_else() {
         let policy = qualified_policy();
         assert!(policy
-            .contract_for("h264", "h264", QUALIFIED_STDERR_MODE)
+            .contract_for("h264", "h264", &software_backend(), QUALIFIED_STDERR_MODE)
             .is_some());
         assert!(
             policy
-                .contract_for("h264", "h264", LEGACY_STDERR_MODE)
+                .contract_for("h264", "h264", &software_backend(), LEGACY_STDERR_MODE)
                 .is_none(),
             "a contract qualified under repeat+level+error says nothing about a \
              child launched without severity labels"
         );
         assert!(policy
-            .contract_for("hevc", "hevc", QUALIFIED_STDERR_MODE)
+            .contract_for("hevc", "hevc", &software_backend(), QUALIFIED_STDERR_MODE)
             .is_none());
         assert!(
             policy
-                .contract_for("h264", "h264_qsv", QUALIFIED_STDERR_MODE)
+                .contract_for(
+                    "h264",
+                    "h264_qsv",
+                    &software_backend(),
+                    QUALIFIED_STDERR_MODE
+                )
                 .is_none(),
             "the decoder this effort swaps in is not the decoder that was qualified"
         );
         assert!(
             DiagnosticPolicy::default()
-                .contract_for("h264", "h264", QUALIFIED_STDERR_MODE)
+                .contract_for("h264", "h264", &software_backend(), QUALIFIED_STDERR_MODE)
                 .is_none(),
             "a node that measured nothing covers nothing"
         );
@@ -2640,7 +2689,7 @@ mod tests {
             vec![one, two],
         );
         assert!(policy
-            .contract_for("h264", "h264", QUALIFIED_STDERR_MODE)
+            .contract_for("h264", "h264", &software_backend(), QUALIFIED_STDERR_MODE)
             .is_none());
     }
 
@@ -3060,7 +3109,7 @@ mod tests {
         let policy = diagnostic_policy();
         assert!(
             policy
-                .contract_for("h264", "h264", QUALIFIED_STDERR_MODE)
+                .contract_for("h264", "h264", &software_backend(), QUALIFIED_STDERR_MODE)
                 .is_none()
                 || policy.measured_build().is_some(),
             "either nothing was installed for this test process, or whatever \
