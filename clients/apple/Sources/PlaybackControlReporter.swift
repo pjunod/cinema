@@ -345,7 +345,7 @@ struct ControlRequest: Codable, Equatable {
     }
 }
 
-enum AcknowledgementState: String, Codable, Equatable, Sendable {
+enum AcknowledgementState: String, Codable, Equatable, Hashable, Sendable {
     case metadataReady = "metadata_ready"
     case bufferReady = "buffer_ready"
     case committed
@@ -599,7 +599,15 @@ actor PlaybackControlReporter {
     private var nextAllowedAt = 0
     private var pump: Task<Void, Never>?
     private var activePreparation: ActivePreparation?
-    private var pendingAcknowledgement: ActionAcknowledgement?
+    /// Progress already observed locally and waiting to cross the wire. The
+    /// list is bounded by the five-state protocol: duplicate and backwards
+    /// transitions are refused, and a terminal state closes it.
+    private var pendingAcknowledgements: [ActionAcknowledgement] = []
+    /// The first queued acknowledgement may already be on the network while
+    /// the actor receives later player progress. Keep that distinction so a
+    /// failure can supersede unsent readiness without changing an in-flight
+    /// or retryable request body.
+    private var inFlightAcknowledgement: ActionAcknowledgement?
     /// A terminal acknowledgement that comes back with the same offer was
     /// silently discarded. Keep its id tombstoned until the server withdraws
     /// it so cadence cannot build the same successor again.
@@ -771,26 +779,39 @@ actor PlaybackControlReporter {
     @discardableResult
     func queuePreparationAcknowledgement(_ acknowledgement: ActionAcknowledgement) -> Bool {
         guard !stopped, acknowledgement.isValid,
-              pendingAcknowledgement == nil,
               let activePreparation,
               activePreparation.offer.actionId == acknowledgement.actionId
         else { return false }
+        let terminalStates: Set<AcknowledgementState> = [.committed, .failed, .aborted]
+        guard !pendingAcknowledgements.contains(where: {
+            terminalStates.contains($0.state)
+        }) else { return false }
+        let priorState = pendingAcknowledgements.last?.state
+            ?? activePreparation.acceptedState
         switch acknowledgement.state {
         case .metadataReady:
-            guard activePreparation.acceptedState == nil else { return false }
+            guard priorState == nil else { return false }
         case .bufferReady:
-            guard activePreparation.acceptedState == .metadataReady else { return false }
+            guard priorState == .metadataReady else { return false }
         case .committed:
-            guard activePreparation.acceptedState == .bufferReady else { return false }
+            guard priorState == .bufferReady else { return false }
             guard currentCapture()?.snapshot.selection == activePreparation.selection else {
                 return queuePreparationAcknowledgement(ActionAcknowledgement(
                     actionId: acknowledgement.actionId, state: .aborted
                 ))
             }
         case .failed, .aborted:
-            break
+            // Terminal failure is more important than readiness nobody has
+            // seen yet. Preserve only a packet already sent or awaiting exact
+            // replay, then report the terminal state immediately after it.
+            let transmitted = inFlightAcknowledgement ?? retryRequest?.request.acknowledgement
+            if let first = pendingAcknowledgements.first, transmitted == first {
+                pendingAcknowledgements = [first]
+            } else {
+                pendingAcknowledgements.removeAll()
+            }
         }
-        pendingAcknowledgement = acknowledgement
+        pendingAcknowledgements.append(acknowledgement)
         pending = newestCapture(pending)
         if !inFlight {
             pump?.cancel()
@@ -878,7 +899,11 @@ actor PlaybackControlReporter {
         nextAllowedAt = 0
         lastStartedAt = now()
         inFlight = true
-        defer { inFlight = false }
+        inFlightAcknowledgement = request.acknowledgement
+        defer {
+            inFlight = false
+            inFlightAcknowledgement = nil
+        }
         do {
             let response = try await withDeadline(PlaybackControl.exchangeDeadlineMs) {
                 [send, bootstrap] in
@@ -889,7 +914,7 @@ actor PlaybackControlReporter {
             retryRequest = nil
             if let capabilities = request.capabilities { acceptedCapabilities = capabilities }
             acceptedSequence = max(acceptedSequence, response.acceptedSequence)
-            reconcilePreparation(
+            let committedPreparation = reconcilePreparation(
                 request: request,
                 response: response,
                 requestSelection: pendingRequest.capture.snapshot.selection
@@ -912,6 +937,7 @@ actor PlaybackControlReporter {
             // fetched is still worth playing. The milestone that moves that
             // authority is the one that acts on this.
             if request.demand == .end { stop() }
+            else if committedPreparation { stop() }
             else if response.action.type == "terminal" { stopForTerminal(pendingRequest.capture) }
         } catch {
             if stopped { return }
@@ -1000,7 +1026,7 @@ actor PlaybackControlReporter {
             }
             if request.acknowledgement != nil {
                 ignoredPreparationActionId = request.acknowledgement?.actionId
-                pendingAcknowledgement = nil
+                retryRequest = nil
                 releasePreparation(.staleControl)
                 pending = newestCapture(pending)
                 return
@@ -1046,7 +1072,7 @@ actor PlaybackControlReporter {
         acceptedCapabilities = nil
         lastStartedAt = nil
         pending = newest
-        pendingAcknowledgement = nil
+        pendingAcknowledgements.removeAll()
         ignoredPreparationActionId = nil
         return true
     }
@@ -1057,12 +1083,11 @@ actor PlaybackControlReporter {
     }
 
     private func acknowledgement(for snapshot: PlaybackControlSnapshot) -> ActionAcknowledgement? {
-        guard let acknowledgement = pendingAcknowledgement else { return nil }
+        guard let acknowledgement = pendingAcknowledgements.first else { return nil }
         // End owns teardown. A commit on the same request is both invalid and
         // ambiguous, so release the unpresented successor locally and let End
         // be the sole server-side path.
         if snapshot.demand == .end, acknowledgement.state == .committed {
-            pendingAcknowledgement = nil
             releasePreparation(.withdrawn)
             return nil
         }
@@ -1072,7 +1097,7 @@ actor PlaybackControlReporter {
             let aborted = ActionAcknowledgement(
                 actionId: acknowledgement.actionId, state: .aborted
             )
-            pendingAcknowledgement = aborted
+            pendingAcknowledgements[0] = aborted
             return aborted
         }
         return acknowledgement
@@ -1082,9 +1107,11 @@ actor PlaybackControlReporter {
         request: ControlRequest,
         response: ControlResponse,
         requestSelection: ClientSelection
-    ) {
+    ) -> Bool {
         let acknowledged = request.acknowledgement
-        if acknowledged == pendingAcknowledgement { pendingAcknowledgement = nil }
+        if let acknowledged, acknowledged == pendingAcknowledgements.first {
+            pendingAcknowledgements.removeFirst()
+        }
         let offered = response.action.preparedOffer
 
         if let acknowledged,
@@ -1096,15 +1123,16 @@ actor PlaybackControlReporter {
                 releasePreparation(.acknowledgementDiscarded)
             } else {
                 releasePreparation(acknowledged.state == .committed ? .committed : .withdrawn)
+                if acknowledged.state == .committed { return true }
             }
         }
 
         guard let offered else {
             ignoredPreparationActionId = nil
             if activePreparation != nil { releasePreparation(.withdrawn) }
-            return
+            return false
         }
-        if ignoredPreparationActionId == offered.actionId { return }
+        if ignoredPreparationActionId == offered.actionId { return false }
         if let current = activePreparation {
             if current.offer.actionId == offered.actionId {
                 if let acknowledged,
@@ -1113,7 +1141,7 @@ actor PlaybackControlReporter {
                 {
                     activePreparation?.acceptedState = acknowledged.state
                 }
-                return
+                return false
             }
             releasePreparation(.replaced)
         }
@@ -1122,15 +1150,16 @@ actor PlaybackControlReporter {
             offer: offered, selection: requestSelection, acceptedState: nil
         )
         onPreparation(.offered(offered))
+        return false
     }
 
     private func releasePreparation(_ reason: PreparedSwitchReleaseReason) {
         guard let actionId = activePreparation?.offer.actionId else {
-            pendingAcknowledgement = nil
+            pendingAcknowledgements.removeAll()
             return
         }
         activePreparation = nil
-        pendingAcknowledgement = nil
+        pendingAcknowledgements.removeAll()
         onPreparation(.released(actionId: actionId, reason: reason))
     }
 

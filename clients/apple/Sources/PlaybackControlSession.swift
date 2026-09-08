@@ -116,13 +116,20 @@ final class PlaybackControlSession {
     private let scheduleSubtitleReady: @Sendable (
         @escaping @MainActor @Sendable () -> Void
     ) -> Void
+    private let schedulePreparedSwitch: @Sendable (
+        @escaping @MainActor @Sendable () -> Void
+    ) -> Void
 
     init(
         scheduleSubtitleReady: @escaping @Sendable (
             @escaping @MainActor @Sendable () -> Void
+        ) -> Void = { callback in Task { @MainActor in callback() } },
+        schedulePreparedSwitch: @escaping @Sendable (
+            @escaping @MainActor @Sendable () -> Void
         ) -> Void = { callback in Task { @MainActor in callback() } }
     ) {
         self.scheduleSubtitleReady = scheduleSubtitleReady
+        self.schedulePreparedSwitch = schedulePreparedSwitch
     }
 
     /// What the reporter reads. See `PlaybackControlLatestCapture`: the
@@ -196,6 +203,7 @@ final class PlaybackControlSession {
         answers.begin(generation: generation)
         let lease = TimeInterval(bootstrap.leaseTimeoutMs) / 1_000
         let subtitleReadiness = SubtitleReadinessRetryState()
+        let preparationEvents = PlaybackControlPreparationEvents()
         self.observe = observe
         // The reporter takes its first snapshot the moment it starts, so the
         // first one has to be there before it does.
@@ -261,8 +269,16 @@ final class PlaybackControlSession {
             },
             // Message plumbing only. The callback is deliberately not wired to
             // AVPlayer until the staged successor has a producer to open.
-            onPreparation: { event in
-                Task { @MainActor in onPreparedSwitch(event) }
+            onPreparation: { [weak self, schedulePreparedSwitch] event in
+                guard preparationEvents.enqueue(event) else { return }
+                schedulePreparedSwitch { [weak self] in
+                    let events = preparationEvents.drain()
+                    guard let self, self.activeGeneration == generation else { return }
+                    for event in events {
+                        guard self.activeGeneration == generation else { return }
+                        onPreparedSwitch(event)
+                    }
+                }
             }
         )
         guard let reporter else {
@@ -307,37 +323,38 @@ final class PlaybackControlSession {
 
     /// Prepared-switch producer seam. These are inert until a caller receives
     /// `onPreparedSwitch(.offered)` and has real successor progress to report.
-    func preparedMetadataReady(actionId: String) {
-        guard let reporter else { return }
-        Task { await reporter.preparationMetadataReady(actionId: actionId) }
+    @discardableResult
+    func preparedMetadataReady(actionId: String) async -> Bool {
+        guard let reporter else { return false }
+        return await reporter.preparationMetadataReady(actionId: actionId)
     }
 
-    func preparedBufferReady(actionId: String, bufferedThroughMs: Int) {
-        guard let reporter else { return }
-        Task {
-            await reporter.preparationBufferReady(
-                actionId: actionId, bufferedThroughMs: bufferedThroughMs
-            )
-        }
+    @discardableResult
+    func preparedBufferReady(actionId: String, bufferedThroughMs: Int) async -> Bool {
+        guard let reporter else { return false }
+        return await reporter.preparationBufferReady(
+            actionId: actionId, bufferedThroughMs: bufferedThroughMs
+        )
     }
 
-    func commitPrepared(actionId: String, firstFrameUnixMs: Int) {
-        guard let reporter else { return }
-        Task {
-            await reporter.preparationCommitted(
-                actionId: actionId, firstFrameUnixMs: firstFrameUnixMs
-            )
-        }
+    @discardableResult
+    func commitPrepared(actionId: String, firstFrameUnixMs: Int) async -> Bool {
+        guard let reporter else { return false }
+        return await reporter.preparationCommitted(
+            actionId: actionId, firstFrameUnixMs: firstFrameUnixMs
+        )
     }
 
-    func failPrepared(actionId: String) {
-        guard let reporter else { return }
-        Task { await reporter.preparationFailed(actionId: actionId) }
+    @discardableResult
+    func failPrepared(actionId: String) async -> Bool {
+        guard let reporter else { return false }
+        return await reporter.preparationFailed(actionId: actionId)
     }
 
-    func abortPrepared(actionId: String) {
-        guard let reporter else { return }
-        Task { await reporter.preparationAborted(actionId: actionId) }
+    @discardableResult
+    func abortPrepared(actionId: String) async -> Bool {
+        guard let reporter else { return false }
+        return await reporter.preparationAborted(actionId: actionId)
     }
 
     /// Publish what a recovery owner is about to act on, then wait — briefly —
@@ -479,6 +496,34 @@ final class PlaybackControlSession {
         )
         latest.store(capture)
         return capture
+    }
+}
+
+/// Serializes reporter events before they cross to MainActor. One scheduled
+/// drain owns every event already queued, so offer/release order cannot invert;
+/// a generation check in the session discards the whole stale drain after End.
+private final class PlaybackControlPreparationEvents: @unchecked Sendable {
+    private let lock = NSLock()
+    private var events: [PreparedSwitchEvent] = []
+    private var scheduled = false
+
+    /// Returns true only for the event that must schedule the next drain.
+    func enqueue(_ event: PreparedSwitchEvent) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        events.append(event)
+        guard !scheduled else { return false }
+        scheduled = true
+        return true
+    }
+
+    func drain() -> [PreparedSwitchEvent] {
+        lock.lock()
+        defer { lock.unlock() }
+        let drained = events
+        events.removeAll()
+        scheduled = false
+        return drained
     }
 }
 

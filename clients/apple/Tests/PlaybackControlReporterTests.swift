@@ -119,7 +119,7 @@ private final class Harness: @unchecked Sendable {
     private var _preparedAction: ControlAction?
     private var _withdrawPreparation = false
     private var _repeatAfterTerminalAcknowledgement = false
-    private var _acknowledgementFailure: ControlTransportError?
+    private var _acknowledgementFailures: [ControlTransportError] = []
     private var _preparationEvents: [PreparedSwitchEvent] = []
     private var _preparedResources: Set<String> = []
     private let gate = DispatchSemaphore(value: 0)
@@ -157,7 +157,7 @@ private final class Harness: @unchecked Sendable {
     }
     func withdrawPreparation() { lock.withLock { _withdrawPreparation = true } }
     func failAcknowledgement(with error: ControlTransportError) {
-        lock.withLock { _acknowledgementFailure = error }
+        lock.withLock { _acknowledgementFailures.append(error) }
     }
 
     /// Queue what the next exchanges answer, oldest first. Anything beyond
@@ -170,6 +170,7 @@ private final class Harness: @unchecked Sendable {
     /// Keep every exchange in flight instead of answering it. This is how a
     /// test observes what the reporter does while it is already talking.
     func holdExchanges() { lock.withLock { _holds = true } }
+    func resumeExchanges() { lock.withLock { _holds = false } }
 
     var send: PlaybackControlReporter.Send {
         { [self] _, request in
@@ -179,21 +180,25 @@ private final class Harness: @unchecked Sendable {
             lock.withLock {
                 _requests.append(request)
                 hold = _holds
-                if request.acknowledgement != nil, let failure = _acknowledgementFailure {
-                    _acknowledgementFailure = nil
-                    outcome = .failure(failure)
+                if request.acknowledgement != nil, !_acknowledgementFailures.isEmpty {
+                    outcome = .failure(_acknowledgementFailures.removeFirst())
                 } else if !_outcomes.isEmpty {
                     outcome = _outcomes.removeFirst()
                 } else if !_withdrawPreparation, let prepared = _preparedAction {
                     let terminal = request.acknowledgement.map {
                         [.committed, .failed, .aborted].contains($0.state)
                     } ?? false
-                    if !terminal || _repeatAfterTerminalAcknowledgement { action = prepared }
+                    if terminal && !_repeatAfterTerminalAcknowledgement {
+                        _withdrawPreparation = true
+                    } else {
+                        action = prepared
+                    }
                 }
             }
             if hold {
-                try await Task.sleep(nanoseconds: 60_000_000_000)
-                throw CancellationError()
+                while lock.withLock({ _holds }) {
+                    try await Task.sleep(nanoseconds: 1_000_000)
+                }
             }
             return try (outcome ?? .success(ControlResponse(
                 proto: PlaybackControl.protocolName,
@@ -664,6 +669,78 @@ final class PlaybackControlReporterTests: XCTestCase {
             actionId: preparedActionId, reason: .committed
         )))
         XCTAssertTrue(harness.preparedResources.isEmpty)
+    }
+
+    func testRapidPreparedProgressQueuesInOrderAndCommitStopsThePredecessor() async throws {
+        let harness = Harness()
+        harness.announcePreparation()
+        let reporter = try XCTUnwrap(makeReporter(harness))
+        await reporter.start()
+        XCTAssertTrue(harness.waitUntil { !harness.preparedResources.isEmpty })
+
+        let beforeHold = harness.requests.count
+        harness.holdExchanges()
+        XCTAssertTrue(harness.waitUntil { harness.requests.count > beforeHold })
+        let metadataQueued = await reporter.preparationMetadataReady(actionId: preparedActionId)
+        let bufferQueued = await reporter.preparationBufferReady(
+            actionId: preparedActionId, bufferedThroughMs: 625_000
+        )
+        let commitQueued = await reporter.preparationCommitted(
+            actionId: preparedActionId, firstFrameUnixMs: 1_700_000_000_123
+        )
+        XCTAssertTrue(metadataQueued)
+        XCTAssertTrue(bufferQueued)
+        XCTAssertTrue(commitQueued)
+        harness.resumeExchanges()
+
+        XCTAssertTrue(harness.waitUntil {
+            harness.requests.compactMap(\.acknowledgement).map(\.state)
+                .suffix(3) == [.metadataReady, .bufferReady, .committed]
+        })
+        XCTAssertTrue(harness.waitUntil {
+            harness.preparationEvents.contains(.released(
+                actionId: preparedActionId, reason: .committed
+            ))
+        })
+        let stopped = await reporter.stopped
+        XCTAssertTrue(stopped, "the predecessor has no defined post-commit control bootstrap")
+        let countAtCommit = harness.requests.count
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(harness.requests.count, countAtCommit)
+    }
+
+    func testRapidFailureSupersedesReadinessThatNeverLeftTheClient() async throws {
+        let harness = Harness()
+        harness.announcePreparation()
+        let reporter = try XCTUnwrap(makeReporter(harness))
+        await reporter.start()
+        XCTAssertTrue(harness.waitUntil { !harness.preparedResources.isEmpty })
+
+        let beforeHold = harness.requests.count
+        harness.holdExchanges()
+        XCTAssertTrue(harness.waitUntil { harness.requests.count > beforeHold })
+        let metadataQueued = await reporter.preparationMetadataReady(actionId: preparedActionId)
+        let bufferQueued = await reporter.preparationBufferReady(
+            actionId: preparedActionId, bufferedThroughMs: 625_000
+        )
+        let failedQueued = await reporter.preparationFailed(actionId: preparedActionId)
+        XCTAssertTrue(metadataQueued)
+        XCTAssertTrue(bufferQueued)
+        XCTAssertTrue(failedQueued)
+        harness.resumeExchanges()
+
+        XCTAssertTrue(harness.waitUntil {
+            harness.requests.contains { $0.acknowledgement?.state == .failed }
+        })
+        XCTAssertEqual(
+            harness.requests.compactMap(\.acknowledgement).map(\.state),
+            [.failed],
+            "terminal failure supersedes readiness packets that were never transmitted"
+        )
+        XCTAssertTrue(harness.waitUntil { harness.preparedResources.isEmpty })
+        let stopped = await reporter.stopped
+        XCTAssertFalse(stopped, "preparation failure leaves the predecessor loop alive")
+        await reporter.stop()
     }
 
     func testACommitWithTheWrongOriginNoticesTheRepeatedOffer() async throws {
@@ -1234,6 +1311,58 @@ final class PlaybackControlReporterTests: XCTestCase {
         XCTAssertTrue(harness.waitUntil { harness.requests.count > requestsAfterRefusal })
         let stopped = await reporter.stopped
         XCTAssertFalse(stopped, "the playing predecessor and its loop continue")
+        await reporter.stop()
+    }
+
+    func testARejectedReplayClearsTheRetryBeforeOrdinaryCadenceResumes() async throws {
+        let harness = Harness()
+        harness.announcePreparation()
+        let reporter = try XCTUnwrap(makeReporter(harness))
+        await reporter.start()
+        XCTAssertTrue(harness.waitUntil { !harness.preparedResources.isEmpty })
+        let metadataQueued = await reporter.preparationMetadataReady(actionId: preparedActionId)
+        XCTAssertTrue(metadataQueued)
+        XCTAssertTrue(harness.waitUntil {
+            harness.exchanges.contains { $0.request.acknowledgement?.state == .metadataReady }
+        })
+        let bufferQueued = await reporter.preparationBufferReady(
+            actionId: preparedActionId, bufferedThroughMs: 625_000
+        )
+        XCTAssertTrue(bufferQueued)
+        XCTAssertTrue(harness.waitUntil {
+            harness.exchanges.contains { $0.request.acknowledgement?.state == .bufferReady }
+        })
+        harness.failAcknowledgement(with: ControlTransportError(
+            status: 503, code: "control_unavailable", retryAfterMs: 500
+        ))
+        harness.failAcknowledgement(with: ControlTransportError(
+            status: 409,
+            code: "stale_control",
+            generation: bootstrap().generation,
+            controlEpoch: bootstrap().controlEpoch
+        ))
+        let commitQueued = await reporter.preparationCommitted(
+            actionId: preparedActionId, firstFrameUnixMs: 1_700_000_000_123
+        )
+        XCTAssertTrue(commitQueued)
+        XCTAssertTrue(harness.waitUntil {
+            harness.preparationEvents.contains(.released(
+                actionId: preparedActionId, reason: .staleControl
+            ))
+        })
+        let commits = harness.requests.filter { $0.acknowledgement?.state == .committed }
+        XCTAssertEqual(commits.count, 2)
+        XCTAssertEqual(commits[0], commits[1], "503 still replays the exact packet")
+        let countAfterRefusal = harness.requests.count
+        XCTAssertTrue(harness.waitUntil { harness.requests.count > countAfterRefusal + 1 })
+        XCTAssertEqual(
+            harness.requests.filter { $0.acknowledgement?.state == .committed }.count,
+            2,
+            "the 409 drops the replay instead of pinning retryRequest forever"
+        )
+        XCTAssertTrue(harness.requests.suffix(2).allSatisfy { $0.acknowledgement == nil })
+        let stopped = await reporter.stopped
+        XCTAssertFalse(stopped)
         await reporter.stop()
     }
 
