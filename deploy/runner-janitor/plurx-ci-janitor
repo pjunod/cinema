@@ -144,20 +144,28 @@ floor_kb_for() {
 available_kb_for() { df -Pk "$1" | awk 'NR == 2 { print $4 }'; }
 
 # Said once per pass, from the parent shell, because `floor_kb_for` cannot say
-# it (see the note there). A host in this state is running on the 20 % rule
-# rather than the reserve that was configured for it, which is the original
-# defect narrowed to one machine -- so it is named out loud rather than left in
-# the difference between two numbers nobody prints.
+# it (see the note there). A filesystem in this state is running on the 20 %
+# rule rather than the reserve that was configured for it, which is the
+# original defect narrowed to one volume -- so it is named out loud rather than
+# left in the difference between two numbers nobody prints.
+#
+# It takes the floor that was actually used rather than recomputing it. An
+# earlier version re-derived `percent` here and skipped the 10 GiB minimum that
+# `floor_kb_for` applies, so on a 40 GiB volume it announced an 8 G reserve
+# while the script kept 10 G -- two copies of the same rule, disagreeing on
+# their first outing, on exactly the small hosts the message exists for.
 unreachable_reported=false
+demand_dropped=0
 note_unreachable_demand() {
-  local path filesystem_kb half percent
-  [ "$unreachable_reported" = false ] || return 0
+  local path floor_kb filesystem_kb half
   path=$1
+  floor_kb=$2
   filesystem_kb=$(df -Pk "$path" | awk 'NR == 2 { print $2 }')
   half=$((filesystem_kb / 2))
   [ "$((REQUIRED_GB * 1024 * 1024))" -gt "$half" ] || return 0
-  percent=$(((filesystem_kb + 4) / 5))
-  say "a job needs ${REQUIRED_GB}G and $path holds $((filesystem_kb / 1024 / 1024))G; no amount of pruning reaches that, so this host keeps its $((percent / 1024 / 1024))G reserve and cannot run that lane" >&2
+  demand_dropped=$((demand_dropped + 1))
+  [ "$unreachable_reported" = false ] || return 0
+  say "a job needs ${REQUIRED_GB}G and $path holds $((filesystem_kb / 1024 / 1024))G; no amount of pruning reaches that, so this filesystem keeps its $((floor_kb / 1024 / 1024))G reserve and cannot run that lane" >&2
   unreachable_reported=true
 }
 
@@ -233,7 +241,6 @@ instances=0
 over_budget=0
 reset_count=0
 short_after=0
-reserve_kb=0
 
 while IFS= read -r unit; do
   [ -n "$unit" ] || continue
@@ -258,9 +265,8 @@ while IFS= read -r unit; do
 
   instances=$((instances + 1))
   used_kb=$(du -sk "$dir" | awk '{ print $1 }')
-  note_unreachable_demand "$dir"
   floor_kb=$(floor_kb_for "$dir")
-  [ "$floor_kb" -le "$reserve_kb" ] || reserve_kb=$floor_kb
+  note_unreachable_demand "$dir" "$floor_kb"
   available_kb=$(available_kb_for "$dir")
   budget_kb=$((BUDGET_GB * 1024 * 1024))
 
@@ -269,6 +275,7 @@ while IFS= read -r unit; do
     continue
   fi
   over_budget=$((over_budget + 1))
+  reset_before=$reset_count
   reset_cache "$unit" "$dir" "$used_kb"
 
   # And the part that was invisible: a reset that does not reach the floor. The
@@ -277,7 +284,15 @@ while IFS= read -r unit; do
   # are smaller than the gap will be stopped, wiped cold and left short, every
   # hour, while `done:` reports a successful reset each time. Say it, and put
   # it in the receipt.
-  if [ "$dry_run" != true ]; then
+  #
+  # Only when a reset actually happened. `reset_cache` returns 0 whether it
+  # deleted anything or declined -- a busy runner, a stop that timed out -- and
+  # checking free space after a decline reported "still short after resetting
+  # what it may" about a cache that was never touched. A runner merely busy at
+  # the top of every hour would have carried `reset: 0, short_after: 1`
+  # forever, which reads as a host to re-provision and is the opposite
+  # conclusion.
+  if [ "$dry_run" != true ] && [ "$reset_count" -gt "$reset_before" ]; then
     available_kb=$(available_kb_for "$dir")
     if [ "$available_kb" -lt "$floor_kb" ]; then
       say "$unit: still $((available_kb / 1024 / 1024))G free against a $((floor_kb / 1024 / 1024))G reserve after resetting what it may — this host cannot reach it by pruning" >&2
@@ -298,6 +313,13 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   root=$(docker info --format '{{.DockerRootDir}}')
   if [ -d "$root" ]; then
     floor_kb=$(floor_kb_for "$root")
+    # Docker is usually on its own filesystem, and a demand dropped there was
+    # completely silent: a 45 GiB Docker volume drops a 25 G demand, falls back
+    # to the 10 G minimum, and reports "within reserve" at 12 G free while the
+    # configured reserve says otherwise. That is this branch's own defect, on
+    # the deleter with the widest blast radius. `unreachable_reported` makes
+    # this a no-op when Docker shares the runner volume.
+    note_unreachable_demand "$root" "$floor_kb"
     available_kb=$(available_kb_for "$root")
     if [ "$available_kb" -lt "$floor_kb" ]; then
       if [ "$dry_run" = true ]; then
@@ -322,11 +344,11 @@ fi
 # at, what it decided, and what that cost.
 if [ "$dry_run" != true ]; then
   mkdir -p "$STATE_DIR"
-  printf '{"finished":"%s","host":"%s","instances":%d,"over_budget":%d,"reset":%d,"short_after":%d,"reclaimed_gb":%d,"docker_pruned":%s,"budget_gb":%d,"required_gb":%d,"reserve_gb":%d}\n' \
+  printf '{"finished":"%s","host":"%s","instances":%d,"over_budget":%d,"reset":%d,"short_after":%d,"demand_dropped":%d,"reclaimed_gb":%d,"docker_pruned":%s,"budget_gb":%d,"required_gb":%d}\n' \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(hostname -s)" \
-    "$instances" "$over_budget" "$reset_count" "$short_after" \
+    "$instances" "$over_budget" "$reset_count" "$short_after" "$demand_dropped" \
     "$((reclaimed_kb / 1024 / 1024))" \
-    "$docker_pruned" "$BUDGET_GB" "$REQUIRED_GB" "$((reserve_kb / 1024 / 1024))" \
+    "$docker_pruned" "$BUDGET_GB" "$REQUIRED_GB" \
     > "$STATE_DIR/last-run.json"
 fi
-say "done: $instances runner cache servers, $over_budget over budget, $reset_count reset, $short_after still short, $((reclaimed_kb / 1024 / 1024))G reclaimed"
+say "done: $instances runner cache servers, $over_budget over budget, $reset_count reset, $short_after still short, $demand_dropped on the percentage rule, $((reclaimed_kb / 1024 / 1024))G reclaimed"

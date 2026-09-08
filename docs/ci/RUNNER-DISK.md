@@ -224,8 +224,8 @@ record to `/var/lib/plurx-ci-janitor/last-run.json`:
 
 ```json
 {"finished":"2026-09-07T22:00:04Z","host":"nynuc","instances":4,
- "over_budget":1,"reset":1,"short_after":0,"reclaimed_gb":16,
- "docker_pruned":false,"budget_gb":20,"required_gb":25,"reserve_gb":19}
+ "over_budget":1,"reset":1,"short_after":0,"demand_dropped":0,
+ "reclaimed_gb":16,"docker_pruned":false,"budget_gb":20,"required_gb":25}
 ```
 
 `over_budget` and `reset` are deliberately separate: a runner that is over
@@ -242,11 +242,20 @@ reset and says so when it did not reach the floor. A `short_after` that is
 non-zero hour after hour is a host to give more disk or fewer lanes, not a
 janitor to tune.
 
-**`required_gb` and `reserve_gb` are both there** because they can differ: the
-reserve is what was actually kept, and when a demand is larger than half the
-filesystem it is dropped rather than met (below), so a host can be running on
-the 20 % rule while `required_gb` says 25. Two numbers, because one would hide
-which.
+It is only ever counted **after a reset actually happened**. `reset: 0,
+short_after: 1` is not a state this script can write, and it should not be: a
+runner merely busy at the top of every hour is the normal condition of a
+working CI host, and reporting it as short would send an operator to
+re-provision a machine that is fine.
+
+**`demand_dropped` counts filesystems running on the percentage rule rather
+than the reserve configured for them** — a demand larger than half the volume
+is dropped rather than met (below), and that is the original defect narrowed to
+one filesystem. It is a count and not a reserve figure on purpose: an earlier
+version reported the largest reserve seen in the pass, which on a host with one
+big volume and one small one read as healthy while hiding the small one
+entirely. The message naming the filesystem is printed once per pass; the
+counter counts every one.
 
 ### The reserve has to clear the bar jobs are held to
 

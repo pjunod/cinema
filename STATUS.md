@@ -284,10 +284,14 @@ free the cache and Docker; the OS, the toolchains and the 30 G Cargo cache are
 not its to take. A host whose freeable bytes are smaller than its gap was being
 stopped, wiped cold and left short every hour, with `done:` reporting a
 successful reset each time. Free space is re-read after a reset now, the
-shortfall is said out loud, and `short_after` is in the receipt beside
-`required_gb` and the `reserve_gb` actually kept — because a bound that
-silently cannot be met is the failure this whole entry is about, and the
-janitor had a second one of its own.
+shortfall is said out loud, and `short_after` is in the receipt — gated on a
+reset having actually happened, because `reset: 0, short_after: 1` would have
+described a runner that was merely busy and sent an operator to re-provision a
+machine that is fine. `demand_dropped` counts the filesystems running on the
+percentage rule instead of the reserve configured for them, Docker's own volume
+included: that path was silent, and it is the one that runs
+`docker image prune -af`. A bound that silently cannot be met is the failure
+this whole entry is about, and the janitor had two more of its own.
 
 **A wrong fix was built first, and the way it was wrong is the lesson.** The
 error message names a path under `_work`, so `_work` was taken to be the full

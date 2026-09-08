@@ -61,9 +61,19 @@ esac
 exit 0
 """
 
+# Path-aware, because Docker is usually on its own filesystem and a single
+# static answer cannot express the shape where a demand is met on the runner
+# volume and dropped on the Docker one.
 DF = """#!/bin/sh
+fs=$FIXTURE_FS_KB
+avail=$FIXTURE_AVAIL_KB
+case "$*" in
+  *docker*)
+    [ -n "$FIXTURE_DOCKER_FS_KB" ] && fs=$FIXTURE_DOCKER_FS_KB
+    [ -n "$FIXTURE_DOCKER_AVAIL_KB" ] && avail=$FIXTURE_DOCKER_AVAIL_KB ;;
+esac
 printf '%s\\n' 'Filesystem 1024-blocks Used Available Capacity Mounted'
-printf 'fixture %s 0 %s 50%% /fixture\\n' "$FIXTURE_FS_KB" "$FIXTURE_AVAIL_KB"
+printf 'fixture %s 0 %s 50%% /fixture\\n' "$fs" "$avail"
 """
 
 DU = """#!/bin/sh
@@ -71,8 +81,16 @@ shift $(($# - 1))
 printf '%s\\t%s\\n' "$FIXTURE_USED_KB" "$1"
 """
 
+# Absent by default: `docker info` fails, so the Docker block is skipped
+# entirely. A test that wants it sets FIXTURE_DOCKER_ROOT.
 DOCKER = """#!/bin/sh
-exit 1
+[ -n "$FIXTURE_DOCKER_ROOT" ] || exit 1
+case "$1 $2" in
+  "info --format") printf '%s\\n' "$FIXTURE_DOCKER_ROOT"; exit 0 ;;
+esac
+[ "$1" = info ] && exit 0
+printf '%s %s\\n' "$1" "$2" >> "$FIXTURE_DOCKER_LOG"
+exit 0
 """
 
 
@@ -132,6 +150,10 @@ class JanitorContractCase(unittest.TestCase):
                 "FIXTURE_LOG": str(self.log),
                 "FIXTURE_MAIN_PID": "4242",
                 "FIXTURE_STOP_STATUS": "0",
+                "FIXTURE_DOCKER_ROOT": "",
+                "FIXTURE_DOCKER_LOG": str(fixture / "docker.log"),
+                "FIXTURE_DOCKER_FS_KB": "",
+                "FIXTURE_DOCKER_AVAIL_KB": "",
                 "FIXTURE_FS_KB": str(78 * 1024 * 1024),
                 "FIXTURE_AVAIL_KB": str(40 * 1024 * 1024),
                 "FIXTURE_USED_KB": str(4 * 1024 * 1024),
@@ -449,6 +471,55 @@ class JanitorContractCase(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.last_run()["instances"], 2)
         self.assertEqual(result.stderr.count("no amount of pruning"), 1)
+        # Said once, counted every time: the message is for a human reading a
+        # journal, the counter is for whoever asks how many filesystems on this
+        # host are running on the percentage rule instead of the reserve.
+        self.assertEqual(self.last_run()["demand_dropped"], 2)
+
+    def test_the_reported_reserve_is_the_one_the_script_actually_kept(self):
+        """Two copies of the reserve rule is one too many.
+
+        The message used to recompute the floor and skip the 10 GiB minimum
+        `floor_kb_for` applies, so on a 40 GiB volume it announced 8 G while
+        the script kept 10 G -- on exactly the small hosts the message exists
+        for, and with nothing to catch a future change made in one place and
+        not the other.
+        """
+        self.environment["FIXTURE_FS_KB"] = str(40 * 1024 * 1024)
+        self.environment["FIXTURE_AVAIL_KB"] = str(19 * 1024 * 1024)
+
+        result = self.run_janitor()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # 20 % of 40 GiB is 8 G, floored at the 10 GiB minimum: 19 G free is
+        # inside it, so nothing is taken and the message must say 10, not 8.
+        self.assertIn("keeps its 10G reserve", result.stderr)
+        self.assertEqual(self.systemctl_calls(), [])
+        self.assertEqual(self.last_run()["demand_dropped"], 1)
+
+    def test_a_runner_that_was_not_reset_is_never_reported_as_still_short(self):
+        """`reset: 0, short_after: 1` is a state the script must not write.
+
+        `reset_cache` returns 0 whether it deleted anything or declined, so
+        checking free space unconditionally after it reported "still short
+        after resetting what it may" about a cache nothing had touched. A
+        runner merely busy at the top of every hour -- the normal state of a
+        working CI host -- would have carried that forever, and the doc tells
+        an operator to read it as a host needing more disk. That is the
+        opposite conclusion.
+        """
+        self.environment["FIXTURE_AVAIL_KB"] = str(18 * 1024 * 1024)
+        self.environment["FIXTURE_USED_KB"] = str(3 * 1024 * 1024)
+        self.procs.write_text("4242\n5150\n", encoding="utf-8")
+
+        result = self.run_janitor()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("running a job", result.stdout)
+        self.assertEqual(self.last_run()["over_budget"], 1)
+        self.assertEqual(self.last_run()["reset"], 0)
+        self.assertEqual(self.last_run()["short_after"], 0)
+        self.assertNotIn("cannot reach it by pruning", result.stderr)
 
     def test_a_demand_of_exactly_half_the_disk_is_kept_not_dropped(self):
         """`-gt`, not `-ge`, now that the branch drops instead of capping.
@@ -467,8 +538,8 @@ class JanitorContractCase(unittest.TestCase):
         self.assertNotIn("no amount of pruning", result.stderr)
         # 20 G free against a 25 G reserve: short, so it acts.
         self.assertEqual(self.systemctl_calls(), ["stop", UNIT, "start", UNIT])
-        self.assertEqual(self.last_run()["reserve_gb"], 25)
         self.assertEqual(self.last_run()["required_gb"], 25)
+        self.assertEqual(self.last_run()["demand_dropped"], 0)
 
     def test_a_reset_that_cannot_reach_the_floor_says_so_every_time(self):
         """The invisible hourly loop, made visible.
@@ -560,6 +631,34 @@ class JanitorContractCase(unittest.TestCase):
         # host nobody is watching stays attributable.
         self.assertIn("done:", result.stdout)
         self.assertTrue((self.state / "last-run.json").is_file())
+
+    def test_a_demand_dropped_on_the_docker_filesystem_is_not_silent(self):
+        """The same defect this branch is named for, on the widest deleter.
+
+        Docker usually sits on its own filesystem. A 45 GiB Docker volume
+        drops a 25 G demand -- 25 is more than half of 45 -- and falls back to
+        the 10 GiB minimum, so 12 G free reports "within reserve" and
+        `docker image prune -af` never runs, while the reserve configured for
+        this host says it should have. None of that reached stderr or the
+        receipt, on the one path in this script that deletes images.
+        """
+        docker_root = Path(self._directory.name) / "var/lib/docker"
+        docker_root.mkdir(parents=True)
+        self.environment["FIXTURE_DOCKER_ROOT"] = str(docker_root)
+        # The runner volume is large and healthy; only Docker's is short.
+        self.environment["FIXTURE_FS_KB"] = str(200 * 1024 * 1024)
+        self.environment["FIXTURE_AVAIL_KB"] = str(120 * 1024 * 1024)
+        self.environment["FIXTURE_DOCKER_FS_KB"] = str(45 * 1024 * 1024)
+        self.environment["FIXTURE_DOCKER_AVAIL_KB"] = str(12 * 1024 * 1024)
+
+        result = self.run_janitor()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("no amount of pruning reaches that", result.stderr)
+        self.assertEqual(self.last_run()["demand_dropped"], 1)
+        # And it is still the runner cache's turn first: the runner volume is
+        # healthy, so nothing there is touched.
+        self.assertEqual(self.systemctl_calls(), [])
 
     def test_a_cache_dir_the_config_points_somewhere_else_is_refused(self):
         """The delete is a whole directory, so the path check is the safety."""
