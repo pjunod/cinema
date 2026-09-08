@@ -326,6 +326,81 @@ fixture defect on the same day.**
 
 ### 4. Executable prepared transaction and three client adapters
 
+> **The successor's worker is blocked on a device measurement, not on code.
+> Read this before planning any of §4's remaining work.**
+>
+> Staging starts no worker — `ControlAction::Prepare`'s own doc says *"This
+> slice deliberately starts no worker behind that route"* — so a client that
+> is offered a successor cannot fetch it. Closing that looks like server work.
+> It mostly is not, and the reason is three facts that stack:
+>
+> 1. `PREPARED_AXIS_SETS` admits exactly two crossings: `{ResolutionOrBitrate}`
+>    alone, and that paired with `{DeliveryMethod}`.
+> 2. `rendition_key` (`vodserve.rs`) hashes file id, source identity, audio
+>    index, AAC, the two Dolby Vision flags, audio offset and cluster cache
+>    key. **Not height. Not bitrate.** Two Copy recipes differing only in
+>    resolution or bitrate therefore share one rendition — the same producer
+>    and the same bytes. On a Copy source the delivered media *is* the source,
+>    so `{ResolutionOrBitrate}` alone is not a transition in delivery terms;
+>    there is nothing to switch to.
+> 3. The pair that does change the media — Copy→Transcode, which is what the
+>    2026-09-03 hardware run measured — is refused by immutable-VOD serving:
+>    `try_create_with_release_fence` answers `501 vod_transcode_unavailable`,
+>    *"transcode serving is gated on the D6 device measurement"*.
+>
+> So the worker can be built, and for every case VOD may legally serve it
+> would produce the identical stream the viewer already has. **Transcode-rung
+> VOD stays unavailable until the open P2/D6 measurement establishes that
+> AVPlayer and Media3 tolerate the planned EXTINF timing**
+> ([PLAYBACK-TESTING.md](PLAYBACK-TESTING.md)) — an Apple TV and an Android TV
+> in a room, not a PR. Do not spend a week on the plumbing expecting to
+> demonstrate a switch at the end of it.
+>
+> **Two findings to keep, for whoever does build it after D6 lifts.**
+>
+> **Publishing the staged row is a fork, and the cheap-looking side is the
+> wrong one.** `classify_durable_route` reads four fields and never joins the
+> pointer, so clearing `publication_ready_at_ms` makes a staged route fully
+> playable while the pointer still names its predecessor — no new gate needed.
+> But the sentinel is also what keeps the row out of `owned_media_sessions`
+> and out of the retirement sweep. Clear it and the 3-second lease loop adopts
+> the row and renews `lease_expires_at_ms` to a 12-second TTL, overwriting the
+> 330-second deadline the preparation ledger mirrors — the exact thing
+> `MediaSessionPreparation::deadline_ms` forbids in its own words: *"Two clocks
+> over one row is how a staged generation ends up half reaped."* Worse, a
+> published row whose worker stops being `live` becomes a stale-settlement
+> candidate and is ended within one tick, so a slow client's commit then fails
+> the CAS and reports a rejected acknowledgement for a successor **the server
+> killed while the viewer did exactly what it was told**. The recorded
+> preference is therefore the other side: leave the sentinel, and teach
+> `classify_durable_route` one additional case for a route that is the
+> currently-staged successor of this playback — with the extra read taken only
+> when the route would otherwise be refused, so a serving route still
+> short-circuits on `publication_ready_at_ms == 0` and the hot path is
+> unchanged.
+>
+> **There is a fourth teardown path nobody has enumerated.** Abort, deadline
+> lapse and owner death are all durable-only and none of them stops a worker.
+> On top of those, `SESSION_IDLE_TTL` is 300 s while `PREPARATION_DEADLINE_MS`
+> is 330 s, so a successor the client never fetches is idle-reaped **thirty
+> seconds before its own deadline** — and that reap is deliberately
+> tombstone-free (*"an idle reap is the one ending a session may come back
+> from"*), so `Session::abort_staged_preparation` never runs and nothing clears
+> the slot. The reap also acts on the *successor's* session, whose control
+> state holds no slot; the slot is on the predecessor. In that 30-second window
+> the offer still validates and a commit still succeeds, onto a successor with
+> no worker. Any slice here must release the worker on all four paths.
+>
+> **Also do not write the acceptance on `install_http_test_session`.** Every
+> existing `stage_prepared_successor` test runs against the *rolling* gate, not
+> `VodPreparationGate`, because the fixture registers into the rolling map —
+> the same miss `PreparationGate`'s own doc predicted once already: *"a gate
+> that existed only on the actor would let M6 stage successors on a path
+> viewers do not take, and its acceptance would pass while the feature fired on
+> nothing."* The only assertion this gap's definition supports is fetching a
+> real segment from the successor's playlist while the pointer still names the
+> predecessor.
+
 Retain the existing durable ledger; do not build a second competing transaction.
 Create a real candidate worker with capacity ownership, immutable recipe/codec
 metadata and bounded exact-candidate priming reads. Never remove the global
