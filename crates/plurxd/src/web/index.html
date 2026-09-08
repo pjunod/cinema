@@ -13938,11 +13938,11 @@ function liveTvNowBar(channel){
       <br><span class="muted">${esc(channel.guide_number)} · ${esc(channel.guide_name)}${at.now?" · "+esc(liveTvClock(at.now.start))+"–"+esc(liveTvClock(at.now.end)):""}${left!==null?" · "+left+" min left":""}${at.next?" · Next: "+esc(at.next.title):""}</span>
     </span>
     <span class="lt-mini" style="width:120px"><i style="width:${pct}%"></i></span>
-    <button type="button" onclick="pauseLiveTv()" title="Pause">⏸</button>
-    <button type="button" onclick="muteLiveTv(this)" title="Mute">🔇</button>
-    ${liveTvPipSupported()?'<button type="button" onclick="toggleLiveTvPip()" title="Picture-in-picture (P)">⧉</button>':""}
-    <button type="button" onclick="fullscreenLiveTv()" title="Fullscreen (F)">⛶</button>
-    <button type="button" onclick="stopLiveTv().catch(liveTvFailure)" title="Stop">■</button>
+    <button type="button" onclick="pauseLiveTv()" title="Pause" aria-label="Pause">⏸</button>
+    <button type="button" onclick="muteLiveTv(this)" title="Mute" aria-label="Mute">🔇</button>
+    ${liveTvPipSupported()?'<button type="button" onclick="toggleLiveTvPip()" title="Picture-in-picture (P)" aria-label="Picture-in-picture">⧉</button>':""}
+    <button type="button" onclick="fullscreenLiveTv()" title="Fullscreen (F)" aria-label="Fullscreen">⛶</button>
+    <button type="button" onclick="stopLiveTv().catch(liveTvFailure)" title="Stop" aria-label="Stop">■</button>
   </div>`;
 }
 function liveTvTonight(channel){
@@ -14107,9 +14107,9 @@ function liveTvPaint(){
   if(caption){
     caption.innerHTML=channel?`<span class="lt-chip">${esc(channel.guide_name.slice(0,5))}</span>
       <span class="grow"><b>${at.now?esc(at.now.title):esc(channel.guide_name)}</b> · ${esc(channel.guide_number)}</span>
-      <button type="button" onclick="location.hash='#/live-tv'" title="Back to Live TV">↩</button>
-      ${liveTvPipSupported()?'<button type="button" onclick="toggleLiveTvPip()" title="Picture-in-picture">⧉</button>':""}
-      <button type="button" onclick="stopLiveTv().catch(liveTvFailure)" title="Stop">■</button>`:"";
+      <button type="button" onclick="location.hash='#/live-tv'" title="Back to Live TV" aria-label="Back to Live TV">↩</button>
+      ${liveTvPipSupported()?'<button type="button" onclick="toggleLiveTvPip()" title="Picture-in-picture" aria-label="Picture-in-picture in the dock">⧉</button>':""}
+      <button type="button" onclick="stopLiveTv().catch(liveTvFailure)" title="Stop" aria-label="Stop from the dock">■</button>`:"";
   }
   const overlay=document.getElementById("live-tv-overlay");
   if(!overlay||host.dataset.mode!=="full") return;
