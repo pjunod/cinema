@@ -13752,7 +13752,14 @@ impl TranscodeManager {
         if matches!(req.kind, SessionKind::Copy { .. }) && req.subtitle_burn.is_none() {
             return Ok(None);
         }
-        let source = crate::fragment_index_cluster::open_source_fence(file, None).await?;
+        let source = crate::fragment_index_cluster::open_source_fence(file, None)
+            .await
+            .map_err(|error| {
+                vod_refusal_error(
+                    "vod_source_rescan_required",
+                    format!("the source could not be held for encoded preparation: {error}"),
+                )
+            })?;
         // Bind preparation, burn extraction, key construction, and the final
         // producer open to the same inspected object, not scanner seconds.
         let source_object_version = source.object_version().to_owned();
@@ -13816,7 +13823,9 @@ impl TranscodeManager {
             .store
             .get_file_probe_json(file.id)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| {
+                start_infrastructure_error(format!("reading the stored source probe: {error}"))
+            })?;
         let held_probe = crate::ffmpeg::held_source_probe_json(&source.handle)
             .await
             .map_err(|error| {
@@ -13880,7 +13889,10 @@ impl TranscodeManager {
             None
         };
         if !source.unchanged() {
-            return Err("source changed during encoded recipe preparation".into());
+            return Err(vod_refusal_error(
+                "vod_source_rescan_required",
+                "the source changed during encoded recipe preparation; rescan it before playback",
+            ));
         }
         let subtitle_digest = if let Some(subtitle) = &subtitle {
             Some(
@@ -13900,7 +13912,10 @@ impl TranscodeManager {
         .await
         .map_err(|error| vod_refusal_error("vod_engine_unattested", error))?;
         if !source.unchanged() {
-            return Err("source changed while attesting the encoded engine".into());
+            return Err(vod_refusal_error(
+                "vod_source_rescan_required",
+                "the source changed while attesting the encoded engine; rescan it before playback",
+            ));
         }
         Ok(Some(Arc::new(crate::vodencode::Encoding {
             source_object_version,
@@ -13910,7 +13925,9 @@ impl TranscodeManager {
             subtitle,
             subtitle_digest,
             ffmpeg_build: crate::ffmpeg::ffmpeg_build().await,
-            executable: crate::ffmpeg::EncodedExecutable::capture().await?,
+            executable: crate::ffmpeg::EncodedExecutable::capture()
+                .await
+                .map_err(|error| vod_refusal_error("vod_engine_unattested", error))?,
             engine,
             admissions: self.admissions.clone(),
             store: Arc::clone(&self.store),
@@ -16767,10 +16784,8 @@ impl TranscodeManager {
             .filter_map(|candidate| details.remove(&candidate.id))
             .collect::<Vec<_>>();
         deliveries.extend(self.vod.delivery_infos().await.into_iter().map(|info| {
-            (
-                vod_delivery_session_info(info),
-                crate::delivery::Method::HlsCopy,
-            )
+            let method = info.method;
+            (vod_delivery_session_info(info), method)
         }));
         deliveries.sort_by(|left, right| {
             right

@@ -3433,6 +3433,8 @@ fn session_start_error(file_id: i64, error: String) -> ApiError {
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "vod_frame_cadence_unknown",
             ),
+            "vod_source_rescan_required" => (StatusCode::CONFLICT, "vod_source_rescan_required"),
+            "vod_engine_unattested" => (StatusCode::SERVICE_UNAVAILABLE, "vod_engine_unattested"),
             "vod_audio_track_missing" => {
                 (StatusCode::UNPROCESSABLE_ENTITY, "vod_audio_track_missing")
             }
@@ -20106,6 +20108,8 @@ mod tests {
                 "vod_frame_cadence_unknown",
                 StatusCode::UNPROCESSABLE_ENTITY,
             ),
+            ("vod_source_rescan_required", StatusCode::CONFLICT),
+            ("vod_engine_unattested", StatusCode::SERVICE_UNAVAILABLE),
             ("vod_audio_track_missing", StatusCode::UNPROCESSABLE_ENTITY),
             (
                 "vod_subtitle_track_missing",

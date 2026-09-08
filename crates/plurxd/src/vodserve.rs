@@ -382,6 +382,7 @@ pub struct VodSessionInfo {
 #[derive(Debug, Clone)]
 pub struct VodDeliveryInfo {
     pub id: String,
+    pub method: crate::delivery::Method,
     pub file_id: i64,
     pub item_id: i64,
     pub item_title: String,
@@ -2988,6 +2989,10 @@ impl VodServe {
                 session.live_rendition()?;
                 Some(VodDeliveryInfo {
                     id: id.clone(),
+                    method: match &session.kind {
+                        SessionKind::Copy { .. } => crate::delivery::Method::HlsCopy,
+                        SessionKind::Transcode { .. } => crate::delivery::Method::Transcode,
+                    },
                     file_id: session.file.id,
                     item_id: session.file.item_id,
                     item_title: session.item_title.clone(),

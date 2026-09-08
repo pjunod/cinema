@@ -1697,7 +1697,7 @@ mod tests {
         let mut command = tokio::process::Command::new("/bin/sh");
         command.args([
             "-c",
-            "i=0; while [ $i -lt 1024 ]; do printf '0123456789abcdef'; printf 'extracting' >&2; i=$((i + 1)); done; sleep 30",
+            "while :; do printf '0123456789abcdef'; printf 'extracting' >&2; done",
         ]);
         let mut owner =
             BoundedDiagnosticChild::spawn_piped_output(&mut command).expect("piped child");

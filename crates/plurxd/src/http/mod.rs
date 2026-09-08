@@ -8789,24 +8789,17 @@ mod tests {
         assert_eq!(body["delivered_dynamic_range"], "sdr", "{body}");
     }
 
-    /// ADAPTIVE-QUALITY Phase 1 still advertises the source-filtered ladder,
-    /// but M4 must not use the retained live engine to fulfill a rung. Until
-    /// D6 unlocks transcode-rung VOD, both a stray rung and the source-height
-    /// promise fail with the same typed, honest refusal — with the fallback
-    /// switched off, which this test does explicitly. The engine is retained,
-    /// not removed, and the shipped default answers these requests with it.
+    /// ADAPTIVE-QUALITY advertises the source-filtered ladder, and immutable
+    /// encoded VOD normalizes a stray height to the closest supported rung
+    /// while preserving an explicit source-height request. Live recovery is
+    /// pinned off so it cannot hide an encoded-path regression.
     #[tokio::test]
     async fn the_ladder_is_advertised_and_stray_heights_snap() {
         crate::transcode::require_ffmpeg();
         let (app, state) = test_state();
         let admin = setup_admin(&app).await;
         let s = seed_content(&state).await;
-        // This test asserts the typed VOD refusal, so it says which policy
-        // it is under. The shipped default is the other one: an absent
-        // `playback.vod_live_recovery` falls back to the retained live engine.
-        // The two used to be decided by `cfg(test)`, which is how every
-        // refusal regression here came to describe a policy production never
-        // runs.
+        // Encoded VOD must satisfy both requests without the retained engine.
         state
             .store
             .put_setting(plurx_core::store::keys::VOD_LIVE_RECOVERY, "0")
@@ -8817,9 +8810,20 @@ mod tests {
         let dir = crate::test_temp_path(format!("plurx-ladder-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("dir");
         let path = dir.join("Odd.mkv");
-        std::fs::write(&path, b"\x00\x00\x00\x18ftypmp42 placeholder").expect("write");
+        write_real_av_fixture(&path, 8);
+        let metadata = std::fs::metadata(&path).expect("fixture metadata");
+        let mtime = metadata
+            .modified()
+            .expect("fixture mtime")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("fixture after Unix epoch")
+            .as_secs() as i64;
+        let held = std::fs::File::open(&path).expect("held fixture source");
+        let raw_json = crate::ffmpeg::held_source_probe_json(&held)
+            .await
+            .expect("exact fixture probe");
         let probe = plurx_core::domain::ProbeResult {
-            duration_ms: Some(600_000),
+            duration_ms: Some(8_000),
             container: Some("mkv".into()),
             video_codec: Some("h264".into()),
             width: Some(1600),
@@ -8831,13 +8835,21 @@ mod tests {
                 default: true,
                 ..Default::default()
             }],
+            raw_json: Some(raw_json),
             ..Default::default()
         };
         let odd = state
             .store
-            .upsert_file(s.movie, &path.to_string_lossy(), 77, 1, &probe)
+            .upsert_file(
+                s.movie,
+                &path.to_string_lossy(),
+                i64::try_from(metadata.len()).expect("fixture size"),
+                mtime,
+                &probe,
+            )
             .await
             .expect("file");
+        store_current_fragment_index(&state, odd).await;
 
         // The decision advertises the ladder, filtered to the source: a 900p
         // file offers 720 and below, priced both ways.
@@ -8864,7 +8876,9 @@ mod tests {
         assert_eq!(body["ladder"][0]["total_kbps"], 4_160, "{body}");
         assert_eq!(body["ladder"][0]["peak_kbps"], 6_160, "{body}");
 
-        for (playback_id, height) in [("pb-snap", 850), ("pb-promise", 900)] {
+        for (playback_id, height, expected_height) in
+            [("pb-snap", 850, 720), ("pb-promise", 900, 900)]
+        {
             let (status, body) = call(
                 &app,
                 post(
@@ -8874,14 +8888,13 @@ mod tests {
                 ),
             )
             .await;
-            assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{body}");
-            assert_eq!(body["code"], "vod_transcode_unavailable", "{body}");
-            assert!(
-                body["message"]
-                    .as_str()
-                    .is_some_and(|message| message.contains("D6 device measurement")),
-                "the refusal names the gate instead of falling back: {body}"
-            );
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["vod"], true, "{body}");
+            assert_eq!(body["height"], expected_height, "{body}");
+            state
+                .transcode
+                .stop_session(body["session_id"].as_str().expect("session id"), "test")
+                .await;
         }
     }
 
@@ -11113,12 +11126,20 @@ mod tests {
     /// operator watching a busy GPU find out what was running or that a
     /// switch existed.
     #[tokio::test]
-    async fn the_shipped_default_answers_a_vod_refusal_with_the_retained_engine() {
+    async fn the_shipped_default_answers_an_index_refusal_with_the_retained_engine() {
         crate::transcode::require_ffmpeg();
         let (app, state) = test_state();
         let admin = setup_admin(&app).await;
         let s = seed_content(&state).await;
         prepare_vod_copy_fixture(&state, s.file, 16).await;
+        assert!(
+            state
+                .store
+                .forget_fragment_index(s.file)
+                .await
+                .expect("remove fixture index"),
+            "the default-recovery setup must reach an index refusal"
+        );
         assert!(
             state
                 .store
@@ -11131,14 +11152,14 @@ mod tests {
 
         let before = crate::transcode::live_recovery_snapshot();
 
-        // A transcode rung has no VOD recipe yet, so this is a
-        // `vod_transcode_unavailable` refusal at the VOD door.
+        // The absent index is a typed VOD prerequisite refusal, so the shipped
+        // default answers it with the retained engine.
         let (status, body) = call(
             &app,
             post(
                 &format!("/api/v1/files/{}/hls/sessions", s.file),
                 Some(&admin),
-                json!({ "playback_id": "pb-default-recovery", "height": 720 }),
+                json!({ "playback_id": "pb-default-recovery", "copy": true }),
             ),
         )
         .await;
@@ -11156,7 +11177,7 @@ mod tests {
         // fixture that moved underneath it.
         let after = crate::transcode::live_recovery_snapshot();
         assert!(
-            after[2] > before[2],
+            after[1] > before[1],
             "a session the retained engine served must be attributable to the reason it was \
              chosen, or an operator watching this node encode has nothing to read"
         );
@@ -11203,9 +11224,7 @@ mod tests {
         )
         .expect("utf8");
         assert!(
-            scrape.contains(
-                "plurx_live_hls_recovery_sessions_total{reason=\"vod_transcode_unavailable\"}"
-            ),
+            scrape.contains("plurx_live_hls_recovery_sessions_total{reason=\"vod_index_pending\"}"),
             "the family must appear in the scrape, not only in the function that builds it"
         );
 
@@ -11230,12 +11249,7 @@ mod tests {
         let (app, state) = test_state();
         let admin = setup_admin(&app).await;
         let s = seed_content(&state).await;
-        // This test asserts the typed VOD refusal, so it says which policy
-        // it is under. The shipped default is the other one: an absent
-        // `playback.vod_live_recovery` falls back to the retained live engine.
-        // The two used to be decided by `cfg(test)`, which is how every
-        // refusal regression here came to describe a policy production never
-        // runs.
+        // Every HLS row must come from immutable VOD, never live recovery.
         state
             .store
             .put_setting(plurx_core::store::keys::VOD_LIVE_RECOVERY, "0")
@@ -11272,7 +11286,7 @@ mod tests {
             .expect("r");
         assert_eq!(remux.status(), StatusCode::OK);
 
-        // 3. Immutable copy VOD is the only HLS method available before D6.
+        // 3. Immutable copy VOD.
         let (st, copy) = call(
             &app,
             post(
@@ -11284,12 +11298,7 @@ mod tests {
         .await;
         assert_eq!(st, StatusCode::OK, "{copy}");
 
-        // With the fallback pinned off above, a transcode request is an
-        // explicit typed refusal. Under the shipped default it is not — the
-        // retained engine answers it, which is what
-        // `the_shipped_default_answers_a_vod_refusal_with_the_retained_engine`
-        // covers. This assertion is about the refusal, not about what a fleet
-        // node does.
+        // 4. Immutable encoded VOD.
         let (st, tx) = call(
             &app,
             post(
@@ -11299,10 +11308,11 @@ mod tests {
             ),
         )
         .await;
-        assert_eq!(st, StatusCode::NOT_IMPLEMENTED, "{tx}");
-        assert_eq!(tx["code"], "vod_transcode_unavailable", "{tx}");
+        assert_eq!(st, StatusCode::OK, "{tx}");
+        assert_eq!(tx["vod"], true, "{tx}");
+        assert_eq!(tx["height"], 720, "{tx}");
 
-        let rows = settled_deliveries(&app, &admin, 3).await;
+        let rows = settled_deliveries(&app, &admin, 4).await;
         let mut methods: Vec<&str> = rows
             .iter()
             .map(|r| r["method"].as_str().unwrap_or("?"))
@@ -11310,29 +11320,35 @@ mod tests {
         methods.sort_unstable();
         assert_eq!(
             methods,
-            ["direct", "hls-copy", "remux"],
-            "three viable routes, three names: {rows:?}"
+            ["direct", "hls-copy", "remux", "transcode"],
+            "four viable routes, four names: {rows:?}"
         );
         for row in &rows {
             assert_eq!(row["user"], "paul", "{row}");
             assert_eq!(row["title"], "The Target", "{row}");
             assert_eq!(row["file_id"], s.file, "{row}");
         }
-        // Only immutable VOD is a session. Direct and progressive remux keep
+        // Both immutable VOD deliveries are sessions. Direct and progressive remux keep
         // their existing non-session accounting.
         let with_session = rows.iter().filter(|r| !r["session_id"].is_null()).count();
-        assert_eq!(with_session, 1, "{rows:?}");
+        assert_eq!(with_session, 2, "{rows:?}");
         let (_, page) = call(&app, get("/api/v1/activity/detail", Some(&admin))).await;
         let sessions = page["sessions"].as_array().expect("sessions");
-        assert_eq!(sessions.len(), 1, "only VOD copy is live: {page}");
+        assert_eq!(
+            sessions.len(),
+            2,
+            "both immutable VOD sessions are live: {page}"
+        );
         assert!(
             sessions[0].get("encoder").is_some() && sessions[0].get("user_name").is_some(),
             "and unchanged in shape: {page}"
         );
 
         // Each row ends the way its delivery does. VOD when it is stopped...
-        let id = copy["session_id"].as_str().expect("session id");
-        assert!(state.transcode.stop_session(id, "test").await);
+        for body in [&copy, &tx] {
+            let id = body["session_id"].as_str().expect("session id");
+            assert!(state.transcode.stop_session(id, "test").await);
+        }
         // ...the remux when its body is dropped, which is the same moment
         // `kill_on_drop` takes its ffmpeg down...
         drop(remux);
@@ -11558,19 +11574,25 @@ mod tests {
             .expect("file read")
             .expect("file");
         write_real_av_fixture(&file.path, seconds);
-        let size = i64::try_from(
-            std::fs::metadata(&file.path)
-                .expect("fixture metadata")
-                .len(),
-        )
-        .expect("fixture size");
+        let held = std::fs::File::open(&file.path).expect("held fixture source");
+        let raw_json = crate::ffmpeg::held_source_probe_json(&held)
+            .await
+            .expect("exact fixture probe");
+        let metadata = std::fs::metadata(&file.path).expect("fixture metadata");
+        let size = i64::try_from(metadata.len()).expect("fixture size");
+        let mtime = metadata
+            .modified()
+            .expect("fixture mtime")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("fixture after Unix epoch")
+            .as_secs() as i64;
         let refreshed = state
             .store
             .upsert_file(
                 file.item_id,
                 &file.path.to_string_lossy(),
                 size,
-                file.mtime,
+                mtime,
                 &ProbeResult {
                     duration_ms: Some(i64::from(seconds) * 1_000),
                     container: file.container.clone(),
@@ -11584,6 +11606,7 @@ mod tests {
                     bitrate: file.bitrate,
                     audio_streams: file.audio_streams.clone(),
                     subtitle_streams: file.subtitle_streams.clone(),
+                    raw_json: Some(raw_json),
                     ..Default::default()
                 },
             )
@@ -11866,12 +11889,7 @@ mod tests {
         let (app, state) = test_state();
         let admin = setup_admin(&app).await;
         let s = seed_content(&state).await;
-        // This test asserts the typed VOD refusal, so it says which policy
-        // it is under. The shipped default is the other one: an absent
-        // `playback.vod_live_recovery` falls back to the retained live engine.
-        // The two used to be decided by `cfg(test)`, which is how every
-        // refusal regression here came to describe a policy production never
-        // runs.
+        // Every compatibility shape in this test must stay on immutable VOD.
         state
             .store
             .put_setting(plurx_core::store::keys::VOD_LIVE_RECOVERY, "0")
@@ -11893,15 +11911,16 @@ mod tests {
             StatusCode::NOT_FOUND
         );
 
-        // The query-shaped compatibility route has no copy recipe. It must
-        // refuse that transcode honestly instead of reviving live HLS.
+        // The query-shaped compatibility route creates the same immutable
+        // encoded presentation as the JSON route.
         let (st, old_start) = call(
             &app,
             get_q(&format!("/api/v1/files/{}/hls/start?token={admin}", s.file)),
         )
         .await;
-        assert_eq!(st, StatusCode::NOT_IMPLEMENTED, "{old_start}");
-        assert_eq!(old_start["code"], "vod_transcode_unavailable");
+        assert_eq!(st, StatusCode::OK, "{old_start}");
+        assert_eq!(old_start["vod"], true, "{old_start}");
+        let old_session = old_start["session_id"].as_str().expect("session id");
 
         // A client that explicitly names the removed presentation gets a
         // terminal typed answer; omission below means VOD.
@@ -12015,6 +12034,14 @@ mod tests {
             status_of(
                 &app,
                 delete(&format!("/api/v1/hls/{session}"), Some(&admin))
+            )
+            .await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            status_of(
+                &app,
+                delete(&format!("/api/v1/hls/{old_session}"), Some(&admin))
             )
             .await,
             StatusCode::NO_CONTENT
@@ -12305,7 +12332,7 @@ mod tests {
     /// that missing context as permission to turn a known HDR source into
     /// H.264 SDR. The refusal happens before playback accounting or ffmpeg.
     #[tokio::test]
-    async fn hls_create_refuses_hdr_downgrades_but_accepts_an_existing_sdr_plan() {
+    async fn hls_create_refuses_hdr_downgrades_and_preserves_an_existing_sdr_plan() {
         crate::transcode::require_ffmpeg();
         let (app, state) = test_state();
         let admin = setup_admin(&app).await;
@@ -12367,9 +12394,10 @@ mod tests {
 
         // TCL 9445X / Bad Boys for Life's route: the display advertises
         // `hdr=0`, so the decision may still select an SDR transcode before
-        // considering its forced PGS track. M4 must not fulfill that decision
-        // through the removed live engine: session creation names the deferred
-        // transcode-rung VOD gate instead.
+        // considering its forced PGS track. This synthetic fixture carries
+        // structured PGS facts but no exact raw probe. Session creation must
+        // preserve the SDR plan while refusing the unattested source; it must
+        // not revive live HLS or misreport the refusal as an HDR downgrade.
         let (status, sdr_preflight) = call(
             &app,
             get(
@@ -12405,8 +12433,8 @@ mod tests {
             ),
         )
         .await;
-        assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{accepted}");
-        assert_eq!(accepted["code"], "vod_transcode_unavailable", "{accepted}");
+        assert_eq!(status, StatusCode::CONFLICT, "{accepted}");
+        assert_eq!(accepted["code"], "vod_source_rescan_required", "{accepted}");
     }
 
     /// `/decision` used to promise more than the server would accept: a
