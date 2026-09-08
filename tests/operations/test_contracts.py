@@ -179,8 +179,30 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("activity_poll_paused = pause_activity_polling", script)
         self.assertIn('page.wait_for_load_state("networkidle"', script)
         self.assertIn("resume_activity_polling(page)", script)
-        self.assertIn('api_calls.count("GET /api/v1/scan/status") < 3', script)
-        self.assertIn('api_calls.count("GET /api/v1/activity") < 2', script)
+        # The settings tick budget is enforced inside the page, not by counting
+        # requests from Python. A count read over a round trip cannot bound a
+        # 2s timer: on a starved runner it is handed the total only after the
+        # interval has fired again, and the golden then fails on
+        # `GET /api/v1/scan/status 3 -> 4` with nothing about the page changed.
+        # So what this pins is the clamp and the boundary the capture waits on.
+        self.assertIn("window.__plurxSettingsScanTicks >= 2", script)
+        self.assertIn("window.__plurxSettingsScanCaptureTick = true", script)
+        self.assertIn(
+            '"() => window.__plurxSettingsScanCaptureTick === true"', script
+        )
+        self.assertNotIn(
+            'api_calls.count("GET /api/v1/scan/status") <', script,
+            "the settings poll budget must not go back to a Python-side count",
+        )
+        # Settings waits for the activity fetch to finish like every other
+        # route. It used to be excluded, so the recorders could run while the
+        # response was in flight and re-render the page under the tab walk.
+        self.assertIn("if activity_poll_paused:", script)
+        self.assertIn(
+            "window.__plurxGlobalActivityCaptureTick === true && !ACT_POLLING",
+            script,
+        )
+        self.assertNotIn('if activity_poll_paused and name != "settings":', script)
         self.assertIn('if name == "analysis":', script)
         self.assertIn("if (PAGE_TIMER) clearInterval(PAGE_TIMER);", script)
         self.assertIn("if (ACT_TIMER) clearInterval(ACT_TIMER);", script)

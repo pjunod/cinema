@@ -1097,6 +1097,8 @@ ACTIVITY_CAPTURE_JS = """
   const schedule = window.setInterval.bind(window);
   window.__plurxActivityCaptureTick = false;
   window.__plurxGlobalActivityCaptureTick = false;
+  window.__plurxSettingsScanTicks = 0;
+  window.__plurxSettingsScanCaptureTick = false;
   window.setInterval = (callback, delay, ...args) => {
     if (typeof callback !== "function") return schedule(callback, delay, ...args);
     const timer = schedule(function (...values) {
@@ -1111,6 +1113,23 @@ ACTIVITY_CAPTURE_JS = """
         clearInterval(timer);
         ACT_TIMER = null;
         window.__plurxGlobalActivityCaptureTick = true;
+      }
+      if (delay === 2000 &&
+          (location.hash === "#/settings" || location.hash === "#/settings/libraries") &&
+          typeof PAGE_TIMER !== "undefined" && PAGE_TIMER === timer) {
+        // The Libraries tab fetches scan status once on render, then polls
+        // every 2s. The golden records three calls: that render plus two
+        // ticks. Retain exactly two and stop the interval synchronously
+        // before the second one runs, so a third can never be scheduled no
+        // matter how far behind the harness has fallen. Counting requests
+        // from Python instead puts round-trip latency in charge of a number
+        // the golden treats as structure.
+        window.__plurxSettingsScanTicks += 1;
+        if (window.__plurxSettingsScanTicks >= 2) {
+          clearInterval(timer);
+          PAGE_TIMER = null;
+          window.__plurxSettingsScanCaptureTick = true;
+        }
       }
       return callback.apply(this, values);
     }, delay, ...args);
@@ -1565,22 +1584,37 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
             }""")
         if name == "settings":
             # The Libraries tab loads scan status once, then polls every 2s.
-            # A fixed sleep lets an overloaded event loop enqueue a third tick
-            # before the sleep callback, changing an unchanged request golden
-            # from three calls to four. Observe exactly two production ticks,
-            # then stop this route's timer at that named boundary.
-            deadline = time.time() + args.timeout / 1000
-            while (api_calls.count("GET /api/v1/scan/status") < 3 or
-                   api_calls.count("GET /api/v1/activity") < 2):
-                if time.time() >= deadline:
-                    raise Fail("settings did not complete its scan-status and activity polling ticks")
-                page.wait_for_timeout(50)
-            page.evaluate("""() => {
-              if (PAGE_TIMER) clearInterval(PAGE_TIMER);
-              PAGE_TIMER = null;
-              if (ACT_TIMER) clearInterval(ACT_TIMER);
-              ACT_TIMER = null;
-            }""")
+            # The two ticks the golden records are retained and stopped inside
+            # the page by ACTIVITY_CAPTURE_JS, so wait for that named boundary
+            # rather than counting requests from here: a Python-side count is
+            # decided by round-trip latency, and on a starved runner it can see
+            # the target only after the interval has already fired again. The
+            # count it then reads is the one the golden fails on.
+            page.wait_for_function(
+                "() => window.__plurxSettingsScanCaptureTick === true",
+                timeout=args.timeout,
+            )
+            # Say so here, at the route, rather than letting it surface thirty
+            # routes later as a bare `3 -> 4` in a golden diff. That is how the
+            # 2026-09-07 failure arrived, and it is why it could not be
+            # reproduced: by the time anyone saw the number, everything that
+            # would explain it was gone.
+            retained = page.evaluate("() => window.__plurxSettingsScanTicks")
+            if retained != 2:
+                raise Fail(
+                    f"settings retained {retained} scan-status ticks, expected "
+                    "exactly 2 — the in-page clamp did not hold, so this route's "
+                    "request inventory is not a fixed observation")
+            observed = api_calls.count("GET /api/v1/scan/status")
+            if observed != 3:
+                # Not a failure: the golden is the authority on how many calls
+                # the route makes, and `--update` has to be able to record a
+                # new one. But two retained ticks and a total that is not
+                # render-plus-two means a call came from somewhere this harness
+                # does not control, which is worth naming while the run is here.
+                print(f"NOTE    settings: {observed} GET /api/v1/scan/status "
+                      f"(one render + {retained} retained ticks should be 3)",
+                      flush=True)
             # Waiting for those two 2s ticks already spans one complete 4s
             # activity period. A second full settle window would add another
             # activity request only on Settings and lengthen the sweep without
@@ -1592,12 +1626,20 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
         # lands on the same steady state instead of on whichever half of the
         # cycle happened to be showing.
         page.wait_for_timeout(settle_ms)
-        if activity_poll_paused and name != "settings":
+        if activity_poll_paused:
             # The wrapper clears ACT_TIMER synchronously before its first real
             # callback. Requiring that callback (and its request completion)
             # retains one complete production period without allowing runner
             # starvation to squeeze a second 4s tick ahead of Python's 4.5s
             # sleep callback.
+            #
+            # Settings is no longer excluded. It used to reach this line having
+            # only observed that the activity request was *issued*, so the
+            # recorders could run while its response was still in flight — and
+            # a response that lands after the 200ms settle re-renders the page
+            # under the tab walk, which is the exact failure freeze_timers()
+            # exists to prevent. `!ACT_POLLING` is the condition that says the
+            # fetch is done, and every other route already waits for it.
             page.wait_for_function(
                 "() => window.__plurxGlobalActivityCaptureTick === true && !ACT_POLLING",
                 timeout=args.timeout,
