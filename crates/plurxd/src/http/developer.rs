@@ -73,6 +73,16 @@ pub(crate) struct DeveloperEnableItem {
     /// capability has no switch — it is compiled in and behaves by itself.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
+    /// The settings key this row's switch is, when it has one.
+    ///
+    /// Named rather than implied by `id`, because for two of these rows they
+    /// differ, and because the one property this whole route has to keep — no
+    /// prerequisite refuses any switch — can only be tested by a caller that
+    /// can enumerate the switches. A test that had to hard-code the list
+    /// tested the switch somebody remembered, and a gate is cheapest to add
+    /// on the one they did not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub setting: Option<&'static str>,
     pub requirements: Vec<DeveloperRequirement>,
 }
 
@@ -202,6 +212,7 @@ fn live_hls_recovery(enabled: bool) -> DeveloperEnableItem {
         id: "live_hls_recovery",
         title: "Fall back to the retained live-HLS engine",
         enabled: Some(enabled),
+        setting: Some(plurx_core::store::keys::VOD_LIVE_RECOVERY),
         requirements: vec![coverage, takeover],
     }
 }
@@ -249,6 +260,7 @@ async fn cluster_transport_recovery(state: &AppState) -> DeveloperEnableItem {
         id: "cluster_transport_recovery",
         title: "Enable cluster transport recovery",
         enabled: None,
+        setting: None,
         requirements,
     }
 }
@@ -310,17 +322,41 @@ async fn cluster_api_requirement(state: &AppState) -> DeveloperRequirement {
     };
 
     if unreachable.is_empty() {
+        // Two different readings, and they must not share a sentence. Below
+        // two nodes the host check was skipped on purpose, so claiming the
+        // hosts are routable would be claiming a reading that did not happen
+        // — and it would be false for the single voter on 127.0.0.1 that the
+        // skip exists to accommodate.
+        //
+        // `status.nodes` counts `cluster_nodes` rows that are not tombstoned,
+        // which is not the same as the committed Raft configuration; a
+        // two-member config with one tombstoned row reports one node here.
+        // Said out loud rather than rounded to "committed".
+        let evidence = if status.nodes.len() < 2 {
+            format!(
+                "{} node(s) in the local roster, so no peer would have to dial an advertised host \
+                 and the host check was skipped rather than passed \u{2014} a single voter on \
+                 127.0.0.1 is configured correctly. Nothing else in this requirement is readable \
+                 from here either: the daemon does not dial, does not know whether every node \
+                 shares the cluster API credential, and cannot see whether \
+                 /cluster/transport/sqlite is reachable beyond your trusted network.",
+                status.nodes.len()
+            )
+        } else {
+            format!(
+                "None of the {} node(s) in the local roster advertises an empty or loopback \
+                 cluster API host, which is the one clause of this requirement the daemon can \
+                 read. It does not dial them, does not know whether every node shares the cluster \
+                 API credential, and cannot see whether /cluster/transport/sqlite is reachable \
+                 beyond your trusted network.",
+                status.nodes.len()
+            )
+        };
         DeveloperRequirement {
             id: ID,
             title: TITLE,
             status: RequirementStatus::Unobservable,
-            evidence: format!(
-                "All {} committed node(s) advertise a routable cluster API host, which is the one \
-                 clause of this requirement the daemon can read. It does not dial them, does not \
-                 know whether every node shares the cluster API credential, and cannot see \
-                 whether /cluster/transport/sqlite is reachable beyond your trusted network.",
-                status.nodes.len()
-            ),
+            evidence,
         }
     } else {
         DeveloperRequirement {
@@ -366,21 +402,55 @@ async fn cache_revocation_requirement(state: &AppState) -> DeveloperRequirement 
             id: ID,
             title: TITLE,
             status: RequirementStatus::Met,
-            evidence: "Every member of the exact committed configuration wrote the cache \
-                       revocation capability inside its current heartbeat."
+            evidence: "In this node's local applied roster, every member of the committed \
+                       configuration has the cache revocation capability in a current heartbeat. \
+                       That read is deliberately local so it still answers during quorum loss, so \
+                       a lagging follower can report this from rows a leader has already moved \
+                       past."
                 .to_owned(),
         },
-        Ok(false) => DeveloperRequirement {
-            id: ID,
-            title: TITLE,
-            status: RequirementStatus::Unmet,
-            evidence: "The local applied roster does not show every committed member proving the \
-                       capability in its current heartbeat, so cache-only recovery authorization \
-                       stays closed. This also reads false while this node is itself outside \
-                       committed membership, so check whether Cluster \u{2192} Nodes lists this \
-                       node before looking for a faulty peer."
-                .to_owned(),
-        },
+        // The readiness answer is one boolean over four separate conditions,
+        // and naming the wrong one sends an operator hunting a peer that is
+        // fine. Only one of the four has its own accessor, so read that one
+        // and name the rest as the disjunction they are.
+        //
+        // The `false` arms are: this node is outside committed membership; a
+        // committed member has no current-heartbeat capability row; the
+        // credential guard has never activated; a revocation is in flight. An
+        // earlier version of this sentence asserted the second as fact, which
+        // on this fleet — where the guard has not activated — was a reading
+        // the function never took.
+        Ok(false) => {
+            let activated = state
+                .membership
+                .cache_admin_revocation_activated_locally()
+                .await;
+            let evidence = match activated {
+                Ok(false) => "The credential guard has never activated on this cluster \
+                              (`cluster_credential_guard_activation` is empty), which closes \
+                              cache-only recovery authorization on its own. Nothing here says \
+                              anything about any peer's heartbeat."
+                    .to_owned(),
+                Ok(true) => "The guard has activated, so the closure is one of: this node is \
+                             itself outside committed membership; some committed member has no \
+                             current-heartbeat capability row; or a cache-admin revocation is in \
+                             flight. This route cannot tell those three apart \u{2014} check \
+                             whether Cluster \u{2192} Nodes lists this node before looking for a \
+                             faulty peer."
+                    .to_owned(),
+                Err(error) => format!(
+                    "Cache-only recovery authorization is closed. Which of the four causes it is \
+                     could not be narrowed, because the guard activation marker could not be read \
+                     ({error})."
+                ),
+            };
+            DeveloperRequirement {
+                id: ID,
+                title: TITLE,
+                status: RequirementStatus::Unmet,
+                evidence,
+            }
+        }
         Err(error) => DeveloperRequirement {
             id: ID,
             title: TITLE,
@@ -392,25 +462,35 @@ async fn cache_revocation_requirement(state: &AppState) -> DeveloperRequirement 
 
 fn playback_control_protocol(advertised: bool) -> DeveloperEnableItem {
     let vocabulary = crate::playback_control::control_vocabulary_snapshot();
-    let complete = vocabulary.complete.iter().sum::<u64>();
-    let partial = vocabulary.partial.iter().sum::<u64>();
+    let complete = vocabulary.passive_complete.iter().sum::<u64>();
+    let partial = vocabulary.passive_partial.iter().sum::<u64>();
 
-    // "Every client" cannot be read upward from this counter. A client with no
-    // reporter never performs a control exchange, so it appears in neither
-    // column: any number of complete exchanges is consistent with a fleet full
-    // of silent clients. Downward it reads fine — one partial exchange proves
-    // a client in the fleet is not fully declared. So `Unmet` is reachable and
-    // `Met` is not, which is the honest shape of this question.
+    // The passive vocabulary is `hold`, `terminal` and `retry_resource` —
+    // what a reporter applies to a stream already playing. Deliberately not
+    // the four-action "fully managed" reading: `prepare_replacement` is the
+    // prepared handoff, no client ships it, and it has its own row below. A
+    // passive-reporter row that demanded it answered `Unmet` on every fleet
+    // that had a complete passive reporter on every client, which is a red
+    // tick that means "measured something else".
+    //
+    // "Every client" still cannot be read upward from this counter. A client
+    // with no reporter never performs a control exchange, so it appears in
+    // neither column: any number of complete exchanges is consistent with a
+    // fleet full of silent clients. Downward it reads fine — one partial
+    // exchange proves a client in the fleet is not fully declared. So `Unmet`
+    // is reachable and `Met` is not, which is the honest shape of this
+    // question.
     let reporters = if partial > 0 {
         DeveloperRequirement {
             id: "clients_report",
             title: "Every client has a passive reporter",
             status: RequirementStatus::Unmet,
             evidence: format!(
-                "{partial} exchange(s) since this process started came from a client declaring \
-                 only part of the action vocabulary, so at least one client in the fleet is not \
-                 fully declared. By platform (web/apple/android): partial {:?}, complete {:?}.",
-                vocabulary.partial, vocabulary.complete
+                "{partial} exchange(s) since this process started came from a client that did not \
+                 declare all of hold, terminal and retry_resource, so at least one client in the \
+                 fleet has no complete passive reporter. By platform (web/apple/android): partial \
+                 {:?}, complete {:?}.",
+                vocabulary.passive_partial, vocabulary.passive_complete
             ),
         }
     } else if complete > 0 {
@@ -419,11 +499,11 @@ fn playback_control_protocol(advertised: bool) -> DeveloperEnableItem {
             title: "Every client has a passive reporter",
             status: RequirementStatus::Unobservable,
             evidence: format!(
-                "{complete} exchange(s) since this process started declared the full vocabulary \
-                 and none were partial \u{2014} but a client with no reporter never performs an \
-                 exchange at all, so this cannot speak for clients it has not heard from. By \
-                 platform (web/apple/android): complete {:?}.",
-                vocabulary.complete
+                "{complete} exchange(s) since this process started declared all of hold, terminal \
+                 and retry_resource, and none were partial \u{2014} but a client with no reporter \
+                 never performs an exchange at all, so this cannot speak for clients it has not \
+                 heard from. By platform (web/apple/android): complete {:?}.",
+                vocabulary.passive_complete
             ),
         }
     } else {
@@ -442,6 +522,7 @@ fn playback_control_protocol(advertised: bool) -> DeveloperEnableItem {
         id: "playback_control_protocol_v1",
         title: "Advertise playback control protocol v1",
         enabled: Some(advertised),
+        setting: Some(plurx_core::store::keys::PLAYBACK_CONTROL_PROTOCOL_V1),
         requirements: vec![reporters],
     }
 }
@@ -513,6 +594,7 @@ fn prepared_quality_handoff() -> DeveloperEnableItem {
         id: "prepared_quality_handoff",
         title: "Enable prepared quality handoff",
         enabled: None,
+        setting: None,
         requirements,
     }
 }
