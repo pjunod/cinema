@@ -186,7 +186,7 @@ green runs proves nothing at all.
 
 ## The CI fleet filled up because the bound was behind a flag nobody set
 
-**Branch `fix/ci-runner-disk` — open against `main`.** Runners kept running
+**Merged into `main`; the last of it is `5b30eb92`.** Runners kept running
 out of disk. The failure never says so: a runner that fills mid-link reports
 `ld terminated with signal 7 [Bus error]`, which is what a miscompile looks
 like, and the real `No space left on device` is hundreds of lines further down.
@@ -232,7 +232,19 @@ was holding 24G of its own and gave all of it back on the first pass.
 `gha-mba-apple-01`, the one runner with no systemd, and it is installed and
 verified there: it read the runner's label and config out of the launchd plist,
 unloaded the daemon, reset a 4 G cache and loaded it again, and the runner was
-back `idle` in Forgejo twenty seconds later. **The whole fleet is bounded.** The `pjunod/ansible`
+back `idle` in Forgejo twenty seconds later. **The cache is bounded fleet-wide.**
+
+**What is still unbounded, found 2026-09-08 and not fixed here.** The janitor
+bounds `cache.dir`. It does not bound `_work`, and that is what refused a job
+this morning: task 3753 on `gha-nuc4-general-01` ended
+`::error::gha-nuc4-general-01 is out of disk: 18G available at
+/opt/forgejo-runner/_work/1e3b94b21c43de67/hostexecutor, need 25G`, with the
+preflight refusing before anything compiled. The preflight is doing its job —
+it says the real cause instead of letting a link die on `signal 7` — but a
+checkout tree that nothing evicts fills the same disk the cache used to. The
+janitor's own comment already names this host, so the gap is the directory,
+not the coverage. A `_work` reaper wants the same shape: graceful stop, a
+budget, mutation-proven refusals. The `pjunod/ansible`
 repository still describes the retired GitHub `actions-runner` fleet and knows
 nothing about `forgejo-runner`, so the janitor ships from this repository until
 that catches up.
