@@ -41,7 +41,7 @@ recovery remains deliberately unreachable rather than falsely certified.
 | Milestone | M7b slice 2 — measure and report decoders per `(codec, backend)`, then use that exact path for diagnostic-contract lookup |
 | Task base | Effort head `48ad8716`; Forgejo PRs #168 and #169 were already merged when this continuation began |
 | Task branch | `codex/decoder-m7b-inventory` in an agent-owned clone at `/private/tmp/codex-plurx-decoder.RRcx8j/repo` |
-| Task PR | Not opened yet. It will stay `WIP:` until focused checks and adversarial findings are clean; the full suite runs once on that corrected candidate |
+| Task PR | [Forgejo #174](http://192.168.4.7:3000/noirr/plurx/pulls/174), `WIP:`. It stays draft until adversarial findings are clean; the full suite runs once on that corrected candidate |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
 | Implemented locally | Nested backend-aware inventory · advertised-hwaccel probe fan-out · positive hardware-selection parser · backend-aware readiness/API display · plan observation reads its measured `(codec, backend)` name · Settings → Developer explains the measured prerequisites without disabling any control |
 | Focused evidence | Pinned compile passed · decoder inventory 13/13 · backend contract separation 1/1 · backend readiness 1/1 · composed hardware observation 1/1 · Developer UI 15/15 · status contract 21/21 · validation 196/196 |
