@@ -769,7 +769,10 @@ pattern = "publication_ready_at_ms"
 # proposed successor is still held at the blocked publication fence before
 # asking the existing actor slot to authorize its announcement. It writes no
 # fence and creates no publication authority.
-expected_occurrences = 79
+# 79 -> 80 with the drain-release test: one test-only activation, built the
+# way every other fixture in that file builds one, so the predecessor it
+# drains is a published row rather than a hand-written one.
+expected_occurrences = 80
 
 [[module_symbols]]
 id = "m4-durable-projection-safety-window"
@@ -911,7 +914,10 @@ pattern = "terminal_reason"
 # stops serving. The other is a test reading that the commit no longer decides
 # a cause at all: a predecessor mid-drain has `terminal_reason` null, which is
 # the property the whole step turns on.
-expected_occurrences = 22
+# 22 -> 23 with the drain-release test, which asserts the predecessor ends
+# with cause `superseded` rather than merely ending. Test-only: the cause is
+# written by the release that already existed on this branch.
+expected_occurrences = 23
 
 [[module_symbols]]
 id = "m4-release-terminal-cause"
@@ -1483,7 +1489,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # spawned, nothing is retried, and the deadline the drain is actually bounded
 # by lives on the row, not here. A timeout here means this tick did not manage
 # to end the row, and the next tick tries again -- or the cross-node sweep does.
-expected_occurrences = 645
+# 645 -> 646 with the drain-release test's one `Duration::from_millis`, which
+# spaces two exchanges past `MIN_CONTROL_INTERVAL` so the second is judged
+# rather than rate-limited. Test-only, and owned by the test's own future.
+expected_occurrences = 646
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -1680,7 +1689,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # catches `.status(` alongside `.spawn(` and `.output(`; this is a replicated
 # read on an existing manager. It starts no process, owns no producer and
 # creates no timer.
-expected_occurrences = 275
+# 275 -> 279 with the drain-release and staged-switch tests: four `.await`
+# shapes across the store calls that stage, commit and read back the drained
+# row. Test-only; no new shipped path launches anything.
+expected_occurrences = 279
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
