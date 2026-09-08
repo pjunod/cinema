@@ -1547,7 +1547,12 @@ struct DecodeFaultSink {
 }
 
 impl DecodeFaultSink {
-    fn report(&self, fault: crate::decoder_health::DecodeFaultKind, records: u64) {
+    fn report(
+        &self,
+        fault: crate::decoder_health::DecodeFaultKind,
+        records: u64,
+        action_qualified: bool,
+    ) {
         self.control.observe_producer_decode_fault(
             self.producer_attempt,
             self.plan_digest.clone(),
@@ -1555,6 +1560,7 @@ impl DecodeFaultSink {
             self.input_video_stream,
             records,
             self.diagnostic_contract.clone(),
+            action_qualified,
         );
     }
 }
@@ -1781,9 +1787,9 @@ fn spawn_ffmpeg(
                 grammar,
                 |line| log_ffmpeg_stderr(&sid, encoder_label, line),
                 |_| false,
-                |fault, records| {
+                |fault, records, action_qualified| {
                     if let Some(sink) = fault_sink.as_ref() {
-                        sink.report(fault, records);
+                        sink.report(fault, records, action_qualified);
                     }
                 },
             )
@@ -38375,7 +38381,9 @@ pub(crate) mod tests {
                 grammar,
                 |_| {},
                 |_| false,
-                move |fault, records| sink.report(fault, records),
+                move |fault, records, action_qualified| {
+                    sink.report(fault, records, action_qualified);
+                },
             )
             .await
         });

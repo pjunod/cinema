@@ -957,6 +957,30 @@ impl HealthAccumulator {
     /// can be disqualified from acting and still be disqualified from the
     /// cache — the two questions have different answers and conflating them is
     /// how an unqualified build ends up killing sessions.
+    /// Asked at the latch as well as at the settle, and deliberately the same
+    /// question in both places.
+    ///
+    /// A first draft of M5c introduced a second, weaker method for the latch,
+    /// on the reasoning that `observation_complete` protects a claim of
+    /// *absence* and adds nothing to evidence that is present — and that
+    /// requiring it at the latch would be impossible anyway, "because at latch
+    /// time the log is by definition still being read".
+    ///
+    /// That second reason is simply false, and it is worth recording why so
+    /// the idea is not had twice. Nothing clears `observation_complete` for
+    /// being mid-read: it is cleared only by a read error, a partial trailing
+    /// line, a malformed record, an oversized line, or invalid UTF-8. A clean
+    /// stream is `observation_complete` at every line, including the one that
+    /// latches.
+    ///
+    /// And the first reason is false too, because three of those five clear it
+    /// while still handing the offending line to classification. An oversized
+    /// line contributes its retained head; an invalid-UTF-8 line contributes
+    /// its lossy transcription; a stream killed mid-write contributes the
+    /// partial record `finish` returns. A triggering window can be assembled
+    /// entirely out of degraded records — so completeness is not only a claim
+    /// about absence here, it is a claim about the quality of the very records
+    /// that are present.
     pub fn automatic_action_allowed(&self) -> bool {
         self.fault.is_some()
             && self.triggering_window_contract_qualified
@@ -1523,7 +1547,7 @@ pub(crate) async fn read_diagnostics<R>(
 where
     R: tokio::io::AsyncRead + Unpin,
 {
-    read_diagnostics_reporting(stream, grammar, log, progress, |_, _| {}).await
+    read_diagnostics_reporting(stream, grammar, log, progress, |_, _, _| {}).await
 }
 
 /// The same read, reporting a latch the moment it happens.
@@ -1538,7 +1562,7 @@ pub(crate) async fn read_diagnostics_reporting<R>(
     grammar: Option<DiagnosticGrammar>,
     mut log: impl FnMut(&str),
     mut progress: impl FnMut(&str) -> bool,
-    mut on_fault: impl FnMut(DecodeFaultKind, u64),
+    mut on_fault: impl FnMut(DecodeFaultKind, u64, bool),
 ) -> HealthAccumulator
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -1601,7 +1625,7 @@ fn observe_line(
     accumulator: &mut HealthAccumulator,
     log: &mut impl FnMut(&str),
     progress: &mut impl FnMut(&str) -> bool,
-    on_fault: &mut impl FnMut(DecodeFaultKind, u64),
+    on_fault: &mut impl FnMut(DecodeFaultKind, u64, bool),
 ) {
     // A `-progress` block on this stream is telemetry, not a diagnostic. It is
     // sorted out before classification so a key=value line can never become a
@@ -1615,7 +1639,15 @@ fn observe_line(
         // which is what makes one barrier per attempt a property of the
         // accumulator rather than of the caller remembering to ask once.
         if let Some(fault) = accumulator.observe(std::time::Instant::now(), &record) {
-            on_fault(fault, accumulator.primary_error_records());
+            // The qualification travels with the fault because it is a fact
+            // about the window that just latched, and only the accumulator
+            // holds that. Answered here rather than at the settle, where it
+            // would arrive after the decisions it is meant to inform.
+            on_fault(
+                fault,
+                accumulator.primary_error_records(),
+                accumulator.automatic_action_allowed(),
+            );
         }
     }
     // Without a grammar the line is still read, still bounded and still
