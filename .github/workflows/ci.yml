@@ -416,7 +416,12 @@ jobs:
     needs: [scope, preflight]
     if: needs.scope.outputs.cluster_auth == 'true'
     runs-on: [self-hosted, Linux, X64, lab, ci-topology]
-    timeout-minutes: 120
+    # A voter recovery is ~4.7 min on this two-core runner (main run 4284:
+    # cycles at 16:38, 16:43, 16:47, 16:52), so the twenty-one voter cycles
+    # alone are ~100 min and the learner half follows them. No Forgejo run
+    # of this lane has ever reached the learner campaign, so 120 would have
+    # timed out the first campaign that got past the resource check.
+    timeout-minutes: 240
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v4
       - uses: https://github.com/dtolnay/rust-toolchain@1.97.1

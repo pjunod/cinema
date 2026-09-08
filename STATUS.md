@@ -49,9 +49,12 @@ tests; the mutations prove a socket, thread or task leaked every cycle, a
 leak starting at cycle 13, and one socket leaked at cycle 15 all still fail —
 and that the measured drain and jitter pass. Decision document:
 [docs/cluster/TRANSPORT-RECOVERY-RESOURCE-CONTRACT-DECISION.md](docs/cluster/TRANSPORT-RECOVERY-RESOURCE-CONTRACT-DECISION.md)
-§0. Still open: Option C there — making `idle` mean the transports are
-released, which is a vendored hiqlite change and helps everything that reads
-`operation_owns_work`, not only this lane.
+§0. The lane's `timeout-minutes` goes from 120 to 240 in the same change: a
+voter recovery is ~4.7 min on the two-core `ci-topology` runner, so the
+voter half alone is ~100 min, and no Forgejo run has ever reached the
+learner half to find that out. Still open: Option C there — making `idle`
+mean the transports are released, which is a vendored hiqlite change and
+helps everything that reads `operation_owns_work`, not only this lane.
 
 ## Phase 3 is buildable today, and the first answer to that question was wrong
 
