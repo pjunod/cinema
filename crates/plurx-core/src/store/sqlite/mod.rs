@@ -3824,7 +3824,11 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .expect("read the row back");
-        assert_eq!((owner.as_str(), epoch), ("node-a", 4), "ownership is intact");
+        assert_eq!(
+            (owner.as_str(), epoch),
+            ("node-a", 4),
+            "ownership is intact"
+        );
         assert_eq!(state, "active", "and nothing else about the row moved");
 
         // The owner keeps renewing this row for the whole drain, and the

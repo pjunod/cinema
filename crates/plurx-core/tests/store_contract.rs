@@ -3543,56 +3543,44 @@ async fn media_session_commit_atomically_retains_its_control_receipt() {
         );
 
         // The viewer closes the player during the drain. That is an ordinary
-        // `demand: end`, it is receipted like every other terminal exchange,
-        // and the commit receipt is already sitting on this session's one row.
+        // `demand: end`, and on a draining predecessor the daemon answers it
+        // by ending the row rather than by asking for a second receipt: this
+        // session's one receipt slot already holds the commit's, and a write
+        // that lost to it would read back as "not durably committed" — a 503
+        // the client retries twice a second for the rest of the window.
         //
-        // Until the drain, this could not happen: the commit ended the
-        // predecessor in its own transaction, so no second receipted exchange
-        // ever reached it. Now one can, and a write that quietly lost to the
-        // commit receipt would be read back as "not durably committed" — a
-        // 503 the client retries twice a second until the receipt expires.
-        let terminal = MediaSessionTerminalAck {
-            sequence: receipt.sequence + 1,
-            request_fingerprint: "f".repeat(64),
-            response_json: "{\"action\":\"end\"}".to_owned(),
-            updated_at_ms: 4_000,
-            ..receipt.clone()
-        };
-        assert!(
-            store
-                .record_media_session_terminal_ack(&terminal)
-                .await
-                .unwrap_or_else(|error| panic!("{backend}: terminal receipt: {error}")),
-            "{backend}: a later exchange on a draining predecessor gets its receipt"
+        // What the Store has to guarantee for that to be safe is the two
+        // things below: the commit receipt stays exactly as written, and
+        // ending the predecessor leaves the successor's pointer alone.
+        let ended = store
+            .end_media_session(&receipt.session_id, "superseded", 4_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: end the draining predecessor: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the draining predecessor is still endable"));
+        assert_eq!(ended.incarnation_id, predecessor, "{backend}");
+        assert_eq!(
+            ended.terminal_reason.as_deref(),
+            Some("superseded"),
+            "{backend}: the client saying it is done earns the same cause the \
+             deadline would have written"
         );
         assert_eq!(
             store
-                .media_session_terminal_ack(&terminal.session_id, 4_001)
+                .media_session_terminal_ack(&receipt.session_id, 4_001)
                 .await
-                .unwrap_or_else(|error| panic!("{backend}: terminal read: {error}")),
-            Some(terminal.clone()),
-            "{backend}: the retained reply is the most recent receipted exchange"
+                .unwrap_or_else(|error| panic!("{backend}: receipt after the end: {error}")),
+            Some(receipt.clone()),
+            "{backend}: the commit's retained reply survives the terminal that \
+             followed it, because the commit still has to be able to replay"
         );
         assert_eq!(
             store
-                .media_session_route_by_incarnation(predecessor)
+                .media_session_route_for_playback(user.id, playback)
                 .await
-                .unwrap_or_else(|error| panic!("{backend}: predecessor read: {error}"))
-                .map(|route| route.state),
-            Some("ended".to_owned()),
-            "{backend}: the terminal exchange ends the drain early, which is the \
-             whole point of the client saying so"
-        );
-
-        // A repeat of an exchange the client has already moved past does not
-        // clobber the newer reply. It reads back non-exact, exactly as it
-        // does today, rather than winning on arrival order.
-        assert!(
-            !store
-                .record_media_session_terminal_ack(&receipt)
-                .await
-                .unwrap_or_else(|error| panic!("{backend}: stale receipt: {error}")),
-            "{backend}: a lower sequence cannot replace a newer retained reply"
+                .unwrap_or_else(|error| panic!("{backend}: pointer after the end: {error}"))
+                .map(|route| route.incarnation_id),
+            Some(staged.to_owned()),
+            "{backend}: ending the predecessor must not take the successor's pointer"
         );
     })
     .await;

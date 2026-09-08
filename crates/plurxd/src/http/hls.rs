@@ -4974,6 +4974,34 @@ impl crate::playback_control::TerminalControlCommitter for DurableTerminalCommit
         };
         let store = Arc::clone(&self.store);
         let faults = self.faults.clone();
+        // A terminal exchange on a *draining* predecessor is not receipted,
+        // and that is the whole handling.
+        //
+        // The receipt table holds one row per `session_id`, and on a draining
+        // predecessor that row is already the commit's: the prepared commit
+        // runs on this route and retains its reply here. Until the drain, no
+        // second receipted exchange could reach a predecessor, because the
+        // commit ended it in the same transaction. Now the viewer closing the
+        // player sends `demand: end` to a session that is still live, and a
+        // write that loses to the commit receipt reads back as "not durably
+        // committed" — a 503 the client retries twice a second for the rest
+        // of the window.
+        //
+        // Ending the row is a better answer than a receipt anyway. The
+        // retained reply exists so a lost terminal answer can be replayed;
+        // once this row is `ended`, a client that missed the reply asks again
+        // and gets `410 session_ended` from the row itself, which is the same
+        // terminal by a shorter path. So the drain ends here, early, and the
+        // commit keeps the receipt slot it needs for its own replay.
+        //
+        // `end_media_session` rather than the owner-scoped CAS: the lease
+        // boundary on this route was read when the request arrived and the
+        // owner's tick renews every three seconds, so an exact-boundary CAS
+        // would lose a race it has no reason to enter. The pointer delete
+        // inside it is guarded on this exact incarnation, and the pointer
+        // names the successor, so ending the predecessor cannot take it.
+        let draining = self.route.drain_deadline_ms.is_some();
+        let session_id = self.route.session_id.clone();
         crate::playback_control::TerminalCommitReceipt::retryable_until(
             acknowledgement.expires_at_ms,
             move |attempt| {
@@ -4982,20 +5010,30 @@ impl crate::playback_control::TerminalControlCommitter for DurableTerminalCommit
                 let response = response.clone();
                 let handoff = handoff.clone();
                 let faults = faults.clone();
+                let session_id = session_id.clone();
                 if let Some(handoff) = &handoff {
                     handoff.restart();
                 }
                 tokio::spawn(async move {
-                    let persisted = match faults {
-                        Some(faults) => {
-                            persist_terminal_ack_with_faults(
-                                store,
-                                acknowledgement,
-                                Some(faults.as_ref()),
-                            )
-                            .await
+                    let persisted = if draining {
+                        matches!(
+                            store
+                                .end_media_session(&session_id, "superseded", unix_ms())
+                                .await,
+                            Ok(Some(_))
+                        )
+                    } else {
+                        match faults {
+                            Some(faults) => {
+                                persist_terminal_ack_with_faults(
+                                    store,
+                                    acknowledgement,
+                                    Some(faults.as_ref()),
+                                )
+                                .await
+                            }
+                            None => persist_terminal_ack(store, acknowledgement).await,
                         }
-                        None => persist_terminal_ack(store, acknowledgement).await,
                     };
                     if let Some(handoff) = handoff {
                         handoff.complete();
@@ -11887,6 +11925,7 @@ mod tests {
             media_sequence: 0,
             discontinuity_sequence: 0,
             updated_at_ms: unix_ms(),
+            drain_deadline_ms: None,
         };
         let request = crate::playback_control::ControlRequestV1 {
             intent: None,
@@ -18026,6 +18065,7 @@ mod tests {
             media_sequence: 0,
             discontinuity_sequence: 0,
             updated_at_ms: 1,
+            drain_deadline_ms: None,
         };
         assert!(resolved_replay_is_live(&route, 1_000));
         route.publication_ready_at_ms = 1_001;
@@ -18087,6 +18127,7 @@ mod tests {
             media_sequence: 0,
             discontinuity_sequence: 0,
             updated_at_ms: unix_ms(),
+            drain_deadline_ms: None,
         };
         assert!(route_matches_activation(&route, &activation));
         route.owner_epoch = 2;
@@ -18119,6 +18160,7 @@ mod tests {
             media_sequence: 0,
             discontinuity_sequence: 0,
             updated_at_ms: now_ms,
+            drain_deadline_ms: None,
         };
         let mut published = observed.clone();
         published.owner_node_id = "surviving-owner".to_owned();

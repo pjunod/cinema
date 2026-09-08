@@ -852,6 +852,16 @@ pub struct MediaSessionRoute {
     pub media_sequence: i64,
     pub discontinuity_sequence: i64,
     pub updated_at_ms: i64,
+    /// When this session stops being kept alive on purpose, or `None` when it
+    /// is not draining — which is every ordinary session.
+    ///
+    /// On the route rather than only on the owner inventory because the
+    /// control plane has to know: a terminal exchange that arrives on a
+    /// draining predecessor ends the drain there and then, instead of asking
+    /// for a durable receipt on a session whose one receipt slot the commit
+    /// already used.
+    #[serde(default)]
+    pub drain_deadline_ms: Option<i64>,
 }
 
 /// Stable keyset position for scanning expired active media sessions.

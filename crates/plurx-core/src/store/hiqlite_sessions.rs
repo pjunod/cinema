@@ -306,7 +306,7 @@ pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), Store
 const ROUTE_COLS: &str = "incarnation_id, session_id, user_id, playback_id,
     request_fingerprint, owner_node_id, owner_epoch, lease_expires_at_ms, state, terminal_reason,
     publication_ready_at_ms, recipe_json, response_json, produced_playable_through_ms, fetched_through_ms,
-    media_origin_ms, media_sequence, discontinuity_sequence, updated_at_ms";
+    media_origin_ms, media_sequence, discontinuity_sequence, updated_at_ms, drain_deadline_ms";
 
 struct RouteRow(MediaSessionRoute);
 
@@ -332,6 +332,7 @@ impl From<&mut Row<'_>> for RouteRow {
             media_sequence: row.get("media_sequence"),
             discontinuity_sequence: row.get("discontinuity_sequence"),
             updated_at_ms: row.get("updated_at_ms"),
+            drain_deadline_ms: row.get("drain_deadline_ms"),
         })
     }
 }
@@ -3279,37 +3280,6 @@ impl MediaSessionStore for HiqliteAuthStore {
         let lease_resource = format!("session:{}", acknowledgement.incarnation_id);
         self.client()
             .txn([
-                (
-                    // The superseding-receipt update; see the SQLite twin for
-                    // why a session can now need a receipt more than once.
-                    // Placeholders numbered by first appearance, which here
-                    // means the `SET` list numbers itself and `session_id`
-                    // takes the last one because it is only read in the
-                    // `WHERE`. `ce253a55` is what happens when that is done
-                    // by convenience instead.
-                    "UPDATE media_session_terminal_acks
-                        SET incarnation_id = $1, owner_node_id = $2, owner_epoch = $3,
-                            client_instance_id = $4, sequence = $5,
-                            request_fingerprint = $6, response_json = $7,
-                            expires_at_ms = $8, updated_at_ms = $9
-                      WHERE session_id = $10 AND sequence < $5
-                        AND EXISTS (SELECT 1 FROM media_sessions
-                          WHERE incarnation_id = $1 AND session_id = $10
-                            AND owner_node_id = $2 AND owner_epoch = $3
-                            AND state = 'active')",
-                    params!(
-                        acknowledgement.incarnation_id.as_str(),
-                        acknowledgement.owner_node_id.as_str(),
-                        acknowledgement.owner_epoch,
-                        acknowledgement.client_instance_id.as_str(),
-                        acknowledgement.sequence,
-                        acknowledgement.request_fingerprint.as_str(),
-                        acknowledgement.response_json.as_str(),
-                        acknowledgement.expires_at_ms,
-                        acknowledgement.updated_at_ms,
-                        acknowledgement.session_id.as_str()
-                    ),
-                ),
                 (
                     "INSERT INTO media_session_terminal_acks
                     (incarnation_id, session_id, owner_node_id, owner_epoch,

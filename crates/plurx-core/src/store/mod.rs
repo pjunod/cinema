@@ -377,8 +377,7 @@ macro_rules! media_session_drain_ownership_fence_trigger {
 }
 
 /// The drain deadline column, for the replicated migration's first statement.
-pub(crate) const MEDIA_SESSION_DRAIN_DEADLINE_COLUMN: &str =
-    media_session_drain_deadline_column!();
+pub(crate) const MEDIA_SESSION_DRAIN_DEADLINE_COLUMN: &str = media_session_drain_deadline_column!();
 
 /// The ownership fence on its own, for the replicated migration and install.
 pub(crate) const MEDIA_SESSION_DRAIN_OWNERSHIP_FENCE_TRIGGER: &str =

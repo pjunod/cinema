@@ -32,7 +32,7 @@ const RESOLVED_RETENTION_MS: i64 = 24 * 60 * 60 * 1_000;
 const ROUTE_COLS: &str = "incarnation_id, session_id, user_id, playback_id, \
     request_fingerprint, owner_node_id, owner_epoch, lease_expires_at_ms, state, terminal_reason, \
     publication_ready_at_ms, recipe_json, response_json, produced_playable_through_ms, fetched_through_ms, \
-    media_origin_ms, media_sequence, discontinuity_sequence, updated_at_ms";
+    media_origin_ms, media_sequence, discontinuity_sequence, updated_at_ms, drain_deadline_ms";
 
 fn route_from_row(row: &Row<'_>) -> rusqlite::Result<MediaSessionRoute> {
     Ok(MediaSessionRoute {
@@ -55,6 +55,7 @@ fn route_from_row(row: &Row<'_>) -> rusqlite::Result<MediaSessionRoute> {
         media_sequence: row.get(16)?,
         discontinuity_sequence: row.get(17)?,
         updated_at_ms: row.get(18)?,
+        drain_deadline_ms: row.get(19)?,
     })
 }
 
@@ -2624,61 +2625,6 @@ impl MediaSessionStore for SqliteStore {
         let acknowledgement = acknowledgement.clone();
         self.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
-            // A session may need a receipt more than once.
-            //
-            // The table holds one row per `session_id`, and until the drain
-            // that was enough: the commit transaction wrote the predecessor's
-            // commit receipt and ended the row in the same breath, so no
-            // second receipted exchange could ever reach it. A draining
-            // predecessor stays live and answers `demand: end` when the
-            // viewer closes the player, and `INSERT OR IGNORE` loses that
-            // receipt to the commit's — silently, which the caller reads as
-            // "not durably committed" and answers with a 503 the client
-            // retries every 500 ms for the rest of the window.
-            //
-            // Replace the stored receipt when the incoming one supersedes it
-            // on the client's own monotone sequence. That is what the row has
-            // always meant — the retained reply for this session's most
-            // recent receipted exchange — and a client that has moved past a
-            // sequence will never ask for that reply again. A repeat of the
-            // stored exchange has an equal sequence, so it does not update and
-            // still reads back exact, which is the replay path unchanged.
-            //
-            // A lower sequence, including one from a second client instance
-            // starting its own numbering, is left to lose exactly as it does
-            // today rather than being allowed to clobber a newer reply.
-            //
-            // `state = 'active'`, not `IN ('active', 'ended')` like the insert
-            // below. Once a session is settled its retained receipt *is* the
-            // terminal reply, and the replay window has to outlive the
-            // settlement — a later sequence arriving after that is a client
-            // talking to a stream that is over, and it is refused. The only
-            // thing this opens is a receipt on a session that is still live,
-            // which before the drain could not have one.
-            tx.execute(
-                "UPDATE media_session_terminal_acks
-                    SET incarnation_id = ?1, owner_node_id = ?3, owner_epoch = ?4,
-                        client_instance_id = ?5, sequence = ?6,
-                        request_fingerprint = ?7, response_json = ?8,
-                        expires_at_ms = ?9, updated_at_ms = ?10
-                  WHERE session_id = ?2 AND sequence < ?6
-                    AND EXISTS (SELECT 1 FROM media_sessions
-                      WHERE incarnation_id = ?1 AND session_id = ?2
-                        AND owner_node_id = ?3 AND owner_epoch = ?4
-                        AND state = 'active')",
-                params![
-                    acknowledgement.incarnation_id.as_str(),
-                    acknowledgement.session_id.as_str(),
-                    acknowledgement.owner_node_id.as_str(),
-                    acknowledgement.owner_epoch,
-                    acknowledgement.client_instance_id.as_str(),
-                    acknowledgement.sequence,
-                    acknowledgement.request_fingerprint.as_str(),
-                    acknowledgement.response_json.as_str(),
-                    acknowledgement.expires_at_ms,
-                    acknowledgement.updated_at_ms,
-                ],
-            )?;
             tx.execute(
                 "INSERT OR IGNORE INTO media_session_terminal_acks
                     (incarnation_id, session_id, owner_node_id, owner_epoch,

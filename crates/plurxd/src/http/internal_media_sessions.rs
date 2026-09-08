@@ -1438,6 +1438,7 @@ mod tests {
             media_sequence: 0,
             discontinuity_sequence: 0,
             updated_at_ms: 1,
+            drain_deadline_ms: None,
         };
         assert_eq!(
             post_classification_route_rejection(&RelayResource::Status, &route, 10_000),

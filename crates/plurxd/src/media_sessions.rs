@@ -3716,47 +3716,82 @@ pub(crate) async fn lease_loop(state: AppState) {
         .collect::<Vec<_>>()
         .await;
         let mut cleanup = Vec::new();
-        for lease in &drained {
-            // End the row first, then reap the worker through the same path
-            // every other terminal takes. Order matters: `fence_and_reap`'s
-            // VOD arm re-reads the route and only emits a typed terminal
-            // cause when it finds the row already `ended`, which is what
-            // gives the client its `410 session_ended` instead of a retry.
+        // End the lapsed drains against the tick's own shared deadline, the
+        // same way renewals are issued, and for the same reason: this loop
+        // runs inside a three-second tick that is guarding twelve-second
+        // leases, so a store that has gone slow must not be able to spend the
+        // tick one route at a time. A serial loop with a fresh four-second
+        // budget per route could hold three drains for twelve seconds and
+        // take every other session this node owns past its TTL with them.
+        let drain_ends = stream::iter(
+            drained
+                .iter()
+                .map(|lease| plurx_core::domain::MediaSessionEnd {
+                    incarnation_id: lease.incarnation_id.clone(),
+                    session_id: lease.session_id.clone(),
+                    expected_owner_node_id: state.node_id.clone(),
+                    expected_owner_epoch: lease.owner_epoch,
+                    expected_lease_expires_at_ms: lease.lease_expires_at_ms,
+                    terminal_reason: "superseded".to_owned(),
+                    now_ms: unix_ms(),
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|end| {
+                    let store = Arc::clone(&state.store);
+                    async move {
+                        tokio::time::timeout_at(
+                            renewal_deadline,
+                            store.end_media_session_if_owner(&end),
+                        )
+                        .await
+                    }
+                }),
+        )
+        .buffer_unordered(LEASE_RENEWAL_FANOUT)
+        .collect::<Vec<_>>()
+        .await;
+        for (lease, outcome) in drained.iter().zip(drain_ends) {
+            // Reap the worker only when the row is actually finished. A store
+            // call that failed or timed out has ended nothing, and reaping on
+            // it would take the session out of `live` — which is what both
+            // `lease_tick_drained` and `lease_tick_active` filter on, so this
+            // node would never look at the row again and the five-minute
+            // cross-node sweep would become the bound for a drain on a
+            // perfectly healthy node. Leaving it alone costs one more tick.
             //
-            // The lease boundary comes from this tick's inventory and the
-            // route was left out of the renewal batch above, so nothing this
-            // node did between the two can defeat the CAS. Anything that
-            // *does* defeat it — a takeover, a delete, the sweep on another
-            // node — has already ended or moved the row, and the reap below
-            // reads whatever it actually finds.
-            let end = plurx_core::domain::MediaSessionEnd {
-                incarnation_id: lease.incarnation_id.clone(),
-                session_id: lease.session_id.clone(),
-                expected_owner_node_id: state.node_id.clone(),
-                expected_owner_epoch: lease.owner_epoch,
-                expected_lease_expires_at_ms: lease.lease_expires_at_ms,
-                terminal_reason: "superseded".to_owned(),
-                now_ms: unix_ms(),
-            };
-            match tokio::time::timeout(
-                LEASE_RENEWAL_DEADLINE,
-                state.store.end_media_session_if_owner(&end),
-            )
-            .await
-            {
-                Ok(Ok(_)) => {}
+            // `Ok(Ok(None))` is finished too: the CAS found no matching row,
+            // which means something already ended it or ownership moved. The
+            // reap below reads whatever it actually finds.
+            let ended = match outcome {
+                Ok(Ok(_)) => true,
                 Ok(Err(error)) => {
                     tracing::debug!(%error, "draining media session could not be ended");
+                    false
                 }
                 Err(_) => {
                     tracing::debug!("draining media session end timed out");
+                    false
                 }
+            };
+            if !ended {
+                continue;
             }
             cleanup.push((
                 lease.incarnation_id.clone(),
                 lease.session_id.clone(),
                 lease.owner_epoch,
-                vod_capabilities.contains(&lease.session_id),
+                // The remembered flag, not this tick's set. A VOD session
+                // whose capability has already been dropped from
+                // `vod_capabilities` still needs the VOD arm of the reap, or
+                // it is fenced and stopped instead of given the typed
+                // terminal its client is waiting for. Every other cleanup
+                // site in this loop carries the stored flag; this one is not
+                // special.
+                known
+                    .get(&lease.incarnation_id)
+                    .is_some_and(|(_, _, _, vod)| *vod)
+                    || vod_capabilities.contains(&lease.session_id),
                 "drain window elapsed",
             ));
             known.remove(&lease.incarnation_id);
@@ -5368,6 +5403,7 @@ mod tests {
             media_sequence: 0,
             discontinuity_sequence: 0,
             updated_at_ms: unix_ms(),
+            drain_deadline_ms: None,
         }
     }
 
