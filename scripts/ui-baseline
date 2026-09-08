@@ -995,6 +995,11 @@ def discover_routes(base_url, token, args, preferred_library=None, preferred_ite
         "settings": {"hash": "#/settings"},
         "settings-developer": {"hash": "#/settings/developer"},
         "live-tv": {"hash": "#/live-tv"},
+        # The switch is a persisted preference, so the grid is a different
+        # first paint of the same route rather than a different route. Both
+        # views ship, so both are swept — a golden that only ever saw the list
+        # would let the grid rot without a diff.
+        "live-tv-grid": {"hash": "#/live-tv", "prefs": {"plurx_live_tv_view": "grid"}},
         # No token in localStorage, so `boot()` falls through to the sign-in
         # card. The only route whose container is #app: there is no #main
         # until somebody is signed in.
@@ -1479,7 +1484,7 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
     page.on("console", note_console)
     page.on("pageerror", lambda e: problems.append(f"pageerror: {e}"))
 
-    if name == "live-tv":
+    if name in {"live-tv", "live-tv-grid"}:
         # Layout captures never lease a household tuner. The browser fixture
         # separately exercises media and session lifecycle.
         page.route("**/api/v1/live-tv/channels", lambda route: route.fulfill(
@@ -1492,6 +1497,33 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
                      "favorite": False, "drm": False, "support": "ready"},
                     {"id": "107.1", "guide_number": "107.1", "guide_name": "Protected Channel",
                      "favorite": False, "drm": True, "support": "drm_unsupported"},
+                ],
+            })))
+        # The guide is a second, independent read. Mocking it is what makes the
+        # layout sweep cover the rows and cells a real lineup draws; without it
+        # every channel row would capture in its degraded "no programme
+        # information" state, which is the one state the golden least needs to
+        # pin. Times are anchored to FROZEN_EPOCH so the capture never moves.
+        guide_start = FROZEN_EPOCH - FROZEN_EPOCH % 1800
+        page.route("**/api/v1/live-tv/guide*", lambda route: route.fulfill(
+            status=200, content_type="application/json", body=json.dumps({
+                "source": "hdhomerun", "freshness": "fresh", "age_seconds": 300,
+                "fetched_at": guide_start, "refresh_error": None,
+                "window": {"start": guide_start - 1800, "end": guide_start + 4 * 1800},
+                "matched_channels": 2, "lineup_channels": 3,
+                "channels": [
+                    {"id": "7.1", "guide_number": "7.1", "affiliate": "NEWS", "programmes": [
+                        {"start": guide_start - 1800, "end": guide_start, "title": "Morning Edition"},
+                        {"start": guide_start, "end": guide_start + 1800, "title": "Evening Edition",
+                         "episode": "E812", "synopsis": "The evening edition.", "filters": ["News"]},
+                        {"start": guide_start + 1800, "end": guide_start + 3 * 1800,
+                         "title": "Harbor Lights", "episode": "S2E03", "filters": ["Drama"]},
+                    ]},
+                    {"id": "10.2", "guide_number": "10.2", "affiliate": "PBS", "programmes": [
+                        {"start": guide_start, "end": guide_start + 2 * 1800, "title": "The Long Game"},
+                        {"start": guide_start + 2 * 1800, "end": guide_start + 4 * 1800,
+                         "title": "Studio Sessions"},
+                    ]},
                 ],
             })))
 
@@ -1548,7 +1580,8 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
         # /scan/status calls. The phase is product state, so synchronizing on it
         # preserves the request-count contract without baking a count or an
         # endpoint into this harness.
-        if name in {"home", "activity", "analysis", "settings", "settings-developer", "live-tv"}:
+        if name in {"home", "activity", "analysis", "settings", "settings-developer",
+                    "live-tv", "live-tv-grid"}:
             page.wait_for_selector(
                 f'{container}[data-phase="settled"]', timeout=args.timeout)
         if activity_poll_paused:
@@ -1754,7 +1787,13 @@ def context_prefs(args, layout_id, token, route):
         # dismissed keeps Home's first row from depending on the browser's PWA
         # opinion.
         "plurx_getapp_dismissed": "1",
+        # Live TV's own persisted choices. Pinned for the same reason as the
+        # theme: a default that moves would silently redecorate the baseline.
+        "plurx_live_tv_view": "list",
+        "plurx_live_tv_filter": "all",
+        "plurx_live_tv_hide_protected": "0",
     }
+    prefs.update(route.get("prefs") or {})
     if not route.get("anonymous"):
         prefs["plurx_token"] = token
     return prefs

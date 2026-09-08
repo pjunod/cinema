@@ -79,6 +79,12 @@ INDEX_REGIONS = (
         "Card and episode-row activation (Enter/Space) outside playback, shared by every layout.",
     ),
     (
+        "// live-tv-input-adapter:begin",
+        "// live-tv-input-adapter:end",
+        "Live TV owns the channel keys while its host is fullscreen or focused; "
+        "it routes them through the fixture's `live` table, not its own opinions.",
+    ),
+    (
         "function catalogWireOnce(){",
         "// ---- phone: the library sheet and the search tab",
         "Catalog owns Escape for its phone library sheet.",

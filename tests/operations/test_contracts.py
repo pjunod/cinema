@@ -171,9 +171,18 @@ class OperationsContractCase(unittest.TestCase):
     def test_ui_baseline_starts_poll_observation_after_route_settles(self):
         script = read("scripts/ui-baseline")
 
-        self.assertIn(
-            'if name in {"home", "activity", "analysis", "settings", "settings-developer", "live-tv"}:', script
+        # The contract is that every route publishing a settled phase is waited
+        # on before the polling observation window opens — not that the set is
+        # spelled on one line. Pinning the literal made adding a route a
+        # two-file edit whose second file had nothing to do with the change.
+        settled_gate = re.search(
+            r"if name in \{([^}]*)\}:\s*\n\s*page\.wait_for_selector\(", script
         )
+        self.assertIsNotNone(settled_gate, "ui-baseline no longer gates on the settled phase")
+        waited = set(re.findall(r'"([^"]+)"', settled_gate.group(1)))
+        for route in ("home", "activity", "analysis", "settings", "settings-developer",
+                      "live-tv", "live-tv-grid"):
+            self.assertIn(route, waited, f"{route} publishes a settled phase but is not waited on")
         self.assertIn('[data-phase="settled"]', script)
         self.assertIn('wait_until="domcontentloaded"', script)
         self.assertIn("activity_poll_paused = pause_activity_polling", script)

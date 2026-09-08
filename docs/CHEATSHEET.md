@@ -147,9 +147,18 @@ curl -s -X PUT -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/j
 # 2. Probe it (admin only) — this is the step that says what is actually wrong.
 curl -s -X POST -H "Authorization: Bearer $TOKEN" $HOST/api/v1/live-tv/readiness/refresh
 
-# 3. Enable, carrying the generation step 1 returned.
+# 3. Enable, carrying the generation step 1 returned. A red check in step 2 does
+#    not stop you: readiness is advice. Enabling with one unmet tells you what
+#    actually breaks; structural problems still refuse the save.
 curl -s -X PUT -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"live_tv_config_generation":1,"live_tv_enabled":true}' $HOST/api/v1/settings
+
+# 4. Optional: turn on the programme guide, so rows say what is on rather than
+#    just a number and a callsign. Editable while Live TV is enabled.
+curl -s -X PUT -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"live_tv_config_generation":2,"live_tv_guide_source":"hdhomerun"}' $HOST/api/v1/settings
+#    …or point it at a grabber you already run:
+#    {"live_tv_guide_source":"xmltv","live_tv_xmltv_url":"https://…/guide.xml.gz"}
 
 # Then: Live TV appears in the web app and in every first-party client.
 ```
@@ -180,6 +189,7 @@ Runbook, with the owner-move procedure: [OPERATIONS.md](OPERATIONS.md).
 | Web app + API | `http://<host>:32400` |
 | GDM discovery | UDP `32414` (movable host-side via `PLURX_GDM_PORT`) |
 | Live TV device (outbound, from the owner node) | TCP `80` (`discover.json`, and `lineup.json` unless the device advertises it on 5004) and TCP `5004` (stream) on the configured tuner |
+| Live TV guide (outbound, owner node, only with a guide source set) | `https` to `api.hdhomerun.com`, or to the XMLTV URL you configured. None at all while the source is `off`, which is the default |
 | Data (db, artwork, transcode cache) | `PLURX_DATA_DIR` (default `./data`; Docker bind mount `${PLURX_DATA:-/srv/plurx}` → `/var/lib/plurx`) |
 | Config file | `./plurx.toml` → `/etc/plurx/plurx.toml` (or `PLURX_CONFIG`) |
 | Runtime settings (TMDB key, libraries, users) | In the database, edited in Settings — not the config file |
