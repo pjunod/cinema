@@ -77,16 +77,22 @@ class PlaybackControlTransport(
             var generation: String? = null
             var epoch: Long? = null
             var retryAfter: Long? = null
+            var detail: String? = null
+            var invalidField: String? = null
             try {
                 val fields = json.parseToJsonElement(body).jsonObject
                 code = fields["code"]?.jsonPrimitive?.contentOrNullSafe()
                 generation = fields["generation"]?.jsonPrimitive?.contentOrNullSafe()
                 epoch = fields["control_epoch"]?.jsonPrimitive?.longOrNull
                 retryAfter = fields["retry_after_ms"]?.jsonPrimitive?.longOrNull
+                detail = fields["message"]?.jsonPrimitive?.contentOrNullSafe()
+                invalidField = fields["invalid_field"]?.jsonPrimitive?.contentOrNullSafe()
             } catch (_: Exception) {
                 // Status only. That is still enough to classify.
             }
-            return ControlTransportException(status, code, generation, epoch, retryAfter)
+            return ControlTransportException(
+                status, code, generation, epoch, retryAfter, detail, invalidField,
+            )
         }
 
         /** `null` for a JSON null or a non-string, rather than the text "null". */
@@ -118,6 +124,8 @@ class PlaybackControlSession(
     // reporter reads this immutable envelope, including on cadence/retry.
     private val latest = AtomicReference<PlaybackControlCapture?>(null)
     private var captureRevision = 0L
+    private val prepared = PreparedReplacementCoordinator()
+    private var onPreparedEvent: (PreparedReplacementEvent) -> Unit = {}
 
     /**
      * One identity per player instance, not per session: a reopen is the same
@@ -292,9 +300,11 @@ class PlaybackControlSession(
         observe: () -> PlayerControlObservation?,
         transport: PlaybackControlTransport = PlaybackControlTransport(Session.origin),
         onSubtitleReady: () -> Unit = {},
+        onPreparedEvent: (PreparedReplacementEvent) -> Unit = {},
     ) {
         end()
         this.observe = observe
+        this.onPreparedEvent = onPreparedEvent
         // A generation, not a reset. `end()` stops the old reporter in a
         // launched coroutine, so the stop does not necessarily land before
         // this begin — and an old in-flight exchange completing in that window
@@ -327,11 +337,18 @@ class PlaybackControlSession(
             // already honours them; a player acting on them here would be
             // deciding, which is the next slice.
             onExchange = { exchange ->
-                if (exchange.capture.owner != PlaybackControlCaptureOwner(clientInstanceId, generation) ||
-                    latest.get()?.owner != exchange.capture.owner
+                if (exchange.capture.owner != owner ||
+                    synchronized(verdictLock) { generation != verdictGeneration }
                 ) {
                     return@create
                 }
+                // Preparation settlement belongs to the session generation,
+                // not to the transient capture slot. A routine mutation clears
+                // that slot while its new source is being attached, but an
+                // in-flight acknowledgement still has to be retired exactly
+                // once during that gap.
+                handlePreparedExchange(exchange)
+                if (latest.get()?.owner != exchange.capture.owner) return@create
                 // Every exchange advances the counter, including a failed one:
                 // an owner that asked must not wait out its whole bound for an
                 // exchange that has already come back with nothing.
@@ -392,6 +409,7 @@ class PlaybackControlSession(
      * but replaces what the next exchange will carry.
      */
     fun playerChanged() {
+        applyPreparedEvents(prepared.expire(monotonicNowMs()))
         val capture = publish() ?: return
         val subject = reporter ?: return
         scope.launch { subject.notify(capture) }
@@ -412,6 +430,46 @@ class PlaybackControlSession(
         scope.launch { subject.notifyUrgently(scope, capture) }
     }
 
+    /** The later presentation path calls this after parsing the successor manifest. */
+    fun preparedMetadataReady(actionId: String): Boolean =
+        queuePreparedAcknowledgement { prepared.metadataReady(actionId) }
+
+    /** [bufferedThroughMs] is source/film time, matching the offered origin. */
+    fun preparedBufferReady(actionId: String, bufferedThroughMs: Long): Boolean =
+        queuePreparedAcknowledgement { prepared.bufferReady(actionId, bufferedThroughMs) }
+
+    /**
+     * Queue the durable commit. The origin is intentionally not an argument:
+     * it is echoed byte-for-byte from the retained offer and cannot be
+     * recomputed from a playhead by the presentation path.
+     */
+    fun preparedCommitted(actionId: String, firstFrameUnixMs: Long): Boolean {
+        if (reporter == null) return false
+        val snapshot = latest.get()?.snapshot
+        val result = prepared.committed(
+            actionId,
+            firstFrameUnixMs,
+            snapshot?.selection,
+            snapshot?.demand,
+        )
+        if (!result.queued && result.released == null) return false
+        refreshPreparedCapture()
+        result.released?.let { applyPreparedEvents(listOf(it)) }
+        sendPreparedAcknowledgementUrgently()
+        return result.queued
+    }
+
+    fun preparedFailed(actionId: String): Boolean = queuePreparedTerminal {
+        prepared.failed(actionId)
+    }
+
+    fun preparedAborted(actionId: String): Boolean = queuePreparedTerminal {
+        prepared.aborted(actionId)
+    }
+
+    internal fun pendingPreparedAcknowledgementForTest(): ActionAcknowledgement? =
+        prepared.nextAcknowledgement
+
     /**
      * Publish a viewer destination before the media item or server session is
      * replaced. The pending target lives in [PlaybackIntent], so the snapshot
@@ -428,21 +486,27 @@ class PlaybackControlSession(
     }
 
     /** Called synchronously by the player dispatcher; never by the reporter. */
-    private fun publish(): PlaybackControlCapture? = synchronized(verdictLock) {
-        val snapshot = observe?.invoke()?.let(PlaybackControlMapping::snapshot)
-        val capture = snapshot?.let {
-            PlaybackControlCapture(
-                it,
-                verdictIntentGeneration,
-                PlaybackControlCaptureOwner(clientInstanceId, verdictGeneration),
-                ++captureRevision,
-            )
+    private fun publish(): PlaybackControlCapture? {
+        val observed = observe?.invoke()?.let(PlaybackControlMapping::snapshot)
+        val release = observed?.let { prepared.reconcile(it.selection, it.demand) }
+        release?.let { applyPreparedEvents(listOf(it)) }
+        return synchronized(verdictLock) {
+            val snapshot = observed?.copy(acknowledgement = prepared.nextAcknowledgement)
+            val capture = snapshot?.let {
+                PlaybackControlCapture(
+                    it,
+                    verdictIntentGeneration,
+                    PlaybackControlCaptureOwner(clientInstanceId, verdictGeneration),
+                    ++captureRevision,
+                )
+            }
+            latest.set(capture)
+            capture
         }
-        latest.set(capture)
-        capture
     }
 
     fun end() {
+        applyPreparedEvents(prepared.reset(PreparedReplacementReleaseReason.SESSION_ENDED))
         // Stopping the coroutine is asynchronous. Invalidate every callback
         // synchronously, including an exchange already returning from HTTP.
         val generation = synchronized(verdictLock) {
@@ -457,6 +521,70 @@ class PlaybackControlSession(
         reporter = null
         observe = null
         if (subject != null) scope.launch { subject.stop() }
+    }
+
+    private fun handlePreparedExchange(exchange: PlaybackControlReporter.Exchange) {
+        val events = exchange.response?.let { response ->
+            prepared.receive(
+                response.action,
+                exchange.request.acknowledgement,
+                exchange.request.selection,
+                monotonicNowMs(),
+            )
+        } ?: prepared.failure(
+            exchange.cause,
+            exchange.request.acknowledgement,
+            exchange.request.generation,
+        )
+        val next = prepared.nextAcknowledgement
+        if (exchange.request.acknowledgement != next) {
+            refreshPreparedCapture()
+        }
+        applyPreparedEvents(events)
+        if (next != null && next != exchange.request.acknowledgement) {
+            sendPreparedAcknowledgementUrgently()
+        }
+    }
+
+    private fun queuePreparedAcknowledgement(update: () -> Boolean): Boolean {
+        if (reporter == null || !update()) return false
+        refreshPreparedCapture()
+        sendPreparedAcknowledgementUrgently()
+        return true
+    }
+
+    private fun queuePreparedTerminal(
+        update: () -> PreparedReplacementEvent.Released?,
+    ): Boolean {
+        if (reporter == null) return false
+        val event = update() ?: return false
+        refreshPreparedCapture()
+        applyPreparedEvents(listOf(event))
+        sendPreparedAcknowledgementUrgently()
+        return true
+    }
+
+    /** Rewrite only the immutable envelope; never sample Media3 on the return path. */
+    private fun refreshPreparedCapture(): PlaybackControlCapture? = synchronized(verdictLock) {
+        val current = latest.get() ?: return@synchronized null
+        val refreshed = PlaybackControlCapture(
+            current.snapshot.copy(acknowledgement = prepared.nextAcknowledgement),
+            current.intentGeneration,
+            current.owner,
+            ++captureRevision,
+        )
+        latest.set(refreshed)
+        refreshed
+    }
+
+    private fun sendPreparedAcknowledgementUrgently() {
+        val capture = latest.get() ?: return
+        val subject = reporter ?: return
+        scope.launch { subject.notifyUrgently(scope, capture) }
+    }
+
+    private fun applyPreparedEvents(events: List<PreparedReplacementEvent>) {
+        events.forEach(onPreparedEvent)
     }
 
     private companion object {

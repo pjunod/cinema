@@ -175,24 +175,22 @@ class ControlRequestWireCase(unittest.TestCase):
         cls.android = ANDROID.read_text(encoding="utf-8")
 
     def assertSameWire(self, label: str, rust: set[str], swift: set[str], kotlin: set[str]) -> None:
+        self.assertPortWire(label, "Apple", rust, swift)
+        self.assertPortWire(label, "Android", rust, kotlin)
+
+    def assertPortWire(
+        self, label: str, port: str, rust: set[str], client: set[str]
+    ) -> None:
         self.assertEqual(
-            swift,
+            client,
             rust,
-            f"{label}: Apple and the server disagree "
-            f"(apple-only {sorted(swift - rust)}, server-only {sorted(rust - swift)})",
-        )
-        self.assertEqual(
-            kotlin,
-            rust,
-            f"{label}: Android and the server disagree "
-            f"(android-only {sorted(kotlin - rust)}, server-only {sorted(rust - kotlin)})",
+            f"{label}: {port} and the server disagree "
+            f"({port.lower()}-only {sorted(client - rust)}, "
+            f"server-only {sorted(rust - client)})",
         )
 
     def test_the_request_itself(self) -> None:
         rust = rust_struct_fields(self.rust, "ControlRequestV1")
-        # The server accepts an acknowledgement M2 clients never send: they
-        # consume no action, so they have nothing to acknowledge.
-        rust.discard("acknowledgement")
         # And it accepts an intent envelope no client sends yet. The field is
         # optional precisely so every deployed client keeps working without it,
         # and teaching the two ports to build one is §4's client-adapter work,
@@ -205,46 +203,73 @@ class ControlRequestWireCase(unittest.TestCase):
         # the Swift and Kotlin requests, and the test starts comparing it
         # again.
         rust.discard("intent")
+        swift = swift_coding_keys(self.apple, "ControlRequest")
+        kotlin = kotlin_fields(self.android, "ControlRequest")
+        common_rust = rust - {"acknowledgement"}
         self.assertSameWire(
             "ControlRequestV1",
-            rust,
-            swift_coding_keys(self.apple, "ControlRequest"),
-            kotlin_fields(self.android, "ControlRequest"),
+            common_rust,
+            swift - {"acknowledgement"},
+            kotlin - {"acknowledgement"},
         )
-
-    def test_the_acknowledgement_is_server_only_until_a_client_models_it(self) -> None:
-        """A struct no port declares is a parity hole nothing else would catch.
-
-        `ActionAcknowledgement` is the one request field with no client model:
-        M2 clients consume no action, so they have nothing to acknowledge, and
-        `test_the_request_itself` discards it for that reason. That discard is
-        correct today and silently wrong the moment a client gains the type —
-        the server could add, rename or retype a field and no test in this file
-        would notice, because the struct is outside every comparison.
-
-        So this asserts the premise rather than the parity. When it fails, the
-        fix is not to relax it: promote the pair to a real `assertSameWire`
-        beside the others, which is the check the discard has been standing in
-        for.
-        """
-        declared = {
-            "Apple": re.search(r"struct\s+ActionAcknowledgement\b", self.apple),
-            "Android": re.search(
-                r"(data\s+)?class\s+ActionAcknowledgement\b", self.android
+        for label, fields, source, pattern in (
+            (
+                "Apple",
+                swift,
+                self.apple,
+                r"supportedActions\s*=\s*\[([^\]]*)\]",
             ),
-        }
-        modelled = sorted(port for port, hit in declared.items() if hit)
-        self.assertEqual(
-            modelled,
-            [],
-            "ActionAcknowledgement is now modelled by "
-            + ", ".join(modelled)
-            + " while this file still discards it from the request comparison. "
-            "Add an assertSameWire for it rather than widening the discard: "
-            "the server requires committed_media_origin_ms and "
-            "first_frame_unix_ms on a commit, and a port that spells either "
-            "differently is refused at validation with no other test to say so.",
+            (
+                "Android",
+                kotlin,
+                self.android,
+                r"SUPPORTED_ACTIONS\s*=\s*listOf\(([^)]*)\)",
+            ),
+        ):
+            found = re.search(pattern, source)
+            self.assertIsNotNone(found, f"{label} no longer declares an action vocabulary")
+            supports_prepare = "prepare_replacement" in set(
+                re.findall(r'"([^"]+)"', found.group(1))
+            )
+            self.assertEqual(
+                "acknowledgement" in fields,
+                supports_prepare,
+                f"{label} must model acknowledgement exactly when it declares "
+                "prepare_replacement",
+            )
+
+    def test_every_modelled_acknowledgement_matches_the_server(self) -> None:
+        """Each active adapter spells every acknowledgement field exactly."""
+        rust = rust_struct_fields(self.rust, "ActionAcknowledgement")
+        self.assertPortWire(
+            "ActionAcknowledgement",
+            "Apple",
+            rust,
+            swift_coding_keys(self.apple, "ActionAcknowledgement"),
         )
+        self.assertPortWire(
+            "ActionAcknowledgement",
+            "Android",
+            rust,
+            kotlin_fields(self.android, "ActionAcknowledgement"),
+        )
+
+        server = rust_enum_values(self.rust, "AcknowledgementState")
+        self.assertIn("switched", server, "the server vocabulary unexpectedly changed")
+        for label, states in (
+            ("Apple", swift_enum_values(self.apple, "AcknowledgementState")),
+            ("Android", kotlin_enum_values(self.android, "AcknowledgementState")),
+        ):
+            self.assertNotIn(
+                "switched",
+                states,
+                f"{label} must not send switched before that state is fleet-safe",
+            )
+            self.assertEqual(
+                states,
+                server - {"switched"},
+                f"{label} speaks a different acknowledgement vocabulary subset",
+            )
 
     def test_the_selection(self) -> None:
         self.assertSameWire(

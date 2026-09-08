@@ -804,3 +804,19 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "func selectQuality(_ height: Int?)"
 test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "testQualityAudioAndSubtitleCommandsCreateANewPresentationDestinationSynchronously"
+
+[[fixes]]
+id = "android.prepared-switch-settlement-fences"
+commits = ["1865c051"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PreparedReplacement.kt"
+source_anchor = "fun committed("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedReplacementTest.kt"
+test_anchor = "commit rejection settles while the current capture is cleared"
+
+[[fixes]]
+id = "apple.prepared-switch-lifecycle-hardening"
+commits = ["638ac998"]
+source = "clients/apple/Sources/PlaybackControlReporter.swift"
+source_anchor = "private var pendingAcknowledgements: [ActionAcknowledgement] = []"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testRapidPreparedProgressQueuesInOrderAndCommitStopsThePredecessor"
