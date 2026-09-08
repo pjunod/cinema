@@ -28,7 +28,7 @@ a bug.
 
 `./gradlew testDebugUnitTest :app:assembleDebug :app:lintDebug` — the
 non-Docker equivalent of `make android-test` and `make android` — green.
-**442 tests, 0 failures, 0 errors.**
+**461 tests, 0 failures, 0 errors.**
 
 ---
 
@@ -237,42 +237,14 @@ file the JVM unit lane cannot reach. Two of its decisions moved out in response,
 into `PreparedReplacement.kt` where they are tested; the residue is named in a
 comment listing all six paths that must abandon a preparation.
 
-**Fixed after the fourth pass:** `observed_download_bps` measured average
-throughput rather than headroom. The rate window divided bytes by *wall clock*,
-and an HLS player with a full buffer fetches a segment in a burst and then idles
-for seconds — so a window opened during one burst was closed by the first byte
-of the next and its denominator was mostly idle. The reading oscillated between
-roughly the link speed and near zero, and the low readings are the ones a floor
-sees. The server's floor asks `observed >= 2 * delivered`, which is a question
-about headroom; an average that includes the idle between segments answers
-roughly "what is this stream's bitrate" and answers it with a number that can
-never be twice itself.
-
-`ThroughputWindow` counts only the time a transfer is actually open — a count
-rather than a flag, because Media3 fetches a playlist and a segment
-concurrently — and closes after a second of transfer however long that second
-takes to accumulate. Lifted out of the transfer listener so it has no Media3 in
-it: the arithmetic was untestable while it lived there, and it was wrong the
-whole time.
-
-**And the tests were checked against the code they replaced.** The first draft
-of them passed against the old algorithm eight times out of nine, because the
-old reading *oscillated* — roughly the link speed at the end of a burst, a
-fraction of it on the first byte after a gap — and every case sampled at the
-end. They sample at the gap now, and the old algorithm was reinstated behind
-the same API to prove it: eight of ten reject it, and the two that do not are
-named in the file with what they do pin instead.
-
-**What this does not fix, and nothing client-side can.** A CDN that paces a
-segment — dripping it at some multiple of the bitrate rather than as fast as
-the link allows — keeps the transfer open for most of the window, so active
-time is close to wall time and the measured rate is the paced rate rather than
-the link's capacity. On such a server `observed` can sit below `2 × delivered`
-on a link with ample headroom, and the refusal is indistinguishable from a
-tight link. TCP slow start biases the same way. Both under-report, which is the
-safe direction for a floor that authorises priming a second decoder on a
-viewer's device — but read the `throughput_insufficient` counter with this in
-mind rather than concluding Android has no headroom.
+**Left unfixed, deliberately:** `observed_download_bps` measures average
+throughput rather than headroom, because the rate window's denominator includes
+inter-segment idle time. During steady-state playback it converges on the
+delivered bitrate — which is the number the floor requires it to be *twice*. If
+prepared handoffs are enabled and still never fire, this is the second thing to
+look at after the VOD `delivered_bps` gap. The window predates this milestone
+and lives in `MediaOrigin.kt`; fixing it is a change to what every session
+reports, not to this path.
 
 ---
 
@@ -281,16 +253,41 @@ mind rather than concluding Android has no headroom.
 Recorded from another session's trace of the same server. None of it is in this
 effort branch yet; all of it changes a client.
 
-- **`ActionAcknowledgement` gains a fifth field, `committed_media_origin_ms`,
-  required on `Committed`** and compared against the staged successor's own
-  `media_origin_ms`. Omit it once that lands and every commit is `400
-  invalid_control`. **Do not add it early**: the struct carries
-  `deny_unknown_fields`, so against today's server a fifth key refuses the whole
-  exchange the acknowledgement rides on. Echo the offer's value when it lands;
-  never recompute it. `test_control_wire_conformance` is what will fail first,
-  which is the cheapest possible warning.
+- **`ActionAcknowledgement`'s fifth field, `committed_media_origin_ms` —
+  now carried.** It is required on `Committed` on `main` and compared against
+  the staged successor's own `media_origin_ms`; a commit that omits it is a
+  `400 invalid_control`. The earlier note here said not to add it early, on the
+  grounds that `deny_unknown_fields` would make a fifth key refuse the whole
+  exchange against this branch's older server. That reasoning was right about
+  the mechanism and wrong about the risk:
+
+  `explicitNulls` is off, so the field is **absent from the wire on every state
+  except `committed`** — the four other acknowledgements are byte-identical to
+  before and this branch's server accepts them unchanged. Only a `committed`
+  carries it, and a `committed` cannot happen here: the successor can never
+  become playable while staging does not prime, so the ledger's
+  `canOfferPreparation` retires the path after the first attempt. Against
+  `main` it is required. So the field is safe on both and correct on the one
+  that matters.
+
+  It is echoed from the offer and never recomputed. That is the whole point of
+  it: `action_id` says which offer is being answered, and this says the client
+  built the thing that offer described — the server refuses a mismatch, which
+  closes the gap the commit digest does not cover (a successor primed for one
+  point in the film and committed after the viewer seeked elsewhere). A number
+  derived from this client's own player would agree with itself no matter what
+  the viewer did.
 - **`ControlRequestV1` gains `intent`**, which no client sends yet.
 - **VOD stops being excluded**, as above.
+
+**Where the three ports actually are, 2026-09-08.** Apple's
+`PreparedReplacement.swift` and the five-field acknowledgement are on `main`;
+the web half is PR #125 into `main`; Android is here, on the effort branch,
+because that is the baseline its brief named. So the effort branch's merge into
+`main` is where the three meet — and `test_control_wire_conformance`'s
+`ActionAcknowledgement` arm on `main` already reads Android's Kotlin, which is
+why the field is carried now rather than left for whoever performs that merge
+to discover as a red gate.
 
 The general rule this branch already follows: the code wins and the contract
 document is the bug. Re-derive every mirrored rule from the Rust at build time.
@@ -300,11 +297,7 @@ document is the bug. Re-derive every mirrored rule from the Rust at build time.
 ## Follow-ups this branch deliberately left
 
 - The lab re-run in §1 of the brief. Highest-value item and not code.
-- ~~The three documents naming a stale AGP version.~~ Done: `README.md` and
-  `docs/PUBLISHING.md` quote the catalog now, and a check keeps every document
-  that names one honest. The Dockerfile's comment is left alone on purpose: the
-  Android CI job pulls a tag that *is* `sha256sum clients/android/Dockerfile`,
-  so editing it costs the next Android job a full SDK re-download and a push.
-  One job, not every job — but a poor trade for a comment on a runner whose
-  registry access has already been seen to fail.
+- `clients/android/README.md:249`, `clients/android/Dockerfile:36` and
+  `docs/PUBLISHING.md:360` all say AGP 9.3.1; the version catalog says 9.3.2
+  and the catalog is right. A courtesy fix, not this milestone's.
 - A narrower capability keyed by axis and device class — protocol v2.

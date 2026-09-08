@@ -282,6 +282,22 @@ class PreparedReplacementLedgerTest {
         assertFalse(
             ActionAcknowledgement(ACTION_ID, AcknowledgementState.COMMITTED).isValid,
         )
+        // A commit carries both. The frame is the measurement; the origin is
+        // the evidence, and the server refuses a commit that omits either.
+        assertFalse(
+            ActionAcknowledgement(
+                ACTION_ID,
+                AcknowledgementState.COMMITTED,
+                firstFrameUnixMs = 1_788_000_000_000,
+            ).isValid,
+        )
+        assertFalse(
+            ActionAcknowledgement(
+                ACTION_ID,
+                AcknowledgementState.COMMITTED,
+                committedMediaOriginMs = 0,
+            ).isValid,
+        )
     }
 
     @Test
@@ -702,6 +718,7 @@ class SettlingSnapshotTest {
                 ActionAcknowledgement(
                     ACTION_ID,
                     AcknowledgementState.COMMITTED,
+                    committedMediaOriginMs = 1_800_000,
                     firstFrameUnixMs = 1_788_000_000_000,
                 ),
             ),
@@ -750,6 +767,7 @@ class SettlingSnapshotTest {
                 acknowledgement = ActionAcknowledgement(
                     ACTION_ID,
                     AcknowledgementState.COMMITTED,
+                    committedMediaOriginMs = 1_800_000,
                     firstFrameUnixMs = 1_788_000_000_000,
                 ),
                 selection = ClientSelection(
@@ -834,5 +852,97 @@ class PreparedOfferIsLearnedTest {
         exhausted.failed()
         assertFalse(exhausted.canOfferPreparation)
         assertTrue(PreparedReplacementLedger().canOfferPreparation)
+    }
+}
+
+/**
+ * `committed_media_origin_ms`: the field that makes a commit evidence rather
+ * than an assertion.
+ *
+ * `action_id` says which offer the client is answering. This says the client
+ * built the thing that offer described — and the server compares it against
+ * the staged successor's own `media_origin_ms` and refuses a mismatch, which
+ * closes the one gap the commit digest does not cover: a successor primed for
+ * one point in the film and committed after the viewer seeked elsewhere.
+ *
+ * So the only correct source is the offer. A number this client derived from
+ * its own player would agree with itself no matter what the viewer did, which
+ * is exactly the check being defeated.
+ */
+class CommittedMediaOriginTest {
+    @Test
+    fun `a commit echoes the offer's origin rather than recomputing one`() {
+        val ledger = PreparedReplacementLedger()
+        ledger.offer(prepare(mediaOriginMs = 1_800_000))
+        ledger.bufferReady(1_805_000)
+        ledger.switched()
+        val committed = assertNotNull(ledger.committed(1_788_000_000_000))
+        assertEquals(1_800_000L, committed.committedMediaOriginMs)
+        assertEquals(1_788_000_000_000L, committed.firstFrameUnixMs)
+        assertTrue(committed.isValid)
+    }
+
+    @Test
+    fun `a zero origin is echoed as zero rather than dropped`() {
+        // The common VOD-shaped offer. `explicitNulls` is off, so a field left
+        // null vanishes from the wire — and a commit that omits this one is a
+        // `400` that takes the whole exchange with it.
+        val ledger = PreparedReplacementLedger()
+        ledger.offer(prepare(mediaOriginMs = 0))
+        ledger.switched()
+        val committed = assertNotNull(ledger.committed(1_788_000_000_000))
+        assertEquals(0L, committed.committedMediaOriginMs)
+        val encoded = json.encodeToString(ActionAcknowledgement.serializer(), committed)
+        assertTrue(encoded.contains("\"committed_media_origin_ms\":0"), encoded)
+    }
+
+    @Test
+    fun `only a commit carries it`() {
+        // The earlier states report progress toward a successor that is not
+        // being published yet, and the server does not ask them for an origin.
+        val ledger = PreparedReplacementLedger()
+        ledger.offer(prepare(mediaOriginMs = 1_800_000))
+        assertNull(assertNotNull(ledger.metadataReady()).committedMediaOriginMs)
+        assertNull(assertNotNull(ledger.bufferReady(90_000)).committedMediaOriginMs)
+        val abandoned = PreparedReplacementLedger()
+        abandoned.offer(prepare(mediaOriginMs = 1_800_000))
+        assertNull(assertNotNull(abandoned.aborted()).committedMediaOriginMs)
+    }
+
+    @Test
+    fun `the field is absent from the wire when it is absent from the state`() {
+        val encoded = json.encodeToString(
+            ActionAcknowledgement.serializer(),
+            ActionAcknowledgement(ACTION_ID, AcknowledgementState.ABORTED),
+        )
+        assertFalse(encoded.contains("committed_media_origin_ms"), encoded)
+    }
+
+    @Test
+    fun `an origin outside the protocol's range is refused before it is sent`() {
+        assertFalse(
+            ActionAcknowledgement(
+                ACTION_ID,
+                AcknowledgementState.COMMITTED,
+                committedMediaOriginMs = -1,
+                firstFrameUnixMs = 1,
+            ).isValid,
+        )
+        assertFalse(
+            ActionAcknowledgement(
+                ACTION_ID,
+                AcknowledgementState.COMMITTED,
+                committedMediaOriginMs = PlaybackControl.MAX_MEDIA_MILLIS + 1,
+                firstFrameUnixMs = 1,
+            ).isValid,
+        )
+        assertTrue(
+            ActionAcknowledgement(
+                ACTION_ID,
+                AcknowledgementState.COMMITTED,
+                committedMediaOriginMs = PlaybackControl.MAX_MEDIA_MILLIS,
+                firstFrameUnixMs = 1,
+            ).isValid,
+        )
     }
 }

@@ -1143,11 +1143,15 @@ class PlaybackControlPreparedReplacementTest {
                 acknowledgement = ActionAcknowledgement(
                     actionId,
                     AcknowledgementState.COMMITTED,
+                    committedMediaOriginMs = 1_800_000,
                     firstFrameUnixMs = 1_788_000_000_000,
                 ),
             ),
         )
         assertTrue(committed.contains("\"state\":\"committed\""), committed)
+        // The evidence half of a commit, beside the measurement half. The
+        // server requires both and compares this one against the offer.
+        assertTrue(committed.contains("\"committed_media_origin_ms\":1800000"), committed)
         assertTrue(committed.contains("\"first_frame_unix_ms\":1788000000000"), committed)
 
         assertEquals(
@@ -1173,6 +1177,7 @@ class PlaybackControlPreparedReplacementTest {
             acknowledgement = ActionAcknowledgement(
                 actionId,
                 AcknowledgementState.COMMITTED,
+                committedMediaOriginMs = 1_800_000,
                 firstFrameUnixMs = 1_788_000_000_000,
             ),
         )

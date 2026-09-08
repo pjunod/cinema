@@ -249,10 +249,16 @@ internal class PreparedReplacementLedger {
     fun committed(firstFrameUnixMs: Long): ActionAcknowledgement? {
         if (!isLive) return null
         if (firstFrameUnixMs <= 0) return null
+        // Read off the offer, not off the player. The server compares this
+        // against the staged successor's own `media_origin_ms` and refuses a
+        // mismatch — that refusal is what makes a commit evidence, and a number
+        // this client derived for itself would only ever agree with itself.
+        val origin = action?.mediaOriginMs ?: return null
         phase = PreparationPhase.COMMITTED
         return acknowledgement(
             AcknowledgementState.COMMITTED,
             firstFrameUnixMs = firstFrameUnixMs,
+            committedMediaOriginMs = origin,
         )
     }
 
@@ -293,10 +299,16 @@ internal class PreparedReplacementLedger {
         state: AcknowledgementState,
         bufferedThroughMs: Long? = null,
         firstFrameUnixMs: Long? = null,
+        committedMediaOriginMs: Long? = null,
     ): ActionAcknowledgement? {
         val id = actionId ?: return null
-        return ActionAcknowledgement(id, state, bufferedThroughMs, firstFrameUnixMs)
-            .takeIf { it.isValid }
+        return ActionAcknowledgement(
+            actionId = id,
+            state = state,
+            bufferedThroughMs = bufferedThroughMs,
+            committedMediaOriginMs = committedMediaOriginMs,
+            firstFrameUnixMs = firstFrameUnixMs,
+        ).takeIf { it.isValid }
     }
 }
 
