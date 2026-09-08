@@ -721,8 +721,20 @@ class Controller(
     private var presentationListener: Player.Listener? = null
     private var recipePresentationFrame: Pair<Long, Long>? = null
 
+    /**
+     * Registered through [addPlayerListener], not on `player` directly.
+     *
+     * A prepared replacement swaps the player out from under this controller,
+     * and only the listeners the registry knows about are carried across. A
+     * listener bound to whichever player happened to be current stops firing at
+     * the commit — and this is the one listener that clears a pending seek, so
+     * losing it means the destination never settles: the target-presentation
+     * deadline reports STARVED about a player that is rendering fine, reopens
+     * the session, and on its second firing tells the viewer their place is
+     * saved and stops.
+     */
     private fun disarmVideoPresentation() {
-        presentationListener?.let(player::removeListener)
+        presentationListener?.let(::removePlayerListener)
         presentationListener = null
     }
 
@@ -743,12 +755,12 @@ class Controller(
                 if (!recipeOwnership.canPresent(recipe)) return
                 if (!playbackIntent.presentedVideoFrame(realPosition(), sequence)) return
                 playbackControl.playerChanged()
-                player.removeListener(this)
+                removePlayerListener(this)
                 if (presentationListener === this) presentationListener = null
             }
         }
         presentationListener = captured
-        player.addListener(captured)
+        addPlayerListener(captured)
     }
 
     private fun markIntentExecuted(
@@ -1027,11 +1039,7 @@ class Controller(
         // encoder runs for another 330 seconds after the viewer left.
         abandonPreparedReplacement(failed = false)
         awaitingCommitFrameSinceMs = null
-        val settling = pendingAcknowledgement?.let {
-            playbackControlObservation()
-                ?.let(PlaybackControlMapping::snapshot)
-                ?.let(::settlingSnapshot)
-        }
+        val settling = settlingSnapshotIfOwed()
         // Every read below this line is against a player that is about to be
         // released, so the observation is closed first.
         controlObservationIsClosed = true
@@ -1044,6 +1052,11 @@ class Controller(
         // A verdict survives a reopen because the failure it explains usually
         // arrives after one. It must not survive the title: a confident
         // sentence about the wrong film is worse than a generic one.
+        //
+        // This runs after the hand-off above and empties the slot the session
+        // publishes captures into — which is why a settled reporter does not
+        // read that slot again. See `PlaybackControlReporter.settled`: without
+        // it, this line silently threw the teardown exchange away.
         playbackControl.clearVerdict()
         controlWaitingSince = null
         controlObservationOverride = null
@@ -1872,9 +1885,46 @@ class Controller(
         }
     }
 
+    /**
+     * The acknowledgement a just-abandoned preparation owes, as a snapshot.
+     *
+     * Null unless one is actually owed, so every caller's ordinary path is the
+     * plain teardown it always was.
+     */
+    private fun settlingSnapshotIfOwed(): PlaybackControlSnapshot? =
+        pendingAcknowledgement?.let {
+            playbackControlObservation()
+                ?.let(PlaybackControlMapping::snapshot)
+                ?.let(::settlingSnapshot)
+        }
+
+    /**
+     * End this session's reporting — carrying an owed acknowledgement out if
+     * there is one.
+     *
+     * Every caller of this abandons a preparation immediately before it, and an
+     * abandonment publishes its acknowledgement by *queueing* an urgent report
+     * on the composition's dispatcher. `end()` runs synchronously and empties
+     * the slot that report would read from, so the queued report found nothing
+     * and the acknowledgement was dropped on the session that owned the
+     * staging — leaving a real encoder and that session's one preparation slot
+     * held for the server's 330 s deadline. This is [release]'s hand-off,
+     * applied to the reopen paths for the same reason.
+     *
+     * The acknowledgement may still ride the next session's first exchange as
+     * well: the delivery callback that would clear it is fenced by a
+     * generation this teardown invalidates. A duplicate is inert — the server
+     * ignores an `action_id` not bound to the session it arrives on — and it is
+     * strictly what happened before this hand-off existed.
+     */
     private fun endPlaybackControl() {
         playbackControlBootstrapFence.invalidate()
-        playbackControl.end()
+        val settling = settlingSnapshotIfOwed()
+        if (settling != null) {
+            playbackControl.endAfterFinalExchange(vm.viewModelScope, settling)
+        } else {
+            playbackControl.end()
+        }
     }
 
     /**

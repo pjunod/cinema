@@ -778,6 +778,20 @@ class PlaybackControlReporter private constructor(
     private var reportingScope: CoroutineScope? = null
     private var inFlight = false
     private var pending: PlaybackControlCapture? = null
+
+    /**
+     * This reporter has been handed its last word and will not read another.
+     *
+     * Every ordinary path reconciles what it is given against the source's live
+     * capture, because the source may have moved on since the caller read it.
+     * After [settle] that reconciliation is not merely unnecessary, it is
+     * wrong: the caller closed its observation before handing over, and its
+     * session invalidates the live slot in the same synchronous pass — so a
+     * reconciliation finds nothing there and discards the one capture that
+     * carried the acknowledgement. This flag is what makes "the value handed in
+     * is the truth" true rather than merely intended.
+     */
+    private var settled = false
     private var retryRequest: PendingRequest? = null
     private var acceptedCapabilities: DynamicCapabilities? = null
     private var lastStartedAt: Long? = null
@@ -931,6 +945,7 @@ class PlaybackControlReporter private constructor(
                 retryRequest = null
                 nextAllowedAt = 0L
                 pending = value
+                settled = true
                 true
             }
         }
@@ -993,7 +1008,7 @@ class PlaybackControlReporter private constructor(
             val cadence = bootstrap.nextExchangeMs
             val wait = mutex.withLock {
                 if (stopped) return
-                if (pending == null && retryRequest == null) {
+                if (!settled && pending == null && retryRequest == null) {
                     pending = newestCapture(null)
                 }
                 if (pending == null && retryRequest == null) return@withLock cadence
@@ -1025,7 +1040,11 @@ class PlaybackControlReporter private constructor(
      */
     private fun nextRequestLocked(): PendingRequest? {
         retryRequest?.let { return it }
-        val newest = newestCapture(pending)
+        // A settled reporter uses what it was handed, unreconciled. See
+        // [settled]: the live slot is invalidated by the same pass that handed
+        // this over, so reconciling here answers null and throws the last word
+        // away.
+        val newest = if (settled) pending else newestCapture(pending)
         pending = null
         if (newest == null || !newest.snapshot.isValid) return null
         sequence += 1

@@ -550,7 +550,35 @@ class PlaybackControlSession(
     ) {
         dispatching = false
         val subject = reporter ?: return
+        // Stamped before the invalidation below, from the identity the reporter
+        // was built with — it is answering for that session, not for whatever
+        // replaces it.
+        val settling = captureOf(finalSnapshot)
+        // The same synchronous invalidation [end] performs, and for the same
+        // reason twice over. A reopen calls this and then begins a new session
+        // immediately, so an exchange still returning from HTTP on the old
+        // reporter must not reach a callback that would act on it — least of
+        // all `onPrepare`, which builds a player. The exchange itself survives
+        // the invalidation because a settled reporter reads what it was handed
+        // rather than the slot this empties.
+        //
+        // What does not survive is the delivery callback for the
+        // acknowledgement this carries: it is fenced by the generation being
+        // bumped here, so the acknowledgement stays pending and may ride the
+        // next session's first exchange as well. That duplicate is inert — the
+        // server ignores an `action_id` not bound to the session it arrives on
+        // — and the alternative is leaving a live reporter un-fenced across a
+        // reopen, which is not a trade.
+        val generation = synchronized(verdictLock) {
+            latest.set(null)
+            ++verdictGeneration
+        }
+        synchronized(answerLock) {
+            answerGeneration = generation
+            ownerChangesSeen += 1
+        }
         reporter = null
+        observe = null
         outerScope.launch {
             // `settle`, not `notifyUrgently`. The urgent path deliberately
             // leaves an in-flight exchange alone, because `run()` picks the
@@ -559,7 +587,7 @@ class PlaybackControlSession(
             // "straight after it" never arrives, and the coroutine dies inside
             // `send` without ever clearing `inFlight`. Re-homing
             // unconditionally is what makes this path work at all.
-            val handed = subject.settle(outerScope, captureOf(finalSnapshot))
+            val handed = subject.settle(outerScope, settling)
             val deadline = monotonicNowMs() + FINAL_EXCHANGE_MS
             while (handed && monotonicNowMs() < deadline) {
                 val status = subject.status()

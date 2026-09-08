@@ -112,7 +112,17 @@ private class Harness(private val scope: TestScope) {
     }
 
     val now: () -> Long = { scope.currentTime }
-    val captureOf: () -> PlaybackControlCapture? = { PlaybackControlCapture(current, intentGeneration, owner, sourceRevision) }
+
+    /**
+     * The source stopped publishing. Not a hypothetical: a session empties its
+     * capture slot synchronously on teardown, so every reporter that outlives
+     * its session by one exchange reads exactly this.
+     */
+    var sourceIsGone = false
+    val captureOf: () -> PlaybackControlCapture? = {
+        if (sourceIsGone) null
+        else PlaybackControlCapture(current, intentGeneration, owner, sourceRevision)
+    }
     val onExchange: (PlaybackControlReporter.Exchange) -> Unit = { exchanges += it }
 }
 
@@ -1568,6 +1578,36 @@ class PlaybackControlSettleTest {
         // all, which is the one thing it existed to carry.
         assertEquals(2L, last.sequence)
         assertFalse(subject.status().retrying)
+        subject.stop()
+    }
+
+    @Test
+    fun `a teardown outlives the source that handed it over`() = runTest {
+        // The third way this acknowledgement has been lost, and the one the
+        // port onto main introduced: the session empties its capture slot in
+        // the same synchronous pass that hands the reporter its last word —
+        // `clearVerdict` on the disposal path, `end`'s invalidation on a
+        // reopen. Every ordinary path reconciles what it is given against that
+        // slot, and a reconciliation against an empty slot answers null, so the
+        // exchange was built from nothing and never sent. A settled reporter
+        // uses what it was handed.
+        val harness = Harness(this)
+        val subject = assertNotNull(reporter(harness))
+        subject.start(backgroundScope)
+        advanceTimeBy(1)
+        runCurrent()
+        assertTrue(subject.settle(backgroundScope, settling(AcknowledgementState.ABORTED)))
+        harness.sourceIsGone = true
+        advanceTimeBy(2_000)
+        runCurrent()
+
+        val last = harness.requests.last()
+        assertEquals(
+            AcknowledgementState.ABORTED,
+            last.acknowledgement?.state,
+            "the exchange the teardown exists to send",
+        )
+        assertEquals(actionId, last.acknowledgement?.actionId)
         subject.stop()
     }
 
