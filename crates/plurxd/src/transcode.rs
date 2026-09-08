@@ -1627,15 +1627,26 @@ impl DiagnosticObservation {
         // grammar that matches nothing certifies every stream as clean. That
         // is the exact substitution this milestone exists to remove, so the
         // answer is no unless the command says the decoder out loud.
-        if backend != plurx_core::transcode::DecodeBackend::Software {
-            return unqualified;
-        }
+        //
+        // The backend used to be refused here outright, and that refusal was
+        // right about the danger and wrong about the remedy: it made the
+        // recovery this effort exists for unreachable, because only a
+        // software-decode plan could ever latch a qualified fault and only a
+        // hardware-decode plan has a software alternate to be given. The
+        // refusal now lives where the danger actually is — the backend is part
+        // of the contract's coverage key, so a contract qualified on software
+        // `h264` cannot answer for a VideoToolbox `h264`, which prints the
+        // identical `[dec:h264 @ …]` context. Naming the backend is what makes
+        // the two distinguishable; refusing one of them made them moot.
         let Some(decoder) = named_decoder else {
             return unqualified;
         };
-        let Some(contract) =
-            policy.contract_for(codec, decoder, crate::decoder_health::QUALIFIED_STDERR_MODE)
-        else {
+        let Some(contract) = policy.contract_for(
+            codec,
+            decoder,
+            backend.name(),
+            crate::decoder_health::QUALIFIED_STDERR_MODE,
+        ) else {
             return unqualified;
         };
         Self {
@@ -10534,7 +10545,17 @@ pub fn artifact_qualification_readiness(
     // flags. A contract qualified under different flags describes a different
     // log and cannot certify this one.
     let covering = |codec: &str, decoder: &str| {
-        policy.covering_contracts(codec, decoder, crate::decoder_health::QUALIFIED_STDERR_MODE)
+        // Software, because that is what the startup inventory measures: it
+        // runs one probe per codec with no hwaccel. When the inventory becomes
+        // backend-aware this reads the pair's own backend, and until then
+        // saying `software` out loud is the honest reading of a number that
+        // was only ever about software decode.
+        policy.covering_contracts(
+            codec,
+            decoder,
+            plurx_core::transcode::DecodeBackend::Software.name(),
+            crate::decoder_health::QUALIFIED_STDERR_MODE,
+        )
     };
     let covered_decoders = measured_decoders
         .iter()
@@ -39615,6 +39636,9 @@ pub(crate) mod tests {
             stderr_mode: crate::decoder_health::QUALIFIED_STDERR_MODE.to_owned(),
             input_codec: "h264".to_owned(),
             decoder: "h264".to_owned(),
+            decode_backend: plurx_core::transcode::DecodeBackend::Software
+                .name()
+                .to_owned(),
             require_context_addresses: true,
             primary_message: "Error submitting packet to decoder:".to_owned(),
             subordinate_message: Some("No frame decoded?".to_owned()),
@@ -39660,9 +39684,13 @@ pub(crate) mod tests {
                 "software, no implementation measured",
                 resolve(DecodeBackend::Software, None),
             ),
-            // A hardware backend substitutes `<codec>_qsv` and prints that.
+            // A hardware backend, which is no longer refused for being one.
+            // It is refused here because the only contract in this policy was
+            // qualified on software, and a decode path nobody qualified gets
+            // no grammar — which is the same rule as every other line in this
+            // list rather than a special case for hardware.
             (
-                "hardware backend",
+                "a backend no contract covers",
                 resolve(DecodeBackend::Qsv, Some("h264")),
             ),
             // A named implementation no contract covers.
@@ -39679,6 +39707,206 @@ pub(crate) mod tests {
             assert!(observation.contract_id.is_none(), "{label}");
             assert_eq!(observation.plan_digest, "digest", "{label}");
         }
+    }
+
+    /// One contract, on the backend asked for. `h264` on both, because that is
+    /// the measured fact the tests below are about: the accelerated and the
+    /// software decode of h264 print the same decoder name.
+    fn decode_contract_fixture(
+        backend: plurx_core::transcode::DecodeBackend,
+    ) -> crate::decoder_health::DiagnosticContract {
+        crate::decoder_health::DiagnosticContract {
+            id: "fixture".to_owned(),
+            host: "test".to_owned(),
+            ffmpeg_version: "9.0.1".to_owned(),
+            binary_sha256: "b".repeat(64),
+            buildconf_sha256: "c".repeat(64),
+            stderr_mode: crate::decoder_health::QUALIFIED_STDERR_MODE.to_owned(),
+            input_codec: "h264".to_owned(),
+            decoder: "h264".to_owned(),
+            decode_backend: backend.name().to_owned(),
+            require_context_addresses: true,
+            primary_message: "Decoding error:".to_owned(),
+            subordinate_message: None,
+            attributes_every_failure: false,
+            error_detail: "corrupt input packet".to_owned(),
+            fixture: "f".to_owned(),
+            fixture_sha256: "d".repeat(64),
+            scope: "test".to_owned(),
+            backend_fault_detail: None,
+        }
+    }
+
+    /// A contract is qualified on a decode *path*, and the decoder name does
+    /// not carry the path.
+    ///
+    /// Measured on the local Apple toolchain, FFmpeg 9.0.1: a VideoToolbox
+    /// decode of h264 and a software decode of h264 print the identical
+    /// context, `[vist#0:0/h264 @ …] [dec:h264 @ …]`. That backend attaches an
+    /// accelerator to the same decoder rather than selecting a
+    /// differently-named one, and the only line that says so at all is
+    /// `Selecting decoder 'h264' because of requested hwaccel method
+    /// videotoolbox` — which is not in the context grammar.
+    ///
+    /// So a contract keyed on the name alone would answer for a decode path
+    /// nobody qualified. This is the assertion that it does not, and it is the
+    /// reason M7b exists rather than simply deleting a refusal.
+    #[test]
+    fn a_contract_qualified_on_one_backend_does_not_answer_for_another() {
+        use plurx_core::transcode::DecodeBackend;
+
+        let software = decode_contract_fixture(DecodeBackend::Software);
+        let accelerated = decode_contract_fixture(DecodeBackend::VideoToolbox);
+        assert_eq!(
+            software.decoder, accelerated.decoder,
+            "the premise: both decode paths print the same decoder name"
+        );
+
+        let policy = crate::decoder_health::DiagnosticPolicy::new(
+            Some(crate::decoder_health::MeasuredBuild {
+                ffmpeg_version: software.ffmpeg_version.clone(),
+                binary_sha256: software.binary_sha256.clone(),
+                buildconf_sha256: software.buildconf_sha256.clone(),
+            }),
+            vec![software.clone()],
+        );
+        assert!(
+            policy
+                .contract_for(
+                    "h264",
+                    "h264",
+                    DecodeBackend::Software.name(),
+                    crate::decoder_health::QUALIFIED_STDERR_MODE,
+                )
+                .is_some(),
+            "the software contract covers the path it was qualified on"
+        );
+        assert!(
+            policy
+                .contract_for(
+                    "h264",
+                    "h264",
+                    DecodeBackend::VideoToolbox.name(),
+                    crate::decoder_health::QUALIFIED_STDERR_MODE,
+                )
+                .is_none(),
+            "and answers for no other, even though the decoder name matches"
+        );
+
+        // And the reverse, so this is a key rather than a one-way refusal.
+        let policy = crate::decoder_health::DiagnosticPolicy::new(
+            Some(crate::decoder_health::MeasuredBuild {
+                ffmpeg_version: accelerated.ffmpeg_version.clone(),
+                binary_sha256: accelerated.binary_sha256.clone(),
+                buildconf_sha256: accelerated.buildconf_sha256.clone(),
+            }),
+            vec![accelerated],
+        );
+        assert!(policy
+            .contract_for(
+                "h264",
+                "h264",
+                DecodeBackend::VideoToolbox.name(),
+                crate::decoder_health::QUALIFIED_STDERR_MODE,
+            )
+            .is_some());
+        assert!(
+            policy
+                .contract_for(
+                    "h264",
+                    "h264",
+                    DecodeBackend::Software.name(),
+                    crate::decoder_health::QUALIFIED_STDERR_MODE,
+                )
+                .is_none(),
+            "a hardware contract is not a licence to read a software decode"
+        );
+    }
+
+    /// A hardware plan that names its decoder and is covered gets a grammar.
+    ///
+    /// This is the refusal M7a found and the whole reason the recovery could
+    /// not fire: the backend used to be rejected before the contract was ever
+    /// consulted, so a hardware decode could not produce the evidence that
+    /// triggers the software-decode alternate — while a software decode, which
+    /// can produce it, has no alternate to be given.
+    #[test]
+    fn a_covered_hardware_decode_is_no_longer_refused_for_being_hardware() {
+        use plurx_core::transcode::DecodeBackend;
+
+        let contract = decode_contract_fixture(DecodeBackend::VideoToolbox);
+        let policy = crate::decoder_health::DiagnosticPolicy::new(
+            Some(crate::decoder_health::MeasuredBuild {
+                ffmpeg_version: contract.ffmpeg_version.clone(),
+                binary_sha256: contract.binary_sha256.clone(),
+                buildconf_sha256: contract.buildconf_sha256.clone(),
+            }),
+            vec![contract],
+        );
+        let observation = DiagnosticObservation::resolve(
+            &policy,
+            "digest".to_owned(),
+            Some("h264"),
+            DecodeBackend::VideoToolbox,
+            Some("h264"),
+            0,
+        );
+        assert!(observation.grammar.is_some());
+        assert!(observation.qualified_logging());
+        assert_eq!(observation.contract_id.as_deref(), Some("fixture"));
+
+        // The refusals that remain are the ones that were always right: a
+        // plan that names no decoder still gets nothing, whatever its backend.
+        assert!(
+            DiagnosticObservation::resolve(
+                &policy,
+                "digest".to_owned(),
+                Some("h264"),
+                DecodeBackend::VideoToolbox,
+                None,
+                0,
+            )
+            .grammar
+            .is_none(),
+            "a plan that does not say the decoder out loud is still unqualified"
+        );
+    }
+
+    /// A contract table written before the backend key parses as software.
+    ///
+    /// The retained tables on disk have no `decode_backend`, and they describe
+    /// software decodes. A default that widened them to every backend would
+    /// hand a software grammar to a hardware decode on the first node that
+    /// upgraded — the exact confusion this key exists to prevent, arriving
+    /// through the door marked backwards compatibility.
+    #[test]
+    fn a_contract_written_before_the_backend_key_means_software() {
+        let table = r#"
+version = 2
+
+[[contracts]]
+id = "legacy"
+host = "test"
+ffmpeg_version = "8.0.1"
+binary_sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+buildconf_sha256 = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+stderr_mode = "repeat+level+error"
+input_codec = "h264"
+decoder = "h264"
+require_context_addresses = true
+primary_message = "Error submitting packet to decoder:"
+attributes_every_failure = true
+error_detail = "corrupt input packet"
+fixture = "f"
+fixture_sha256 = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+scope = "test"
+"#;
+        let contracts = crate::decoder_health::DiagnosticContract::load(table).expect("load");
+        assert_eq!(contracts.len(), 1);
+        assert_eq!(
+            contracts[0].decode_backend,
+            plurx_core::transcode::DecodeBackend::Software.name(),
+        );
     }
 
     /// The flags a child is launched with are the flags the contract was
@@ -39750,6 +39978,9 @@ pub(crate) mod tests {
             stderr_mode: crate::decoder_health::QUALIFIED_STDERR_MODE.to_owned(),
             input_codec: "h264".to_owned(),
             decoder: "h264".to_owned(),
+            decode_backend: plurx_core::transcode::DecodeBackend::Software
+                .name()
+                .to_owned(),
             require_context_addresses: true,
             primary_message: "Error submitting packet to decoder:".to_owned(),
             subordinate_message: Some("No frame decoded?".to_owned()),
@@ -40838,6 +41069,9 @@ pub(crate) mod tests {
                 stderr_mode: crate::decoder_health::QUALIFIED_STDERR_MODE.to_owned(),
                 input_codec: input_codec.to_owned(),
                 decoder: decoder.to_owned(),
+                decode_backend: plurx_core::transcode::DecodeBackend::Software
+                    .name()
+                    .to_owned(),
                 require_context_addresses: true,
                 primary_message: "Decoding error:".to_owned(),
                 subordinate_message: None,
@@ -40976,6 +41210,9 @@ pub(crate) mod tests {
             stderr_mode: crate::decoder_health::QUALIFIED_STDERR_MODE.to_owned(),
             input_codec: "hevc".to_owned(),
             decoder: "hevc".to_owned(),
+            decode_backend: plurx_core::transcode::DecodeBackend::Software
+                .name()
+                .to_owned(),
             require_context_addresses: true,
             primary_message: "Decoding error:".to_owned(),
             subordinate_message: None,
@@ -41072,6 +41309,9 @@ pub(crate) mod tests {
             stderr_mode: crate::decoder_health::QUALIFIED_STDERR_MODE.to_owned(),
             input_codec: "h264".to_owned(),
             decoder: "h264".to_owned(),
+            decode_backend: plurx_core::transcode::DecodeBackend::Software
+                .name()
+                .to_owned(),
             require_context_addresses: true,
             primary_message: "Decoding error:".to_owned(),
             subordinate_message: None,
