@@ -3,11 +3,11 @@
 **Milestone:** the Android half of M6, the prepared replacement.
 **Brief:** [`M6-ANDROID-CLIENT-BUILD.md`](M6-ANDROID-CLIENT-BUILD.md).
 **Contract:** [`M6-CLIENT-REPLACEMENT-CONTRACT.md`](M6-CLIENT-REPLACEMENT-CONTRACT.md).
-**Branch:** `agent/m6-android-on-main`, cut from `main` at `a3997ffb`.
-The work was built on `agent/m6-android-prepared-replacement` off
-`effort/decoder-selection-recovery` at `bc9d4100` — four pull requests, all
-merged there — and reconciled onto `main` here, because that effort is still
-open and `main` had two of the three clients without it.
+**Landed:** PR #136 into `main`, 2026-09-08. Built on
+`agent/m6-android-prepared-replacement` off `effort/decoder-selection-recovery`
+at `bc9d4100` — four pull requests, all merged there — then reconciled onto
+`main`, because that effort is still open and `main` had two of the three
+clients without it. All three are on `main` now.
 **Scope:** `clients/android` only. Web and Apple are being built in parallel by
 separate sessions against the same contract.
 
@@ -324,7 +324,7 @@ document is the bug. Re-derive every mirrored rule from the Rust at build time.
 
 ---
 
-## What the port onto `main` moved, and the one thing it cannot decide
+## What the port onto `main` moved, and what it left for the effort
 
 Four pull requests carried this work onto `effort/decoder-selection-recovery`:
 the protocol half, the successor and the enable, the adversarial-review
@@ -346,16 +346,25 @@ attaches, because `main` restructured the three files it attaches to:
 `test_control_wire_conformance`'s last per-port discard came out here, as its
 own comment said it would.
 
-**The one thing this branch cannot decide.** If
-`effort/decoder-selection-recovery` is later promoted to `main`, the same
-change arrives twice — once as these commits and once as the four it was built
-from. That is a merge for a person to plan, not a gate for a branch to pass, so
-this stays a draft: land it and re-base the effort's Android commits away, or
-hold it and let the promotion carry them. The five `tests/client-fixes.toml`
-anchors are the visible edge of that choice — they name commits reachable only
-from the effort branch, so they are deliberately *not* added here; the
-regression tests they point at are all present, and the rows follow whichever
-history wins.
+**What landing it decided, and what whoever promotes the effort must do.**
+`AGENTS.md` is explicit that ordinary independent changes may target `main` and
+use its affected-surface validation, and this is one: it has nothing to do with
+decoder selection, and only sat on that effort because its brief named that
+baseline. `Main promotion gate` passed on the candidate, so it landed.
+
+The consequence is inherited by the effort, not avoided by it. When
+`effort/decoder-selection-recovery` is promoted, its four Android commits
+(`c8c8ffb2`, `32ab6753`, `fa01cf77`+`8a6ee8b3`, `96a1be44`+`24dd3c58`+
+`a0746179`) are **duplicates of what `main` already carries** — and their
+version is the *pre-reconciliation* one. A merge that resolves those three
+files toward the effort silently reverts the three seam fixes below, none of
+which any test on that branch can catch. Rebase them away instead; nothing in
+them is missing from `main`.
+
+The five `tests/client-fixes.toml` anchors are the visible edge of the same
+seam. They name commits reachable only from the effort branch, so they are not
+on `main`; the regression tests they point at all are. They arrive with the
+promotion or not at all, and `history-check` is green either way.
 
 ---
 
