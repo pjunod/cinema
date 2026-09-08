@@ -217,6 +217,7 @@ function preparedReporterHarness(answer) {
     now: () => now,
     onExchange: ({ request, response: reply, error }) => {
       const outcome = preparation.settle(request, reply, error);
+      if (outcome === "acknowledged") reporter.notify();
       if (outcome === "commit_discarded") reporter.notify();
       if (outcome === "committed") reporter.stop();
     },
@@ -258,6 +259,8 @@ function preparedReporterHarness(answer) {
 }
 
 async function main() {
+  const preparationRejectionMessage =
+    "the preparation acknowledgement lost its commit or deadline fence";
   assert.equal(control.validBootstrap(bootstrap()), true);
   assert.equal(control.validBootstrap(Object.assign(bootstrap(), { control_epoch: 0 })), false);
   assert.equal(control.validBootstrap(Object.assign(bootstrap(), { url: "https://attacker/control" })), false);
@@ -721,6 +724,7 @@ async function main() {
 
   const rejectedPreparation = await preparedRefusal(controlError(409, "stale_control", {
     generation: bootstrap().generation, controlEpoch: bootstrap().control_epoch,
+    serverMessage: preparationRejectionMessage,
   }), true);
   assert.equal(rejectedPreparation.refusalCalls[0].acknowledgement.state, "committed");
   assert.equal(rejectedPreparation.preparation.status().last_outcome, "commit_rejected");
@@ -728,6 +732,41 @@ async function main() {
   assert.equal(rejectedPreparation.reporter.status().stopped, false,
     "a rejected preparation is dropped while the incumbent control loop continues");
   rejectedPreparation.reporter.stop();
+
+  const committedFence = await preparedRefusal(controlError(409, "stale_control", {
+    generation: bootstrap().generation, controlEpoch: bootstrap().control_epoch,
+    serverMessage: "the generation, client instance, or sequence fence is stale",
+  }), true);
+  assert.equal(committedFence.reporter.status().stopped, true,
+    "a committed body does not turn a client-instance or sequence bug into a recoverable refusal");
+  assert.deepEqual(committedFence.refusalReleases, ["stale_control"]);
+
+  const malformedReleases = [];
+  const malformedPreparation = new control.Preparation({ now: () => 0 });
+  malformedPreparation.adopt(prepareAction(), Object.assign(snapshot(), {
+    generation: bootstrap().generation,
+    control_epoch: bootstrap().control_epoch,
+    sequence: 1,
+  }));
+  malformedPreparation.attachResource(prepareAction().action_id, {}, (_resource, reason) => {
+    malformedReleases.push(reason);
+  });
+  const malformedReporter = new control.Reporter({
+    bootstrap: bootstrap(),
+    clientInstanceId: "45454545-4545-4545-8545-454545454545",
+    capture: () => captureSnapshot(snapshot()),
+    send: async (_url, request) => Object.assign(response(request), {
+      action: { type: "prepare", action_id: prepareAction().action_id },
+    }),
+    onExchange: ({ request, response: reply, error }) => {
+      malformedPreparation.settle(request, reply, error);
+    },
+  }).start();
+  await flush();
+  assert.equal(malformedReporter.status().stopped, true);
+  assert.equal(malformedPreparation.status().active, false);
+  assert.deepEqual(malformedReleases, ["invalid_response"],
+    "a malformed response releases preparation state before reporting stops");
 
   const late=deferred();
   let lateCompletions=0;
@@ -1778,6 +1817,28 @@ async function main() {
   assert.match(playSource,/PLAY_OPEN_GATE\.acceptResource\(openAttempt/);
   assert.match(shippedSource("startCopyHls"),/PLAY_OPEN_GATE\.acceptResource/);
 
+  const transportError = await new Function(
+    "fetch", "TOKEN",
+    `${shippedSource("sendPlaybackControl")}; return sendPlaybackControl;`,
+  )(
+    async () => ({
+      ok: false,
+      status: 409,
+      json: async () => ({
+        code: "stale_control",
+        message: preparationRejectionMessage,
+        generation: bootstrap().generation,
+        control_epoch: bootstrap().control_epoch,
+      }),
+    }),
+    null,
+  )(bootstrap().url, {}, null).then(
+    () => null,
+    error => error,
+  );
+  assert.equal(transportError.serverMessage, preparationRejectionMessage,
+    "the shipped transport preserves the server discriminator for stale-control handling");
+
   // The action vocabulary. Declaring `hold` is what permits the server to send
   // it at all: an undeclared action is never sent, so a client that did not ask
   // cannot be silenced by one.
@@ -1871,6 +1932,60 @@ async function main() {
   assert.equal(ladder.preparation.status().active, false);
   assert.equal(ladder.reporter.status().stopped, true,
     "the predecessor loop stops at the missing successor-bootstrap seam");
+
+  // Readiness callbacks need not wait for a control round trip. Queue every
+  // rung, and promote it only when the previous acknowledgement is accepted.
+  const heldMetadata = deferred();
+  const rapid = preparedReporterHarness((request, call) => {
+    if (call === 2) return heldMetadata.promise;
+    const terminal = request.acknowledgement
+      && ["committed", "failed", "aborted"].includes(request.acknowledgement.state);
+    return Object.assign(response(request), {
+      action: terminal ? { type: "none" } : prepareAction(),
+    });
+  });
+  await flush();
+  rapid.attachResource();
+  assert.equal(await rapid.advance("metadata_ready"), true);
+  assert.equal(await rapid.advance("buffer_ready", { bufferedThroughMs: 612_000 }), true);
+  assert.equal(await rapid.advance("committed", { firstFrameUnixMs: 1_700_000_000_124 }), true);
+  assert.deepEqual(rapid.calls.slice(1).map(request => request.acknowledgement.state),
+    ["metadata_ready"], "later readiness waits behind the in-flight metadata acknowledgement");
+  heldMetadata.resolve(Object.assign(response(rapid.calls[1]), { action: prepareAction() }));
+  await flush();
+  assert.deepEqual(rapid.calls.slice(1).map(request => request.acknowledgement.state),
+    ["metadata_ready", "buffer_ready"]);
+  await rapid.tick(250);
+  assert.deepEqual(rapid.calls.slice(1).map(request => request.acknowledgement.state),
+    ["metadata_ready", "buffer_ready", "committed"]);
+  assert.equal(rapid.reporter.status().stopped, true);
+  assert.deepEqual(rapid.releases.map(item => item.reason), ["committed"]);
+
+  // A terminal local decision outranks an older response. In particular, a
+  // metadata reply cannot clear an abort that was queued while it was away.
+  const heldBeforeAbort = deferred();
+  const aborting = preparedReporterHarness((request, call) => {
+    if (call === 2) return heldBeforeAbort.promise;
+    const terminal = request.acknowledgement
+      && ["failed", "aborted"].includes(request.acknowledgement.state);
+    return Object.assign(response(request), {
+      action: terminal ? { type: "none" } : prepareAction(),
+    });
+  });
+  await flush();
+  aborting.attachResource();
+  assert.equal(await aborting.advance("metadata_ready"), true);
+  assert.equal(await aborting.advance("aborted"), true);
+  assert.equal(aborting.preparation.status().acknowledgement.state, "aborted");
+  heldBeforeAbort.resolve(Object.assign(response(aborting.calls[1]), { action: prepareAction() }));
+  await flush();
+  assert.deepEqual(aborting.calls.slice(1).map(request => request.acknowledgement.state),
+    ["metadata_ready", "aborted"]);
+  assert.deepEqual(aborting.releases.map(item => item.reason), ["aborted"]);
+  assert.equal(aborting.preparation.status().active, false);
+  assert.equal(aborting.reporter.status().stopped, false,
+    "aborting a successor leaves the incumbent reporter alive");
+  aborting.reporter.stop();
 
   // The shipped HTML owns the player binding around the module state machine.
   // Exercise that seam too, so a module-only implementation cannot pass while
@@ -2252,6 +2367,22 @@ async function main() {
     };
   }
   const stalledVideo = { paused: false, seeking: false };
+  {
+    const h=stallHarness(),player=stalledPlayer(),held=deferred();
+    player.mediaAttachment={};player.controlIntentGeneration=0;
+    h.holdWith(()=>held.promise);
+    h.stub.attach(player,stalledVideo,bootstrap());h.attached.push(player);
+    await flush();
+    assert.equal(h.sent.length,1);
+    h.stub.supersede(player);
+    held.resolve(Object.assign(response(h.sent[0]),{action:prepareAction()}));
+    await flush();
+    assert.equal(player.controlPreparation.status().active,false,
+      "an offer answered for a superseded viewer intent is not adopted");
+    assert.equal(player.controlPreparation.status().ignored_action_id,prepareAction().action_id,
+      "the stale offer remains declined if the server repeats it");
+    player.controlReporter.stop();
+  }
   {
     const h=stallHarness(),player=stalledPlayer(),held=deferred();
     player.mediaAttachment={};player.controlIntentGeneration=0;

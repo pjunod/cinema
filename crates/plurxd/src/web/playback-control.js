@@ -11,6 +11,8 @@
   const EXCHANGE_DEADLINE_MS = 6_000;
   const PREPARATION_TTL_MS = 330_000;
   const MAX_MEDIA_MILLIS = 366 * 24 * 60 * 60 * 1_000;
+  const PREPARATION_REJECTED_MESSAGE =
+    "the preparation acknowledgement lost its commit or deadline fence";
   const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
   // The actions this client will accept from the server, and the only ones the
@@ -232,11 +234,24 @@
         expiresAt: receivedAt + PREPARATION_TTL_MS,
         progress: null,
         acknowledgement: null,
+        queuedAcknowledgements: [],
+        terminal: null,
         resource: null,
         release: null,
       };
       this.ignoredActionId = null;
       this.lastOutcome = "offered";
+      return true;
+    }
+
+    ignore(actionId, reason) {
+      if (typeof actionId !== "string" || !UUID_RE.test(actionId)) return false;
+      if (this.active && this.active.offer.action_id === actionId) {
+        this.drop(reason || "ignored", true);
+      } else {
+        this.ignoredActionId = actionId;
+        this.lastOutcome = reason || "ignored";
+      }
       return true;
     }
 
@@ -291,18 +306,24 @@
       }
       const current = this.active;
       const value = fields || {};
+      if (current.terminal !== null) return false;
+      const newest = current.queuedAcknowledgements.length
+        ? current.queuedAcknowledgements[current.queuedAcknowledgements.length - 1]
+        : current.acknowledgement;
+      const latestState = newest ? newest.state : current.progress;
       if (state === "metadata_ready") {
-        if (current.progress !== null && current.progress !== "metadata_ready") return false;
+        if (latestState !== null) return false;
       } else if (state === "buffer_ready") {
-        if (current.progress !== "metadata_ready" && current.progress !== "buffer_ready") return false;
+        if (latestState !== "metadata_ready") return false;
         if (!Number.isSafeInteger(value.bufferedThroughMs)
             || value.bufferedThroughMs < 0 || value.bufferedThroughMs > MAX_MEDIA_MILLIS) return false;
       } else if (state === "committed") {
-        if (current.progress !== "buffer_ready") return false;
+        if (latestState !== "buffer_ready") return false;
         if (!Number.isSafeInteger(value.firstFrameUnixMs) || value.firstFrameUnixMs <= 0) return false;
         if (!sameJson(current.requestedSelection, currentSelection)) {
           this.releaseResource("selection_changed");
-          current.progress = "aborted";
+          current.terminal = "aborted";
+          current.queuedAcknowledgements = [];
           current.acknowledgement = immutableCopy({
             action_id: current.offer.action_id,
             state: "aborted",
@@ -324,14 +345,27 @@
         first_frame_unix_ms: state === "committed" ? value.firstFrameUnixMs : null,
       };
       if (!validAcknowledgement(acknowledgement)) return false;
-      current.acknowledgement = immutableCopy(acknowledgement);
-      if (state === "failed" || state === "aborted") this.releaseResource(state);
+      const immutableAcknowledgement = immutableCopy(acknowledgement);
+      if (state === "failed" || state === "aborted") {
+        current.terminal = state;
+        current.queuedAcknowledgements = [];
+        current.acknowledgement = immutableAcknowledgement;
+        this.releaseResource(state);
+      } else if (current.acknowledgement === null) {
+        current.acknowledgement = immutableAcknowledgement;
+      } else {
+        current.queuedAcknowledgements.push(immutableAcknowledgement);
+      }
       return true;
     }
 
     settle(request, response, error) {
       const acknowledgement = request && request.acknowledgement;
       if (error) {
+        if (error.name === "PlaybackControlProtocolError") {
+          this.drop("invalid_response", false);
+          return "failed";
+        }
         const retryable = (error.status === 425 && error.code === "owner_transition")
           || (error.status === 429 && error.code === "control_rate_limited")
           || (error.status === 503 && error.code === "control_unavailable")
@@ -341,7 +375,8 @@
           && acknowledgement && acknowledgement.state === "committed"
           && this.active && acknowledgement.action_id === this.active.offer.action_id
           && error.generation === request.generation
-          && error.controlEpoch === request.control_epoch;
+          && error.controlEpoch === request.control_epoch
+          && error.serverMessage === PREPARATION_REJECTED_MESSAGE;
         if (rejectedCommit) {
           this.drop("commit_rejected", false);
           return "commit_rejected";
@@ -368,8 +403,10 @@
         }
         if (acknowledgement && acknowledgement.action_id === action.action_id) {
           if (acknowledgement.state === "committed") {
+            if (!sameJson(this.active.acknowledgement, acknowledgement)) return "repeated";
             this.releaseResource("commit_discarded");
-            this.active.progress = "aborted";
+            this.active.terminal = "aborted";
+            this.active.queuedAcknowledgements = [];
             this.active.acknowledgement = immutableCopy({
               action_id: action.action_id,
               state: "aborted",
@@ -381,8 +418,14 @@
             return "commit_discarded";
           }
           if (["metadata_ready", "buffer_ready"].includes(acknowledgement.state)) {
-            this.active.progress = acknowledgement.state;
-            this.active.acknowledgement = null;
+            const rank = acknowledgement.state === "metadata_ready" ? 1 : 2;
+            const progressRank = this.active.progress === "metadata_ready" ? 1
+              : (this.active.progress === "buffer_ready" ? 2 : 0);
+            if (rank > progressRank) this.active.progress = acknowledgement.state;
+            if (sameJson(this.active.acknowledgement, acknowledgement)) {
+              this.active.acknowledgement = this.active.queuedAcknowledgements.shift() || null;
+              if (this.active.acknowledgement !== null) return "acknowledged";
+            }
           }
         }
         return "repeated";
@@ -617,12 +660,13 @@
             && this.resetForOwner(reportedError);
           // A rejected commit has already torn the staged successor down. It
           // is the one stale-control answer this reporter can recover from:
-          // the request shape proves which transaction was rejected, while
-          // the immutable sequence/client fences make their own failures bugs.
+          // v1 carries no typed subcode, so retain and match the server's
+          // bounded message; the other same-fence answer is a sequencing bug.
           const preparationRejected = status === 409 && reportedError.code === "stale_control"
             && request.acknowledgement && request.acknowledgement.state === "committed"
             && reportedError.generation === request.generation
-            && reportedError.controlEpoch === request.control_epoch;
+            && reportedError.controlEpoch === request.control_epoch
+            && reportedError.serverMessage === PREPARATION_REJECTED_MESSAGE;
           const retryableControl = (status === 425 && reportedError.code === "owner_transition")
             || (status === 429 && reportedError.code === "control_rate_limited")
             || (status === 503 && reportedError.code === "control_unavailable");

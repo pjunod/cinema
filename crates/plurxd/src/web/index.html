@@ -6918,6 +6918,8 @@ async function sendPlaybackControl(url,body,signal){
     const code=failure&&typeof failure.code==="string"?failure.code:null;
     const error=new Error(code?`playback control ${code}`:"playback control HTTP "+response.status);
     error.status=response.status; error.code=code;
+    if(failure&&typeof failure.message==="string")
+      error.serverMessage=failure.message.replace(/[\r\n\0]/g," ").slice(0,240);
     if(failure&&typeof failure.generation==="string") error.generation=failure.generation;
     if(failure&&Number.isSafeInteger(failure.control_epoch)) error.controlEpoch=failure.control_epoch;
     if(failure&&Number.isSafeInteger(failure.retry_after_ms)) error.retryAfterMs=failure.retry_after_ms;
@@ -7206,8 +7208,16 @@ function startPlaybackControl(v,p,bootstrap){
           ||p.mediaAttachment!==attachment||captured.owner.lifecycleId!==owner.lifecycleId
           ||captured.owner.attachmentGeneration!==owner.attachmentGeneration) return;
         p.controlLastRequest=request;
-        const preparationOutcome=preparation.settle(request,response,error);
+        const stalePrepare=!!response&&response.action&&response.action.type==="prepare"
+          &&captured.intentGeneration!==(p.controlIntentGeneration||0)
+          &&!preparation.status().active;
+        const preparationOutcome=stalePrepare
+          ?(preparation.ignore(response.action.action_id,"stale_intent")?"ignored":"invalid")
+          :preparation.settle(request,response,error);
         if(preparationOutcome==="invalid") reporter.stop();
+        // Readiness may arrive while the prior acknowledgement is in flight.
+        // Send the next queued rung only after the server accepts this one.
+        if(preparationOutcome==="acknowledged") reporter.notify();
         // A commit returning the same offer is a successful HTTP exchange but
         // a discarded acknowledgement. Queue `aborted` to release the staged
         // server slot; waiting for an error would wait forever.
