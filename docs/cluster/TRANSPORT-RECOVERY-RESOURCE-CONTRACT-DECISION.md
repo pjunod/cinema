@@ -63,19 +63,25 @@ fourth-highest sample of the closing window**
 (`RESOURCE_CEILING_SUSTAINED_SAMPLES`): a count that three cycles reached
 and seven did not is a spike — a replacement connection during one
 recovery, a slower drain on one cycle, a blocking thread that had not idled
-out — and a leak is not a spike. A leak from cycle 13 puts eight samples
-above the opening ceiling and its fourth-highest is five over; one socket
-leaked at cycle 15 and never released puts six samples one over, and fails
-at zero allowance. The opening ceiling is the plain highest of cycles 1
-through 10, so a spike there raises the bar for the closing window rather
-than lowering it. The warmup baseline, the one number in the artifact that
-nothing recomputes, bounds the floor only.
+out — and a leak is not a spike. On a flat series a leak from cycle 13
+puts eight samples above the opening ceiling and its fourth-highest is five
+over, and one socket leaked at cycle 15 and never released puts six samples
+one over. On the series the lane actually samples the bar is the drain's
+high state, so only high-side samples after the leak count, and the
+boundary sits earlier — §0.2 states it against that series. The opening
+ceiling is the plain highest of cycles 1 through 10, so a spike there
+raises the bar for the closing window rather than lowering it (and, by the
+same token, widens what a late leak can hide under). The warmup baseline,
+the one number in the artifact that nothing recomputes, bounds the floor
+only. The artifact records the order statistic
+(`closing_ceiling_sustained_samples`) beside the window sizes, so a reader
+recomputing the halves knows which number the closing ceiling is.
 
 ### 0.2 The allowances, and what each one hides
 
 | resource | allowance | why, and the boundary |
 |---|---|---|
-| sockets | **0** | the drain is one connection per peer, and a ten-cycle opening window holds both of its states; a per-peer transport that stops being released is +10 at the floor, and one leaked connection at cycle 15 is +1 at the sustained ceiling. What hides: a leak that starts after cycle 11 *and* has fewer than four closing samples above the opening's high state by cycle 20 — a per-cycle leak from cycle 18 on, or one leaked connection after cycle 17, or any late leak that has accumulated less than the drain amplitude on the low-side samples. That is the limit of a sustained statistic on this signal, and the alternative was a ceiling that fails on one sample |
+| sockets | **0** | the drain is one connection per peer, and a ten-cycle opening window holds both of its states; a per-peer transport that stops being released is +10 at the floor. At the ceiling, on the alternating series the lane samples, only high-side samples after a late leak clear the opening's high state, so four of them are needed: **a single connection leaked by cycle 13 is caught** in either phase of the alternation (by 14 in one of them), one leaked from cycle 15 on is the documented miss; **a per-cycle leak from cycle 15 or earlier is caught**, cycle 16–17 depends on the phase and the node's amplitude, and from cycle 18 on it is missed. A spike in the opening half raises the bar by its own height and widens that gap. That is the limit of a sustained statistic on this signal, and the alternative was a ceiling that fails on one sample |
 | owned async tasks | **0** | same shape, same reasoning, same boundary |
 | threads | **2** | §2.3 and §5.3: threads jitter with no recovery in flight, and the floor is not seen on every cycle; two is the widest measured swing. A thread leaked every recovery is +10 at the floor; one every third recovery lifts the closing floor by three and is caught; **one every fourth recovery or slower hides** inside the allowance at both edges. The per-cycle check could not see a leak that slow either, because it never finished a campaign |
 
@@ -100,8 +106,8 @@ show, it is zero. The two edges fail on opposite hosts. A slow runner that
 mostly lands high is exposed at the floor; a fast one that mostly lands low
 — nuc3 sampled `16/31` on the warmup and cycles 1 and 2, then `19/35` on
 cycle 3 — is exposed at the ceiling, and needs four slow drains in the
-closing half after none in the opening: at one slow drain in five, 0.7% per
-role. The other wobble in the record, 34 against 35 owned tasks on node 1's
+closing half after none in the opening: at one slow drain in five, 1.3% per
+role, about 2.6% per campaign. The other wobble in the record, 34 against 35 owned tasks on node 1's
 high side, needs the rarer value four times in the closing half and never in
 the opening ten; at one in four it is about 1% per node-resource, and it was
 the reason the raw maximum was not shipped. What would move any of these
@@ -163,9 +169,11 @@ named a count over its baseline, which the sampler no longer computes).
 Leaks that must fail, and do, naming node, resource, edge and both values:
 `a_socket_leaked_every_cycle_is_rejected` ·
 `a_thread_leaked_every_cycle_is_rejected` ·
-`a_leak_that_begins_late_in_the_campaign_is_rejected` (onset at cycle 13,
-caught at the ceiling with the floor untouched; and one socket leaked at
-cycle 15) · `a_thread_envelope_past_the_allowance_is_rejected` (including
+`a_leak_that_begins_late_in_the_campaign_is_rejected` (on a flat series:
+onset at cycle 13, caught at the ceiling with the floor untouched, and one
+socket leaked at cycle 15; on the alternating series: one connection leaked
+at cycle 12 caught and at 15 missed, a per-cycle leak from 15 caught and
+from 18 missed — the boundaries in §0.2, pinned both ways) · `a_thread_envelope_past_the_allowance_is_rejected` (including
 one thread every third recovery, and every fourth as the documented miss) ·
 `three_high_closing_samples_are_spikes_and_four_are_a_trend` (and a
 baseline written as 99 sockets bounds nothing at the ceiling) ·
@@ -183,7 +191,7 @@ high side, landing high every third cycle) ·
 spike in either window, unmatched by the other).
 
 The artifact proving itself: `recorded_resource_envelopes_must_match_the_cycles`
-(each of the four recorded numbers tampered) ·
+(each of the five recorded numbers tampered) ·
 `an_envelope_over_incomplete_or_reordered_records_is_refused` ·
 `the_opening_window_is_the_first_half_of_the_series_rounded_up` (20 →
 0..=10 | 11..=20; smoke 3 → 0..=1 | 2..=3; asserted from nineteen cycles) ·

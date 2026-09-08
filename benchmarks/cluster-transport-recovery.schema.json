@@ -291,10 +291,16 @@
     "resourceEnvelopes": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["opening_window_last_cycle", "closing_window_samples", "nodes"],
+      "required": [
+        "opening_window_last_cycle",
+        "closing_window_samples",
+        "closing_ceiling_sustained_samples",
+        "nodes"
+      ],
       "properties": {
         "opening_window_last_cycle": { "const": 10 },
         "closing_window_samples": { "const": 10 },
+        "closing_ceiling_sustained_samples": { "const": 4 },
         "nodes": {
           "type": "array",
           "minItems": 4,

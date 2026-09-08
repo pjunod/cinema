@@ -313,6 +313,10 @@ pub struct NodeResourceEnvelope {
 pub struct RecoveryResourceEnvelopes {
     pub opening_window_last_cycle: u32,
     pub closing_window_samples: u32,
+    /// The closing band's `ceiling` is this-highest sample of the closing
+    /// window, not its highest; the opening band's is the plain highest of
+    /// its cycles. Recorded so the file says what the number is.
+    pub closing_ceiling_sustained_samples: u32,
     pub nodes: Vec<NodeResourceEnvelope>,
 }
 
@@ -1755,6 +1759,8 @@ fn resource_envelopes(cycles: &[RecoveryCycleEvidence]) -> Result<RecoveryResour
     Ok(RecoveryResourceEnvelopes {
         opening_window_last_cycle,
         closing_window_samples,
+        closing_ceiling_sustained_samples: u32::try_from(RESOURCE_CEILING_SUSTAINED_SAMPLES)
+            .unwrap_or(u32::MAX),
         nodes,
     })
 }
@@ -3442,6 +3448,34 @@ mod tests {
             counts(12, if cycle >= 15 { 9 } else { 8 }, 10)
         });
         assert!(validate_transport_recovery_artifact(&value).is_err());
+
+        // On the signal the lane actually samples — a follower alternating
+        // between 8 and 9 sockets one recovery apart — only the high-side
+        // samples after the leak sit above the opening ceiling, so the
+        // boundary is earlier: one connection leaked by cycle 12 is caught
+        // and one leaked at cycle 15 is the documented miss; a per-cycle
+        // leak from cycle 15 is caught and one from cycle 18 is not.
+        let drain = |cycle: u32| if cycle % 2 == 1 { 9 } else { 8 };
+        let mut value = artifact();
+        with_node_series(&mut value.voter, 1, |cycle| {
+            counts(12, drain(cycle) + u64::from(cycle >= 12), 10)
+        });
+        assert!(validate_transport_recovery_artifact(&value).is_err());
+        let mut value = artifact();
+        with_node_series(&mut value.voter, 1, |cycle| {
+            counts(12, drain(cycle) + u64::from(cycle >= 15), 10)
+        });
+        validate_transport_recovery_artifact(&value).expect("the documented miss");
+        let mut value = artifact();
+        with_node_series(&mut value.voter, 1, |cycle| {
+            counts(12, drain(cycle) + u64::from(cycle.saturating_sub(14)), 10)
+        });
+        assert!(validate_transport_recovery_artifact(&value).is_err());
+        let mut value = artifact();
+        with_node_series(&mut value.voter, 1, |cycle| {
+            counts(12, drain(cycle) + u64::from(cycle.saturating_sub(17)), 10)
+        });
+        validate_transport_recovery_artifact(&value).expect("the documented miss");
     }
 
     /// Exactly the measured shape: one connection and one owned task per
@@ -3624,6 +3658,13 @@ mod tests {
 
         let mut value = artifact();
         value.learner.resource_envelopes.closing_window_samples = 11;
+        assert!(validate_transport_recovery_artifact(&value).is_err());
+
+        let mut value = artifact();
+        value
+            .learner
+            .resource_envelopes
+            .closing_ceiling_sustained_samples = 1;
         assert!(validate_transport_recovery_artifact(&value).is_err());
     }
 

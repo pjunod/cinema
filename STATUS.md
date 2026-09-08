@@ -30,9 +30,10 @@ spikes are spikes and four are a trend. The drain visits both of its states
 within a few cycles and moves neither edge. The option first written up —
 last cycle against first cycle — was rejected on the way: two samples of a
 two-state range is the same coin flip, drawn twice instead of forty times.
-What still hides is stated, not implied: a late leak with fewer than four
-closing samples above the opening's high state, and a thread leak of one per
-four recoveries or slower.
+What still hides is stated, not implied, against the alternating series
+the lane samples: a single connection leaked after about cycle 13, a
+per-cycle leak that starts after about cycle 15, and a thread leak of one
+per four recoveries or slower.
 
 What moved: the sampler no longer waits for a ceiling, only for idle and two
 identical samples; the record-time bail is gone; the campaign computes and

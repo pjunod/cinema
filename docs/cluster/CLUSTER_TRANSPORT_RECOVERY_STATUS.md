@@ -44,8 +44,9 @@ ceiling is the fourth-highest sample so that three spikes are not a trend;
 the drain visits both of its states within a few cycles and moves neither
 edge. The artifact is schema version 2 and records both bands per node, so
 it proves the comparison without the harness. What hides, stated in §0.2
-there: a leak with fewer than four closing samples above the opening's high
-state, and a thread leak of one per four recoveries or slower. The `idle` predicate itself
+there against the alternating series the lane samples: a single connection
+leaked after about cycle 13, a per-cycle leak that starts after about cycle
+15, and a thread leak of one per four recoveries or slower. The `idle` predicate itself
 is unchanged and still wrong on its own terms; that is Option C in the
 decision document and remains open.
 
