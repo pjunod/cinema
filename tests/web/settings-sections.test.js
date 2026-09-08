@@ -307,8 +307,25 @@ test("Developer is where the switches that cost something live", () => {
   assert.ok(counted("not measured here") >= 1,
     "…and a question this page cannot answer is not rendered as a refusal");
   assert.match(readiness, /met:false/, "the server-preparation row is a stated fact, not a guess");
-  assert.doesNotMatch(html, />met<\/span>[^]{0,400}Server preparation is real/,
-    "the row that is false must not render as met");
+  // Row by row, against the readiness function's own verdicts. Counting pills
+  // proves all three renderings exist; only this proves each row got the one it
+  // asked for, and it is what catches the two renderings being swapped.
+  const verdicts = new Function(
+    "settings",
+    [shippedSource("preparedHandoffReadiness"), shippedSource("readinessRow"),
+      "return preparedHandoffReadiness(settings).map(row=>[row.label,row.met,readinessRow(row)]);",
+    ].join("\n"),
+  )({ playback_control_protocol_v1: true });
+  const pillOf = (markup) => (markup.match(/>(met|not met|not measured here)<\/span>/) || [])[1];
+  const expected = { true: "met", false: "not met", null: "not measured here" };
+  for (const [label, met, markup] of verdicts) {
+    assert.equal(pillOf(markup), expected[String(met)],
+      `"${label}" is ${met} and must not render as anything else`);
+  }
+  assert.equal(verdicts.find(([label]) => /Server preparation is real/.test(label))[1], false,
+    "the staged route has no worker, and the card says so rather than implying otherwise");
+  assert.ok(verdicts.some(([, met]) => met === true), "a checked-and-true row exists");
+  assert.ok(verdicts.some(([, met]) => met === null), "so does one this page cannot answer");
   assert.match(html, /HDHomeRun Live TV/);
   assert.match(html, /Save the configuration, check readiness, then enable/);
 });

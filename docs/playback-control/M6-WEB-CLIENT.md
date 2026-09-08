@@ -24,8 +24,20 @@ two-player replacement:
 | align | the successor's local zero is placed at `media_origin_ms` in film time |
 | report | `metadata_ready`, then `buffer_ready` with `buffered_through_ms` |
 | switch | successor becomes visible and audible; predecessor is retired |
-| commit | `committed` with `first_frame_unix_ms`, sent only after a frame renders |
+| commit | `committed` with `first_frame_unix_ms` **and** `committed_media_origin_ms`, sent only after a frame renders |
 | settle | `failed` or `aborted` on every abandon path, never silence |
+
+**A commit owes two fields, and the contract names one.** `committed` requires
+`first_frame_unix_ms` **and** `committed_media_origin_ms`, and the second must
+equal the offer's `media_origin_ms` verbatim: `ActionAcknowledgement::validate`
+answers `400 acknowledgement.committed_media_origin_ms` without it, and
+`bound_preparation_acknowledgement` silently drops a commit that names a
+different origin. It is how the server tells *the client built what I offered*
+from *the client built something else and is asking me to publish it* —
+`desired_digest` already covers quality, codec, grade and subtitles, but not
+position. A 400 is neither retryable nor a transport error, so a client that
+omits it stops its own reporter for the rest of the session, immediately after
+swapping the picture.
 
 **The name trap, because it is the one mistake that fails silently in both
 directions:** the string declared in `supported_actions` is
@@ -127,7 +139,46 @@ up, which is exactly how the web control plane once shipped a fully green suite
 over zero completed exchanges. Run the browser check before believing the path
 works end to end.
 
-## 5. Non-goals
+## 5. The switch moves the listeners, not just the id
+
+Worth knowing before changing anything in this path, because it is the part
+that has nothing to do with the protocol and everything to do with the page.
+
+The successor primes on its own hidden `<video>`, so committing has to change
+which element the page treats as `#video`. Swapping the two elements' ids fixes
+every `getElementById("video")` — and fixes nothing else. `wirePlayer` runs
+**once per page** and binds about twenty-five listeners to the element it
+captured, and `play()` binds five more per playback:
+
+```
+ wirePlayer()            once per page   ─┐
+   playing / waiting / error              │  bound to ONE element,
+   pause / play / seeking / seeked        ├─ and `PLAYER_WIRED` never resets,
+   timeupdate → pbTick, checkMarkers      │  so one handoff would brick the
+   click / dblclick / pointerdown         │  player until a page reload
+ play()                  per playback    ─┤
+   onended → handleEnded                  │
+   progressTimer → playbackProgressTick   │
+   armHitchDetector · setupAirplay        │
+   probeDecode                           ─┘
+```
+
+So the media listener set lives in `wirePlayerMedia(v)`, keyed to the element
+rather than to the page, and `adoptPlaybackMediaElement(p,v)` moves it and the
+per-playback bindings onto the element that now owns the picture. Then the
+retired element **leaves the page**: keeping it as the next successor's host
+would put a hidden pipeline behind the visible stream's overlays — dismissing
+its loading spinner, raising its "Buffering…", reporting its errors as the
+viewer's.
+
+Two things the commit deliberately does *not* do. It does not begin a new media
+attachment: `startPlaybackControl` captured the current one and refuses to
+snapshot against any other, so a new token would wedge the reporter and the
+`committed` this switch just earned would never reach an exchange. And it does
+not release the predecessor's session — the commit CAS retires it server-side,
+and releasing it here would remove the row the CAS names.
+
+## 6. Non-goals
 
 - **The capability literal is not a fleet claim.** The switch says what one
   browser will offer. Nothing in this milestone changes what
@@ -147,10 +198,16 @@ works end to end.
   is per-stream and must not survive the page; the switch is a per-viewer
   preference and must.
 
-## 6. For the Apple and Android client sessions
+## 7. For the Apple and Android client sessions
 
-Two corrections to the shared wire contract, found while building this half:
+Three corrections to the shared wire contract, found while building this half:
 
+0. **A `committed` carries `committed_media_origin_ms` as well as
+   `first_frame_unix_ms`**, echoing the offer verbatim. §C7's table omits the
+   field entirely. Without it every commit is a `400`, and a 400 stops the
+   reporter permanently — after the client has already switched the picture.
+   This is the single highest-cost omission in the contract; §1 above has the
+   citations.
 1. **§C2 and §C8's "real encoder" is wrong.** Staging writes a durable row and
    takes the actor slot; it starts nothing. §3 above has the trace and the
    status code. Build the `failed` path first — it is the one your client will

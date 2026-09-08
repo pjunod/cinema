@@ -87,6 +87,7 @@ const settle = (value) => { window.__settled = value; };
   let declared = null;
   let preparedAction = null;
   let acknowledged = null;
+  let validated = null;
   const fail = (stage, error) => settle({
     ok: false, stage,
     error: String((error && (error.stack || error.message)) || error),
@@ -179,8 +180,26 @@ const settle = (value) => { window.__settled = value; };
         });
         if (response && response.action && response.action.type === "prepare") {
           preparedAction = response.action;
-          // What the player does with it: queue the first progress state, and
-          // let the next ordinary exchange carry it.
+          // Standing in for the player's state machine — which lives in
+          // index.html and is covered by the node suite — so that what this
+          // gate proves is narrow and true: the module accepts the action in a
+          // real browser, and carries an acknowledgement built to the server's
+          // shape back out. A commit owes BOTH its timestamp and the origin it
+          // was offered; the second is the field a client omits by accident,
+          // and it is a 400 that stops the reporter for good.
+          const commit = {
+            action_id: response.action.action_id,
+            state: "committed",
+            first_frame_unix_ms: Date.now(),
+            committed_media_origin_ms: response.action.media_origin_ms,
+          };
+          validated = {
+            commit: PlurxPlaybackControl.validAcknowledgement(commit, "active"),
+            withoutOrigin: PlurxPlaybackControl.validAcknowledgement(
+              { action_id: commit.action_id, state: "committed",
+                first_frame_unix_ms: commit.first_frame_unix_ms }, "active"),
+            onEnd: PlurxPlaybackControl.validAcknowledgement(commit, "end"),
+          };
           acknowledgement = { action_id: response.action.action_id, state: "metadata_ready" };
           reporter.notify();
         }
@@ -192,7 +211,7 @@ const settle = (value) => { window.__settled = value; };
         if (seen.length >= 3) {
           reporter.stop();
           settle({ ok: true, seen, declared, prepared: preparedAction,
-            acknowledged });
+            acknowledged, validated });
         }
       },
     });
@@ -274,6 +293,16 @@ def main(argv):
             problems.append("the browser refused the staged successor")
         if acknowledged.get("state") != "metadata_ready":
             problems.append(f"no acknowledgement reached the wire ({acknowledged!r})")
+        validated = result.get("validated") or {}
+        if validated.get("commit") is not True:
+            problems.append("the browser refused a correctly shaped commit")
+        if validated.get("withoutOrigin") is not False:
+            problems.append(
+                "a commit without committed_media_origin_ms was accepted — the server "
+                "answers 400 to it and the reporter never recovers"
+            )
+        if validated.get("onEnd") is not False:
+            problems.append("a commit was accepted on an exchange that ends the session")
         if problems:
             print("FAIL  the reporter runs, but the prepared-replacement path does not")
             for problem in problems:
@@ -281,8 +310,9 @@ def main(argv):
             return 1
         print(f"PASS  reporter completed {len(result['seen'])} exchanges in a real browser")
         print(f"      declared {declared}")
-        print(f"      accepted a staged successor for session {prepared['session_id']}")
-        print(f"      carried acknowledgement {acknowledged['state']} back on the next exchange")
+        print(f"      parsed a staged successor for session {prepared['session_id']}")
+        print(f"      carried a {acknowledged['state']} acknowledgement back on the next exchange")
+        print("      validated a commit, and refused one missing its origin and one on an end")
         return 0
 
     print("FAIL  the shipped playback-control reporter does not run in a browser")
