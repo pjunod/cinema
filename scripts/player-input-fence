@@ -36,6 +36,9 @@ TEST_TREE_MARKERS = ("/androidTest/", "/src/test/", "clients/apple/Tests/")
 WHOLE_FILE_ALLOWLIST = {
     Path("clients/android/app/src/main/java/tv/plurx/app/player/PlayerKeyAdapter.kt"):
         "Android player key codes are decoded into contract inputs here.",
+    Path("clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvKeyAdapter.kt"):
+        "Live TV key codes are decoded into contract inputs here, and nowhere else; "
+        "what each one does is LiveTvInputPolicy's answer, from the fixture.",
     Path("clients/android/app/src/main/java/tv/plurx/app/ui/AuthScreens.kt"):
         "The sign-in form uses Select/Enter to begin editing; it is not a player.",
     Path("clients/apple/Sources/PlayerRemoteAdapter.swift"):
