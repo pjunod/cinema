@@ -28,7 +28,7 @@ a bug.
 
 `./gradlew testDebugUnitTest :app:assembleDebug :app:lintDebug` — the
 non-Docker equivalent of `make android-test` and `make android` — green.
-**431 tests, 0 failures, 0 errors.**
+**442 tests, 0 failures, 0 errors.**
 
 ---
 
@@ -187,6 +187,33 @@ round of fixes, which is the reason it ran.
 - Releasing the predecessor on a one-second tick assumed a frame clock that is
   parked whenever the window is not visible. The surface owner collects it now,
   from the composition that re-points the view — the only place that knows.
+
+**Pass three — four more, one of them the sharpest finding of the review.**
+Cancelling a coroutine parked inside the exchange did not unwind it:
+`CancellationException` is an `Exception`, every `mutex.withLock` on the way out
+is uncontended, so the dying coroutine ran its whole failure tail — recording a
+fabricated transport failure and arming a five-second replay of the request it
+was being replaced by. The pump that took over then paced five seconds and, when
+it did speak, sent the inherited request rather than the one it was handed. So
+the teardown fix from pass two was a no-op or worse in exactly the case it was
+written for. A cancellation is re-thrown now, and the hand-off re-asserts the
+state the dead coroutine never released.
+
+Also from pass three: the `end`-to-`active` rewrite changed one half of a pair
+the mapper computes together, and `active` at rate zero is a `400` that takes
+the commit with it; two commits between two composition passes dropped a
+retired player on the floor; and `onSubtitleReady` was left as the only
+unfenced exchange callback, so a stale exchange could fight the new session's
+subtitle selection after a stall recovery.
+
+**Pass four — clean.** Nothing new, and it answered two questions worth
+recording: nothing outside the changed files depends on `Controller.player`
+being stable (every reader is a composable read or the snapshot-observed
+`AndroidView` update, and no `remember` caches a player), and the pattern behind
+every defect that survived a pass is that it lived in `Controller` — the one
+file the JVM unit lane cannot reach. Two of its decisions moved out in response,
+into `PreparedReplacement.kt` where they are tested; the residue is named in a
+comment listing all six paths that must abandon a preparation.
 
 **Left unfixed, deliberately:** `observed_download_bps` measures average
 throughput rather than headroom, because the rate window's denominator includes

@@ -327,7 +327,17 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
                         answerRequestSequence = exchange.request.sequence
                     }
                 }
-                if (subtitleReadiness.record(exchange.response?.delivery?.subtitleReadiness)) {
+                // Recorded always, dispatched only for the generation that
+                // asked. The state machine has to see every sample or its
+                // false-to-true edge is wrong; the *action* must not cross a
+                // reopen, because it disables and re-enables the text track and
+                // a stale one lands on the new session just after `prepare()`,
+                // fighting the override `applyTextSelection` is trying to
+                // place — subtitles dropping out and returning after a stall
+                // recovery, on a session that never reported the edge.
+                val readinessEdge =
+                    subtitleReadiness.record(exchange.response?.delivery?.subtitleReadiness)
+                if (readinessEdge && generation == answerGeneration && dispatching) {
                     scope.launch { onSubtitleReady() }
                 }
                 // An acknowledgement rides on the request, so its delivery is

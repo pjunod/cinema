@@ -608,3 +608,160 @@ class EffectiveSelectionDecodingTest {
         assertTrue(decoded.isValid)
     }
 }
+
+/**
+ * Two rules that used to live inside `Controller` as a pair of lines each, and
+ * were wrong there both times. `Controller` needs a `Context` and a real
+ * ExoPlayer, so nothing in the JVM lane can reach it — which is why every
+ * defect that survived a review pass lived in that file. The answer is not more
+ * tests; it is one fewer decision in there per defect.
+ */
+class PreparedGradeAdoptionTest {
+    @Test
+    fun `a grade that moves takes the profile with it`() {
+        // The §9.1 two-axis case the server actually admits: a Dolby Vision
+        // direct play handing over to a `server_selected` SDR transcode. Two
+        // independent assignments left the profile standing and the panel read
+        // "SDR - Profile 8", with each half correct on its own.
+        val adopted = adoptedGrade(
+            DeliveredGrade("dolby_vision", 8),
+            selection(codec = "server_selected", dynamicRange = "sdr"),
+        )
+        assertEquals(DeliveredGrade("sdr", null), adopted)
+    }
+
+    @Test
+    fun `a successor that names no grade moves neither half`() {
+        val current = DeliveredGrade("hdr10", null)
+        assertEquals(current, adoptedGrade(current, selection(dynamicRange = null)))
+        assertEquals(current, adoptedGrade(current, null))
+    }
+
+    @Test
+    fun `an unchanged grade is still adopted with no profile`() {
+        // An `EffectiveSelection` carries no profile field, so "no answer" is
+        // the only honest value once the successor is the one being described —
+        // even when the grade itself did not move.
+        assertEquals(
+            DeliveredGrade("dolby_vision", null),
+            adoptedGrade(DeliveredGrade("dolby_vision", 8), selection(dynamicRange = "dolby_vision")),
+        )
+    }
+}
+
+class SettlingSnapshotTest {
+    private fun ended(
+        acknowledgement: ActionAcknowledgement?,
+        rate: Double = 0.0,
+    ) = PlaybackControlMapping.snapshot(
+        PlayerControlObservation(
+            positionMs = 3_600_000,
+            durationMs = 3_600_000,
+            bufferedFromMs = 3_600_000,
+            bufferedThroughMs = 3_600_000,
+            rate = rate,
+            isPaused = true,
+            isEnded = true,
+            isSeeking = false,
+            hasStarted = true,
+            isLikelyToKeepUp = false,
+            acknowledgement = acknowledgement,
+            selection = ClientSelection(
+                quality = QualitySelection.Auto,
+                audioTrack = 0,
+                subtitle = SubtitleSelection(SubtitleMode.OFF),
+                audioOffsetMs = 0,
+                codec = CodecPolicy.AUTO,
+                dynamicRange = DynamicRangePolicy.AUTO,
+            ),
+            capabilities = DynamicCapabilities(
+                platform = "android",
+                maxHeight = 2_160,
+                codecs = listOf(CodecPolicy.H264),
+                dynamicRanges = listOf(DynamicRangePolicy.SDR),
+                dualPlayerPreparation = false,
+            ),
+        ),
+    )
+
+    @Test
+    fun `a commit at the end of a title travels as a pair the server accepts`() {
+        // Asserted as a pair on purpose. `demand` and `playback_rate` are one
+        // answer computed together — the mapper derives the rate *from* the
+        // demand — and raising one without the other produced `active` at rate
+        // zero, which the server refuses outright, taking the commit with it.
+        val committed = settlingSnapshot(
+            ended(
+                ActionAcknowledgement(
+                    ACTION_ID,
+                    AcknowledgementState.COMMITTED,
+                    firstFrameUnixMs = 1_788_000_000_000,
+                ),
+            ),
+        )
+        assertEquals(PlaybackDemand.ACTIVE, committed.demand)
+        assertTrue(
+            committed.playbackRate >= PlaybackControlMapping.MIN_ACTIVE_RATE,
+            "active demand at rate ${committed.playbackRate} is a 400",
+        )
+        assertNotNull(committed.sendableAcknowledgement)
+        assertTrue(committed.isValid)
+        // The one field still saying what the player is actually doing is left
+        // alone. This exchange is not what ends the session.
+        assertEquals(RenderState.ENDED, committed.renderState)
+    }
+
+    @Test
+    fun `every other settlement rides the exchange as mapped`() {
+        for (state in listOf(
+            AcknowledgementState.ABORTED,
+            AcknowledgementState.FAILED,
+            AcknowledgementState.METADATA_READY,
+        )) {
+            val snapshot = ended(ActionAcknowledgement(ACTION_ID, state))
+            assertEquals(snapshot, settlingSnapshot(snapshot), "$state was rewritten")
+            assertEquals(PlaybackDemand.END, settlingSnapshot(snapshot).demand)
+        }
+        val none = ended(null)
+        assertEquals(none, settlingSnapshot(none))
+    }
+
+    @Test
+    fun `a commit mid-title is not rewritten because it does not need to be`() {
+        val playing = PlaybackControlMapping.snapshot(
+            PlayerControlObservation(
+                positionMs = 60_000,
+                durationMs = 3_600_000,
+                bufferedFromMs = 60_000,
+                bufferedThroughMs = 70_000,
+                rate = 1.0,
+                isPaused = false,
+                isEnded = false,
+                isSeeking = false,
+                hasStarted = true,
+                isLikelyToKeepUp = true,
+                acknowledgement = ActionAcknowledgement(
+                    ACTION_ID,
+                    AcknowledgementState.COMMITTED,
+                    firstFrameUnixMs = 1_788_000_000_000,
+                ),
+                selection = ClientSelection(
+                    quality = QualitySelection.Auto,
+                    audioTrack = 0,
+                    subtitle = SubtitleSelection(SubtitleMode.OFF),
+                    audioOffsetMs = 0,
+                    codec = CodecPolicy.AUTO,
+                    dynamicRange = DynamicRangePolicy.AUTO,
+                ),
+                capabilities = DynamicCapabilities(
+                    platform = "android",
+                    maxHeight = 2_160,
+                    codecs = listOf(CodecPolicy.H264),
+                    dynamicRanges = listOf(DynamicRangePolicy.SDR),
+                    dualPlayerPreparation = false,
+                ),
+            ),
+        )
+        assertEquals(playing, settlingSnapshot(playing))
+    }
+}

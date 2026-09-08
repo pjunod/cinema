@@ -48,6 +48,18 @@ internal const val PREPARED_SWITCH_RUNWAY_MS = 3_000L
  */
 internal const val PREPARED_COMMIT_FRAME_BOUND_MS = 5_000L
 
+/**
+ * How long a retired predecessor may sit parked before the watchdog collects it
+ * without waiting for the composition.
+ *
+ * The surface owner normally collects it within a frame, which is the only
+ * deterministic answer and the fast one. But a recomposer stops issuing frames
+ * whenever the window is not visible, and a paused ExoPlayer still holds its
+ * renderers — so a couple of ticks is the bound on how long two live decoders
+ * may overlap on a device class M5.5 measured as failing at exactly two.
+ */
+internal const val PREPARED_RETIRED_COLLECT_MS = 2_500L
+
 /** Where a preparation is on the ladder. Terminal states are absorbing. */
 internal enum class PreparationPhase {
     /** Named by the server, pipeline being built. Nothing reported yet. */
@@ -371,3 +383,52 @@ internal fun preparedReplacementRequirements(
         },
     ),
 )
+
+/**
+ * The delivered grade after a prepared handoff.
+ *
+ * Lifted out of [Controller] so the rule has one statement and one test rather
+ * than being spelled at each call site. `adoptSessionDelivery`'s own doc makes
+ * the argument for that: two independent `?.let`s keep the predecessor's Dolby
+ * Vision profile through a change of grade and paint "SDR - Profile 8" over a
+ * handover to a transcode, and each half looks correct on its own.
+ *
+ * An [EffectiveSelection] carries no profile field, so when the grade moves the
+ * only honest profile is "no answer". When the successor names no grade,
+ * neither half moves.
+ */
+internal data class DeliveredGrade(
+    val range: String?,
+    val dolbyVisionProfile: Int?,
+)
+
+internal fun adoptedGrade(
+    current: DeliveredGrade,
+    successor: EffectiveSelection?,
+): DeliveredGrade {
+    val range = successor?.dynamicRange ?: return current
+    return DeliveredGrade(range, null)
+}
+
+/**
+ * The snapshot a teardown settles a commit on.
+ *
+ * A viewer who closes at the end of a title maps to `demand: end`, and an
+ * ending exchange may not carry a `committed` — the pairing is a `400` that
+ * costs both. This exchange is not what ends the session (`endHlsSession` is,
+ * on its own route), so it does not claim to.
+ *
+ * The rate moves with the demand because the mapper derives one from the other:
+ * a held player reports the rate it actually has, which at the end of a title is
+ * zero, and the server refuses `active` below 0.25 outright — refusing the whole
+ * exchange and the commit with it. `render_state` is left alone, so the one
+ * field still saying what the player is doing goes on saying it.
+ */
+internal fun settlingSnapshot(snapshot: PlaybackControlSnapshot): PlaybackControlSnapshot {
+    if (snapshot.acknowledgement?.state != AcknowledgementState.COMMITTED) return snapshot
+    if (snapshot.demand != PlaybackDemand.END) return snapshot
+    return snapshot.copy(
+        demand = PlaybackDemand.ACTIVE,
+        playbackRate = maxOf(PlaybackControlMapping.MIN_ACTIVE_RATE, snapshot.playbackRate),
+    )
+}

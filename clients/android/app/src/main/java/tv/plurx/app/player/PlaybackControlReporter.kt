@@ -1,5 +1,6 @@
 package tv.plurx.app.player
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.TimeoutCancellationException
@@ -817,13 +818,29 @@ class PlaybackControlReporter private constructor(
         if (!value.isValid) return false
         val stale = mutex.withLock {
             if (stopped) return false
-            pending = value
             val running = pump
             pump = scope.launch { run() }
             running
         }
         stale?.cancel()
-        return true
+        // Re-asserted after the cancel, not before it. The cancelled coroutine
+        // no longer writes anything — it re-throws — which also means it never
+        // reached its own `inFlight = false`, so the slot it was holding has to
+        // be reclaimed here or the exchange this method exists to send would
+        // wait behind a coroutine that no longer exists. `retryRequest` and the
+        // pacing floor go with it: a replay of the pre-teardown request would
+        // carry no acknowledgement, which is the one thing that had to go out.
+        return mutex.withLock {
+            if (stopped) {
+                false
+            } else {
+                inFlight = false
+                retryRequest = null
+                nextAllowedAt = 0L
+                pending = value
+                true
+            }
+        }
     }
 
     suspend fun stop() {
@@ -832,6 +849,12 @@ class PlaybackControlReporter private constructor(
             stopped = true
             pending = null
             retryRequest = null
+            // The coroutine about to be cancelled re-throws rather than
+            // running its tail, so it never clears this itself. No reader
+            // consults `inFlight` without checking `stopped` first, so this is
+            // hygiene rather than a fix — but a slot left held on a stopped
+            // reporter is the kind of state that becomes a fix later.
+            inFlight = false
             val running = pump
             pump = null
             running
@@ -919,6 +942,23 @@ class PlaybackControlReporter private constructor(
         }
         val outcome = try {
             Result.success(withExchangeDeadline { send(url, request) })
+        } catch (cancelled: CancellationException) {
+            // A cancellation is not a failed exchange, and catching it as one
+            // is worse than losing the exchange. `CancellationException` is an
+            // `Exception`, and every `mutex.withLock` below is uncontended —
+            // so a cancelled coroutine runs the whole tail: it records a
+            // fabricated `transport:none:-`, and `handle` classifies a null
+            // status as retryable and arms `retryRequest` plus a five-second
+            // `nextAllowedAt`. The pump that took over then paces five seconds
+            // and, when it does speak, replays the request it inherited rather
+            // than the one it was handed. That is exactly the state a teardown
+            // hand-off leaves behind, so the one path that most needs to speak
+            // is the one this silenced.
+            //
+            // `withExchangeDeadline` has already turned a real deadline into a
+            // `ControlTransportException(408)` above, so the timeout path is
+            // untouched by this.
+            throw cancelled
         } catch (failure: Exception) {
             Result.failure(failure)
         }

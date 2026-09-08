@@ -1289,3 +1289,114 @@ class PlaybackControlPreparedReplacementTest {
         assertTrue(effective.isValid)
     }
 }
+
+/**
+ * The teardown hand-off: one last exchange, on a scope that outlives the
+ * screen.
+ *
+ * Twice now the acknowledgement a preparation is owed has been lost on this
+ * path — once because `end()`'s queued `stop()` cancelled the pump the urgent
+ * notify had just launched, and once because cancelling a pump *inside* an
+ * exchange ran the whole failure tail and armed a five-second retry of the
+ * request it was replacing. Both were invisible: the code looked right and the
+ * staging just quietly ran to its 330 s deadline. So the assertions here are
+ * about what went out, not about what was intended.
+ */
+class PlaybackControlSettleTest {
+    private val actionId = "33333333-3333-4333-8333-333333333333"
+
+    private fun settling(state: AcknowledgementState) = snapshot().copy(
+        acknowledgement = ActionAcknowledgement(actionId, state),
+    )
+
+    @Test
+    fun `a teardown across an in-flight exchange sends the snapshot it was handed`() = runTest {
+        val harness = Harness(this)
+        // The first exchange never comes back — the only case in which the
+        // teardown path differs from an ordinary urgent report, and the case
+        // both regressions lived in.
+        harness.holds = true
+        val subject = assertNotNull(reporter(harness))
+        subject.start(backgroundScope)
+        runCurrent()
+        assertEquals(1, harness.requests.size, "one exchange is in flight")
+        assertNull(harness.requests.first().acknowledgement)
+
+        harness.holds = false
+        assertTrue(subject.settle(backgroundScope, settling(AcknowledgementState.ABORTED)))
+        advanceTimeBy(2_000)
+        runCurrent()
+
+        assertEquals(2, harness.requests.size)
+        val last = harness.requests.last()
+        assertEquals(AcknowledgementState.ABORTED, last.acknowledgement?.state)
+        assertEquals(actionId, last.acknowledgement?.actionId)
+        // Not a replay of the request it inherited. A cancelled exchange used
+        // to arm `retryRequest`, and `nextRequestLocked` prefers that over the
+        // snapshot — so the exchange went out carrying no acknowledgement at
+        // all, which is the one thing it existed to carry.
+        assertEquals(2L, last.sequence)
+        assertFalse(subject.status().retrying)
+        subject.stop()
+    }
+
+    @Test
+    fun `a teardown with nothing in flight still sends it`() = runTest {
+        val harness = Harness(this)
+        val subject = assertNotNull(reporter(harness))
+        subject.start(backgroundScope)
+        advanceTimeBy(1)
+        runCurrent()
+        assertTrue(subject.settle(backgroundScope, settling(AcknowledgementState.FAILED)))
+        advanceTimeBy(2_000)
+        runCurrent()
+        assertEquals(
+            AcknowledgementState.FAILED,
+            harness.requests.last().acknowledgement?.state,
+        )
+        subject.stop()
+    }
+
+    @Test
+    fun `a stopped reporter refuses the hand-off rather than pretending`() = runTest {
+        // The caller waits on the return value: an exchange that will never be
+        // built must not cost the teardown its whole deadline.
+        val harness = Harness(this)
+        val subject = assertNotNull(reporter(harness))
+        subject.start(backgroundScope)
+        runCurrent()
+        subject.stop()
+        assertFalse(subject.settle(backgroundScope, settling(AcknowledgementState.ABORTED)))
+    }
+
+    @Test
+    fun `a snapshot the server would refuse is not handed off`() = runTest {
+        val harness = Harness(this)
+        val subject = assertNotNull(reporter(harness))
+        subject.start(backgroundScope)
+        runCurrent()
+        val impossible = snapshot().copy(
+            acknowledgement = ActionAcknowledgement(actionId, AcknowledgementState.COMMITTED),
+        )
+        assertFalse(impossible.isValid, "a commit with no rendered frame")
+        assertFalse(subject.settle(backgroundScope, impossible))
+        subject.stop()
+    }
+
+    @Test
+    fun `a body this client cannot read stops the reporter rather than looping`() = runTest {
+        // A protocol failure is not a transport failure. Folding it into the
+        // null-status arm made it retryable, which replays the same request at
+        // the cadence forever and logs `transport:none:-` — a diagnosable fatal
+        // turned into an undiagnosable loop.
+        val harness = Harness(this)
+        harness.enqueue(Result.failure(ControlProtocolException("body")))
+        val subject = assertNotNull(reporter(harness))
+        subject.start(backgroundScope)
+        advanceTimeBy(60_000)
+        runCurrent()
+        assertTrue(subject.isStopped())
+        assertEquals(1, harness.requests.size)
+        assertEquals("protocol:body", harness.exchanges.last().failure)
+    }
+}

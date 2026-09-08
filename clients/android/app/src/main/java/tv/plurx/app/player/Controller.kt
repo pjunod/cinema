@@ -737,24 +737,10 @@ class Controller(
         // encoder runs for another 330 seconds after the viewer left.
         abandonPreparedReplacement(failed = false)
         awaitingCommitFrameSinceMs = null
-        val settling = pendingAcknowledgement?.let { owed ->
+        val settling = pendingAcknowledgement?.let {
             playbackControlObservation()
                 ?.let(PlaybackControlMapping::snapshot)
-                ?.let { snapshot ->
-                    // A viewer who closes at the end of the title maps to
-                    // `demand: end`, and an ending exchange may not carry a
-                    // `committed` — so the commit would be dropped and the
-                    // reporter stopped, with nothing left to send it on. This
-                    // exchange is not what ends the session; `endHlsSession`
-                    // below is, on its own route. So it does not claim to.
-                    if (owed.state == AcknowledgementState.COMMITTED &&
-                        snapshot.demand == PlaybackDemand.END
-                    ) {
-                        snapshot.copy(demand = PlaybackDemand.ACTIVE)
-                    } else {
-                        snapshot
-                    }
-                }
+                ?.let(::settlingSnapshot)
         }
         // Every read below this line is against a player that is about to be
         // released, so the observation is closed first.
@@ -1679,6 +1665,15 @@ class Controller(
     private var retiredPlayer: ExoPlayer? = null
 
     /**
+     * When it was parked, so the watchdog can collect one the composition never
+     * came back for. A paused ExoPlayer still holds its renderers — only
+     * `release` frees them — so a predecessor left parked while the frame clock
+     * is stopped is a second live decoder on a device class measured as failing
+     * at two. The fast path stays the composition's; this is the backstop.
+     */
+    private var retiredParkedAtMs = 0L
+
+    /**
      * Release the player the surface has just moved off.
      *
      * Called by the screen from the `AndroidView` update that re-points the
@@ -1690,6 +1685,7 @@ class Controller(
     fun collectRetiredPlayer() {
         val retired = retiredPlayer ?: return
         retiredPlayer = null
+        retiredParkedAtMs = 0L
         retired.release()
     }
 
@@ -1786,6 +1782,13 @@ class Controller(
      * that document says not to do.
      */
     private fun pollPreparedReplacement() {
+        // The composition normally collects this within a frame. When the frame
+        // clock is parked it never does, and a paused player is still a decoder.
+        if (retiredPlayer != null &&
+            monotonicNowMs() - retiredParkedAtMs > PREPARED_RETIRED_COLLECT_MS
+        ) {
+            collectRetiredPlayer()
+        }
         awaitingCommitFrameSinceMs?.let { since ->
             if (monotonicNowMs() - since > PREPARED_COMMIT_FRAME_BOUND_MS) {
                 settleCommitOnFirstFrame(System.currentTimeMillis())
@@ -1865,23 +1868,15 @@ class Controller(
             sessionId = successorSession
             startStatusPolling(successorSession)
         }
-        action.effectiveSelection?.let { effective ->
-            stallReopenBudget.seed(effective.height.toInt())
-            // The badges and the info panel describe the stream on the screen.
-            // Both halves move together, for the same reason
-            // `adoptSessionDelivery` moves them together on a create: a grade
-            // left behind describes the session that just stopped.
-            effective.dynamicRange?.let {
-                deliveredRange = it
-                // Both halves, in one place, for the reason
-                // `adoptSessionDelivery` is one function rather than two lines:
-                // a grade that moved past a profile that did not paints
-                // "SDR - Profile 8" over a Dolby Vision handover to a
-                // transcode, and each half looks correct on its own. An
-                // `EffectiveSelection` carries no profile, so "no answer" is
-                // the only honest value.
-                deliveredDolbyVisionProfile = null
-            }
+        action.effectiveSelection?.let { stallReopenBudget.seed(it.height.toInt()) }
+        // The badges and the info panel describe the stream on the screen, and
+        // both halves of the grade move together or neither does.
+        adoptedGrade(
+            DeliveredGrade(deliveredRange, deliveredDolbyVisionProfile),
+            action.effectiveSelection,
+        ).let {
+            deliveredRange = it.range
+            deliveredDolbyVisionProfile = it.dolbyVisionProfile
         }
         // The successor is a different encoder on a different session. The
         // status poll started above refills both within a couple of seconds;
@@ -1902,7 +1897,14 @@ class Controller(
         // be guessing about a frame clock that is parked whenever the window is
         // not visible. It is paused rather than stopped, so the predecessor's
         // last frame stays on screen through the swap instead of a shutter.
+        // Collect before parking. Two commits between two composition passes
+        // would otherwise drop the first predecessor on the floor — never
+        // released, never referenced again. An uncollected one here means
+        // `player` has already moved twice, so the view is demonstrably past
+        // it.
+        collectRetiredPlayer()
         previous.playWhenReady = false
+        retiredParkedAtMs = monotonicNowMs()
         retiredPlayer = previous
         // The commit is owed a `first_frame_unix_ms`, and the honest source is
         // the successor's own first render — which cannot have happened yet,
@@ -1931,6 +1933,22 @@ class Controller(
      * The interruption that follows is Android's ordinary reopen, measured at
      * 353–766 ms on the Google TV. It works, and it is not seamless; nothing
      * here should ever describe it as such.
+     */
+    /**
+     * Every path that replaces the stream calls this, and the list is the rule.
+     *
+     * There are five: [seekTo] (a VOD seek never reopens, so it never reaches
+     * `restartAt`), [restartAt] (quality, audio, subtitle, fallback),
+     * [openSession], [onStall]'s reopen, [retryMediaOnNextNode], and [release].
+     * A sixth path that replaces the stream and does not appear here leaves the
+     * successor priming against a session that is gone, and the next tick
+     * commits it — which is what `onStall` did until a review traced it.
+     *
+     * The list is a comment rather than a test because reaching any of those
+     * from the JVM unit lane needs a `Context` and a real ExoPlayer. Both
+     * decisions this used to make inline — which grade to adopt, and what a
+     * settling snapshot looks like — now live in `PreparedReplacement.kt`
+     * where they are tested; this is the residue that genuinely needs a player.
      */
     private fun abandonPreparedReplacement(failed: Boolean) {
         // A switched preparation cannot be abandoned — the viewer is watching
