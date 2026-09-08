@@ -24,7 +24,7 @@ An unchecked item is not implied by a nearby passing check.
 | M0–M5 · selection, observation, receipts, admission and bounded prepublication recovery | Done on the effort branch | No planned build work |
 | M6 · prepared replacement contract and clients | Code landed | Apple is the only client currently reaching a viewer; the cross-client fleet receipt remains M8 evidence |
 | M7a · advisory Developer settings | Done | Keep the prerequisites accurate as hardware contracts land; the controls advise and never gate enablement |
-| M7b · hardware diagnostic path | Findings under repair | Backend-aware inventory is implemented. The first adversarial review found five issues; all five have code repairs pending exact-tree verification and re-review. One final full suite, draft-PR promotion and merge remain. A real hardware contract is separate fleet evidence |
+| M7b · hardware diagnostic path | Follow-up repairs verified locally | Backend-aware inventory is implemented. The first adversarial review's five issues are closed. Its exact-head re-review found three follow-ups; their API, UI-copy and cleanup-proof repairs pass the focused tests and fast lane. Exact-tree re-review, one final full suite, draft-PR promotion and merge remain. A real hardware contract is separate fleet evidence |
 | M7 remainder · offline durability and handoff enforcement | Not yet audited | Job-scoped recovery budget · alternate-result and part/assembly receipt verification · versioned worker capabilities · owner-handoff coverage · shipping-path exercise without the legacy recovery feature flag |
 | M8 · fleet qualification | Not started | Hardware diagnostic capture · workload matrix · false-positive classification · startup/concurrency/recovered-latency evidence · three-client replacement runs |
 | Promotion to `main` | Not started | Freeze effort merges · merge fresh `main` · requalify the exact tree · pass Main promotion gate · merge |
@@ -44,11 +44,11 @@ recovery remains deliberately unreachable rather than falsely certified.
 | Task PR | [Forgejo #174](http://192.168.4.7:3000/noirr/plurx/pulls/174), `WIP:`. It stays draft until adversarial findings are clean; the full suite runs once on that corrected candidate |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
 | Implemented locally | Nested backend-aware inventory with a backward-compatible v1 API field and versioned backend-aware sibling · aggregate inventory timeout · successful hardware-frame runtime proof · exact `(codec, backend)` diagnostic lookup · path-scoped policy identity for uniquely covered plans · same-codec recovery readiness · Settings → Developer presents prerequisites as advice and never disables the control |
-| Adversarial review | Exact head `a148676d`: changes requested for node-global partial coverage, pre-initialization hardware evidence, serial worst-case startup latency, crossed-codec UI readiness, and an incompatible API shape. Repairs use per-path qualification, post-initialization hardware-frame evidence plus successful exit, one aggregate deadline, same-codec UI correlation, and a versioned API sibling |
-| Focused evidence | Pre-review head: validation 196/196. Repaired tree: decoder inventory 15/15 · Developer UI 16/16 · status contract 21/21 · five focused readiness/path/API tests passed |
-| Fast lane | Repaired tree: history 1,600 · catalog 24 points / 33 checks / 1,569 audited files · formatting, locked all-target workspace compile, and changed library/binary Clippy with warnings denied pass. Operations has the same 10 failures on this branch and untouched `48ad8716`: the macOS system Bash lacks `mapfile`; 280/290 pass. All-target Clippy reaches the same four unused store-fixture constants on both trees |
+| Adversarial review | Exact head `a148676d`: five changes requested and repaired at `b51eed01` with per-path qualification, post-initialization successful hardware evidence, one aggregate deadline, same-codec UI correlation and a versioned inventory API sibling. Re-review of `b51eed01` closed those five and found three follow-ups: conservative legacy settings semantics, path-scoped cache-cost copy, and mutation-sensitive child/file cleanup proof. All three are repaired locally and await exact-head approval |
+| Focused evidence | Pre-review head: validation 196/196. Current repair tree: decoder inventory 15/15, including exact child termination and partial-file removal · Developer UI 16/16 · status contract 21/21 · path-scoped planner test · conservative settings serialization test · settings request/restart API test |
+| Fast lane | Repaired tree: history 1,601 · catalog 24 points / 33 checks / 1,570 audited files · formatting, locked all-target workspace compile, and changed library/binary Clippy with warnings denied pass. Operations has the same 10 failures on this branch and untouched `48ad8716`: the macOS system Bash lacks `mapfile`; 280/290 pass. All-target Clippy reaches the same four unused store-fixture constants on both trees |
 | Full validation | Per Paul's 2026-09-08 instruction, run one `make validate-full` only after adversarial findings are repaired and immediately before taking `WIP:` off the PR; exact-tree promotion still reruns the Main gate after fresh `main` is merged |
-| Next | Finish exact-tree focused checks and fast lane · commit/push repairs · adversarial re-review · one final full suite · mark ready and merge after the effort gate |
+| Next | Commit/push the verified follow-ups · obtain exact-head adversarial approval · run one final full suite · mark ready and merge after the effort gate |
 | External blocker | No retained contract is yet qualified against a real hardware decoder. The code can make that contract expressible and enforceable; a qualifying host must supply the evidence |
 
 ## Milestones
@@ -1977,16 +1977,19 @@ every node.
 ### Two facts, two fields
 
 The settings API reports the request and the node's answer separately:
-`decoder_health_qualified_artifacts` is what an operator asked for, and the
-read-only `decoder_health_qualification` is the namespace the node actually
-plans into, whether it is enforcing, whether it *could*, what it measured, what
-is covered, and the refusal.
+`decoder_health_qualified_artifacts` is what an operator stored. The read-only
+`decoder_health_qualification` preserves the legacy conservative whole-node
+`namespace` and `enforcing` facts, while additive `policy_enabled`,
+`requested_namespace`, and `path_scoped` fields say whether the published
+request is active and make clear that exact covered paths are its enforcement
+unit. The same record says whether at least one path is eligible, what the node
+measured, what is covered, and the advisory refusal.
 
 Collapsing those into one field is the mistake worth naming. A surface that
-echoed the request back as the state would let someone believe every transcode
-on the node is verified when nothing about it changed — which is precisely the
-false certificate the whole effort exists to prevent, arriving through the
-control that was supposed to prevent it.
+echoed the request back as a node-global state would let someone believe every
+transcode on the node is verified when only a subset changed. Hiding the
+request whenever coverage is partial would instead turn prerequisites into a
+gate. The path-scoped fields avoid both failures.
 
 The request is stored either way. A node that is refused today and later gains
 a covering contract picks the request up on its next start, and does not need
@@ -1999,8 +2002,8 @@ start** — after the decoder probe and the contract install, before anything ca
 plan. The settings write stores the request and deliberately does not apply it.
 
 The first draft of this milestone republished on every write, and that was
-wrong for a reason worth stating plainly: this value is part of every cache key
-the node computes. Moving it on a live node moves the key space *under work
+wrong for a reason worth stating plainly: this value changes the cache key for
+every covered path. Moving it on a live node moves those key spaces *under work
 that is already running*. A session that resolved its plan a second earlier
 publishes into a directory the next lookup will not name. A resumable
 production cannot find its own earlier parts, and under the qualified identity
@@ -2015,13 +2018,11 @@ nodes converge as they restart, and until then a node that has not restarted is
 simply computing the keys it has always computed. Its own surface says a
 restart is owed.
 
-The surface reports **three** facts, and collapsing any pair breaks it. The
-stored request is what an operator asked for. The published answer is what this
-node decided at start, and it is read from the manager's own published value
-rather than recomputed — a recomputation would say `enforcing` on a node that
-is planning unqualified, which is the false certificate this control exists to
-prevent, arriving through the control. `pending_restart` is the gap between
-them, so a saved change is neither hidden nor claimed as in force.
+The surface reports the stored request, published path-scoped policy, legacy
+whole-node projection, exact coverage and restart gap separately. The published
+facts are read from the manager rather than recomputed. `pending_restart` is
+the gap between the stored request and published policy, so a saved change is
+neither hidden nor claimed as in force.
 
 `test_publish_artifact_qualification` stays, and stays test-only. Every test of
 the enforcement behind this control runs on a host no contract covers, where
@@ -2033,14 +2034,13 @@ the real publisher would — correctly — refuse them all.
 what the feature is for in the words the failure actually takes — FFmpeg can
 drop every frame of a file and still exit successfully, and without this that
 result is cached and served forever — then the cost, before the switch: it
-renames every transcode the node caches, nothing is deleted, and each title is
-made again on next demand.
+renames cached transcodes on covered paths, nothing is deleted, and affected
+titles are made again on next demand.
 
-The cost line is conditional, because on a node that cannot honour the request
-there is no cost at all — and an unconditional warning sitting above three
-crosses that contradict it teaches an operator to stop reading the warnings.
-The eligible node is told what it will pay, including that turning it off later
-pays the rename a second time.
+The cost line is conditional, because a node with no covered path pays no cache
+rename yet. An eligible node is told that each covered path pays, including the
+second rename if the policy is turned off later; a newly covered path pays when
+its contract arrives.
 
 Then the three checks, each with a tick or a cross and what it means, filled in
 from what this node measured rather than from a document telling an operator to

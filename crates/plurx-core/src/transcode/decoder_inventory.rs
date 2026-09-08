@@ -823,7 +823,12 @@ qsv\n";
             "#!/bin/sh\n\
 case \" $* \" in\n\
   *\" -hwaccels \"*) printf 'Hardware acceleration methods:\\nqsv\\nvaapi\\n' ;;\n\
-  *) exec /bin/sleep 30 ;;\n\
+  *)\n\
+    for argument do output=\"$argument\"; done\n\
+    printf partial >\"$output\"\n\
+    printf '%s\\n' \"$$\" >\"$0.pid\"\n\
+    exec /bin/sleep 30\n\
+    ;;\n\
 esac\n",
         )
         .expect("write fake ffmpeg");
@@ -838,20 +843,43 @@ esac\n",
             fake.to_str().expect("utf8 fake path"),
             &["mpeg2video".to_owned()],
             scratch.path(),
-            std::time::Duration::from_millis(100),
+            std::time::Duration::from_secs(2),
         )
         .await;
 
         assert!(measured.is_empty());
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(2),
+            started.elapsed() < std::time::Duration::from_secs(4),
             "one wedged pair must not multiply the whole inventory's budget"
+        );
+
+        let pid_file = fake.with_extension("pid");
+        let pid = std::fs::read_to_string(&pid_file)
+            .expect("the wedged child recorded its pid after creating the partial clip")
+            .trim()
+            .parse::<libc::pid_t>()
+            .expect("numeric child pid");
+        let process_is_alive = |pid| {
+            // Safety: signal zero changes no process state; it only asks the
+            // kernel whether this exact pid still exists and is signalable.
+            let result = unsafe { libc::kill(pid, 0) };
+            result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+        };
+        let child_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while process_is_alive(pid) && std::time::Instant::now() < child_deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            !process_is_alive(pid),
+            "cancelling the aggregate probe must terminate its exact child pid"
         );
         assert_eq!(
             std::fs::read_dir(scratch.path())
                 .expect("scratch listing")
                 .filter_map(Result::ok)
-                .filter(|entry| entry.file_name() != "wedged-ffmpeg")
+                .filter(|entry| {
+                    entry.file_name() != "wedged-ffmpeg" && entry.file_name() != "wedged-ffmpeg.pid"
+                })
                 .count(),
             0,
             "cancelling the aggregate probe must remove its partial clip"

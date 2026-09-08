@@ -238,9 +238,9 @@ test("Playback saves per card, and each card writes only its own fields", () => 
       "vod_working_set_bytes",
     ]);
     assert.deepEqual(Object.keys(writes.saveDeveloper.body).sort(), ["playback_control_protocol_v1"]);
-    // Its own card, its own field. The verified-decode request renames every
-    // cached transcode on the node, so it must never ride along with a save
-    // an operator made for something else.
+    // Its own card, its own field. The verified-decode request renames cached
+    // transcodes on covered paths, so it must never ride along with a save an
+    // operator made for something else.
     assert.deepEqual(Object.keys(writes.saveVerifiedDecode.body).sort(), ["decoder_health_qualified_artifacts"]);
     assert.equal(writes.saveVerifiedDecode.path, "/settings");
     assert.deepEqual(Object.keys(writes.saveExperimental.body).sort(), ["hls_typeless_sliding"]);
@@ -383,7 +383,7 @@ test("Verified decode states its cost, its prerequisites, and what this node mea
 
   // Requested and enabled, with the uncovered state still shown as advice.
   const refused = card({ decoder_health_qualified_artifacts: true, decoder_health_qualification: {
-    namespace: "decoder-plan-v1-health-qualified-r1", enforcing: true, eligible: false,
+    namespace: "decoder-plan-v1-unqualified", enforcing: false, policy_enabled: true, eligible: false,
     measured_build: "ffmpeg version 5.1.9", measured_decoders: ["h264/software/h264", "hevc/software/hevc"],
     covered_decoders: [], refusal: "no_contract_covers_this_build",
     explanation: "No retained diagnostic contract covers this node's FFmpeg build under the qualified log flags.",
@@ -397,7 +397,7 @@ test("Verified decode states its cost, its prerequisites, and what this node mea
 
   // In force.
   const on = card({ decoder_health_qualified_artifacts: true, decoder_health_qualification: {
-    namespace: "decoder-plan-v1-health-qualified-r1", enforcing: true, eligible: true,
+    namespace: "decoder-plan-v1-health-qualified-r1", enforcing: true, policy_enabled: true, eligible: true,
     measured_build: "ffmpeg version 9.0.1", measured_decoders: ["h264/software/h264"],
     covered_decoders: ["h264/software/h264"], refusal: null, explanation: null,
   } });
@@ -405,23 +405,25 @@ test("Verified decode states its cost, its prerequisites, and what this node mea
   assert.equal((on.match(/✗/g) || []).length, 0);
   assert.doesNotMatch(on, /Not in force/);
   // An eligible node is the one that actually pays, so it is the one told.
-  assert.match(on, /This node can honour the request/);
-  assert.match(on, /renames every transcode it caches/);
-  assert.match(on, /pays the same rename a second time/);
+  assert.match(on, /This node has covered decode paths/);
+  assert.match(on, /renames cached transcodes that use those paths/);
+  assert.match(on, /paths pay the same rename a second time/);
+  assert.doesNotMatch(on, /every transcode/);
 
   // Saved and not yet applied is a third state, and it is neither of the
   // other two: reporting the request as the state would claim a change that
   // has not happened, and reporting only the published answer would hide one
   // an operator just made.
   const pending = card({ decoder_health_qualified_artifacts: true, decoder_health_qualification: {
-    namespace: "decoder-plan-v1-unqualified", enforcing: false, eligible: true,
+    namespace: "decoder-plan-v1-unqualified", enforcing: false, policy_enabled: false, eligible: true,
     measured_build: "ffmpeg version 9.0.1", measured_decoders: ["h264/software/h264"],
     covered_decoders: ["h264/software/h264"], refusal: "not_requested",
     explanation: "Not requested on this node.", pending_restart: true,
   } });
   assert.match(pending, /Saved · restart to apply/);
   assert.match(pending, /applies the request when it next starts/);
-  assert.match(pending, /move that key space under work already in flight/);
+  assert.match(pending, /move an affected key space under work already in flight/);
+  assert.doesNotMatch(pending, /every cache key/);
 
   // FFmpeg's version banner and decoder names are somebody else's strings.
   const hostile = card({ decoder_health_qualified_artifacts: false, decoder_health_qualification: {

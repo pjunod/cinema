@@ -10516,8 +10516,9 @@ pub struct ArtifactQualificationReadiness {
     /// The subset of those a retained diagnostic contract covers on this
     /// build, under the qualified log flags.
     pub covered_decoders: Vec<(String, plurx_core::transcode::DecodeBackend, String)>,
-    /// The enabled policy. Individual plans use the qualified identity only
-    /// when their exact measured path has one unique covering contract.
+    /// Conservative whole-node projection retained for existing API clients.
+    /// This is qualified only when every measured path is uniquely covered;
+    /// individual plans still apply `requested` to exact covered paths.
     pub effective: plurx_core::transcode::ArtifactQualification,
     /// Readiness advisory for incomplete or ambiguous coverage, if any.
     pub refusal: Option<QualificationRefusal>,
@@ -10621,7 +10622,7 @@ pub fn artifact_qualification_readiness(
         measured_build,
         measured_decoders,
         covered_decoders,
-        effective: if requested {
+        effective: if requested && refusal.is_none() {
             ArtifactQualification::HealthQualified
         } else {
             ArtifactQualification::Unqualified
@@ -16754,7 +16755,7 @@ impl TranscodeManager {
         self.caps.choose(&prefer)
     }
 
-    /// The published requested mode.
+    /// The conservative whole-node projection retained for legacy readers.
     ///
     /// Production planning additionally intersects this with the exact
     /// resolved decode path; this accessor remains for the direct-identity
@@ -16793,8 +16794,8 @@ impl TranscodeManager {
     /// Read and publish the operator's requested path-scoped policy.
     ///
     /// **Called once, at start.** Not on every write, and that is the whole
-    /// design rather than an omission. This value is part of every cache key
-    /// the node computes, so moving it on a live node moves the key space
+    /// design rather than an omission. This value can change the cache key for
+    /// every covered path, so moving it on a live node moves those key spaces
     /// under work that is already running: a session that resolved its plan a
     /// second ago publishes into a directory the next lookup will not name, a
     /// resumable production cannot find its own earlier parts and — under the
@@ -41322,7 +41323,7 @@ scope = "test"
         // measured and is not covered, so the surface must call the node
         // partially covered rather than imply every plan is verified.
         let asked = artifact_qualification_readiness(true, &covered, &measured);
-        assert_eq!(asked.effective, ArtifactQualification::HealthQualified);
+        assert_eq!(asked.effective, ArtifactQualification::Unqualified);
         assert_eq!(
             asked.refusal,
             Some(QualificationRefusal::IncompleteCoverage)
@@ -41344,8 +41345,8 @@ scope = "test"
         let readiness = artifact_qualification_readiness(true, &unmeasured, &measured);
         assert_eq!(
             readiness.effective,
-            ArtifactQualification::HealthQualified,
-            "readiness is advisory and does not turn the request back off"
+            ArtifactQualification::Unqualified,
+            "the legacy whole-node projection stays conservative without disabling the request"
         );
         assert_eq!(
             readiness.refusal,
@@ -41360,7 +41361,7 @@ scope = "test"
         // so a plan that names none can never be matched to one.
         let readiness =
             artifact_qualification_readiness(true, &covered, &MeasuredDecoders::default());
-        assert_eq!(readiness.effective, ArtifactQualification::HealthQualified);
+        assert_eq!(readiness.effective, ArtifactQualification::Unqualified);
         assert_eq!(
             readiness.refusal,
             Some(QualificationRefusal::NoDecoderMeasured)
@@ -41371,7 +41372,7 @@ scope = "test"
         // leave: it needs a capture from this build.
         let uncovered = crate::decoder_health::DiagnosticPolicy::new(Some(build()), Vec::new());
         let readiness = artifact_qualification_readiness(true, &uncovered, &measured);
-        assert_eq!(readiness.effective, ArtifactQualification::HealthQualified);
+        assert_eq!(readiness.effective, ArtifactQualification::Unqualified);
         assert_eq!(
             readiness.refusal,
             Some(QualificationRefusal::NoContractCoversThisBuild)

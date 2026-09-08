@@ -3481,6 +3481,18 @@ mod tests {
             json!(false)
         );
         assert_eq!(
+            initial["decoder_health_qualification"]["policy_enabled"],
+            json!(false)
+        );
+        assert_eq!(
+            initial["decoder_health_qualification"]["requested_namespace"],
+            json!(plurx_core::transcode::UNQUALIFIED_ARTIFACT_NAMESPACE)
+        );
+        assert_eq!(
+            initial["decoder_health_qualification"]["path_scoped"],
+            json!(true)
+        );
+        assert_eq!(
             initial["decoder_health_qualification"]["refusal"],
             json!("not_requested")
         );

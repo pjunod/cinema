@@ -1157,16 +1157,14 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         self.assertIn("five gates M5a tripped and nobody read", self.status)
         self.assertNotIn("four gates M5a tripped", self.status)
 
-    def test_m3f_the_control_is_a_request_the_node_may_refuse(self) -> None:
-        """A switch here would rename every transcode on a node that cannot use it.
+    def test_m3f_the_control_is_path_scoped_and_prerequisites_are_advisory(self) -> None:
+        """A covered path rotates identity without gating the operator request.
 
-        The identity this control selects is a content-addressed key space. A
-        node that honoured a request it could not serve would rotate its whole
-        cache to keys whose every generation is then refused — re-encoding each
-        title once per request forever, with every counter reading healthy.
-        That is worse than the failure the effort exists to fix, because it is
-        silent and it is caused by the fix. So the request is intersected with
-        what the node measured, and the surface reports both facts.
+        The identity this control selects is a content-addressed key space.
+        Enabling the policy rotates only exact paths with one covering
+        contract; uncovered or ambiguous paths retain their current identity.
+        The surface therefore reports the enabled policy, the conservative
+        legacy whole-node fact, and the path coverage separately.
         """
         daemon = DAEMON_TRANSCODE.read_text(encoding="utf-8")
         system = HTTP_SYSTEM.read_text(encoding="utf-8")
@@ -1209,9 +1207,9 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             "crate::decoder_health::QUALIFIED_STDERR_MODE", daemon
         )
 
-        # Published once, at start, and nowhere else. The value is part of
-        # every cache key the node computes, so applying it to a live node
-        # would move that key space under work already running — a session
+        # Published once, at start, and nowhere else. The value can change the
+        # key of each covered path, so applying it to a live node would move
+        # affected key spaces under work already running — a session
         # publishing where the next lookup will not look, a resumable
         # production restarting from parts that carry no receipt.
         self.assertIn("state.transcode.publish_artifact_qualification().await;", main)
@@ -1240,9 +1238,9 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             "#[cfg(test)]\n    pub(crate) fn test_publish_artifact_qualification(", daemon
         )
 
-        # Two facts, two fields. A surface that echoed the request back as the
-        # state would let an operator believe every transcode on the node is
-        # verified when nothing about it changed.
+        # The stored request, conservative legacy state and exact coverage are
+        # separate facts. Collapsing them would either hide an enabled policy
+        # or claim every transcode on the node is verified.
         self.assertIn("pub decoder_health_qualified_artifacts: bool,", system)
         self.assertIn(
             "pub decoder_health_qualification: DecoderHealthQualification,", system
@@ -1251,6 +1249,9 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         for field in (
             "namespace",
             "enforcing",
+            "policy_enabled",
+            "requested_namespace",
+            "path_scoped",
             "eligible",
             "refusal",
             "explanation",
@@ -1269,8 +1270,9 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         # The prerequisites advise; they never disable the operator control.
         self.assertIn("You may still enable the policy", web)
         self.assertIn("advisory and never disable this control", web)
-        self.assertIn("renames every transcode it caches", web)
-        self.assertIn("pays the same rename a second time", web)
+        self.assertIn("renames cached transcodes that use those paths", web)
+        self.assertIn("paths pay the same rename a second time", web)
+        self.assertNotIn("every cache key the node computes", web)
         # FFmpeg's banner and decoder names are somebody else's strings.
         self.assertIn("esc(q.measured_build)", web)
         # Saving replaces this card, never the panel: the Live TV card beside
