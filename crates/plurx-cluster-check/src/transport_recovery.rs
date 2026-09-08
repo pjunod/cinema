@@ -935,6 +935,19 @@ async fn exercise_role_campaign(
             resource_deadline,
         )
         .await?;
+        match baseline_resources.as_deref() {
+            None => println!(
+                "cluster-check: {} baseline resources {}",
+                role.label(),
+                describe_resource_sample(&post_resources)
+            ),
+            Some(baseline) => println!(
+                "cluster-check: {} cycle {cycle} resources {} (baseline {})",
+                role.label(),
+                describe_resource_sample(&post_resources),
+                describe_resource_sample(baseline)
+            ),
+        }
         if cycle == 0 {
             baseline_resources = Some(post_resources);
             continue;
@@ -1451,6 +1464,28 @@ fn sample_movement(
         }
     }
     moved
+}
+
+/// One resource sample as `node N t/s/a`, for the campaign's own log.
+///
+/// A failing campaign never writes its evidence file — it aborts before
+/// `publish_artifact_atomically`, and the workflow's upload of
+/// `cluster-transport-recovery.json` finds nothing — so the log is the only
+/// channel a failure has. Without the per-cycle counts in it, deciding
+/// whether a count is climbing or oscillating needs the campaign rebuilt and
+/// re-run locally with the margins widened, which is what it cost the first
+/// time. One line per cycle makes the next failure answer that from CI.
+fn describe_resource_sample(sample: &[(u64, ProcessResourceCount)]) -> String {
+    sample
+        .iter()
+        .map(|(node_id, counts)| {
+            format!(
+                "node {node_id} {}/{}/{}",
+                counts.threads, counts.sockets, counts.owned_async_tasks
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Every way `current` exceeds `limits`, named one resource at a time.
