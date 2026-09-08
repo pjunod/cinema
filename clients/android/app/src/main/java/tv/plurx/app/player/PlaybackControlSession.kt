@@ -106,6 +106,17 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
     private var reporter: PlaybackControlReporter? = null
 
     /**
+     * Whether an exchange coming back is still allowed to reach the player.
+     *
+     * Cleared before the player is torn down, and never set again. A stop is
+     * asynchronous and an exchange can be in flight across it, so a callback
+     * that acquires resources — `onPrepare` builds an ExoPlayer — needs a
+     * switch as well as the generation fence.
+     */
+    @Volatile
+    private var dispatching = true
+
+    /**
      * One identity per player instance, not per session: a reopen is the same
      * viewer on the same device continuing, and the server reads a new
      * `client_instance_id` as a different client.
@@ -274,6 +285,10 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
         onAcknowledged: (ActionAcknowledgement) -> Unit = {},
     ) {
         end()
+        // `end()` closed the dispatch switch on the generation that just
+        // finished. This one is open again; the generation below is what keeps
+        // the two apart.
+        dispatching = true
         // A generation, not a reset. `end()` stops the old reporter in a
         // launched coroutine, so the stop does not necessarily land before
         // this begin — and an old in-flight exchange completing in that window
@@ -328,7 +343,19 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
                 // on a stall ask, so the dispatch is here rather than in the
                 // player's stall path. The reporter has already refused a
                 // malformed payload — this only ever sees one that validated.
-                if (action != null && action.type == PlaybackControl.PREPARE_ACTION_TYPE) {
+                //
+                // Behind the generation fence and the dispatch switch, like its
+                // neighbours and for a sharper reason than either: this
+                // callback *builds an ExoPlayer*. An exchange that was already
+                // in flight when the session ended, or when the player was
+                // released, would otherwise stand a second pipeline up against
+                // a session that no longer exists — with nothing left running
+                // to release it.
+                if (action != null &&
+                    action.type == PlaybackControl.PREPARE_ACTION_TYPE &&
+                    generation == answerGeneration &&
+                    dispatching
+                ) {
                     onPrepare(action)
                 }
                 if (action != null &&
@@ -374,9 +401,56 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
     }
 
     fun end() {
+        dispatching = false
         val subject = reporter ?: return
         reporter = null
         scope.launch { subject.stop() }
+    }
+
+    /**
+     * Send one last exchange, then stop — on a scope that outlives the screen.
+     *
+     * [end] cannot do this and the difference is not a detail. `end()` queues a
+     * `stop()`, and a `stop()` queued after an urgent notify still runs before
+     * the pump it was meant to let finish: the notify sets `pending` and
+     * launches `run()`, `stop()` clears `pending` and cancels that job, and the
+     * exchange is never built. On the disposal path it is worse — the
+     * composition's scope is cancelled in the same synchronous pass, so nothing
+     * launched on it runs at all.
+     *
+     * That matters for exactly one thing: the terminal acknowledgement a
+     * preparation is owed. Leaving it unsent hands the staging to the server's
+     * 330 s deadline, which means a real encoder and an actor slot held for
+     * five and a half minutes after the viewer closed the player.
+     *
+     * [finalSnapshot] is captured by the caller *before* it tears its player
+     * down, because this exchange outlives that player.
+     */
+    fun endAfterFinalExchange(
+        outerScope: CoroutineScope,
+        finalSnapshot: PlaybackControlSnapshot,
+    ) {
+        dispatching = false
+        val subject = reporter ?: return
+        reporter = null
+        outerScope.launch {
+            // `settle`, not `notifyUrgently`. The urgent path deliberately
+            // leaves an in-flight exchange alone, because `run()` picks the
+            // new snapshot up straight after it — but the pump running that
+            // exchange is on the scope that is being cancelled right now, so
+            // "straight after it" never arrives, and the coroutine dies inside
+            // `send` without ever clearing `inFlight`. Re-homing
+            // unconditionally is what makes this path work at all.
+            val handed = subject.settle(outerScope, finalSnapshot)
+            val deadline = monotonicNowMs() + FINAL_EXCHANGE_MS
+            while (handed && monotonicNowMs() < deadline) {
+                val status = subject.status()
+                if (status.stopped) break
+                if (!status.inFlight && !status.pending && !status.retrying) break
+                kotlinx.coroutines.delay(ASK_POLL_MS)
+            }
+            subject.stop()
+        }
     }
 
     private companion object {
@@ -390,6 +464,13 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
          * where the Android framework stubs throw.
          */
         const val ASK_POLL_MS = 25L
+
+        /**
+         * How long a teardown waits for its last exchange. Bounded because the
+         * viewer has already left: past this the server's own deadline is the
+         * fallback, which is the behaviour without this path at all.
+         */
+        const val FINAL_EXCHANGE_MS = 3_000L
     }
 
 }

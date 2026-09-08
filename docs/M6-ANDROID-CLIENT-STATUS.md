@@ -28,6 +28,7 @@ a bug.
 
 `./gradlew testDebugUnitTest :app:assembleDebug :app:lintDebug` — the
 non-Docker equivalent of `make android-test` and `make android` — green.
+**431 tests, 0 failures, 0 errors.**
 
 ---
 
@@ -133,6 +134,68 @@ the mechanical reason the capability is not a judgement call from here.
 - Nothing on any of these paths is seamless, and nothing in this branch calls
   it that. Android's fallback interruption is measured at 353–766 ms, mean 471,
   on the Google TV.
+
+---
+
+## What the adversarial review found
+
+Two passes, told to assume the change was wrong until it had traced it. Both
+passes found real defects; the second found defects introduced by the first
+round of fixes, which is the reason it ran.
+
+**Pass one — nine confirmed.** The ones worth remembering:
+
+- `onStall`'s reopen was the only stream-replacing path that did not abandon
+  the preparation, so a stall could reopen to a new session and the successor
+  would then commit *over* it — putting the viewer back on the stream that had
+  just stalled and orphaning the replacement they were actually watching.
+- `offer()` checked liveness before identity, so the **ordinary commit**
+  produced a third pipeline: the exchange carrying `buffer_ready` is still in
+  flight when the client switches, and the server — which has settled nothing
+  yet — replays the same `action_id` in its answer.
+- The window between the swap and the successor's first frame was abortable, so
+  a Back press in it told the server to tear down the incarnation its pointer
+  was about to move to.
+- The `aborted` published from `release()` was structurally guaranteed never to
+  reach the wire: `end()` queues a `stop()` that cancels the very pump the
+  urgent notify had just launched, and on the disposal path the composition's
+  scope is cancelled in the same synchronous pass.
+- `EffectiveSelection` gave Kotlin defaults to four fields the server declares
+  plainly, so a truncated payload decoded to `height = 0`, passed validation,
+  and was seeded into the stall budget.
+
+**Pass two — six more, five of them introduced by the fixes.** The sharpest:
+
+- `onPrepare` was the one exchange callback outside the generation fence, and
+  it is the one that *builds an ExoPlayer*. A late exchange on a dead
+  generation would stand a pipeline up against a session that no longer exists,
+  with nothing left running to release it.
+- `notifyUrgently` deliberately leaves an in-flight exchange alone, which is
+  right while the pump is alive and wrong at teardown — the pump is on the
+  scope being cancelled, and a coroutine killed inside `send` never clears
+  `inFlight`, so the teardown poll could never finish. Fixed with a `settle`
+  that re-homes the pump unconditionally.
+- A `ControlProtocolException("body")` was classified as a null-status
+  transport failure and retried forever. Making the selection's fields required
+  widened the set of inputs that reach that arm, turning a diagnosable fatal
+  into an undiagnosable loop. A protocol failure now stops the reporter, which
+  is what it always should have done.
+- `deliveredDolbyVisionProfile` did not move with `deliveredRange`, which is
+  exactly the drift `adoptSessionDelivery` is one function rather than two
+  lines to prevent: a Dolby Vision handover to an SDR transcode would have read
+  "SDR · Profile 8".
+- Releasing the predecessor on a one-second tick assumed a frame clock that is
+  parked whenever the window is not visible. The surface owner collects it now,
+  from the composition that re-points the view — the only place that knows.
+
+**Left unfixed, deliberately:** `observed_download_bps` measures average
+throughput rather than headroom, because the rate window's denominator includes
+inter-segment idle time. During steady-state playback it converges on the
+delivered bitrate — which is the number the floor requires it to be *twice*. If
+prepared handoffs are enabled and still never fire, this is the second thing to
+look at after the VOD `delivered_bps` gap. The window predates this milestone
+and lives in `MediaOrigin.kt`; fixing it is a change to what every session
+reports, not to this path.
 
 ---
 

@@ -124,6 +124,28 @@ object PlaybackControl {
      * check is exactly the mistake it exists to prevent.
      */
     fun isUuid(value: String): Boolean = UUID_RE.matches(value)
+
+    private val UUID_SHAPE_RE = Regex(
+        "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        RegexOption.IGNORE_CASE,
+    )
+
+    /**
+     * The hyphenated shape, without pinning a version or a variant.
+     *
+     * Deliberately laxer than [isUuid], and only for the two identifiers inside
+     * a `prepare`. [isUuid] guards the *bootstrap*, where a loose check would
+     * let a redirected or spoofed generation rebind the session — that is a
+     * credential. `action_id` and `session_id` are not: the action is fatal if
+     * malformed, the playlist is separately checked against `session_id`
+     * character for character, and the server has already run
+     * `Uuid::parse_str` over both, which accepts v6 and v7 where the strict
+     * regex does not. Refusing an id this client merely does not recognise the
+     * version of would kill the whole control plane for the rest of the film —
+     * the "stricter than the server" failure — and a shape check is what the
+     * fields are actually load-bearing for.
+     */
+    fun isUuidShape(value: String): Boolean = UUID_SHAPE_RE.matches(value)
 }
 
 // ---------------------------------------------------------------- wire types
@@ -304,17 +326,27 @@ data class DynamicCapabilities(
  */
 @Serializable
 data class EffectiveSelection(
-    @SerialName("quality_auto") val qualityAuto: Boolean = false,
-    val height: Long = 0,
+    // No defaults on the four the server declares as plain fields. It carries
+    // `deny_unknown_fields` and no `Option` on these, so a payload omitting one
+    // is a serde error there — and a Kotlin default here would turn that
+    // refusal into a silent `height = 0` that passes validation and gets acted
+    // on. Only the three genuine `Option`s below may be absent.
+    @SerialName("quality_auto") val qualityAuto: Boolean,
+    val height: Long,
     @SerialName("audio_track") val audioTrack: Long? = null,
     @SerialName("subtitle_burn") val subtitleBurn: Long? = null,
-    @SerialName("audio_offset_ms") val audioOffsetMs: Long = 0,
+    @SerialName("audio_offset_ms") val audioOffsetMs: Long,
     /** `source` or `server_selected` — a delivery method, not a codec name. */
-    val codec: String = "",
+    val codec: String,
     @SerialName("dynamic_range") val dynamicRange: String? = null,
 ) {
     /** `EffectiveSelection::is_valid`, boundary for boundary. */
     val isValid: Boolean
+        // `MAX_HEIGHT` is 2160 here and `crate::transcode::MAX_HEIGHT` is 2160
+        // on the server (verified against `transcode.rs:256`). They are two
+        // literals that must agree; if the server's ever rises, a legitimate
+        // `prepare` at the new height would be refused here and the refusal is
+        // fatal to the control plane, so this is the pair to move together.
         get() = height in 0..PlaybackControl.MAX_HEIGHT.toLong() &&
             (audioTrack == null || audioTrack in 0..PlaybackControl.MAX_TRACK_INDEX) &&
             (subtitleBurn == null || subtitleBurn in 0..PlaybackControl.MAX_TRACK_INDEX) &&
@@ -354,7 +386,7 @@ data class ActionAcknowledgement(
      * exchange it rides on is refused whole.
      */
     val isValid: Boolean
-        get() = PlaybackControl.isUuid(actionId) &&
+        get() = PlaybackControl.isUuidShape(actionId) &&
             actionId.length <= PlaybackControl.MAX_ACTION_ID_LEN &&
             (
                 bufferedThroughMs == null ||
@@ -559,9 +591,9 @@ data class ControlAction(
             val playlist = playlistUrl ?: return false
             val origin = mediaOriginMs ?: return false
             val selection = effectiveSelection ?: return false
-            return PlaybackControl.isUuid(id) &&
+            return PlaybackControl.isUuidShape(id) &&
                 id.length <= PlaybackControl.MAX_ACTION_ID_LEN &&
-                PlaybackControl.isUuid(session) &&
+                PlaybackControl.isUuidShape(session) &&
                 PlaybackControl.isNodeRelativePlaylist(playlist, session) &&
                 origin in 0..PlaybackControl.MAX_MEDIA_MILLIS &&
                 selection.isValid
@@ -764,6 +796,36 @@ class PlaybackControlReporter private constructor(
         stale?.cancel()
     }
 
+    /**
+     * Hand this reporter to another scope and report once more.
+     *
+     * The teardown counterpart to [notifyUrgently], and it differs in exactly
+     * one way: it re-homes the pump **unconditionally**, including across an
+     * exchange that is already in flight. [notifyUrgently] deliberately leaves
+     * that exchange alone because `run()` picks the new snapshot up straight
+     * afterwards — which is right while the pump is alive, and wrong here,
+     * because the caller is about to cancel the scope that pump is on. A
+     * coroutine cancelled inside `send` never reaches its
+     * `mutex.withLock { inFlight = false }`, so waiting for it to finish waits
+     * forever.
+     *
+     * Returns false when there was nothing to say — a stopped reporter, or a
+     * snapshot the server would refuse — so the caller can stop rather than
+     * wait out a deadline for an exchange that will never be built.
+     */
+    suspend fun settle(scope: CoroutineScope, value: PlaybackControlSnapshot): Boolean {
+        if (!value.isValid) return false
+        val stale = mutex.withLock {
+            if (stopped) return false
+            pending = value
+            val running = pump
+            pump = scope.launch { run() }
+            running
+        }
+        stale?.cancel()
+        return true
+    }
+
     suspend fun stop() {
         val job = mutex.withLock {
             if (stopped) return
@@ -958,6 +1020,16 @@ class PlaybackControlReporter private constructor(
 
     private suspend fun handle(failure: Throwable, request: ControlRequest) {
         onExchange(Exchange(request, null, describe(failure)))
+        // A protocol failure is not a transport failure, and folding it into
+        // the null-status arm below makes it retryable — which turns a
+        // diagnosable fatal into an unbounded silent loop, replaying the same
+        // request at the cadence forever and logging `transport:none:-`. The
+        // body this client could not read will not become readable on the
+        // fourth attempt.
+        if (failure is ControlProtocolException) {
+            stop()
+            return
+        }
         val transport = failure as? ControlTransportException
         val status = transport?.status
         val code = transport?.code

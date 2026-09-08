@@ -36,6 +36,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.viewModelScope
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.Format
@@ -728,12 +729,42 @@ class Controller(
         clearStatusPolling()
         pgsOverlay.release()
         stallGuard.invalidateForUserAction()
-        // Before the reporter ends, so the `aborted` has an exchange left to
-        // ride on. After it, the acknowledgement would be published into a
-        // stopped reporter and the server would reap the staging instead.
+        // The terminal acknowledgement a live preparation is owed, and then one
+        // exchange to carry it — on the view model's scope, because this
+        // composition's is cancelled in the same pass that called this. Without
+        // that hand-off the acknowledgement is published into a reporter whose
+        // pump is cancelled before it can build a request, and the staging's
+        // encoder runs for another 330 seconds after the viewer left.
         abandonPreparedReplacement(failed = false)
         awaitingCommitFrameSinceMs = null
-        playbackControl.end()
+        val settling = pendingAcknowledgement?.let { owed ->
+            playbackControlObservation()
+                ?.let(PlaybackControlMapping::snapshot)
+                ?.let { snapshot ->
+                    // A viewer who closes at the end of the title maps to
+                    // `demand: end`, and an ending exchange may not carry a
+                    // `committed` — so the commit would be dropped and the
+                    // reporter stopped, with nothing left to send it on. This
+                    // exchange is not what ends the session; `endHlsSession`
+                    // below is, on its own route. So it does not claim to.
+                    if (owed.state == AcknowledgementState.COMMITTED &&
+                        snapshot.demand == PlaybackDemand.END
+                    ) {
+                        snapshot.copy(demand = PlaybackDemand.ACTIVE)
+                    } else {
+                        snapshot
+                    }
+                }
+        }
+        // Every read below this line is against a player that is about to be
+        // released, so the observation is closed first.
+        controlObservationIsClosed = true
+        collectRetiredPlayer()
+        if (settling != null) {
+            playbackControl.endAfterFinalExchange(vm.viewModelScope, settling)
+        } else {
+            playbackControl.end()
+        }
         // A verdict survives a reopen because the failure it explains usually
         // arrives after one. It must not survive the title: a confident
         // sentence about the wrong film is worse than a generic one.
@@ -1048,6 +1079,14 @@ class Controller(
         // server validates previous_session_id against a live session
         // map.  Session creation supersedes and kills the predecessor
         // atomically.
+        //
+        // The successor was staged against the session this reopen replaces,
+        // and this is the one stream-replacing path that does not go through
+        // `openSession`. Without this the preparation stays live against a
+        // session that no longer exists, and the next tick commits it — putting
+        // the viewer back on the stream that just stalled and orphaning the
+        // replacement they are actually watching.
+        abandonPreparedReplacement(failed = false)
         sessionId = null
         clearStatusPolling()
         encoder = null
@@ -1342,6 +1381,11 @@ class Controller(
     private fun retryMediaOnNextNode(error: PlaybackException): Boolean {
         val path = activeMediaPath ?: return false
         val next = Session.nextMediaFailoverUrl(path) ?: return false
+        // Same session, different ingress — but the incumbent is about to be
+        // re-attached and the successor was primed against the playhead the
+        // failure interrupted, so it is abandoned rather than left to commit
+        // over the recovery.
+        abandonPreparedReplacement(failed = false)
         val attachPosition = if (progressiveTransport) 0L else player.currentPosition.coerceAtLeast(0)
         playbackTelemetry.report(
             event = "playback_transport_failover",
@@ -1495,7 +1539,15 @@ class Controller(
         playbackControl.reportEvidence()
     }
 
+    /**
+     * Set the moment the players are torn down. A final exchange may still be
+     * in flight on a scope that outlives this controller, and every field below
+     * is read off an ExoPlayer that no longer exists.
+     */
+    private var controlObservationIsClosed = false
+
     private fun playbackControlObservation(): PlayerControlObservation? {
+        if (controlObservationIsClosed) return null
         val capabilities = deviceControlCapabilities ?: return null
         val position = realPosition()
         val duration = player.duration
@@ -1620,6 +1672,28 @@ class Controller(
     private var awaitingCommitFrameSinceMs: Long? = null
 
     /**
+     * The predecessor, after a commit and before the surface has moved off it.
+     * Collected by [collectRetiredPlayer] the moment the view has re-pointed,
+     * or by [release], whichever comes first.
+     */
+    private var retiredPlayer: ExoPlayer? = null
+
+    /**
+     * Release the player the surface has just moved off.
+     *
+     * Called by the screen from the `AndroidView` update that re-points the
+     * `PlayerView`, because that is the only place that *knows* the surface has
+     * moved. A timer here would be guessing about a frame clock that is parked
+     * whenever the window is not visible, and releasing early leaves the view
+     * calling into a released player.
+     */
+    fun collectRetiredPlayer() {
+        val retired = retiredPlayer ?: return
+        retiredPlayer = null
+        retired.release()
+    }
+
+    /**
      * The acknowledgement the next exchange will carry.
      *
      * One slot, not a queue: the ladder is monotonic and the server keeps the
@@ -1631,9 +1705,6 @@ class Controller(
      */
     private var pendingAcknowledgement: ActionAcknowledgement? = null
 
-    /** Test seam: what the next request would carry. */
-    internal fun pendingAcknowledgementForTest(): ActionAcknowledgement? = pendingAcknowledgement
-
     /**
      * The server named a successor. Build the second pipeline and align it.
      *
@@ -1644,6 +1715,11 @@ class Controller(
      * already runs every second.
      */
     private fun onPrepareAction(action: ControlAction) {
+        // The session fences this too, and this is the second lock on the same
+        // door: an action that reached a released controller would read the
+        // playhead off a released ExoPlayer and stand up a pipeline nothing is
+        // left running to release.
+        if (controlObservationIsClosed) return
         when (val offer = preparedLedger.offer(action)) {
             // The server replays a staging byte-identically until it settles,
             // so this is what most exchanges carrying a `prepare` are. Building
@@ -1674,7 +1750,21 @@ class Controller(
         preparedOrigin = built.progressiveMediaOrigin
         val successorListener = object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) {
-                abandonPreparedReplacement(failed = true)
+                // Posted, not called. Abandoning releases this very player, and
+                // re-entering `release()` from inside its own `ListenerSet`
+                // dispatch is the kind of thing that works until it does not.
+                // A tick's delay costs a viewer who is not watching this
+                // pipeline nothing.
+                //
+                // And it names the pipeline that errored. A seek in the gap
+                // releases this one and the next `prepare` builds another, and
+                // an unqualified post would then report `failed` for a
+                // preparation that never failed and kill it — burning the
+                // session's one preparation slot on a stale event.
+                val errored = built.player
+                scope.launch {
+                    if (preparedPlayer === errored) abandonPreparedReplacement(failed = true)
+                }
             }
         }
         preparedListener = successorListener
@@ -1731,6 +1821,18 @@ class Controller(
     private fun commitPreparedReplacement() {
         val successor = preparedPlayer ?: return
         val action = preparedLedger.action ?: return
+        // The ledger enters its unabortable state before anything moves. From
+        // here the viewer is looking at this pipeline, so a Back press or a
+        // seek in the seconds before its first frame must settle the commit
+        // rather than publish an `aborted` for the staging the server is about
+        // to move its pointer to.
+        if (!preparedLedger.switched()) return
+        // Armed here rather than at the end of this function. `switched()` is
+        // what makes an abandon settle instead of abort, and the settle is
+        // gated on this clock — so any window where one is set and the other is
+        // not is a window where a preparation can be left permanently
+        // unsettleable.
+        awaitingCommitFrameSinceMs = monotonicNowMs()
         val previous = player
         val previousVolume = previous.volume
 
@@ -1763,13 +1865,45 @@ class Controller(
             sessionId = successorSession
             startStatusPolling(successorSession)
         }
-        action.effectiveSelection?.let { stallReopenBudget.seed(it.height.toInt()) }
+        action.effectiveSelection?.let { effective ->
+            stallReopenBudget.seed(effective.height.toInt())
+            // The badges and the info panel describe the stream on the screen.
+            // Both halves move together, for the same reason
+            // `adoptSessionDelivery` moves them together on a create: a grade
+            // left behind describes the session that just stopped.
+            effective.dynamicRange?.let {
+                deliveredRange = it
+                // Both halves, in one place, for the reason
+                // `adoptSessionDelivery` is one function rather than two lines:
+                // a grade that moved past a profile that did not paints
+                // "SDR - Profile 8" over a Dolby Vision handover to a
+                // transcode, and each half looks correct on its own. An
+                // `EffectiveSelection` carries no profile, so "no answer" is
+                // the only honest value.
+                deliveredDolbyVisionProfile = null
+            }
+        }
+        // The successor is a different encoder on a different session. The
+        // status poll started above refills both within a couple of seconds;
+        // until it does, no answer is better than the predecessor's.
+        encoder = null
+        sessionStatus = null
         establishedPlayback = false
         armTrackSelections()
         applyTextSelection()
         applyAudioSelection()
 
-        previous.release()
+        // Not released here. `player` is snapshot state, so the `PlayerView`
+        // re-points at the successor on the next composition pass — releasing
+        // the predecessor synchronously would leave the view holding a released
+        // player for a frame, and would tear the surface down before the
+        // successor could take it. The surface owner collects it the moment it
+        // has re-pointed, which is the only deterministic answer: a timer would
+        // be guessing about a frame clock that is parked whenever the window is
+        // not visible. It is paused rather than stopped, so the predecessor's
+        // last frame stays on screen through the swap instead of a shutter.
+        previous.playWhenReady = false
+        retiredPlayer = previous
         // The commit is owed a `first_frame_unix_ms`, and the honest source is
         // the successor's own first render — which cannot have happened yet,
         // because a prepared successor has no surface and a surfaceless player
@@ -1779,7 +1913,6 @@ class Controller(
         // frame arrives within [PREPARED_COMMIT_FRAME_BOUND_MS], because by
         // then the switch has demonstrably happened and a late commit is worth
         // more than a precise one.
-        awaitingCommitFrameSinceMs = monotonicNowMs()
     }
 
     /**
@@ -1800,6 +1933,13 @@ class Controller(
      * here should ever describe it as such.
      */
     private fun abandonPreparedReplacement(failed: Boolean) {
+        // A switched preparation cannot be abandoned — the viewer is watching
+        // it. Settle the commit it is still owed instead, with the best clock
+        // available, and leave the ledger terminal.
+        if (preparedLedger.isSwitched) {
+            settleCommitOnFirstFrame(System.currentTimeMillis())
+            return
+        }
         val owed = if (failed) preparedLedger.failed() else preparedLedger.aborted()
         releaseSuccessor()
         publishAcknowledgement(owed)

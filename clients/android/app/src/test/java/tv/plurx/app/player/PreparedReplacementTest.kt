@@ -3,6 +3,7 @@ package tv.plurx.app.player
 import kotlinx.serialization.json.Json
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -378,5 +379,232 @@ class PreparedReplacementRequirementsTest {
         )
         assertEquals(false, vod[2].met)
         assertTrue(vod[2].detail.contains("VOD"))
+    }
+}
+
+/**
+ * The window between the swap and the successor's first frame.
+ *
+ * A prepared successor has no surface, so it renders nothing until it takes
+ * one — which means the commit is always owed a moment *after* the switch. In
+ * that gap the viewer is already watching the successor, so nothing may abandon
+ * it: an `aborted` there tells the server to tear down the incarnation its
+ * pointer is about to move to.
+ */
+class PreparedCommitWindowTest {
+    @Test
+    fun `nothing may replace a preparation the viewer is already watching`() {
+        // The switched window took the "supersedes" branch, where `terminal()`
+        // refuses to abort a switched preparation and the branch reads that
+        // refusal as "nothing was owed" — silently dropping the commit and
+        // stamping the next preparation's id with it.
+        val ledger = PreparedReplacementLedger()
+        ledger.offer(prepare())
+        ledger.switched()
+        val second = "55555555-5555-4555-8555-555555555555"
+        assertTrue(ledger.offer(prepare(actionId = second)) is PreparationOffer.Refuse)
+        assertEquals(ACTION_ID, ledger.actionId, "the switched preparation still owns the ledger")
+        assertTrue(ledger.isSwitched)
+        val committed = assertNotNull(ledger.committed(1_788_000_000_000))
+        assertEquals(ACTION_ID, committed.actionId)
+    }
+
+    @Test
+    fun `a switched preparation cannot be aborted or failed`() {
+        val ledger = PreparedReplacementLedger()
+        ledger.offer(prepare())
+        ledger.bufferReady(90_000)
+        assertTrue(ledger.switched())
+        assertTrue(ledger.isSwitched)
+        assertNull(ledger.aborted(), "the viewer is watching this pipeline")
+        assertNull(ledger.failed())
+        assertTrue(ledger.isLive, "it still owes a commit")
+        val committed = assertNotNull(ledger.committed(1_788_000_000_000))
+        assertEquals(AcknowledgementState.COMMITTED, committed.state)
+        assertFalse(ledger.isLive)
+    }
+
+    @Test
+    fun `switching twice is refused, and a dead preparation cannot switch`() {
+        val ledger = PreparedReplacementLedger()
+        ledger.offer(prepare())
+        assertTrue(ledger.switched())
+        assertFalse(ledger.switched())
+
+        val abandoned = PreparedReplacementLedger()
+        abandoned.offer(prepare())
+        abandoned.aborted()
+        assertFalse(abandoned.switched())
+    }
+
+    @Test
+    fun `a replayed action id after the ladder settled is still the same preparation`() {
+        // The regression this exists for: the ordinary commit produces it. The
+        // exchange carrying `buffer_ready` is in flight when the client
+        // switches and commits, and the server — which has not settled
+        // anything yet — replays `Prepare` with the same `action_id` in its
+        // answer. Read as a *new* preparation that builds a third pipeline over
+        // the one the viewer is watching.
+        val ledger = PreparedReplacementLedger()
+        ledger.offer(prepare())
+        ledger.bufferReady(90_000)
+        ledger.switched()
+        ledger.committed(1_788_000_000_000)
+        assertFalse(ledger.isLive)
+        assertTrue(
+            ledger.offer(prepare()) is PreparationOffer.Same,
+            "a settled id is not a new staging",
+        )
+        // And the same after an abandon, which is the other way a preparation
+        // stops being live while the server keeps replaying it.
+        val abandoned = PreparedReplacementLedger()
+        abandoned.offer(prepare())
+        abandoned.aborted()
+        assertTrue(abandoned.offer(prepare()) is PreparationOffer.Same)
+    }
+}
+
+/**
+ * The outbound body of an abandon, asserted rather than inspected.
+ *
+ * §C12.6 wants the abandon path proved by what goes on the wire. The ledger is
+ * the seam it can be proved at: a `Controller` needs a `Context` and a real
+ * ExoPlayer, neither of which exists in the JVM unit lane, and a test that
+ * could not run would prove less than this one.
+ */
+class PreparedAbandonBodyTest {
+    private fun encode(acknowledgement: ActionAcknowledgement?): String {
+        val snapshot = PlaybackControlMapping.snapshot(
+            PlayerControlObservation(
+                positionMs = 60_000,
+                durationMs = 3_600_000,
+                bufferedFromMs = 60_000,
+                bufferedThroughMs = 70_000,
+                rate = 1.0,
+                isPaused = false,
+                isEnded = false,
+                isSeeking = false,
+                hasStarted = true,
+                isLikelyToKeepUp = true,
+                acknowledgement = acknowledgement,
+                selection = ClientSelection(
+                    quality = QualitySelection.Auto,
+                    audioTrack = 0,
+                    subtitle = SubtitleSelection(SubtitleMode.OFF),
+                    audioOffsetMs = 0,
+                    codec = CodecPolicy.AUTO,
+                    dynamicRange = DynamicRangePolicy.AUTO,
+                ),
+                capabilities = DynamicCapabilities(
+                    platform = "android",
+                    maxHeight = 2_160,
+                    codecs = listOf(CodecPolicy.H264),
+                    dynamicRanges = listOf(DynamicRangePolicy.SDR),
+                    dualPlayerPreparation = false,
+                ),
+            ),
+        )
+        return json.encodeToString(
+            ControlRequest.serializer(),
+            ControlRequest(
+                protocol = PlaybackControl.PROTOCOL,
+                generation = "11111111-1111-4111-8111-111111111111",
+                controlEpoch = 7,
+                clientInstanceId = "22222222-2222-4222-8222-222222222222",
+                sequence = 9,
+                demand = snapshot.demand,
+                positionMs = snapshot.positionMs,
+                bufferedThroughMs = snapshot.bufferedThroughMs,
+                playbackRate = snapshot.playbackRate,
+                renderState = snapshot.renderState,
+                selection = snapshot.selection,
+                acknowledgement = snapshot.sendableAcknowledgement,
+                supportedActions = PlaybackControl.SUPPORTED_ACTIONS,
+            ),
+        )
+    }
+
+    @Test
+    fun `an abandoned preparation puts aborted on the wire`() {
+        val ledger = PreparedReplacementLedger()
+        ledger.offer(prepare())
+        ledger.metadataReady()
+        val encoded = encode(ledger.aborted())
+        assertTrue(encoded.contains("\"state\":\"aborted\""), encoded)
+        assertTrue(encoded.contains("\"action_id\":\"$ACTION_ID\""), encoded)
+    }
+
+    @Test
+    fun `a successor that will not build puts failed on the wire`() {
+        val ledger = PreparedReplacementLedger()
+        ledger.offer(prepare())
+        val encoded = encode(ledger.failed())
+        assertTrue(encoded.contains("\"state\":\"failed\""), encoded)
+    }
+
+    @Test
+    fun `a preparation that was never offered puts nothing on the wire`() {
+        assertFalse(encode(null).contains("acknowledgement"))
+    }
+}
+
+class PreparedIdentifierShapeTest {
+    @Test
+    fun `an identifier the server minted is accepted even at a version this client predates`() {
+        // The server runs `Uuid::parse_str`, which accepts v6 and v7. A client
+        // stricter than the server here does not fail safe: an unrecognised
+        // version makes the action fatal and kills the control plane for the
+        // rest of the film.
+        val v7 = "01912d4c-7b3a-7c2e-9f01-2b7c9d4e5f60"
+        assertFalse(PlaybackControl.isUuid(v7), "the strict check is what guards the bootstrap")
+        assertTrue(PlaybackControl.isUuidShape(v7))
+        assertTrue(prepare(actionId = v7).preparedPayloadIsValid)
+    }
+
+    @Test
+    fun `the shape check is still a shape check`() {
+        assertFalse(PlaybackControl.isUuidShape(""))
+        assertFalse(PlaybackControl.isUuidShape("../../etc/passwd"))
+        assertFalse(PlaybackControl.isUuidShape("4444444444444444444444444444444"))
+        assertFalse(PlaybackControl.isUuidShape("gggggggg-4444-4444-8444-444444444444"))
+        assertTrue(PlaybackControl.isUuidShape(SUCCESSOR))
+    }
+}
+
+class EffectiveSelectionDecodingTest {
+    @Test
+    fun `a payload missing a field the server declares plainly is refused`() {
+        // The server's struct carries `deny_unknown_fields` and no `Option` on
+        // `quality_auto`, `height`, `audio_offset_ms` or `codec`, so a payload
+        // omitting one is a serde error there. A Kotlin default would turn that
+        // refusal into a silent `height = 0` that passes validation and gets
+        // seeded into the stall budget.
+        for (missing in listOf("quality_auto", "height", "audio_offset_ms", "codec")) {
+            val fields = linkedMapOf(
+                "quality_auto" to "true",
+                "height" to "1080",
+                "audio_offset_ms" to "0",
+                "codec" to "\"server_selected\"",
+            )
+            fields.remove(missing)
+            val body = fields.entries.joinToString(",", "{", "}") { "\"${it.key}\":${it.value}" }
+            assertFailsWith<kotlinx.serialization.MissingFieldException>(
+                "$missing must be required",
+            ) {
+                json.decodeFromString(EffectiveSelection.serializer(), body)
+            }
+        }
+    }
+
+    @Test
+    fun `the three the server declares optional may be absent`() {
+        val decoded = json.decodeFromString(
+            EffectiveSelection.serializer(),
+            """{"quality_auto":false,"height":720,"audio_offset_ms":0,"codec":"source"}""",
+        )
+        assertNull(decoded.audioTrack)
+        assertNull(decoded.subtitleBurn)
+        assertNull(decoded.dynamicRange)
+        assertTrue(decoded.isValid)
     }
 }

@@ -54,6 +54,20 @@ internal enum class PreparationPhase {
     STAGED,
     METADATA_READY,
     BUFFER_READY,
+
+    /**
+     * The successor is on the surface and the predecessor is gone, but the
+     * commit has not been sent because it is still owed the wall clock of a
+     * frame the successor actually rendered.
+     *
+     * Not terminal — a terminal state is still owed — and **not abortable**:
+     * the viewer is looking at this pipeline. Without this phase the window
+     * between the swap and the first frame is one where a Back press or a seek
+     * publishes `aborted` for the staging the client is at that moment playing,
+     * which tells the server to tear down the incarnation its pointer is about
+     * to move to.
+     */
+    SWITCHED,
     COMMITTED,
     FAILED,
     ABORTED,
@@ -109,9 +123,29 @@ internal class PreparedReplacementLedger {
     val isLive: Boolean
         get() = actionId != null && !phase.isTerminal
 
+    /**
+     * True once the switch has happened and only the commit is outstanding.
+     * Nothing may abandon a preparation in this state.
+     */
+    val isSwitched: Boolean
+        get() = phase == PreparationPhase.SWITCHED
+
     fun offer(inbound: ControlAction): PreparationOffer {
         if (!inbound.preparedPayloadIsValid) return PreparationOffer.Refuse
-        if (isLive && inbound.actionId == actionId) return PreparationOffer.Same
+        // Nothing replaces a preparation the viewer is already watching. Without
+        // this the switched-but-unsettled window takes the "supersedes" branch,
+        // where `terminal()` correctly refuses to abort it and the branch then
+        // reads that refusal as "nothing was owed" — silently discarding a
+        // commit and stamping the *next* preparation's id with it.
+        if (isSwitched) return PreparationOffer.Refuse
+        // Identity first, liveness second. The server replays a staging until
+        // it settles, and an exchange that was already in flight when the
+        // client settled comes back carrying that same `action_id` — so
+        // checking liveness first makes the *ordinary commit* look like a new
+        // preparation and builds a third pipeline over the one the viewer is
+        // watching. A repeat of an id this ledger has seen is the same
+        // preparation whatever became of it.
+        if (inbound.actionId == actionId) return PreparationOffer.Same
         // A live preparation the viewer never got is abandoned explicitly.
         // Leaving it to the 330 s deadline holds this session's one preparation
         // slot for the rest of the session, so it gets exactly one, ever.
@@ -155,7 +189,20 @@ internal class PreparedReplacementLedger {
     }
 
     /**
-     * The successor is on the surface and audible and the predecessor is gone.
+     * The switch happened: the successor took the surface and the volume.
+     *
+     * Separate from [committed] because the commit is owed a rendered frame
+     * that cannot have happened yet, and the gap between the two is a window
+     * nothing may abort.
+     */
+    fun switched(): Boolean {
+        if (!isLive || isSwitched) return false
+        phase = PreparationPhase.SWITCHED
+        return true
+    }
+
+    /**
+     * The successor rendered, and the transaction can settle.
      *
      * [firstFrameUnixMs] must be the wall clock of a frame the successor
      * actually rendered. A timer would answer the question the server asked
@@ -179,6 +226,9 @@ internal class PreparedReplacementLedger {
 
     private fun terminal(state: PreparationPhase): ActionAcknowledgement? {
         if (!isLive) return null
+        // You cannot abandon what is already on the screen. A switched
+        // preparation is settled by its commit or by nothing.
+        if (isSwitched) return null
         phase = state
         return acknowledgement(
             when (state) {

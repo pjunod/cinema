@@ -868,12 +868,35 @@ class PlaybackControlWireTest {
              "control_epoch":7,"accepted_sequence":4,"server_time_unix_ms":1,
              "lease":{"state":"active","renew_after_ms":5000,"expires_at_unix_ms":2},
              "delivery":{"subtitle_readiness":"warming"},
-             "effective_selection":{},"action":{"type":"none"}}
+             "effective_selection":{"quality_auto":true,"height":1080,
+               "audio_offset_ms":0,"codec":"server_selected"},
+             "action":{"type":"none"}}
             """.trimIndent(),
         )
         assertEquals(4, decoded.acceptedSequence)
         assertEquals("warming", decoded.delivery?.subtitleReadiness)
         assertEquals("none", decoded.action.type)
+        // `effective_selection` used to be an ignored key and this fixture
+        // carried `{}` to prove it was ignored. The client consumes it now, and
+        // the server declares four of its fields plainly — so the fixture
+        // carries what a server actually sends.
+        assertEquals(1_080L, decoded.effectiveSelection?.height)
+    }
+
+    @Test
+    fun `a server that sends no effective selection is still understood`() {
+        // The field is informational on the response path, and a server old
+        // enough to omit it is not a server this client should stop reporting
+        // to.
+        val decoded = json.decodeFromString(
+            ControlResponse.serializer(),
+            """
+            {"protocol":"plurx-playback-control-v1",
+             "generation":"11111111-1111-4111-8111-111111111111",
+             "control_epoch":7,"accepted_sequence":4,"action":{"type":"none"}}
+            """.trimIndent(),
+        )
+        assertNull(decoded.effectiveSelection)
     }
 
     @Test

@@ -1164,7 +1164,13 @@ private fun PlayerContent(
             // successor: the read makes this recompose when the instance
             // changes, and `PlayerView.setPlayer` moves the surface across.
             update = { view ->
-                if (view.player !== controller.player) view.player = controller.player
+                if (view.player !== controller.player) {
+                    view.player = controller.player
+                    // The surface has moved, so the player it moved off can go.
+                    // This is the only place that knows that; the controller
+                    // parks the predecessor and waits to be told.
+                    controller.collectRetiredPlayer()
+                }
                 playerView = view
             },
             modifier = Modifier.fillMaxSize(),
