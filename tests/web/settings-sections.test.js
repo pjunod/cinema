@@ -472,7 +472,7 @@ test("Automatic recovery requires a covered hardware and software pair for one c
   assert.match(crossed, /✗ The same codec has covered hardware and software paths/);
   assert.match(crossed, /different codecs do not form a recovery/);
 
-  const paired = card({ decoder_health_qualification: {
+  const paired = card({ decoder_health_qualified_artifacts: true, decoder_health_qualification: {
     policy_enabled: true,
     measured_build: "ffmpeg version 9.0.1",
     covered_decoders: ["h264/h264"],
@@ -484,7 +484,7 @@ test("Automatic recovery requires a covered hardware and software pair for one c
   assert.match(paired, /ready for eligible sessions/);
   assert.doesNotMatch(paired, /prerequisites unmet/);
 
-  const off = card({ decoder_health_qualification: {
+  const off = card({ decoder_health_qualified_artifacts: false, decoder_health_qualification: {
     policy_enabled: false,
     measured_build: "ffmpeg version 9.0.1",
     covered_paths_v2: ["h264/software/h264", "h264/videotoolbox/h264"],
@@ -494,14 +494,25 @@ test("Automatic recovery requires a covered hardware and software pair for one c
   assert.match(off, /policy is off on this node/);
   assert.match(off, /checks advise and never gate that setting/);
 
-  const pending = card({ decoder_health_qualification: {
+  const pendingEnable = card({ decoder_health_qualified_artifacts: true, decoder_health_qualification: {
+    policy_enabled: false, pending_restart: true,
+    measured_build: "ffmpeg version 9.0.1",
+    covered_paths_v2: ["h264/software/h264", "h264/videotoolbox/h264"],
+  } });
+  assert.match(pendingEnable, /prerequisites unmet/);
+  assert.match(pendingEnable, /✗ The receipt-qualified decode policy is applied/);
+  assert.match(pendingEnable, /must restart before the published policy enables/);
+  assert.match(pendingEnable, /Recovery stays unavailable until that restart/);
+
+  const pendingDisable = card({ decoder_health_qualified_artifacts: false, decoder_health_qualification: {
     policy_enabled: true, pending_restart: true,
     measured_build: "ffmpeg version 9.0.1",
     covered_paths_v2: ["h264/software/h264", "h264/videotoolbox/h264"],
   } });
-  assert.match(pending, /prerequisites unmet/);
-  assert.match(pending, /✗ The receipt-qualified decode policy is applied/);
-  assert.match(pending, /must restart before the published policy changes/);
+  assert.match(pendingDisable, /✓ The receipt-qualified decode policy is applied/);
+  assert.match(pendingDisable, /ready for eligible sessions/);
+  assert.match(pendingDisable, /will turn off at that restart/);
+  assert.doesNotMatch(pendingDisable, /prerequisites unmet/);
 
   const legacy = card({ decoder_health_qualification: {
     enforcing: true,

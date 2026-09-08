@@ -14498,12 +14498,15 @@ function decodeRecoveryCard(s){
   const software=paths.filter(path=>path.backend==="software");
   const hardware=paths.filter(path=>path.backend!=="software");
   const recoverable=hardware.filter(path=>software.some(peer=>peer.codec===path.codec));
+  const requested=!!s.decoder_health_qualified_artifacts;
   const policyEnabled=q.policy_enabled===undefined?!!q.enforcing:!!q.policy_enabled;
-  const policyReady=policyEnabled&&!q.pending_restart;
+  const policyReady=policyEnabled;
   const ready=policyReady&&!!q.measured_build&&recoverable.length>0;
   const ok=b=>b?"✓":"✗";
   const policyNote=q.pending_restart
-    ? "The setting is saved, but this node must restart before the published policy changes. Recovery stays unavailable until that restart."
+    ? (requested
+        ? "The setting is saved on, but this node must restart before the published policy enables. Recovery stays unavailable until that restart."
+        : "The setting is saved off, but the receipt-qualified decode policy remains applied until restart. Recovery is ready now for eligible sessions and will turn off at that restart.")
     : (policyEnabled
         ? "The receipt-qualified decode policy is applied on this node."
         : "The receipt-qualified decode policy is off on this node. Turn on Require a producer health receipt and restart this node; these checks advise and never gate that setting.");

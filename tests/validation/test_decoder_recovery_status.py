@@ -368,7 +368,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
 
         self.assertIn(
             "M0–M5 complete · M6 server/client implementation landed, fleet "
-            "acceptance open · M7b final advisory finding under repair · "
+            "acceptance open · M7b exact candidate awaiting re-review · "
             "M8 and promotion remain",
             self.flat_status,
         )
@@ -1360,9 +1360,11 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             "const ready=policyReady&&!!q.measured_build&&recoverable.length>0;",
             web,
         )
-        self.assertIn("const policyReady=policyEnabled&&!q.pending_restart;", web)
+        self.assertIn("const requested=!!s.decoder_health_qualified_artifacts;", web)
+        self.assertIn("const policyReady=policyEnabled;", web)
         self.assertIn("checks advise and never gate that setting", web)
-        self.assertIn("must restart before the published policy changes", web)
+        self.assertIn("must restart before the published policy enables", web)
+        self.assertIn("will turn off at that restart", web)
         self.assertIn("ready for eligible sessions", web)
         self.assertIn("Only some selectable decode paths", daemon)
         self.assertIn("missing measurements or contracts", daemon)
