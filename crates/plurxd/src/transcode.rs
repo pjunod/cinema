@@ -5336,6 +5336,11 @@ struct Session {
     supersession_user: String,
     /// The player instance that owns this session — the supersession key.
     playback_id: String,
+    /// The durable identity this session reserves its recovery budget against.
+    ///
+    /// `None` for a cached serve and for a test fixture: neither has a
+    /// producer, so neither can fault, so neither can spend a budget.
+    recovery: Option<SessionRecoveryIdentity>,
     /// Whether this session's height came from server Auto policy. A manual
     /// height is sticky across a stall reopen; only Auto sessions may move
     /// down the ladder without another viewer choice.
@@ -5699,6 +5704,34 @@ fn ahead_of(index: &SegmentIndex, fetched_end_ms: i64) -> Option<Ahead> {
 }
 
 impl Session {
+    /// The identity a reservation against the recovery ledger is keyed by,
+    /// when this session has one.
+    ///
+    /// `None` for a cached serve and a test fixture, which have no producer.
+    /// `None` too for a legacy process-local start and a relayed worker start:
+    /// both reach the daemon without a server-minted epoch, so both mean *no
+    /// budget* rather than *an unspent budget* — a distinction a caller must
+    /// not collapse, because reading "no epoch" as "a fresh one" grants an
+    /// automatic recovery per attempt on exactly the paths that have no
+    /// durable bound.
+    ///
+    /// The filter checks all three fields rather than the epoch alone. The
+    /// store refuses a non-positive `user_id`, an empty incarnation and an
+    /// empty epoch, and it refuses them separately — so a `Some` this method
+    /// returned on the strength of the epoch alone would be a reservation the
+    /// store rejects at the moment it is needed. Today the three legacy sites
+    /// zero all three together and the epoch check happens to catch them, but
+    /// "happens to" is not a contract, and this method is the one place a
+    /// caller is entitled to trust.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn recovery_identity(&self) -> Option<&SessionRecoveryIdentity> {
+        self.recovery.as_ref().filter(|recovery| {
+            recovery.user_id > 0
+                && !recovery.incarnation_id.is_empty()
+                && !recovery.recovery_epoch.is_empty()
+        })
+    }
+
     fn compatibility_producer_attempt(&self) -> u64 {
         *self
             .compatibility_attempt
@@ -8450,6 +8483,36 @@ pub(crate) fn is_init_object(name: &str) -> bool {
 pub struct DeliveryCandidate {
     pub id: String,
     pub started_unix: i64,
+}
+
+/// The durable identity a session reserves its recovery budget against.
+///
+/// Three values that travel together because they are one thing: the ledger
+/// `media_session_producer_recovery` is keyed by `(user_id, playback_id,
+/// recovery_epoch)`, and a reservation additionally names the incarnation that
+/// failed. `playback_id` is already on [`SessionRequest`] because a client
+/// supplies it; these three are not, and deliberately.
+///
+/// **Not on [`SessionRequest`].** That type is `deny_unknown_fields` and it
+/// crosses the cluster relay, so a field added to it is refused outright by a
+/// node that has not been upgraded — a fleet rollout, taken on behalf of a
+/// value the client never sends. Its own doc says what it carries: what a
+/// client asked for. The recovery epoch is server-minted and is never
+/// client-supplied, which is the entire property that makes it a budget rather
+/// than a suggestion.
+///
+/// The epoch may be empty, for a session that predates the column. An empty
+/// epoch is refused by the store's own validator, so it means *this playback
+/// has no budget* rather than *this playback has an unused one* — a caller
+/// must treat it as "no reservation is possible" and not as a fresh grant.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionRecoveryIdentity {
+    pub user_id: i64,
+    /// The coordination identity of the generation being started, which is
+    /// what a reservation records as the attempt that failed.
+    pub incarnation_id: String,
+    /// The server-owned budget identity. Empty means no budget.
+    pub recovery_epoch: String,
 }
 
 /// What a client asked for, normalised. Two requests with the same
@@ -13607,6 +13670,9 @@ impl TranscodeManager {
             user_name: owner.user_name.to_owned(),
             supersession_user: owner.supersession_user.to_owned(),
             playback_id: owner.playback_id.to_owned(),
+            // A cached serve has no producer, so it cannot fault and cannot
+            // spend a budget.
+            recovery: None,
             automatic: owner.automatic,
             kind: cached_kind,
             // A cache hit only ever answers a transcode request (`serve_cached`
@@ -15199,9 +15265,25 @@ impl TranscodeManager {
         user_name: &str,
     ) -> Result<StartInfo, String> {
         let supersession_user = serde_json::json!(["username", user_name]).to_string();
-        self.create_session_inner(req, user_name, &supersession_user, None, None, None)
-            .await
-            .map(|creation| creation.info)
+        // A legacy process-local start has no cluster identity: no user id, no
+        // incarnation, and therefore no epoch. The ledger refuses an empty
+        // epoch, so this is "no budget" rather than "an unused one".
+        let recovery = SessionRecoveryIdentity {
+            user_id: 0,
+            incarnation_id: String::new(),
+            recovery_epoch: String::new(),
+        };
+        self.create_session_inner(
+            req,
+            user_name,
+            &supersession_user,
+            &recovery,
+            None,
+            None,
+            None,
+        )
+        .await
+        .map(|creation| creation.info)
     }
 
     /// Start a cluster-owned replacement while retaining its process-local
@@ -15209,11 +15291,12 @@ impl TranscodeManager {
     pub async fn create_cluster_session(
         &self,
         req: &SessionRequest,
-        user_id: i64,
+        recovery: &SessionRecoveryIdentity,
         user_name: &str,
         deadline: tokio::time::Instant,
         admitted_serving_generation: u64,
     ) -> Result<ClusterSessionStart, String> {
+        let user_id = recovery.user_id;
         let serving_admission = ClusterServingAdmission {
             generation: admitted_serving_generation,
             deadline,
@@ -15240,6 +15323,7 @@ impl TranscodeManager {
                 req,
                 user_name,
                 &supersession_user,
+                recovery,
                 Some(deadline),
                 None,
                 Some(serving_admission),
@@ -15296,12 +15380,12 @@ impl TranscodeManager {
     pub(crate) async fn create_cluster_takeover_session_under_guard(
         &self,
         req: &SessionRequest,
-        user_id: i64,
+        recovery: &SessionRecoveryIdentity,
         user_name: &str,
         deadline: tokio::time::Instant,
         takeover: SessionTakeoverStart,
     ) -> Result<StartInfo, String> {
-        let supersession_user = serde_json::json!(["user_id", user_id]).to_string();
+        let supersession_user = serde_json::json!(["user_id", recovery.user_id]).to_string();
         // Same check the ordinary cluster start makes after its gate wait: a
         // start with no budget left cannot finish, and spawning ffmpeg only to
         // abandon it costs an admission slot for nothing.
@@ -15314,6 +15398,7 @@ impl TranscodeManager {
             req,
             user_name,
             &supersession_user,
+            recovery,
             Some(deadline),
             Some(takeover),
             None,
@@ -15370,11 +15455,13 @@ impl TranscodeManager {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn create_session_inner(
         &self,
         req: &SessionRequest,
         user_name: &str,
         supersession_user: &str,
+        recovery: &SessionRecoveryIdentity,
         replacement_deadline: Option<tokio::time::Instant>,
         takeover: Option<SessionTakeoverStart>,
         serving_admission: Option<ClusterServingAdmission>,
@@ -15431,6 +15518,7 @@ impl TranscodeManager {
                 req,
                 user_name,
                 supersession_user,
+                recovery,
                 replacement_deadline,
                 takeover,
             )
@@ -15471,6 +15559,7 @@ impl TranscodeManager {
                                 req,
                                 user_name,
                                 supersession_user,
+                                recovery,
                                 replacement_deadline,
                                 takeover,
                             )
@@ -15535,6 +15624,7 @@ impl TranscodeManager {
         req: &SessionRequest,
         user_name: &str,
         supersession_user: &str,
+        recovery: &SessionRecoveryIdentity,
         replacement_deadline: Option<tokio::time::Instant>,
         takeover: Option<SessionTakeoverStart>,
     ) -> Result<StartInfo, String> {
@@ -15549,6 +15639,7 @@ impl TranscodeManager {
                     req.audio_offset_ms,
                     user_name,
                     supersession_user,
+                    recovery,
                     replacement_deadline,
                     takeover,
                     &req.playback_id,
@@ -15574,6 +15665,7 @@ impl TranscodeManager {
                     },
                     user_name,
                     supersession_user,
+                    recovery,
                     replacement_deadline,
                     takeover,
                     &req.playback_id,
@@ -17085,6 +17177,13 @@ impl TranscodeManager {
         playback_id: &str,
     ) -> Result<StartInfo, String> {
         let supersession_user = serde_json::json!(["username", user_name]).to_string();
+        // A legacy process-local start carries no cluster identity, so no
+        // budget. The ledger refuses an empty epoch, which is the answer.
+        let recovery = SessionRecoveryIdentity {
+            user_id: 0,
+            incarnation_id: String::new(),
+            recovery_epoch: String::new(),
+        };
         self.start_with_audio_offset(
             file_id,
             target_height,
@@ -17094,6 +17193,7 @@ impl TranscodeManager {
             0,
             user_name,
             &supersession_user,
+            &recovery,
             None,
             None,
             playback_id,
@@ -17294,6 +17394,7 @@ impl TranscodeManager {
         audio_offset_ms: i64,
         user_name: &str,
         supersession_user: &str,
+        recovery: &SessionRecoveryIdentity,
         replacement_deadline: Option<tokio::time::Instant>,
         takeover: Option<SessionTakeoverStart>,
         playback_id: &str,
@@ -17741,6 +17842,7 @@ impl TranscodeManager {
             user_name: user_name.to_owned(),
             supersession_user: supersession_user.to_owned(),
             playback_id: playback_id.to_owned(),
+            recovery: Some(recovery.clone()),
             automatic,
             kind: session_kind,
             method: crate::delivery::Method::Transcode,
@@ -17924,6 +18026,12 @@ impl TranscodeManager {
         playback_id: &str,
     ) -> Result<StartInfo, String> {
         let supersession_user = serde_json::json!(["username", user_name]).to_string();
+        // As above: no cluster identity, no budget.
+        let recovery = SessionRecoveryIdentity {
+            user_id: 0,
+            incarnation_id: String::new(),
+            recovery_epoch: String::new(),
+        };
         self.start_copy_with_audio_offset(
             file_id,
             start_seconds,
@@ -17932,6 +18040,7 @@ impl TranscodeManager {
             options,
             user_name,
             &supersession_user,
+            &recovery,
             None,
             None,
             playback_id,
@@ -17951,6 +18060,7 @@ impl TranscodeManager {
         options: CopySessionOptions,
         user_name: &str,
         supersession_user: &str,
+        recovery: &SessionRecoveryIdentity,
         replacement_deadline: Option<tokio::time::Instant>,
         takeover: Option<SessionTakeoverStart>,
         playback_id: &str,
@@ -18250,6 +18360,7 @@ impl TranscodeManager {
             user_name: user_name.to_owned(),
             supersession_user: supersession_user.to_owned(),
             playback_id: playback_id.to_owned(),
+            recovery: Some(recovery.clone()),
             automatic,
             kind: copy_kind,
             method: crate::delivery::Method::HlsCopy,
@@ -23664,6 +23775,7 @@ fn test_session(dir: PathBuf) -> Session {
     let control = crate::playback_control::RollingControlHandle::spawn("test-start");
     Session {
         dir,
+        recovery: None,
         response_incarnation: uuid::Uuid::new_v4(),
         frozen_presentation: None,
         actor_managed_response_publication: false,
@@ -32466,6 +32578,74 @@ pub(crate) mod tests {
         }
     }
 
+    /// The identity reaches the session, and an absent budget is not an
+    /// unspent one.
+    ///
+    /// This is the whole of M5c3's first slice, and the distinction in the
+    /// second half is the one everything after it rests on. Three starts reach
+    /// the daemon without a server-minted epoch — a legacy process-local
+    /// start, a relayed worker start, and a cached serve — and the ledger
+    /// refuses an empty epoch. A caller that read "no epoch" as "a fresh
+    /// budget" would grant one automatic recovery per attempt on exactly the
+    /// paths that have no durable bound at all, which is the failure the
+    /// budget exists to prevent.
+    #[tokio::test]
+    async fn a_session_without_a_server_minted_epoch_reports_no_budget_rather_than_a_fresh_one() {
+        let dir = crate::test_tempdir().expect("dir");
+        let mut session = test_session(dir.path().to_path_buf());
+
+        assert!(
+            session.recovery_identity().is_none(),
+            "a session with no identity at all has no budget"
+        );
+
+        session.recovery = Some(SessionRecoveryIdentity {
+            user_id: 7,
+            incarnation_id: "incarnation".to_owned(),
+            recovery_epoch: String::new(),
+        });
+        assert!(
+            session.recovery_identity().is_none(),
+            "an empty epoch is what the legacy and relayed starts carry, and the \
+             ledger refuses it — so it is no budget, not an unspent one"
+        );
+
+        // Each field the store refuses, refused here too. A `Some` returned on
+        // the strength of the epoch alone is a reservation that fails at the
+        // moment it is needed, and this method is the one place a caller is
+        // entitled to trust.
+        session.recovery = Some(SessionRecoveryIdentity {
+            user_id: 0,
+            incarnation_id: "incarnation".to_owned(),
+            recovery_epoch: "epoch-1".to_owned(),
+        });
+        assert!(
+            session.recovery_identity().is_none(),
+            "the store refuses a non-positive user id"
+        );
+        session.recovery = Some(SessionRecoveryIdentity {
+            user_id: 7,
+            incarnation_id: String::new(),
+            recovery_epoch: "epoch-1".to_owned(),
+        });
+        assert!(
+            session.recovery_identity().is_none(),
+            "the store refuses an empty failed incarnation"
+        );
+
+        session.recovery = Some(SessionRecoveryIdentity {
+            user_id: 7,
+            incarnation_id: "incarnation".to_owned(),
+            recovery_epoch: "epoch-1".to_owned(),
+        });
+        let identity = session
+            .recovery_identity()
+            .expect("a server-minted epoch is a budget");
+        assert_eq!(identity.user_id, 7);
+        assert_eq!(identity.incarnation_id, "incarnation");
+        assert_eq!(identity.recovery_epoch, "epoch-1");
+    }
+
     /// The alternate M5c installs, frozen at session start like the one beside
     /// it, and different from it in exactly one way.
     ///
@@ -33170,6 +33350,7 @@ pub(crate) mod tests {
     ) -> Arc<Session> {
         Arc::new(Session {
             dir: dir.to_path_buf(),
+            recovery: None,
             response_incarnation: uuid::Uuid::new_v4(),
             frozen_presentation: None,
             actor_managed_response_publication: actor_managed_prepublication,
@@ -37598,13 +37779,34 @@ pub(crate) mod tests {
         );
 
         let supersession_user = serde_json::json!(["username", "paul"]).to_string();
+        let recovery = SessionRecoveryIdentity {
+            user_id: 0,
+            incarnation_id: String::new(),
+            recovery_epoch: String::new(),
+        };
         let first_creation = mgr
-            .create_session_inner(&request, "paul", &supersession_user, None, None, None)
+            .create_session_inner(
+                &request,
+                "paul",
+                &supersession_user,
+                &recovery,
+                None,
+                None,
+                None,
+            )
             .await
             .expect("create");
         assert!(first_creation.created);
         let again_creation = mgr
-            .create_session_inner(&request, "paul", &supersession_user, None, None, None)
+            .create_session_inner(
+                &request,
+                "paul",
+                &supersession_user,
+                &recovery,
+                None,
+                None,
+                None,
+            )
             .await
             .expect("replay");
         assert!(!again_creation.created);

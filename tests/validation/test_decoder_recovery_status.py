@@ -1380,14 +1380,38 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             "fn recovery_epoch_for(predecessor: Option<&MediaSessionRoute>) -> String",
             hls,
         )
-        # Read at the point of use rather than kept in a local: the store
-        # decides the row's epoch, and `activation_route_matches` compares
-        # nothing about this field — so a local copy could be believed after
-        # the store had already ruled otherwise.
-        self.assertIn(
-            "recovery_epoch: recovery_epoch_for(activation_predecessor.as_ref()),", hls
+        # Minted exactly once per start, and read from that one binding by
+        # both the session identity and the durable activation.
+        #
+        # M5b pinned the opposite — read at the point of use, never a local —
+        # on the reasoning that the store decides the row's epoch and a local
+        # copy could be believed after the store had ruled otherwise. That
+        # reasoning is about a *read* and it still holds; it was never about a
+        # mint. M5c3 needed the epoch before placement, because the session
+        # that carries it is built by the task placement spawns, and calling
+        # the function twice mints twice: `recovery_epoch_for` draws a fresh
+        # UUID when there is no predecessor, which is the whole point of it.
+        # A new play would have given the live session one budget and the
+        # durable row another.
+        production, _, _ = hls.partition("\nmod tests {")
+        self.assertEqual(
+            production.count("recovery_epoch_for(activation_predecessor.as_ref())"),
+            1,
+            "exactly one mint per start; a second call mints a second budget",
         )
-        self.assertNotIn("let recovery_epoch =", hls)
+        self.assertIn(
+            "let recovery_epoch = recovery_epoch_for(activation_predecessor.as_ref());",
+            production,
+        )
+        self.assertEqual(
+            production.count("recovery_epoch: recovery_epoch.clone(),"),
+            2,
+            "the session identity and the durable activation, and nothing else",
+        )
+        self.assertIn(
+            "fn one_start_mints_one_recovery_epoch_for_both_the_session_and_the_row",
+            hls,
+        )
         # And the claim about what the epoch buys is the one that holds.
         self.assertIn("It does not\n/// bound a client that varies", hls)
         self.assertIn(

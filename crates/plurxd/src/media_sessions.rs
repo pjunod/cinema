@@ -4647,12 +4647,16 @@ async fn supervise_takeover_settlement(
     let creation_request = request.clone();
     let creation_user = user_name.clone();
     let creation_start = start.clone();
-    let creation_user_id = original.user_id;
+    let creation_recovery = crate::transcode::SessionRecoveryIdentity {
+        user_id: original.user_id,
+        incarnation_id: original.incarnation_id.clone(),
+        recovery_epoch: original.recovery_epoch.clone(),
+    };
     let creation = tokio::spawn(async move {
         creation_manager
             .create_cluster_takeover_session_under_guard(
                 &creation_request,
-                creation_user_id,
+                &creation_recovery,
                 &creation_user,
                 creation_deadline,
                 creation_start,
