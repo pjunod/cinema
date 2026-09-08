@@ -111,7 +111,7 @@ page; the milestone files are contracts an executing agent works from.
 | [M6-CALLER-HANDOFF.md](playback-control/M6-CALLER-HANDOFF.md) | M6: where the preparation decision is made, and by whom. | open |
 | [M6-IMPLEMENTATION-HANDOFF.md](playback-control/M6-IMPLEMENTATION-HANDOFF.md) | M6: the prepared-recipe contract, with its measured numbers. | open |
 | [M6-AXIS-CASE-HANDOFF.md](playback-control/M6-AXIS-CASE-HANDOFF.md) | The one measurement M6 waits on, and how to take it. | done |
-| [M6-AXIS-CASE-RESULTS.md](playback-control/M6-AXIS-CASE-RESULTS.md) | That measurement, taken 2026-09-03: physical Apple TV admission failed. | done |
+| [M6-AXIS-CASE-RESULTS.md](playback-control/M6-AXIS-CASE-RESULTS.md) | The 30 Mbit/s axis run, below the throughput floor and superseded the same day by a 40 Mbit/s re-run that admitted the pair. Read the correction at the top. | superseded |
 | [M6-CLIENT-REPLACEMENT-CONTRACT.md](playback-control/M6-CLIENT-REPLACEMENT-CONTRACT.md) | The byte-level wire contract all three clients implement against. | open |
 | [M6-APPLE-CLIENT-BUILD.md](playback-control/M6-APPLE-CLIENT-BUILD.md) | Building the Apple half of M6 — the only one a viewer sees. | open |
 | [M6-WEB-CLIENT-BUILD.md](playback-control/M6-WEB-CLIENT-BUILD.md) | Building the web half of M6, proven by tests until a measurement lands. | open |
@@ -119,7 +119,7 @@ page; the milestone files are contracts an executing agent works from.
 | [M6-ANDROID-CLIENT-STATUS.md](playback-control/M6-ANDROID-CLIENT-STATUS.md) | M6: what the Android client does with a staged successor, and how an operator turns it on. | built |
 | [M6-APPLE-HARDWARE-ACCEPTANCE.md](playback-control/M6-APPLE-HARDWARE-ACCEPTANCE.md) | The two M6 numbers a simulator cannot supply, and the prompt that takes them. | open |
 | [M6-WEB-CLIENT.md](playback-control/M6-WEB-CLIENT.md) | M6: what the browser does with a staged successor, and how an operator turns it on. | built |
-| [M6-SERVER-PRIME-HANDOFF.md](playback-control/M6-SERVER-PRIME-HANDOFF.md) | Phase 3 — why a staged successor serves nothing, and the decision that blocks it. | open |
+| [M6-SERVER-PRIME-HANDOFF.md](playback-control/M6-SERVER-PRIME-HANDOFF.md) | Phase 3 — why a staged successor serves nothing, and the copy-to-copy transition it can be built against today (§5.1). | open |
 | [M7-REMAINDER-HANDOFF.md](playback-control/M7-REMAINDER-HANDOFF.md) | M7: subtitle readiness, bounded materialization, seek coalescing, burn-join, prewarm. | open |
 | [M7-R-M3-CLAUDE-HANDOFF.md](playback-control/M7-R-M3-CLAUDE-HANDOFF.md) | Finish M2, then build seek coalescing. | open |
 | [M7-M1-LARGE-MKV-OBSERVATION.md](playback-control/M7-M1-LARGE-MKV-OBSERVATION.md) | Large-MKV readiness and bounded subtitle publication, observed. | done |
