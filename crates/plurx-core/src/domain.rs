@@ -1893,6 +1893,17 @@ pub enum DecodeRestrictionError {
     UnsupportedVersion(u32),
     TooLarge(usize),
     InvalidField(&'static str),
+    /// The record is well formed and this build does not know the decoder
+    /// family it names.
+    ///
+    /// Distinct from [`Self::InvalidField`], which every other producer uses
+    /// to mean *the stored record is malformed*. A record that reaches this
+    /// has already passed [`ContinuationDecodeRestriction::decode`]: its
+    /// fields are the right shape and the right length. What is unknown is the
+    /// vocabulary, which is what [`Self::UnsupportedVersion`] says about the
+    /// schema and nothing said about the names. An operator diagnosing a
+    /// mixed-version fleet needs to be told "newer", not "invalid".
+    UnknownBackend(String),
 }
 
 impl std::fmt::Display for DecodeRestrictionError {
@@ -1907,6 +1918,10 @@ impl std::fmt::Display for DecodeRestrictionError {
                 "decode restriction is {bytes} bytes, over the {MAX_DECODE_RESTRICTION_BYTES}-byte bound"
             ),
             Self::InvalidField(field) => write!(formatter, "decode restriction field {field} is invalid"),
+            Self::UnknownBackend(name) => write!(
+                formatter,
+                "decode restriction names decoder backend {name}, which this build does not know"
+            ),
         }
     }
 }

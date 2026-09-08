@@ -2480,17 +2480,30 @@ fn continuation_restriction(failed: &str, required: &str) -> ContinuationDecodeR
 }
 
 #[test]
+fn all_lists_every_backend_and_a_new_one_cannot_be_added_quietly() {
+    // The compiler cannot check that `DecodeBackend::ALL` is complete, so
+    // this does. The match is exhaustive over the variants: adding one makes
+    // this test fail to compile, and the arm it forces you to write is the
+    // reminder that `ALL` and `parse` both need the new spelling. `name` is
+    // already an exhaustive match and therefore guards nothing here — it
+    // forces a spelling to be written, never to be readable.
+    for backend in DecodeBackend::ALL {
+        match backend {
+            DecodeBackend::Software
+            | DecodeBackend::VideoToolbox
+            | DecodeBackend::Cuda
+            | DecodeBackend::Qsv
+            | DecodeBackend::Vaapi => {}
+        }
+    }
+}
+
+#[test]
 fn every_backend_name_survives_the_round_trip_and_nothing_else_parses() {
     // `name` is what a durable record stores and `parse` is what reads it
     // back, so the two are one contract. A backend added on one side and not
     // the other is a restriction that writes cleanly and reads as a stranger.
-    for backend in [
-        DecodeBackend::Software,
-        DecodeBackend::VideoToolbox,
-        DecodeBackend::Cuda,
-        DecodeBackend::Qsv,
-        DecodeBackend::Vaapi,
-    ] {
+    for backend in DecodeBackend::ALL {
         assert_eq!(DecodeBackend::parse(backend.name()), Some(backend));
     }
     // No default, no nearest match, no leniency about spelling. Each of these
@@ -2509,6 +2522,36 @@ fn every_backend_name_survives_the_round_trip_and_nothing_else_parses() {
 }
 
 #[test]
+fn the_two_stored_spellings_of_a_backend_are_pinned_apart() {
+    // `DecodeBackend` has two wire forms: `name`, which the restriction record
+    // stores, and serde's snake_case rename, which every struct holding a
+    // `DecodeBackend` field serializes. They agree for four variants and
+    // disagree for the fifth, and `parse` inverts only the first. Pinning both
+    // keeps that divergence deliberate: a writer that reaches for the serde
+    // form produces a record this build refuses, which is exactly the loop the
+    // restriction exists to stop.
+    assert_eq!(DecodeBackend::VideoToolbox.name(), "videotoolbox");
+    assert_eq!(
+        serde_json::to_value(DecodeBackend::VideoToolbox).expect("backend json"),
+        json!("video_toolbox"),
+        "the serde spelling differs from the stored one for this variant"
+    );
+    assert_eq!(DecodeBackend::parse("video_toolbox"), None);
+    for backend in [
+        DecodeBackend::Software,
+        DecodeBackend::Cuda,
+        DecodeBackend::Qsv,
+        DecodeBackend::Vaapi,
+    ] {
+        assert_eq!(
+            serde_json::to_value(backend).expect("backend json"),
+            json!(backend.name()),
+            "the two spellings agree for every other variant"
+        );
+    }
+}
+
+#[test]
 fn a_continuation_record_names_the_successor_outright() {
     let restriction = continuation_restriction("videotoolbox", "software");
     let restrictions =
@@ -2519,28 +2562,62 @@ fn a_continuation_record_names_the_successor_outright() {
         "the required form is the branch resolution reads first, and it names \
          the successor rather than leaving preference order to pick what is left"
     );
+    // A hardware successor is legitimate and reaches the same shape, so the
+    // conversion cannot be one that ignores the field and always says software.
+    assert_eq!(
+        AttemptRestrictions::for_continuation(&continuation_restriction("software", "cuda"))
+            .expect("a readable restriction"),
+        AttemptRestrictions::requiring(DecodeBackend::Cuda),
+    );
 }
 
 #[test]
-fn an_unreadable_continuation_record_is_a_refusal_and_never_an_absence() {
+fn an_unreadable_required_backend_is_a_refusal_and_never_an_absence() {
     // The whole point of the restriction is that a source which failed on
     // hardware does not get hardware again. Reading an unknown name as "no
     // restriction" restores automatic selection and reproduces the failure,
     // silently, on every later continuation.
     assert_eq!(
         AttemptRestrictions::for_continuation(&continuation_restriction("videotoolbox", "banana")),
+        Err(DecodeRestrictionError::UnknownBackend("banana".to_owned())),
+        "an unknown vocabulary is reported as newer, not as malformed"
+    );
+}
+
+#[test]
+fn an_unreadable_failed_backend_is_honoured_because_it_is_never_used() {
+    // The rolling-upgrade case, and the one an earlier draft got wrong by
+    // being careful. A newer node records that some backend this build has
+    // never heard of failed, and asks for software; the playback then moves to
+    // an older node. Refusing there would restore hardware decode for a source
+    // that already failed on hardware — the exact loop the record exists to
+    // stop. The failed name is never used: the answer is the required one.
+    assert_eq!(
+        AttemptRestrictions::for_continuation(&continuation_restriction("av1hw", "software"))
+            .expect("the usable half of the record is usable"),
+        AttemptRestrictions::requiring(DecodeBackend::Software),
+    );
+    // Version is untouched by a new backend name, so the old node really does
+    // see this record rather than refusing it at the schema.
+    let record = continuation_restriction("av1hw", "software");
+    assert_eq!(record.version, CONTINUATION_DECODE_RESTRICTION_VERSION);
+    let encoded = record
+        .encode()
+        .expect("a new backend name is not a schema change");
+    assert_eq!(
+        ContinuationDecodeRestriction::decode(&encoded).expect("decodes on this build"),
+        record
+    );
+}
+
+#[test]
+fn requiring_what_just_failed_is_refused_by_the_record_not_by_the_conversion() {
+    // The division of labour this conversion depends on: `validate` already
+    // refuses a record that requires the backend that just failed, because
+    // that is a loop rather than a restriction. Asserted exactly, so a change
+    // that started refusing for some other reason would be visible here.
+    assert_eq!(
+        continuation_restriction("software", "software").encode(),
         Err(DecodeRestrictionError::InvalidField("required_backend")),
     );
-    // And the less obvious half: a record whose *failed* backend this build
-    // does not know was written by a build that knew something this one does
-    // not. Honouring half of it is a guess.
-    assert_eq!(
-        AttemptRestrictions::for_continuation(&continuation_restriction("banana", "software")),
-        Err(DecodeRestrictionError::InvalidField("failed_backend")),
-    );
-    // `validate` refuses a record that requires what just failed, so the
-    // conversion never has to. This asserts that division stays true.
-    assert!(continuation_restriction("software", "software")
-        .encode()
-        .is_err());
 }
