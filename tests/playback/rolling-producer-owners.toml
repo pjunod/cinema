@@ -17,7 +17,12 @@ replacement = "the sole actor-owned rolling producer progress budget before and 
 [[symbols]]
 id = "replacement-mask-flag"
 pattern = "replacing_child"
-expected_occurrences = 29
+# 29 -> 30 with M5c3: one test-only read. The durable recovery budget is
+# reserved before `begin_child_replacement`, so a refused reservation must
+# leave the failed producer where the actor left it; the regression asserts
+# the mask is still clear at that point. No production reader was added and
+# nothing new elects a replacement.
+expected_occurrences = 30
 kind = "recovery_election"
 replacement = "retained process-replacement serialization projection; actor decisions and exact attempts own transcode prepublication"
 
@@ -31,7 +36,12 @@ replacement = "specific attempt, response-admission, copy replacement, published
 [[symbols]]
 id = "replacement-transaction"
 pattern = "begin_child_replacement"
-expected_occurrences = 7
+# 7 -> 9 with M5c3, both in prose. The pattern is a plain string match, and
+# the two additions are a production comment and a test doc explaining why the
+# recovery reservation is taken *before* this call — reserving after it would
+# turn "this playback already recovered" into a session with no producer. No
+# new call site: the transaction still has exactly one authorized entry.
+expected_occurrences = 9
 kind = "replacement_owner"
 replacement = "one actor-authorized prepublication retry action"
 
@@ -59,7 +69,12 @@ replacement = "typed producer facts entering the actor; only prepublication and 
 [[symbols]]
 id = "supervisor-registration"
 pattern = "AttemptChild::new\\("
-expected_occurrences = 20
+# 20 -> 22 with M5c3: two test-only predecessor children. The retry executor
+# terminates the exact failed attempt before it clears scratch, so both
+# recovery-budget regressions need a child bound to that attempt or the
+# transaction fails before reaching what they are about. Both are killed or
+# reaped by the fixture. No production supervisor was added.
+expected_occurrences = 22
 kind = "process_owner"
 replacement = "retained as the sole OS-child supervisor, registered before publication"
 
@@ -294,7 +309,9 @@ expected_occurrences = 0
 [[module_symbols]]
 id = "legacy-replacement-mask"
 pattern = "replacing_child"
-expected_occurrences = 29
+# 29 -> 30 with M5c3; the module-wide twin of `replacement-mask-flag` above,
+# and the same single test-only read.
+expected_occurrences = 30
 
 [[module_symbols]]
 id = "legacy-downgrade-owner"
@@ -1451,7 +1468,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # twice the budget its caller was told. Neither owns a producer; each bounds a
 # wait for a reader whose child is already reaped, and expiry aborts the reader
 # and settles an incomplete observation rather than waiting.
-expected_occurrences = 651
+# 651 -> 652 with M5c3: one test-only `tokio::time::timeout` bounding the wait
+# for actor retirement after a recovery whose transaction failed, the same
+# shape as its neighbour in the scratch-clear fencing regression. It is awaited
+# before fixture teardown and owns nothing.
+expected_occurrences = 652
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -1676,7 +1697,9 @@ expected_occurrences = 42
 [[module_structures]]
 id = "rolling-supervisor-construction"
 pattern = "AttemptChild::new\\s*\\("
-expected_occurrences = 20
+# 20 -> 22 with M5c3; the module-wide twin of `supervisor-registration`, and
+# the same two test-only predecessor children.
+expected_occurrences = 22
 
 [[module_structures]]
 id = "forbidden-timer-or-task-alias"
