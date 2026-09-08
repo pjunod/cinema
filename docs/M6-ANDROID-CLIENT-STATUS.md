@@ -126,11 +126,33 @@ the mechanical reason the capability is not a judgement call from here.
   on `owner_epoch == 1`, carrying no acknowledgement, and not ending. That read
   always answers `Absent` while nothing is staged. Correct, not free, and said
   here rather than discovered in a dashboard.
-- With the switch **on**, a prepared handoff still cannot fire on a **VOD**
-  session, on any platform: `DeliveryView::from_status` leaves `delivered_bps`
-  `None` on every VOD session and the throughput floor needs both numbers.
-  Closing that is server work and out of scope for all three client briefs. It
-  is the first thing to re-read if a prepared handoff turns out never to fire.
+- With the switch **on**, a prepared handoff still fires on nothing, and the
+  reason is bigger than any capability. **`stage_prepared_successor` is
+  stage-only.** Its own comment says so — "a durable row and the actor's one
+  successor slot, nothing produced yet" — and the roadmap's third phase,
+  *reserve and prime*, is not implemented. The staged row carries
+  `publication_ready_at_ms = MEDIA_SESSION_PUBLICATION_BLOCKED`, so a GET of
+  the successor's `playlist_url` answers `503 media_owner_transition` until the
+  pointer moves, and commit does not publish it either. A client built from the
+  contract's §C8 sequence diagram therefore stands up a second pipeline that
+  can never become playable — **on every selection change, for the whole
+  film**, which is a regression rather than a feature.
+
+  So the ledger learns. The first successor that dies *before it was ever
+  playable* — no track published, whether it errored or the readiness bound
+  elapsed — ends the offers for that playback. Not a flag anyone sets, and
+  forgotten when the player ends: one attempt is evidence about this playback,
+  not about this attempt. Apple reached the same rule independently
+  (`PreparedReplacementCoordinator.canOfferPreparation`), which is the sameness
+  the three ports are meant to keep.
+- On **VOD**: at this branch `DeliveryView::from_status` still leaves
+  `delivered_bps` `None` on a VOD session and the floor needs both numbers, so
+  VOD cannot reach a preparation here. That is changing — a parallel effort
+  populates it and records that its absence "is what made preparation
+  unreachable on the primary presentation" — so nothing in this client gates on
+  `!isVod`. The requirement row names the mechanism (the server reports a
+  delivered-throughput number, or it does not) rather than the presentation, so
+  it stays true on both sides of that change.
 - Nothing on any of these paths is seamless, and nothing in this branch calls
   it that. Android's fallback interruption is measured at 353–766 ms, mean 471,
   on the Google TV.
@@ -223,6 +245,27 @@ prepared handoffs are enabled and still never fire, this is the second thing to
 look at after the VOD `delivered_bps` gap. The window predates this milestone
 and lives in `MediaOrigin.kt`; fixing it is a change to what every session
 reports, not to this path.
+
+---
+
+## What a parallel effort is about to change, and what to do about it
+
+Recorded from another session's trace of the same server. None of it is in this
+effort branch yet; all of it changes a client.
+
+- **`ActionAcknowledgement` gains a fifth field, `committed_media_origin_ms`,
+  required on `Committed`** and compared against the staged successor's own
+  `media_origin_ms`. Omit it once that lands and every commit is `400
+  invalid_control`. **Do not add it early**: the struct carries
+  `deny_unknown_fields`, so against today's server a fifth key refuses the whole
+  exchange the acknowledgement rides on. Echo the offer's value when it lands;
+  never recompute it. `test_control_wire_conformance` is what will fail first,
+  which is the cheapest possible warning.
+- **`ControlRequestV1` gains `intent`**, which no client sends yet.
+- **VOD stops being excluded**, as above.
+
+The general rule this branch already follows: the code wins and the contract
+document is the bug. Re-derive every mirrored rule from the Rust at build time.
 
 ---
 
