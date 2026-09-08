@@ -50,6 +50,11 @@ M5B_TASK_BASE = M3F_MERGED_HEAD
 M5B_MERGED_HEAD = "7f2cb598c6ed89dd24996e06783077f1e29c0678"
 M5C1_TASK_BASE = M5B_MERGED_HEAD
 M5C1_MERGED_HEAD = "67216de972c1e39f1ef6aefb2541cf542619cb0c"
+# The head after M5c3, M7a and the merge of current `main`. Named here rather
+# than derived because "the next task base" is a claim the document makes and
+# a reader acts on, and a stale one sends a task branch at a tree that no
+# longer exists.
+MAIN_MERGED_HEAD = "08086371180ae9ae89063ec0946e42bb355a8d60"
 CORE_INVENTORY = ROOT / "crates/plurx-core/src/transcode/decoder_inventory.rs"
 CORE_STORE = ROOT / "crates/plurx-core/src/store/mod.rs"
 SQLITE_CACHE = ROOT / "crates/plurx-core/src/store/sqlite/cache.rs"
@@ -226,7 +231,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
     def test_current_base_and_receipt_state_cannot_be_confused_with_history(self) -> None:
         self.assertIn(FORGEJO_MAIN_LINEAGE, self.status)
         self.assertIn(
-            f"Next task base:** effort head `{M5C1_MERGED_HEAD}`", self.flat_status
+            f"Next task base:** effort head `{MAIN_MERGED_HEAD}`", self.flat_status
         )
         # Each merged head is named, not only the pull request that carried it.
         self.assertIn(M3C1_MERGED_HEAD[:8], self.status)
@@ -363,8 +368,9 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
                 self.assertEqual(source.count(surface.get("m2_anchor", "")), 1)
 
         self.assertIn(
-            "M0–M3f, M4, M5a, M5b, the M5a census repair and M5c1 merged into "
-            "the effort; M5c2 complete, M5c3 next",
+            "M0–M3f, M4, M5a, M5b, the M5a census repair, M5c1, M5c2, M5c3 and "
+            "M7a merged into the effort, and current `main` merged in ahead of "
+            "promotion; M5 complete, M7 next",
             self.flat_status,
         )
         self.assertIn("decoder-plan-v1-unqualified", self.status)
