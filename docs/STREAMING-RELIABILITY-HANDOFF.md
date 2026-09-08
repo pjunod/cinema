@@ -743,13 +743,19 @@ qualification/promotion run.
 yet addressed. Each is a switch that changes product behaviour with no visible
 control:
 
-- `PLURX_PGS_OVERLAY` (`state.rs`) — default **off**, gates the whole PGS
-  subtitle-overlay feature including which subtitle tracks clients are told
-  exist. No setting, no API field, no UI, and a whole `plurx-pgs` crate behind
-  it.
-- `PLURX_DV_CONVERT` (`main.rs`) — default **on**, kill switch for the
-  Profile 7 → 8.1 conversion. It surfaces as `RenderCaps.dolby_vision_convert`
-  on `/decision`, not in `system_info`, and is settable nowhere.
+- ~~`PLURX_PGS_OVERLAY`~~ — **done.** It is `subtitles.pgs_overlay`, read at
+  the request boundary, with a Settings → Developer card carrying the switch
+  and what has to be true first. The variable seeds the setting once on a node
+  that has never been told either way and does nothing after that.
+- ~~`PLURX_DV_CONVERT`~~ — **done.** `playback.dolby_vision_convert`, same
+  shape. Worth knowing for the next one of these: moving the switch is the
+  easy half. The expensive defect was a *reader left behind* — the fragment
+  indexer still read the boot value, so turning the conversion on gave a
+  decision path that named a converting identity nothing would ever build, and
+  it healed only on restart. Grep for every reader of the old boot-latched
+  value before believing the move is complete, and make one parser own the
+  stored string: three parses of it meant a hand-edited `TRUE` served overlays
+  while the card said off.
 - `OFFLINE_ENABLED` — master kill switch for offline packages; reaches the
   settings API and renders nowhere.
 - `SW_POOL_THREADS` — a settings key with no DTO field at all.
