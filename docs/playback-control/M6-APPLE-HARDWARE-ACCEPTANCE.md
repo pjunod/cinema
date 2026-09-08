@@ -31,6 +31,34 @@ down, without assuming the reader has read anything else.
 > fallback, not the handoff** — and the fallback is exactly what §1.2 needs you
 > to measure. Do not report the fallback as a failure; report it as the number.
 >
+> ### 1.0 Getting the build onto the devices, and the server onto the nodes
+>
+> This runs from the control host — Paul's Mac, where `~/code/plurx` lives and
+> the private Ansible checkout is at `~/code/plurx-agent/ansible`. Neither
+> command can be run from a cloud session: the mobile one needs the physical
+> devices attached, and the fleet one needs the control host's own checkouts.
+>
+> ```
+> cd ~/code/plurx-agent/ansible/media
+> ansible-playbook -i inventory.yml deploy.yml -e only=plurx    # the nodes
+> ansible-playbook -i inventory.yml mobile-physical.yml         # the devices
+> ```
+>
+> `deploy.yml` fast-forwards `~/code/plurx` from the remote first and refuses if
+> the local branch has commits the remote does not, so run it after the merge
+> rather than before. It ships Apple build 119's server side — which for this
+> change is the corrected Settings → Developer card and nothing else, since the
+> whole of the prepared handoff is client code. **The fleet is behind by more
+> than this change**, so read what else lands with it before running it
+> unattended.
+>
+> `mobile-physical.yml` builds and installs to every attached physical device
+> and fails the run if a device named in
+> `mobile_release_required_android_devices` is unplugged. Apple TVs are
+> discovered rather than named, so an asleep one is silently skipped — wake
+> them first, or the acceptance below runs against an older build and says so
+> about the wrong code.
+>
 > ### 1.1 One directed replacement, on real hardware
 >
 > 1. Turn on **Settings → Developer → Advertise playback control protocol v1**
