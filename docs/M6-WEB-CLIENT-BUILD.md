@@ -1,8 +1,8 @@
 # M6 web client — the prepared handoff in one embedded file
 
-**Status:** ready to build · **Executes:** the web half of M6 · **Written:**
-2026-09-07 · **Baseline:** effort head `e3b11182` on
-`effort/decoder-selection-recovery`
+**Status:** ready to build · **Executes:** the web half of M6 ·
+**Written:** 2026-09-07 · **Revised:** 2026-09-08 · **Baseline:** effort
+head `58503d2d` on `effort/decoder-selection-recovery`
 
 This file is self-contained; you need no other document to start.
 **Part I** is what to change in the web client, in what order, and how to know
@@ -883,7 +883,7 @@ File it; do not fix it in a client PR.
 
 ---
 
-## C10. Terminal reasons — 15 values, 3 of them permanent
+## C10. Terminal reasons — 16 values, 3 of them permanent
 
 `ProducerDecisionReason` — `playback_control.rs:3847+`. These strings appear in
 `delivery.producer_decision`, in `Terminal.code`, and in `RetryResource.reason`.
@@ -892,22 +892,38 @@ File it; do not fix it in a client PR.
 startup_deadline · progress_deadline · exit_classification_deadline
 process_exit · partial_success_exit · unsupported · invalid_configuration
 reader_failed · flow_stop_failed · flow_resume_failed · flow_stop_deadline
-flow_resume_deadline · install_deadline · executor_lost · source_decode_failed
+flow_resume_deadline · install_deadline · executor_lost · source_decode_retry
+source_decode_failed
 ```
 
 `is_permanent()` is exactly `{unsupported, invalid_configuration,
 source_decode_failed}`. A permanent reason becomes `Terminal`; everything else
-becomes `RetryResource`. **`source_decode_failed` is new in this effort** and
-is the reason the decoder work exists: the process may exit zero and still have
-decoded nothing, and every timing reason tells a client to try again, which
-reproduces the fault.
+becomes `RetryResource`.
+
+**The last two are new in this effort, they describe the same finding, and the
+difference between them is the one most worth reading twice.** The decoder's
+own diagnostics said the source did not decode — the failure this whole effort
+is named after, where the process may exit zero having decoded nothing, and
+where every timing reason tells a client to try again and so reproduces the
+fault. What separates the two is whether the server has a software-decode
+alternate to install:
+
+- **`source_decode_retry`** — it does. Impermanent, so it reaches a client as
+  `retry_resource`. The server is bringing up a successor that reads the same
+  source differently, and a client that tears down here abandons a recovery
+  that was about to work. **No server build emits this yet** — the vocabulary
+  landed before the installer that produces it, so handle it and do not wait
+  for it. Until that installer ships, this situation reaches you as one of the
+  timing reasons above, most often `progress_deadline` or `startup_deadline`.
+- **`source_decode_failed`** — it does not. Permanent, so it reaches a client
+  as `terminal`, and it is the one verdict in this vocabulary that means *stop
+  asking*.
 
 Two cautions:
 
-1. `terminal_message()` (`:1992-2007`) has no prose sentence for
-   `source_decode_failed` yet, so its `message` on the wire is currently the
-   literal string `"source_decode_failed"`. **Do not render `message` to a
-   viewer unmodified.** Map `code` to your own localised copy.
+1. `terminal_message()` has a sentence for `source_decode_failed` but the
+   general rule stands: **do not render `message` to a viewer unmodified.** Map
+   `code` to your own localised copy.
 2. There is a **second, unrelated** terminal vocabulary for session teardown in
    `crates/plurxd/src/vodserve.rs:141-192` (`deleted`, `superseded`,
    `admin_stop`, `revoked`, `replaced`), delivered on `410` answers. It is not
