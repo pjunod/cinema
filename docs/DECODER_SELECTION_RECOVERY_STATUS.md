@@ -1,7 +1,7 @@
 # Decoder selection and recovery — implementation status
 
 **Status:** M0–M3f, M4, M5a, M5b, the M5a census repair and M5c1 merged into
-the effort; M5c2 next · **Updated:** 2026-09-08 ·
+the effort; M5c2 complete, M5c3 next · **Updated:** 2026-09-08 ·
 **Integration branch:** `effort/decoder-selection-recovery` · **Next task
 base:** effort head `67216de972c1e39f1ef6aefb2541cf542619cb0c`
 
@@ -20,7 +20,7 @@ An unchecked item is not implied by a nearby passing check.
 
 | Field | Current value |
 |---|---|
-| Milestone | M5c — prepublication recovery. M5c1 merged (the decision seam); M5c2 next (the restricted retry and its durable budget) |
+| Milestone | M5c — prepublication recovery. M5c1 and M5c2a–d merged: the decision seam, the durable-restriction reader, the alternate, its reason, and the installer. M5c3 next — the durable budget, which is still the only thing bounding a recovery to one per playback |
 | Task branch | Next task branches from effort head `67216de9` |
 | Task PR | Open against the effort branch. One whole-PR adversarial review is owed on this candidate before it merges |
 | M1 dependency | [Forgejo #63](http://192.168.4.7:3000/noirr/plurx/pulls/63) is merged. Exact head `f7f98b01` completed `make validate-full` with 23 passed, 0 failed, and 2 declared skips (`android-device`, no `adb` on the qualifying host; `live-tv-two-node`, which does not run on Darwin); `target/validation/report.json` records `git_ref f7f98b01`, generated `2026-09-07T01:01:02Z`. It fast-forwarded into the effort. M2 ([Forgejo #73](http://192.168.4.7:3000/noirr/plurx/pulls/73)) then fast-forwarded onto it after its own whole-PR review, its findings repair, and the Forgejo effort gate on exact head `773ad488` — which is the commit this M3a branch is based on |
@@ -2475,6 +2475,28 @@ record applies to the plan at all, and the fact that a record requiring a
 hardware backend on a node without it is a permanent `CapabilityUnavailable`
 with no software rescue — fail-closed and correct, and a choice the caller is
 making.
+
+### M5c2 is complete, and the rollout window it opened is now closed
+
+`source_decode_retry` can reach the wire from this build. The constraint the
+section below describes is therefore live: a node emitting it to a relay that
+cannot parse it makes the whole relayed response unbelievable, so the fleet
+has to be on a build that reads the vocabulary before one is on a build that
+writes it.
+
+What M5c2 shipped, in four slices: the durable continuation restriction is
+readable back into a selection input (a), the software-decode alternate is
+resolvable and preparable (b), the impermanent reason exists (c), and the
+actor chooses the alternate while the executor installs the one it named (d).
+
+**What it does not have yet, and this is M5c3.** Nothing durable bounds the
+recovery. `PrepublicationRetryState` is an in-process one-shot: it makes a
+session take either the alternate or the colour-safe retry, once — and a new
+session mints a fresh one. A viewer whose source cannot be decoded still gets
+one automatic alternate per *session*, which a reopen, a seek or a track
+change resets. The ledger M5a built and M5b keyed exists to make it one per
+*playback*, and `plurxd` still calls none of it. Until it does, the loop this
+effort is named after is narrowed rather than closed.
 
 ### The vocabulary is an owner-before-relay rollout constraint
 

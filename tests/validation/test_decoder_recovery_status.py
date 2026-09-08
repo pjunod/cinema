@@ -364,7 +364,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
 
         self.assertIn(
             "M0–M3f, M4, M5a, M5b, the M5a census repair and M5c1 merged into "
-            "the effort; M5c2 next",
+            "the effort; M5c2 complete, M5c3 next",
             self.flat_status,
         )
         self.assertIn("decoder-plan-v1-unqualified", self.status)
