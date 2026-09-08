@@ -1,8 +1,8 @@
 # M6 web client — the prepared handoff in one embedded file
 
-**Status:** ready to build · **Executes:** the web half of M6 · **Written:**
-2026-09-07 · **Baseline:** effort head `e3b11182` on
-`effort/decoder-selection-recovery`
+**Status:** ready to build · **Executes:** the web half of M6 ·
+**Written:** 2026-09-07 · **Revised:** 2026-09-08 · **Baseline:** effort
+head `58503d2d` on `effort/decoder-selection-recovery`
 
 This file is self-contained; you need no other document to start.
 **Part I** is what to change in the web client, in what order, and how to know
@@ -911,7 +911,10 @@ alternate to install:
 - **`source_decode_retry`** — it does. Impermanent, so it reaches a client as
   `retry_resource`. The server is bringing up a successor that reads the same
   source differently, and a client that tears down here abandons a recovery
-  that was about to work.
+  that was about to work. **No server build emits this yet** — the vocabulary
+  landed before the installer that produces it, so handle it and do not wait
+  for it. Until that installer ships, this situation reaches you as one of the
+  timing reasons above, most often `progress_deadline` or `startup_deadline`.
 - **`source_decode_failed`** — it does not. Permanent, so it reaches a client
   as `terminal`, and it is the one verdict in this vocabulary that means *stop
   asking*.

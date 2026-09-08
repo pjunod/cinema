@@ -1641,8 +1641,9 @@ pub(crate) enum ControlAction {
     },
     /// Production stopped for a reason that may not recur.
     ///
-    /// Thirteen of the sixteen producer decisions are timing, process or
-    /// executor facts. The client should try again on the server's own
+    /// Thirteen of the sixteen producer decisions are timing, process,
+    /// executor or recovery facts, and this is what a client is told about
+    /// every one of them. The client should try again on the server's own
     /// cadence rather than deciding for itself how hard to retry, which is
     /// what every client does today.
     RetryResource {
@@ -3916,10 +3917,18 @@ impl ProducerDecisionReason {
     ///
     /// Thirteen of these sixteen reasons are timing, process, executor or
     /// recovery facts: the same file on the same pipeline may well work on the
-    /// next attempt. Three are verdicts about the source itself — this container
-    /// cannot be carried by this pipeline, the recipe that was asked for is
-    /// not a legal one, or the decoder's own diagnostics said the source did
-    /// not decode — and no amount of retrying changes any of them.
+    /// next attempt. Three are verdicts about the source itself — this
+    /// container cannot be carried by this pipeline, the recipe that was asked
+    /// for is not a legal one, or the decoder said the source did not decode
+    /// and there is nothing else to try — and no amount of retrying changes
+    /// any of them.
+    ///
+    /// The last of those three is the one to read carefully, because
+    /// [`Self::SourceDecodeRetry`] carries the *same finding* and sits on the
+    /// impermanent side. What separates them is not the evidence, which is
+    /// identical; it is whether this node holds a software-decode alternate to
+    /// install. A decode fault with an alternate is a retry the client should
+    /// wait through; the same fault without one is the answer.
     ///
     /// The distinction is the whole reason a client cannot decide for itself.
     /// `producer_state` flattens all sixteen to the word `failed`, so a
@@ -13643,6 +13652,36 @@ mod tests {
             );
         }
         assert_eq!(ProducerDecisionReason::ALL.len(), 16);
+        // A variant present in the enum and absent from `ALL` is caught by
+        // nothing else. `status` is exhaustive, so the compiler forces a
+        // spelling to be written; `ALL` is a hand-maintained array it cannot
+        // check, and both this test and the permanence test iterate `ALL` — so
+        // a forgotten variant is invisible to both while being unnameable by
+        // `from_status`, which is the hazard the paragraph above describes.
+        //
+        // The match is exhaustive over the variants, so adding one fails to
+        // compile here, and the arm it forces you to write is the reminder to
+        // extend `ALL` with it.
+        for reason in ProducerDecisionReason::ALL {
+            match reason {
+                ProducerDecisionReason::StartupDeadline
+                | ProducerDecisionReason::ProgressDeadline
+                | ProducerDecisionReason::ExitClassificationDeadline
+                | ProducerDecisionReason::ProcessExit
+                | ProducerDecisionReason::PartialSuccessExit
+                | ProducerDecisionReason::Unsupported
+                | ProducerDecisionReason::InvalidConfiguration
+                | ProducerDecisionReason::ReaderFailed
+                | ProducerDecisionReason::FlowStopFailed
+                | ProducerDecisionReason::FlowResumeFailed
+                | ProducerDecisionReason::FlowStopDeadline
+                | ProducerDecisionReason::FlowResumeDeadline
+                | ProducerDecisionReason::InstallDeadline
+                | ProducerDecisionReason::ExecutorLost
+                | ProducerDecisionReason::SourceDecodeRetry
+                | ProducerDecisionReason::SourceDecodeFailed => {}
+            }
+        }
         assert_eq!(ProducerDecisionReason::from_status("invented"), None);
         // The names are wire-safe: lowercase, underscored, no spaces.
         for reason in ProducerDecisionReason::ALL {

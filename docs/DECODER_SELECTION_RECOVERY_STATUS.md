@@ -2476,6 +2476,30 @@ hardware backend on a node without it is a permanent `CapabilityUnavailable`
 with no software rescue — fail-closed and correct, and a choice the caller is
 making.
 
+### The vocabulary is an owner-before-relay rollout constraint
+
+Recorded here because nothing else says it and the first person to hit it will
+be looking at a client error.
+
+A relayed control response is validated whole: `ControlResponseV1::action_is_believable`
+refuses a `delivery.producer_decision` that `ProducerDecisionReason::from_status`
+cannot parse, and `media_sessions`' relay caller turns that into
+`PeerTransportError::InvalidResponse`. So in a fleet where the session's owner
+runs a build with a reason string and the node the client is talking to does
+not, the client does not get a degraded action — it gets an owner-unavailable
+error, and the lease, the delivery view and the action are all discarded with
+it. The older node's serde refuses the unknown `ControlAction` payload for the
+same exchange independently.
+
+That is the designed behaviour and it is right: an unrecognised decision makes
+the whole relayed response unbelievable, and guessing would be worse. It does
+mean **every addition to this vocabulary has to reach relay nodes before it
+reaches owners**, which is the opposite of the order a rolling deploy takes by
+default. `source_decode_retry` and `source_decode_failed` both landed in the
+effort branch with nothing constructing them, so the constraint is inert until
+the installer ships — which is the window in which the fleet should be brought
+to a build that can read them.
+
 ### What must not be assumed on the way
 
 The restriction is durable and applies to *every* later continuation, so the
