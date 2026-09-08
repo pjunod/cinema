@@ -206,16 +206,17 @@ final class LiveTvTests: XCTestCase {
     // tests/web/live-tv.test.js disagree, one of the clients is lying about
     // what is on.
 
+    /// No explicit `CodingKeys` anywhere below. The decoder applies
+    /// `.convertFromSnakeCase` to the whole document — exactly as the client
+    /// decodes a live response — so by the time a key reaches a `CodingKey`
+    /// it is already camelCase. Spelling the snake_case original here meant
+    /// every lookup was `keyNotFound` and the whole fixture decode threw, so
+    /// none of the parity tests below had ever run.
     private struct GuideCases: Decodable {
         struct Expect: Decodable {
             let nowTitle: String?
             let nextTitle: String?
             let progress: Double?
-            enum CodingKeys: String, CodingKey {
-                case nowTitle = "now_title"
-                case nextTitle = "next_title"
-                case progress
-            }
         }
         struct AiringCase: Decodable {
             let name: String
@@ -238,11 +239,6 @@ final class LiveTvTests: XCTestCase {
             let nowLineX: Double
             let totalWidth: Double
             let rows: [GridRow]
-            enum CodingKeys: String, CodingKey {
-                case nowLineX = "now_line_x"
-                case totalWidth = "total_width"
-                case rows
-            }
         }
         struct Grid: Decodable {
             let window: LiveTvGuideWindow
@@ -250,20 +246,11 @@ final class LiveTvTests: XCTestCase {
             let slotSeconds: Int
             let pxPerSlot: Double
             let expect: GridExpect
-            enum CodingKeys: String, CodingKey {
-                case window, now, expect
-                case slotSeconds = "slot_seconds"
-                case pxPerSlot = "px_per_slot"
-            }
         }
         struct FilterOptions: Decodable {
             let query: String
             let filter: String
             let hideProtected: Bool
-            enum CodingKeys: String, CodingKey {
-                case query, filter
-                case hideProtected = "hide_protected"
-            }
         }
         struct FilterCase: Decodable {
             let name: String
@@ -283,10 +270,6 @@ final class LiveTvTests: XCTestCase {
         let grid: Grid
         let filters: [FilterCase]
         let adjacent: [AdjacentCase]
-        enum CodingKeys: String, CodingKey {
-            case lineup, guide, grid, filters, adjacent
-            case programmeAt = "programme_at"
-        }
     }
 
     /// `.convertFromSnakeCase` on the whole document, exactly as the client
@@ -480,10 +463,49 @@ final class LiveTvTests: XCTestCase {
                        "both live surfaces must allow picture-in-picture")
         XCTAssertFalse(source.contains("allowsPictureInPicture: false"))
         // Entering PiP backgrounds the app. Stopping on that would kill the one
-        // case PiP exists for, so every release path consults it.
-        XCTAssertTrue(source.contains("private var mayRelease: Bool { !pictureInPicture.isActive }"))
-        XCTAssertTrue(source.contains("if phase != .active && mayRelease"))
+        // case PiP exists for, so every release path consults it — and consults
+        // `isStarting` too, because automatic PiP has not set `isActive` yet at
+        // the `.inactive` edge where the old rule fired.
+        XCTAssertTrue(source.contains(
+            "private var mayRelease: Bool { !pictureInPicture.isActive && !pictureInPicture.isStarting }"))
+        XCTAssertTrue(source.contains("if phase == .background && mayRelease"))
         XCTAssertTrue(source.contains("if !fullscreen && mayRelease"))
+        // And the reverse: PiP ending while this screen is gone is the only
+        // moment left that can give the tuner back.
+        XCTAssertTrue(source.contains("if !active && !onScreen && live.playing { Task { await live.stop() } }"))
+        // Only the inline surface is built while the cover is up, so the two
+        // never fight over one PictureInPictureController.
+        XCTAssertTrue(source.contains("if live.playing && !fullscreen {"))
+        // Exit leaves the presentation. It does not release the lease.
+        XCTAssertFalse(source.contains("onDismiss: { if mayRelease"))
+    }
+
+    func testTheTenFootSurfaceKeepsSomethingFocusableWhileTheOverlayIsHidden() throws {
+        // tvOS delivers move/exit/playPause only to the focused view and its
+        // ancestors, and PlayerSurfaceView refuses focus — so once the overlay
+        // auto-hid, the cover held nothing focusable and every `hidden →
+        // reveal` row of the contract became unreachable.
+        let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let source = try String(
+            contentsOf: testsDirectory.appendingPathComponent("../Sources/LiveTvView.swift").standardizedFileURL,
+            encoding: .utf8)
+        XCTAssertTrue(source.contains(".focused($focusedControl, equals: FocusTarget.reveal)"))
+        XCTAssertTrue(source.contains("if !visible { focusedControl = .reveal }"))
+        // And the television is fullscreen without anyone pressing a button.
+        XCTAssertTrue(source.contains(".onChange(of: live.playing) { _, playing in if playing { fullscreen = true } }"))
+    }
+
+    func testTuningFromTheOverlayDoesNotDismissTheSurfaceMidStart() throws {
+        // `watch()` detaches before it awaits, so `playing` goes false in the
+        // middle of a tune. Closing the cover on that ran `onDismiss`, stopped
+        // the session still being granted, and left nothing playing — which on
+        // tvOS was the only tune path there was.
+        let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let source = try String(
+            contentsOf: testsDirectory.appendingPathComponent("../Sources/LiveTvView.swift").standardizedFileURL,
+            encoding: .utf8)
+        XCTAssertFalse(source.contains(".onChange(of: live.playing) { _, playing in if !playing { fullscreen = false } }"))
+        XCTAssertTrue(source.contains("if !busy && !live.playing { fullscreen = false }"))
     }
 
     func testTheGuideRefreshAndHeartbeatOutliveTheViewThatStartedThem() throws {
@@ -502,13 +524,33 @@ final class LiveTvTests: XCTestCase {
 
     func testAHeldChannelKeyIsOneTunerStart() async throws {
         // The coalescing window is the guardrail against a channel-surf storm.
-        // Superseding requests must cancel, not queue.
-        let controller = LiveTvPlayerController.shared
+        // Superseding requests must cancel, not queue. Asserting the constant
+        // alone proved nothing — it never checked that three requests produce
+        // one start — so this counts the starts a stub lease actually sees.
+        let requests = LiveTvCountingRequests()
+        let controller = LiveTvPlayerController.testing(requests: requests)
         controller.requestChannel(channel)
         controller.requestChannel(channel)
         controller.requestChannel(channel)
+        try await Task.sleep(nanoseconds: UInt64(LiveTvInputRouting.channelCoalesceMilliseconds + 250) * 1_000_000)
+        XCTAssertEqual(requests.starts, 1, "three presses inside the window are one tuner start")
         XCTAssertEqual(LiveTvInputRouting.channelCoalesceMilliseconds, 350)
     }
+}
+
+/// Counts what actually reached the server. The coalescing test asserted a
+/// constant before, which would have passed with `requestChannel` deleted.
+private final class LiveTvCountingRequests: LiveTvRequests, @unchecked Sendable {
+    private(set) var starts = 0
+    func start(_ channel: String) async throws -> LiveTvStarted {
+        starts += 1
+        return LiveTvStarted(
+            sessionId: "cap-\(starts)",
+            channel: LiveTvChannel(id: channel, guideNumber: channel, guideName: "Test",
+                                   favorite: false, drm: false, support: "ready"),
+            live: true)
+    }
+    func release(_ capability: String) async throws {}
 }
 
 private final class LiveTvMemoryBarrierStore: LiveTvBarrierStore {

@@ -6,6 +6,18 @@ import SwiftUI
 @MainActor
 final class LiveTvPlayerController: ObservableObject {
     static let shared = LiveTvPlayerController()
+
+    /// A controller wired to stub requests, for tests that need to count what
+    /// actually reached the server rather than assert a constant.
+    static func testing(requests: LiveTvRequests) -> LiveTvPlayerController {
+        let controller = LiveTvPlayerController()
+        controller.lease = LiveTvLease(requests: requests)
+        // A real client only so `watch` gets past its own guard; it is never
+        // asked for the network, because the stub lease answers first.
+        controller.api = LiveTvAPI(origin: "http://127.0.0.1:1", token: nil)
+        controller.channels = []
+        return controller
+    }
     @Published private(set) var channels: [LiveTvChannel] = []
     @Published private(set) var message = "Choose a channel to watch live."
     @Published private(set) var title: String?
@@ -56,7 +68,12 @@ final class LiveTvPlayerController: ObservableObject {
     }
 
     func watch(_ channel: LiveTvChannel) async {
-        guard channel.watchable, let lease, let api, !busy else { return }
+        guard channel.watchable, let lease, let api else { return }
+        // A second tune while the first is starting used to be dropped in
+        // silence — the viewer pressed a channel and nothing happened at all.
+        // Bumping the serial supersedes the in-flight start instead: the lease
+        // serialises the release, so this is still exactly one live session.
+        if busy { serial += 1 }
         serial += 1
         let expected = serial
         detach()
@@ -125,7 +142,12 @@ final class LiveTvPlayerController: ObservableObject {
                 guard let self, self.loadId == loading, let api = self.api else { return }
                 // A guide that will not load leaves a working page: the rows
                 // fall back to number and callsign and nothing else changes.
-                if let fetched = try? await api.guide() {
+                // Ask for at least what the grid draws. The default window is
+                // `now - 3600 … now - 3600 + guide_hours`, so with the common
+                // 4-hour setting the right-hand columns were permanently empty
+                // even where the owner had data.
+                if let fetched = try? await api.guide(
+                    hours: LiveTvGridGeometry.requestedHours) {
                     guard self.loadId == loading else { return }
                     self.guide = fetched
                 }
@@ -140,6 +162,9 @@ final class LiveTvPlayerController: ObservableObject {
 
     /// A held channel key is one tuner start, not ten. The contract's 350 ms of
     /// stillness is the whole guardrail against a channel-surf storm.
+    /// A coalesced tune. Every repeat inside the contract's window replaces
+    /// the last, so a held direction or a fast run along the neighbour strip
+    /// costs one tuner start rather than one per press.
     func requestChannel(_ channel: LiveTvChannel) {
         channelChange?.cancel()
         channelChange = Task { @MainActor [weak self] in
@@ -232,6 +257,9 @@ enum LiveTvGridMetrics {
     static let rowHeight: Double = 56
     static let channelColumnWidth: Double = 128
     static let visibleSlots = 8
+    /// The hours the client must ask for to fill `visibleSlots`, plus the
+    /// hour of backfill the server prepends and one for the partial slot.
+    static var requestedHours: Int { (visibleSlots * slotSeconds) / 3600 + 2 }
 
     static func window(now: Int) -> LiveTvGuideWindow {
         let start = now - now % slotSeconds
@@ -386,6 +414,17 @@ struct LiveTvView: View {
     @State private var detailChannel: LiveTvChannel?
     @State private var overlayVisible = true
     @State private var overlayGeneration = 0
+    @State private var onScreen = false
+    #if os(iOS)
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
+    #endif
+    #if os(tvOS)
+    /// The one focusable thing on the ten-foot surface while the overlay is
+    /// hidden. Its only job is to exist, so the remote has somewhere to send
+    /// a press that the routing table can then decide.
+    private enum FocusTarget: Hashable { case reveal }
+    @FocusState private var focusedControl: FocusTarget?
+    #endif
     @State private var now = Int(Date().timeIntervalSince1970)
 
     private let tick = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
@@ -400,14 +439,25 @@ struct LiveTvView: View {
     }
 
     /// Leaving the tab or backgrounding the app releases the tuner — unless
-    /// picture-in-picture is running, which is the one case where the video is
-    /// still on screen and its tuner is still in use.
-    private var mayRelease: Bool { !pictureInPicture.isActive }
+    /// picture-in-picture is running or about to be, which is the one case
+    /// where the video is still on screen and its tuner is still in use.
+    ///
+    /// `isActive` alone is not enough on either side of that question.
+    /// Automatic PiP starts on *background*, and iOS publishes `.inactive`
+    /// first, so at the `.inactive` edge the flag is still false and the old
+    /// test released the tuner before PiP could ever start — killing the exact
+    /// case the milestone exists for. `isStarting` covers that gap.
+    private var mayRelease: Bool { !pictureInPicture.isActive && !pictureInPicture.isStarting }
 
     var body: some View {
         GeometryReader { geometry in
           VStack(spacing: 12) {
-            if live.playing {
+            // Not while the cover is up. Both surfaces would exist, both would
+            // call `attach` with a different layer on every body pass, and
+            // `attach` begins by detaching — so the 30-second tick alone was
+            // enough to stop a running PiP, and two AVPlayerLayers cannot both
+            // render one AVPlayer anyway.
+            if live.playing && !fullscreen {
                 VStack(spacing: 8) {
                     PlayerSurface(player: live.player, pictureInPicture: pictureInPicture,
                                   pgsOverlay: nil, allowsPictureInPicture: true)
@@ -431,8 +481,15 @@ struct LiveTvView: View {
         .background(Palette.bg)
         .task { await live.load(origin: model.origin, token: Session.shared.token) }
         .onReceive(tick) { _ in now = Int(Date().timeIntervalSince1970) }
-        .onDisappear { if !fullscreen && mayRelease { Task { await live.stop() } } }
-        .fullScreenCover(isPresented: $fullscreen, onDismiss: { if mayRelease { Task { await live.stop() } } }) {
+        .onDisappear {
+            onScreen = false
+            if !fullscreen && mayRelease { Task { await live.stop() } }
+        }
+        // Dismissing the cover is `exit` — leave the presentation. It is not
+        // `stop`. Releasing here meant "Exit" cost a full tuner re-acquisition
+        // to get back to the channel you were on two seconds earlier, and made
+        // the tvOS `back → exit` row destructive.
+        .fullScreenCover(isPresented: $fullscreen) {
             fullscreenSurface
         }
         .sheet(item: $detail) { programme in
@@ -440,9 +497,41 @@ struct LiveTvView: View {
         }
         .onChange(of: scenePhase) { _, phase in
             // Narrowed, not removed: entering PiP backgrounds the app, and the
-            // old rule would have killed the exact case PiP exists for.
-            if phase != .active && mayRelease { Task { await live.stop() } }
+            // old rule would have killed the exact case PiP exists for. Only
+            // a full background decides — `.inactive` is a notification banner
+            // or an app-switcher peek, and it is also the edge automatic PiP
+            // has not yet crossed.
+            if phase == .background && mayRelease { Task { await live.stop() } }
         }
+        // The other half of the PiP rule, and the one that was missing: when
+        // PiP ends and this screen is no longer on show, nothing else will ever
+        // release the tuner. Without this the lease was renewed forever by the
+        // heartbeat and the household's only tuner was held by an app
+        // displaying nothing.
+        .onChange(of: pictureInPicture.isActive) { _, active in
+            if !active && !onScreen && live.playing { Task { await live.stop() } }
+        }
+        .onAppear {
+            onScreen = true
+            #if os(tvOS)
+            // The ten-foot surface is always fullscreen. There is no inline
+            // player on a television; the milestone said so and the code shipped
+            // the phone layout with a "Fullscreen" button in front of it.
+            if live.playing { fullscreen = true }
+            #endif
+        }
+        #if os(tvOS)
+        .onChange(of: live.playing) { _, playing in if playing { fullscreen = true } }
+        #endif
+        #if os(iOS)
+        // Rotating to landscape is the phone's fullscreen gesture. Compact
+        // height is the honest test — it covers every phone in landscape and
+        // no iPad in a split view.
+        .onChange(of: verticalSizeClass) { _, height in
+            if live.playing && height == .compact { fullscreen = true }
+            else if height == .regular { fullscreen = false }
+        }
+        #endif
     }
 
     private var filterBar: some View {
@@ -455,8 +544,16 @@ struct LiveTvView: View {
             .onChange(of: browse) { _, view in view.persist() }
             #endif
             HStack {
+                // `ButtonToggleStyle` has no tvOS availability, and this
+                // file is compiled for both targets — the plain switch style
+                // is correct on the ten-foot surface anyway.
+                #if os(iOS)
                 Toggle("Favorites", isOn: $favoritesOnly).toggleStyle(.button)
                 Toggle("Hide protected", isOn: $hideProtected).toggleStyle(.button)
+                #else
+                Toggle("Favorites", isOn: $favoritesOnly)
+                Toggle("Hide protected", isOn: $hideProtected)
+                #endif
                 Spacer()
                 if let guide = live.guide, guide.freshness != "fresh" {
                     Text(guide.freshness == "stale" ? "Guide is stale" : "No guide data")
@@ -545,6 +642,20 @@ struct LiveTvView: View {
             PlayerSurface(player: live.player, pictureInPicture: pictureInPicture,
                           pgsOverlay: nil, allowsPictureInPicture: true)
                 .ignoresSafeArea()
+            #if os(tvOS)
+            // tvOS delivers move/exit/playPause commands only to the focused
+            // view and its ancestors, and `PlayerSurfaceView` refuses focus.
+            // Without this layer the overlay's own four-second auto-hide
+            // removed the last focusable view from the cover and the surface
+            // went permanently deaf — every `hidden → reveal` row of the
+            // contract unreachable, with no way back to any chrome. The finite
+            // player solves it the same way (PlayerView.swift's `.reveal`).
+            Color.clear
+                .contentShape(Rectangle())
+                .focusable(true)
+                .focused($focusedControl, equals: FocusTarget.reveal)
+                .accessibilityHidden(true)
+            #endif
             if overlayVisible {
                 VStack {
                     HStack(alignment: .top) {
@@ -573,7 +684,10 @@ struct LiveTvView: View {
                         ScrollView(.horizontal, showsIndicators: false) {
                             HStack(spacing: 8) {
                                 ForEach(visible) { entry in
-                                    Button { Task { await live.watch(entry) } } label: {
+                                    // Through the coalescer, not straight to
+                                    // `watch`: running along the strip must be
+                                    // one tuner start, not one per card.
+                                    Button { live.requestChannel(entry) } label: {
                                         VStack(alignment: .leading, spacing: 2) {
                                             Text(entry.title).font(.caption.weight(.semibold))
                                             Text(live.airing(entry, now: now).now?.title ?? "—")
@@ -612,7 +726,24 @@ struct LiveTvView: View {
             guard !Task.isCancelled, live.playing, !live.paused else { return }
             overlayVisible = false
         }
-        .onChange(of: live.playing) { _, playing in if !playing { fullscreen = false } }
+        #if os(tvOS)
+        // Focus must land on the reveal layer whenever the overlay is not
+        // there to hold it, or the next press goes nowhere.
+        .onAppear { focusedControl = .reveal }
+        .onChange(of: overlayVisible) { _, visible in
+            if !visible { focusedControl = .reveal }
+        }
+        #endif
+        // Deliberately NOT `onChange(of: live.playing)`. `watch()` detaches
+        // before it awaits the new lease, so `playing` goes false mid-tune —
+        // which dismissed the cover, ran `onDismiss`, stopped the session that
+        // was still being granted, and left the viewer on the inline page with
+        // nothing playing. On tvOS that was the only tune path in the overlay,
+        // so `activate → tune` never worked at all. Only a session that has
+        // actually finished closes the surface.
+        .onChange(of: live.busy) { _, busy in
+            if !busy && !live.playing { fullscreen = false }
+        }
     }
 
     /// Every ten-foot press lands here, already decided by the shared table.
