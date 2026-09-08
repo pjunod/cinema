@@ -2567,6 +2567,36 @@ The second is the better trade and the more invasive one. Whichever is taken,
 it should be taken deliberately: the first reads as simpler and moves the
 failure to the worst moment.
 
+### Slice 1 refinement: the identity must not travel on `SessionRequest`
+
+The obvious carrier for the three missing values is `SessionRequest` — it
+already runs the whole start chain and already holds `playback_id` and
+`request_id`, which is the incarnation. It is the wrong carrier, and the reason
+is the same one this document records two sections down.
+
+`SessionRequest` is `Serialize`/`Deserialize` with `#[serde(deny_unknown_fields)]`
+and it crosses the cluster relay. A field added to it is refused outright by
+any node that has not been upgraded — so what looks like three lines is a
+fleet-wide rollout with an owner-before-relay ordering constraint, taken on
+behalf of a value that is not part of what the client asked for. The type's own
+doc says what it is for: *"what a client asked for, normalised"*, and the
+recovery epoch is server-minted and deliberately never client-supplied.
+
+So the identity travels as its own parameter beside `user_id`, which
+`create_cluster_session` already takes and already drops one frame later. That
+is more signature churn — the chain is `create_cluster_session` →
+`create_session_inner` → `start_live_recovery_session` →
+`start_with_audio_offset` / `start_copy_with_audio_offset` — and no wire
+change, no rollout constraint, and no client-facing type gaining a field the
+client may not set. A single struct carrying `user_id`, `incarnation_id` and
+`recovery_epoch` keeps that churn to one parameter per frame and gives the
+three values a name, which they need anyway: they are one thing, the identity a
+session reserves against.
+
+**Assumption recorded, taken without the user:** the extra signature churn is
+worth it against a wire change. Reverse it only with a reason that is about the
+fleet rather than about the diff size.
+
 ### Three things that will bite
 
 **A copy session's plan digest is not a digest.** The copy path sets
