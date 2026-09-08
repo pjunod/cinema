@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["ac77b56f"]
+reason = "This commit adds the transport-recovery CI effort's live status and source map, records the exact base and pinned compiler evidence, and indexes that document. It changes no executable behavior; the documentation index test is its retained proof."
+ignore = true
