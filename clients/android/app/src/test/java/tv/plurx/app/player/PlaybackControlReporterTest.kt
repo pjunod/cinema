@@ -494,7 +494,7 @@ class PlaybackControlRefusalTest {
         subject.start(backgroundScope)
         advanceTimeBy(30_001)
         assertEquals(
-            listOf("hold", "retry_resource", "terminal"),
+            listOf("hold", "retry_resource", "terminal", "prepare_replacement"),
             harness.requests.first().supportedActions,
         )
         subject.stop()
@@ -502,6 +502,79 @@ class PlaybackControlRefusalTest {
 }
 
 class PlaybackControlFailureTest {
+    @Test
+    fun `400 invalid control stops without replaying the bad packet`() = runTest {
+        val harness = Harness(this)
+        harness.enqueue(
+            Result.failure(ControlTransportException(status = 400, code = "invalid_control")),
+        )
+        val subject = assertNotNull(reporter(harness))
+        subject.start(backgroundScope)
+        runCurrent()
+        assertTrue(subject.isStopped())
+        assertEquals(1, harness.requests.size)
+    }
+
+    @Test
+    fun `404 session gone stops the control loop`() = runTest {
+        val harness = Harness(this)
+        harness.enqueue(
+            Result.failure(ControlTransportException(status = 404, code = "session_gone")),
+        )
+        val subject = assertNotNull(reporter(harness))
+        subject.start(backgroundScope)
+        runCurrent()
+        assertTrue(subject.isStopped())
+        assertEquals(404, (harness.exchanges.single().cause as ControlTransportException).status)
+    }
+
+    @Test
+    fun `410 session ended stops the control loop`() = runTest {
+        val harness = Harness(this)
+        harness.enqueue(
+            Result.failure(ControlTransportException(status = 410, code = "session_ended")),
+        )
+        val subject = assertNotNull(reporter(harness))
+        subject.start(backgroundScope)
+        runCurrent()
+        assertTrue(subject.isStopped())
+        assertEquals(1, harness.requests.size)
+    }
+
+    @Test
+    fun `410 owner lost stops the control loop`() = runTest {
+        val harness = Harness(this)
+        harness.enqueue(
+            Result.failure(ControlTransportException(status = 410, code = "owner_lost")),
+        )
+        val subject = assertNotNull(reporter(harness))
+        subject.start(backgroundScope)
+        runCurrent()
+        assertTrue(subject.isStopped())
+        assertEquals(1, harness.requests.size)
+    }
+
+    @Test
+    fun `409 stale sequencing stops instead of minting a new client identity`() = runTest {
+        val harness = Harness(this)
+        harness.enqueue(
+            Result.failure(
+                ControlTransportException(
+                    status = 409,
+                    code = "stale_control",
+                    generation = GENERATION,
+                    controlEpoch = 7,
+                    detail = "the generation, client instance, or sequence fence is stale",
+                ),
+            ),
+        )
+        val subject = assertNotNull(reporter(harness))
+        subject.start(backgroundScope)
+        runCurrent()
+        assertTrue(subject.isStopped())
+        assertEquals(CLIENT_ID, harness.requests.single().clientInstanceId)
+    }
+
     @Test
     fun `a retryable control failure replays the exact request`() = runTest {
         val harness = Harness(this)
@@ -650,6 +723,31 @@ class PlaybackControlOwnerChangeTest {
             harness.requests[1].capabilities,
             "the new owner has never been told this player's capabilities",
         )
+    }
+
+    @Test
+    fun `a stale generation is re-resolved and restarts the sequence`() = runTest {
+        val harness = Harness(this)
+        harness.enqueue(
+            Result.failure(
+                ControlTransportException(
+                    status = 409,
+                    code = "stale_control",
+                    generation = newGeneration,
+                    controlEpoch = 7,
+                    detail = "the control generation is no longer current",
+                ),
+            ),
+        )
+        val subject = assertNotNull(reporter(harness))
+        subject.start(backgroundScope)
+        advanceTimeBy(1_001)
+        subject.stop()
+
+        assertTrue(harness.requests.size >= 2)
+        assertEquals(newGeneration, harness.requests[1].generation)
+        assertEquals(1, harness.requests[1].sequence)
+        assertEquals(capabilities(), harness.requests[1].capabilities)
     }
 
     @Test
@@ -826,7 +924,11 @@ class PlaybackControlWireTest {
         assertTrue(encoded.contains("\"dynamic_range\":\"dolby_vision\""))
         assertTrue(encoded.contains("\"render_state\":\"waiting\""))
         assertTrue(encoded.contains("\"demand\":\"hold\""))
-        assertTrue(encoded.contains("\"supported_actions\":[\"hold\",\"retry_resource\",\"terminal\"]"))
+        assertTrue(
+            encoded.contains(
+                "\"supported_actions\":[\"hold\",\"retry_resource\",\"terminal\",\"prepare_replacement\"]",
+            ),
+        )
         assertFalse(encoded.contains("\"error_detail\""), "explicitNulls is off; absent means absent")
     }
 
