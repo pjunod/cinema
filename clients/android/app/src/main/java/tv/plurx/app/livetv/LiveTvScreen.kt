@@ -40,11 +40,6 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.ui.input.key.Key
-import androidx.compose.ui.input.key.KeyEventType
-import androidx.compose.ui.input.key.key
-import androidx.compose.ui.input.key.onPreviewKeyEvent
-import androidx.compose.ui.input.key.type
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.runtime.Composable
@@ -238,24 +233,13 @@ fun LiveTvScreen(origin: String, onBack: () -> Unit) {
 
     Column(
         Modifier.fillMaxSize().windowInsetsPadding(safeDisplayInsets()).padding(16.dp)
-            .onPreviewKeyEvent { event ->
-                if (event.type != KeyEventType.KeyDown || !state.playing || isInPip) return@onPreviewKeyEvent false
-                val input = when (event.key) {
-                    Key.DirectionLeft -> LiveTvContractInput.Left
-                    Key.DirectionRight -> LiveTvContractInput.Right
-                    Key.DirectionUp -> LiveTvContractInput.Up
-                    Key.DirectionDown -> LiveTvContractInput.Down
-                    Key.DirectionCenter, Key.Enter -> LiveTvContractInput.Select
-                    Key.Back -> LiveTvContractInput.Back
-                    Key.MediaPlayPause, Key.MediaPlay, Key.MediaPause, Key.Spacebar ->
-                        LiveTvContractInput.PlayPause
-                    else -> null
-                } ?: return@onPreviewKeyEvent false
-                // A press on a hidden overlay is consumed whatever it does, so
-                // the focus engine cannot move focus behind a picture that is
-                // showing no chrome.
-                val outcome = LiveTvInputPolicy.route(surface, inputState(), input)
-                apply(outcome)
+            // Key spellings and the handler that installs them both live in
+            // LiveTvKeyAdapter, so this screen can only speak the contract's
+            // vocabulary. A press on a hidden overlay is consumed whatever it
+            // decides, so the focus engine cannot move focus behind a picture
+            // that is showing no chrome.
+            .liveTvInputAdapter(enabled = state.playing && !isInPip) { input ->
+                apply(LiveTvInputPolicy.route(surface, inputState(), input))
             },
     ) {
         if (!fullscreen && !isInPip) {

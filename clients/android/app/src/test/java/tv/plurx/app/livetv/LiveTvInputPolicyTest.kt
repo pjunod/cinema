@@ -107,8 +107,17 @@ class LiveTvScreenWiringTest {
 
     @Test
     fun `every press goes through the shared table`() {
-        assertTrue(screen.contains("onPreviewKeyEvent"))
+        // Key spellings and the handler both live in LiveTvKeyAdapter, which is
+        // the only file `scripts/player-input-fence` lets hold them.
+        assertTrue(screen.contains(".liveTvInputAdapter(enabled = state.playing && !isInPip)"))
         assertTrue(screen.contains("LiveTvInputPolicy.route(surface, inputState(), input)"))
+        val adapter = java.io.File(
+            "src/main/java/tv/plurx/app/livetv/LiveTvKeyAdapter.kt",
+        ).readText()
+        assertTrue(adapter.contains("Key.DirectionLeft -> LiveTvContractInput.Left"))
+        // Key-up is never an input: the contract is written in presses, and
+        // routing both edges would double every outcome.
+        assertTrue(adapter.contains("if (event.type != KeyEventType.KeyDown) return null"))
         // And a hidden overlay is `Hidden`, which is the state whose direction
         // rows say `reveal` and nothing else.
         assertTrue(screen.contains("else -> LiveTvInputState.Hidden"))
