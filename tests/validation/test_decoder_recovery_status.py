@@ -22,6 +22,7 @@ CORE_RECIPE = ROOT / "crates/plurx-core/src/transcode/recipe.rs"
 DAEMON_TRANSCODE = ROOT / "crates/plurxd/src/transcode.rs"
 LIVE_TV = ROOT / "crates/plurxd/src/live_tv.rs"
 DECODER_HEALTH = ROOT / "crates/plurxd/src/decoder_health.rs"
+PLAYBACK_CONTROL = ROOT / "crates/plurxd/src/playback_control.rs"
 CORE_HEALTH = ROOT / "crates/plurx-core/src/transcode/health.rs"
 CORE_MANIFEST = ROOT / "crates/plurx-core/src/transcode/manifest.rs"
 FORGEJO_MAIN_LINEAGE = "4a6a0268bd314ad5587cb3037f12ebd992c0074e"
@@ -47,6 +48,8 @@ M3F_TASK_BASE = M5A_CENSUS_MERGED_HEAD
 M3F_MERGED_HEAD = "02831892f096c047d5300ac0c89cbff2ed7216a3"
 M5B_TASK_BASE = M3F_MERGED_HEAD
 M5B_MERGED_HEAD = "7f2cb598c6ed89dd24996e06783077f1e29c0678"
+M5C1_TASK_BASE = M5B_MERGED_HEAD
+M5C1_MERGED_HEAD = "67216de972c1e39f1ef6aefb2541cf542619cb0c"
 CORE_INVENTORY = ROOT / "crates/plurx-core/src/transcode/decoder_inventory.rs"
 CORE_STORE = ROOT / "crates/plurx-core/src/store/mod.rs"
 SQLITE_CACHE = ROOT / "crates/plurx-core/src/store/sqlite/cache.rs"
@@ -223,7 +226,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
     def test_current_base_and_receipt_state_cannot_be_confused_with_history(self) -> None:
         self.assertIn(FORGEJO_MAIN_LINEAGE, self.status)
         self.assertIn(
-            f"Next task base:** effort head `{M5B_MERGED_HEAD}`", self.flat_status
+            f"Next task base:** effort head `{M5C1_MERGED_HEAD}`", self.flat_status
         )
         # Each merged head is named, not only the pull request that carried it.
         self.assertIn(M3C1_MERGED_HEAD[:8], self.status)
@@ -234,6 +237,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         self.assertIn(M3E_MERGED_HEAD[:8], self.status)
         self.assertIn(M3C5_MERGED_HEAD[:8], self.status)
         self.assertIn(M5A_CENSUS_MERGED_HEAD[:8], self.status)
+        self.assertIn(M5C1_MERGED_HEAD[:8], self.status)
         self.assertIn(M3F_MERGED_HEAD[:8], self.status)
         self.assertIn(M5B_MERGED_HEAD[:8], self.status)
         self.assertIn(M1_EFFORT_BASE, self.status)
@@ -359,8 +363,8 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
                 self.assertEqual(source.count(surface.get("m2_anchor", "")), 1)
 
         self.assertIn(
-            "M0–M3f, M4, M5a, M5b and the M5a census repair merged into the "
-            "effort; M5c specified and not started",
+            "M0–M3f, M4, M5a, M5b, the M5a census repair and M5c1 merged into "
+            "the effort; M5c2 next",
             self.flat_status,
         )
         self.assertIn("decoder-plan-v1-unqualified", self.status)
@@ -1274,6 +1278,74 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         # And the document says what is still owed, which is the reason every
         # fleet node will be refused on day one.
         self.assertIn("no_contract_covers_this_build", self.status)
+
+    def test_m5c1_the_decode_evidence_names_only_the_answer_a_client_gets(
+        self,
+    ) -> None:
+        """The seam that ends the reopen loop, and the three bounds on it.
+
+        A source the decoder cannot decode answers a retry with the identical
+        failure, and every reason outside `is_permanent` tells a client to
+        retry. M5c1 lets a contract-qualified decode fault rewrite that reason.
+        Everything asserted here is a way that rewrite could reach a decision
+        it has no business naming: a retry the client can see, a producer that
+        demonstrably decoded, or an outage on this node.
+        """
+        control = PLAYBACK_CONTROL.read_text(encoding="utf-8")
+        health = DECODER_HEALTH.read_text(encoding="utf-8")
+
+        # The reason exists, is permanent, and says so in prose rather than
+        # handing the client a raw status token.
+        self.assertIn("SourceDecodeFailed,", control)
+        self.assertIn('Self::SourceDecodeFailed => "source_decode_failed",', control)
+        self.assertIn(
+            "Self::Unsupported | Self::InvalidConfiguration | Self::SourceDecodeFailed",
+            control,
+        )
+        self.assertIn(
+            "this source did not decode, and trying again will not change that",
+            control,
+        )
+
+        # The gate is a named list, not a negation. `!is_permanent()` also
+        # swept up ExecutorLost and the flow and install deadlines, which are
+        # facts about this node rather than about the file.
+        self.assertIn("fn yields_to_decode_evidence(self) -> bool", control)
+        self.assertIn(
+            "if !producer_media_published && reason.yields_to_decode_evidence() {",
+            control,
+        )
+
+        # And it is asked on the failing branch only. The reason on a Retry
+        # reaches DeliveryView, and resolve_action turns any permanent reason
+        # into a terminal answer, so a rewritten Retry ends the session while
+        # the node is still bringing up a fallback that would have played it.
+        for name in (
+            "fn a_qualified_decode_fault_replaces_the_process_verdict_a_client_would_retry",
+            "fn an_unqualified_decode_fault_leaves_the_process_verdict_alone",
+            "fn a_qualified_decode_fault_does_not_overwrite_a_verdict_that_already_knows_more",
+            "fn a_retry_is_never_handed_a_permanent_reason_while_the_fallback_is_still_coming",
+            "fn a_fault_on_a_producer_that_published_is_recorded_and_not_acted_on",
+            "fn a_server_side_loss_is_never_relabelled_as_a_verdict_about_the_source",
+        ):
+            with self.subTest(regression=name):
+                self.assertIn(name, control)
+
+        # The latch asks the same question as the settle. A weaker method for
+        # the latch was written and deleted; the reasoning stays where the
+        # next person will read it.
+        self.assertNotIn("latched_action_qualified", health)
+        self.assertIn("accumulator.automatic_action_allowed(),", health)
+        self.assertIn("Asked at the latch as well as at the settle", health)
+
+        # The status document records that the specification's three
+        # candidates were not chosen between, and what M5c2 still owes.
+        self.assertIn(
+            "M5c1, merged: the ordering question is answered, and by a fourth option",
+            self.status,
+        )
+        self.assertIn("Seams 4,
+5, 6, 7 and 9 are all still open.", self.status)
 
     def test_m5b_a_budget_is_minted_by_a_new_play_and_inherited_by_everything_else(
         self,

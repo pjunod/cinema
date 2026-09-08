@@ -3,7 +3,7 @@
 **Status:** M0–M3f, M4, M5a, M5b, the M5a census repair and M5c1 merged into
 the effort; M5c2 next · **Updated:** 2026-09-08 ·
 **Integration branch:** `effort/decoder-selection-recovery` · **Next task
-base:** effort head `67216de9`
+base:** effort head `67216de972c1e39f1ef6aefb2541cf542619cb0c`
 
 The effort was created from Forgejo `main` at
 `4a6a0268bd314ad5587cb3037f12ebd992c0074e`. The original M0 research baseline was `main` at
