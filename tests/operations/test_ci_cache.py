@@ -73,7 +73,7 @@ class CiCacheContractCase(unittest.TestCase):
         }
         self.assertEqual(failures, {})
 
-    def test_cargo_cache_is_local_only_on_persistent_runners(self):
+    def test_cargo_cache_is_local_on_every_self_hosted_runner(self):
         action = (ROOT / ".github/actions/cargo-cache/action.yml").read_text(
             encoding="utf-8"
         )
@@ -82,10 +82,16 @@ class CiCacheContractCase(unittest.TestCase):
         )
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 
+        # The bound cannot be conditional on a rollout flag. It was, and the
+        # flag was never set, so every job took the unbounded hosted path into
+        # a runner cache server that evicts nothing.
         self.assertIn('"${RUNNER_ENVIRONMENT:-}" = github-hosted', action)
-        self.assertIn('"$EXECUTION_MODE" != shadow', action)
-        self.assertIn('"$PERSISTENT_ELIGIBLE" != true', action)
-        self.assertIn('default: "false"', action)
+        self.assertIn('[ -z "${RUNNER_TOOL_CACHE:-}" ]', action)
+        self.assertNotIn('"$EXECUTION_MODE"', action)
+        self.assertNotIn('"$PERSISTENT_ELIGIBLE"', action)
+        self.assertNotIn("inputs.execution-mode", action)
+        self.assertNotIn("inputs.persistent-eligible", action)
+        self.assertIn("scripts/ci-runner-cache-audit", action)
         self.assertIn("scripts/ci-cargo-cache-prepare", action)
         self.assertIn("ensure_child_directory", prepare)
         self.assertIn("plurx-ci", prepare)
@@ -99,7 +105,16 @@ class CiCacheContractCase(unittest.TestCase):
             workflow.count("uses: ./.github/actions/cargo-cache\n"),
             workflow.count("uses: ./.github/actions/cargo-cache-finalize\n"),
         )
-        self.assertNotIn("persistent-eligible: true", workflow)
+        self.assertNotIn("persistent-eligible", workflow)
+        for caller in (
+            ".github/workflows/ci.yml",
+            ".github/workflows/effort-ci.yml",
+            ".github/workflows/store-shards.yml",
+            ".github/workflows/cluster-store-backstop.yml",
+        ):
+            text = (ROOT / caller).read_text(encoding="utf-8")
+            self.assertNotIn("persistent-eligible", text)
+            self.assertNotIn("          execution-mode:", text)
         effort = (ROOT / ".github/workflows/effort-ci.yml").read_text(
             encoding="utf-8"
         )
@@ -459,9 +474,11 @@ class CiCacheContractCase(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 
         self.assertIn("keep-state: true", action)
-        self.assertIn('"$EXECUTION_MODE" != shadow', action)
-        self.assertIn('"$PERSISTENT_ELIGIBLE" != true', action)
-        self.assertIn('default: "false"', action)
+        self.assertIn('"${RUNNER_ENVIRONMENT:-}" = github-hosted', action)
+        self.assertNotIn('"$EXECUTION_MODE"', action)
+        self.assertNotIn('"$PERSISTENT_ELIGIBLE"', action)
+        self.assertNotIn("inputs.execution-mode", action)
+        self.assertNotIn("inputs.persistent-eligible", action)
         self.assertIn("builder_name=plurx-$runner_name", action)
         self.assertNotIn("plurx-$runner_name-$CACHE_LANE", action)
         self.assertIn("buildkitd-config:", action)
@@ -474,7 +491,7 @@ class CiCacheContractCase(unittest.TestCase):
         self.assertIn("mode=max,scope=package-compile-{0}", workflow)
         self.assertIn("scope=package-runtime-{0}", workflow)
         self.assertIn("mode=min,scope=package-runtime-{0}", workflow)
-        self.assertNotIn("persistent-eligible: true", workflow)
+        self.assertNotIn("persistent-eligible", workflow)
 
     def test_buildkit_pruner_enforces_hostwide_budget_and_reserve(self):
         script = ROOT / "scripts/ci-buildkit-prune"
@@ -579,6 +596,184 @@ class CiCacheContractCase(unittest.TestCase):
             )
             self.assertNotEqual(unsafe.returncode, 0)
             self.assertIn("unsafe builder name", unsafe.stderr)
+
+    def test_buildkit_usage_reads_the_units_buildx_actually_prints(self):
+        """buildx 0.30.1 prints `"Size":"8.192kB"`, not a byte count.
+
+        The parser wanted digits, so every record was rejected with `BuildKit
+        returned an invalid disk-usage size` and the arm64 package lane failed
+        after its build had succeeded. Both spellings are read now, and the
+        totals still have to decide the budget correctly.
+        """
+        script = ROOT / "scripts/ci-buildkit-prune"
+        with tempfile.TemporaryDirectory() as raw_directory:
+            fixture = Path(raw_directory)
+            docker_root = fixture / "docker-root"
+            docker_root.mkdir()
+            fake_bin = fixture / "bin"
+            fake_bin.mkdir()
+            marker = fixture / "pruned"
+            log = fixture / "docker.log"
+
+            fake_docker = fake_bin / "docker"
+            fake_docker.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = info ]; then\n"
+                "  printf '%s\\n' \"$DOCKER_ROOT_FIXTURE\"\n"
+                "elif [ \"$1 $2\" = 'buildx du' ]; then\n"
+                "  if [ -f \"$DOCKER_PRUNED\" ]; then printf '%s\\n' "
+                "\"$DU_AFTER\"; else printf '%s\\n' \"$DU_BEFORE\"; fi\n"
+                "elif [ \"$1 $2\" = 'buildx prune' ]; then\n"
+                "  printf '%s\\n' \"$@\" > \"$DOCKER_LOG\"\n"
+                "  touch \"$DOCKER_PRUNED\"\n"
+                "else\n"
+                "  exit 97\n"
+                "fi\n",
+                encoding="utf-8",
+            )
+            fake_docker.chmod(0o755)
+            fake_df = fake_bin / "df"
+            fake_df.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' "
+                "'Filesystem 1024-blocks Used Available Capacity Mounted'\n"
+                "printf 'fixture 1073741824 1 838860800 1%% /fixture\\n'\n",
+                encoding="utf-8",
+            )
+            fake_df.chmod(0o755)
+
+            summary = fixture / "summary.md"
+            record = '{{"Description":"[build 2/4]","Size":"{0}","Type":"regular"}}'
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "DOCKER_LOG": str(log),
+                    "DOCKER_PRUNED": str(marker),
+                    "DOCKER_ROOT_FIXTURE": str(docker_root),
+                    # 30 GB + 31 GB decimal = 61e9 bytes, over a 50 GiB budget.
+                    "DU_BEFORE": "\n".join(
+                        (record.format("30GB"), record.format("31GB"))
+                    ),
+                    # 8.192kB is verbatim what buildx 0.30.1 printed on nynuc.
+                    "DU_AFTER": "\n".join(
+                        (record.format("20GB"), record.format("8.192kB"))
+                    ),
+                    "GITHUB_STEP_SUMMARY": str(summary),
+                    "PATH": f"{fake_bin}{os.pathsep}{environment['PATH']}",
+                }
+            )
+
+            result = subprocess.run(
+                [str(script), "plurx-runner-01", "50"],
+                env=environment,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = summary.read_text()
+            # 61e9 bytes is 58174 MiB; 20000008192 is 19073 MiB.
+            self.assertIn("before: 58174 MiB cache", report)
+            self.assertIn("after: 19073 MiB cache", report)
+
+            # And a builder still over budget in those units still fails.
+            marker.unlink()
+            environment["DU_AFTER"] = record.format("60GB")
+            failed = subprocess.run(
+                [str(script), "plurx-runner-01", "50"],
+                env=environment,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn("remains over", failed.stderr)
+
+    def test_buildkit_budget_holds_when_the_docker_root_is_unreadable(self):
+        """The runner can talk to the daemon and still not enter its directory.
+
+        `/var/lib/docker` is root:root 0710 on a stock engine, so a runner in
+        the `docker` group cannot `cd` into it. `gha-mbp-linux-arm-01` failed
+        the arm64 package lane on exactly that, after its build had already
+        succeeded. The budget does not need the filesystem — only the reserve
+        does — so the budget is still enforced and the reserve is reported as
+        unmeasured rather than guessed at or made fatal.
+        """
+        script = ROOT / "scripts/ci-buildkit-prune"
+        with tempfile.TemporaryDirectory() as raw_directory:
+            fixture = Path(raw_directory)
+            fake_bin = fixture / "bin"
+            fake_bin.mkdir()
+            marker = fixture / "pruned"
+            log = fixture / "docker.log"
+
+            fake_docker = fake_bin / "docker"
+            fake_docker.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = info ]; then\n"
+                "  printf '%s\\n' \"$DOCKER_ROOT_FIXTURE\"\n"
+                "elif [ \"$1 $2\" = 'buildx du' ]; then\n"
+                "  if [ -f \"$DOCKER_PRUNED\" ]; then size=$DU_AFTER_BYTES; "
+                "else size=$DU_BEFORE_BYTES; fi\n"
+                "  printf '{\"Size\":\"%s\"}\\n' \"$size\"\n"
+                "elif [ \"$1 $2\" = 'buildx prune' ]; then\n"
+                "  printf '%s\\n' \"$@\" > \"$DOCKER_LOG\"\n"
+                "  touch \"$DOCKER_PRUNED\"\n"
+                "else\n"
+                "  exit 97\n"
+                "fi\n",
+                encoding="utf-8",
+            )
+            fake_docker.chmod(0o755)
+
+            summary = fixture / "summary.md"
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "DOCKER_LOG": str(log),
+                    "DOCKER_PRUNED": str(marker),
+                    # A path this process cannot enter, exactly as the runner
+                    # cannot enter the real one.
+                    "DOCKER_ROOT_FIXTURE": str(fixture / "unreadable/docker"),
+                    "DU_AFTER_BYTES": str(40 * 1024**3),
+                    "DU_BEFORE_BYTES": str(60 * 1024**3),
+                    "GITHUB_STEP_SUMMARY": str(summary),
+                    "PATH": f"{fake_bin}{os.pathsep}{environment['PATH']}",
+                }
+            )
+
+            result = subprocess.run(
+                [str(script), "plurx-runner-01", "50"],
+                env=environment,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            arguments = log.read_text(encoding="utf-8").splitlines()
+            self.assertIn("--max-used-space", arguments)
+            self.assertEqual(
+                arguments[arguments.index("--max-used-space") + 1],
+                str(50 * 1024**3),
+            )
+            # No reserve, because no reserve could be measured. Passing a
+            # guessed one would be worse than passing none.
+            self.assertNotIn("--min-free-space", arguments)
+            report = summary.read_text()
+            self.assertIn("not enforced", report)
+            self.assertIn("not readable by this user", report)
+
+            # The budget still discriminates: a builder that stays over it
+            # fails, unreadable filesystem or not.
+            marker.unlink()
+            environment["DU_AFTER_BYTES"] = str(60 * 1024**3)
+            failed = subprocess.run(
+                [str(script), "plurx-runner-01", "50"],
+                env=environment,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn("remains over", failed.stderr)
 
     def test_external_cargo_targets_reach_browser_harnesses(self):
         ui = (ROOT / "scripts/ui-baseline").read_text(encoding="utf-8")
@@ -700,6 +895,268 @@ class CiCacheContractCase(unittest.TestCase):
         for text in (workflow, effort):
             self.assertIn("vars.CI_EXECUTION_MODE || 'legacy'", text)
             self.assertIn("scripts/ci-execution-mode resolve", text)
+
+    def test_cache_floor_is_satisfiable_on_the_smallest_runner_disk(self):
+        """A reserve larger than the disk is a reserve that can never be met.
+
+        The floor was a flat 100 GiB. Every Incus runner guest in this fleet is
+        a 78-97 GB volume, so on those the pruner deleted every cache it was
+        allowed to delete and then failed the job anyway. The floor is a share
+        of the filesystem now, and this fixture is one of those guests.
+        """
+        script = ROOT / "scripts/ci-cache-prune"
+        with tempfile.TemporaryDirectory() as raw_directory:
+            tool_cache = Path(raw_directory) / "tool"
+            tool_cache.mkdir()
+            fake_bin = tool_cache / "bin"
+            fake_bin.mkdir()
+            fake_df = fake_bin / "df"
+            # 78 GiB total, 40 GiB available: gha-m6-general-01's root volume.
+            fake_df.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' "
+                "'Filesystem 1024-blocks Used Available Capacity Mounted' "
+                "'fixture 81788928 39845888 41943040 49% /fixture'\n",
+                encoding="utf-8",
+            )
+            fake_df.chmod(0o755)
+            cache_root = tool_cache / "plurx-ci/cargo/runner-01/rust-1.97.1"
+            target = cache_root / "rust-gate/target"
+            target.mkdir(parents=True)
+            (target / "proof").write_bytes(b"cache")
+            summary = tool_cache / "summary.md"
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "GITHUB_STEP_SUMMARY": str(summary),
+                    "PATH": f"{fake_bin}{os.pathsep}{environment['PATH']}",
+                    "RUNNER_TOOL_CACHE": str(tool_cache),
+                }
+            )
+
+            result = subprocess.run(
+                [str(script), str(cache_root), "30"],
+                env=environment,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(target.is_dir())
+            report = summary.read_text()
+            self.assertIn("prune decision: `within-budget`", report)
+            # 20 % of 78 GiB, and demonstrably less than the whole filesystem.
+            self.assertIn("filesystem floor: 15 GiB", report)
+
+    def test_runner_cache_server_is_reported_and_never_deleted(self):
+        """The one cache a job can see and must not touch.
+
+        `forgejo-runner` 13.1.0 serves `actions/cache` from a bolt.db index
+        beside a tree of blobs and evicts neither, so the directory only grows.
+        A job cannot safely delete from it — index rows and blobs have to go
+        together, and that needs the runner stopped — so the contract is that
+        the audit reports the number, warns on it, and leaves every byte alone.
+        """
+        script = ROOT / "scripts/ci-runner-cache-audit"
+        subprocess.run(["bash", "-n", str(script)], check=True)
+        with tempfile.TemporaryDirectory() as raw_directory:
+            runner_root = Path(raw_directory) / "forgejo-runner"
+            blobs = runner_root / "cache/cache/0a"
+            blobs.mkdir(parents=True)
+            (runner_root / "cache/bolt.db").write_bytes(b"index")
+            for name in ("11", "12", "13"):
+                (blobs / name).write_bytes(b"x" * 4096)
+            (runner_root / "tool-cache").mkdir()
+            summary = Path(raw_directory) / "summary.md"
+            # A fixture cannot hold 41G, and the size is the whole point, so
+            # `du` is the thing this substitutes — the same way the pruner
+            # tests substitute `df`.
+            fake_bin = Path(raw_directory) / "bin"
+            fake_bin.mkdir()
+            fake_du = fake_bin / "du"
+            fake_du.write_text(
+                "#!/bin/sh\n"
+                "shift $(($# - 1))\n"
+                "printf '%s\\t%s\\n' \"$FIXTURE_USED_KB\" \"$1\"\n",
+                encoding="utf-8",
+            )
+            fake_du.chmod(0o755)
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "GITHUB_STEP_SUMMARY": str(summary),
+                    "RUNNER_NAME": "gha-m6-general-01",
+                    "PATH": f"{fake_bin}{os.pathsep}{environment['PATH']}",
+                    "FIXTURE_USED_KB": str(41 * 1024 * 1024),
+                }
+            )
+
+            loud = subprocess.run(
+                [str(script), str(runner_root), "20"],
+                env=environment,
+                capture_output=True,
+                text=True,
+            )
+            environment["FIXTURE_USED_KB"] = str(3 * 1024 * 1024)
+            quiet = subprocess.run(
+                [str(script), str(runner_root), "20"],
+                env=environment,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(quiet.returncode, 0, quiet.stderr)
+            self.assertEqual(loud.returncode, 0, loud.stderr)
+            report = summary.read_text()
+            self.assertIn("### Runner cache server", report)
+            self.assertIn("gha-m6-general-01", report)
+            self.assertIn("in 3 entries", report)
+            self.assertIn("eviction: none", report)
+            self.assertIn("retained: 41 GiB", report)
+            self.assertIn("retained: 3 GiB", report)
+            # Discriminating in both directions: over the threshold it names
+            # the runner, under it says nothing at all.
+            self.assertIn("::warning::gha-m6-general-01's cache server holds 41G", loud.stdout)
+            self.assertNotIn("::warning::", quiet.stdout)
+            for name in ("11", "12", "13"):
+                self.assertTrue((blobs / name).is_file())
+            self.assertTrue((runner_root / "cache/bolt.db").is_file())
+
+            # A runner whose layout this does not recognize is not an error.
+            for absent in (runner_root / "tool-cache", Path(raw_directory) / "nope"):
+                with self.subTest(absent=str(absent)):
+                    skipped = subprocess.run(
+                        [str(script), str(absent), "1"],
+                        env=environment,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertEqual(skipped.returncode, 0, skipped.stderr)
+
+    @staticmethod
+    def _composite_run_block(action_path, marker):
+        """The shell of one composite step, dedented so it can be executed.
+
+        These blocks are the only place the runner-local cache path exists, and
+        until 2026-09-07 no job had ever run one — the gate above them was
+        false on every job — so `RUNNER_NAME: unbound variable` sat in both of
+        them undetected. Reading the file is not enough; the block has to run.
+        """
+        lines = (ROOT / action_path).read_text(encoding="utf-8").splitlines()
+        start = next(
+            index
+            for index, line in enumerate(lines)
+            if line.strip() == "run: |" and marker in "\n".join(lines[: index + 1])
+        )
+        indent = len(lines[start]) - len(lines[start].lstrip()) + 2
+        body = []
+        for line in lines[start + 1 :]:
+            if line.strip() and len(line) - len(line.lstrip()) < indent:
+                break
+            body.append(line[indent:] if len(line) >= indent else line)
+        return "\n".join(body)
+
+    def _runner_fixture(self, directory):
+        """A Forgejo runner instance: a runner root with a tool cache in it."""
+        fixture = Path(directory)
+        runner_root = fixture / "opt/forgejo-runner-03"
+        tool_cache = runner_root / "tool-cache"
+        tool_cache.mkdir(parents=True)
+        fake_bin = fixture / "bin"
+        fake_bin.mkdir()
+        rustc = fake_bin / "rustc"
+        rustc.write_text(
+            "#!/bin/sh\nprintf 'rustc 1.97.1\\nrelease: 1.97.1\\n'\n",
+            encoding="utf-8",
+        )
+        rustc.chmod(0o755)
+        df = fake_bin / "df"
+        df.write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\n' "
+            "'Filesystem 1024-blocks Used Available Capacity Mounted' "
+            "'fixture 81788928 20971520 60817408 26%% /fixture'\n",
+            encoding="utf-8",
+        )
+        df.chmod(0o755)
+        environment = os.environ.copy()
+        environment.pop("RUNNER_NAME", None)
+        environment.update(
+            {
+                "PATH": f"{fake_bin}{os.pathsep}{environment['PATH']}",
+                "GITHUB_WORKSPACE": str(ROOT),
+                "GITHUB_ENV": str(fixture / "env"),
+                "GITHUB_OUTPUT": str(fixture / "output"),
+                "GITHUB_STEP_SUMMARY": str(fixture / "summary"),
+                "RUNNER_ENVIRONMENT": "self-hosted",
+                "RUNNER_TOOL_CACHE": str(tool_cache),
+                "RUNNER_WORKSPACE": str(fixture),
+                "CACHE_LANE": "rust-gate",
+                "CACHE_BUDGET_GB": "30",
+                "DISK_GB": "25",
+            }
+        )
+        return fixture, tool_cache, environment
+
+    def test_the_cargo_cache_path_runs_without_a_RUNNER_NAME(self):
+        block = self._composite_run_block(
+            ".github/actions/cargo-cache/action.yml", "Select and bound"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            fixture, tool_cache, environment = self._runner_fixture(directory)
+
+            result = subprocess.run(
+                ["bash", "-c", block],
+                env=environment,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("unbound variable", result.stderr)
+            outputs = dict(
+                line.split("=", 1)
+                for line in (fixture / "output").read_text().splitlines()
+                if "=" in line
+            )
+            self.assertEqual(outputs["local"], "true")
+            # Unique per runner INSTANCE, not per host: nynuc runs four runners
+            # and rogg16 five, and two sharing a Cargo root would prune each
+            # other's target directories mid-build.
+            self.assertIn("forgejo-runner-03", outputs["cache_root"])
+            self.assertTrue(outputs["cache_root"].startswith(str(tool_cache)))
+            self.assertTrue(Path(outputs["target_dir"]).is_dir())
+            written = (fixture / "env").read_text()
+            self.assertIn(f"CARGO_HOME={outputs['cache_root']}/cargo-home", written)
+            self.assertIn("CARGO_INCREMENTAL=0", written)
+
+    def test_the_buildkit_path_runs_without_a_RUNNER_NAME(self):
+        block = self._composite_run_block(
+            ".github/actions/buildx-cache/action.yml", "Select the BuildKit"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            fixture, _, environment = self._runner_fixture(directory)
+            environment["CACHE_LANE"] = "package-smoke-amd64"
+
+            result = subprocess.run(
+                ["bash", "-c", block],
+                env=environment,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("unbound variable", result.stderr)
+            outputs = dict(
+                line.split("=", 1)
+                for line in (fixture / "output").read_text().splitlines()
+                if "=" in line
+            )
+            self.assertEqual(outputs["local"], "true")
+            # Several runners on one host share one Docker daemon, so a builder
+            # name that is only the hostname would have them pruning each other.
+            self.assertTrue(outputs["builder_name"].startswith("plurx-"))
+            self.assertIn("forgejo-runner-03", outputs["builder_name"])
 
 
 if __name__ == "__main__":

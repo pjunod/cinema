@@ -2178,7 +2178,10 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("runs-on: [self-hosted, Linux, X64, lab, ci-store]", job)
         self.assertIn("uses: https://github.com/dtolnay/rust-toolchain@1.97.1", job)
         self.assertIn("lane: cluster-store-backstop", job)
-        self.assertIn('persistent-eligible: "true"', job)
+        # No eligibility input any more: a self-hosted runner always gets the
+        # bounded runner-local cache, and always enforces it on the way out.
+        self.assertNotIn("persistent-eligible", job)
+        self.assertIn("uses: ./.github/actions/cargo-cache-finalize", job)
         self.assertEqual(job.count("make cluster-store-check"), 2)
         self.assertNotIn("validation.store_shard run", job)
         self.assertNotIn("--exact", job)
@@ -2232,9 +2235,9 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("DOCKER_ARCH: ${{ matrix.docker_machine }}", package)
         self.assertIn("docker_machine: aarch64", package)
         self.assertIn("linux/$DOCKER_ARCH", proof)
+        self.assertNotIn("persistent-eligible", package)
         self.assertIn(
-            "persistent-eligible: ${{ matrix.arch == 'arm64' && 'true' || 'false' }}",
-            package,
+            'run: scripts/ci-buildkit-prune "$BUILDER_NAME" 50', package
         )
         self.assertIn("package_smoke", workflow_job_needs(pr_gate))
         self.assertNotIn("native_arm_shadow", jobs)
@@ -2403,10 +2406,12 @@ assert.equal(context.ACT_TIMER, null);
         )[0]
         self.assertIn("uses: ./.github/actions/cargo-cache", store)
         self.assertIn("lane: cluster-store-legacy", store)
-        self.assertIn('persistent-eligible: "true"', store)
+        self.assertNotIn("persistent-eligible", store)
+        self.assertIn("uses: ./.github/actions/cargo-cache-finalize", store)
         self.assertIn("uses: ./.github/actions/cargo-cache", topology)
         self.assertIn("lane: cluster-topology", topology)
-        self.assertIn('persistent-eligible: "true"', topology)
+        self.assertNotIn("persistent-eligible", topology)
+        self.assertIn("uses: ./.github/actions/cargo-cache-finalize", topology)
         self.assertIn(
             "Resolve pinned Rust executables for the long contract run", topology
         )
@@ -2476,7 +2481,8 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("runs-on: [self-hosted, Linux, X64, lab, ci-topology]", recovery)
         self.assertIn("rust-toolchain@1.97.1", recovery)
         self.assertIn("lane: cluster-transport-recovery", recovery)
-        self.assertIn('persistent-eligible: "true"', recovery)
+        self.assertNotIn("persistent-eligible", recovery)
+        self.assertIn("uses: ./.github/actions/cargo-cache-finalize", recovery)
         self.assertIn("make cluster-transport-recovery-check", recovery)
         self.assertIn("PLURX_BUILD_SHA: ${{ github.sha }}", recovery)
         self.assertIn("cluster-transport-recovery-receipt.json", recovery)
