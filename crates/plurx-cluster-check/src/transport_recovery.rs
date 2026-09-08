@@ -59,6 +59,10 @@ const RECOVERY_DEADLINE: Duration = Duration::from_secs(1_500);
 const RESOURCE_CLEANUP_HORIZON: Duration = Duration::from_secs(60);
 const RESOURCE_SAMPLE_INTERVAL: Duration = Duration::from_secs(3);
 const RESOURCE_STABLE_SAMPLES: usize = 2;
+// Transport event ages are sampled independently in the source and target
+// processes and rounded to whole milliseconds before the parent compares
+// them. Preserve causal ordering while allowing only that quantization edge.
+const CROSS_PROCESS_TIMESTAMP_TOLERANCE_MILLIS: i64 = 2;
 const RESOURCE_BASELINE_WARMUP_CYCLES: u32 = 1;
 /// How far a node's resource *envelope* may rise between the opening and the
 /// closing half of a campaign before it is a leak.
@@ -1240,15 +1244,11 @@ async fn exercise_role_campaign(
             cluster.kill(TARGET_NODE).await?;
             delete_disposable_target(cluster_root, TARGET_NODE)?;
             let leader = cluster.leader_among(&[1, 2, 3]).await?;
-            let source_status =
+            let purge_evidence =
                 trigger_and_wait_for_snapshot(cluster, leader, role, cycle, recovery_deadline)
                     .await?;
-            let snapshot_index = source_status
-                .snapshot_index
-                .context("source did not publish a snapshot index")?;
-            let purged_index = source_status
-                .purged_index
-                .context("source did not publish a purged index")?;
+            let snapshot_index = purge_evidence.snapshot_index;
+            let purged_index = purge_evidence.purged_index;
             let source_snapshot = snapshot_file(cluster_root, leader)?;
             if source_snapshot.bytes < minimum_sqlite_bytes {
                 bail!(
@@ -1473,13 +1473,19 @@ async fn exercise_role_campaign(
     })
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SnapshotPurgeEvidence {
+    snapshot_index: u64,
+    purged_index: u64,
+}
+
 async fn trigger_and_wait_for_snapshot(
     cluster: &mut ClusterProcesses,
     leader: u64,
     role: RecoveryRole,
     cycle: u32,
     deadline: Instant,
-) -> Result<RecoveryRuntimeStatus> {
+) -> Result<SnapshotPurgeEvidence> {
     let previous = request_status(cluster, leader).await?.snapshot_index;
     let mut observed = None;
     for ordinal in 0..TRANSPORT_RECOVERY_SNAPSHOT_LOGS_SINCE_LAST.saturating_mul(3) {
@@ -1517,7 +1523,29 @@ async fn trigger_and_wait_for_snapshot(
         tokio::time::sleep(Duration::from_millis(50)).await;
         status = request_status(cluster, leader).await?;
     }
-    Ok(status)
+    snapshot_purge_evidence(
+        // Pin the snapshot whose purge boundary this function actually
+        // awaited. The external writer can publish a newer current snapshot
+        // between observations; substituting that later index here would
+        // falsely claim the later boundary was also awaited.
+        snapshot,
+        status
+            .purged_index
+            .context("source purged index disappeared")?,
+    )
+}
+
+fn snapshot_purge_evidence(
+    snapshot_index: u64,
+    purged_index: u64,
+) -> Result<SnapshotPurgeEvidence> {
+    if purged_index < snapshot_index {
+        bail!("snapshot {snapshot_index} was not purged before recovery continued");
+    }
+    Ok(SnapshotPurgeEvidence {
+        snapshot_index,
+        purged_index,
+    })
 }
 
 async fn wait_for_installed_snapshot(
@@ -3440,10 +3468,19 @@ fn validate_cycle_transport(cycle: &RecoveryCycleEvidence) -> Result<()> {
         || target.observing_node_id != TARGET_NODE
         || target.source_node_id != source.observing_node_id
         || target.attempt_id == 0
-        || target.receive_started_at_unix_ms < source.attempt_started_at_unix_ms
+        || timestamp_precedes_beyond_tolerance(
+            target.receive_started_at_unix_ms,
+            source.attempt_started_at_unix_ms,
+        )
         || target.last_local_receive_at_unix_ms < target.install_completed_at_unix_ms
-        || target.last_local_receive_at_unix_ms > source.completed_at_unix_ms
-        || target.install_completed_at_unix_ms > source.completed_at_unix_ms
+        || timestamp_follows_beyond_tolerance(
+            target.last_local_receive_at_unix_ms,
+            source.completed_at_unix_ms,
+        )
+        || timestamp_follows_beyond_tolerance(
+            target.install_completed_at_unix_ms,
+            source.completed_at_unix_ms,
+        )
         || target.received_bytes != cycle.source_snapshot.bytes
         || target.total_bytes != cycle.source_snapshot.bytes
         || target.transfer_millis != target_transfer
@@ -3452,6 +3489,14 @@ fn validate_cycle_transport(cycle: &RecoveryCycleEvidence) -> Result<()> {
         bail!("recovery cycle transport evidence is incomplete or inconsistent");
     }
     Ok(())
+}
+
+fn timestamp_precedes_beyond_tolerance(value: i64, floor: i64) -> bool {
+    value < floor.saturating_sub(CROSS_PROCESS_TIMESTAMP_TOLERANCE_MILLIS)
+}
+
+fn timestamp_follows_beyond_tolerance(value: i64, ceiling: i64) -> bool {
+    value > ceiling.saturating_add(CROSS_PROCESS_TIMESTAMP_TOLERANCE_MILLIS)
 }
 
 /// The campaign's leak question, asked again offline from the recorded cycles.
@@ -3824,6 +3869,22 @@ mod tests {
             validate_transport_recovery_role_report(&report)
                 .unwrap_or_else(|error| panic!("{cycles}-cycle report failed: {error:#}"));
         }
+    }
+
+    #[test]
+    fn purge_evidence_pins_the_boundary_that_was_awaited() {
+        let evidence = snapshot_purge_evidence(1_278, 1_278).expect("awaited purge boundary");
+        assert_eq!(evidence.snapshot_index, 1_278);
+        assert_eq!(evidence.purged_index, 1_278);
+        assert!(snapshot_purge_evidence(1_279, 1_278).is_err());
+    }
+
+    #[test]
+    fn cross_process_timestamp_tolerance_is_bounded() {
+        assert!(!timestamp_precedes_beyond_tolerance(998, 1_000));
+        assert!(timestamp_precedes_beyond_tolerance(997, 1_000));
+        assert!(!timestamp_follows_beyond_tolerance(1_002, 1_000));
+        assert!(timestamp_follows_beyond_tolerance(1_003, 1_000));
     }
 
     #[test]
