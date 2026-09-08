@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["4554b1aa"]
+points = ["offline.viewing", "playback.pipeline"]
+checks = ["rust-gate", "rust-gate-ci", "cluster-auth"]
+reason = "The daemon's offline recovery regression scripts a qualified primary receipt refusal, requires exactly one distinct software-decode recipe, resets and reclaims the durable package, and proves the resumed attempt uses that same alternate without moving the stored result reference again. Backend-neutral Store contracts run on SQLite and three Hiqlite voters, reject stale-owner, no-op, and second recipe transitions, preserve the alternate through worker restart, and reject unsupported worker capability protocol versions."
