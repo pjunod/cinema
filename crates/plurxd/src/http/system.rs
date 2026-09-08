@@ -1681,6 +1681,20 @@ pub struct SettingsDto {
     /// Let the web client's Auto controller change rungs after playback starts.
     /// Explicit opt-in; missing is false.
     pub playback_auto_abr: bool,
+    /// How many sessions may hold a hardware encoder at once
+    /// (`transcode.max_hw_sessions`), and how many threads the software pool
+    /// may use (`transcode.software_pool_threads`).
+    ///
+    /// Both were settings the admission path already read and no page ever
+    /// showed. The hardware cap is the more consequential of the two: it is
+    /// what a start is refused against, and it is also what a predecessor
+    /// holds for the length of its drain, so an operator who cannot see it
+    /// cannot tell a saturated encoder from a refused one. [`SystemDto`]
+    /// carries the same cap beside the count in use, but only over the API —
+    /// no page renders that pair today, so this is the only place an operator
+    /// meets the number.
+    pub transcode_max_hw_sessions: i64,
+    pub transcode_software_pool_threads: i64,
     /// App-managed offline preparation has a separate reservation budget from
     /// the opportunistic playback cache above.
     pub offline_enabled: bool,
@@ -1802,9 +1816,31 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         setting(keys::PLAYBACK_NETWORK_PRIORS).is_some_and(|value| value.trim() == "1");
     let playback_auto_abr =
         setting(keys::PLAYBACK_AUTO_ABR).is_some_and(|value| value.trim() == "1");
-    let offline_enabled = !matches!(
-        setting(keys::OFFLINE_ENABLED).as_deref(),
-        Some("0" | "false" | "off" | "no")
+    // One parser owns the stored string. Three copies of this negated match
+    // existed — here, in the preparer, and at the offline API boundary — and
+    // none of them trimmed or folded case, so a hand-edited ` OFF ` read as
+    // *enabled* on all three.
+    let offline_enabled =
+        plurx_core::store::stored_switch(setting(keys::OFFLINE_ENABLED).as_deref(), true);
+    // Read exactly the way `TranscodeManager::num_setting` reads them, zero
+    // included. A stored zero is a real answer for the hardware cap — "this
+    // GPU is doing something else" — and the admission path already honours
+    // it, so coercing it to the default here would make the page report
+    // capacity a node does not have. Anything the reader would fall back on,
+    // this falls back on too.
+    let transcode_stored = |value: Option<String>, default: usize| {
+        value
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            .filter(|value| *value >= 0)
+            .unwrap_or(default as i64)
+    };
+    let transcode_max_hw_sessions = transcode_stored(
+        setting(keys::MAX_HW_SESSIONS),
+        crate::admission::DEFAULT_MAX_HW_SESSIONS,
+    );
+    let transcode_software_pool_threads = transcode_stored(
+        setting(keys::SW_POOL_THREADS),
+        crate::admission::software_budget(),
     );
     let offline_integer = |value: Option<String>, default: i64| {
         value
@@ -1894,7 +1930,10 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         hls_typeless_sliding: setting(keys::HLS_TYPELESS_SLIDING)
             .is_some_and(|value| value.trim() == "1"),
         vod_presentation: setting(keys::VOD_PRESENTATION).as_deref() != Some("0"),
-        vod_live_recovery: setting(keys::VOD_LIVE_RECOVERY).as_deref() != Some("0"),
+        vod_live_recovery: plurx_core::store::stored_switch(
+            setting(keys::VOD_LIVE_RECOVERY).as_deref(),
+            true,
+        ),
         playback_control_protocol_v1: setting(keys::PLAYBACK_CONTROL_PROTOCOL_V1).as_deref()
             == Some("1"),
         // Both through the shared parser, so the card cannot say off while the
@@ -1929,6 +1968,8 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         telemetry_retain_days,
         playback_network_priors,
         playback_auto_abr,
+        transcode_max_hw_sessions,
+        transcode_software_pool_threads,
         offline_enabled,
         offline_max_gb,
         offline_max_gb_per_user,
@@ -2033,6 +2074,17 @@ pub struct UpdateSettings {
     pub telemetry_retain_days: Option<i64>,
     pub playback_network_priors: Option<bool>,
     pub playback_auto_abr: Option<bool>,
+    /// Encoder capacity. Bounded rather than free-form, because both numbers
+    /// buy hardware that does not exist if they are wrong: a hardware cap
+    /// above the encoders a node has admits sessions that then fail at
+    /// `ffmpeg`, and a software pool wider than the machine turns one stream's
+    /// stall into every stream's.
+    ///
+    /// The bounds are wide on purpose. A control must be able to write back
+    /// every value its own page can display, and the DTO reports what is
+    /// stored rather than what this API would have accepted.
+    pub transcode_max_hw_sessions: Option<i64>,
+    pub transcode_software_pool_threads: Option<i64>,
     pub offline_enabled: Option<bool>,
     pub offline_max_gb: Option<i64>,
     pub offline_max_gb_per_user: Option<i64>,
@@ -2142,6 +2194,8 @@ impl UpdateSettings {
             || self.telemetry_retain_days.is_some()
             || self.playback_network_priors.is_some()
             || self.playback_auto_abr.is_some()
+            || self.transcode_max_hw_sessions.is_some()
+            || self.transcode_software_pool_threads.is_some()
             || self.offline_enabled.is_some()
             || self.offline_max_gb.is_some()
             || self.offline_max_gb_per_user.is_some()
@@ -2499,6 +2553,43 @@ pub async fn update_settings(
             Some(Some(parsed))
         }
     };
+    // Encoder capacity. Both bounds accept zero, because both readers do, and
+    // the bound a control writes must not be narrower than the bound its own
+    // page can display.
+    //
+    // An earlier draft refused a zero software pool on the theory that
+    // `try_admit_software` admits nothing against a budget of zero. It does
+    // not: `SwPool::try_take` short-circuits the budget check while the pool
+    // is empty, deliberately and with its own comment saying why — on a
+    // two-core box every session is over budget, and refusing all of them
+    // would turn the budget into a ban. A zero budget therefore degrades to
+    // one saturating session at a time, which is a poor setting and not a
+    // broken one. Refusing to write it had a worse consequence than the value
+    // it was guarding against: the DTO reports a stored value verbatim and
+    // the page sends the whole card on every save, so any node that already
+    // held a zero could not save *any* streaming setting until an operator
+    // noticed a control they had not touched.
+    //
+    // The ceilings are generous rather than derived from this node's CPU
+    // count: a container's visible cores are not the operator's licence, and
+    // a number that refuses to save is worse than one that is optimistic.
+    // They are also wide enough that no value this DTO can plausibly report
+    // is unsavable, which is the same rule as the floor.
+    for (label, value) in [
+        ("transcode_max_hw_sessions", req.transcode_max_hw_sessions),
+        (
+            "transcode_software_pool_threads",
+            req.transcode_software_pool_threads,
+        ),
+    ] {
+        if let Some(value) = value {
+            if !(0..=1_024).contains(&value) {
+                return Err(ApiError::BadRequest(format!(
+                    "{label} must be between 0 and 1024"
+                )));
+            }
+        }
+    }
     let stream_readrate = if let Some(raw) = req.stream_readrate.as_deref() {
         let parsed: f64 = raw
             .trim()
@@ -2965,25 +3056,49 @@ pub async fn update_settings(
             .put_setting(keys::PLAYBACK_AUTO_ABR, if enabled { "1" } else { "0" })
             .await?;
     }
+    // The offline card's four fields land together or not at all. They were
+    // four separate writes, which for the budgets is merely untidy and for the
+    // switch is not: it is the one whose write is followed by `cancel_all`, so
+    // a store error between the budgets and the switch leaves a node that
+    // accepted the new ceilings and kept preparing against the old answer.
+    // `put_settings` exists for exactly this.
+    let mut offline_values: Vec<(&'static str, String)> = Vec::with_capacity(4);
     for (key, _, value) in offline_gb_settings {
         if let Some(gb) = value {
-            state.store.put_setting(key, &gb.to_string()).await?;
+            offline_values.push((key, gb.to_string()));
         }
     }
     if let Some(rows) = req.offline_max_rows_per_user {
-        state
-            .store
-            .put_setting(keys::OFFLINE_MAX_ROWS_PER_USER, &rows.to_string())
-            .await?;
+        offline_values.push((keys::OFFLINE_MAX_ROWS_PER_USER, rows.to_string()));
     }
     if let Some(on) = req.offline_enabled {
-        state
-            .store
-            .put_setting(keys::OFFLINE_ENABLED, if on { "1" } else { "0" })
-            .await?;
-        if !on {
+        offline_values.push((keys::OFFLINE_ENABLED, if on { "1" } else { "0" }.to_owned()));
+    }
+    if !offline_values.is_empty() {
+        let borrowed = offline_values
+            .iter()
+            .map(|(key, value)| (*key, value.as_str()))
+            .collect::<Vec<_>>();
+        state.store.put_settings(&borrowed).await?;
+        // Only after the switch is durably off. Cancelling first would stop
+        // work the store might then refuse to record the reason for.
+        if req.offline_enabled == Some(false) {
             state.offline.cancel_all().await;
         }
+    }
+    let capacity_values = [
+        (keys::MAX_HW_SESSIONS, req.transcode_max_hw_sessions),
+        (keys::SW_POOL_THREADS, req.transcode_software_pool_threads),
+    ]
+    .into_iter()
+    .filter_map(|(key, value)| value.map(|value| (key, value.to_string())))
+    .collect::<Vec<_>>();
+    if !capacity_values.is_empty() {
+        let borrowed = capacity_values
+            .iter()
+            .map(|(key, value)| (*key, value.as_str()))
+            .collect::<Vec<_>>();
+        state.store.put_settings(&borrowed).await?;
     }
     if let Some(on) = req.scan_on_startup {
         state

@@ -116,13 +116,17 @@ pub(crate) async fn readiness(
         .map(String::as_str)
         == Some("1");
 
-    // Not trimmed, deliberately: `live_hls_recovery_enabled` and the settings
-    // DTO both compare the raw value, and a row that trimmed would report the
-    // switch off while the engine kept falling back.
-    let live_recovery_on = settings
-        .get(plurx_core::store::keys::VOD_LIVE_RECOVERY)
-        .map(String::as_str)
-        != Some("0");
+    // Parsed exactly the way the engine parses it. That was the point when all
+    // three sites compared the raw value — a row that trimmed on its own would
+    // report the switch off while the engine kept falling back — and it is
+    // still the point now that all of them, takeover included, share
+    // `stored_switch`.
+    let live_recovery_on = plurx_core::store::stored_switch(
+        settings
+            .get(plurx_core::store::keys::VOD_LIVE_RECOVERY)
+            .map(String::as_str),
+        true,
+    );
 
     let overlay_on = plurx_core::store::stored_switch(
         settings

@@ -1306,8 +1306,15 @@ pub mod keys {
     /// Threads the software-encoder CPU pool may hand out at once. Defaults
     /// to every core but one (plurxd derives it from the machine); an admin
     /// sets it lower on a box whose CPU has other jobs, or higher at their
-    /// own risk. API-settable, deliberately no UI dropdown — the same policy
-    /// as the scratch limits.
+    /// own risk.
+    ///
+    /// A dropdown in Playback → Streaming, alongside [`MAX_HW_SESSIONS`]. Note
+    /// what a stored `0` means here, because it is not what it looks like:
+    /// `SwPool::try_take` grants unconditionally while the pool is empty, so a
+    /// zero budget is not a ban but a degradation to one saturating session at
+    /// a time. The default is per-node while this key is replicated, so a
+    /// write pins one machine's core count on the whole cluster — which is why
+    /// the page sends this field only when an operator actually moved it.
     pub const SW_POOL_THREADS: &str = "transcode.software_pool_threads";
     /// Disk the pre-transcode cache may occupy, in gigabytes. `0` turns the
     /// cache off: nothing is produced, and what is already there is evicted.

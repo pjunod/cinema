@@ -13106,7 +13106,37 @@ function maintenancePanel(settings,dv){
     ${togRow("job-boot","Scan every library at startup","About 30 seconds after the server starts — a server switched off while files landed doesn't notice them until its next scheduled run.",settings.scan_on_startup)}
     ${setCardFoot("saveMaintenance")}`);
   return `${setHead("Maintenance","Background work this node does on its own: what is scheduled, what it costs, and where to turn it off.")}
-    <div class="setgrid2">${jobs}${precachePanel(settings)}${dvDiskPanel(settings,dv)}${telemetryPanel(settings)}</div>`;
+    <div class="setgrid2">${jobs}${precachePanel(settings)}${offlinePanel(settings)}${dvDiskPanel(settings,dv)}${telemetryPanel(settings)}</div>`;
+}
+// The offline budgets have always been in the settings API and have never had
+// a control. The master switch is the one that matters: turning it off stops
+// every preparation in flight, which is not a thing to leave discoverable
+// only by reading the API.
+const OFFLINE_GB=[1,5,10,25,50,100,250,500];
+const OFFLINE_USER_GB=[1,2,5,10,15,25,50,100];
+const OFFLINE_ROWS=[1,3,5,10,25,50,100];
+function offlinePanel(settings){
+  const on=settings.offline_enabled!==false;
+  return setCard(`${cardHead("Offline downloads","Packages the apps prepare on the server and take with them. Separate from the pre-transcoding budget above — this is media a viewer asked to keep.",`<span class="pill${on?" ok":""}">${on?"on":"off"}</span>`)}
+    ${togRow("off-on","Prepare offline packages","Turning this off cancels everything being prepared right now and refuses new requests. Packages already on a device are unaffected — they are on the device.",on)}
+    <div class="setfields">
+      <div><label for="off-gb">Server budget</label><select id="off-gb" class="every" title="How much disk all prepared offline packages may occupy on this node">${presetOpts(OFFLINE_GB.map(n=>[String(n),`${n} GB`]),settings.offline_max_gb,v=>`${v} GB`)}</select></div>
+      <div><label for="off-user-gb">Per viewer</label><select id="off-user-gb" class="every" title="How much of that budget any one viewer may hold">${presetOpts(OFFLINE_USER_GB.map(n=>[String(n),`${n} GB`]),settings.offline_max_gb_per_user,v=>`${v} GB`)}</select></div>
+      <div><label for="off-user-rows">Titles per viewer</label><select id="off-user-rows" class="every" title="How many packages any one viewer may have at once">${presetOpts(OFFLINE_ROWS.map(n=>[String(n),`${n}`]),settings.offline_max_rows_per_user,v=>`${v}`)}</select></div>
+    </div>
+    <div class="hint">Preparation encodes, so it competes for the same encoders as playback and loses to it, the same way pre-transcoding does. What is being prepared right now is on Activity.</div>
+    ${setCardFoot("saveOffline")}`);
+}
+async function saveOffline(btn){
+  btn.disabled=true;
+  try{
+    cacheSettings(await api("/settings",{method:"PUT",body:{
+      offline_enabled:document.getElementById("off-on").checked,
+      offline_max_gb:Number(document.getElementById("off-gb").value),
+      offline_max_gb_per_user:Number(document.getElementById("off-user-gb").value),
+      offline_max_rows_per_user:Number(document.getElementById("off-user-rows").value)}}));
+    toast("Offline downloads saved"); setCardSaved(btn);
+  }catch(e){ toast(e.message||"Couldn't save"); btn.disabled=false; }
 }
 const PRODUCE_EVERY=[[0,"Never"],[360,"6 hours"],[720,"12 hours"],[1440,"Daily"]];
 const CACHE_SIZES=[0,10,25,50,100,250,500,1000];
@@ -13470,6 +13500,13 @@ function playbackPanel(settings){
         <div><label for="phr">Then pace at</label><select id="phr" style="min-width:200px">${presetOpts([["1.5","1.5× — gentlest"],["2","2× — recommended"],["4","4×"],["0","Unlimited"]], settings.hls_readrate, v=>`${v}×`)}</select></div>
         <div><label for="pha">Buffer limit</label><select id="pha" style="min-width:200px">${presetOpts([["60","1 minute"],["180","3 minutes — recommended"],["600","10 minutes"],["0","No limit — needs disk"]], settings.hls_ahead_max_secs, v=>`${v} seconds`)}</select></div>
       </div>
+      <h2 class="section">Encoder capacity</h2>
+      <p class="sub" style="margin:0">How many streams this node may encode at once. The hardware number is what a start is admitted or refused against.</p>
+      <div class="setfields">
+        <div><label for="phw">Hardware encoders</label><select id="phw" style="min-width:230px" title="How many sessions may hold a hardware encoder at the same time">${presetOpts([["1","1 — one stream at a time"],["2","2 — recommended"],["3","3"],["4","4"],["6","6"],["8","8 — a capable GPU"]],settings.transcode_max_hw_sessions,v=>`${v} sessions`)}</select></div>
+        <div><label for="psw">Software encoder threads</label><select id="psw" style="min-width:230px" title="How many threads the software encoder pool may use when no hardware encoder is free">${presetOpts([["2","2"],["4","4"],["8","8"],["12","12"],["16","16"],["24","24"],["32","32"]],settings.transcode_software_pool_threads,v=>`${v} threads`)}</select></div>
+      </div>
+      <div class="hint">A hardware number above the encoders this machine actually has does not buy capacity — the extra sessions start and then fail in <b>ffmpeg</b>. Raising it also raises what a <em>switch</em> costs: while a viewer changes quality, the stream they are leaving keeps its slot for a few seconds so their player never sees a gap, so two of these are held for one viewer for that moment. To stop using the hardware encoder at all, set the encoder preference itself — a cap of zero leaves every start queuing for a slot that never frees before it gives up and encodes in software.</div>
       <div class="err" id="serr"></div>
       ${setCardFoot("saveStreaming")}`);
   const local=setCard(`${cardHead("This browser only","Saved in this browser. Nothing here reaches the server or another viewer.",`<span class="pill acc">local</span>`)}
@@ -15382,6 +15419,13 @@ async function savePlaybackDefaults(btn){
     toast("Playback defaults saved"); if(btn) setCardSaved(btn);
   }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
 }
+function capacityIfChanged(id,field){
+  const el=document.getElementById(id);
+  const value=Number(el&&el.value);
+  if(!Number.isFinite(value)) return {};
+  const loaded=SETTINGS?Number(SETTINGS[field]):NaN;
+  return value===loaded?{}:{[field]:value};
+}
 async function saveStreaming(btn){
   const err=document.getElementById("serr"); err.textContent="";
   if(btn) btn.disabled=true;
@@ -15397,7 +15441,14 @@ async function saveStreaming(btn){
       vod_working_set_bytes:document.getElementById("pvws").value,
       vod_block_budget_secs:"8",
       vod_materialize_budget_secs:document.getElementById("pvmb").value,
-      vod_blocked_get_cap:document.getElementById("pvbg").value}}));
+      vod_blocked_get_cap:document.getElementById("pvbg").value,
+      // Only when they moved. Both defaults are derived from the machine the
+      // page happens to be talking to — the software one is its core count —
+      // and the settings store is shared by the cluster, so writing an
+      // unchanged value would pin one node's hardware on every node, from an
+      // edit that was about the buffer limit.
+      ...capacityIfChanged("phw","transcode_max_hw_sessions"),
+      ...capacityIfChanged("psw","transcode_software_pool_threads")}}));
     if(SERVER) SERVER.playback_auto_abr=SETTINGS.playback_auto_abr;
     toast("Streaming settings saved"); if(btn) setCardSaved(btn);
   }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }

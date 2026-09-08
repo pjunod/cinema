@@ -4883,6 +4883,43 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
         metric.outcome = TAKEOVER_SKIPPED;
         return Err("takeover cannot replace a session serving an EVENT playlist".to_owned());
     }
+    // Takeover is the only producer of a `Presentation::Live` recipe —
+    // `takeover_recipe_is_valid` requires that stamp and both public and
+    // worker ingress refuse it — so it was also the one path that could put a
+    // session on the retained growing-HLS engine while the switch that governs
+    // that engine was off. It consults the switch now.
+    //
+    // This is a decision, and it was taken the other way first. The argument
+    // for adopting anyway is that the session already exists and someone is
+    // watching it, so refusing ends a film rather than preventing a stream.
+    // The argument that won is simpler and is a rule rather than a trade: the
+    // cluster does not do what a setting says it may not do. The window is
+    // narrow — a session that started while the fallback was on, kept running
+    // when an operator turned it off, and then outlived its owner — and a
+    // cluster-wide setting means every node agrees about it, so the refusal
+    // cannot be a disagreement between nodes. The message names the switch,
+    // because "takeover failed" would send an operator looking at the node
+    // that died.
+    // A store read that fails is not an answer of "on". It is a skip, so the
+    // next sweep asks again, rather than an adoption taken on a value nobody
+    // read — which is the shape of the readiness rows an earlier review
+    // rejected for reporting a status from a reading the code never took.
+    match state.transcode.live_hls_recovery_enabled().await {
+        Ok(true) => {}
+        Ok(false) => {
+            metric.outcome = TAKEOVER_SKIPPED;
+            return Err(
+                "live HLS fallback is disabled cluster-wide, so this session cannot be adopted"
+                    .to_owned(),
+            );
+        }
+        Err(error) => {
+            metric.outcome = TAKEOVER_SKIPPED;
+            return Err(format!(
+                "takeover could not read the live HLS fallback setting: {error}"
+            ));
+        }
+    }
     let file = tokio::time::timeout_at(deadline, state.store.get_file(envelope.request.file_id))
         .await
         .map_err(|_| "media-session takeover timed out".to_owned())?

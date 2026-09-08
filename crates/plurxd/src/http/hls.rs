@@ -15232,6 +15232,60 @@ mod tests {
         );
     }
 
+    /// Takeover will not adopt a live-HLS session while the switch that
+    /// governs the live engine is off, and says which switch it was.
+    ///
+    /// Takeover is the only producer of a `Presentation::Live` recipe —
+    /// `takeover_recipe_is_valid` requires that stamp and both public and
+    /// worker ingress refuse it — so before this it was the one path that
+    /// could put a session on the retained engine with the fallback disabled.
+    /// The window is narrow: a session that started while the fallback was on,
+    /// kept running when an operator turned it off, and then outlived its
+    /// owner. It is also the reason the rule is worth having, because the
+    /// setting is replicated and every node agrees about it, so a refusal here
+    /// can only ever mean what it says.
+    ///
+    /// The message is asserted, not only the refusal. "Takeover failed" sends
+    /// an operator to look at the node that died; naming the switch sends them
+    /// to the one they turned off.
+    #[tokio::test]
+    async fn attempt_takeover_refuses_a_live_session_while_the_fallback_is_off() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "fallback-off-unrelated").await;
+        let route = || {
+            let mut route = eligible_owner_loss_route();
+            route.owner_node_id = "some-other-node".to_owned();
+            route
+        };
+
+        // With the fallback on, this fixture gets past the switch: whatever it
+        // is refused for next, it is not this. Without that half the test
+        // would pass against a build that refuses every takeover.
+        let allowed = crate::media_sessions::attempt_takeover_for_test(&fixture.state, route())
+            .await
+            .err()
+            .unwrap_or_default();
+        assert!(
+            !allowed.contains("live HLS fallback"),
+            "the switch is on, so it cannot be the reason: {allowed}"
+        );
+
+        for stored in ["0", "false", " OFF ", "no"] {
+            fixture
+                .store
+                .put_setting(plurx_core::store::keys::VOD_LIVE_RECOVERY, stored)
+                .await
+                .expect("disable the fallback");
+            let refusal = crate::media_sessions::attempt_takeover_for_test(&fixture.state, route())
+                .await
+                .expect_err("a live session is not adopted while the engine is disabled");
+            assert!(
+                refusal.contains("live HLS fallback is disabled cluster-wide"),
+                "{stored:?} must refuse and name the switch: {refusal}"
+            );
+        }
+    }
+
     async fn control_body(response: Response) -> (StatusCode, serde_json::Value) {
         let http_status = response.status();
         let bytes = response

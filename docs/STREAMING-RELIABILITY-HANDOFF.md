@@ -761,24 +761,51 @@ silently. Three things came with it:
   what it served and why, and a Developer card reports the same numbers and
   names the switch that stops the fallback. The switch itself stays in
   Playback → Streaming; two copies of one control drift.
-- **One path does not consult the switch, and now says so.** A request that
-  arrives already naming `Presentation::Live` goes straight to the retained
-  engine — today that is the peer takeover path, whose recipe validation
-  requires it. It is counted under `requested_live` and reported by
-  `no_session_bypasses_the_switch`, because a node serving live-HLS sessions
-  with the fallback off is otherwise invisible. **Whether that path should
-  consult the setting is a decision, not an oversight, and it is still open.**
+- **One path does not consult the switch, and that is now settled rather than
+  open.** A request arriving already stamped `Presentation::Live` goes straight
+  to the retained engine — today the only producer of one is peer takeover,
+  whose `takeover_recipe_is_valid` *requires* that stamp, while public and
+  worker ingress both require `Presentation::Vod`. It is counted under
+  `requested_live` and reported by `no_session_bypasses_the_switch`, because a
+  node serving live-HLS sessions with the fallback off is otherwise invisible.
+
+  **Decision (Paul, 2026-09-08): takeover consults the setting and refuses,
+  and the refusal names the switch.** `attempt_takeover` now answers *"live HLS
+  fallback is disabled cluster-wide, so this session cannot be adopted"*, right
+  after the EVENT gate.
+
+  Two earlier framings of this were wrong and are worth keeping so nobody
+  re-derives them. The note first left the question open on the premise that a
+  node might be configured differently from its cluster; it cannot be, because
+  settings are replicated. What it was actually describing is a *time* gap — a
+  session that started while the fallback was on, kept running when it was
+  turned off, and then outlived its owner. The second framing used that
+  narrowness to argue for adopting anyway: the session exists, someone is
+  watching, and refusing ends a film rather than preventing a stream. **The
+  rule beat the trade.** The cluster does not do what a setting says it may
+  not do — a system that quietly makes exceptions to its own configuration is
+  one an operator cannot reason about, and the rarity of the case is an
+  argument that the rule is cheap, not that it can be skipped.
+
+  A store read that fails is a skip rather than an adoption, so the next sweep
+  asks again instead of proceeding on a value nobody read.
+
+  This was the fourth reader of `playback.vod_live_recovery`, and adding it is
+  what settled the parse: the engine, the settings DTO and the Developer card
+  each compared the raw string against `Some("0")`, with the card's comment
+  pinned to that on purpose so the row could not report a switch the engine was
+  not honouring. All four share `stored_switch` now, which keeps that pin.
 
 Not done here: removing the engine. §5 conditions that on real VOD recipe
 coverage replacing it, and the coverage row exists precisely so someone can
 tell when that is true.
 
-Still open here: the remaining hidden gates in the inventory below, and the
-qualification/promotion run.
+Still open here: the qualification/promotion run. The hidden-gate inventory
+below is closed — every entry in it now has a visible control — and is kept
+for what each one cost, because the shape repeats.
 
-**The rest of the hidden-gate inventory**, found while doing the above and not
-yet addressed. Each is a switch that changes product behaviour with no visible
-control:
+**The hidden-gate inventory**, found while doing the above. Each was a switch
+that changed product behaviour with no visible control:
 
 - ~~`PLURX_PGS_OVERLAY`~~ — **done.** It is `subtitles.pgs_overlay`, read at
   the request boundary, with a Settings → Developer card carrying the switch
@@ -793,11 +820,43 @@ control:
   value before believing the move is complete, and make one parser own the
   stored string: three parses of it meant a hand-edited `TRUE` served overlays
   while the card said off.
-- `OFFLINE_ENABLED` — master kill switch for offline packages; reaches the
-  settings API and renders nowhere.
-- `SW_POOL_THREADS` — a settings key with no DTO field at all.
-  `MAX_HW_SESSIONS` has none either, though it is at least visible read-only as
-  `hw_slots_max`. **`LIBRARY_DV_DISK_CONVERT` is not one of these** — it has a
+- ~~`OFFLINE_ENABLED`~~ — **done.** It had a settings-API field and no
+  control, along with the three offline budgets beside it; all four now render
+  as an Offline downloads card in Maintenance. The same three-parsers defect
+  #141 found in the overlay switch was here too — the DTO, the preparer and
+  the offline API each ran their own negated `matches!`, none trimming or
+  folding case, so a hand-written ` OFF ` read as *enabled* at all three. One
+  `stored_switch` now. Two of the three readers are reachable from a request
+  and are asserted together in `http/mod.rs`; the preparer is pinned where it
+  lives, in `offline.rs`, because its only existing test stored lowercase
+  `off` — a value the old parser also read as disabled — so that reader could
+  have been left behind with the suite green.
+- ~~`SW_POOL_THREADS`~~ and ~~`MAX_HW_SESSIONS`~~ — **done.** Both are fields
+  on the settings DTO and selects in Playback → Streaming. The round-trip test
+  ends at `TranscodeManager`, not at the DTO, because the expensive half of
+  moving a switch is always the reader. Three things the adversarial pass on
+  that PR established, each of which had been guessed wrong first:
+  - **A stored zero is reported and writable on both keys**, because both
+    readers honour it. The first draft refused a zero software pool on the
+    theory that `try_admit_software` admits nothing against a budget of zero.
+    It does not — `SwPool::try_take` grants unconditionally while the pool is
+    empty, deliberately, so a two-core box is not banned by its own budget.
+    Worse, refusing it made the *whole Streaming card* unsavable on any node
+    that already held a zero, because the DTO reports a stored value verbatim
+    and the page sent the card whole. **A control must be able to write back
+    every value its own page can display.**
+  - **A zero hardware cap is not a software-only mode**, and must not be
+    offered as one. `admit_live` still takes the hardware branch whenever the
+    node has an encoder, so every start queues for a slot that never frees,
+    waits out the full five-second admission window and only then falls back —
+    and a 4K HEVC HDR stream, which software cannot keep up with, is refused
+    outright with "all 0 hardware transcode slots are in use". The mechanism
+    for software-only is `keys::HWACCEL`.
+  - **The software default is per-node and the setting is replicated.** The
+    page therefore sends either capacity field only when an operator actually
+    moved it; a card that always wrote them would give a 4-core node a 16-core
+    machine's budget from an edit about the buffer limit.
+  **`LIBRARY_DV_DISK_CONVERT` is not one of these** — it has a
   dedicated API in `http/dv_disk.rs` and a per-library select in the web UI
   (`dvModeSelect`). It was listed here in a first draft and is recorded as a
   correction so the next reader does not build a control that already ships.
