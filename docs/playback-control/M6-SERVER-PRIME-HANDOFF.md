@@ -211,8 +211,46 @@ The options, ranked:
 3), or narrow the admitted axis set so the transaction can be built and proven
 against copy-only recipes (2)?
 
-Everything else in this document follows from that answer, which is why nothing
-below §4 has been built.
+### Answered 2026-09-08, without Paul, and here is the reasoning to overrule
+
+**Option 1: hold priming for D6. Do not narrow the axis set.** Three reasons,
+and the first is the one that decides it.
+
+1. **Option 2 is not cheaper — it is a different hardware dependency wearing
+   the costume of a code change.** The copy-only transitions are
+   `{AudioTrackOrOffset}` and a subtitle-burn removal. Neither axis is in
+   `PREPARED_AXIS_SETS`, and neither has a receipt: `PreparationAxis` declares
+   five axes, the table holds two, and the gap between those numbers is
+   entirely "nobody has run it on a device". Admitting an axis so that the
+   transaction can be built against it is reasoning from convenience, which is
+   the exact reasoning shadow mode was built to replace — `0cb370ac` says so in
+   as many words: *"Widening on that observation alone would have been exactly
+   the reasoning shadow mode exists to replace, so the pair was run on hardware
+   first."* So option 2 trades a known hardware dependency (D6) for a new,
+   unscheduled one, and disables the feature for the transition the fleet
+   actually produces while it waits.
+2. **The cost of waiting is bounded and self-clearing.** Apple's
+   `PreparedReplacementCoordinator.canOfferPreparation` learns after one failed
+   staging and stops asking for the rest of that playback, so a viewer pays
+   once per playback rather than once per quality change, nothing configures
+   it, and the day priming lands the client uses it with no change. That is
+   already merged and on `main`. Waiting costs a bounded amount of nothing.
+3. **There is no third path that is buildable today.** Priming's whole job is
+   to make the staged successor's playlist servable, and
+   `VodServe::try_create_with_release_fence` refuses every non-`Copy` kind
+   until D6. Building phases 3-8 against a refusal would produce code exercised
+   only by tests, in the subsystem where the last runtime change made here — the
+   commit publication in §4 — was a net regression that a full 1905-test suite
+   passed and only an adversarial review caught. That is a bad place to build
+   ahead of a measurement.
+
+**What this does NOT decide.** If D6 slips far enough that M6 is blocking M8
+§10.2, option 2 becomes worth its receipt — but the order is still: run the
+axis case on a device, write the result up in `docs/playback-control/`, *then*
+admit the axis. Not the reverse.
+
+Everything below §4 remains unbuilt, and now deliberately so rather than
+pending an answer.
 
 ## 6. If the answer is "build it", the order
 

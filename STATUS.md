@@ -52,6 +52,58 @@ until the D6 device measurement lands. Priming cannot be built against the
 transition the fleet actually produces. Hold it for D6, or narrow the axis set
 to copy-only and prove the transaction on those — that choice is Paul's.
 
+## The axis receipt said do not widen, and the fleet widened anyway — correctly
+
+**Documentation only.** Found while answering M6's open phase-3 question with
+Paul away. `docs/playback-control/M6-AXIS-CASE-RESULTS.md` carries a live
+verdict — *"do not widen `PREPARED_AXIS`"*, *"do not build §3.4 on this
+evidence"* — and `PREPARED_AXIS_SETS` on `main` contains exactly the pair it
+refuses. The code is right and the document is stale, but nothing said so, and
+that report is what somebody consults before touching the axis table.
+
+**There were two runs on 2026-09-03 and this report is the first one.** It used
+a 30 Mbit/s shaping proxy against an 18.183 Mbit/s predecessor: 1.65x headroom,
+*below* the floor `headroom_refusal` itself enforces, so it was measuring a
+transition the server would have declined anyway — which is why eight of twenty
+failed. The re-run on a 40 Mbit/s link, 2.20x, came back 20/20 clean and is
+what `0cb370ac` admitted the pair on. A dated correction now sits above §1.
+
+**And the receipt for the run that admitted it is not in the folder** — it
+exists only in `0cb370ac`'s commit message. The axis table is receipt-driven by
+design, so the receipt should be a document beside the one that failed. Named
+as a gap for whoever runs the next axis case.
+
+## Phase 3 answered without Paul: hold for D6, do not narrow the axis set
+
+**A decision, made because he was away and asked for one to be made. Overrule
+it freely — the reasoning is written down so that is cheap.**
+`M6-SERVER-PRIME-HANDOFF.md` §5 offered two paths: hold priming until D6 lands,
+or narrow `PREPARED_AXIS_SETS` to copy-only transitions and prove the
+transaction on those.
+
+**Narrowing is not a code change wearing a hardware costume — it is a hardware
+dependency wearing a code costume.** The copy-only transitions are
+`{AudioTrackOrOffset}` and a subtitle-burn removal. `PreparationAxis` declares
+five axes and the table holds two; the gap is entirely "nobody has run it on a
+device". Admitting an axis so the transaction can be built against it is
+reasoning from convenience, which is what shadow mode exists to replace —
+`0cb370ac` says exactly that. So option 2 swaps a scheduled hardware dependency
+for an unscheduled one and disables the feature for the transition the fleet
+actually produces while it waits.
+
+Meanwhile the cost of waiting is bounded and clears itself: Apple's client
+learns after one failed staging and stops asking for the rest of that playback,
+so a viewer pays once per playback rather than once per quality change, and the
+day priming lands it uses it unchanged. And there is no third path — priming's
+job is to make the staged playlist servable, and the VOD engine refuses every
+non-`Copy` kind until D6, so phases 3-8 would be code exercised only by tests,
+in the subsystem where the last runtime change written here was a net
+regression that 1905 passing tests missed.
+
+**What would change the answer:** D6 slipping far enough that M6 blocks M8
+§10.2. Even then the order is run the axis case on a device, write the result
+up, *then* admit the axis — not the reverse.
+
 ## The third client speaks the protocol, on a platform the server will not use it for
 
 **Merged into `main` as `b266341e`, 2026-09-08, from

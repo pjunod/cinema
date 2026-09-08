@@ -8,7 +8,33 @@ Companion to
 required physical-device run of the product transition the fleet actually
 produces: 2160p source/direct play to 1080p server-selected transcode.
 
-## 1. Verdict — do not widen `PREPARED_AXIS`
+> **Correction, 2026-09-08 — this report documents the SUPERSEDED attempt, and
+> its verdict below is no longer the fleet's.** The run recorded here used a
+> 30 Mbit/s shaping proxy (§3) against an 18.183 Mbit/s predecessor: 1.65x
+> headroom, *below* the floor `headroom_refusal` itself enforces. So it was
+> measuring a transition the server would have declined anyway, which is why
+> eight of twenty failed before the swap.
+>
+> The pair was re-run the same day on a 40 Mbit/s link — 2.20x, above that
+> floor — and came back **20/20 clean, zero failed admissions, zero
+> predecessor or post-commit stalls**. On that result
+> `{ResolutionOrBitrate, DeliveryMethod}` WAS admitted, in commit `0cb370ac`
+> "admit the axis pair the hardware run measured", and it is in
+> `PREPARED_AXIS_SETS` on `main` today. `a72a1f67` later narrowed it to one
+> direction — toward a server-selected successor — because
+> `headroom_refusal` computes its floor from the predecessor's rate, which is
+> only the conservative side when the successor is a rung the server chose.
+>
+> **Read §1 as "what a run below the throughput floor looks like", not as the
+> admission decision.** The rows here remain useful as bounds and as the
+> reason the floor exists.
+>
+> **The receipt for the run that did admit the pair is not in this folder.**
+> It exists only in `0cb370ac`'s commit message. That is a gap: the axis table
+> is receipt-driven by design, and the receipt it rests on should be a document
+> beside this one. Whoever next runs an axis case should write it up here.
+
+## 1. Verdict — do not widen `PREPARED_AXIS` (superseded, see the correction above)
 
 **The case failed.** The Apple TV completed 12 of 20 attempts cleanly. Eight
 attempts failed before the swap because the predecessor did not reach the
