@@ -101,6 +101,101 @@ internal fun mediaOriginMsFromHeaders(headers: Map<String, List<String>>): Long?
         ?.firstNotNullOfOrNull { value -> value.toLongOrNull()?.takeIf { it >= 0L } }
 
 /**
+ * What this client can pull off the wire, measured over the time it is actually
+ * pulling.
+ *
+ * Separated from [ProgressiveMediaOrigin] because it has no Media3 in it, and
+ * the arithmetic is the whole of what was wrong: the previous window divided
+ * bytes by *wall clock*, and an HLS player with a full buffer fetches a segment
+ * in a burst and then idles for seconds. A window opened during one burst is
+ * closed by the first byte of the next, so its denominator is mostly idle time
+ * — the number that reached the server oscillated between roughly the link
+ * speed and near zero, and the low readings are the ones a floor sees.
+ *
+ * The server's floor wants `observed >= 2 * delivered`
+ * (`headroom_refusal`, `playback_control.rs:1168`), which is a question about
+ * *headroom*: could this link carry a second pipeline as well as this one. An
+ * average that includes the idle between segments answers a different question
+ * — roughly "what is this stream's bitrate" — and answers it with a number that
+ * can never be twice itself. So idle time is not counted at all: the window
+ * closes after a second of transfer, however long that second takes to
+ * accumulate.
+ *
+ * Not thread-safe on its own; [ProgressiveMediaOrigin] holds its monitor,
+ * because Media3 calls a transfer listener from its loader threads.
+ */
+internal class ThroughputWindow(private val windowNanos: Long = 1_000_000_000L) {
+    /**
+     * How many transfers are open. Media3 fetches a playlist and a segment
+     * concurrently, so this is a count rather than a flag: the link is busy
+     * while any of them is, and the clock must not start twice or stop early.
+     */
+    private var inFlight = 0
+    private var busySinceNanos = 0L
+    private var activeNanos = 0L
+    private var bytes = 0L
+    private var bitsPerSecond: Long? = null
+
+    /** A new stream. The rate belongs to the one that produced it. */
+    fun begin() {
+        inFlight = 0
+        busySinceNanos = 0L
+        activeNanos = 0L
+        bytes = 0L
+        bitsPerSecond = null
+    }
+
+    fun transferStarted(nowNanos: Long) {
+        if (inFlight == 0) busySinceNanos = nowNanos
+        inFlight += 1
+    }
+
+    fun bytesTransferred(count: Int, nowNanos: Long) {
+        if (count <= 0) return
+        // A byte arriving with no open transfer is a listener call this class
+        // did not see the start of. Counting it against a clock that was never
+        // started would divide by zero-or-nonsense, so the transfer is adopted
+        // from here instead.
+        if (inFlight == 0) transferStarted(nowNanos)
+        bytes += count
+        close(nowNanos)
+    }
+
+    fun transferEnded(nowNanos: Long) {
+        if (inFlight == 0) return
+        inFlight -= 1
+        if (inFlight > 0) return
+        activeNanos += (nowNanos - busySinceNanos).coerceAtLeast(0L)
+        busySinceNanos = 0L
+        close(nowNanos)
+    }
+
+    /**
+     * The last completed window's rate, or null before one has completed.
+     *
+     * Null is not a placeholder: the server reads a client that reports no
+     * throughput as one it may not offer a preparation to, which is the honest
+     * answer before anything has been measured.
+     */
+    fun bitsPerSecond(): Long? = bitsPerSecond
+
+    private fun close(nowNanos: Long) {
+        val open = if (inFlight > 0) (nowNanos - busySinceNanos).coerceAtLeast(0L) else 0L
+        val elapsed = activeNanos + open
+        if (elapsed < windowNanos) return
+        bitsPerSecond = (bytes * 8.0 / (elapsed / 1_000_000_000.0))
+            .toLong()
+            .coerceIn(0L, PlaybackControl.MAX_OBSERVED_DOWNLOAD_BPS)
+        // The next window starts now and inherits nothing. An open transfer
+        // keeps its clock running from this instant rather than from its own
+        // start, or its first second would be counted twice.
+        bytes = 0L
+        activeNanos = 0L
+        if (inFlight > 0) busySinceNanos = nowNanos
+    }
+}
+
+/**
  * Tracks the true source origin of the currently requested progressive remux.
  *
  * Media3 opens the response on a loader thread, so the value is volatile. The
@@ -114,10 +209,7 @@ internal class ProgressiveMediaOrigin : TransferListener {
     @Volatile
     private var originMs: Long = 0L
 
-    @Volatile
-    private var observedBitsPerSecond: Long? = null
-    private var rateWindowStartedNanos: Long = 0L
-    private var rateWindowBytes: Long = 0L
+    private val throughput = ThroughputWindow()
 
     fun begin(uri: String, requestedOriginMs: Long) {
         synchronized(this) {
@@ -131,15 +223,13 @@ internal class ProgressiveMediaOrigin : TransferListener {
             // to close after the switch divides leftover old-stream bytes plus
             // new-stream bytes by a span that includes the reconnect gap,
             // producing a number belonging to neither.
-            observedBitsPerSecond = null
-            rateWindowStartedNanos = 0L
-            rateWindowBytes = 0L
+            throughput.begin()
         }
     }
 
     fun currentOriginMs(): Long = originMs
 
-    fun currentObservedBitsPerSecond(): Long? = observedBitsPerSecond
+    fun currentObservedBitsPerSecond(): Long? = synchronized(this) { throughput.bitsPerSecond() }
 
     internal fun acceptResponse(uri: String, headers: Map<String, List<String>>): Boolean {
         val resolved = mediaOriginMsFromHeaders(headers) ?: return false
@@ -162,9 +252,7 @@ internal class ProgressiveMediaOrigin : TransferListener {
         isNetwork: Boolean,
     ) {
         if (!isNetwork) return
-        synchronized(this) {
-            if (rateWindowStartedNanos == 0L) rateWindowStartedNanos = System.nanoTime()
-        }
+        synchronized(this) { throughput.transferStarted(System.nanoTime()) }
         val http = source as? HttpDataSource ?: return
         acceptResponse(dataSpec.uri.toString(), http.responseHeaders)
     }
@@ -176,23 +264,18 @@ internal class ProgressiveMediaOrigin : TransferListener {
         bytesTransferred: Int,
     ) {
         if (!isNetwork || bytesTransferred <= 0) return
-        synchronized(this) {
-            val now = System.nanoTime()
-            if (rateWindowStartedNanos == 0L) rateWindowStartedNanos = now
-            rateWindowBytes += bytesTransferred
-            val elapsed = now - rateWindowStartedNanos
-            if (elapsed >= 500_000_000L) {
-                observedBitsPerSecond = (rateWindowBytes * 8.0 / (elapsed / 1_000_000_000.0))
-                    .toLong().coerceAtLeast(0L)
-                rateWindowStartedNanos = now
-                rateWindowBytes = 0L
-            }
-        }
+        synchronized(this) { throughput.bytesTransferred(bytesTransferred, System.nanoTime()) }
     }
 
     override fun onTransferEnd(
         source: DataSource,
         dataSpec: DataSpec,
         isNetwork: Boolean,
-    ) = Unit
+    ) {
+        if (!isNetwork) return
+        synchronized(this) { throughput.transferEnded(System.nanoTime()) }
+    }
+
+    /** Test seam: the window, drivable without Media3's types or a clock. */
+    internal fun throughputWindowForTest(): ThroughputWindow = throughput
 }

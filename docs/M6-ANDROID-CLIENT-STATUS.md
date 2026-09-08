@@ -237,14 +237,23 @@ file the JVM unit lane cannot reach. Two of its decisions moved out in response,
 into `PreparedReplacement.kt` where they are tested; the residue is named in a
 comment listing all six paths that must abandon a preparation.
 
-**Left unfixed, deliberately:** `observed_download_bps` measures average
-throughput rather than headroom, because the rate window's denominator includes
-inter-segment idle time. During steady-state playback it converges on the
-delivered bitrate — which is the number the floor requires it to be *twice*. If
-prepared handoffs are enabled and still never fire, this is the second thing to
-look at after the VOD `delivered_bps` gap. The window predates this milestone
-and lives in `MediaOrigin.kt`; fixing it is a change to what every session
-reports, not to this path.
+**Fixed after the fourth pass:** `observed_download_bps` measured average
+throughput rather than headroom. The rate window divided bytes by *wall clock*,
+and an HLS player with a full buffer fetches a segment in a burst and then idles
+for seconds — so a window opened during one burst was closed by the first byte
+of the next and its denominator was mostly idle. The reading oscillated between
+roughly the link speed and near zero, and the low readings are the ones a floor
+sees. The server's floor asks `observed >= 2 * delivered`, which is a question
+about headroom; an average that includes the idle between segments answers
+roughly "what is this stream's bitrate" and answers it with a number that can
+never be twice itself.
+
+`ThroughputWindow` counts only the time a transfer is actually open — a count
+rather than a flag, because Media3 fetches a playlist and a segment
+concurrently — and closes after a second of transfer however long that second
+takes to accumulate. Lifted out of the transfer listener so it has no Media3 in
+it: the arithmetic was untestable while it lived there, and it was wrong the
+whole time.
 
 ---
 
@@ -272,7 +281,9 @@ document is the bug. Re-derive every mirrored rule from the Rust at build time.
 ## Follow-ups this branch deliberately left
 
 - The lab re-run in §1 of the brief. Highest-value item and not code.
-- `clients/android/README.md:249`, `clients/android/Dockerfile:36` and
-  `docs/PUBLISHING.md:360` all say AGP 9.3.1; the version catalog says 9.3.2
-  and the catalog is right. A courtesy fix, not this milestone's.
+- ~~The three documents naming a stale AGP version.~~ Done: `README.md` and
+  `docs/PUBLISHING.md` quote the catalog now, a check keeps every document that
+  names one honest, and the Dockerfile's comment is left alone on purpose — its
+  hash keys CI's pre-pulled image, so a tidy-up there costs every Android job a
+  full SDK re-download.
 - A narrower capability keyed by axis and device class — protocol v2.

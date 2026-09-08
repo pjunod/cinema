@@ -214,3 +214,175 @@ class SuccessorTimelineTest {
         assertEquals(0L, successorFilmPositionMs(mediaOriginMs = -1, playerPositionMs = -1))
     }
 }
+
+/**
+ * `observed_download_bps` is the client's half of the server's preparation
+ * floor, and the floor asks for **headroom**: `observed >= 2 * delivered`. A
+ * window that divides bytes by wall clock cannot answer that question, because
+ * an HLS player with a full buffer fetches a segment in a burst and then idles
+ * for seconds — so the denominator is mostly idle, and the reading a floor sees
+ * is roughly the stream's own bitrate or, when a window happens to span a gap,
+ * near zero.
+ *
+ * These drive the window directly with an injected clock. Nothing here needs
+ * Media3, which is the point: this arithmetic was untestable while it lived
+ * inside the transfer listener, and it was wrong the whole time.
+ */
+class ThroughputWindowTest {
+    private val second = 1_000_000_000L
+    private val megabit = 1_000_000L
+
+    /** 12.5 MB/s = 100 Mbit/s. */
+    private fun bytesFor(bitsPerSecond: Long, nanos: Long): Int =
+        (bitsPerSecond / 8.0 * (nanos / 1e9)).toInt()
+
+    @Test
+    fun idleTimeBetweenSegmentsIsNotInTheDenominator() {
+        // A 100 Mbit/s link carrying a 10 Mbit/s stream: each six-second
+        // segment arrives in 0.6 s and the link then sits idle for 5.4 s. The
+        // honest answer is 100, and the floor needs it to be at least twice the
+        // 10 the server is delivering.
+        val window = ThroughputWindow()
+        var now = 0L
+        repeat(4) {
+            window.transferStarted(now)
+            // The burst, delivered in chunks as Media3 reports them.
+            repeat(6) {
+                now += second / 10
+                window.bytesTransferred(bytesFor(100 * megabit, second / 10), now)
+            }
+            window.transferEnded(now)
+            now += 5_400_000_000L // idle
+        }
+        val measured = requireNotNull(window.bitsPerSecond())
+        assertTrue(
+            "measured $measured, expected about 100 Mbit/s",
+            measured > 90 * megabit && measured < 110 * megabit,
+        )
+    }
+
+    @Test
+    fun aWindowThatSpansAnIdleGapDoesNotReportNearZero() {
+        // The regression that motivated this: the old window closed on the
+        // first byte after a gap, so its span was the gap. Here the gap is
+        // seven seconds and the two bursts either side are a second of actual
+        // transfer at 80 Mbit/s.
+        val window = ThroughputWindow()
+        var now = 0L
+        window.transferStarted(now)
+        now += second / 2
+        window.bytesTransferred(bytesFor(80 * megabit, second / 2), now)
+        window.transferEnded(now)
+
+        now += 7 * second
+        window.transferStarted(now)
+        now += second / 2
+        window.bytesTransferred(bytesFor(80 * megabit, second / 2), now)
+        window.transferEnded(now)
+
+        val measured = requireNotNull(window.bitsPerSecond())
+        assertTrue("measured $measured, expected about 80 Mbit/s", measured > 70 * megabit)
+    }
+
+    @Test
+    fun nothingIsReportedBeforeASecondOfTransferHasHappened() {
+        // Null is the honest answer, and the server reads it as "may not be
+        // offered a preparation" — which is correct for a client that has not
+        // measured anything yet.
+        val window = ThroughputWindow()
+        window.transferStarted(0)
+        window.bytesTransferred(bytesFor(100 * megabit, second / 4), second / 4)
+        window.transferEnded(second / 4)
+        assertNull(window.bitsPerSecond())
+    }
+
+    @Test
+    fun concurrentTransfersCountTheLinkBusyOnce() {
+        // Media3 fetches a playlist and a segment at the same time. The clock
+        // must not start twice, and it must not stop when the first of the two
+        // finishes while the other is still pulling.
+        val window = ThroughputWindow()
+        window.transferStarted(0)
+        window.transferStarted(second / 10)
+        window.bytesTransferred(bytesFor(50 * megabit, second), second)
+        window.transferEnded(second / 2) // the playlist finished; the segment has not
+        window.transferEnded(second)
+        val measured = requireNotNull(window.bitsPerSecond())
+        assertTrue(
+            "measured $measured, expected about 50 Mbit/s over one busy second",
+            measured > 45 * megabit && measured < 55 * megabit,
+        )
+    }
+
+    @Test
+    fun aNewStreamInheritsNothingFromTheOneItReplaces() {
+        // The first exchange of a replacement is the only one the server's
+        // replacement seam reads, so a predecessor's rate arriving there is
+        // worse than no rate.
+        val window = ThroughputWindow()
+        window.transferStarted(0)
+        window.bytesTransferred(bytesFor(100 * megabit, 2 * second), 2 * second)
+        window.transferEnded(2 * second)
+        requireNotNull(window.bitsPerSecond())
+        window.begin()
+        assertNull(window.bitsPerSecond())
+    }
+
+    @Test
+    fun aWindowIsNotCountedTwice() {
+        // Two seconds of transfer at one rate must not read as a rate the link
+        // never achieved, which is what carrying the closed window's clock
+        // forward into the next one would do.
+        val window = ThroughputWindow()
+        window.transferStarted(0)
+        var now = 0L
+        repeat(4) {
+            now += second
+            window.bytesTransferred(bytesFor(40 * megabit, second), now)
+        }
+        window.transferEnded(now)
+        val measured = requireNotNull(window.bitsPerSecond())
+        assertTrue(
+            "measured $measured, expected about 40 Mbit/s",
+            measured > 35 * megabit && measured < 45 * megabit,
+        )
+    }
+
+    @Test
+    fun bytesWithNoStartAdoptTheTransferRatherThanDivideByNothing() {
+        val window = ThroughputWindow()
+        window.bytesTransferred(1_000, 0)
+        window.bytesTransferred(bytesFor(20 * megabit, 2 * second), 2 * second)
+        val measured = requireNotNull(window.bitsPerSecond())
+        assertTrue("measured $measured", measured in 1..(30 * megabit))
+    }
+
+    @Test
+    fun anAbsurdReadingIsClampedRatherThanInvalidatingEveryExchange() {
+        // `PlaybackControlSnapshot.isValid` refuses a rate above the protocol
+        // ceiling, and an invalid snapshot is dropped whole — so an
+        // out-of-range reading would silently stop the client reporting
+        // anything at all, which is a much larger failure than a wrong number.
+        val window = ThroughputWindow()
+        window.transferStarted(0)
+        window.bytesTransferred(Int.MAX_VALUE, second)
+        repeat(64) { window.bytesTransferred(Int.MAX_VALUE, second) }
+        window.transferEnded(second)
+        val measured = requireNotNull(window.bitsPerSecond())
+        assertTrue("measured $measured", measured <= PlaybackControl.MAX_OBSERVED_DOWNLOAD_BPS)
+    }
+
+    @Test
+    fun theTransferListenerReportsWhatTheWindowMeasured() {
+        // The seam is real: `ProgressiveMediaOrigin` delegates rather than
+        // keeping a second copy of this arithmetic.
+        val origin = ProgressiveMediaOrigin()
+        val window = origin.throughputWindowForTest()
+        window.transferStarted(0)
+        window.bytesTransferred(bytesFor(60 * megabit, 2 * second), 2 * second)
+        window.transferEnded(2 * second)
+        assertEquals(window.bitsPerSecond(), origin.currentObservedBitsPerSecond())
+        origin.begin("http://server/stream.mp4", 0)
+        assertNull(origin.currentObservedBitsPerSecond())
+    }
+}
