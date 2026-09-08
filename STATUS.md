@@ -4,6 +4,69 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## Phase 3 is buildable today, and the first answer to that question was wrong
+
+**Documentation only, and a decision taken in Paul's absence — overrule it
+freely, the reasoning is written down so that is cheap.**
+`M6-SERVER-PRIME-HANDOFF.md` §5 asked whether to hold server-side priming for
+D6 or narrow `PREPARED_AXIS_SETS` to copy-only transitions. This session
+answered "hold for D6", an adversarial review checked the premise against the
+code rather than the prose, and it does not survive.
+
+**There is an admitted, receipted, copy-only transition, and the VOD engine
+serves it today.** `candidate_request` has three arms that leave a `Copy`
+predecessor a `Copy` — `Auto`, `Original`, and a `Manual` ask at the source
+height — and `EffectiveSelection` maps `Copy` to codec `source` on both sides,
+so no `DeliveryMethod` crossing occurs. A direct-playing session toggling
+between Auto and Original therefore crosses `{ResolutionOrBitrate}` **alone**:
+in the axis table, receipted by M5.5 on Apple at 20/20, and yielding a `Copy`
+candidate that `try_create_with_release_fence` serves, so the
+`vod_transcode_unavailable` refusal never fires. The module's own test asserts
+it returns `Prepare { ResolutionOrBitrate }`. It is a transition a viewer
+makes.
+
+So **phase 3 should be built now and proven against that**, with no new
+hardware receipt and no change to the axis table. What stays blocked on D6 is
+priming for the transition the fleet actually produces — a copy dropping to a
+transcoded rung — and building the copy-to-copy case does not front-run it: it
+means D6 lands into working machinery instead of an unbuilt phase.
+
+**How the first answer went wrong, recorded because the shape recurs.** It
+enumerated the copy-only transitions as *"`{AudioTrackOrOffset}` and a subtitle
+burn removal"* and concluded that neither has a receipt. The handoff's own
+option 2, four paragraphs above, says *"audio track, source-height
+**Original**"* — and the item quietly dropped is the one carrying the receipt.
+The substituted example is unreachable besides: `try_create_with_release_fence`
+refuses `subtitle_burn.is_some()` independently of D6, so a VOD session with a
+burn cannot exist to transition out of. **Swapping an example for the one on
+the list is how a false premise reads as true**, and it is the same family as
+the guards that could not fail: the reasoning looked careful and checked
+nothing.
+
+## The axis receipt said do not widen, and the fleet widened anyway — correctly
+
+**Documentation only.** `docs/playback-control/M6-AXIS-CASE-RESULTS.md` carries
+a live verdict — *"do not widen `PREPARED_AXIS`"*, *"do not build §3.4 on this
+evidence"* — and `PREPARED_AXIS_SETS` on `main` contains exactly the pair it
+refuses. The code is right, and nothing said so.
+
+**There were two runs on 2026-09-03 and that report is the first one.** It used
+a 30 Mbit/s shaping proxy against an 18.183 Mbit/s predecessor: 1.65x headroom,
+below the 2.0x floor `headroom_refusal` enforces, so it measured a transition
+the server would have declined anyway. The re-run on a 40 Mbit/s link, 2.20x,
+came back 20/20 clean, and `0cb370ac` admitted the pair on that. A dated
+correction now heads the file, its title and status line say superseded, and
+`docs/README.md`'s row says so too — that index is how a reader arrives.
+
+**Two things the correction is careful not to claim.** The throughput floor is
+why the run does not bear on *admission*; it is not a root cause for the eight
+failures. §8 of that report declines to name one and §4's receipts point
+elsewhere — failure tracks the commit boundary rather than the link, and every
+failed row records `Pred stalls 0`. And **the receipt for the run that admitted
+the pair is not in the folder**: it exists only in `0cb370ac`'s commit message.
+The axis table is receipt-driven by design, so that is a gap, named rather than
+filled by someone who was not there.
+
 ## A prepared commit hands the viewer a session that is refused from its first request
 
 **Merged into `main` as `4c93ef29`, 2026-09-08, from
@@ -46,11 +109,16 @@ retries against the Store has to fit inside the client's four-second exchange
 budget.
 
 `docs/playback-control/M6-SERVER-PRIME-HANDOFF.md` carries the phase this was
-found under, and **the decision it waits on**: the only transition M6 admits
+found under, and **the decision it waits on**: ~~the only transition M6 admits
 produces a `Transcode` recipe, and the VOD engine refuses every non-`Copy` kind
 until the D6 device measurement lands. Priming cannot be built against the
 transition the fleet actually produces. Hold it for D6, or narrow the axis set
-to copy-only and prove the transaction on those — that choice is Paul's.
+to copy-only and prove the transaction on those.~~ **That premise is false and
+the strike-through is deliberate — it is what this entry said, and what
+`M6-SERVER-PRIME-HANDOFF.md` §5 said, until a review checked it against the
+code. Answered 2026-09-08 and neither of those:** there is already an admitted, receipted, copy-only
+transition the engine serves, so phase 3 can be built now without narrowing
+anything. See the entry at the top of this page.
 
 ## The third client speaks the protocol, on a platform the server will not use it for
 

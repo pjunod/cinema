@@ -1,6 +1,7 @@
-# M6 phase 3 — reserve and prime, and the decision it waits on
+# M6 phase 3 — reserve and prime
 
-**Status:** open · **Blocks:** every client half of M6 doing anything a viewer
+**Status:** open, and no longer waiting on a decision — see §5.1 ·
+**Blocks:** every client half of M6 doing anything a viewer
 sees · **Written:** 2026-09-08 · **Baseline:** `main` at `3006f38a`
 
 The client halves of M6 are being built now — Apple is merged, web and Android
@@ -166,9 +167,14 @@ aspirational rather than true. It needs mirroring in the replicated backend,
 and on its own it changes nothing observable, because a committed successor
 without a worker is reaped by the sweep either way.
 
-## 5. The decision, and it is not ours
+## 5. The decision, taken 2026-09-08 (§5.1)
 
-**The only transition M6 admits produces a recipe the server cannot serve.**
+**The transition the FLEET produces makes a recipe the server cannot serve.**
+
+> **Correction, 2026-09-08.** This line read *"The only transition M6 admits
+> produces a recipe the server cannot serve"*, and that is false. See
+> §5.1 — there is an admitted, receipted, copy-only transition the VOD engine
+> serves today, and it is what phase 3 should be built and proven against.
 
 - `PREPARED_AXIS_SETS` admits `{ResolutionOrBitrate}` and
   `{ResolutionOrBitrate, DeliveryMethod}`. Shadow mode established that a pure
@@ -211,10 +217,82 @@ The options, ranked:
 3), or narrow the admitted axis set so the transaction can be built and proven
 against copy-only recipes (2)?
 
-Everything else in this document follows from that answer, which is why nothing
-below §4 has been built.
+### 5.1 Answered 2026-09-08, and the first answer was wrong
 
-## 6. If the answer is "build it", the order
+**Build phase 3 now, and prove it on the copy-to-copy transition that is
+already admitted.** Do not narrow `PREPARED_AXIS_SETS`, and do not wait for D6.
+
+An earlier revision of this section answered "hold for D6" on the reasoning
+that no transition M6 admits can be served today. An adversarial review checked
+that premise against the code instead of the prose and it does not survive.
+
+**There is an admitted, receipted, copy-only transition, and the engine serves
+it.** `candidate_request` has three arms that leave a `Copy` predecessor a
+`Copy`: `QualitySelection::Auto`, `QualitySelection::Original`, and
+`Manual { height }` where the height is the source height — *"Auto and Original
+leave a copy copying, and a source-height ask is a copy's own delivery asked
+for by name."* `EffectiveSelection::from_request` maps `SessionKind::Copy` to
+codec `"source"`, so both sides read `source` and **no `DeliveryMethod`
+crossing occurs**. The crossing test fires `ResolutionOrBitrate` when the
+height *or* `quality_auto` differs. So a direct-playing session moving between
+Auto and Original — or Auto and a pinned source rung — crosses
+`{ResolutionOrBitrate}` **alone**, which:
+
+- is in `PREPARED_AXIS_SETS`;
+- has a receipt, M5.5 on Apple, 2026-09-01, 20/20;
+- passes `successor_rate_is_bounded`, which only constrains the pair;
+- and yields a `SessionKind::Copy` candidate, so
+  `VodServe::try_create_with_release_fence` **serves it** — the
+  `vod_transcode_unavailable` refusal never fires.
+
+The module's own test asserts exactly this returns
+`Prepare { ResolutionOrBitrate }`. It is a transition a viewer makes: toggling
+Auto on a title that direct-plays.
+
+**So phase 3 is buildable today, against a real production transition, with no
+new hardware receipt and no change to the axis table.** The transcode case
+stays gated by the engine's own D6 refusal, which is the right boundary —
+nothing new is flagged or configured, and the day D6 lands the transcode case
+starts working with no code change.
+
+**What the earlier revision got wrong, recorded because the shape recurs.** It
+enumerated the copy-only transitions as *"`{AudioTrackOrOffset}` and a subtitle
+burn removal"*, and reasoned that since neither axis has a receipt, narrowing
+was a hardware dependency in disguise. Both halves were wrong. Option 2 four
+paragraphs above says *"audio track, source-height **Original**"* — the item
+silently dropped is the one carrying the receipt. And a burn removal is
+unreachable anyway: `try_create_with_release_fence` refuses
+`req.subtitle_burn.is_some()` with `vod_subtitle_burn_unavailable`
+independently of D6, so a VOD session with a burn cannot exist to transition
+out of, and a burn removal moves the delivery method too, making it a pair
+rather than an axis. Substituting an example for the one in the list is how a
+false premise reads as true.
+
+**What the copy-to-copy case proves, and what it does not.** For a `Copy`,
+`candidate_request` copies every field and changes only `automatic`: the height
+is the source height on both sides, and `automatic` is consulted for a `Copy`
+in exactly one place, the session fingerprint. So predecessor and successor are
+two distinct sessions serving **byte-identical media**. That is the ideal
+control for a transaction test — nothing about the handoff can be explained by
+the media changing — but it means this case proves *the transaction*, not a
+changed pipeline. Say so when it lands rather than letting a reader infer a
+media handoff was proven. The first thing to confirm in the build is that two
+VOD sessions on the same file and playback id can coexist; the differing
+`automatic` gives them distinct fingerprints, so the expectation is yes, and
+this document asserts it implicitly.
+
+**What is still blocked on D6**, unchanged: priming for the transition the
+fleet actually produces — a copy dropping to a transcoded rung. That is the
+common case, and it stays refused by the engine until the measurement lands.
+Building phase 3 on the copy-to-copy case does not front-run it; it proves the
+eight-phase transaction end to end so that D6 lands into working machinery
+rather than into an unbuilt phase.
+
+Everything below §4 remains unbuilt, and §6 is now the order to build it in
+rather than a conditional. The copy-to-copy case is the one to build against
+first.
+
+## 6. The order to build it in
 
 1. Free the worker on every exit first — `begin_end_detached` in
    `PreparationExecutor::abort`, in the deadline task, and in both refusal
