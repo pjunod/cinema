@@ -4389,6 +4389,268 @@ pub(crate) struct PreparationExecutor {
     expected_predecessor_owner_epoch: i64,
 }
 
+/// What a reservation attempt found.
+///
+/// Not a `bool`. The store answers `Ok(None)` for six different situations —
+/// no row, a row that is no longer `Reserved`, and any of five request fields
+/// differing from the row that is there — and they are not the same fact. The
+/// neighbour this type is modelled on made the same call for the same reason:
+/// [`PreparationCommitOutcome`] exists because a commit that lost a CAS and a
+/// commit that was never staged need different answers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) enum RecoveryReservation {
+    /// This attempt holds the budget. Carries the stored row, because a
+    /// replaying executor needs to read back what it had already decided —
+    /// including the restriction the row carries, which is the only place a
+    /// later continuation can learn it.
+    Held(Box<plurx_core::domain::ProducerRecoveryReservation>),
+    /// The budget is gone: an earlier attempt of this playback took it and
+    /// settled it. The honest answer to a viewer is the permanent one.
+    Spent(Box<plurx_core::domain::ProducerRecoveryReservation>),
+    /// A *live* reservation for this playback that this request does not
+    /// match — a different attempt, sequence, digest pair, or restriction.
+    ///
+    /// Distinct from `Spent` and the distinction is load-bearing: the budget
+    /// has not been used up, it is held, possibly by this very session under
+    /// a decision it has since changed. Reading this as `Spent` and giving up
+    /// leaves a `reserved` row nothing will ever settle, and the schema never
+    /// deletes one — so every later continuation sees a live reservation for
+    /// a recovery that was abandoned.
+    Mismatched(Box<plurx_core::domain::ProducerRecoveryReservation>),
+    /// The insert did not take and no row can be read. Nothing is known, so
+    /// nothing is claimed.
+    Unavailable,
+}
+
+/// What a settlement found. `bool` hides the case the store fenced on purpose.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) enum RecoverySettlement {
+    /// The row moved to the state asked for, or was already in it.
+    Settled,
+    /// A row exists and this identity does not own it.
+    ///
+    /// The store fences on `failed_incarnation_id` so that a stale holder
+    /// cannot write an outcome over the real owner's. Rendering that as "there
+    /// was nothing to settle" is what makes the split-brain invisible.
+    NotOurs,
+    /// No row for this epoch — nothing was ever reserved.
+    Absent,
+    /// The row is this identity's, and it is already closed the other way.
+    ///
+    /// The store is idempotent for the same terminal state, so the only way
+    /// here is settling `Installed` over an `Exhausted` row or the reverse:
+    /// two different answers about one attempt, which is a caller bug rather
+    /// than a race. It is named so it stays out of `NotOurs`, where it would
+    /// read as a fencing failure and send whoever debugs it looking for a
+    /// second node that does not exist.
+    Conflicting,
+}
+
+/// The two ways a reservation can end. The store rejects `Reserved` here with
+/// an error, so it is not offered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) enum RecoveryOutcome {
+    Installed,
+    Exhausted,
+}
+
+impl RecoveryOutcome {
+    fn state(self) -> plurx_core::domain::ProducerRecoveryState {
+        match self {
+            Self::Installed => plurx_core::domain::ProducerRecoveryState::Installed,
+            Self::Exhausted => plurx_core::domain::ProducerRecoveryState::Exhausted,
+        }
+    }
+}
+
+/// The durable per-playback recovery budget, addressed.
+///
+/// Modelled on [`PreparationExecutor`]: store plus identity, doing durable
+/// work on the actor's behalf. The difference is where it is consumed — that
+/// one is built and used on the HTTP side, and this one has to be reachable
+/// from the producer executor, which is why the identity travels down the
+/// start chain rather than being read off a route at the point of use.
+///
+/// **The budget is never refunded.** `ProducerRecoveryState` goes
+/// `Reserved → Installed | Exhausted` and never returns, so a reservation
+/// taken for an alternate that then fails to install has spent this playback's
+/// one recovery. Settling on every path out — including the ones that never
+/// reach an installer — is the whole correctness of using this type.
+#[derive(Clone)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct ProducerRecoveryLedger {
+    store: std::sync::Arc<dyn plurx_core::store::Store>,
+    user_id: i64,
+    playback_id: String,
+    recovery_epoch: String,
+    failed_incarnation_id: String,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl ProducerRecoveryLedger {
+    /// `None` unless every identity field the store validates is present and
+    /// within bounds.
+    ///
+    /// The store refuses a non-positive user id, an empty or over-long
+    /// playback id, an empty or over-long epoch, and an empty or over-long
+    /// failed incarnation — separately, and at the moment a reservation is
+    /// needed, which is the worst moment to learn a session never had a
+    /// budget. Refusing to construct the handle moves that discovery to
+    /// session start, where "this playback has no durable bound" is a fact a
+    /// caller can act on.
+    ///
+    /// It moves *that* discovery and no other. The per-call refusals — a zero
+    /// attempt or sequence, a digest that is not sixty-four lowercase hex
+    /// bytes, or the two digests being equal — depend on values this type does
+    /// not hold, so [`Self::reserve`] still returns a `StoreError` and a caller
+    /// still handles one.
+    pub(crate) fn new(
+        store: std::sync::Arc<dyn plurx_core::store::Store>,
+        user_id: i64,
+        playback_id: &str,
+        recovery_epoch: &str,
+        failed_incarnation_id: &str,
+    ) -> Option<Self> {
+        // The same bound the store applies, spelled once here.
+        const MAX_KEY_BYTES: usize = 128;
+        let bounded = |value: &str| !value.is_empty() && value.len() <= MAX_KEY_BYTES;
+        if user_id <= 0
+            || !bounded(playback_id)
+            || !bounded(recovery_epoch)
+            || !bounded(failed_incarnation_id)
+        {
+            return None;
+        }
+        Some(Self {
+            store,
+            user_id,
+            playback_id: playback_id.to_owned(),
+            recovery_epoch: recovery_epoch.to_owned(),
+            failed_incarnation_id: failed_incarnation_id.to_owned(),
+        })
+    }
+
+    /// Take this playback's one automatic recovery, and say what was found.
+    ///
+    /// The store's conditional insert answers `Ok(None)` for every case that
+    /// is not "this exact request now owns the row", so a refusal is read back
+    /// and classified rather than reported as one fact. Without the read back,
+    /// a request that differs from a live reservation — the same session
+    /// changing its mind about the alternate, most obviously — is
+    /// indistinguishable from a budget an earlier attempt already spent, and
+    /// the two call for opposite behaviour.
+    ///
+    /// The read is deliberately local rather than a quorum read: it is used to
+    /// explain a refusal, never to grant one. The grant is the conditional
+    /// insert, which is linearizable.
+    pub(crate) async fn reserve(
+        &self,
+        failed_producer_attempt: u64,
+        decision_sequence: u64,
+        failed_plan_digest: &str,
+        alternate_plan_digest: &str,
+        now_ms: i64,
+    ) -> Result<RecoveryReservation, plurx_core::error::StoreError> {
+        let request = plurx_core::domain::ProducerRecoveryRequest {
+            user_id: self.user_id,
+            playback_id: self.playback_id.clone(),
+            recovery_epoch: self.recovery_epoch.clone(),
+            failed_incarnation_id: self.failed_incarnation_id.clone(),
+            failed_producer_attempt,
+            decision_sequence,
+            failed_plan_digest: failed_plan_digest.to_owned(),
+            alternate_plan_digest: alternate_plan_digest.to_owned(),
+            // Deliberately null, and deliberately recorded as a decision.
+            //
+            // The restriction is what makes the *next* session inherit this
+            // answer rather than rediscovering it, and it cannot be built
+            // here: `ContinuationDecodeRestriction` is not referenced anywhere
+            // in this daemon, and `source_revision_digest` and
+            // `policy_revision` have no producer at all. So the null is forced
+            // rather than preferred.
+            //
+            // **It is part of the row's identity.** The store compares this
+            // field when deciding whether a repeat is a replay, so a later
+            // build that starts writing a real restriction will find its
+            // replay refused as `Mismatched` rather than accepted as an
+            // upgrade — and the row it cannot replace stays null forever,
+            // which means the continuation re-plans onto the decoder that
+            // already failed. Whoever writes the first restriction has to
+            // settle the existing row and take a new epoch, not replay.
+            decode_restriction: None,
+        };
+        if let Some(reservation) = self
+            .store
+            .reserve_producer_recovery(&request, now_ms)
+            .await?
+        {
+            return Ok(RecoveryReservation::Held(Box::new(reservation)));
+        }
+        let Some(existing) = self
+            .store
+            .producer_recovery_for_epoch(self.user_id, &self.playback_id, &self.recovery_epoch)
+            .await?
+        else {
+            return Ok(RecoveryReservation::Unavailable);
+        };
+        if existing.state == plurx_core::domain::ProducerRecoveryState::Reserved {
+            Ok(RecoveryReservation::Mismatched(Box::new(existing)))
+        } else {
+            Ok(RecoveryReservation::Spent(Box::new(existing)))
+        }
+    }
+
+    /// Close this playback's reservation, whatever happened to it.
+    ///
+    /// `Installed` when the alternate is running, `Exhausted` on every other
+    /// way out. Neither returns the budget, and that is the point: a recovery
+    /// that was attempted and failed has been attempted.
+    ///
+    /// The three answers are separated because the store fences settlement on
+    /// the reserving incarnation, and it does that so a stale holder cannot
+    /// write an outcome over the real owner's. Collapsing `NotOurs` into "no
+    /// row" is what would make that split-brain invisible.
+    pub(crate) async fn settle(
+        &self,
+        outcome: RecoveryOutcome,
+        now_ms: i64,
+    ) -> Result<RecoverySettlement, plurx_core::error::StoreError> {
+        if self
+            .store
+            .settle_producer_recovery(
+                self.user_id,
+                &self.playback_id,
+                &self.recovery_epoch,
+                &self.failed_incarnation_id,
+                outcome.state(),
+                now_ms,
+            )
+            .await?
+            .is_some()
+        {
+            return Ok(RecoverySettlement::Settled);
+        }
+        match self
+            .store
+            .producer_recovery_for_epoch(self.user_id, &self.playback_id, &self.recovery_epoch)
+            .await?
+        {
+            None => Ok(RecoverySettlement::Absent),
+            Some(existing) if existing.failed_incarnation_id != self.failed_incarnation_id => {
+                Ok(RecoverySettlement::NotOurs)
+            }
+            // Ours, and the store still refused: it is already in the other
+            // terminal state. That is a double settle with two different
+            // answers, which is a caller bug rather than a race, and it is not
+            // this type's to paper over — nor to disguise as a lost fence.
+            Some(_) => Ok(RecoverySettlement::Conflicting),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PreparationCommitOutcome {
     Committed(plurx_core::domain::MediaSessionPreparationCommit),
@@ -25115,6 +25377,325 @@ mod tests {
             ),
             "a permanent verdict that still selects a fallback must survive the fault"
         );
+    }
+
+    /// A ledger handle for the tests below, at the one identity they share.
+    fn recovery_ledger(
+        store: &std::sync::Arc<dyn plurx_core::store::Store>,
+        playback: &str,
+        epoch: &str,
+        incarnation: &str,
+    ) -> ProducerRecoveryLedger {
+        ProducerRecoveryLedger::new(
+            std::sync::Arc::clone(store),
+            7,
+            playback,
+            epoch,
+            incarnation,
+        )
+        .expect("a complete identity")
+    }
+
+    /// The budget is one per playback, and it is never given back.
+    ///
+    /// Everything this milestone is for lives in the second half of this test.
+    /// The in-process one-shot M5c2 uses makes a session take one recovery; a
+    /// reopen, a seek or a track change mints a fresh session and therefore a
+    /// fresh one-shot, which is one automatic recovery per *attempt* against a
+    /// file that cannot be decoded. The durable row is what makes the second
+    /// attempt find the budget already gone.
+    ///
+    /// The two refusals in here are different facts and the test asserts them
+    /// separately, because a `bool` cannot tell them apart and reading one as
+    /// the other is a live bug in either direction: a held reservation read as
+    /// spent abandons a `reserved` row that nothing will ever settle, and a
+    /// spent one read as held hands out a second recovery.
+    #[tokio::test]
+    async fn the_recovery_budget_is_taken_once_per_playback_and_never_returned() {
+        use plurx_core::domain::ProducerRecoveryState;
+        use plurx_core::store::SqliteStore;
+
+        let store: std::sync::Arc<dyn plurx_core::store::Store> =
+            std::sync::Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let failed = "a".repeat(64);
+        let alternate = "b".repeat(64);
+
+        let first = recovery_ledger(&store, "playback-1", "epoch-1", "incarnation-1");
+        assert!(
+            matches!(
+                first
+                    .reserve(1, 1, &failed, &alternate, 1_000)
+                    .await
+                    .expect("reserve"),
+                RecoveryReservation::Held(_)
+            ),
+            "the first fault of a playback takes its one budget"
+        );
+
+        // The same session asking again for the same thing is a replay, not a
+        // second budget: the store compares every field and answers with the
+        // row it already wrote. The row comes back because a replaying
+        // executor has to be able to read what it had already decided.
+        let RecoveryReservation::Held(replayed) = first
+            .reserve(1, 1, &failed, &alternate, 1_100)
+            .await
+            .expect("replay")
+        else {
+            panic!("an exact replay is the same reservation");
+        };
+        assert_eq!(replayed.state, ProducerRecoveryState::Reserved);
+        assert_eq!(replayed.failed_incarnation_id, "incarnation-1");
+        assert_eq!(replayed.alternate_plan_digest, alternate);
+
+        // A later session of the same playback — a reopen, a seek, a track
+        // change — is a new incarnation and a new attempt. It inherits the
+        // epoch, and the epoch is what the budget is keyed by, so it finds a
+        // row. The row is still `Reserved`, so what it has found is the
+        // predecessor *holding* the budget, not a budget spent: the store
+        // fences on the reserving incarnation, and this is that fence.
+        let successor = recovery_ledger(&store, "playback-1", "epoch-1", "incarnation-2");
+        assert!(
+            matches!(
+                successor
+                    .reserve(1, 1, &failed, &alternate, 1_200)
+                    .await
+                    .expect("second reserve"),
+                RecoveryReservation::Mismatched(_)
+            ),
+            "a continuation does not get a second recovery, and the one it \
+             cannot have is held rather than gone"
+        );
+
+        // Settling does not return it, whichever way the attempt went. Now,
+        // and only now, is the budget spent.
+        assert_eq!(
+            first
+                .settle(RecoveryOutcome::Exhausted, 1_300)
+                .await
+                .expect("settle"),
+            RecoverySettlement::Settled,
+            "the reserving identity settles its own row"
+        );
+        assert!(
+            matches!(
+                successor
+                    .reserve(1, 1, &failed, &alternate, 1_400)
+                    .await
+                    .expect("after settle"),
+                RecoveryReservation::Spent(_)
+            ),
+            "a settled budget is spent, not released"
+        );
+        assert!(
+            matches!(
+                first
+                    .reserve(1, 1, &failed, &alternate, 1_450)
+                    .await
+                    .expect("reserver after settle"),
+                RecoveryReservation::Spent(_)
+            ),
+            "not even the identity that settled it gets it back"
+        );
+
+        // A different playback is a different budget, which is the other half
+        // of "one per playback".
+        let other = recovery_ledger(&store, "playback-2", "epoch-2", "incarnation-3");
+        assert!(
+            matches!(
+                other
+                    .reserve(1, 1, &failed, &alternate, 1_500)
+                    .await
+                    .expect("other playback"),
+                RecoveryReservation::Held(_)
+            ),
+            "one playback spending its budget does not spend another's"
+        );
+    }
+
+    /// A live reservation the request no longer matches is a mismatch, and the
+    /// session that made it is the likeliest one to hit it.
+    ///
+    /// Every field of the request is part of the row's identity, so an
+    /// executor that reserved against one alternate and then re-planned onto
+    /// another asks for something the stored row does not describe. It has not
+    /// spent anything; it is holding a reservation it has to settle before it
+    /// can take a different one. `decode_restriction` is in this list too and
+    /// cannot be exercised from here — nothing in this daemon builds a
+    /// `ContinuationDecodeRestriction` yet — which is exactly why the
+    /// reservation doc says the first build that writes one has to settle and
+    /// re-epoch rather than replay.
+    #[tokio::test]
+    async fn a_changed_request_against_its_own_live_reservation_is_a_mismatch() {
+        use plurx_core::store::SqliteStore;
+
+        let store: std::sync::Arc<dyn plurx_core::store::Store> =
+            std::sync::Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let failed = "a".repeat(64);
+        let alternate = "b".repeat(64);
+        let other_digest = "c".repeat(64);
+
+        let ledger = recovery_ledger(&store, "playback-1", "epoch-1", "incarnation-1");
+        assert!(
+            matches!(
+                ledger
+                    .reserve(1, 1, &failed, &alternate, 1_000)
+                    .await
+                    .expect("reserve"),
+                RecoveryReservation::Held(_)
+            ),
+            "the reservation under test"
+        );
+
+        for (attempt, sequence, failed_digest, alternate_digest, why) in [
+            (2, 1, &failed, &alternate, "a later producer attempt"),
+            (1, 2, &failed, &alternate, "a later decision"),
+            (1, 1, &other_digest, &alternate, "a different failed plan"),
+            (1, 1, &failed, &other_digest, "a different alternate"),
+        ] {
+            assert!(
+                matches!(
+                    ledger
+                        .reserve(attempt, sequence, failed_digest, alternate_digest, 1_100)
+                        .await
+                        .expect("changed request"),
+                    RecoveryReservation::Mismatched(_)
+                ),
+                "{why} does not replay onto a row that describes a different decision"
+            );
+        }
+    }
+
+    /// Settlement names the fence it hit, because a fence reported as "there
+    /// was nothing there" is a split brain nobody looks for.
+    #[tokio::test]
+    async fn a_settlement_says_which_of_the_three_refusals_it_found() {
+        use plurx_core::store::SqliteStore;
+
+        let store: std::sync::Arc<dyn plurx_core::store::Store> =
+            std::sync::Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let failed = "a".repeat(64);
+        let alternate = "b".repeat(64);
+
+        // Nothing was ever reserved for this epoch. A caller settling on a
+        // path out that never reserved is the ordinary case, not an error.
+        let never = recovery_ledger(&store, "playback-absent", "epoch-absent", "incarnation-1");
+        assert_eq!(
+            never
+                .settle(RecoveryOutcome::Exhausted, 1_000)
+                .await
+                .expect("absent"),
+            RecoverySettlement::Absent
+        );
+
+        let owner = recovery_ledger(&store, "playback-1", "epoch-1", "incarnation-1");
+        assert!(
+            matches!(
+                owner
+                    .reserve(1, 1, &failed, &alternate, 1_100)
+                    .await
+                    .expect("reserve"),
+                RecoveryReservation::Held(_)
+            ),
+            "the reservation under test"
+        );
+
+        // A stale holder of the three key fields — a node that handled this
+        // playback before a handoff — cannot exhaust a live reservation.
+        let stale = recovery_ledger(&store, "playback-1", "epoch-1", "incarnation-2");
+        assert_eq!(
+            stale
+                .settle(RecoveryOutcome::Exhausted, 1_200)
+                .await
+                .expect("stale"),
+            RecoverySettlement::NotOurs
+        );
+        assert!(
+            matches!(
+                owner
+                    .reserve(1, 1, &failed, &alternate, 1_250)
+                    .await
+                    .expect("still held"),
+                RecoveryReservation::Held(_)
+            ),
+            "the fence left the owner's reservation alone"
+        );
+
+        assert_eq!(
+            owner
+                .settle(RecoveryOutcome::Installed, 1_300)
+                .await
+                .expect("owner settles"),
+            RecoverySettlement::Settled
+        );
+        assert_eq!(
+            owner
+                .settle(RecoveryOutcome::Installed, 1_400)
+                .await
+                .expect("owner settles again"),
+            RecoverySettlement::Settled,
+            "an owner that crashed after settling and settles again is told \
+             what happened, not handed a silence it cannot read"
+        );
+        assert_eq!(
+            owner
+                .settle(RecoveryOutcome::Exhausted, 1_500)
+                .await
+                .expect("owner contradicts itself"),
+            RecoverySettlement::Conflicting,
+            "two different answers about one attempt is a caller bug, and it \
+             is not the fencing failure `NotOurs` would send someone hunting"
+        );
+    }
+
+    /// An incomplete identity is refused at construction, not at reservation.
+    ///
+    /// The store refuses a non-positive user id, an empty playback id and an
+    /// empty epoch separately, and it refuses them at the moment a recovery is
+    /// needed — the worst moment to learn a session never had a budget. Three
+    /// real start paths carry exactly those gaps: a legacy process-local
+    /// start, a relayed worker start, and any session predating the epoch
+    /// column.
+    #[test]
+    fn an_incomplete_identity_has_no_ledger_handle_at_all() {
+        use plurx_core::store::SqliteStore;
+        let store: std::sync::Arc<dyn plurx_core::store::Store> =
+            std::sync::Arc::new(SqliteStore::open_in_memory().expect("store"));
+        for (user_id, playback, epoch, incarnation, why) in [
+            (
+                0,
+                "playback",
+                "epoch",
+                "incarnation",
+                "a legacy start has no user id",
+            ),
+            (7, "", "epoch", "incarnation", "no playback is no key"),
+            (
+                7,
+                "playback",
+                "",
+                "incarnation",
+                "a relayed start carries no epoch",
+            ),
+            (
+                7,
+                "playback",
+                "epoch",
+                "",
+                "a reservation names the attempt that failed",
+            ),
+        ] {
+            assert!(
+                ProducerRecoveryLedger::new(
+                    std::sync::Arc::clone(&store),
+                    user_id,
+                    playback,
+                    epoch,
+                    incarnation,
+                )
+                .is_none(),
+                "{why}"
+            );
+        }
     }
 
     /// The recovery this whole effort exists for, at the moment it fires.
