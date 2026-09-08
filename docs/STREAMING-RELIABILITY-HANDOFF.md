@@ -531,14 +531,35 @@ a settled contract instead of three guesses.
   - **The predecessor can now need a second receipt, and the table holds one
     per session.** `media_session_terminal_acks` is `session_id PRIMARY KEY`,
     and the commit transaction writes the commit receipt under the
-    *predecessor's* session id. Today that is harmless because the same
-    transaction ends the predecessor, so no second receipted exchange can
-    reach it. A draining predecessor stays live and answers the `demand: end`
-    every shipped reporter sends when the viewer closes the player: the write
-    loses to the commit receipt, the caller reads that as "not durably
-    committed", and the client gets a `503 control_unavailable` it retries
-    twice a second for the rest of the window. The retained reply has to
-    become the most recent receipted exchange rather than the first one.
+    *predecessor's* session id. Before the drain that was harmless because the
+    same transaction ended the predecessor, so no second receipted exchange
+    could reach it. A draining predecessor stays live and answers the
+    `demand: end` every shipped reporter sends when the viewer closes the
+    player: the write loses to the commit receipt, the caller reads that as
+    "not durably committed", and the client gets a `503 control_unavailable`
+    it retries twice a second for the rest of the window.
+
+    ~~The retained reply has to become the most recent receipted exchange
+    rather than the first one.~~ **Built that way, then withdrawn under
+    review, because it is worse than what it replaced.** Every reader of that
+    row demands byte-exact equality with what the commit wrote, so a commit
+    whose response was lost and is replayed after the viewer closed the player
+    reads back non-exact and is classified as *refused* — a rejection
+    tombstone for a successor the pointer already names. And the ordering rule
+    it needed was wrong: `sequence` is monotone per *client instance*, not per
+    session, so a reloaded page starting again at one either starves or
+    clobbers depending on which side of the stored number it lands.
+
+    **What shipped instead: a terminal exchange on a draining predecessor is
+    not receipted at all — it ends the row.** The retained reply exists so a
+    lost terminal answer can be replayed; once the row is `ended`, a client
+    that missed the answer asks again and gets `410 session_ended` from the
+    row itself, which is the same terminal by a shorter path. The commit keeps
+    the receipt slot it needs for its own replay, and the route carries
+    `drain_deadline_ms` so the control plane can tell the two cases apart.
+    This is also most of what step 2's `Switched` was for: the ordinary case
+    releases the encoder and its admission permit immediately rather than
+    waiting out the window.
   - **An old binary must not be able to take a draining session over, and SQL
     predicates cannot make that true.** Compatibility is checked when a store
     is opened and never again, so during a rolling upgrade every node still
