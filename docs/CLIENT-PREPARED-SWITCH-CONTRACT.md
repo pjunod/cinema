@@ -84,14 +84,39 @@ prepare:
 
 - `supported_actions` must contain `"prepare_replacement"`. At most 16 names,
   each 1–32 bytes.
-- `capabilities.dual_player_preparation` must be **`true`**. All three shipped
-  clients hardcode `false` today, so this is the first line you will change in
-  each of them.
+- `capabilities.dual_player_preparation` must be **`true`**. The server reads
+  the *retained* capability — clients send `capabilities` only on sequence 1 —
+  so this is decided once per session and cannot be raised later.
 - `observed_download_bps` must be reported, and honestly. A prepare is refused
   unless the client's observed throughput is at least **twice** the delivered
-  rate the server measures — there is no point staging a second stream a
-  connection cannot carry alongside the first. A client that omits the field
-  is refused silently for the same reason.
+  rate the server measures — an Auto rung change is the transition a client
+  reaches without a viewer touching anything, and the reason it fires is
+  usually that the link just degraded, so staging a second stream on it is the
+  worst possible moment to guess. A client that omits the field is refused
+  silently for the same reason.
+
+**Where each platform stands on that flag today, because it is a measured
+answer and not a line to flip:**
+
+| Platform | `dual_player_preparation` | Why |
+|---|---|---|
+| Apple | **`true`**, shipped | M5.5's 20/20 commit proof on both recipes and both devices. The literal is pinned by a test so a silent revert cannot look like a quiet fleet |
+| Android | `false` | Its own hardware evidence: the Google TV's same-codec dual path failed 3/3 admission attempts |
+| Web | `false` | Safari's codec/HDR case reached 13/20 |
+
+Android's and web's `false` are **correct answers to a measurement**, not
+oversights. Do not flip either to `true` to make your adapter work — that
+turns a refusal you can see into a stall a viewer sees. The known problem is
+that a bare boolean cannot say *yes for this recipe on this device*, so a
+correct `false` also throws away two Android phones that passed both cases;
+narrowing the capability is a v1 protocol change and is deliberately not
+yours to make inside an adapter PR. Apple is the platform where this does not
+bite, which makes it the sensible one to build first.
+
+Apple and Android already send `observed_download_bps` — AVFoundation's
+`observedBitrate` from the newest access-log event, and the rate `MediaOrigin`
+counts off the wire over a rolling 500 ms window. Both are nil until measured,
+which the server reads as a refusal rather than a pass.
 
 **The server never sends an action a client has not named.** That is what makes
 the shipped protocol safe against every client that exists today, and it is
