@@ -1,9 +1,9 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M0–M3f, M4, M5a, M5b and the M5a census repair merged into the
-effort; M5c specified and not started · **Updated:** 2026-09-07 ·
+**Status:** M0–M3f, M4, M5a, M5b, the M5a census repair and M5c1 merged into
+the effort; M5c2 next · **Updated:** 2026-09-08 ·
 **Integration branch:** `effort/decoder-selection-recovery` · **Next task
-base:** effort head `7f2cb598c6ed89dd24996e06783077f1e29c0678`
+base:** effort head `67216de9`
 
 The effort was created from Forgejo `main` at
 `4a6a0268bd314ad5587cb3037f12ebd992c0074e`. The original M0 research baseline was `main` at
@@ -20,8 +20,8 @@ An unchecked item is not implied by a nearby passing check.
 
 | Field | Current value |
 |---|---|
-| Milestone | M5c — prepublication recovery. Specified below; not started |
-| Task branch | Next task branches from effort head `7f2cb598` |
+| Milestone | M5c — prepublication recovery. M5c1 merged (the decision seam); M5c2 next (the restricted retry and its durable budget) |
+| Task branch | Next task branches from effort head `67216de9` |
 | Task PR | Open against the effort branch. One whole-PR adversarial review is owed on this candidate before it merges |
 | M1 dependency | [Forgejo #63](http://192.168.4.7:3000/noirr/plurx/pulls/63) is merged. Exact head `f7f98b01` completed `make validate-full` with 23 passed, 0 failed, and 2 declared skips (`android-device`, no `adb` on the qualifying host; `live-tv-two-node`, which does not run on Darwin); `target/validation/report.json` records `git_ref f7f98b01`, generated `2026-09-07T01:01:02Z`. It fast-forwarded into the effort. M2 ([Forgejo #73](http://192.168.4.7:3000/noirr/plurx/pulls/73)) then fast-forwarded onto it after its own whole-PR review, its findings repair, and the Forgejo effort gate on exact head `773ad488` — which is the commit this M3a branch is based on |
 | Effort PR | Not opened yet |
@@ -2369,6 +2369,63 @@ can help a viewer who has already been served those bytes. That case is M3c's,
 and M3c already handles it — the artifact is refused, so the next request
 re-produces rather than re-serving. The live session is not recoverable and
 this document does not claim it is.
+
+### M5c1, merged: the ordering question is answered, and by a fourth option
+
+[Forgejo #114](http://192.168.4.7:3000/noirr/plurx/pulls/114), effort head
+`67216de9`. The three candidates above were not chosen between; building the
+thing produced a fourth that is better than any of them, and the reason is
+worth keeping because it invalidates part of the analysis that generated the
+list.
+
+**The override happens inside the commit the timing deadline triggers.** Not
+before it, not after it, not instead of it. `commit_producer_decision_at`
+already reads the latched fault through the accessor built for it; the change
+is that on the failing branch it now rewrites `reason` to the new
+`ProducerDecisionReason::SourceDecodeFailed`. There is no race to lose, because
+the decode evidence is consulted during the very decision that would otherwise
+have said "try again" — which is candidate 2 without its cost, since nothing
+ever observes a decision whose reason later changed. Candidate 3's bounded wait
+is unnecessary, and candidate 1's gate split turned out to be unnecessary too.
+
+**Because the premise behind the split was false.** Candidate 1 assumed
+`automatic_action_allowed` cannot be asked at latch time, since it requires a
+complete observation and "at latch time the log is by definition still being
+read". Nothing clears `observation_complete` for being mid-read: it is cleared
+only by a read error, a partial trailing line, a malformed record, an oversized
+line, or invalid UTF-8. A clean stream is complete at every line, including the
+one that latches. A first draft of the repair did split the gate, and the
+adversarial review found the split unsafe for a second reason — three of those
+five clear the flag while still handing the offending line to classification,
+so a triggering window can be assembled entirely out of an oversized line's
+retained head, an invalid-UTF-8 line's lossy transcription, and the partial
+record a killed stream yields. Completeness is not only a claim about absence
+here; it is a claim about the quality of the records that are present. The
+split method is deleted and its reasoning kept in `automatic_action_allowed`'s
+own doc so the idea is not had twice.
+
+**What the review caught, and what it means for M5c2.** Two high-severity
+findings, both about scope rather than mechanism, both now guarded by named
+tests. The rewrite reached `Retry` decisions, whose reason is not private to
+the server — it reaches `DeliveryView` and `resolve_action` turns any permanent
+reason into `ControlAction::Terminal`, so a viewer was told the file was dead
+while the node was still bringing up a fallback that would likely have played
+it, and `last_decision` is never cleared, so that stood for the rest of the
+session rather than for a moment. It also reached producers that had already
+published, where `PartialSuccessExit` is by construction proof the source
+decoded. A third finding replaced the `!is_permanent()` test with a named list,
+`yields_to_decode_evidence`, because the negative test also swept up
+`ExecutorLost` and the flow and install deadlines: facts about this node,
+relabelled as permanent properties of a file.
+
+**What M5c1 deliberately did not do.** The specification's item 3 asks for a
+reason that is *not* permanent, because a restricted retry is the point.
+`SourceDecodeFailed` is permanent, and that is the honest answer for what
+exists today: with no software-restricted recipe to install, "try again" is a
+lie. M5c2 adds the restricted retry, and when it lands the decision becomes
+two-sided — reserve the durable budget and install the restricted recipe when
+one is available, fall to the permanent verdict only when it is not. Seams 4,
+5, 6, 7 and 9 are all still open.
 
 ### What must not be assumed on the way
 
