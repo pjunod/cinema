@@ -4,6 +4,42 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## The transport-recovery campaign asserted a property the system does not have
+
+**Decided and built; the lane that has been red on `main` and every PR since
+`14d0519a` gets an assertion it can pass without losing its teeth.**
+`ci / cluster transport recovery campaign` compared every one of its forty
+cycles against a single warmed sample with all three margins at zero. The
+counts it samples do not sit at a value: sockets and owned async tasks
+alternate between two states one recovery apart — one connection and one
+owned task per peer, still open when `operation_owns_work` clears — and
+threads jitter on their own. Forty cycles needed forty favourable draws,
+which is why the failure moved between cycles 1, 4, 6, 9 and 13 and why
+`Main promotion gate` failed in two seconds behind it on every PR.
+
+**What it asserts now is a floor.** The series per node is the warmup plus the
+twenty cycles; the minimum over the closing half may not exceed the minimum
+over the opening half by more than the allowance — zero for sockets and owned
+async tasks, two for threads. A leak adds every cycle and moves the floor by
+ten or more; a drain visits its low state every other cycle and cannot move a
+minimum over ten samples at all. The option first written up — last cycle
+against first cycle — was rejected on the way: two samples of a two-state
+range is the same coin flip, drawn twice instead of forty times.
+
+What moved: the sampler no longer waits for a ceiling, only for idle and two
+identical samples; the record-time bail is gone; the campaign computes and
+prints both floors per node at the end of each role and fails there, with
+the whole per-cycle series in the log; the offline validator recomputes the
+floors from the cycles and refuses a hand-written one. Artifact schema is
+version 2 (`resource_*_floor_allowance`, `resource_floors` per role). 37
+focused tests, six of them the mutations that prove a leak of one socket,
+thread or task per cycle still fails — and that the measured drain and
+jitter pass. Decision document:
+[docs/cluster/TRANSPORT-RECOVERY-RESOURCE-CONTRACT-DECISION.md](docs/cluster/TRANSPORT-RECOVERY-RESOURCE-CONTRACT-DECISION.md)
+§0. Still open: Option C there — making `idle` mean the transports are
+released, which is a vendored hiqlite change and helps everything that reads
+`operation_owns_work`, not only this lane.
+
 ## Phase 3 is buildable today, and the first answer to that question was wrong
 
 **Documentation only, and a decision taken in Paul's absence — overrule it

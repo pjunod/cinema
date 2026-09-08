@@ -1,10 +1,12 @@
 # Transport-recovery resource baseline — why that lane has never passed
 
-**Status:** measured, not fixed · **Blocks:** `ci / cluster transport recovery
-campaign`, and through it `ci / Main promotion gate` on every pull request ·
-**Measured:** 2026-09-07 · **Decision needed:** §6
+**Status:** measured, and the decision in §6 is taken — Option A as a
+campaign floor, built and described in
+[TRANSPORT-RECOVERY-RESOURCE-CONTRACT-DECISION.md](TRANSPORT-RECOVERY-RESOURCE-CONTRACT-DECISION.md)
+§0 · **Measured:** 2026-09-07 · **Decided:** 2026-09-08
 
-Read this before changing anything under `wait_for_stable_idle_resources` in
+This is the measurement the contract was changed on. Read it before touching
+`wait_for_stable_idle_resources` in
 [`crates/plurx-cluster-check/src/transport_recovery.rs`](../../crates/plurx-cluster-check/src/transport_recovery.rs),
 and before raising `RESOURCE_CLEANUP_HORIZON`, relaxing the stability rule, or
 opening any margin. Three of those four were tried on 2026-09-07 and §5 records

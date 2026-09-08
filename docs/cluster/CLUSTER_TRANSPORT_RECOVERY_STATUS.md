@@ -1,7 +1,7 @@
 # Cluster transport recovery — live implementation status
 
 **Status:** deploy-first promotion · **Effort:** `effort/cluster-transport-recovery` ·
-**Started:** 2026-09-05 · **Last updated:** 2026-09-06
+**Started:** 2026-09-05 · **Last updated:** 2026-09-08
 
 Companion to [OPERATIONS.md](../OPERATIONS.md) (operator contracts) and
 [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md) (branch, gate, and
@@ -25,6 +25,24 @@ deploy-first exception, not a qualification claim. The retained 20-voter plus
 image publication, and fleet rollout verification remain open. Follow
 [CLUSTER-TRANSPORT-RECOVERY-POST-MERGE-HANDOFF.md](CLUSTER-TRANSPORT-RECOVERY-POST-MERGE-HANDOFF.md)
 without weakening or feature-gating the shipped behavior.
+
+## Resource contract — the campaign asserts a floor, not a per-cycle ceiling (2026-09-08)
+
+The retained 20+20 campaign never passed under the resource check that landed
+with M5: it compared every cycle against one warmed sample at zero margin,
+and the counts it sampled visit two states one recovery apart (the per-peer
+transports are still open when `operation_owns_work` clears). The measurement
+is [TRANSPORT-RECOVERY-RESOURCE-BASELINE.md](TRANSPORT-RECOVERY-RESOURCE-BASELINE.md);
+the decision and what it changed, site by site, is
+[TRANSPORT-RECOVERY-RESOURCE-CONTRACT-DECISION.md](TRANSPORT-RECOVERY-RESOURCE-CONTRACT-DECISION.md)
+§0. In one line: the minimum of each resource over the closing half of the
+campaign may not exceed its minimum over the opening half — by zero for
+sockets and owned async tasks, by two for threads. A leak moves that floor by
+ten or more; a drain cannot move a minimum over ten samples at all. The
+artifact is schema version 2 and records both floors per node, so it proves
+the comparison without the harness. The `idle` predicate itself is unchanged
+and still wrong on its own terms; that is Option C in the decision document
+and remains open.
 
 ## Outcome — bounded recovery without weakening authority
 
