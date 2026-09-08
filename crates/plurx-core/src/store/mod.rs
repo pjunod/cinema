@@ -1247,6 +1247,18 @@ pub mod keys {
     /// HLS sessions. Explicit opt-in until every client has a passive reporter
     /// and mixed-fleet behavior has been measured.
     pub const PLAYBACK_CONTROL_PROTOCOL_V1: &str = "playback.control_protocol_v1";
+    /// Serve PGS subtitle tracks through the authenticated `pgs-v1` overlay
+    /// API instead of hiding them.
+    ///
+    /// This was `PLURX_PGS_OVERLAY`, read once at boot. An environment
+    /// variable is the wrong place for it twice over: it decides which
+    /// subtitle tracks a client is even offered, which is a product question
+    /// an operator should be able to see and answer, and it could only be
+    /// changed by restarting the daemon with a different compose file. The
+    /// setting is the switch now; the old variable is read once at startup to
+    /// seed it, so a deployment that had turned it on keeps it on and can
+    /// then find it in Settings.
+    pub const PGS_OVERLAY: &str = "subtitles.pgs_overlay";
     /// Node-wide byte budget for un-admitted VOD rendition working sets.
     /// Absent takes the built-in default. A parsed zero is refused at the
     /// settings surface: "no working set" and "not configured" are opposite

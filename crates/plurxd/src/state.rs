@@ -657,10 +657,6 @@ pub struct AppState {
     /// Where extracted subtitles are kept, keyed by file identity and source
     /// fingerprint — see `http::stream::subtitles_vtt`.
     pub subs_dir: PathBuf,
-    /// Staged rollout gate for the authenticated `pgs-v1` overlay API. The
-    /// daemon only advertises the capability when the same process will serve
-    /// it. Default-off until physical-client acceptance is complete.
-    pub pgs_overlay_enabled: bool,
     pub jobs: Arc<JobManager>,
     pub transcode: Arc<TranscodeManager>,
     pub offline: Arc<OfflineManager>,
@@ -711,6 +707,29 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Whether PGS subtitle tracks are served through the `pgs-v1` overlay.
+    ///
+    /// Read at the request boundary rather than latched at boot, so an
+    /// operator who turns it on in Settings sees the next request honour it.
+    /// A store that cannot be read answers `false`: the overlay API is the
+    /// thing that would then be advertised and not served, and a capability
+    /// the same process cannot honour is worse than one it does not offer.
+    pub(crate) async fn pgs_overlay_enabled(&self) -> bool {
+        self.store
+            .get_setting(keys::PGS_OVERLAY)
+            .await
+            .ok()
+            .flatten()
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|value| {
+                matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+    }
+
     /// Resolve the operator's bounded forward subtitle span at the request
     /// boundary. A malformed hand-edited row falls back to the 200-second
     /// default; the settings API itself only persists values inside 30–900.
@@ -907,12 +926,6 @@ impl AppState {
             runtime_cache_dir: runtime_cache,
             shared_cache,
             subs_dir,
-            pgs_overlay_enabled: std::env::var("PLURX_PGS_OVERLAY").is_ok_and(|value| {
-                matches!(
-                    value.trim().to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes" | "on"
-                )
-            }),
             jobs,
             transcode,
             offline,

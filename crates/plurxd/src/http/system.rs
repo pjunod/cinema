@@ -1613,6 +1613,10 @@ pub struct SettingsDto {
     /// Additive, behavior-neutral playback-control v1 advertisement. Off by
     /// default until clients ship passive reporters.
     pub playback_control_protocol_v1: bool,
+    /// Serve PGS subtitle tracks through the authenticated `pgs-v1` overlay.
+    /// Off by default. Was `PLURX_PGS_OVERLAY`, which decided which subtitle
+    /// tracks a client is offered from a compose file.
+    pub pgs_overlay: bool,
     /// Node-wide byte budget for un-admitted VOD working sets. Empty = the
     /// built-in default. Never zero — "no working set" is not a configuration
     /// this accepts (M3 handoff §6).
@@ -1890,6 +1894,10 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         vod_live_recovery: setting(keys::VOD_LIVE_RECOVERY).as_deref() != Some("0"),
         playback_control_protocol_v1: setting(keys::PLAYBACK_CONTROL_PROTOCOL_V1).as_deref()
             == Some("1"),
+        pgs_overlay: matches!(
+            setting(keys::PGS_OVERLAY).as_deref().map(str::trim),
+            Some("1" | "true" | "yes" | "on")
+        ),
         vod_working_set_bytes: setting(keys::VOD_WORKING_SET_BYTES).unwrap_or_default(),
         vod_block_budget_secs: setting(keys::VOD_BLOCK_BUDGET_SECS).unwrap_or_default(),
         vod_materialize_budget_secs: setting(keys::VOD_MATERIALIZE_BUDGET_SECS).unwrap_or_default(),
@@ -1966,6 +1974,7 @@ pub struct UpdateSettings {
     pub vod_presentation: Option<bool>,
     pub vod_live_recovery: Option<bool>,
     pub playback_control_protocol_v1: Option<bool>,
+    pub pgs_overlay: Option<bool>,
     pub vod_working_set_bytes: Option<String>,
     pub vod_block_budget_secs: Option<String>,
     pub vod_materialize_budget_secs: Option<String>,
@@ -2091,6 +2100,7 @@ impl UpdateSettings {
             || self.vod_presentation.is_some()
             || self.vod_live_recovery.is_some()
             || self.playback_control_protocol_v1.is_some()
+            || self.pgs_overlay.is_some()
             || self.vod_working_set_bytes.is_some()
             || self.vod_block_budget_secs.is_some()
             || self.vod_materialize_budget_secs.is_some()
@@ -2823,6 +2833,12 @@ pub async fn update_settings(
                 keys::PLAYBACK_CONTROL_PROTOCOL_V1,
                 if on { "1" } else { "0" },
             )
+            .await?;
+    }
+    if let Some(on) = req.pgs_overlay {
+        state
+            .store
+            .put_setting(keys::PGS_OVERLAY, if on { "1" } else { "0" })
             .await?;
     }
     if let Some(on) = req.vod_index_cluster_cache {

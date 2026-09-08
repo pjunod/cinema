@@ -15,7 +15,11 @@ use crate::pgs_overlay::{self, OverlayError, PrepareState};
 use crate::state::AppState;
 
 async fn file_and_track(state: &AppState, id: i64, index: i64) -> Result<MediaFile, ApiError> {
-    if !state.pgs_overlay_enabled {
+    if !state.pgs_overlay_enabled().await {
+        // Counted before the refusal, because "a client asked and the switch
+        // was off" is the one reading that tells an operator the feature is
+        // wanted here. A 404 alone says nothing to anybody.
+        OVERLAY_REFUSED_OFF.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return Err(ApiError::NotFound("PGS overlay"));
     }
     if index < 0 {
@@ -38,12 +42,35 @@ async fn file_and_track(state: &AppState, id: i64, index: i64) -> Result<MediaFi
     Ok(file)
 }
 
+/// Overlay manifests served since this process started, and refusals because
+/// the switch is off.
+///
+/// The Developer readiness row for this switch has to answer "does anything in
+/// this fleet actually render pgs-v1", and the only honest evidence a daemon
+/// holds is whether a client ever asked for a manifest. Process-local, so a
+/// restart returns it to zero — the row says so rather than presenting a fresh
+/// process's silence as a fleet fact.
+pub(crate) static OVERLAY_MANIFESTS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub(crate) static OVERLAY_REFUSED_OFF: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// What this process has seen of the overlay, for the readiness route.
+pub(crate) fn overlay_demand_snapshot() -> (u64, u64) {
+    use std::sync::atomic::Ordering;
+    (
+        OVERLAY_MANIFESTS.load(Ordering::Relaxed),
+        OVERLAY_REFUSED_OFF.load(Ordering::Relaxed),
+    )
+}
+
 pub async fn manifest(
     _user: AuthUser,
     State(state): State<AppState>,
     AxPath((id, index)): AxPath<(i64, i64)>,
 ) -> Result<Response, ApiError> {
     let file = file_and_track(&state, id, index).await?;
+    OVERLAY_MANIFESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     match pgs_overlay::prepare(&state.subs_dir, &file, index)
         .await
         .map_err(map_overlay_error)?

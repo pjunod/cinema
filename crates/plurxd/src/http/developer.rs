@@ -117,14 +117,91 @@ pub(crate) async fn readiness(
         .map(String::as_str)
         != Some("0");
 
+    let overlay_on = matches!(
+        settings
+            .get(plurx_core::store::keys::PGS_OVERLAY)
+            .map(|value| value.trim().to_ascii_lowercase()),
+        Some(ref value) if matches!(value.as_str(), "1" | "true" | "yes" | "on")
+    );
+
     Ok(Json(DeveloperReadiness {
         items: vec![
             cluster_transport_recovery(&state).await,
             playback_control_protocol(control_advertised),
             prepared_quality_handoff(),
             live_hls_recovery(live_recovery_on),
+            pgs_overlay(overlay_on),
         ],
     }))
+}
+
+/// Image subtitles served as an overlay rather than hidden or burned in.
+///
+/// This was `PLURX_PGS_OVERLAY`, a boot-time environment read that decided
+/// which subtitle tracks a client is offered. It is here because that decision
+/// is a product question — a viewer with a PGS-only subtitle track either sees
+/// it or does not — and an operator could neither see the answer nor change it
+/// without redeploying.
+fn pgs_overlay(enabled: bool) -> DeveloperEnableItem {
+    let (served, refused) = crate::http::pgs_overlay::overlay_demand_snapshot();
+
+    // Reachable both ways, and neither direction can be read upward into "the
+    // fleet renders overlays". One manifest served proves one client asked and
+    // was answered; it does not prove the client drew anything, which is what
+    // the acceptance row below is for and which no counter can see.
+    let clients = if served > 0 {
+        DeveloperRequirement {
+            id: "clients_render_overlays",
+            title: "A client in the fleet renders pgs-v1",
+            status: RequirementStatus::Unobservable,
+            evidence: format!(
+                "{served} overlay manifest(s) have been served since this process started, so at \
+                 least one client asked for one. Whether it drew them is not something this \
+                 server can see. These counters are process-local and a restart returns them to \
+                 zero."
+            ),
+        }
+    } else if refused > 0 {
+        DeveloperRequirement {
+            id: "clients_render_overlays",
+            title: "A client in the fleet renders pgs-v1",
+            status: RequirementStatus::Unobservable,
+            evidence: format!(
+                "{refused} overlay request(s) since this process started were refused because \
+                 this switch is off, so a client here is asking for the capability. That is a \
+                 reason to consider turning it on, not evidence that the client renders it."
+            ),
+        }
+    } else {
+        DeveloperRequirement {
+            id: "clients_render_overlays",
+            title: "A client in the fleet renders pgs-v1",
+            status: RequirementStatus::Unobservable,
+            evidence: "No client has asked this process for an overlay manifest since it \
+                       started \u{2014} which is also what a fleet with no PGS subtitles looks \
+                       like. These counters are process-local and a restart returns them to zero."
+                .to_owned(),
+        }
+    };
+
+    DeveloperEnableItem {
+        id: "pgs_overlay",
+        title: "Serve PGS subtitles as an overlay",
+        enabled: Some(enabled),
+        setting: Some(plurx_core::store::keys::PGS_OVERLAY),
+        requirements: vec![
+            clients,
+            DeveloperRequirement {
+                id: "overlay_acceptance",
+                title: "Physical-client acceptance is complete",
+                status: RequirementStatus::Unobservable,
+                evidence: "Whether image subtitles land in the right place, at the right size, at \
+                           the right moment is judged on a screen. The daemon never receives that \
+                           receipt, and a green unit suite is not it."
+                    .to_owned(),
+            },
+        ],
+    }
 }
 
 /// The retained live-HLS engine: what it is, why it chose the work, and where

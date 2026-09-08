@@ -1798,6 +1798,7 @@ async fn probe_system(
     let decoders = plurx_core::transcode::detect_video_decoders(&ffmpeg).await;
 
     let hwaccel_pref = resolve_hwaccel_pref(store).await?;
+    seed_pgs_overlay_setting(store).await?;
     let probe_pref = probe_preference(&hwaccel_pref);
     let encoder_selected = encoder_caps.choose(&probe_pref).label().to_owned();
     // Which tone-map graph this node may use. After encoder detection, because
@@ -1906,6 +1907,33 @@ fn dv_convert_enabled(value: Option<&str>) -> bool {
             "0" | "false" | "off" | "no"
         )
     })
+}
+
+/// Carry a deployment's `PLURX_PGS_OVERLAY` across to the setting that
+/// replaced it, once.
+///
+/// Deliberately seed-when-absent rather than the env-wins rule
+/// `resolve_hwaccel_pref` uses below, and the difference is the point. This is
+/// a switch an operator now turns on and off in Settings; if a stale compose
+/// file re-asserted itself at every restart, turning it off in the product
+/// would appear to work and then quietly undo itself on the next deploy, which
+/// is worse than the boot-time gate it replaced. The variable answers only for
+/// a node that has never been told either way.
+async fn seed_pgs_overlay_setting(store: &Arc<dyn plurx_core::store::Store>) -> anyhow::Result<()> {
+    if store.get_setting(keys::PGS_OVERLAY).await?.is_some() {
+        return Ok(());
+    }
+    let Ok(value) = std::env::var("PLURX_PGS_OVERLAY") else {
+        return Ok(());
+    };
+    let on = matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    );
+    store
+        .put_setting(keys::PGS_OVERLAY, if on { "1" } else { "0" })
+        .await?;
+    Ok(())
 }
 
 /// The encoder preference this boot runs under.

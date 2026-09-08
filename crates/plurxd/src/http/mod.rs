@@ -4246,7 +4246,8 @@ mod tests {
                 "cluster_transport_recovery",
                 "playback_control_protocol_v1",
                 "prepared_quality_handoff",
-                "live_hls_recovery"
+                "live_hls_recovery",
+                "pgs_overlay"
             ],
             "every Developer card with prerequisites needs a row here: {body}"
         );
@@ -5715,10 +5716,10 @@ mod tests {
         (router(state.clone()), state)
     }
 
-    fn test_state_with_pgs_overlay() -> (Router, AppState) {
+    async fn test_state_with_pgs_overlay() -> (Router, AppState) {
         let store = SqliteStore::open_in_memory().expect("store");
         let base = crate::test_temp_path(format!("plurx-pgs-api-{}", uuid::Uuid::new_v4()));
-        let mut state = AppState::new(
+        let state = AppState::new(
             "test".into(),
             Arc::new(store),
             test_dirs(&base),
@@ -5727,7 +5728,11 @@ mod tests {
             Default::default(),
             Arc::new(crate::logbuf::LogBuffer::new(64)),
         );
-        state.pgs_overlay_enabled = true;
+        state
+            .store
+            .put_setting(plurx_core::store::keys::PGS_OVERLAY, "1")
+            .await
+            .expect("enable the pgs overlay");
         (router(state.clone()), state)
     }
 
@@ -7123,7 +7128,7 @@ mod tests {
         };
         use sha2::{Digest, Sha256};
 
-        let (app, state) = test_state_with_pgs_overlay();
+        let (app, state) = test_state_with_pgs_overlay().await;
         let admin = setup_admin(&app).await;
         let source_dir =
             crate::test_temp_path(format!("plurx-pgs-source-{}", uuid::Uuid::new_v4()));

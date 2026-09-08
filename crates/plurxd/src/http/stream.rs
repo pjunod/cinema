@@ -1889,8 +1889,13 @@ pub async fn decision(
     let selected_subtitle =
         effective_subtitle_selection(&file, q.subtitle, policy_selection.subtitle_index)?;
     let selection_requested = q.audio.is_some() || q.subtitle.is_some();
+    // One read for both uses below: whether a PGS track is offered to the
+    // client and whether selecting one forces a burn-in are the same question
+    // asked twice, and answering them from two reads would let a switch flip
+    // between them inside one request.
+    let pgs_overlay = state.pgs_overlay_enabled().await;
     let selected_subtitle_requires_burn =
-        subtitle_requires_burn_in(&file, selected_subtitle, state.pgs_overlay_enabled);
+        subtitle_requires_burn_in(&file, selected_subtitle, pgs_overlay);
     let container_default_audio = container_default_audio_index(&file.audio_streams);
     set_selected_audio_default(&mut file.audio_streams, selected_audio);
     let mut decision = q.decide(
@@ -1985,7 +1990,7 @@ pub async fn decision(
 
     // DTO defaults and the verdict now come from the same selection above.
     let audio = audio_tracks(&file);
-    let mut subtitles = sub_tracks(&file, state.pgs_overlay_enabled);
+    let mut subtitles = sub_tracks(&file, pgs_overlay);
     for s in &mut subtitles {
         s.default = selected_subtitle == Some(s.index);
     }
