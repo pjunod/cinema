@@ -368,7 +368,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
 
         self.assertIn(
             "M0–M5 complete · M6 server/client implementation landed, fleet "
-            "acceptance open · M7b exact candidate awaiting re-review · "
+            "acceptance open · M7b approved, final effort gate pending · "
             "M8 and promotion remain",
             self.flat_status,
         )
