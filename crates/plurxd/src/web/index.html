@@ -6809,7 +6809,7 @@ function playbackControlCapabilities(){
   const decoderPx=Number(PLAY_CAPS&&PLAY_CAPS.maxheight)||displayPx;
   const px=Math.min(displayPx||decoderPx,decoderPx||displayPx);
   return {platform:"web",max_height:Math.max(144,Math.min(2160,Math.round(px)||1080)),
-    codecs,dynamic_ranges:ranges,dual_player_preparation:false};
+    codecs,dynamic_ranges:ranges,dual_player_preparation:preparedHandoffOffered(PLAYER)};
 }
 function playbackControlSelection(p){
   const requested=playQuality();
@@ -6925,8 +6925,597 @@ function playbackControlSnapshot(v,p){
       ? (pendingSeek?pendingSeek.targetMs:positionMs) : null,
     observed_download_bps:Number.isFinite(bps)&&bps>0?Math.round(bps):null,
     selection:playbackControlSelection(p),capabilities:playbackControlCapabilities(),
-    observation,acknowledgement:null};
+    observation,acknowledgement:pendingPlaybackControlAcknowledgement(p,demand)};
 }
+
+// ---- prepared replacement --------------------------------------------------
+//
+// The client half of a two-player handoff: the server stages a successor
+// session, tells this client where its playlist is and what source position
+// that playlist's zero maps to, and then waits. It never orders the switch —
+// there is no `commit_replacement` action — so everything below is this
+// client's decision, reported back as acknowledgement states.
+//
+// Two gates decide whether any of it ever runs, and they are independent. Gate
+// A is `capabilities.dual_player_preparation`: a hardware claim, and the
+// server stages nothing at all for a client that says false. Gate B is naming
+// `prepare_replacement` in `supported_actions`: a vocabulary claim, which this
+// build now makes unconditionally, because a client that declares it and is
+// never offered a preparation behaves exactly as it did before.
+//
+// Settings → Developer owns Gate A for this browser. It is advisory there —
+// the card lists what is measured and what is not, and whether each is
+// currently met — and it does not gate the switch: an operator who wants the
+// path on gets it on, and the readiness list is what tells them the cost.
+const PREPARED_HANDOFF_KEY="plurx.prepared_handoff";
+// How far past the incumbent's current film position the successor must be
+// buffered before this client will switch. A handoff that commits at the
+// playhead hands the viewer a decoder with nothing in front of it.
+const PREPARED_BUFFER_LEAD_MS=4000;
+// Drift the successor may carry into the switch before it is seeked onto the
+// incumbent's second. Below this a corrective seek costs more than it fixes:
+// it flushes the buffer that was the whole point of preparing.
+const PREPARED_ALIGN_SLACK_MS=250;
+// A switch that never renders is a failed preparation, and the server is owed
+// that answer rather than a 330-second silence.
+const PREPARED_FIRST_FRAME_MS=8000;
+const PREPARED_TERMINAL_STATES=["committed","failed","aborted"];
+// Unsent settlements, bounded. Two stagings can be unsettled at once — a
+// supersede queues the old one's `aborted` while the new one is already
+// reporting progress — and more than a few means the exchanges are not
+// happening at all, at which point the server's deadline has settled them.
+const PREPARED_ACK_QUEUE_MAX=4;
+// Stagings this client has settled, remembered so a replay of one is
+// recognised rather than built again. The server replays a `Prepare`
+// byte-identically until it processes the acknowledgement.
+const PREPARED_SETTLED_MEMORY=8;
+// How long a stopping reporter is left alive to deliver a final settlement.
+// One exchange, not a lease: the cadence floor is 250 ms and the deadline is
+// four seconds, so anything longer is waiting on a server that is not going to
+// answer.
+const CONTROL_SETTLE_FLUSH_MS=5000;
+// Whether this browser will OFFER to prepare, right now.
+//
+// The switch is the operator's answer; this is the player's. A successor that
+// died before it was ever playable is evidence about this playback rather than
+// about that attempt — and while staging starts no worker, that is every
+// attempt — so the offer is withdrawn for the rest of the playback instead of
+// building a doomed second pipeline on every quality change. Learned, and
+// forgotten when the player ends: no flag, nothing persisted, and nothing an
+// operator has to reset.
+function preparedHandoffOffered(p){
+  return preparedHandoffEnabled() && !(p&&p.preparedRefused);
+}
+function preparedHandoffEnabled(){
+  // Any scope without storage — a private window that refuses it, and the test
+  // harnesses that build these functions out of source — reads as off.
+  try{ return localStorage.getItem(PREPARED_HANDOFF_KEY)==="1"; }catch(e){ return false; }
+}
+function setPreparedHandoffEnabled(on){
+  try{ localStorage.setItem(PREPARED_HANDOFF_KEY,on?"1":"0"); }catch(e){}
+}
+// Source position represented by a session's own zero.
+//
+// Named after Android's `MediaOrigin.kt` and Apple's `sessionMediaOriginMs`
+// rather than inventing a third vocabulary for the same two timelines. A VOD
+// playlist is the whole immutable title, so its zero IS the source's zero; a
+// live or recovery session's zero is wherever the server started cutting, and
+// `media_origin_ms` is the server saying so. `start_seconds` is the older
+// field that says the same thing, and is the fallback.
+function sessionMediaOriginMs(session){
+  if(!session||typeof session!=="object") return 0;
+  if(session.vod) return 0;
+  const explicit=Number(session.media_origin_ms);
+  if(Number.isFinite(explicit)) return Math.max(0,Math.round(explicit));
+  const seconds=Number(session.start_seconds);
+  if(Number.isFinite(seconds)) return Math.max(0,Math.round(seconds*1000));
+  return 0;
+}
+// Film time from a player's local time. The commit boundary is expressed in
+// film time, so a handoff that reasons in local time lands the viewer at the
+// wrong second and reads as a seek bug rather than an alignment bug.
+function realMediaPositionMs(localMs,baseMs,isVod){
+  const local=Number(localMs);
+  if(!Number.isFinite(local)) return 0;
+  const base=isVod?0:Math.max(0,Number(baseMs)||0);
+  return Math.max(0,Math.round(base+local));
+}
+// The inverse: where a film position sits on a session whose zero is `baseMs`.
+// This is the only thing that puts the second pipeline on the first's second.
+function preparedLocalPositionMs(filmMs,baseMs){
+  return Math.max(0,Math.round((Number(filmMs)||0)-Math.max(0,Number(baseMs)||0)));
+}
+// Where the incumbent is, in film time, right now.
+function playbackFilmPositionMs(v,p){
+  if(!v||!p) return 0;
+  return realMediaPositionMs(Math.max(0,(v.currentTime||0)*1000),(p.offset||0)*1000,!!p.vod);
+}
+// The queued settlement, if this exchange may carry it.
+//
+// A `committed` may not share an exchange with `demand:"end"` — the server
+// answers 400 to that pair — so a commit that collides with a close waits for
+// its own exchange instead of being dropped or renamed. Switching and then
+// closing is two exchanges, in that order.
+function pendingPlaybackControlAcknowledgement(p,demand){
+  const queue=p&&p.controlAcknowledgements;
+  if(!queue||!queue.length) return null;
+  // The head, unless it is a commit and this exchange ends the session: a
+  // `committed` may not share an exchange with `demand:"end"` — the server
+  // answers 400 to the pair — so the commit waits for its own exchange instead
+  // of being dropped or renamed. Switching and then closing is two exchanges,
+  // in that order.
+  const head=queue[0];
+  if(head.state==="committed"&&demand==="end") return null;
+  return head;
+}
+
+function queuePlaybackControlAcknowledgement(p,actionId,state,extra){
+  if(!p||!actionId||!state) return null;
+  const queue=p.controlAcknowledgements||(p.controlAcknowledgements=[]);
+  // A QUEUE and not a slot, because two stagings can be unsettled at once: a
+  // second `prepare` aborts the first, and the first's `aborted` is still
+  // waiting for an exchange when the second's `metadata_ready` is queued. One
+  // slot loses the abort, and the staging it belonged to then holds the
+  // session's only preparation slot until the 330-second deadline.
+  const at=queue.findIndex(entry=>entry.action_id===actionId);
+  if(at!==-1){
+    const pending=queue[at];
+    // A terminal settlement outranks a progress one: a `failed` must not be
+    // overwritten by a `metadata_ready` that was already in flight when the
+    // pipeline died.
+    if(PREPARED_TERMINAL_STATES.includes(pending.state)
+      &&!PREPARED_TERMINAL_STATES.includes(state)) return pending;
+    queue.splice(at,1);
+  }
+  const ack=Object.assign({action_id:actionId,state},extra||{});
+  queue.push(ack);
+  // Bounded, because an unsent queue is a leak with a wire cost. The oldest
+  // goes first: a settlement nobody has managed to send in four preparations
+  // is one the server's deadline has already reaped.
+  while(queue.length>PREPARED_ACK_QUEUE_MAX) queue.shift();
+  notifyPlaybackControl();
+  return ack;
+}
+
+function settlePlaybackControlAcknowledgement(p,request){
+  const sent=request&&request.acknowledgement;
+  const queue=p&&p.controlAcknowledgements;
+  if(!sent||!queue||!queue.length) return;
+  // Matched on both fields rather than on identity: the reporter replays a
+  // retried request, and the object it replays is the one that was queued.
+  const at=queue.findIndex(entry=>entry.action_id===sent.action_id&&entry.state===sent.state);
+  if(at!==-1) queue.splice(at,1);
+}
+
+function preparedVideoElement(){
+  return document.getElementById("video-prepared");
+}
+// Created on the first preparation rather than shipped in the modal. The
+// structural golden pins what `#player` contains, and a second `<video>` that
+// exists on every page — including the ones that never prepare anything — is a
+// decoder host the page has no use for. Once a switch has happened the retired
+// element IS this element, so nothing is created twice.
+function ensurePreparedVideoElement(){
+  const existing=preparedVideoElement();
+  if(existing) return existing;
+  const v=document.getElementById("video");
+  if(!v||!v.parentNode) return null;
+  const spare=document.createElement("video");
+  spare.id="video-prepared";
+  spare.muted=true;
+  // The attributes the authoritative element carries, because after a switch
+  // this element IS the authoritative one. A successor without
+  // `x-webkit-airplay` would silently cost the viewer AirPlay for the rest of
+  // the session, and nobody would connect that to a quality change.
+  spare.setAttribute("playsinline","");
+  spare.setAttribute("x-webkit-airplay","allow");
+  spare.setAttribute("aria-hidden","true");
+  spare.setAttribute("tabindex","-1");
+  spare.style.display="none";
+  v.parentNode.appendChild(spare);
+  return spare;
+}
+
+function preparedState(p){
+  return (p&&p.prepared)||null;
+}
+// One successor at a time.
+//
+// A repeated `action_id` is the SAME staging replayed — the server replays it
+// byte-identically on every exchange until it settles — so it must not build a
+// second pipeline. A different `action_id` while one is live aborts the old
+// one first: the server allows one preparation per session, and a client that
+// silently dropped the first would hold its slot until the 330 s deadline.
+function handlePreparedReplacementAction(p,action){
+  if(!p||!action) return null;
+  if(!window.PlurxPlaybackControl||!PlurxPlaybackControl.validPreparation(action)) return null;
+  // A staging this client has already settled is replayed until the server
+  // processes the acknowledgement, which takes at least one more exchange —
+  // and `p.prepared` is cleared the moment it settles. Without this, a commit
+  // whose first frame is still pending, or an abort whose exchange has not
+  // landed, is answered by BUILDING THE SAME PREPARATION AGAIN, on the element
+  // the viewer is now watching.
+  if(preparedSettlementDone(p,action.action_id)) return null;
+  const existing=preparedState(p);
+  if(existing&&existing.actionId===action.action_id) return existing;
+  if(existing) abandonPreparedReplacement(p,"aborted","superseded by a newer preparation");
+  return beginPreparedReplacement(p,action);
+}
+// Settled stagings, so a replay is recognised rather than rebuilt. Bounded and
+// keyed by `action_id`; a session sees a handful of these at most.
+function preparedSettlementDone(p,actionId){
+  return !!(p&&p.preparedSettled&&p.preparedSettled.includes(actionId));
+}
+function markPreparedSettlement(p,actionId){
+  if(!p||!actionId) return;
+  const settled=p.preparedSettled||(p.preparedSettled=[]);
+  if(settled.includes(actionId)) return;
+  settled.push(actionId);
+  while(settled.length>PREPARED_SETTLED_MEMORY) settled.shift();
+}
+
+function beginPreparedReplacement(p,action){
+  const v=document.getElementById("video"), spare=ensurePreparedVideoElement();
+  if(!v||!spare||PLAYER!==p) return null;
+  // Two origins, and they are not the same number.
+  //
+  // `offeredOriginMs` is what the server said, echoed verbatim in the commit —
+  // it drops a commit that names a different one, silently, because the origin
+  // is how it tells "the client built what I offered" from "the client built
+  // something else and is asking me to publish it".
+  //
+  // `mediaOriginMs` is what this client aligns against, and a VOD successor's
+  // is zero: a VOD playlist is the whole immutable title, so its own zero IS
+  // the source's zero and adding the resume position would seek the successor
+  // twice. A prepared replacement never changes presentation — the successor is
+  // the predecessor's request with the selection fields overwritten — so the
+  // predecessor's `vod` is the successor's.
+  const offeredOriginMs=Math.max(0,Math.round(Number(action.media_origin_ms)||0));
+  const originMs=sessionMediaOriginMs({vod:!!p.vod,media_origin_ms:offeredOriginMs});
+  const filmMs=playbackFilmPositionMs(v,p);
+  const state={actionId:action.action_id,sessionId:action.session_id,
+    playlistUrl:action.playlist_url,mediaOriginMs:originMs,offeredOriginMs,
+    selection:action.effective_selection,
+    startAtSec:preparedLocalPositionMs(filmMs,originMs)/1000,
+    state:"building",hls:null,metadata:false,buffered:false,
+    frameTimer:null,frameListener:null,startedAt:Date.now()};
+  p.prepared=state;
+  clientLog(Object.assign({level:"info",event:"prepared_replacement",detail:"staged",
+    message:`preparing ${action.session_id} at film ${Math.round(filmMs/1000)}s `+
+      `(origin ${Math.round(offeredOriginMs/1000)}s, ${preparedSelectionText(action.effective_selection)})`},
+    playbackContext()));
+  try{
+    spare.muted=true;
+    spare.style.display="none";
+    if(preferNativeHls(spare)||!window.Hls||!Hls.isSupported()) preparedNativeAttach(p,state,spare);
+    else preparedHlsAttach(p,state,spare);
+  }catch(error){
+    failPreparedReplacement(p,state,String(error&&error.message||error));
+    return null;
+  }
+  return state;
+}
+
+function preparedSelectionText(selection){
+  if(!selection) return "unknown delivery";
+  const delivery=selection.codec==="source"?"direct":"transcode";
+  const grade=selection.dynamic_range?` ${selection.dynamic_range}`:"";
+  return `${selection.height||0}p${grade} ${delivery}${selection.quality_auto?" auto":""}`;
+}
+function preparedHlsAttach(p,state,spare){
+  const tgt=bufferTargets(p&&p.bufSegSecs);
+  const hls=new Hls({
+    enableWorker:false,
+    maxBufferLength:tgt.fwd,
+    backBufferLength:tgt.back,
+    ...(tgt.budgeted?{maxBufferSize:tgt.fwdBytes}:{}),
+    fragLoadPolicy:vodClientContract().fragLoadPolicy,
+    // Told before the first fragment, exactly as the incumbent was: seeking
+    // after attach downloads the opening of the successor and throws it away,
+    // which on a prepared handoff is the entire cost the preparation exists to
+    // avoid.
+    startPosition:state.startAtSec>0?state.startAtSec:-1,
+    xhrSetup:x=>{ if(TOKEN) x.setRequestHeader("authorization","Bearer "+TOKEN); }});
+  // The EWMA the incumbent paid to learn, so the successor's first rung choice
+  // is not a cold guess on a link this client has been measuring all along.
+  // Deliberately one-way: what the successor measures is not written back, so
+  // a pipeline that fails on its way up cannot drag the incumbent's estimate
+  // down with it.
+  const seed=PlaybackPolicy.bandwidthSeedBps({
+    outgoingEstimateBps:p&&p.bandwidthSeedBps, priorKbps:p&&p.priorKbps});
+  if(seed) try{ hls.bandwidthEstimate=seed; }catch(e){}
+  state.hls=hls;
+  hls.loadSource(state.playlistUrl);
+  hls.attachMedia(spare);
+  const current=()=>preparedState(p)===state&&PLAYER===p;
+  hls.on(Hls.Events.MANIFEST_PARSED,()=>{
+    if(!current()) return;
+    notePreparedMetadata(p,state);
+    // Muted and hidden, and playing: a paused successor's clock does not track
+    // the incumbent's, and every second of drift is a corrective seek at the
+    // switch.
+    try{ const started=spare.play(); if(started&&started.catch) started.catch(()=>{}); }catch(e){}
+  });
+  if(Hls.Events.BUFFER_APPENDED) hls.on(Hls.Events.BUFFER_APPENDED,()=>{
+    if(current()) notePreparedBuffer(p,state);
+  });
+  hls.on(Hls.Events.ERROR,(_,d)=>{
+    if(!current()||!d||!d.fatal) return;
+    failPreparedReplacement(p,state,String(d.details||d.type||"hls.js fatal error"));
+  });
+}
+// Native HLS: the session id in the URL is the credential, same as the
+// incumbent's path.
+function preparedNativeAttach(p,state,spare){
+  const current=()=>preparedState(p)===state&&PLAYER===p;
+  const onMetadata=()=>{
+    spare.removeEventListener("loadedmetadata",onMetadata);
+    if(!current()) return;
+    if(state.startAtSec>0) try{ spare.currentTime=state.startAtSec; }catch(e){}
+    notePreparedMetadata(p,state);
+    try{ const started=spare.play(); if(started&&started.catch) started.catch(()=>{}); }catch(e){}
+  };
+  const onProgress=()=>{ if(current()) notePreparedBuffer(p,state); };
+  const onError=()=>{
+    if(current()) failPreparedReplacement(p,state,"the successor element reported an error");
+  };
+  state.nativeListeners=[["loadedmetadata",onMetadata],["progress",onProgress],
+    ["timeupdate",onProgress],["error",onError]];
+  for(const pair of state.nativeListeners) spare.addEventListener(pair[0],pair[1]);
+  spare.src=tok(state.playlistUrl);
+}
+// The manifest parsed and the tracks are known. Progress states are optional —
+// the server behaves correctly without them — but they are how an operator
+// sees how far a preparation got before it died.
+function notePreparedMetadata(p,state){
+  if(state.metadata) return;
+  state.metadata=true;
+  state.state="metadata_ready";
+  queuePlaybackControlAcknowledgement(p,state.actionId,"metadata_ready");
+}
+// How far the successor is buffered, in FILM time, through the range that
+// contains its own playhead. A range that does not contain the playhead is not
+// runway; it is a gap the decoder will stop at.
+function preparedBufferedThroughMs(state,spare){
+  try{
+    const local=spare.currentTime||0;
+    for(let i=0;i<spare.buffered.length;i++){
+      if(spare.buffered.start(i)<=local+0.25&&spare.buffered.end(i)>=local){
+        return Math.max(0,Math.round(state.mediaOriginMs+spare.buffered.end(i)*1000));
+      }
+    }
+  }catch(e){}
+  return null;
+}
+function notePreparedBuffer(p,state){
+  const v=document.getElementById("video"), spare=preparedVideoElement();
+  if(!v||!spare) return;
+  const through=preparedBufferedThroughMs(state,spare);
+  if(through==null) return;
+  const target=playbackFilmPositionMs(v,p)+PREPARED_BUFFER_LEAD_MS;
+  if(through<target) return;
+  if(!state.buffered){
+    state.buffered=true;
+    state.state="buffer_ready";
+    queuePlaybackControlAcknowledgement(p,state.actionId,"buffer_ready",
+      {buffered_through_ms:through});
+  }
+  commitPreparedReplacement(p,state);
+}
+// The switch.
+//
+// Order matters and it is not negotiable: the successor becomes visible and
+// audible, the predecessor is retired, and only then — once a frame has
+// actually rendered — is `committed` sent. The commit is a claim that the
+// switch already happened, and the store CAS that follows moves the playback
+// pointer; a commit sent early moves it to a session the viewer is not
+// watching.
+function commitPreparedReplacement(p,state){
+  const v=document.getElementById("video"), spare=preparedVideoElement();
+  if(!v||!spare||PLAYER!==p||preparedState(p)!==state) return false;
+  if(state.state==="committing"||state.state==="committed") return false;
+  if(!playbackOwnsAttachedMedia(p)) return false;
+  state.state="committing";
+  const filmMs=playbackFilmPositionMs(v,p);
+  const wanted=preparedLocalPositionMs(filmMs,state.mediaOriginMs)/1000;
+  const drift=Math.abs((spare.currentTime||0)-wanted)*1000;
+  if(drift>PREPARED_ALIGN_SLACK_MS) try{ spare.currentTime=Math.max(0,wanted); }catch(e){}
+  const predecessor=p.hls, retired=v;
+  // Authoritative before visible, so anything that reads PLAYER.hls during the
+  // swap reads the instance that owns the picture.
+  p.hls=state.hls;
+  p.sessionId=state.sessionId;
+  p.probeUrl=state.playlistUrl;
+  p.offset=state.mediaOriginMs/1000;
+  p.prepared=null;
+  // Still this player's business until its first frame settles: the watchdog
+  // below has to be cancellable by a teardown, or it fires eight seconds after
+  // the player is gone and files a `failed` against a staging nobody is
+  // watching any more.
+  p.preparedCommitting=state;
+  markPreparedSettlement(p,state.actionId);
+  spare.muted=false;
+  try{ spare.volume=retired.volume; }catch(e){}
+  spare.style.display="";
+  spare.removeAttribute("aria-hidden");
+  retired.style.display="none";
+  retired.muted=true;
+  retired.setAttribute("aria-hidden","true");
+  // The element the rest of the page addresses is `#video`. Swapping the ids
+  // rather than moving nodes keeps every `getElementById("video")` correct
+  // without touching the modal's structure — but only the lookups. Everything
+  // bound to the old NODE has to move too, which is what `adoptPlaybackMediaElement`
+  // is for, and it runs before the predecessor is destroyed so the retired
+  // element is never the one the page is talking to.
+  retired.id="video-prepared";
+  spare.id="video";
+  adoptPlaybackMediaElement(p,spare);
+  // Deliberately NOT a new media attachment. `startPlaybackControl` captured
+  // the current one and refuses to capture a snapshot against any other, so
+  // beginning one here would wedge the reporter — and the `committed` this
+  // switch is about to earn would never reach an exchange.
+  resetPlaybackTransportEvents(spare);
+  p.wantsPlayback=true;
+  // Un-muting without a user gesture pauses the element on WebKit, and the
+  // last gesture was minutes ago. Ask again: a switch whose picture never
+  // advances is reported as a failure eight seconds later, after the
+  // predecessor is already gone.
+  try{ const resumed=spare.play(); if(resumed&&resumed.catch) resumed.catch(()=>{}); }catch(e){}
+  destroyHlsInstance(p,predecessor,retired);
+  disposeRetiredMediaElement(retired);
+  // The delivery badges and the info panel are painted from the session, and
+  // the session just changed. Without this they describe the predecessor for
+  // the rest of the film — on a handoff whose entire purpose was to change what
+  // is being delivered.
+  renderPlayerInfo();
+  preparedFirstFrame(p,state,spare,unixMs=>{
+    state.state="committed";
+    if(p.preparedCommitting===state) p.preparedCommitting=null;
+    queuePlaybackControlAcknowledgement(p,state.actionId,"committed",
+      {first_frame_unix_ms:unixMs,committed_media_origin_ms:state.offeredOriginMs});
+    clientLog(Object.assign({level:"info",event:"prepared_replacement",detail:"committed",
+      message:`switched to ${state.sessionId} at film ${Math.round(filmMs/1000)}s`},
+      playbackContext()));
+  },()=>{
+    // Switched, and nothing rendered. The honest answer is `failed`: the
+    // server is owed a settlement either way, and reporting a commit that did
+    // not happen would write it to a durable row and move the playback pointer
+    // to a session showing the viewer nothing.
+    state.state="failed";
+    if(p.preparedCommitting===state) p.preparedCommitting=null;
+    queuePlaybackControlAcknowledgement(p,state.actionId,"failed");
+    clientLog(Object.assign({level:"error",event:"prepared_replacement",detail:"no_first_frame",
+      message:`successor ${state.sessionId} rendered no frame within ${PREPARED_FIRST_FRAME_MS}ms`},
+      playbackContext()));
+  });
+  return true;
+}
+// Move every per-element binding onto the element that now owns the picture.
+//
+// `wirePlayerMedia` carries the listener set, and `play()` binds five more
+// things to the element it captured — the ended handler, the progress tick, the
+// hitch detector, the decode probe and the AirPlay button. A switch that
+// changed which element is `#video` and left those behind would produce a
+// player that looks fine and has no scrubber, no stall detection, no decode
+// rescue and no autoplay-next, until the page is reloaded.
+function adoptPlaybackMediaElement(p,v){
+  if(!p||!v) return;
+  wirePlayerMedia(v);
+  try{ v.onended=()=>{ handleEnded(p.fileId).catch(()=>{}); }; }catch(e){}
+  try{ v.addEventListener("loadedmetadata",probeDecode,{once:true}); }catch(e){}
+  armHitchDetector(v);
+  setupAirplay(v);
+  clearInterval(p.progressTimer);
+  p.progressTimer=setInterval(()=>playbackProgressTick(v,p),500);
+  // The subtitle selection is element state — a `<track>`, a script cue list,
+  // or an hls.js rendition index — and none of it followed the switch. Clearing
+  // the applied-offset marker is what makes the transport tick re-apply
+  // `p.curSub` to the element that now owns the picture.
+  p._subOff=null;
+  pbTick(); pbSyncPlayIcon();
+}
+// The retired element leaves the page.
+//
+// It cannot simply be kept as the next successor's host: it carries the whole
+// listener set from its time as `#video`, so restaging it would have a hidden
+// pipeline dismissing the visible stream's loading overlay, raising its
+// "Buffering…" spinner and reporting its own errors as the viewer's. Dropping
+// the node drops the listeners with it, and `ensurePreparedVideoElement` builds
+// a clean one when a successor is next staged.
+function disposeRetiredMediaElement(retired){
+  if(!retired) return;
+  try{ retired.pause(); }catch(e){}
+  try{ retired.removeAttribute("src"); retired.load(); }catch(e){}
+  try{ retired.onended=null; }catch(e){}
+  try{ if(retired.parentNode) retired.parentNode.removeChild(retired); }catch(e){}
+}
+
+function preparedFirstFrame(p,state,element,onFrame,onTimeout){
+  let settled=false;
+  const finish=(run)=>{
+    if(settled) return;
+    settled=true;
+    if(state.frameTimer!=null){ clearTimeout(state.frameTimer); state.frameTimer=null; }
+    if(state.frameListener){
+      try{ element.removeEventListener("timeupdate",state.frameListener); }catch(e){}
+      state.frameListener=null;
+    }
+    run();
+  };
+  state.frameTimer=setTimeout(()=>finish(onTimeout),PREPARED_FIRST_FRAME_MS);
+  const done=()=>finish(()=>onFrame(Date.now()));
+  // `requestVideoFrameCallback` is the only API that answers "has a frame been
+  // presented" — but it answers it for VIDEO. On an audio-only title it exists
+  // and never fires, so a healthy handoff would sit out the watchdog and report
+  // `failed`. There, the first advancing `timeupdate` is the honest substitute,
+  // and it is the only one older Safari and Firefox have either.
+  if(streamHasVideo(p,element)&&typeof element.requestVideoFrameCallback==="function"){
+    try{ element.requestVideoFrameCallback(()=>done()); return; }catch(e){}
+  }
+  state.frameListener=()=>done();
+  element.addEventListener("timeupdate",state.frameListener);
+}
+
+function failPreparedReplacement(p,state,detail){
+  if(preparedState(p)!==state) return;
+  state.state="failed";
+  // Never playable, so stop asking for the next one. `buffered` is the line: a
+  // successor that reached its buffer target and then failed says something
+  // about that successor; one that never got there says the server cannot hand
+  // this playback a usable second pipeline at all.
+  if(!state.buffered) p.preparedRefused=true;
+  queuePlaybackControlAcknowledgement(p,state.actionId,"failed");
+  clientLog(Object.assign({level:"warn",event:"prepared_replacement",detail:"failed",
+    message:`preparation of ${state.sessionId} failed: ${detail}`},playbackContext()));
+  freePreparedReplacement(p,state);
+}
+// Settle and free. Every exit path runs through here — a new attach, a seek, a
+// quality change, the player closing, the reporter going away — because a
+// preparation nobody answered holds this session's ONLY preparation slot until
+// the 330-second deadline, and that session then gets no second chance for the
+// rest of its life. A leaked instance is also a second decoder running behind
+// a closed modal.
+function abandonPreparedReplacement(p,ackState,reason){
+  const state=preparedState(p);
+  if(!state) return false;
+  if(!PREPARED_TERMINAL_STATES.includes(state.state)){
+    queuePlaybackControlAcknowledgement(p,state.actionId,ackState||"aborted");
+    clientLog(Object.assign({level:"info",event:"prepared_replacement",detail:ackState||"aborted",
+      message:`preparation of ${state.sessionId} abandoned: ${reason||"no reason given"}`},
+      playbackContext()));
+  }
+  freePreparedReplacement(p,state);
+  return true;
+}
+function freePreparedReplacement(p,state){
+  if(preparedState(p)!==state) return;
+  p.prepared=null;
+  markPreparedSettlement(p,state.actionId);
+  const spare=preparedVideoElement();
+  if(state.frameTimer!=null){ clearTimeout(state.frameTimer); state.frameTimer=null; }
+  if(state.frameListener&&spare){
+    try{ spare.removeEventListener("timeupdate",state.frameListener); }catch(e){}
+  }
+  state.frameListener=null;
+  if(state.nativeListeners&&spare){
+    for(const pair of state.nativeListeners) spare.removeEventListener(pair[0],pair[1]);
+  }
+  state.nativeListeners=null;
+  // The same teardown discipline the incumbent gets, on an instance that was
+  // never authoritative: destroy it, then clear the element, or hls.js keeps
+  // polling a playlist nothing is watching. The player is deliberately NOT
+  // passed — a pipeline that failed should not seed the incumbent's bandwidth
+  // estimate with whatever it measured on its way down.
+  destroyHlsInstance(null,state.hls,spare);
+  state.hls=null;
+  if(spare){
+    try{ spare.pause(); spare.removeAttribute("src"); spare.load(); }catch(e){}
+    spare.muted=true;
+    spare.style.display="none";
+    spare.setAttribute("aria-hidden","true");
+  }
+}
+
 async function sendPlaybackControl(url,body,signal){
   const response=await fetch(url,{method:"POST",signal,
     headers:Object.assign({"content-type":"application/json"},TOKEN?{"authorization":"Bearer "+TOKEN}:{}),
@@ -6945,9 +7534,59 @@ async function sendPlaybackControl(url,body,signal){
   return response.json();
 }
 function stopPlaybackControl(p){
-  if(p&&p.controlReporter){ p.controlReporter.stop(); p.controlReporter=null; }
+  // Settle first, then flush, then stop — in that order, because each step
+  // destroys the means of the one before it. `abandonPreparedReplacement`
+  // queues the settlement; `flushPreparedSettlement` is what actually gets it
+  // onto an exchange, because the reporter's own capture refuses once the
+  // player no longer owns the media; and `stop()` aborts whatever is in flight,
+  // so stopping in the same turn is how a settlement is silently lost and a
+  // staging left to burn its 330-second deadline.
+  abandonPreparedReplacement(p,"aborted","the control reporter stopped");
+  cancelPreparedFirstFrame(p);
+  const reporter=p&&p.controlReporter;
+  if(reporter){
+    const flushed=flushPreparedSettlement(p,reporter);
+    p.controlReporter=null;
+    if(flushed) setTimeout(()=>reporter.stop(),CONTROL_SETTLE_FLUSH_MS);
+    else reporter.stop();
+  }
   clearPlaybackControlWaiters(p);
+  if(p) p.controlAcknowledgements=[];
 }
+// A switch whose first frame is still pending when the player goes away. The
+// watchdog is the only thing still holding that staging, and left armed it
+// reports a failure against a session that ended for an unrelated reason.
+function cancelPreparedFirstFrame(p){
+  const state=p&&p.preparedCommitting;
+  if(!state) return;
+  p.preparedCommitting=null;
+  if(state.frameTimer!=null){ clearTimeout(state.frameTimer); state.frameTimer=null; }
+  const spare=document.getElementById("video");
+  if(state.frameListener&&spare){
+    try{ spare.removeEventListener("timeupdate",state.frameListener); }catch(e){}
+  }
+  state.frameListener=null;
+}
+// One last exchange for a settlement that has nowhere else to go.
+//
+// The reporter's `capture` returns null the moment the player stops owning the
+// attached media — which is exactly the state every teardown path is in — so a
+// queued `aborted` would never be built into a request. Building the capture
+// explicitly is the difference between settling the staging and leaving the
+// server to reap it 330 seconds later, after which that session gets no second
+// preparation for the rest of its life.
+function flushPreparedSettlement(p,reporter){
+  if(!p||!reporter||reporter.stopped) return false;
+  if(!p.controlOwner||!window.PlurxPlaybackControl) return false;
+  const queue=p.controlAcknowledgements;
+  if(!queue||!queue.length) return false;
+  const v=document.getElementById("video");
+  const snapshot=playbackControlSnapshot(v,p);
+  if(!snapshot||!snapshot.acknowledgement) return false;
+  const capture=PlurxPlaybackControl.capture(snapshot,p.controlIntentGeneration||0,p.controlOwner);
+  return !!(capture&&reporter.notify(capture));
+}
+
 function notifyPlaybackControl(renderOverride,observationOverride){
   if(!playbackOwnsAttachedMedia(PLAYER))return null;
   const p=PLAYER;
@@ -7198,6 +7837,17 @@ function startPlaybackControl(v,p,bootstrap){
           ||captured.owner.attachmentGeneration!==owner.attachmentGeneration) return;
         p.controlLastRequest=request;
         settlePlaybackControlWaiters(p,request,response,error);
+        // An acknowledgement the server accepted is spent; one whose exchange
+        // failed stays queued for the next.
+        if(response) settlePlaybackControlAcknowledgement(p,request);
+        // The wire tag is `prepare`; the DECLARED name is
+        // `prepare_replacement`, and switching on the declared name here is
+        // the mistake that produces a silent no-op rather than a failure.
+        if(response&&response.action
+          &&response.action.type===PlurxPlaybackControl.PREPARE_ACTION_TAG
+          &&captured.intentGeneration===(p.controlIntentGeneration||0)){
+          handlePreparedReplacementAction(p,response.action);
+        }
         if(captured.intentGeneration===(p.controlIntentGeneration||0)&&response&&response.delivery
           &&subtitleReadinessRetryTransition(p,response.delivery)){
           retryReadyNativeSubtitle(p);
@@ -7233,6 +7883,10 @@ function startPlaybackControl(v,p,bootstrap){
         }
       }});
     p.controlReporter=reporter;
+    // Kept so `flushPreparedSettlement` can build a capture this reporter will
+    // accept after the player has stopped owning the media. Nothing else reads
+    // it, and it is replaced with the reporter it belongs to.
+    p.controlOwner=owner;
     reporter.start();
     return reporter;
   }catch(error){
@@ -9286,19 +9940,35 @@ function retuneBuffer(segSecs, force){
             `${tgt.fwd}s ahead + one ${tgt.seg}s segment + ${tgt.back}s behind = `+
             `${Math.round(tgt.peakBytes/1e6)}MB against a ${Math.round(MSE_QUOTA_BYTES/1e6)}MB quota`});
 }
+// Destroying an hls.js instance, in one place, because there are now two
+// slots that hold one: the authoritative `PLAYER.hls` and a prepared
+// successor. Both owe the same three things — keep the EWMA the instance paid
+// to learn, destroy it so it stops polling a playlist forever, and clear the
+// element's transport expectations.
+function destroyHlsInstance(p,hls,element){
+  if(!hls) return;
+  const estimate=PlaybackPolicy.bandwidthSeedBps({
+    outgoingEstimateBps:hls.bandwidthEstimate,
+    priorKbps:p&&p.priorKbps
+  });
+  if(estimate&&p) p.bandwidthSeedBps=estimate;
+  try{hls.destroy()}catch(e){}
+  resetPlaybackTransportEvents(element);
+}
 function teardownHls(){
   if(PLAYER) PLAYER.mediaAttachment=null;
+  // A staged successor belongs to the stream it was prepared against. Any new
+  // attach on the authoritative element — a seek, a quality change, a close —
+  // is that stream ending, and §C7 requires the staging be settled rather than
+  // left to the 330-second deadline: a preparation nobody answered holds this
+  // session's only preparation slot for the rest of its life.
+  abandonPreparedReplacement(PLAYER,"aborted","the playing stream was replaced");
   if(PLAYER&&PLAYER.hls){
-    rememberPlaybackTransportIntent(document.getElementById("video"),PLAYER);
+    const video=document.getElementById("video");
+    rememberPlaybackTransportIntent(video,PLAYER);
     PLAYER.internalMediaReset=true;
-    pausePlaybackInternally(document.getElementById("video"));
-    const estimate=PlaybackPolicy.bandwidthSeedBps({
-      outgoingEstimateBps:PLAYER.hls.bandwidthEstimate,
-      priorKbps:PLAYER.priorKbps
-    });
-    if(estimate) PLAYER.bandwidthSeedBps=estimate;
-    try{PLAYER.hls.destroy()}catch(e){}
-    resetPlaybackTransportEvents(document.getElementById("video"));
+    pausePlaybackInternally(video);
+    destroyHlsInstance(PLAYER,PLAYER.hls,video);
     PLAYER.hls=null;
   }
 }
@@ -10300,6 +10970,32 @@ function wirePlayer(){
   ["mousemove","pointerdown","touchstart"].forEach(ev=>window.addEventListener(ev,()=>{
     const modal=document.getElementById("modal"); if(modal&&modal.classList.contains("open")) playerActivity();
   }));
+  // Page-level, and therefore bound once here rather than per element: they
+  // read whichever element currently owns the picture.
+  document.addEventListener("visibilitychange",()=>{
+    const current=document.getElementById("video");
+    if(current) samplePlaybackPresentationClock(current,PLAYER);
+  });
+  document.addEventListener("visibilitychange",notifyPlaybackControl);
+  pbWireSeek();
+  if(document.pictureInPictureEnabled){ const pip=document.getElementById("pbpip"); if(pip) pip.style.display=""; }
+  wirePlayerMedia(v);
+}
+// Everything bound to the media element ITSELF, keyed to that element.
+//
+// This used to live inside `wirePlayer`, which runs once per page and captured
+// one element forever. That was correct while the page had exactly one
+// `<video>` for its whole life. A prepared handoff replaces which element owns
+// the picture, and a listener set that stayed on the retired node would leave
+// the scrubber frozen, the stall watchdog deaf, the decode-error rescue silent
+// and the end of the film unhandled — every one of them a symptom nobody would
+// trace back to a quality change. So the set moves with the element, and the
+// guard is on the element rather than on a page-level flag.
+function wirePlayerMedia(v){
+  if(!v||v._plurxMediaWired) return;
+  v._plurxMediaWired=true;
+  const p=document.getElementById("player");
+  if(!p) return;
   v.addEventListener("playing",()=>handlePlaybackPlaying(v,PLAYER));
   v.addEventListener("canplay",()=>{
     if(PLAYER?.started&&!playbackWaitNeedsProgress(PLAYER)) setLoading(false);
@@ -10401,8 +11097,6 @@ function wirePlayer(){
     const loading=document.getElementById("ploading"); if(loading) loading.classList.add("failed");
     toast("Playback failed — "+(names[code]||("error "+code)));
   });
-  document.addEventListener("visibilitychange",samplePresentation);
-  document.addEventListener("visibilitychange",notifyPlaybackControl);
   v.addEventListener("timeupdate",()=>{ settlePlaybackControlSeek(v,PLAYER); checkMarkers(); });
   // Click the picture to play/pause and double-click for fullscreen — the
   // behaviour the native controls used to give us, gone now that we draw our
@@ -10418,11 +11112,10 @@ function wirePlayer(){
   });
   v.addEventListener("dblclick",e=>{ e.preventDefault(); toggleFullscreen(); });
   // Custom transport: keep the scrubber, times, buffered bar, and play icon in
-  // sync; enable the drag handler and the PiP button where supported.
-  pbWireSeek();
+  // sync. The seek drag handler and the PiP button belong to the chrome, not to
+  // the element, and are wired once in `wirePlayer`.
   ["timeupdate","progress","durationchange","loadedmetadata"].forEach(ev=>v.addEventListener(ev,pbTick));
   ["play","pause","playing","ended","emptied"].forEach(ev=>v.addEventListener(ev,pbSyncPlayIcon));
-  if(document.pictureInPictureEnabled){ const pip=document.getElementById("pbpip"); if(pip) pip.style.display=""; }
 }
 function markerNowMs(){ const v=document.getElementById("video"); return ((PLAYER.offset||0)+(v?v.currentTime||0:0))*1000; }
 function markerIsEstimated(m){
@@ -13737,12 +14430,15 @@ document.addEventListener("visibilitychange",()=>{
   }
 });
 
-// Everything that is off on purpose, in one place.
-//
-// These are switches with a cost or an unfinished half, not preferences: each
-// one names what it spends and what is still missing, because "experimental"
-// on its own tells an operator nothing about whether turning it on will cost
-// them a stream.
+function setPreparedHandoff(on){
+  setPreparedHandoffEnabled(!!on);
+  // Honest about when: the capability is read on every exchange and the server
+  // keeps the newest document it was sent, so this reaches it on the next
+  // exchange of whatever is playing — not at the next stream.
+  toast(on
+    ?"This browser now offers prepared handoff — from the next control exchange"
+    :"Prepared handoff switched off for this browser");
+}
 function developerPanel(settings){
   const transportRecovery=setCard(`${cardHead("Enable cluster transport recovery","The corrected transport is compiled in and activates automatically on clustered nodes; there is no hidden production feature flag.",`<span class="pill" style="color:var(--good);border-color:var(--good)">automatic</span>`)}
       <div class="hint"><b>Safe enablement means deployment qualification, not flipping a code gate.</b> Keep a ready voter majority, deploy one node at a time, and leave the cluster API listener reachable only on the trusted cluster network. Cache-only recovery authorization stays disabled until every current committed node has heartbeat-proven the cache revocation capability and the automatic guarded activation has cleared cached proofs cluster-wide; a rollback closes it again.</div>
@@ -13774,6 +14470,7 @@ function developerPanel(settings){
       ${req("partly","A client owns a measured two-player handoff","Apple build 119 advertises <code>prepare_replacement</code>, aligns the second timeline with <code>media_origin_ms</code>, reports metadata and buffer readiness, switches visibly, then sends <code>committed</code> with the first qualifying frame timestamp; failed setup sends <code>failed</code> or <code>aborted</code>. Android and web remain unqualified.")}
       ${req("met","A prepared handoff can fire on the sessions you actually serve","The throughput floor needs both the client's observed rate and the server's delivered rate. Both are reported now, on VOD as well as live: the clients fill <code>observed_download_bps</code> and the VOD serving boundary measures <code>delivered_bps</code>. A window that has not closed yet still refuses, which is the honest reading rather than a missing input.")}
       ${req("unmet","The fleet receipt is complete","Requires twenty consecutive commits on the corrected realistic-runway instrument with stable memory, and a measured fallback interruption on at least one Apple device. Apple is the measured candidate for two live pipelines; neither of these numbers exists yet.")}
+      ${togRow("pdp",`Tell the server this browser can prepare a second player <span class="pill warn">unqualified</span>`,"Sets <code>dual_player_preparation</code> on this browser's control exchanges, which is the only thing that lets the server stage a successor for it. Nothing above blocks this switch — the list is what tells you the cost. It reaches the server on the next control exchange, and a playback whose successor was never playable stops offering for the rest of that playback.",preparedHandoffEnabled(),'onchange="setPreparedHandoff(this.checked)"')}
       <div class="hint"><b>Enable path after those checks pass:</b> turn on <b>Advertise playback control protocol v1</b> above and deploy only a qualified client that declares the action. There is no separate hidden server flag, and nothing on this card prevents you enabling it now — a client that is offered a successor it cannot prime settles it and falls back to the ordinary in-place change.</div>`);
   const experimental=setCard(`${cardHead("Experimental delivery","Changes the shape of the stream itself. Applies to new sessions only.")}
       ${togRow("phs",`Typeless sliding HLS <span class="pill warn">experimental</span>`,"Only for the iPad control comparison.",settings.hls_typeless_sliding)}

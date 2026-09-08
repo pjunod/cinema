@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["47cf56dd"]
+points = ["playback.pipeline", "web.experience"]
+checks = ["web-static"]
+reason = "Two facts about `main` that the M6 client brief has backwards. `f2fecc98` populates `delivered_bps` for VOD sessions, so the throughput floor is reachable on the presentation nearly every session uses; the Developer readiness card and the web-client doc still said a prepared handoff cannot fire on VOD, which would have a client gating the feature off on exactly the presentation the server had just enabled it for. And a successor that fails before it was ever playable now withdraws the offer for the rest of that playback — `preparedHandoffOffered` reports `dual_player_preparation` false once `preparedRefused` is set — because staging starts no worker, so every attempt fails that way today and an operator who turned the switch on would otherwise get a doomed second pipeline built on every quality change. The retained regression is in `tests/playback/web-control.test.js`: the capability scope asserts that a player carrying `preparedRefused` reports the capability false while the switch is still on, and the failure case asserts that a preparation which never reached its buffer target sets it. `tests/web/settings-sections.test.js` pins the corrected readiness row against the verdict the readiness function gives it."
