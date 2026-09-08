@@ -370,7 +370,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         self.assertIn(
             "M0–M3f, M4, M5a, M5b, the M5a census repair, M5c1, M5c2, M5c3 and "
             "M7a merged into the effort, and current `main` merged in ahead of "
-            "promotion; M5 complete, M7 next",
+            "promotion; M5 complete, M7b specified and next",
             self.flat_status,
         )
         self.assertIn("decoder-plan-v1-unqualified", self.status)
@@ -1293,6 +1293,20 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             "M7a — the enable section, and the prerequisite that is not met",
             self.status,
         )
+        # M7b is the milestone that closes M7a's finding, and the one claim in
+        # its specification that a later reader must not lose is the measured
+        # one: the accelerated and the software decode of a codec print the
+        # same decoder name, so the contract cannot be keyed on that name.
+        self.assertIn(
+            "M7b specification — the hardware decoder contract, measured before it is written",
+            self.status,
+        )
+        self.assertIn("**The lines are identical.**", self.status)
+        self.assertIn(
+            "Selecting decoder 'h264' because of requested hwaccel method videotoolbox",
+            self.status,
+        )
+        self.assertIn("This is toolchain evidence, not\nfleet evidence", self.status)
         self.assertIn("async function saveVerifiedDecode(", web)
         self.assertIn(
             "decoder_health_qualified_artifacts:document.getElementById"
