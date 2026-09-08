@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://plurx.dev/schemas/cluster-transport-recovery-role-v1.json",
+  "title": "Plurx transport recovery role report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "kind",
+    "execution_id",
+    "build_sha",
+    "platform",
+    "build_profile",
+    "started_at_unix_ms",
+    "finished_at_unix_ms",
+    "scope",
+    "resource_envelope_asserted",
+    "snapshot_policy",
+    "transport",
+    "resource_thread_envelope_allowance",
+    "resource_socket_envelope_allowance",
+    "resource_owned_async_task_envelope_allowance",
+    "resource_cleanup_horizon_millis",
+    "resource_stable_samples",
+    "campaign"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "kind": { "const": "transport_recovery_role" },
+    "execution_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._-]+$"
+    },
+    "build_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "platform": { "const": "linux" },
+    "build_profile": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "started_at_unix_ms": { "type": "integer", "minimum": 0 },
+    "finished_at_unix_ms": { "type": "integer", "minimum": 0 },
+    "scope": {
+      "type": "string",
+      "enum": ["smoke", "qualification_role"]
+    },
+    "resource_envelope_asserted": { "type": "boolean" },
+    "snapshot_policy": { "$ref": "#/$defs/snapshotPolicy" },
+    "transport": { "$ref": "#/$defs/transport" },
+    "resource_thread_envelope_allowance": { "const": 2 },
+    "resource_socket_envelope_allowance": { "const": 0 },
+    "resource_owned_async_task_envelope_allowance": { "const": 0 },
+    "resource_cleanup_horizon_millis": { "const": 60000 },
+    "resource_stable_samples": { "const": 2 },
+    "campaign": { "type": "object" }
+  },
+  "$defs": {
+    "snapshotPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "validation_only",
+        "logs_since_last",
+        "production_default_unchanged"
+      ],
+      "properties": {
+        "validation_only": { "const": true },
+        "logs_since_last": { "const": 256 },
+        "production_default_unchanged": { "const": true }
+      }
+    },
+    "transport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "raft_transport",
+        "api_writer_transport",
+        "tls_enabled",
+        "tls_certificate_verification_disabled_for_self_signed_harness",
+        "separate_node_processes",
+        "separate_writer_process"
+      ],
+      "properties": {
+        "raft_transport": {
+          "const": "hiqlite_production_tls_chunked_snapshot"
+        },
+        "api_writer_transport": {
+          "const": "hiqlite_production_tls_websocket"
+        },
+        "tls_enabled": { "const": true },
+        "tls_certificate_verification_disabled_for_self_signed_harness": {
+          "const": true
+        },
+        "separate_node_processes": { "const": true },
+        "separate_writer_process": { "const": true }
+      }
+    }
+  }
+}
