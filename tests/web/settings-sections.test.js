@@ -238,14 +238,23 @@ test("Playback saves per card, and each card writes only its own fields", () => 
 test("Developer is where the switches that cost something live", () => {
   const panel = new Function(
     "setHead", "setCard", "cardHead", "togRow", "setCardFoot", "esc",
-    `${shippedSource("preparedHandoffEnabled")}${shippedSource("preparedHandoffReadiness")}
-     ${shippedSource("readinessRow")}
-     ${shippedSource("liveTvSettingsCard")}${shippedSource("developerPanel")} return developerPanel;`,
+    // Joined with newlines, never bare interpolation: `shippedSource` here
+    // stops at the next `\nfunction `, so a fragment can end inside a trailing
+    // `//` comment and swallow whatever follows it.
+    [
+      shippedSource("preparedHandoffEnabled"), shippedSource("preparedHandoffReadiness"),
+      shippedSource("readinessRow"), shippedSource("liveTvSettingsCard"),
+      shippedSource("developerPanel"), "return developerPanel;",
+    ].join("\n"),
   )(
     (title, sub) => `HEAD:${title}|${sub}`,
     (body) => `CARD[${body}]`,
     (title, sub) => `CARDHEAD:${title}|${sub || ""}`,
-    (id, label, note) => `TOG:${id}|${label}|${note}`,
+    // Every argument, because the last two are the switch's state and the
+    // handler that makes it do anything — a stub that drops them lets an inert
+    // control pass as a working one.
+    (id, label, note, checked, attrs) =>
+      `TOG:${id}|${label}|${note}|checked=${!!checked}|${attrs || ""}`,
     (fn) => `FOOT:${fn}`,
     esc,
   );
@@ -279,11 +288,27 @@ test("Developer is where the switches that cost something live", () => {
   assert.match(html, /advisory and does not block this switch/);
   assert.match(html, /503 media_owner_transition/,
     "the card says what a staged playlist actually answers today");
-  assert.match(html, /not met/, "an unmet requirement says so beside the switch");
-  assert.match(html, /not measured here/,
-    "…and a question this page cannot answer is not rendered as a refusal");
-  assert.match(html, /met<\/span>/);
   assert.match(html, /cannot fire on VOD/);
+  // The switch has to be wired to something. A control that renders and does
+  // nothing is worse than no control: it reports a capability to the operator
+  // that the server never hears about.
+  assert.match(html, /TOG:pdp\|[^|]*\|[^|]*\|checked=false\|onchange="setPreparedHandoff\(this\.checked\)"/,
+    "the prepared-handoff switch reflects the stored state and sets it");
+  // Readiness pills, counted rather than matched, because "not met" contains
+  // "met": an assertion that only looks for the word cannot tell a met row from
+  // an unmet one, and would pass with the two renderings swapped.
+  const readiness = shippedSource("preparedHandoffReadiness");
+  const rows = (fn) => fn({ playback_control_protocol_v1: true });
+  const pills = html.match(/>(met|not met|not measured here)<\/span>/g) || [];
+  const counted = (word) => pills.filter((pill) => pill === `>${word}</span>`).length;
+  assert.ok(counted("not met") >= 1,
+    "an unmet requirement says so beside the switch — the staged route has no worker");
+  assert.ok(counted("met") >= 1, "…and a requirement this page checked and found true says that");
+  assert.ok(counted("not measured here") >= 1,
+    "…and a question this page cannot answer is not rendered as a refusal");
+  assert.match(readiness, /met:false/, "the server-preparation row is a stated fact, not a guess");
+  assert.doesNotMatch(html, />met<\/span>[^]{0,400}Server preparation is real/,
+    "the row that is false must not render as met");
   assert.match(html, /HDHomeRun Live TV/);
   assert.match(html, /Save the configuration, check readiness, then enable/);
 });

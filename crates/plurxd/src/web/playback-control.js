@@ -112,10 +112,21 @@
       && validEffectiveSelection(action.effective_selection);
   }
 
-  // The three rules a careless client hits as 400s, and one that is a design
+  // The four rules a careless client hits as 400s, and one that is a design
   // rule rather than a field check: a `committed` may not share an exchange
   // with `demand: "end"`. Switching and then closing is two exchanges — the
   // commit, then the end — in that order.
+  //
+  // `committed_media_origin_ms` is the one a client will get wrong by omission
+  // rather than by error, because it is easy to read the state machine and
+  // conclude the commit only owes a timestamp. It owes both, and the reason is
+  // that `action_id` says *which offer* is being answered while the origin says
+  // *what was built*: a successor prepared for one point in the film and
+  // committed after the viewer seeked elsewhere is otherwise indistinguishable
+  // from a correct commit, and the server would publish it on the strength of
+  // this acknowledgement alone. It must equal the `media_origin_ms` of the
+  // offer verbatim — the server drops a commit that names a different one,
+  // silently — so echo the field, never a recomputed value.
   function validAcknowledgement(value, demand) {
     return !!value
       && typeof value === "object"
@@ -125,8 +136,11 @@
         || boundedInteger(value.buffered_through_ms, 0, MAX_MEDIA_MS))
       && (value.first_frame_unix_ms == null
         || (Number.isSafeInteger(value.first_frame_unix_ms) && value.first_frame_unix_ms > 0))
+      && (value.committed_media_origin_ms == null
+        || boundedInteger(value.committed_media_origin_ms, 0, MAX_MEDIA_MS))
       && (value.state !== "buffer_ready" || value.buffered_through_ms != null)
       && (value.state !== "committed" || value.first_frame_unix_ms != null)
+      && (value.state !== "committed" || value.committed_media_origin_ms != null)
       && (value.state !== "committed" || demand !== "end");
   }
 
