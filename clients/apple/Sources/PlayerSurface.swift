@@ -28,6 +28,15 @@ final class PictureInPictureController: NSObject, ObservableObject,
     #endif
     @Published private(set) var isPossible = false
     @Published private(set) var isActive = false
+    /// True from `willStart` until the start resolves either way.
+    ///
+    /// Automatic PiP begins as the app backgrounds, and iOS publishes
+    /// `.inactive` before `.background`, so a caller that asks only `isActive`
+    /// at the `.inactive` edge gets `false` for a window in which PiP is
+    /// genuinely on its way. For Live TV that window was long enough to
+    /// release the tuner before the PiP window it was starting for could
+    /// appear — killing the one case automatic PiP exists for.
+    @Published private(set) var isStarting = false
     @Published private(set) var errorMessage: String?
 
     private weak var playerLayer: AVPlayerLayer?
@@ -189,15 +198,23 @@ final class PictureInPictureController: NSObject, ObservableObject,
         controller?.delegate = nil
         controller = nil
         playerLayer = nil
+        if isStarting { isStarting = false }
         if resetPublishedState {
             if isPossible { isPossible = false }
             if isActive { isActive = false }
         }
     }
 
+    func pictureInPictureControllerWillStartPictureInPicture(
+        _ pictureInPictureController: AVPictureInPictureController
+    ) {
+        isStarting = true
+    }
+
     func pictureInPictureControllerDidStartPictureInPicture(
         _ pictureInPictureController: AVPictureInPictureController
     ) {
+        isStarting = false
         isActive = true
         clearErrorMessage()
     }
@@ -205,6 +222,7 @@ final class PictureInPictureController: NSObject, ObservableObject,
     func pictureInPictureControllerDidStopPictureInPicture(
         _ pictureInPictureController: AVPictureInPictureController
     ) {
+        isStarting = false
         isActive = false
     }
 
@@ -212,6 +230,7 @@ final class PictureInPictureController: NSObject, ObservableObject,
         _ pictureInPictureController: AVPictureInPictureController,
         failedToStartPictureInPictureWithError error: Error
     ) {
+        isStarting = false
         isActive = false
         showPersistentErrorMessage(
             "Picture in Picture couldn't start: \(error.localizedDescription)"
