@@ -31,7 +31,7 @@ a bug.
 
 `./gradlew testDebugUnitTest :app:assembleDebug :app:lintDebug` — the
 non-Docker equivalent of `make android-test` and `make android` — green.
-**518 tests, 0 failures, 0 errors.**
+**519 tests, 0 failures, 0 errors.**
 
 ---
 
@@ -356,6 +356,33 @@ anchors are the visible edge of that choice — they name commits reachable only
 from the effort branch, so they are deliberately *not* added here; the
 regression tests they point at are all present, and the rows follow whichever
 history wins.
+
+---
+
+### The fourth review pass
+
+The feature was reviewed adversarially three times on the branch it came from.
+The reconciliation was reviewed once more here, on the premise that a merge into
+restructured code is its own defect surface, and it found three — all silent,
+none caught by any existing test:
+
+1. `clearVerdict` empties the slot a session publishes captures into, and
+   `release` calls it on the line after handing the reporter its last word. The
+   reporter reconciled that word against the empty slot and sent nothing. Third
+   distinct way this one exchange has been lost; the reporter now knows it is
+   settled. `a teardown outlives the source that handed it over` fails without
+   the fix.
+2. `main`'s `armVideoPresentation` binds to `player` directly, and a committed
+   replacement carries only the registry's listeners across. That listener is
+   the only route that clears a pending seek on a video title, so a commit that
+   raced a seek ended in a reopen and then "your place is saved".
+3. A reopen calls `endPlaybackControl` synchronously after abandoning, and
+   `end` empties the slot the abandonment's queued report reads from. On the
+   old branch neither reopen path called it. `endPlaybackControl` hands an owed
+   acknowledgement over now.
+
+None of the three is in the feature. All three are in the seam — which is the
+argument for reviewing a port as a change rather than as a move.
 
 ---
 

@@ -828,3 +828,11 @@ source = "clients/apple/Sources/PreparedReplacement.swift"
 source_anchor = "mutating func noteSwitching(_ action: PreparedReplacementAction) -> Bool"
 test = "clients/apple/Tests/PreparedReplacementTests.swift"
 test_anchor = "testACommitSettlesTheStagingItWasCalledForRatherThanWhateverIsCurrent"
+
+[[fixes]]
+id = "android.settled-reporter-keeps-its-last-word"
+commits = ["0cf61d93"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackControlReporter.kt"
+source_anchor = "val newest = if (settled) pending else newestCapture(pending)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "a teardown outlives the source that handed it over"
