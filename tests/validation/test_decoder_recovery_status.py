@@ -1263,6 +1263,24 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         self.assertNotIn("#/settings/developer\") render()", web)
         self.assertIn("drop every frame of a file and still exit successfully", web)
         self.assertIn("What this node measured", web)
+
+        # The recovery's own enable section. The effort was required to explain
+        # what safe enablement depends on, and the honest answer today opens
+        # with the prerequisite that is not met — so the section is checked for
+        # saying that, not merely for existing.
+        self.assertIn("function decodeRecoveryCard(", web)
+        self.assertIn("decodeRecoveryCard(settings)", web)
+        self.assertIn("There is no switch here", web)
+        self.assertIn("Not true on any node today", web)
+        self.assertIn("One recovery per playback, and it is never given back", web)
+        self.assertIn("hardware decoders", web)
+        # Saving replaces its own card, like the one above it.
+        self.assertIn("drcard", web)
+        # And the status document carries the finding rather than only the card.
+        self.assertIn(
+            "M7a — the enable section, and the prerequisite that is not met",
+            self.status,
+        )
         self.assertIn("async function saveVerifiedDecode(", web)
         self.assertIn(
             "decoder_health_qualified_artifacts:document.getElementById"
