@@ -145,24 +145,33 @@ object LiveTvGuideReducer {
         val slot = if (slotSeconds > 0) slotSeconds else SLOT_SECONDS
         val px = if (pxPerSlot > 0f) pxPerSlot else 240f
         fun scale(seconds: Long): Float = (seconds - window.start).toFloat() / slot * px
-        val rows = channels.map { channel ->
-            val programmes = channel(guide, channel.id)?.programmes.orEmpty()
-            val cells = programmes.mapNotNull { row ->
-                val start = maxOf(row.start, window.start)
-                val end = minOf(row.end, window.end)
+        // Named `entry`, not `channel`: shadowing the reducer's own `channel`
+        // function with the loop variable reads as a call on the value, and is
+        // the construct most likely to break under a rename nobody here can
+        // compile.
+        val rows = channels.map { entry ->
+            val programmes = channel(guide, entry.id)?.programmes.orEmpty()
+            val cells = programmes.mapNotNull { programme ->
+                val start = maxOf(programme.start, window.start)
+                val end = minOf(programme.end, window.end)
                 if (end <= start) {
                     null
                 } else {
                     LiveTvGridCell(
-                        programme = row,
+                        programme = programme,
                         left = scale(start),
                         width = scale(end) - scale(start),
-                        airing = row.start <= now && now < row.end,
-                        clipped = row.start < window.start || row.end > window.end,
+                        airing = programme.start <= now && now < programme.end,
+                        clipped = programme.start < window.start || programme.end > window.end,
                     )
                 }
-            }
-            LiveTvGridRow(channel, cells)
+                // The grid composes a button per cell in a plain Box, not a
+                // lazy row, and the guide is relayed third-party content whose
+                // only server-side bound is the 2 MiB document cap. Without a
+                // ceiling a feed of one-second programmes would compose tens of
+                // thousands of buttons in one pass and hang the app.
+            }.take(MAX_CELLS_PER_ROW)
+            LiveTvGridRow(entry, cells)
         }
         return LiveTvGridLayout(
             rows = rows,
@@ -194,9 +203,15 @@ object LiveTvGuideReducer {
     }
 
     /** The window the grid draws, anchored to the current half hour. */
+    /** As many cells as a four-hour window can meaningfully draw. */
+    const val MAX_CELLS_PER_ROW: Int = 240
+
     fun window(now: Long, slotSeconds: Long = SLOT_SECONDS, slots: Int = VISIBLE_SLOTS): LiveTvGuideWindow {
         val slot = if (slotSeconds > 0) slotSeconds else SLOT_SECONDS
-        val start = now - Math.floorMod(now, slot)
+        // `Math.floorMod` is API 24 and `minSdk` is 23 with no core-library
+        // desugaring, so opening the guide would have thrown NoSuchMethodError
+        // on an API 23 device — and a JVM unit test cannot see that.
+        val start = now - now.mod(slot)
         return LiveTvGuideWindow(start, start + slots * slot)
     }
 
@@ -233,6 +248,6 @@ object LiveTvGuideReducer {
         if (visible.isEmpty()) return null
         val at = visible.indexOf(current)
         if (at < 0) return visible.first()
-        return visible[Math.floorMod(at + delta, visible.size)]
+        return visible[(at + delta).mod(visible.size)]
     }
 }

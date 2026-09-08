@@ -50,10 +50,13 @@ class LiveTvPlayer private constructor(context: Context) {
     private var guideRefresh: Job? = null
     private var channelChange: Job? = null
     /**
-     * Set by the screen while the activity is in picture-in-picture or while a
-     * dock is showing the picture somewhere else. Both are cases where the
-     * video is still on screen and its tuner is still in use, so the ordinary
-     * "the screen went away, drop the tuner" rules must consult this first.
+     * Set by the screen while, and only while, the activity is genuinely in
+     * picture-in-picture — the one case where the video is still on screen and
+     * its tuner is still in use, so the ordinary "the screen went away, drop
+     * the tuner" rules must consult this first.
+     *
+     * There is no in-app dock on Android in this effort. Saying there was
+     * would tell a reader that a path nobody wrote is covered here.
      */
     @Volatile private var retain = false
     private val mutableState = MutableStateFlow(LiveTvPlayerState())
@@ -177,18 +180,49 @@ class LiveTvPlayer private constructor(context: Context) {
     private fun stopWithMessage(message: String, clearProfile: Boolean = false) {
         val mine = ++serial
         detach()
-        mutableState.value = mutableState.value.copy(busy = false, playing = false, message = message,
-            channels = if (clearProfile) emptyList() else mutableState.value.channels)
+        mutableState.value = mutableState.value.copy(
+            busy = false, playing = false, message = message,
+            // A released tuner is not "Watching". Carrying `watching` forward
+            // left the list row labelled and the grid cell highlighted for a
+            // session that no longer exists.
+            watching = null,
+            channels = if (clearProfile) emptyList() else mutableState.value.channels,
+            // And a guide belongs to the profile whose lineup it was matched
+            // against: keeping it across a sign-out rendered one account's
+            // programme text over the next account's screen.
+            guide = if (clearProfile) null else mutableState.value.guide,
+        )
         scope.launch {
             try {
                 lease?.stop()?.await()
-                if (mine == serial && clearProfile) { api = null; profile = null; lease = null }
+                if (mine == serial && clearProfile) {
+                    // The loop captured `api` in a local, so nulling the field
+                    // did not stop it: after a sign-out it kept issuing
+                    // authenticated guide reads with the previous profile's
+                    // bearer token every twenty minutes, for the life of the
+                    // process.
+                    endGuideRefresh()
+                    api = null; profile = null; lease = null
+                }
             } catch (_: Exception) {
                 if (mine == serial) mutableState.value = mutableState.value.copy(message = "Owner cleanup is unconfirmed. Retry Stop before opening another channel.")
                 // Preserve the old immutable profile and capability for retry.
             }
         }
     }
+    /** A message for the viewer that is not a failure of the stream. */
+    fun report(message: String) {
+        mutableState.value = mutableState.value.copy(message = message)
+    }
+
+    /**
+     * Ends the guide refresh loop. Separate from [detach] because stopping a
+     * session does not end the guide — only losing the profile does.
+     */
+    private fun endGuideRefresh() {
+        guideRefresh?.cancel(); guideRefresh = null
+    }
+
     private fun detach() {
         heartbeat?.cancel(); heartbeat = null
         channelChange?.cancel(); channelChange = null
@@ -205,6 +239,11 @@ class LiveTvPlayer private constructor(context: Context) {
      * when it matters.
      */
     fun setRetained(retained: Boolean) {
+        // Set only by the picture-in-picture listener and by a confirmed
+        // `enterPictureInPictureMode`. There is no in-app dock on Android in
+        // this effort — the KDoc on `retain` used to claim one, which would
+        // have led a reader to believe an untested path was covered here.
+
         retain = retained
     }
 
@@ -241,6 +280,10 @@ class LiveTvPlayer private constructor(context: Context) {
             while (true) {
                 // A guide that will not load leaves a working screen: rows fall
                 // back to number and callsign and nothing else changes.
+                // Check before the request, not only before the state write:
+                // suppressing the write still left the request itself going out
+                // under credentials the viewer has signed out of.
+                if (profile != origin to token) return@launch
                 runCatching { api.guide() }.getOrNull()?.let { fetched ->
                     if (profile == origin to token) {
                         mutableState.value = mutableState.value.copy(guide = fetched)

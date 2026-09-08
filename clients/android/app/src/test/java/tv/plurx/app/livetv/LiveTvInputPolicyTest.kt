@@ -7,6 +7,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -89,5 +90,59 @@ class LiveTvInputPolicyTest {
             timings.getValue("channel_coalesce_ms").jsonPrimitive.int.toLong(),
             LiveTvInputPolicy.CHANNEL_COALESCE_MS,
         )
+    }
+}
+
+/**
+ * The routing table is only worth transcribing if something calls it. Nothing
+ * did: `LiveTvInputPolicy.route` had one call site in the whole app and it was
+ * this test file. These pin the wiring in the screen that turns the table into
+ * behaviour — the source is read rather than composed, because a Compose
+ * screen needs an instrumented device and these run on the JVM.
+ */
+class LiveTvScreenWiringTest {
+    private val screen = java.io.File(
+        "src/main/java/tv/plurx/app/livetv/LiveTvScreen.kt",
+    ).readText()
+
+    @Test
+    fun `every press goes through the shared table`() {
+        assertTrue(screen.contains("onPreviewKeyEvent"))
+        assertTrue(screen.contains("LiveTvInputPolicy.route(surface, inputState(), input)"))
+        // And a hidden overlay is `Hidden`, which is the state whose direction
+        // rows say `reveal` and nothing else.
+        assertTrue(screen.contains("else -> LiveTvInputState.Hidden"))
+    }
+
+    @Test
+    fun `the overlay hides itself after the contract's four seconds`() {
+        assertTrue(screen.contains("delay(LiveTvInputPolicy.HIDE_AFTER_MS)"))
+        assertTrue(screen.contains("overlayVisible = false"))
+    }
+
+    @Test
+    fun `a television is fullscreen without anyone pressing a button`() {
+        assertTrue(screen.contains("if (television) fullscreen = state.playing"))
+    }
+
+    @Test
+    fun `a refused picture-in-picture never latches the retention flag`() {
+        // Setting `retain` before the call and discarding the Boolean disabled
+        // every lifecycle release path for the life of the process whenever the
+        // system refused PiP — a keepalive loop holding the household's only
+        // tuner against a screen nobody was on.
+        assertTrue(screen.contains("val entered = target.enterPictureInPictureMode("))
+        assertTrue(screen.contains("controller.setRetained(entered)"))
+        assertFalse(screen.contains("controller.setRetained(true)\n        target.enterPictureInPictureMode"))
+    }
+
+    @Test
+    fun `leaving picture-in-picture brings the chrome back`() {
+        assertTrue(screen.contains("overlayVisible = !info.isInPictureInPictureMode"))
+    }
+
+    @Test
+    fun `a channel key routes through the coalescer rather than straight to a tuner`() {
+        assertTrue(screen.contains("controller.requestChannel(next)"))
     }
 }

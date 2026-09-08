@@ -806,6 +806,21 @@ test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "testQualityAudioAndSubtitleCommandsCreateANewPresentationDestinationSynchronously"
 
 [[fixes]]
+# The screen set the retention flag before calling `enterPictureInPictureMode`
+# and discarded the Boolean it returns. The system refuses PiP whenever the
+# user has turned it off for the app, and on that path no mode-changed callback
+# ever fires — so the flag latched true for the life of the process and every
+# lifecycle release path was disabled. The client then kept renewing the lease
+# on the household's only tuner against a screen nobody was on, with no way
+# back to the Stop button.
+id = "android.live-tv-refused-pip-must-not-latch-retention"
+commits = ["01413da4"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvScreen.kt"
+source_anchor = "controller.setRetained(entered)"
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvInputPolicyTest.kt"
+test_anchor = "a refused picture-in-picture never latches the retention flag"
+
+[[fixes]]
 # Entering picture-in-picture backgrounds the app, and the release rule read
 # only the scene phase — so the one case picture-in-picture exists for would
 # have released the tuner underneath its own window. Every release path now

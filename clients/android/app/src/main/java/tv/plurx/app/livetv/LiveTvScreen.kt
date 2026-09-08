@@ -11,7 +11,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.LocalActivity
 import androidx.core.util.Consumer
-import androidx.activity.PictureInPictureModeChangedInfo
+import androidx.core.app.PictureInPictureModeChangedInfo
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -34,6 +34,17 @@ import tv.plurx.app.ui.components.TvButton as Button
 import tv.plurx.app.ui.components.TvTextButton as TextButton
 import tv.plurx.app.ui.components.RequestInitialFocus
 import tv.plurx.app.ui.components.tvFocusRing
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.runtime.Composable
@@ -64,6 +75,7 @@ import tv.plurx.app.ui.currentFormFactor
 import androidx.compose.foundation.layout.windowInsetsPadding
 import kotlinx.coroutines.delay
 
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 fun LiveTvScreen(origin: String, onBack: () -> Unit) {
     val context = LocalContext.current
@@ -83,6 +95,7 @@ fun LiveTvScreen(origin: String, onBack: () -> Unit) {
     var hideProtected by remember { mutableStateOf(false) }
     var detail by remember { mutableStateOf<Pair<LiveTvChannel, LiveTvProgramme>?>(null) }
     var overlayVisible by remember { mutableStateOf(true) }
+    var lastInteraction by remember { mutableIntStateOf(0) }
     var isInPip by remember { mutableStateOf(false) }
     var now by remember { mutableLongStateOf(System.currentTimeMillis() / 1000) }
     val scope = rememberCoroutineScope()
@@ -101,7 +114,20 @@ fun LiveTvScreen(origin: String, onBack: () -> Unit) {
     // capability under the new profile's session.
     val token = Session.token.orEmpty()
     LaunchedEffect(origin, token) { controller.load(origin, token) }
-    LaunchedEffect(state.playing) { if (!state.playing) fullscreen = false }
+    // The ten-foot surface is always fullscreen. Shipping the phone layout with
+    // a Fullscreen button in front of it meant the overlay rendered inside a
+    // 260 dp thumbnail with a second, separately focusable channel list beneath
+    // it — two D-pad targets fighting over the same presses.
+    LaunchedEffect(state.playing, television) {
+        if (television) fullscreen = state.playing else if (!state.playing) fullscreen = false
+    }
+    // The contract's four seconds. Without this the overlay never hid at all,
+    // so `ten-foot · overlay · idle → hide` was a row nothing implemented.
+    LaunchedEffect(lastInteraction, overlayVisible, state.playing, state.paused, isInPip) {
+        if (!overlayVisible || !state.playing || state.paused || isInPip) return@LaunchedEffect
+        delay(LiveTvInputPolicy.HIDE_AFTER_MS)
+        overlayVisible = false
+    }
     LaunchedEffect(Unit) {
         while (true) {
             delay(30_000)
@@ -127,30 +153,111 @@ fun LiveTvScreen(origin: String, onBack: () -> Unit) {
             val listener = Consumer<PictureInPictureModeChangedInfo> { info ->
                 isInPip = info.isInPictureInPictureMode
                 controller.setRetained(info.isInPictureInPictureMode)
-                if (info.isInPictureInPictureMode) overlayVisible = false
+                // Restore the chrome on the way out, exactly as the VOD screen
+                // does. Clearing it with no `else` left the expanded window
+                // with no title, no progress, no channel strip and no Exit,
+                // permanently — the only recovery was leaving Live TV, which
+                // releases the tuner.
+                overlayVisible = !info.isInPictureInPictureMode
+                lastInteraction += 1
             }
             target.addOnPictureInPictureModeChangedListener(listener)
             onDispose { target.removeOnPictureInPictureModeChangedListener(listener) }
         }
     }
 
-    val visible = LiveTvGuideReducer.filter(
-        channels = state.channels,
-        guide = state.guide,
-        options = LiveTvChannelFilter(search, favoritesOnly, hideProtected),
-        now = now,
-    )
+    // Remembered on its inputs. `filter` runs `airing` per channel — a linear
+    // scan of that channel's programmes — so recomputing it on every
+    // recomposition made one keystroke in the search field O(channels ×
+    // programmes).
+    val visible = remember(state.channels, state.guide, search, favoritesOnly, hideProtected, now) {
+        LiveTvGuideReducer.filter(
+            channels = state.channels,
+            guide = state.guide,
+            options = LiveTvChannelFilter(search, favoritesOnly, hideProtected),
+            now = now,
+        )
+    }
 
     fun enterPip() {
         val target = componentActivity ?: return
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-        controller.setRetained(true)
-        target.enterPictureInPictureMode(
+        // Retain only if the system actually took us into PiP. Setting the flag
+        // first and discarding the Boolean latched it permanently whenever PiP
+        // was refused — which it is on any device where the user has turned
+        // picture-in-picture off for this app — and every lifecycle release
+        // path is gated on that flag. The result was a keepalive loop renewing
+        // the household's only tuner against a screen nobody was on, with no
+        // way back to the Stop button.
+        val entered = target.enterPictureInPictureMode(
             PictureInPictureParams.Builder().setAspectRatio(Rational(16, 9)).build(),
         )
+        controller.setRetained(entered)
+        if (!entered) {
+            controller.report("Picture-in-picture is turned off for plurx in Android settings.")
+        }
     }
 
-    Column(Modifier.fillMaxSize().windowInsetsPadding(safeDisplayInsets()).padding(16.dp)) {
+    // Every press decided by the shared table, exactly as the web page and the
+    // Apple clients do. The one ruling this has to preserve: a direction on a
+    // hidden overlay only reveals it — it never changes channel behind a
+    // picture nobody can see.
+    fun apply(outcome: LiveTvInputOutcome): Boolean {
+        when (outcome) {
+            LiveTvInputOutcome.Reveal -> { overlayVisible = true; lastInteraction += 1 }
+            LiveTvInputOutcome.Hide -> overlayVisible = false
+            LiveTvInputOutcome.ToggleChrome -> { overlayVisible = !overlayVisible; lastInteraction += 1 }
+            LiveTvInputOutcome.TogglePlay -> { controller.togglePause(); lastInteraction += 1 }
+            LiveTvInputOutcome.Exit -> {
+                if (television) return false
+                fullscreen = false
+            }
+            LiveTvInputOutcome.ChannelUp, LiveTvInputOutcome.ChannelDown -> {
+                val delta = if (outcome == LiveTvInputOutcome.ChannelUp) -1 else 1
+                val next = LiveTvGuideReducer.adjacent(visible, state.watching?.id, delta)
+                    ?.let { id -> visible.firstOrNull { it.id == id } }
+                if (next != null) controller.requestChannel(next)
+                lastInteraction += 1
+            }
+            // Focus movement and activation belong to the focus engine and the
+            // button's own onClick; the table names them so this stays
+            // exhaustive and a future row cannot land silently.
+            LiveTvInputOutcome.FocusRow, LiveTvInputOutcome.Activate -> lastInteraction += 1
+            LiveTvInputOutcome.StripPrev, LiveTvInputOutcome.StripNext,
+            LiveTvInputOutcome.Tune, LiveTvInputOutcome.Ignore -> return false
+        }
+        return true
+    }
+
+    val surface = if (television) LiveTvInputSurface.TenFoot else LiveTvInputSurface.Touch
+    fun inputState(): LiveTvInputState = when {
+        !television && !fullscreen -> LiveTvInputState.Page
+        overlayVisible -> LiveTvInputState.Overlay
+        else -> LiveTvInputState.Hidden
+    }
+
+    Column(
+        Modifier.fillMaxSize().windowInsetsPadding(safeDisplayInsets()).padding(16.dp)
+            .onPreviewKeyEvent { event ->
+                if (event.type != KeyEventType.KeyDown || !state.playing || isInPip) return@onPreviewKeyEvent false
+                val input = when (event.key) {
+                    Key.DirectionLeft -> LiveTvContractInput.Left
+                    Key.DirectionRight -> LiveTvContractInput.Right
+                    Key.DirectionUp -> LiveTvContractInput.Up
+                    Key.DirectionDown -> LiveTvContractInput.Down
+                    Key.DirectionCenter, Key.Enter -> LiveTvContractInput.Select
+                    Key.Back -> LiveTvContractInput.Back
+                    Key.MediaPlayPause, Key.MediaPlay, Key.MediaPause, Key.Spacebar ->
+                        LiveTvContractInput.PlayPause
+                    else -> null
+                } ?: return@onPreviewKeyEvent false
+                // A press on a hidden overlay is consumed whatever it does, so
+                // the focus engine cannot move focus behind a picture that is
+                // showing no chrome.
+                val outcome = LiveTvInputPolicy.route(surface, inputState(), input)
+                apply(outcome)
+            },
+    ) {
         if (!fullscreen && !isInPip) {
             TextButton(onClick = onBack, modifier = Modifier.focusRequester(backFocus)) { Text("Back") }
             Text("Live TV", style = MaterialTheme.typography.headlineMedium)
@@ -166,6 +273,12 @@ fun LiveTvScreen(origin: String, onBack: () -> Unit) {
                 } else {
                     Modifier.fillMaxWidth().heightIn(min = 160.dp, max = 260.dp).background(Color.Black)
                 },
+                    .let { base ->
+                        if (television) base else base.clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                        ) { apply(LiveTvInputPolicy.route(surface, inputState(), LiveTvContractInput.TapSurface)) }
+                    },
             ) {
                 AndroidView(
                     factory = { ctx ->
@@ -244,16 +357,21 @@ fun LiveTvScreen(origin: String, onBack: () -> Unit) {
                 singleLine = true,
             )
             if (browse == LiveTvBrowseView.Guide && !television) {
-                val window = LiveTvGuideReducer.window(now)
-                LiveTvGuideGrid(
-                    layout = LiveTvGuideReducer.gridLayout(
+                val window = remember(now) { LiveTvGuideReducer.window(now) }
+                // The layout allocates the whole row/cell tree; without this it
+                // did so on every recomposition, including every keystroke.
+                val layout = remember(state.guide, visible, window, now) {
+                    LiveTvGuideReducer.gridLayout(
                         guide = state.guide,
                         channels = visible,
                         window = window,
                         now = now,
                         pxPerSlot = LiveTvGridMetrics.slotWidth.value,
-                    ),
-                    slots = LiveTvGuideReducer.gridSlots(window),
+                    )
+                }
+                LiveTvGuideGrid(
+                    layout = layout,
+                    slots = remember(window) { LiveTvGuideReducer.gridSlots(window) },
                     playingChannelId = state.watching?.id,
                     onAiring = { controller.watch(it) },
                     onFuture = { channel, programme -> detail = channel to programme },
@@ -280,8 +398,15 @@ fun LiveTvScreen(origin: String, onBack: () -> Unit) {
     // A future programme gets details and no actions. There is no DVR behind
     // this, so offering "record" would be offering something that does not
     // exist.
+    // A real sheet. Emitted bare, this drew programme text straight over the
+    // channel list with no background, no scrim, no outside-tap dismiss and no
+    // scroll — so a long synopsis (guide text is relayed third-party content
+    // and only the 2 MiB document cap bounds it) pushed Close off the screen
+    // and the only way out was system Back, which drops the tuner.
     detail?.let { (channel, programme) ->
-        LiveTvProgrammeDetail(channel, programme) { detail = null }
+        ModalBottomSheet(onDismissRequest = { detail = null }) {
+            LiveTvProgrammeDetail(channel, programme) { detail = null }
+        }
     }
 }
 
@@ -393,7 +518,7 @@ private fun LiveTvProgrammeDetail(
     programme: LiveTvProgramme,
     onClose: () -> Unit,
 ) {
-    Column(Modifier.fillMaxWidth().padding(16.dp)) {
+    Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(16.dp)) {
         Text(programme.title, style = MaterialTheme.typography.titleMedium)
         Text(
             "${channel.title} · ${liveTvTime(programme.start)}–${liveTvTime(programme.end)}" +

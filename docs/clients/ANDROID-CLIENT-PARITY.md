@@ -232,7 +232,26 @@ have killed the exact case PiP exists for. Both teardown paths, the
 because the screen is precisely the thing that is going away when it matters.
 An ordinary back-out, with no PiP, still releases the tuner immediately. The
 guide refresh runs on the controller's own scope beside the heartbeat rather
-than in a `LaunchedEffect`, for the same reason.
+than in a `LaunchedEffect`, for the same reason — and it ends when the profile
+does, so a sign-out cannot leave it reading the guide with the previous
+account's token.
+
+The flag is set from the mode-changed callback and from a confirmed
+`enterPictureInPictureMode`, never before the call. Android refuses PiP
+whenever the user has turned it off for an app, and no callback fires on that
+path: setting the flag first and discarding the Boolean latched it for the
+life of the process and disabled every release path there is. **There is no
+in-app dock on Android in this effort** — leaving Live TV releases the tuner,
+and picture-in-picture is the only thing that retains it.
+
+**Television is one surface, not the phone layout with a button.** On
+`FormFactor.Television` the video is fullscreen whenever a session is playing,
+and every D-pad press is routed through the `live` table in
+`tests/playback/player-input-contract.json` via `LiveTvInputPolicy`: a
+direction on a hidden overlay reveals it and never changes channel, the
+channel list is preview-then-commit, and four seconds of no input hides the
+overlay again. A phone in fullscreen gets the touch rows of the same table —
+a tap toggles the chrome.
 
 **One input table for the ten-foot overlay.** `LiveTvInputPolicy` transcribes
 the `live` section of `tests/playback/player-input-contract.json`, and

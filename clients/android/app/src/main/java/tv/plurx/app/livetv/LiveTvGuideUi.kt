@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
@@ -54,6 +55,8 @@ object LiveTvGridMetrics {
     val slotWidth: Dp = 160.dp
     val rowHeight: Dp = 56.dp
     val channelColumnWidth: Dp = 132.dp
+    /** The grid's now rule. Red because every guide's is. */
+    val nowLine: Color = Color(0xFFE23A2E)
 }
 
 private val liveTvClock = SimpleDateFormat("h:mm a", Locale.getDefault())
@@ -150,6 +153,10 @@ fun LiveTvGuideGrid(
                 }
             }
         }
+        // The red now line. It was computed by the reducer and drawn by nobody,
+        // while ANDROID-CLIENT-PARITY.md said it shipped — so the grid gave a
+        // viewer no way to tell where the present was in a four-hour window.
+        Box(Modifier.weight(1f)) {
         LazyColumn {
             items(layout.rows, key = { it.channel.id }) { row ->
                 Row(Modifier.height(LiveTvGridMetrics.rowHeight)) {
@@ -182,6 +189,19 @@ fun LiveTvGuideGrid(
                     }
                 }
             }
+        }
+        layout.nowX?.let { x ->
+            val offset = LiveTvGridMetrics.channelColumnWidth + x.dp - scroll.value.dp
+            if (offset >= LiveTvGridMetrics.channelColumnWidth) {
+                Box(
+                    Modifier
+                        .offset(x = offset)
+                        .fillMaxHeight()
+                        .width(2.dp)
+                        .background(LiveTvGridMetrics.nowLine),
+                )
+            }
+        }
         }
     }
 }
