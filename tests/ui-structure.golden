@@ -1457,6 +1457,220 @@ catalog|library@390x780|req|GET /api/v1/libraries/<id>/items|1
 catalog|library@390x780|req|GET /api/v1/libraries|1
 catalog|library@390x780|req|GET /api/v1/me|1
 catalog|library@390x780|req|GET /api/v1/server|1
+catalog|live-tv-grid@1280x860|dom|^ > div#app|1
+catalog|live-tv-grid@1280x860|dom|a > span.px-lbl[text]|3
+catalog|live-tv-grid@1280x860|dom|a > svg.px-ico[aria-hidden=true]|3
+catalog|live-tv-grid@1280x860|dom|a.on[aria-current=page] > span.px-lbl[text]|1
+catalog|live-tv-grid@1280x860|dom|a.on[aria-current=page] > svg.px-ico[aria-hidden=true]|1
+catalog|live-tv-grid@1280x860|dom|a.px-tab > span[text]|2
+catalog|live-tv-grid@1280x860|dom|a.px-tab > svg.px-ico[aria-hidden=true]|2
+catalog|live-tv-grid@1280x860|dom|aside.px-side > div#pxnav.px-scroll|1
+catalog|live-tv-grid@1280x860|dom|aside.px-side > div.px-foot|1
+catalog|live-tv-grid@1280x860|dom|aside.px-side > div.px-head|1
+catalog|live-tv-grid@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.lookword[text]|1
+catalog|live-tv-grid@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.tsw|1
+catalog|live-tv-grid@1280x860|dom|button.ghost.profile.sm > span.caret[text]|1
+catalog|live-tv-grid@1280x860|dom|button.ghost.profile.sm > span.pavatar[text]|1
+catalog|live-tv-grid@1280x860|dom|button.ghost.profile.sm > span.pname[text]|1
+catalog|live-tv-grid@1280x860|dom|button.px-tab[aria-expanded=false aria-controls=* type=button] > span[text]|1
+catalog|live-tv-grid@1280x860|dom|button.px-tab[aria-expanded=false aria-controls=* type=button] > svg.px-ico[aria-hidden=true]|1
+catalog|live-tv-grid@1280x860|dom|button.px-tab[type=button] > span[text]|1
+catalog|live-tv-grid@1280x860|dom|button.px-tab[type=button] > svg.px-ico[aria-hidden=true]|1
+catalog|live-tv-grid@1280x860|dom|div > div.lt-gridwrap|1
+catalog|live-tv-grid@1280x860|dom|div#app > div#pxshell.px-shell|1
+catalog|live-tv-grid@1280x860|dom|div#live-tv-body > div.lt-split|1
+catalog|live-tv-grid@1280x860|dom|div#live-tv-toolbar > div.lt-head|1
+catalog|live-tv-grid@1280x860|dom|div#pxnav.px-scroll > button.ghost.px-sheetx.sm[aria-label=* type=button text]|1
+catalog|live-tv-grid@1280x860|dom|div#pxnav.px-scroll > div#pxlibs|1
+catalog|live-tv-grid@1280x860|dom|div#pxnav.px-scroll > div.px-sec[text]|1
+catalog|live-tv-grid@1280x860|dom|div#pxnav.px-scroll > nav.px-nav[aria-label=*]|2
+catalog|live-tv-grid@1280x860|dom|div#pxshell.px-shell > aside.px-side|1
+catalog|live-tv-grid@1280x860|dom|div#pxshell.px-shell > main#main|1
+catalog|live-tv-grid@1280x860|dom|div#pxshell.px-shell > nav.px-tabs[aria-label=*]|1
+catalog|live-tv-grid@1280x860|dom|div.lt-gcells > button.airing.lt-cell[type=button text]|2
+catalog|live-tv-grid@1280x860|dom|div.lt-gcells > button.lt-cell[type=button text]|2
+catalog|live-tv-grid@1280x860|dom|div.lt-gcells > div.ends.lt-cell[text]|3
+catalog|live-tv-grid@1280x860|dom|div.lt-gname > span.lt-chip[text]|3
+catalog|live-tv-grid@1280x860|dom|div.lt-gname > span[text]|3
+catalog|live-tv-grid@1280x860|dom|div.lt-grid > div.lt-grow|3
+catalog|live-tv-grid@1280x860|dom|div.lt-grid > div.lt-now|1
+catalog|live-tv-grid@1280x860|dom|div.lt-grid > div.lt-times|1
+catalog|live-tv-grid@1280x860|dom|div.lt-gridwrap > div.lt-grid|1
+catalog|live-tv-grid@1280x860|dom|div.lt-grow > div.lt-gcells|3
+catalog|live-tv-grid@1280x860|dom|div.lt-grow > div.lt-gname|3
+catalog|live-tv-grid@1280x860|dom|div.lt-head > div.lt-switch[role=group aria-label=*]|2
+catalog|live-tv-grid@1280x860|dom|div.lt-head > input#live-tv-search[type=search]|1
+catalog|live-tv-grid@1280x860|dom|div.lt-head > label.muted[text]|1
+catalog|live-tv-grid@1280x860|dom|div.lt-head > label.tog|1
+catalog|live-tv-grid@1280x860|dom|div.lt-head > span.muted[text]|1
+catalog|live-tv-grid@1280x860|dom|div.lt-nowbar > span.grow.muted[text]|1
+catalog|live-tv-grid@1280x860|dom|div.lt-split > div.lt-stage|1
+catalog|live-tv-grid@1280x860|dom|div.lt-split > div|1
+catalog|live-tv-grid@1280x860|dom|div.lt-stage > div#live-tv-slot.lt-slot|1
+catalog|live-tv-grid@1280x860|dom|div.lt-stage > div.lt-nowbar|1
+catalog|live-tv-grid@1280x860|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=false type=button text]|2
+catalog|live-tv-grid@1280x860|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=true type=button text]|2
+catalog|live-tv-grid@1280x860|dom|div.lt-times > div.pad|1
+catalog|live-tv-grid@1280x860|dom|div.lt-times > div.t[text]|8
+catalog|live-tv-grid@1280x860|dom|div.px-brand > a.logo[text]|1
+catalog|live-tv-grid@1280x860|dom|div.px-ctl > div.px-pop|1
+catalog|live-tv-grid@1280x860|dom|div.px-foot > div.px-ctl|1
+catalog|live-tv-grid@1280x860|dom|div.px-foot > div.px-user|1
+catalog|live-tv-grid@1280x860|dom|div.px-foot > span#activity.activity|1
+catalog|live-tv-grid@1280x860|dom|div.px-head > div.px-brand|1
+catalog|live-tv-grid@1280x860|dom|div.px-head > input#q.search[aria-label=*]|1
+catalog|live-tv-grid@1280x860|dom|div.px-pop > button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*]|1
+catalog|live-tv-grid@1280x860|dom|div.px-pop > button.ghost.profile.sm|1
+catalog|live-tv-grid@1280x860|dom|div.px-pop > div#lookmenu.amenu.lookmenu|1
+catalog|live-tv-grid@1280x860|dom|div.px-pop > div#profilemenu.amenu|1
+catalog|live-tv-grid@1280x860|dom|div.px-user > div.px-pop|1
+catalog|live-tv-grid@1280x860|dom|label.tog > input#lt-hideprot[type=checkbox]|1
+catalog|live-tv-grid@1280x860|dom|label.tog > span[text]|1
+catalog|live-tv-grid@1280x860|dom|main#main > div#live-tv-body|1
+catalog|live-tv-grid@1280x860|dom|main#main > div#live-tv-toolbar|1
+catalog|live-tv-grid@1280x860|dom|main#main > h1[text]|1
+catalog|live-tv-grid@1280x860|dom|main#main > p#live-tv-message[role=status aria-live=polite text]|1
+catalog|live-tv-grid@1280x860|dom|main#main > p.sub[text]|1
+catalog|live-tv-grid@1280x860|dom|nav.px-nav[aria-label=*] > a.on[aria-current=page]|1
+catalog|live-tv-grid@1280x860|dom|nav.px-nav[aria-label=*] > a|3
+catalog|live-tv-grid@1280x860|dom|nav.px-tabs[aria-label=*] > a.px-tab|2
+catalog|live-tv-grid@1280x860|dom|nav.px-tabs[aria-label=*] > button.px-tab[aria-expanded=false aria-controls=* type=button]|1
+catalog|live-tv-grid@1280x860|dom|nav.px-tabs[aria-label=*] > button.px-tab[type=button]|1
+catalog|live-tv-grid@1280x860|dom|span[text] > span.lt-star[text]|1
+catalog|live-tv-grid@1280x860|dom|svg.px-ico[aria-hidden=true] > circle|2
+catalog|live-tv-grid@1280x860|dom|svg.px-ico[aria-hidden=true] > path|7
+catalog|live-tv-grid@1280x860|dom|svg.px-ico[aria-hidden=true] > rect|5
+catalog|live-tv-grid@1280x860|focus|000|a.logo "cinema"
+catalog|live-tv-grid@1280x860|focus|001|input#q.search "Search cinema"
+catalog|live-tv-grid@1280x860|focus|002|a "Home"
+catalog|live-tv-grid@1280x860|focus|003|a.on "Live TV"
+catalog|live-tv-grid@1280x860|focus|004|a "Activity"
+catalog|live-tv-grid@1280x860|focus|005|a "Settings"
+catalog|live-tv-grid@1280x860|focus|006|button.ghost.sm.lookbtn "Appearance"
+catalog|live-tv-grid@1280x860|focus|007|button.ghost.sm.profile "Account"
+catalog|live-tv-grid@1280x860|focus|008|button "≡ List"
+catalog|live-tv-grid@1280x860|focus|009|button "▦ Grid"
+catalog|live-tv-grid@1280x860|focus|010|button "All"
+catalog|live-tv-grid@1280x860|focus|011|button "Favorites"
+catalog|live-tv-grid@1280x860|focus|012|input#lt-hideprot
+catalog|live-tv-grid@1280x860|focus|013|input#live-tv-search "Number, name, or what is on"
+catalog|live-tv-grid@1280x860|focus|014|button.lt-cell.airing "Evening Edition · 12:00 PM–12:30 PM"
+catalog|live-tv-grid@1280x860|focus|015|button.lt-cell "Harbor Lights · 12:30 PM–1:30 PM"
+catalog|live-tv-grid@1280x860|focus|016|button.lt-cell.airing "The Long Game · 12:00 PM–1:00 PM"
+catalog|live-tv-grid@1280x860|focus|017|button.lt-cell "Studio Sessions · 1:00 PM–2:00 PM"
+catalog|live-tv-grid@1280x860|focus|018|<wrap>
+catalog|live-tv-grid@1280x860|req|GET /api/v1/activity|2
+catalog|live-tv-grid@1280x860|req|GET /api/v1/live-tv/channels|1
+catalog|live-tv-grid@1280x860|req|GET /api/v1/live-tv/guide|1
+catalog|live-tv-grid@1280x860|req|GET /api/v1/me|1
+catalog|live-tv-grid@1280x860|req|GET /api/v1/server|1
+catalog|live-tv-grid@390x780|dom|^ > div#app|1
+catalog|live-tv-grid@390x780|dom|a > span.px-lbl[text]|3
+catalog|live-tv-grid@390x780|dom|a > svg.px-ico[aria-hidden=true]|3
+catalog|live-tv-grid@390x780|dom|a.on[aria-current=page] > span.px-lbl[text]|1
+catalog|live-tv-grid@390x780|dom|a.on[aria-current=page] > svg.px-ico[aria-hidden=true]|1
+catalog|live-tv-grid@390x780|dom|a.px-tab > span[text]|2
+catalog|live-tv-grid@390x780|dom|a.px-tab > svg.px-ico[aria-hidden=true]|2
+catalog|live-tv-grid@390x780|dom|aside.px-side > div#pxnav.px-scroll|1
+catalog|live-tv-grid@390x780|dom|aside.px-side > div.px-foot|1
+catalog|live-tv-grid@390x780|dom|aside.px-side > div.px-head|1
+catalog|live-tv-grid@390x780|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.lookword[text]|1
+catalog|live-tv-grid@390x780|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.tsw|1
+catalog|live-tv-grid@390x780|dom|button.ghost.profile.sm > span.caret[text]|1
+catalog|live-tv-grid@390x780|dom|button.ghost.profile.sm > span.pavatar[text]|1
+catalog|live-tv-grid@390x780|dom|button.ghost.profile.sm > span.pname[text]|1
+catalog|live-tv-grid@390x780|dom|button.px-tab[aria-expanded=false aria-controls=* type=button] > span[text]|1
+catalog|live-tv-grid@390x780|dom|button.px-tab[aria-expanded=false aria-controls=* type=button] > svg.px-ico[aria-hidden=true]|1
+catalog|live-tv-grid@390x780|dom|button.px-tab[type=button] > span[text]|1
+catalog|live-tv-grid@390x780|dom|button.px-tab[type=button] > svg.px-ico[aria-hidden=true]|1
+catalog|live-tv-grid@390x780|dom|div > div.lt-gridwrap|1
+catalog|live-tv-grid@390x780|dom|div#app > div#pxshell.px-shell|1
+catalog|live-tv-grid@390x780|dom|div#live-tv-body > div.lt-split|1
+catalog|live-tv-grid@390x780|dom|div#live-tv-toolbar > div.lt-head|1
+catalog|live-tv-grid@390x780|dom|div#pxnav.px-scroll > button.ghost.px-sheetx.sm[aria-label=* type=button text]|1
+catalog|live-tv-grid@390x780|dom|div#pxnav.px-scroll > div#pxlibs|1
+catalog|live-tv-grid@390x780|dom|div#pxnav.px-scroll > div.px-sec[text]|1
+catalog|live-tv-grid@390x780|dom|div#pxnav.px-scroll > nav.px-nav[aria-label=*]|2
+catalog|live-tv-grid@390x780|dom|div#pxshell.px-shell > aside.px-side|1
+catalog|live-tv-grid@390x780|dom|div#pxshell.px-shell > main#main|1
+catalog|live-tv-grid@390x780|dom|div#pxshell.px-shell > nav.px-tabs[aria-label=*]|1
+catalog|live-tv-grid@390x780|dom|div.lt-gcells > button.airing.lt-cell[type=button text]|2
+catalog|live-tv-grid@390x780|dom|div.lt-gcells > button.lt-cell[type=button text]|2
+catalog|live-tv-grid@390x780|dom|div.lt-gcells > div.ends.lt-cell[text]|3
+catalog|live-tv-grid@390x780|dom|div.lt-gname > span.lt-chip[text]|3
+catalog|live-tv-grid@390x780|dom|div.lt-gname > span[text]|3
+catalog|live-tv-grid@390x780|dom|div.lt-grid > div.lt-grow|3
+catalog|live-tv-grid@390x780|dom|div.lt-grid > div.lt-now|1
+catalog|live-tv-grid@390x780|dom|div.lt-grid > div.lt-times|1
+catalog|live-tv-grid@390x780|dom|div.lt-gridwrap > div.lt-grid|1
+catalog|live-tv-grid@390x780|dom|div.lt-grow > div.lt-gcells|3
+catalog|live-tv-grid@390x780|dom|div.lt-grow > div.lt-gname|3
+catalog|live-tv-grid@390x780|dom|div.lt-head > div.lt-switch[role=group aria-label=*]|2
+catalog|live-tv-grid@390x780|dom|div.lt-head > input#live-tv-search[type=search]|1
+catalog|live-tv-grid@390x780|dom|div.lt-head > label.muted[text]|1
+catalog|live-tv-grid@390x780|dom|div.lt-head > label.tog|1
+catalog|live-tv-grid@390x780|dom|div.lt-head > span.muted[text]|1
+catalog|live-tv-grid@390x780|dom|div.lt-nowbar > span.grow.muted[text]|1
+catalog|live-tv-grid@390x780|dom|div.lt-split > div.lt-stage|1
+catalog|live-tv-grid@390x780|dom|div.lt-split > div|1
+catalog|live-tv-grid@390x780|dom|div.lt-stage > div#live-tv-slot.lt-slot|1
+catalog|live-tv-grid@390x780|dom|div.lt-stage > div.lt-nowbar|1
+catalog|live-tv-grid@390x780|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=false type=button text]|2
+catalog|live-tv-grid@390x780|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=true type=button text]|2
+catalog|live-tv-grid@390x780|dom|div.lt-times > div.pad|1
+catalog|live-tv-grid@390x780|dom|div.lt-times > div.t[text]|8
+catalog|live-tv-grid@390x780|dom|div.px-brand > a.logo[text]|1
+catalog|live-tv-grid@390x780|dom|div.px-ctl > div.px-pop|1
+catalog|live-tv-grid@390x780|dom|div.px-foot > div.px-ctl|1
+catalog|live-tv-grid@390x780|dom|div.px-foot > div.px-user|1
+catalog|live-tv-grid@390x780|dom|div.px-foot > span#activity.activity|1
+catalog|live-tv-grid@390x780|dom|div.px-head > div.px-brand|1
+catalog|live-tv-grid@390x780|dom|div.px-head > input#q.search[aria-label=*]|1
+catalog|live-tv-grid@390x780|dom|div.px-pop > button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*]|1
+catalog|live-tv-grid@390x780|dom|div.px-pop > button.ghost.profile.sm|1
+catalog|live-tv-grid@390x780|dom|div.px-pop > div#lookmenu.amenu.lookmenu|1
+catalog|live-tv-grid@390x780|dom|div.px-pop > div#profilemenu.amenu|1
+catalog|live-tv-grid@390x780|dom|div.px-user > div.px-pop|1
+catalog|live-tv-grid@390x780|dom|label.tog > input#lt-hideprot[type=checkbox]|1
+catalog|live-tv-grid@390x780|dom|label.tog > span[text]|1
+catalog|live-tv-grid@390x780|dom|main#main > div#live-tv-body|1
+catalog|live-tv-grid@390x780|dom|main#main > div#live-tv-toolbar|1
+catalog|live-tv-grid@390x780|dom|main#main > h1[text]|1
+catalog|live-tv-grid@390x780|dom|main#main > p#live-tv-message[role=status aria-live=polite text]|1
+catalog|live-tv-grid@390x780|dom|main#main > p.sub[text]|1
+catalog|live-tv-grid@390x780|dom|nav.px-nav[aria-label=*] > a.on[aria-current=page]|1
+catalog|live-tv-grid@390x780|dom|nav.px-nav[aria-label=*] > a|3
+catalog|live-tv-grid@390x780|dom|nav.px-tabs[aria-label=*] > a.px-tab|2
+catalog|live-tv-grid@390x780|dom|nav.px-tabs[aria-label=*] > button.px-tab[aria-expanded=false aria-controls=* type=button]|1
+catalog|live-tv-grid@390x780|dom|nav.px-tabs[aria-label=*] > button.px-tab[type=button]|1
+catalog|live-tv-grid@390x780|dom|span[text] > span.lt-star[text]|1
+catalog|live-tv-grid@390x780|dom|svg.px-ico[aria-hidden=true] > circle|2
+catalog|live-tv-grid@390x780|dom|svg.px-ico[aria-hidden=true] > path|7
+catalog|live-tv-grid@390x780|dom|svg.px-ico[aria-hidden=true] > rect|5
+catalog|live-tv-grid@390x780|focus|000|a.logo "cinema"
+catalog|live-tv-grid@390x780|focus|001|input#q.search "Search cinema"
+catalog|live-tv-grid@390x780|focus|002|button.ghost.sm.lookbtn "Appearance"
+catalog|live-tv-grid@390x780|focus|003|button.ghost.sm.profile "Account"
+catalog|live-tv-grid@390x780|focus|004|button "≡ List"
+catalog|live-tv-grid@390x780|focus|005|button "▦ Grid"
+catalog|live-tv-grid@390x780|focus|006|button "All"
+catalog|live-tv-grid@390x780|focus|007|button "Favorites"
+catalog|live-tv-grid@390x780|focus|008|input#lt-hideprot
+catalog|live-tv-grid@390x780|focus|009|input#live-tv-search "Number, name, or what is on"
+catalog|live-tv-grid@390x780|focus|010|button.lt-cell.airing "Evening Edition · 12:00 PM–12:30 PM"
+catalog|live-tv-grid@390x780|focus|011|button.lt-cell "Harbor Lights · 12:30 PM–1:30 PM"
+catalog|live-tv-grid@390x780|focus|012|button.lt-cell.airing "The Long Game · 12:00 PM–1:00 PM"
+catalog|live-tv-grid@390x780|focus|013|button.lt-cell "Studio Sessions · 1:00 PM–2:00 PM"
+catalog|live-tv-grid@390x780|focus|014|a.px-tab "Home"
+catalog|live-tv-grid@390x780|focus|015|button.px-tab "Libraries"
+catalog|live-tv-grid@390x780|focus|016|button.px-tab "Search"
+catalog|live-tv-grid@390x780|focus|017|a.px-tab "Activity"
+catalog|live-tv-grid@390x780|focus|018|<wrap>
+catalog|live-tv-grid@390x780|req|GET /api/v1/activity|2
+catalog|live-tv-grid@390x780|req|GET /api/v1/live-tv/channels|1
+catalog|live-tv-grid@390x780|req|GET /api/v1/live-tv/guide|1
+catalog|live-tv-grid@390x780|req|GET /api/v1/me|1
+catalog|live-tv-grid@390x780|req|GET /api/v1/server|1
 catalog|live-tv@1280x860|dom|^ > div#app|1
 catalog|live-tv@1280x860|dom|a > span.px-lbl[text]|3
 catalog|live-tv@1280x860|dom|a > svg.px-ico[aria-hidden=true]|3
@@ -1472,12 +1686,18 @@ catalog|live-tv@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-lab
 catalog|live-tv@1280x860|dom|button.ghost.profile.sm > span.caret[text]|1
 catalog|live-tv@1280x860|dom|button.ghost.profile.sm > span.pavatar[text]|1
 catalog|live-tv@1280x860|dom|button.ghost.profile.sm > span.pname[text]|1
+catalog|live-tv@1280x860|dom|button.locked.lt-row[role=option aria-selected=false disabled type=button] > span.lt-chip[text]|1
+catalog|live-tv@1280x860|dom|button.locked.lt-row[role=option aria-selected=false disabled type=button] > span[text]|1
+catalog|live-tv@1280x860|dom|button.locked.lt-row[role=option aria-selected=false disabled type=button] > span|1
+catalog|live-tv@1280x860|dom|button.lt-row[role=option aria-selected=false type=button] > span.lt-chip[text]|2
+catalog|live-tv@1280x860|dom|button.lt-row[role=option aria-selected=false type=button] > span|4
 catalog|live-tv@1280x860|dom|button.px-tab[aria-expanded=false aria-controls=* type=button] > span[text]|1
 catalog|live-tv@1280x860|dom|button.px-tab[aria-expanded=false aria-controls=* type=button] > svg.px-ico[aria-hidden=true]|1
 catalog|live-tv@1280x860|dom|button.px-tab[type=button] > span[text]|1
 catalog|live-tv@1280x860|dom|button.px-tab[type=button] > svg.px-ico[aria-hidden=true]|1
 catalog|live-tv@1280x860|dom|div#app > div#pxshell.px-shell|1
-catalog|live-tv@1280x860|dom|div#live-tv-channels > div.card|3
+catalog|live-tv@1280x860|dom|div#live-tv-body > div.lt-split|1
+catalog|live-tv@1280x860|dom|div#live-tv-toolbar > div.lt-head|1
 catalog|live-tv@1280x860|dom|div#pxnav.px-scroll > button.ghost.px-sheetx.sm[aria-label=* type=button text]|1
 catalog|live-tv@1280x860|dom|div#pxnav.px-scroll > div#pxlibs|1
 catalog|live-tv@1280x860|dom|div#pxnav.px-scroll > div.px-sec[text]|1
@@ -1485,10 +1705,20 @@ catalog|live-tv@1280x860|dom|div#pxnav.px-scroll > nav.px-nav[aria-label=*]|2
 catalog|live-tv@1280x860|dom|div#pxshell.px-shell > aside.px-side|1
 catalog|live-tv@1280x860|dom|div#pxshell.px-shell > main#main|1
 catalog|live-tv@1280x860|dom|div#pxshell.px-shell > nav.px-tabs[aria-label=*]|1
-catalog|live-tv@1280x860|dom|div.card > button.ghost.sm[disabled text]|1
-catalog|live-tv@1280x860|dom|div.card > button.primary.sm[text]|2
-catalog|live-tv@1280x860|dom|div.card > h2[text]|3
-catalog|live-tv@1280x860|dom|div.card > p[text]|3
+catalog|live-tv@1280x860|dom|div.lt-head > div.lt-switch[role=group aria-label=*]|2
+catalog|live-tv@1280x860|dom|div.lt-head > input#live-tv-search[type=search]|1
+catalog|live-tv@1280x860|dom|div.lt-head > label.muted[text]|1
+catalog|live-tv@1280x860|dom|div.lt-head > label.tog|1
+catalog|live-tv@1280x860|dom|div.lt-head > span.muted[text]|1
+catalog|live-tv@1280x860|dom|div.lt-list[role=listbox aria-label=*] > button.locked.lt-row[role=option aria-selected=false disabled type=button]|1
+catalog|live-tv@1280x860|dom|div.lt-list[role=listbox aria-label=*] > button.lt-row[role=option aria-selected=false type=button]|2
+catalog|live-tv@1280x860|dom|div.lt-nowbar > span.grow.muted[text]|1
+catalog|live-tv@1280x860|dom|div.lt-split > div.lt-list[role=listbox aria-label=*]|1
+catalog|live-tv@1280x860|dom|div.lt-split > div.lt-stage|1
+catalog|live-tv@1280x860|dom|div.lt-stage > div#live-tv-slot.lt-slot|1
+catalog|live-tv@1280x860|dom|div.lt-stage > div.lt-nowbar|1
+catalog|live-tv@1280x860|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=false type=button text]|2
+catalog|live-tv@1280x860|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=true type=button text]|2
 catalog|live-tv@1280x860|dom|div.px-brand > a.logo[text]|1
 catalog|live-tv@1280x860|dom|div.px-ctl > div.px-pop|1
 catalog|live-tv@1280x860|dom|div.px-foot > div.px-ctl|1
@@ -1501,26 +1731,24 @@ catalog|live-tv@1280x860|dom|div.px-pop > button.ghost.profile.sm|1
 catalog|live-tv@1280x860|dom|div.px-pop > div#lookmenu.amenu.lookmenu|1
 catalog|live-tv@1280x860|dom|div.px-pop > div#profilemenu.amenu|1
 catalog|live-tv@1280x860|dom|div.px-user > div.px-pop|1
-catalog|live-tv@1280x860|dom|div.row > a[text]|1
-catalog|live-tv@1280x860|dom|div.row > button.ghost.sm[text]|6
-catalog|live-tv@1280x860|dom|div.row > button.primary.sm[text]|1
-catalog|live-tv@1280x860|dom|div.row > input#live-tv-search[type=search]|1
-catalog|live-tv@1280x860|dom|div.row > label[text]|1
-catalog|live-tv@1280x860|dom|div.row > span.pill[text]|1
-catalog|live-tv@1280x860|dom|div.row > strong#live-tv-title|1
-catalog|live-tv@1280x860|dom|main#main > div#live-tv-channels|1
-catalog|live-tv@1280x860|dom|main#main > div.row|1
+catalog|live-tv@1280x860|dom|label.tog > input#lt-hideprot[type=checkbox]|1
+catalog|live-tv@1280x860|dom|label.tog > span[text]|1
+catalog|live-tv@1280x860|dom|main#main > div#live-tv-body|1
+catalog|live-tv@1280x860|dom|main#main > div#live-tv-toolbar|1
 catalog|live-tv@1280x860|dom|main#main > h1[text]|1
 catalog|live-tv@1280x860|dom|main#main > p#live-tv-message[role=status aria-live=polite text]|1
 catalog|live-tv@1280x860|dom|main#main > p.sub[text]|1
-catalog|live-tv@1280x860|dom|main#main > section#live-tv-player.card[aria-label=* hidden]|1
 catalog|live-tv@1280x860|dom|nav.px-nav[aria-label=*] > a.on[aria-current=page]|1
 catalog|live-tv@1280x860|dom|nav.px-nav[aria-label=*] > a|3
 catalog|live-tv@1280x860|dom|nav.px-tabs[aria-label=*] > a.px-tab|2
 catalog|live-tv@1280x860|dom|nav.px-tabs[aria-label=*] > button.px-tab[aria-expanded=false aria-controls=* type=button]|1
 catalog|live-tv@1280x860|dom|nav.px-tabs[aria-label=*] > button.px-tab[type=button]|1
-catalog|live-tv@1280x860|dom|section#live-tv-player.card[aria-label=* hidden] > div.row|2
-catalog|live-tv@1280x860|dom|section#live-tv-player.card[aria-label=* hidden] > video#live-tv-video[aria-label=*]|1
+catalog|live-tv@1280x860|dom|span > b[text]|3
+catalog|live-tv@1280x860|dom|span > span.lt-mini|2
+catalog|live-tv@1280x860|dom|span > span.lt-star[text]|1
+catalog|live-tv@1280x860|dom|span > span.next[text]|2
+catalog|live-tv@1280x860|dom|span > span.prog[text]|3
+catalog|live-tv@1280x860|dom|span.lt-mini > i|2
 catalog|live-tv@1280x860|dom|svg.px-ico[aria-hidden=true] > circle|2
 catalog|live-tv@1280x860|dom|svg.px-ico[aria-hidden=true] > path|7
 catalog|live-tv@1280x860|dom|svg.px-ico[aria-hidden=true] > rect|5
@@ -1532,15 +1760,18 @@ catalog|live-tv@1280x860|focus|004|a "Activity"
 catalog|live-tv@1280x860|focus|005|a "Settings"
 catalog|live-tv@1280x860|focus|006|button.ghost.sm.lookbtn "Appearance"
 catalog|live-tv@1280x860|focus|007|button.ghost.sm.profile "Account"
-catalog|live-tv@1280x860|focus|008|input#live-tv-search "Number or name"
-catalog|live-tv@1280x860|focus|009|button.ghost.sm "Refresh channels"
-catalog|live-tv@1280x860|focus|010|button.ghost.sm "Stop / retry cleanup"
-catalog|live-tv@1280x860|focus|011|a "Configure HDHomeRun"
-catalog|live-tv@1280x860|focus|012|button.primary.sm "Watch live"
-catalog|live-tv@1280x860|focus|013|button.primary.sm "Watch live"
-catalog|live-tv@1280x860|focus|014|<wrap>
+catalog|live-tv@1280x860|focus|008|button "≡ List"
+catalog|live-tv@1280x860|focus|009|button "▦ Grid"
+catalog|live-tv@1280x860|focus|010|button "All"
+catalog|live-tv@1280x860|focus|011|button "Favorites"
+catalog|live-tv@1280x860|focus|012|input#lt-hideprot
+catalog|live-tv@1280x860|focus|013|input#live-tv-search "Number, name, or what is on"
+catalog|live-tv@1280x860|focus|014|button.lt-row "Local 7.1 · Local News Evening Edition 12:30
+catalog|live-tv@1280x860|focus|015|button.lt-row "Publi 10.2 · Public Television The Long Game
+catalog|live-tv@1280x860|focus|016|<wrap>
 catalog|live-tv@1280x860|req|GET /api/v1/activity|2
 catalog|live-tv@1280x860|req|GET /api/v1/live-tv/channels|1
+catalog|live-tv@1280x860|req|GET /api/v1/live-tv/guide|1
 catalog|live-tv@1280x860|req|GET /api/v1/me|1
 catalog|live-tv@1280x860|req|GET /api/v1/server|1
 catalog|live-tv@390x780|dom|^ > div#app|1
@@ -1558,12 +1789,18 @@ catalog|live-tv@390x780|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-labe
 catalog|live-tv@390x780|dom|button.ghost.profile.sm > span.caret[text]|1
 catalog|live-tv@390x780|dom|button.ghost.profile.sm > span.pavatar[text]|1
 catalog|live-tv@390x780|dom|button.ghost.profile.sm > span.pname[text]|1
+catalog|live-tv@390x780|dom|button.locked.lt-row[role=option aria-selected=false disabled type=button] > span.lt-chip[text]|1
+catalog|live-tv@390x780|dom|button.locked.lt-row[role=option aria-selected=false disabled type=button] > span[text]|1
+catalog|live-tv@390x780|dom|button.locked.lt-row[role=option aria-selected=false disabled type=button] > span|1
+catalog|live-tv@390x780|dom|button.lt-row[role=option aria-selected=false type=button] > span.lt-chip[text]|2
+catalog|live-tv@390x780|dom|button.lt-row[role=option aria-selected=false type=button] > span|4
 catalog|live-tv@390x780|dom|button.px-tab[aria-expanded=false aria-controls=* type=button] > span[text]|1
 catalog|live-tv@390x780|dom|button.px-tab[aria-expanded=false aria-controls=* type=button] > svg.px-ico[aria-hidden=true]|1
 catalog|live-tv@390x780|dom|button.px-tab[type=button] > span[text]|1
 catalog|live-tv@390x780|dom|button.px-tab[type=button] > svg.px-ico[aria-hidden=true]|1
 catalog|live-tv@390x780|dom|div#app > div#pxshell.px-shell|1
-catalog|live-tv@390x780|dom|div#live-tv-channels > div.card|3
+catalog|live-tv@390x780|dom|div#live-tv-body > div.lt-split|1
+catalog|live-tv@390x780|dom|div#live-tv-toolbar > div.lt-head|1
 catalog|live-tv@390x780|dom|div#pxnav.px-scroll > button.ghost.px-sheetx.sm[aria-label=* type=button text]|1
 catalog|live-tv@390x780|dom|div#pxnav.px-scroll > div#pxlibs|1
 catalog|live-tv@390x780|dom|div#pxnav.px-scroll > div.px-sec[text]|1
@@ -1571,10 +1808,20 @@ catalog|live-tv@390x780|dom|div#pxnav.px-scroll > nav.px-nav[aria-label=*]|2
 catalog|live-tv@390x780|dom|div#pxshell.px-shell > aside.px-side|1
 catalog|live-tv@390x780|dom|div#pxshell.px-shell > main#main|1
 catalog|live-tv@390x780|dom|div#pxshell.px-shell > nav.px-tabs[aria-label=*]|1
-catalog|live-tv@390x780|dom|div.card > button.ghost.sm[disabled text]|1
-catalog|live-tv@390x780|dom|div.card > button.primary.sm[text]|2
-catalog|live-tv@390x780|dom|div.card > h2[text]|3
-catalog|live-tv@390x780|dom|div.card > p[text]|3
+catalog|live-tv@390x780|dom|div.lt-head > div.lt-switch[role=group aria-label=*]|2
+catalog|live-tv@390x780|dom|div.lt-head > input#live-tv-search[type=search]|1
+catalog|live-tv@390x780|dom|div.lt-head > label.muted[text]|1
+catalog|live-tv@390x780|dom|div.lt-head > label.tog|1
+catalog|live-tv@390x780|dom|div.lt-head > span.muted[text]|1
+catalog|live-tv@390x780|dom|div.lt-list[role=listbox aria-label=*] > button.locked.lt-row[role=option aria-selected=false disabled type=button]|1
+catalog|live-tv@390x780|dom|div.lt-list[role=listbox aria-label=*] > button.lt-row[role=option aria-selected=false type=button]|2
+catalog|live-tv@390x780|dom|div.lt-nowbar > span.grow.muted[text]|1
+catalog|live-tv@390x780|dom|div.lt-split > div.lt-list[role=listbox aria-label=*]|1
+catalog|live-tv@390x780|dom|div.lt-split > div.lt-stage|1
+catalog|live-tv@390x780|dom|div.lt-stage > div#live-tv-slot.lt-slot|1
+catalog|live-tv@390x780|dom|div.lt-stage > div.lt-nowbar|1
+catalog|live-tv@390x780|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=false type=button text]|2
+catalog|live-tv@390x780|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=true type=button text]|2
 catalog|live-tv@390x780|dom|div.px-brand > a.logo[text]|1
 catalog|live-tv@390x780|dom|div.px-ctl > div.px-pop|1
 catalog|live-tv@390x780|dom|div.px-foot > div.px-ctl|1
@@ -1587,26 +1834,24 @@ catalog|live-tv@390x780|dom|div.px-pop > button.ghost.profile.sm|1
 catalog|live-tv@390x780|dom|div.px-pop > div#lookmenu.amenu.lookmenu|1
 catalog|live-tv@390x780|dom|div.px-pop > div#profilemenu.amenu|1
 catalog|live-tv@390x780|dom|div.px-user > div.px-pop|1
-catalog|live-tv@390x780|dom|div.row > a[text]|1
-catalog|live-tv@390x780|dom|div.row > button.ghost.sm[text]|6
-catalog|live-tv@390x780|dom|div.row > button.primary.sm[text]|1
-catalog|live-tv@390x780|dom|div.row > input#live-tv-search[type=search]|1
-catalog|live-tv@390x780|dom|div.row > label[text]|1
-catalog|live-tv@390x780|dom|div.row > span.pill[text]|1
-catalog|live-tv@390x780|dom|div.row > strong#live-tv-title|1
-catalog|live-tv@390x780|dom|main#main > div#live-tv-channels|1
-catalog|live-tv@390x780|dom|main#main > div.row|1
+catalog|live-tv@390x780|dom|label.tog > input#lt-hideprot[type=checkbox]|1
+catalog|live-tv@390x780|dom|label.tog > span[text]|1
+catalog|live-tv@390x780|dom|main#main > div#live-tv-body|1
+catalog|live-tv@390x780|dom|main#main > div#live-tv-toolbar|1
 catalog|live-tv@390x780|dom|main#main > h1[text]|1
 catalog|live-tv@390x780|dom|main#main > p#live-tv-message[role=status aria-live=polite text]|1
 catalog|live-tv@390x780|dom|main#main > p.sub[text]|1
-catalog|live-tv@390x780|dom|main#main > section#live-tv-player.card[aria-label=* hidden]|1
 catalog|live-tv@390x780|dom|nav.px-nav[aria-label=*] > a.on[aria-current=page]|1
 catalog|live-tv@390x780|dom|nav.px-nav[aria-label=*] > a|3
 catalog|live-tv@390x780|dom|nav.px-tabs[aria-label=*] > a.px-tab|2
 catalog|live-tv@390x780|dom|nav.px-tabs[aria-label=*] > button.px-tab[aria-expanded=false aria-controls=* type=button]|1
 catalog|live-tv@390x780|dom|nav.px-tabs[aria-label=*] > button.px-tab[type=button]|1
-catalog|live-tv@390x780|dom|section#live-tv-player.card[aria-label=* hidden] > div.row|2
-catalog|live-tv@390x780|dom|section#live-tv-player.card[aria-label=* hidden] > video#live-tv-video[aria-label=*]|1
+catalog|live-tv@390x780|dom|span > b[text]|3
+catalog|live-tv@390x780|dom|span > span.lt-mini|2
+catalog|live-tv@390x780|dom|span > span.lt-star[text]|1
+catalog|live-tv@390x780|dom|span > span.next[text]|2
+catalog|live-tv@390x780|dom|span > span.prog[text]|3
+catalog|live-tv@390x780|dom|span.lt-mini > i|2
 catalog|live-tv@390x780|dom|svg.px-ico[aria-hidden=true] > circle|2
 catalog|live-tv@390x780|dom|svg.px-ico[aria-hidden=true] > path|7
 catalog|live-tv@390x780|dom|svg.px-ico[aria-hidden=true] > rect|5
@@ -1614,19 +1859,22 @@ catalog|live-tv@390x780|focus|000|a.logo "cinema"
 catalog|live-tv@390x780|focus|001|input#q.search "Search cinema"
 catalog|live-tv@390x780|focus|002|button.ghost.sm.lookbtn "Appearance"
 catalog|live-tv@390x780|focus|003|button.ghost.sm.profile "Account"
-catalog|live-tv@390x780|focus|004|input#live-tv-search "Number or name"
-catalog|live-tv@390x780|focus|005|button.ghost.sm "Refresh channels"
-catalog|live-tv@390x780|focus|006|button.ghost.sm "Stop / retry cleanup"
-catalog|live-tv@390x780|focus|007|a "Configure HDHomeRun"
-catalog|live-tv@390x780|focus|008|button.primary.sm "Watch live"
-catalog|live-tv@390x780|focus|009|button.primary.sm "Watch live"
-catalog|live-tv@390x780|focus|010|a.px-tab "Home"
-catalog|live-tv@390x780|focus|011|button.px-tab "Libraries"
-catalog|live-tv@390x780|focus|012|button.px-tab "Search"
-catalog|live-tv@390x780|focus|013|a.px-tab "Activity"
-catalog|live-tv@390x780|focus|014|<wrap>
+catalog|live-tv@390x780|focus|004|button "≡ List"
+catalog|live-tv@390x780|focus|005|button "▦ Grid"
+catalog|live-tv@390x780|focus|006|button "All"
+catalog|live-tv@390x780|focus|007|button "Favorites"
+catalog|live-tv@390x780|focus|008|input#lt-hideprot
+catalog|live-tv@390x780|focus|009|input#live-tv-search "Number, name, or what is on"
+catalog|live-tv@390x780|focus|010|button.lt-row "Local 7.1 · Local News Evening Edition 12:30
+catalog|live-tv@390x780|focus|011|button.lt-row "Publi 10.2 · Public Television The Long Game
+catalog|live-tv@390x780|focus|012|a.px-tab "Home"
+catalog|live-tv@390x780|focus|013|button.px-tab "Libraries"
+catalog|live-tv@390x780|focus|014|button.px-tab "Search"
+catalog|live-tv@390x780|focus|015|a.px-tab "Activity"
+catalog|live-tv@390x780|focus|016|<wrap>
 catalog|live-tv@390x780|req|GET /api/v1/activity|2
 catalog|live-tv@390x780|req|GET /api/v1/live-tv/channels|1
+catalog|live-tv@390x780|req|GET /api/v1/live-tv/guide|1
 catalog|live-tv@390x780|req|GET /api/v1/me|1
 catalog|live-tv@390x780|req|GET /api/v1/server|1
 catalog|player@1280x860|dom|^ > div#app|1
@@ -2136,15 +2384,25 @@ catalog|settings-developer@1280x860|dom|button.px-tab[type=button] > span[text]|
 catalog|settings-developer@1280x860|dom|button.px-tab[type=button] > svg.px-ico[aria-hidden=true]|1
 catalog|settings-developer@1280x860|dom|div > div.hint[text]|1
 catalog|settings-developer@1280x860|dom|div > h1[text]|1
-catalog|settings-developer@1280x860|dom|div > h2.section[text]|5
+catalog|settings-developer@1280x860|dom|div > h2.section[text]|6
 catalog|settings-developer@1280x860|dom|div > input#ltip|1
 catalog|settings-developer@1280x860|dom|div > input#ltowner|1
-catalog|settings-developer@1280x860|dom|div > label[text]|4
-catalog|settings-developer@1280x860|dom|div > p.sub[text]|5
+catalog|settings-developer@1280x860|dom|div > label[text]|6
+catalog|settings-developer@1280x860|dom|div > p.sub[text]|6
 catalog|settings-developer@1280x860|dom|div > p[text]|1
+catalog|settings-developer@1280x860|dom|div > select#ltghours|1
+catalog|settings-developer@1280x860|dom|div > select#ltgsrc|1
 catalog|settings-developer@1280x860|dom|div > select#ltheight|1
 catalog|settings-developer@1280x860|dom|div > select#ltlimit|1
 catalog|settings-developer@1280x860|dom|div#app > div#pxshell.px-shell|1
+catalog|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > div#ltgerr.err[role=alert]|1
+catalog|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > div#ltgready[aria-live=polite]|1
+catalog|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > div.cardhead|1
+catalog|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > div.hint[text]|1
+catalog|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > div.row|1
+catalog|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > div.setfields|1
+catalog|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > div.setfoot|1
+catalog|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > h2.section[text]|1
 catalog|settings-developer@1280x860|dom|div#live-tv-settings.card.setcard > div#lterr.err[role=alert]|1
 catalog|settings-developer@1280x860|dom|div#live-tv-settings.card.setcard > div#ltreadiness[aria-live=polite]|1
 catalog|settings-developer@1280x860|dom|div#live-tv-settings.card.setcard > div.cardhead|1
@@ -2153,6 +2411,7 @@ catalog|settings-developer@1280x860|dom|div#live-tv-settings.card.setcard > div.
 catalog|settings-developer@1280x860|dom|div#live-tv-settings.card.setcard > div.setfoot|1
 catalog|settings-developer@1280x860|dom|div#live-tv-settings.card.setcard > p.hint[text]|2
 catalog|settings-developer@1280x860|dom|div#live-tv-settings.card.setcard > p[text]|1
+catalog|settings-developer@1280x860|dom|div#ltgready[aria-live=polite] > p.muted[text]|1
 catalog|settings-developer@1280x860|dom|div#pxnav.px-scroll > button.ghost.px-sheetx.sm[aria-label=* type=button text]|1
 catalog|settings-developer@1280x860|dom|div#pxnav.px-scroll > div#pxlibs|1
 catalog|settings-developer@1280x860|dom|div#pxnav.px-scroll > div.px-sec[text]|1
@@ -2160,6 +2419,7 @@ catalog|settings-developer@1280x860|dom|div#pxnav.px-scroll > nav.px-nav[aria-la
 catalog|settings-developer@1280x860|dom|div#pxshell.px-shell > aside.px-side|1
 catalog|settings-developer@1280x860|dom|div#pxshell.px-shell > main#main|1
 catalog|settings-developer@1280x860|dom|div#pxshell.px-shell > nav.px-tabs[aria-label=*]|1
+catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div#live-tv-guide-settings.card.setcard|1
 catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div#live-tv-settings.card.setcard|1
 catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div.card.setcard|4
 catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div.sethead|1
@@ -2171,12 +2431,12 @@ catalog|settings-developer@1280x860|dom|div.card.setcard > div.setfoot|2
 catalog|settings-developer@1280x860|dom|div.card.setcard > div.tog|6
 catalog|settings-developer@1280x860|dom|div.card.setcard > h2.section[text]|2
 catalog|settings-developer@1280x860|dom|div.card.setcard > label.tog|2
-catalog|settings-developer@1280x860|dom|div.cardhead > div.cardtools|3
-catalog|settings-developer@1280x860|dom|div.cardhead > div|5
+catalog|settings-developer@1280x860|dom|div.cardhead > div.cardtools|4
+catalog|settings-developer@1280x860|dom|div.cardhead > div|6
 catalog|settings-developer@1280x860|dom|div.cardtools > span.pill.warn[text]|1
-catalog|settings-developer@1280x860|dom|div.cardtools > span.pill[text]|2
-catalog|settings-developer@1280x860|dom|div.hint[text] > b[text]|5
-catalog|settings-developer@1280x860|dom|div.hint[text] > code[text]|1
+catalog|settings-developer@1280x860|dom|div.cardtools > span.pill[text]|3
+catalog|settings-developer@1280x860|dom|div.hint[text] > b[text]|6
+catalog|settings-developer@1280x860|dom|div.hint[text] > code[text]|3
 catalog|settings-developer@1280x860|dom|div.px-brand > a.logo[text]|1
 catalog|settings-developer@1280x860|dom|div.px-ctl > div.px-pop|1
 catalog|settings-developer@1280x860|dom|div.px-foot > div.px-ctl|1
@@ -2189,12 +2449,12 @@ catalog|settings-developer@1280x860|dom|div.px-pop > button.ghost.profile.sm|1
 catalog|settings-developer@1280x860|dom|div.px-pop > div#lookmenu.amenu.lookmenu|1
 catalog|settings-developer@1280x860|dom|div.px-pop > div#profilemenu.amenu|1
 catalog|settings-developer@1280x860|dom|div.px-user > div.px-pop|1
-catalog|settings-developer@1280x860|dom|div.row > a[text]|1
+catalog|settings-developer@1280x860|dom|div.row > a[text]|2
 catalog|settings-developer@1280x860|dom|div.row > button#ltenable.primary.sm[text]|1
-catalog|settings-developer@1280x860|dom|div.row > button.ghost.sm[text]|1
-catalog|settings-developer@1280x860|dom|div.setfields > div|4
-catalog|settings-developer@1280x860|dom|div.setfoot > button.primary.sm[disabled text]|3
-catalog|settings-developer@1280x860|dom|div.setfoot > span.setstate[text]|3
+catalog|settings-developer@1280x860|dom|div.row > button.ghost.sm[text]|3
+catalog|settings-developer@1280x860|dom|div.setfields > div|6
+catalog|settings-developer@1280x860|dom|div.setfoot > button.primary.sm[disabled text]|4
+catalog|settings-developer@1280x860|dom|div.setfoot > span.setstate[text]|4
 catalog|settings-developer@1280x860|dom|div.sethead > div|1
 catalog|settings-developer@1280x860|dom|div.setlayout > div#setbody.adminwrap|1
 catalog|settings-developer@1280x860|dom|div.setlayout > nav.settabs[aria-label=*]|1
@@ -2211,6 +2471,8 @@ catalog|settings-developer@1280x860|dom|nav.px-tabs[aria-label=*] > button.px-ta
 catalog|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
 catalog|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|9
 catalog|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
+catalog|settings-developer@1280x860|dom|select#ltghours > option[text]|6
+catalog|settings-developer@1280x860|dom|select#ltgsrc > option[text]|3
 catalog|settings-developer@1280x860|dom|select#ltheight > option[text]|2
 catalog|settings-developer@1280x860|dom|select#ltlimit > option[text]|4
 catalog|settings-developer@1280x860|dom|small[text] > code[text]|6
@@ -2245,9 +2507,14 @@ catalog|settings-developer@1280x860|focus|021|select#ltheight "720p 1080p"
 catalog|settings-developer@1280x860|focus|022|button.ghost.sm "Check saved configuration"
 catalog|settings-developer@1280x860|focus|023|button#ltenable.primary.sm "Enable Live TV"
 catalog|settings-developer@1280x860|focus|024|a "Browse channels"
-catalog|settings-developer@1280x860|focus|025|input#pcpv1
-catalog|settings-developer@1280x860|focus|026|input#phs
-catalog|settings-developer@1280x860|focus|027|<wrap>
+catalog|settings-developer@1280x860|focus|025|select#ltgsrc "Off HDHomeRun guide XMLTV"
+catalog|settings-developer@1280x860|focus|026|select#ltghours "4 hours 8 hours 12 hours 24 hours 48 hours
+catalog|settings-developer@1280x860|focus|027|button.ghost.sm "Check the guide"
+catalog|settings-developer@1280x860|focus|028|button.ghost.sm "Refresh now"
+catalog|settings-developer@1280x860|focus|029|a "Browse channels"
+catalog|settings-developer@1280x860|focus|030|input#pcpv1
+catalog|settings-developer@1280x860|focus|031|input#phs
+catalog|settings-developer@1280x860|focus|032|<wrap>
 catalog|settings-developer@1280x860|req|GET /api/v1/activity|2
 catalog|settings-developer@1280x860|req|GET /api/v1/me|1
 catalog|settings-developer@1280x860|req|GET /api/v1/server|1
@@ -2273,15 +2540,25 @@ catalog|settings-developer@390x780|dom|button.px-tab[type=button] > span[text]|1
 catalog|settings-developer@390x780|dom|button.px-tab[type=button] > svg.px-ico[aria-hidden=true]|1
 catalog|settings-developer@390x780|dom|div > div.hint[text]|1
 catalog|settings-developer@390x780|dom|div > h1[text]|1
-catalog|settings-developer@390x780|dom|div > h2.section[text]|5
+catalog|settings-developer@390x780|dom|div > h2.section[text]|6
 catalog|settings-developer@390x780|dom|div > input#ltip|1
 catalog|settings-developer@390x780|dom|div > input#ltowner|1
-catalog|settings-developer@390x780|dom|div > label[text]|4
-catalog|settings-developer@390x780|dom|div > p.sub[text]|5
+catalog|settings-developer@390x780|dom|div > label[text]|6
+catalog|settings-developer@390x780|dom|div > p.sub[text]|6
 catalog|settings-developer@390x780|dom|div > p[text]|1
+catalog|settings-developer@390x780|dom|div > select#ltghours|1
+catalog|settings-developer@390x780|dom|div > select#ltgsrc|1
 catalog|settings-developer@390x780|dom|div > select#ltheight|1
 catalog|settings-developer@390x780|dom|div > select#ltlimit|1
 catalog|settings-developer@390x780|dom|div#app > div#pxshell.px-shell|1
+catalog|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > div#ltgerr.err[role=alert]|1
+catalog|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > div#ltgready[aria-live=polite]|1
+catalog|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > div.cardhead|1
+catalog|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > div.hint[text]|1
+catalog|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > div.row|1
+catalog|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > div.setfields|1
+catalog|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > div.setfoot|1
+catalog|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > h2.section[text]|1
 catalog|settings-developer@390x780|dom|div#live-tv-settings.card.setcard > div#lterr.err[role=alert]|1
 catalog|settings-developer@390x780|dom|div#live-tv-settings.card.setcard > div#ltreadiness[aria-live=polite]|1
 catalog|settings-developer@390x780|dom|div#live-tv-settings.card.setcard > div.cardhead|1
@@ -2290,6 +2567,7 @@ catalog|settings-developer@390x780|dom|div#live-tv-settings.card.setcard > div.s
 catalog|settings-developer@390x780|dom|div#live-tv-settings.card.setcard > div.setfoot|1
 catalog|settings-developer@390x780|dom|div#live-tv-settings.card.setcard > p.hint[text]|2
 catalog|settings-developer@390x780|dom|div#live-tv-settings.card.setcard > p[text]|1
+catalog|settings-developer@390x780|dom|div#ltgready[aria-live=polite] > p.muted[text]|1
 catalog|settings-developer@390x780|dom|div#pxnav.px-scroll > button.ghost.px-sheetx.sm[aria-label=* type=button text]|1
 catalog|settings-developer@390x780|dom|div#pxnav.px-scroll > div#pxlibs|1
 catalog|settings-developer@390x780|dom|div#pxnav.px-scroll > div.px-sec[text]|1
@@ -2297,6 +2575,7 @@ catalog|settings-developer@390x780|dom|div#pxnav.px-scroll > nav.px-nav[aria-lab
 catalog|settings-developer@390x780|dom|div#pxshell.px-shell > aside.px-side|1
 catalog|settings-developer@390x780|dom|div#pxshell.px-shell > main#main|1
 catalog|settings-developer@390x780|dom|div#pxshell.px-shell > nav.px-tabs[aria-label=*]|1
+catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div#live-tv-guide-settings.card.setcard|1
 catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div#live-tv-settings.card.setcard|1
 catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div.card.setcard|4
 catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div.sethead|1
@@ -2308,12 +2587,12 @@ catalog|settings-developer@390x780|dom|div.card.setcard > div.setfoot|2
 catalog|settings-developer@390x780|dom|div.card.setcard > div.tog|6
 catalog|settings-developer@390x780|dom|div.card.setcard > h2.section[text]|2
 catalog|settings-developer@390x780|dom|div.card.setcard > label.tog|2
-catalog|settings-developer@390x780|dom|div.cardhead > div.cardtools|3
-catalog|settings-developer@390x780|dom|div.cardhead > div|5
+catalog|settings-developer@390x780|dom|div.cardhead > div.cardtools|4
+catalog|settings-developer@390x780|dom|div.cardhead > div|6
 catalog|settings-developer@390x780|dom|div.cardtools > span.pill.warn[text]|1
-catalog|settings-developer@390x780|dom|div.cardtools > span.pill[text]|2
-catalog|settings-developer@390x780|dom|div.hint[text] > b[text]|5
-catalog|settings-developer@390x780|dom|div.hint[text] > code[text]|1
+catalog|settings-developer@390x780|dom|div.cardtools > span.pill[text]|3
+catalog|settings-developer@390x780|dom|div.hint[text] > b[text]|6
+catalog|settings-developer@390x780|dom|div.hint[text] > code[text]|3
 catalog|settings-developer@390x780|dom|div.px-brand > a.logo[text]|1
 catalog|settings-developer@390x780|dom|div.px-ctl > div.px-pop|1
 catalog|settings-developer@390x780|dom|div.px-foot > div.px-ctl|1
@@ -2326,12 +2605,12 @@ catalog|settings-developer@390x780|dom|div.px-pop > button.ghost.profile.sm|1
 catalog|settings-developer@390x780|dom|div.px-pop > div#lookmenu.amenu.lookmenu|1
 catalog|settings-developer@390x780|dom|div.px-pop > div#profilemenu.amenu|1
 catalog|settings-developer@390x780|dom|div.px-user > div.px-pop|1
-catalog|settings-developer@390x780|dom|div.row > a[text]|1
+catalog|settings-developer@390x780|dom|div.row > a[text]|2
 catalog|settings-developer@390x780|dom|div.row > button#ltenable.primary.sm[text]|1
-catalog|settings-developer@390x780|dom|div.row > button.ghost.sm[text]|1
-catalog|settings-developer@390x780|dom|div.setfields > div|4
-catalog|settings-developer@390x780|dom|div.setfoot > button.primary.sm[disabled text]|3
-catalog|settings-developer@390x780|dom|div.setfoot > span.setstate[text]|3
+catalog|settings-developer@390x780|dom|div.row > button.ghost.sm[text]|3
+catalog|settings-developer@390x780|dom|div.setfields > div|6
+catalog|settings-developer@390x780|dom|div.setfoot > button.primary.sm[disabled text]|4
+catalog|settings-developer@390x780|dom|div.setfoot > span.setstate[text]|4
 catalog|settings-developer@390x780|dom|div.sethead > div|1
 catalog|settings-developer@390x780|dom|div.setlayout > div#setbody.adminwrap|1
 catalog|settings-developer@390x780|dom|div.setlayout > nav.settabs[aria-label=*]|1
@@ -2348,6 +2627,8 @@ catalog|settings-developer@390x780|dom|nav.px-tabs[aria-label=*] > button.px-tab
 catalog|settings-developer@390x780|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
 catalog|settings-developer@390x780|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|9
 catalog|settings-developer@390x780|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
+catalog|settings-developer@390x780|dom|select#ltghours > option[text]|6
+catalog|settings-developer@390x780|dom|select#ltgsrc > option[text]|3
 catalog|settings-developer@390x780|dom|select#ltheight > option[text]|2
 catalog|settings-developer@390x780|dom|select#ltlimit > option[text]|4
 catalog|settings-developer@390x780|dom|small[text] > code[text]|6
@@ -2378,13 +2659,18 @@ catalog|settings-developer@390x780|focus|017|select#ltheight "720p 1080p"
 catalog|settings-developer@390x780|focus|018|button.ghost.sm "Check saved configuration"
 catalog|settings-developer@390x780|focus|019|button#ltenable.primary.sm "Enable Live TV"
 catalog|settings-developer@390x780|focus|020|a "Browse channels"
-catalog|settings-developer@390x780|focus|021|input#pcpv1
-catalog|settings-developer@390x780|focus|022|input#phs
-catalog|settings-developer@390x780|focus|023|a.px-tab "Home"
-catalog|settings-developer@390x780|focus|024|button.px-tab "Libraries"
-catalog|settings-developer@390x780|focus|025|button.px-tab "Search"
-catalog|settings-developer@390x780|focus|026|a.px-tab "Activity"
-catalog|settings-developer@390x780|focus|027|<wrap>
+catalog|settings-developer@390x780|focus|021|select#ltgsrc "Off HDHomeRun guide XMLTV"
+catalog|settings-developer@390x780|focus|022|select#ltghours "4 hours 8 hours 12 hours 24 hours 48 hours
+catalog|settings-developer@390x780|focus|023|button.ghost.sm "Check the guide"
+catalog|settings-developer@390x780|focus|024|button.ghost.sm "Refresh now"
+catalog|settings-developer@390x780|focus|025|a "Browse channels"
+catalog|settings-developer@390x780|focus|026|input#pcpv1
+catalog|settings-developer@390x780|focus|027|input#phs
+catalog|settings-developer@390x780|focus|028|a.px-tab "Home"
+catalog|settings-developer@390x780|focus|029|button.px-tab "Libraries"
+catalog|settings-developer@390x780|focus|030|button.px-tab "Search"
+catalog|settings-developer@390x780|focus|031|a.px-tab "Activity"
+catalog|settings-developer@390x780|focus|032|<wrap>
 catalog|settings-developer@390x780|req|GET /api/v1/activity|2
 catalog|settings-developer@390x780|req|GET /api/v1/me|1
 catalog|settings-developer@390x780|req|GET /api/v1/server|1
@@ -3679,30 +3965,203 @@ classic|library@390x780|req|GET /api/v1/libraries/<id>/items|1
 classic|library@390x780|req|GET /api/v1/libraries|1
 classic|library@390x780|req|GET /api/v1/me|1
 classic|library@390x780|req|GET /api/v1/server|1
+classic|live-tv-grid@1280x860|dom|^ > div#app|1
+classic|live-tv-grid@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.lookword[text]|1
+classic|live-tv-grid@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.tsw|1
+classic|live-tv-grid@1280x860|dom|button.ghost.profile.sm > span.caret[text]|1
+classic|live-tv-grid@1280x860|dom|button.ghost.profile.sm > span.pavatar[text]|1
+classic|live-tv-grid@1280x860|dom|button.ghost.profile.sm > span.pname[text]|1
+classic|live-tv-grid@1280x860|dom|div > button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*]|1
+classic|live-tv-grid@1280x860|dom|div > button.ghost.profile.sm|1
+classic|live-tv-grid@1280x860|dom|div > div#lookmenu.amenu.lookmenu|1
+classic|live-tv-grid@1280x860|dom|div > div#profilemenu.amenu|1
+classic|live-tv-grid@1280x860|dom|div > div.lt-gridwrap|1
+classic|live-tv-grid@1280x860|dom|div#app > header.top|1
+classic|live-tv-grid@1280x860|dom|div#app > main#main|1
+classic|live-tv-grid@1280x860|dom|div#live-tv-body > div.lt-split|1
+classic|live-tv-grid@1280x860|dom|div#live-tv-toolbar > div.lt-head|1
+classic|live-tv-grid@1280x860|dom|div.lt-gcells > button.airing.lt-cell[type=button text]|2
+classic|live-tv-grid@1280x860|dom|div.lt-gcells > button.lt-cell[type=button text]|2
+classic|live-tv-grid@1280x860|dom|div.lt-gcells > div.ends.lt-cell[text]|3
+classic|live-tv-grid@1280x860|dom|div.lt-gname > span.lt-chip[text]|3
+classic|live-tv-grid@1280x860|dom|div.lt-gname > span[text]|3
+classic|live-tv-grid@1280x860|dom|div.lt-grid > div.lt-grow|3
+classic|live-tv-grid@1280x860|dom|div.lt-grid > div.lt-now|1
+classic|live-tv-grid@1280x860|dom|div.lt-grid > div.lt-times|1
+classic|live-tv-grid@1280x860|dom|div.lt-gridwrap > div.lt-grid|1
+classic|live-tv-grid@1280x860|dom|div.lt-grow > div.lt-gcells|3
+classic|live-tv-grid@1280x860|dom|div.lt-grow > div.lt-gname|3
+classic|live-tv-grid@1280x860|dom|div.lt-head > div.lt-switch[role=group aria-label=*]|2
+classic|live-tv-grid@1280x860|dom|div.lt-head > input#live-tv-search[type=search]|1
+classic|live-tv-grid@1280x860|dom|div.lt-head > label.muted[text]|1
+classic|live-tv-grid@1280x860|dom|div.lt-head > label.tog|1
+classic|live-tv-grid@1280x860|dom|div.lt-head > span.muted[text]|1
+classic|live-tv-grid@1280x860|dom|div.lt-nowbar > span.grow.muted[text]|1
+classic|live-tv-grid@1280x860|dom|div.lt-split > div.lt-stage|1
+classic|live-tv-grid@1280x860|dom|div.lt-split > div|1
+classic|live-tv-grid@1280x860|dom|div.lt-stage > div#live-tv-slot.lt-slot|1
+classic|live-tv-grid@1280x860|dom|div.lt-stage > div.lt-nowbar|1
+classic|live-tv-grid@1280x860|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=false type=button text]|2
+classic|live-tv-grid@1280x860|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=true type=button text]|2
+classic|live-tv-grid@1280x860|dom|div.lt-times > div.pad|1
+classic|live-tv-grid@1280x860|dom|div.lt-times > div.t[text]|8
+classic|live-tv-grid@1280x860|dom|div.topctl > div|2
+classic|live-tv-grid@1280x860|dom|header.top > a.logo[text]|1
+classic|live-tv-grid@1280x860|dom|header.top > div.topctl|1
+classic|live-tv-grid@1280x860|dom|header.top > input#q.search[aria-label=*]|1
+classic|live-tv-grid@1280x860|dom|header.top > nav|1
+classic|live-tv-grid@1280x860|dom|header.top > span#activity.activity|1
+classic|live-tv-grid@1280x860|dom|header.top > span.spacer|1
+classic|live-tv-grid@1280x860|dom|label.tog > input#lt-hideprot[type=checkbox]|1
+classic|live-tv-grid@1280x860|dom|label.tog > span[text]|1
+classic|live-tv-grid@1280x860|dom|main#main > div#live-tv-body|1
+classic|live-tv-grid@1280x860|dom|main#main > div#live-tv-toolbar|1
+classic|live-tv-grid@1280x860|dom|main#main > div.versionstamp[text]|1
+classic|live-tv-grid@1280x860|dom|main#main > h1[text]|1
+classic|live-tv-grid@1280x860|dom|main#main > p#live-tv-message[role=status aria-live=polite text]|1
+classic|live-tv-grid@1280x860|dom|main#main > p.sub[text]|1
+classic|live-tv-grid@1280x860|dom|nav > a.active[text]|1
+classic|live-tv-grid@1280x860|dom|nav > a[text]|3
+classic|live-tv-grid@1280x860|dom|span[text] > span.lt-star[text]|1
+classic|live-tv-grid@1280x860|focus|000|a.logo "cinema"
+classic|live-tv-grid@1280x860|focus|001|a "home"
+classic|live-tv-grid@1280x860|focus|002|a.active "live tv"
+classic|live-tv-grid@1280x860|focus|003|a "activity"
+classic|live-tv-grid@1280x860|focus|004|a "settings"
+classic|live-tv-grid@1280x860|focus|005|input#q.search "Search cinema"
+classic|live-tv-grid@1280x860|focus|006|button.ghost.sm.lookbtn "Appearance"
+classic|live-tv-grid@1280x860|focus|007|button.ghost.sm.profile "Account"
+classic|live-tv-grid@1280x860|focus|008|button "≡ List"
+classic|live-tv-grid@1280x860|focus|009|button "▦ Grid"
+classic|live-tv-grid@1280x860|focus|010|button "All"
+classic|live-tv-grid@1280x860|focus|011|button "Favorites"
+classic|live-tv-grid@1280x860|focus|012|input#lt-hideprot
+classic|live-tv-grid@1280x860|focus|013|input#live-tv-search "Number, name, or what is on"
+classic|live-tv-grid@1280x860|focus|014|button.lt-cell.airing "Evening Edition · 12:00 PM–12:30 PM"
+classic|live-tv-grid@1280x860|focus|015|button.lt-cell "Harbor Lights · 12:30 PM–1:30 PM"
+classic|live-tv-grid@1280x860|focus|016|button.lt-cell.airing "The Long Game · 12:00 PM–1:00 PM"
+classic|live-tv-grid@1280x860|focus|017|button.lt-cell "Studio Sessions · 1:00 PM–2:00 PM"
+classic|live-tv-grid@1280x860|focus|018|<wrap>
+classic|live-tv-grid@1280x860|req|GET /api/v1/activity|2
+classic|live-tv-grid@1280x860|req|GET /api/v1/live-tv/channels|1
+classic|live-tv-grid@1280x860|req|GET /api/v1/live-tv/guide|1
+classic|live-tv-grid@1280x860|req|GET /api/v1/me|1
+classic|live-tv-grid@1280x860|req|GET /api/v1/server|1
+classic|live-tv-grid@390x780|dom|^ > div#app|1
+classic|live-tv-grid@390x780|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.lookword[text]|1
+classic|live-tv-grid@390x780|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.tsw|1
+classic|live-tv-grid@390x780|dom|button.ghost.profile.sm > span.caret[text]|1
+classic|live-tv-grid@390x780|dom|button.ghost.profile.sm > span.pavatar[text]|1
+classic|live-tv-grid@390x780|dom|button.ghost.profile.sm > span.pname[text]|1
+classic|live-tv-grid@390x780|dom|div > button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*]|1
+classic|live-tv-grid@390x780|dom|div > button.ghost.profile.sm|1
+classic|live-tv-grid@390x780|dom|div > div#lookmenu.amenu.lookmenu|1
+classic|live-tv-grid@390x780|dom|div > div#profilemenu.amenu|1
+classic|live-tv-grid@390x780|dom|div > div.lt-gridwrap|1
+classic|live-tv-grid@390x780|dom|div#app > header.top|1
+classic|live-tv-grid@390x780|dom|div#app > main#main|1
+classic|live-tv-grid@390x780|dom|div#live-tv-body > div.lt-split|1
+classic|live-tv-grid@390x780|dom|div#live-tv-toolbar > div.lt-head|1
+classic|live-tv-grid@390x780|dom|div.lt-gcells > button.airing.lt-cell[type=button text]|2
+classic|live-tv-grid@390x780|dom|div.lt-gcells > button.lt-cell[type=button text]|2
+classic|live-tv-grid@390x780|dom|div.lt-gcells > div.ends.lt-cell[text]|3
+classic|live-tv-grid@390x780|dom|div.lt-gname > span.lt-chip[text]|3
+classic|live-tv-grid@390x780|dom|div.lt-gname > span[text]|3
+classic|live-tv-grid@390x780|dom|div.lt-grid > div.lt-grow|3
+classic|live-tv-grid@390x780|dom|div.lt-grid > div.lt-now|1
+classic|live-tv-grid@390x780|dom|div.lt-grid > div.lt-times|1
+classic|live-tv-grid@390x780|dom|div.lt-gridwrap > div.lt-grid|1
+classic|live-tv-grid@390x780|dom|div.lt-grow > div.lt-gcells|3
+classic|live-tv-grid@390x780|dom|div.lt-grow > div.lt-gname|3
+classic|live-tv-grid@390x780|dom|div.lt-head > div.lt-switch[role=group aria-label=*]|2
+classic|live-tv-grid@390x780|dom|div.lt-head > input#live-tv-search[type=search]|1
+classic|live-tv-grid@390x780|dom|div.lt-head > label.muted[text]|1
+classic|live-tv-grid@390x780|dom|div.lt-head > label.tog|1
+classic|live-tv-grid@390x780|dom|div.lt-head > span.muted[text]|1
+classic|live-tv-grid@390x780|dom|div.lt-nowbar > span.grow.muted[text]|1
+classic|live-tv-grid@390x780|dom|div.lt-split > div.lt-stage|1
+classic|live-tv-grid@390x780|dom|div.lt-split > div|1
+classic|live-tv-grid@390x780|dom|div.lt-stage > div#live-tv-slot.lt-slot|1
+classic|live-tv-grid@390x780|dom|div.lt-stage > div.lt-nowbar|1
+classic|live-tv-grid@390x780|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=false type=button text]|2
+classic|live-tv-grid@390x780|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=true type=button text]|2
+classic|live-tv-grid@390x780|dom|div.lt-times > div.pad|1
+classic|live-tv-grid@390x780|dom|div.lt-times > div.t[text]|8
+classic|live-tv-grid@390x780|dom|div.topctl > div|2
+classic|live-tv-grid@390x780|dom|header.top > a.logo[text]|1
+classic|live-tv-grid@390x780|dom|header.top > div.topctl|1
+classic|live-tv-grid@390x780|dom|header.top > input#q.search[aria-label=*]|1
+classic|live-tv-grid@390x780|dom|header.top > nav|1
+classic|live-tv-grid@390x780|dom|header.top > span#activity.activity|1
+classic|live-tv-grid@390x780|dom|header.top > span.spacer|1
+classic|live-tv-grid@390x780|dom|label.tog > input#lt-hideprot[type=checkbox]|1
+classic|live-tv-grid@390x780|dom|label.tog > span[text]|1
+classic|live-tv-grid@390x780|dom|main#main > div#live-tv-body|1
+classic|live-tv-grid@390x780|dom|main#main > div#live-tv-toolbar|1
+classic|live-tv-grid@390x780|dom|main#main > div.versionstamp[text]|1
+classic|live-tv-grid@390x780|dom|main#main > h1[text]|1
+classic|live-tv-grid@390x780|dom|main#main > p#live-tv-message[role=status aria-live=polite text]|1
+classic|live-tv-grid@390x780|dom|main#main > p.sub[text]|1
+classic|live-tv-grid@390x780|dom|nav > a.active[text]|1
+classic|live-tv-grid@390x780|dom|nav > a[text]|3
+classic|live-tv-grid@390x780|dom|span[text] > span.lt-star[text]|1
+classic|live-tv-grid@390x780|focus|000|a.logo "cinema"
+classic|live-tv-grid@390x780|focus|001|a "home"
+classic|live-tv-grid@390x780|focus|002|a.active "live tv"
+classic|live-tv-grid@390x780|focus|003|a "activity"
+classic|live-tv-grid@390x780|focus|004|a "settings"
+classic|live-tv-grid@390x780|focus|005|input#q.search "Search cinema"
+classic|live-tv-grid@390x780|focus|006|button.ghost.sm.lookbtn "Appearance"
+classic|live-tv-grid@390x780|focus|007|button.ghost.sm.profile "Account"
+classic|live-tv-grid@390x780|focus|008|button "≡ List"
+classic|live-tv-grid@390x780|focus|009|button "▦ Grid"
+classic|live-tv-grid@390x780|focus|010|button "All"
+classic|live-tv-grid@390x780|focus|011|button "Favorites"
+classic|live-tv-grid@390x780|focus|012|input#lt-hideprot
+classic|live-tv-grid@390x780|focus|013|input#live-tv-search "Number, name, or what is on"
+classic|live-tv-grid@390x780|focus|014|button.lt-cell.airing "Evening Edition · 12:00 PM–12:30 PM"
+classic|live-tv-grid@390x780|focus|015|button.lt-cell "Harbor Lights · 12:30 PM–1:30 PM"
+classic|live-tv-grid@390x780|focus|016|button.lt-cell.airing "The Long Game · 12:00 PM–1:00 PM"
+classic|live-tv-grid@390x780|focus|017|button.lt-cell "Studio Sessions · 1:00 PM–2:00 PM"
+classic|live-tv-grid@390x780|focus|018|<wrap>
+classic|live-tv-grid@390x780|req|GET /api/v1/activity|2
+classic|live-tv-grid@390x780|req|GET /api/v1/live-tv/channels|1
+classic|live-tv-grid@390x780|req|GET /api/v1/live-tv/guide|1
+classic|live-tv-grid@390x780|req|GET /api/v1/me|1
+classic|live-tv-grid@390x780|req|GET /api/v1/server|1
 classic|live-tv@1280x860|dom|^ > div#app|1
 classic|live-tv@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.lookword[text]|1
 classic|live-tv@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.tsw|1
 classic|live-tv@1280x860|dom|button.ghost.profile.sm > span.caret[text]|1
 classic|live-tv@1280x860|dom|button.ghost.profile.sm > span.pavatar[text]|1
 classic|live-tv@1280x860|dom|button.ghost.profile.sm > span.pname[text]|1
+classic|live-tv@1280x860|dom|button.locked.lt-row[role=option aria-selected=false disabled type=button] > span.lt-chip[text]|1
+classic|live-tv@1280x860|dom|button.locked.lt-row[role=option aria-selected=false disabled type=button] > span[text]|1
+classic|live-tv@1280x860|dom|button.locked.lt-row[role=option aria-selected=false disabled type=button] > span|1
+classic|live-tv@1280x860|dom|button.lt-row[role=option aria-selected=false type=button] > span.lt-chip[text]|2
+classic|live-tv@1280x860|dom|button.lt-row[role=option aria-selected=false type=button] > span|4
 classic|live-tv@1280x860|dom|div > button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*]|1
 classic|live-tv@1280x860|dom|div > button.ghost.profile.sm|1
 classic|live-tv@1280x860|dom|div > div#lookmenu.amenu.lookmenu|1
 classic|live-tv@1280x860|dom|div > div#profilemenu.amenu|1
 classic|live-tv@1280x860|dom|div#app > header.top|1
 classic|live-tv@1280x860|dom|div#app > main#main|1
-classic|live-tv@1280x860|dom|div#live-tv-channels > div.card|3
-classic|live-tv@1280x860|dom|div.card > button.ghost.sm[disabled text]|1
-classic|live-tv@1280x860|dom|div.card > button.primary.sm[text]|2
-classic|live-tv@1280x860|dom|div.card > h2[text]|3
-classic|live-tv@1280x860|dom|div.card > p[text]|3
-classic|live-tv@1280x860|dom|div.row > a[text]|1
-classic|live-tv@1280x860|dom|div.row > button.ghost.sm[text]|6
-classic|live-tv@1280x860|dom|div.row > button.primary.sm[text]|1
-classic|live-tv@1280x860|dom|div.row > input#live-tv-search[type=search]|1
-classic|live-tv@1280x860|dom|div.row > label[text]|1
-classic|live-tv@1280x860|dom|div.row > span.pill[text]|1
-classic|live-tv@1280x860|dom|div.row > strong#live-tv-title|1
+classic|live-tv@1280x860|dom|div#live-tv-body > div.lt-split|1
+classic|live-tv@1280x860|dom|div#live-tv-toolbar > div.lt-head|1
+classic|live-tv@1280x860|dom|div.lt-head > div.lt-switch[role=group aria-label=*]|2
+classic|live-tv@1280x860|dom|div.lt-head > input#live-tv-search[type=search]|1
+classic|live-tv@1280x860|dom|div.lt-head > label.muted[text]|1
+classic|live-tv@1280x860|dom|div.lt-head > label.tog|1
+classic|live-tv@1280x860|dom|div.lt-head > span.muted[text]|1
+classic|live-tv@1280x860|dom|div.lt-list[role=listbox aria-label=*] > button.locked.lt-row[role=option aria-selected=false disabled type=button]|1
+classic|live-tv@1280x860|dom|div.lt-list[role=listbox aria-label=*] > button.lt-row[role=option aria-selected=false type=button]|2
+classic|live-tv@1280x860|dom|div.lt-nowbar > span.grow.muted[text]|1
+classic|live-tv@1280x860|dom|div.lt-split > div.lt-list[role=listbox aria-label=*]|1
+classic|live-tv@1280x860|dom|div.lt-split > div.lt-stage|1
+classic|live-tv@1280x860|dom|div.lt-stage > div#live-tv-slot.lt-slot|1
+classic|live-tv@1280x860|dom|div.lt-stage > div.lt-nowbar|1
+classic|live-tv@1280x860|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=false type=button text]|2
+classic|live-tv@1280x860|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=true type=button text]|2
 classic|live-tv@1280x860|dom|div.topctl > div|2
 classic|live-tv@1280x860|dom|header.top > a.logo[text]|1
 classic|live-tv@1280x860|dom|header.top > div.topctl|1
@@ -3710,17 +4169,22 @@ classic|live-tv@1280x860|dom|header.top > input#q.search[aria-label=*]|1
 classic|live-tv@1280x860|dom|header.top > nav|1
 classic|live-tv@1280x860|dom|header.top > span#activity.activity|1
 classic|live-tv@1280x860|dom|header.top > span.spacer|1
-classic|live-tv@1280x860|dom|main#main > div#live-tv-channels|1
-classic|live-tv@1280x860|dom|main#main > div.row|1
+classic|live-tv@1280x860|dom|label.tog > input#lt-hideprot[type=checkbox]|1
+classic|live-tv@1280x860|dom|label.tog > span[text]|1
+classic|live-tv@1280x860|dom|main#main > div#live-tv-body|1
+classic|live-tv@1280x860|dom|main#main > div#live-tv-toolbar|1
 classic|live-tv@1280x860|dom|main#main > div.versionstamp[text]|1
 classic|live-tv@1280x860|dom|main#main > h1[text]|1
 classic|live-tv@1280x860|dom|main#main > p#live-tv-message[role=status aria-live=polite text]|1
 classic|live-tv@1280x860|dom|main#main > p.sub[text]|1
-classic|live-tv@1280x860|dom|main#main > section#live-tv-player.card[aria-label=* hidden]|1
 classic|live-tv@1280x860|dom|nav > a.active[text]|1
 classic|live-tv@1280x860|dom|nav > a[text]|3
-classic|live-tv@1280x860|dom|section#live-tv-player.card[aria-label=* hidden] > div.row|2
-classic|live-tv@1280x860|dom|section#live-tv-player.card[aria-label=* hidden] > video#live-tv-video[aria-label=*]|1
+classic|live-tv@1280x860|dom|span > b[text]|3
+classic|live-tv@1280x860|dom|span > span.lt-mini|2
+classic|live-tv@1280x860|dom|span > span.lt-star[text]|1
+classic|live-tv@1280x860|dom|span > span.next[text]|2
+classic|live-tv@1280x860|dom|span > span.prog[text]|3
+classic|live-tv@1280x860|dom|span.lt-mini > i|2
 classic|live-tv@1280x860|focus|000|a.logo "cinema"
 classic|live-tv@1280x860|focus|001|a "home"
 classic|live-tv@1280x860|focus|002|a.active "live tv"
@@ -3729,15 +4193,18 @@ classic|live-tv@1280x860|focus|004|a "settings"
 classic|live-tv@1280x860|focus|005|input#q.search "Search cinema"
 classic|live-tv@1280x860|focus|006|button.ghost.sm.lookbtn "Appearance"
 classic|live-tv@1280x860|focus|007|button.ghost.sm.profile "Account"
-classic|live-tv@1280x860|focus|008|input#live-tv-search "Number or name"
-classic|live-tv@1280x860|focus|009|button.ghost.sm "Refresh channels"
-classic|live-tv@1280x860|focus|010|button.ghost.sm "Stop / retry cleanup"
-classic|live-tv@1280x860|focus|011|a "Configure HDHomeRun"
-classic|live-tv@1280x860|focus|012|button.primary.sm "Watch live"
-classic|live-tv@1280x860|focus|013|button.primary.sm "Watch live"
-classic|live-tv@1280x860|focus|014|<wrap>
+classic|live-tv@1280x860|focus|008|button "≡ List"
+classic|live-tv@1280x860|focus|009|button "▦ Grid"
+classic|live-tv@1280x860|focus|010|button "All"
+classic|live-tv@1280x860|focus|011|button "Favorites"
+classic|live-tv@1280x860|focus|012|input#lt-hideprot
+classic|live-tv@1280x860|focus|013|input#live-tv-search "Number, name, or what is on"
+classic|live-tv@1280x860|focus|014|button.lt-row "Local 7.1 · Local News Evening Edition 12:30
+classic|live-tv@1280x860|focus|015|button.lt-row "Publi 10.2 · Public Television The Long Game
+classic|live-tv@1280x860|focus|016|<wrap>
 classic|live-tv@1280x860|req|GET /api/v1/activity|2
 classic|live-tv@1280x860|req|GET /api/v1/live-tv/channels|1
+classic|live-tv@1280x860|req|GET /api/v1/live-tv/guide|1
 classic|live-tv@1280x860|req|GET /api/v1/me|1
 classic|live-tv@1280x860|req|GET /api/v1/server|1
 classic|live-tv@390x780|dom|^ > div#app|1
@@ -3746,24 +4213,33 @@ classic|live-tv@390x780|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-labe
 classic|live-tv@390x780|dom|button.ghost.profile.sm > span.caret[text]|1
 classic|live-tv@390x780|dom|button.ghost.profile.sm > span.pavatar[text]|1
 classic|live-tv@390x780|dom|button.ghost.profile.sm > span.pname[text]|1
+classic|live-tv@390x780|dom|button.locked.lt-row[role=option aria-selected=false disabled type=button] > span.lt-chip[text]|1
+classic|live-tv@390x780|dom|button.locked.lt-row[role=option aria-selected=false disabled type=button] > span[text]|1
+classic|live-tv@390x780|dom|button.locked.lt-row[role=option aria-selected=false disabled type=button] > span|1
+classic|live-tv@390x780|dom|button.lt-row[role=option aria-selected=false type=button] > span.lt-chip[text]|2
+classic|live-tv@390x780|dom|button.lt-row[role=option aria-selected=false type=button] > span|4
 classic|live-tv@390x780|dom|div > button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*]|1
 classic|live-tv@390x780|dom|div > button.ghost.profile.sm|1
 classic|live-tv@390x780|dom|div > div#lookmenu.amenu.lookmenu|1
 classic|live-tv@390x780|dom|div > div#profilemenu.amenu|1
 classic|live-tv@390x780|dom|div#app > header.top|1
 classic|live-tv@390x780|dom|div#app > main#main|1
-classic|live-tv@390x780|dom|div#live-tv-channels > div.card|3
-classic|live-tv@390x780|dom|div.card > button.ghost.sm[disabled text]|1
-classic|live-tv@390x780|dom|div.card > button.primary.sm[text]|2
-classic|live-tv@390x780|dom|div.card > h2[text]|3
-classic|live-tv@390x780|dom|div.card > p[text]|3
-classic|live-tv@390x780|dom|div.row > a[text]|1
-classic|live-tv@390x780|dom|div.row > button.ghost.sm[text]|6
-classic|live-tv@390x780|dom|div.row > button.primary.sm[text]|1
-classic|live-tv@390x780|dom|div.row > input#live-tv-search[type=search]|1
-classic|live-tv@390x780|dom|div.row > label[text]|1
-classic|live-tv@390x780|dom|div.row > span.pill[text]|1
-classic|live-tv@390x780|dom|div.row > strong#live-tv-title|1
+classic|live-tv@390x780|dom|div#live-tv-body > div.lt-split|1
+classic|live-tv@390x780|dom|div#live-tv-toolbar > div.lt-head|1
+classic|live-tv@390x780|dom|div.lt-head > div.lt-switch[role=group aria-label=*]|2
+classic|live-tv@390x780|dom|div.lt-head > input#live-tv-search[type=search]|1
+classic|live-tv@390x780|dom|div.lt-head > label.muted[text]|1
+classic|live-tv@390x780|dom|div.lt-head > label.tog|1
+classic|live-tv@390x780|dom|div.lt-head > span.muted[text]|1
+classic|live-tv@390x780|dom|div.lt-list[role=listbox aria-label=*] > button.locked.lt-row[role=option aria-selected=false disabled type=button]|1
+classic|live-tv@390x780|dom|div.lt-list[role=listbox aria-label=*] > button.lt-row[role=option aria-selected=false type=button]|2
+classic|live-tv@390x780|dom|div.lt-nowbar > span.grow.muted[text]|1
+classic|live-tv@390x780|dom|div.lt-split > div.lt-list[role=listbox aria-label=*]|1
+classic|live-tv@390x780|dom|div.lt-split > div.lt-stage|1
+classic|live-tv@390x780|dom|div.lt-stage > div#live-tv-slot.lt-slot|1
+classic|live-tv@390x780|dom|div.lt-stage > div.lt-nowbar|1
+classic|live-tv@390x780|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=false type=button text]|2
+classic|live-tv@390x780|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=true type=button text]|2
 classic|live-tv@390x780|dom|div.topctl > div|2
 classic|live-tv@390x780|dom|header.top > a.logo[text]|1
 classic|live-tv@390x780|dom|header.top > div.topctl|1
@@ -3771,17 +4247,22 @@ classic|live-tv@390x780|dom|header.top > input#q.search[aria-label=*]|1
 classic|live-tv@390x780|dom|header.top > nav|1
 classic|live-tv@390x780|dom|header.top > span#activity.activity|1
 classic|live-tv@390x780|dom|header.top > span.spacer|1
-classic|live-tv@390x780|dom|main#main > div#live-tv-channels|1
-classic|live-tv@390x780|dom|main#main > div.row|1
+classic|live-tv@390x780|dom|label.tog > input#lt-hideprot[type=checkbox]|1
+classic|live-tv@390x780|dom|label.tog > span[text]|1
+classic|live-tv@390x780|dom|main#main > div#live-tv-body|1
+classic|live-tv@390x780|dom|main#main > div#live-tv-toolbar|1
 classic|live-tv@390x780|dom|main#main > div.versionstamp[text]|1
 classic|live-tv@390x780|dom|main#main > h1[text]|1
 classic|live-tv@390x780|dom|main#main > p#live-tv-message[role=status aria-live=polite text]|1
 classic|live-tv@390x780|dom|main#main > p.sub[text]|1
-classic|live-tv@390x780|dom|main#main > section#live-tv-player.card[aria-label=* hidden]|1
 classic|live-tv@390x780|dom|nav > a.active[text]|1
 classic|live-tv@390x780|dom|nav > a[text]|3
-classic|live-tv@390x780|dom|section#live-tv-player.card[aria-label=* hidden] > div.row|2
-classic|live-tv@390x780|dom|section#live-tv-player.card[aria-label=* hidden] > video#live-tv-video[aria-label=*]|1
+classic|live-tv@390x780|dom|span > b[text]|3
+classic|live-tv@390x780|dom|span > span.lt-mini|2
+classic|live-tv@390x780|dom|span > span.lt-star[text]|1
+classic|live-tv@390x780|dom|span > span.next[text]|2
+classic|live-tv@390x780|dom|span > span.prog[text]|3
+classic|live-tv@390x780|dom|span.lt-mini > i|2
 classic|live-tv@390x780|focus|000|a.logo "cinema"
 classic|live-tv@390x780|focus|001|a "home"
 classic|live-tv@390x780|focus|002|a.active "live tv"
@@ -3790,15 +4271,18 @@ classic|live-tv@390x780|focus|004|a "settings"
 classic|live-tv@390x780|focus|005|input#q.search "Search cinema"
 classic|live-tv@390x780|focus|006|button.ghost.sm.lookbtn "Appearance"
 classic|live-tv@390x780|focus|007|button.ghost.sm.profile "Account"
-classic|live-tv@390x780|focus|008|input#live-tv-search "Number or name"
-classic|live-tv@390x780|focus|009|button.ghost.sm "Refresh channels"
-classic|live-tv@390x780|focus|010|button.ghost.sm "Stop / retry cleanup"
-classic|live-tv@390x780|focus|011|a "Configure HDHomeRun"
-classic|live-tv@390x780|focus|012|button.primary.sm "Watch live"
-classic|live-tv@390x780|focus|013|button.primary.sm "Watch live"
-classic|live-tv@390x780|focus|014|<wrap>
+classic|live-tv@390x780|focus|008|button "≡ List"
+classic|live-tv@390x780|focus|009|button "▦ Grid"
+classic|live-tv@390x780|focus|010|button "All"
+classic|live-tv@390x780|focus|011|button "Favorites"
+classic|live-tv@390x780|focus|012|input#lt-hideprot
+classic|live-tv@390x780|focus|013|input#live-tv-search "Number, name, or what is on"
+classic|live-tv@390x780|focus|014|button.lt-row "Local 7.1 · Local News Evening Edition 12:30
+classic|live-tv@390x780|focus|015|button.lt-row "Publi 10.2 · Public Television The Long Game
+classic|live-tv@390x780|focus|016|<wrap>
 classic|live-tv@390x780|req|GET /api/v1/activity|2
 classic|live-tv@390x780|req|GET /api/v1/live-tv/channels|1
+classic|live-tv@390x780|req|GET /api/v1/live-tv/guide|1
 classic|live-tv@390x780|req|GET /api/v1/me|1
 classic|live-tv@390x780|req|GET /api/v1/server|1
 classic|player@1280x860|dom|^ > div#app|1
@@ -4195,16 +4679,26 @@ classic|settings-developer@1280x860|dom|div > div#lookmenu.amenu.lookmenu|1
 classic|settings-developer@1280x860|dom|div > div#profilemenu.amenu|1
 classic|settings-developer@1280x860|dom|div > div.hint[text]|1
 classic|settings-developer@1280x860|dom|div > h1[text]|1
-classic|settings-developer@1280x860|dom|div > h2.section[text]|5
+classic|settings-developer@1280x860|dom|div > h2.section[text]|6
 classic|settings-developer@1280x860|dom|div > input#ltip|1
 classic|settings-developer@1280x860|dom|div > input#ltowner|1
-classic|settings-developer@1280x860|dom|div > label[text]|4
-classic|settings-developer@1280x860|dom|div > p.sub[text]|5
+classic|settings-developer@1280x860|dom|div > label[text]|6
+classic|settings-developer@1280x860|dom|div > p.sub[text]|6
 classic|settings-developer@1280x860|dom|div > p[text]|1
+classic|settings-developer@1280x860|dom|div > select#ltghours|1
+classic|settings-developer@1280x860|dom|div > select#ltgsrc|1
 classic|settings-developer@1280x860|dom|div > select#ltheight|1
 classic|settings-developer@1280x860|dom|div > select#ltlimit|1
 classic|settings-developer@1280x860|dom|div#app > header.top|1
 classic|settings-developer@1280x860|dom|div#app > main#main|1
+classic|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > div#ltgerr.err[role=alert]|1
+classic|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > div#ltgready[aria-live=polite]|1
+classic|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > div.cardhead|1
+classic|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > div.hint[text]|1
+classic|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > div.row|1
+classic|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > div.setfields|1
+classic|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > div.setfoot|1
+classic|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > h2.section[text]|1
 classic|settings-developer@1280x860|dom|div#live-tv-settings.card.setcard > div#lterr.err[role=alert]|1
 classic|settings-developer@1280x860|dom|div#live-tv-settings.card.setcard > div#ltreadiness[aria-live=polite]|1
 classic|settings-developer@1280x860|dom|div#live-tv-settings.card.setcard > div.cardhead|1
@@ -4213,6 +4707,8 @@ classic|settings-developer@1280x860|dom|div#live-tv-settings.card.setcard > div.
 classic|settings-developer@1280x860|dom|div#live-tv-settings.card.setcard > div.setfoot|1
 classic|settings-developer@1280x860|dom|div#live-tv-settings.card.setcard > p.hint[text]|2
 classic|settings-developer@1280x860|dom|div#live-tv-settings.card.setcard > p[text]|1
+classic|settings-developer@1280x860|dom|div#ltgready[aria-live=polite] > p.muted[text]|1
+classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div#live-tv-guide-settings.card.setcard|1
 classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div#live-tv-settings.card.setcard|1
 classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div.card.setcard|4
 classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div.sethead|1
@@ -4224,18 +4720,18 @@ classic|settings-developer@1280x860|dom|div.card.setcard > div.setfoot|2
 classic|settings-developer@1280x860|dom|div.card.setcard > div.tog|6
 classic|settings-developer@1280x860|dom|div.card.setcard > h2.section[text]|2
 classic|settings-developer@1280x860|dom|div.card.setcard > label.tog|2
-classic|settings-developer@1280x860|dom|div.cardhead > div.cardtools|3
-classic|settings-developer@1280x860|dom|div.cardhead > div|5
+classic|settings-developer@1280x860|dom|div.cardhead > div.cardtools|4
+classic|settings-developer@1280x860|dom|div.cardhead > div|6
 classic|settings-developer@1280x860|dom|div.cardtools > span.pill.warn[text]|1
-classic|settings-developer@1280x860|dom|div.cardtools > span.pill[text]|2
-classic|settings-developer@1280x860|dom|div.hint[text] > b[text]|5
-classic|settings-developer@1280x860|dom|div.hint[text] > code[text]|1
-classic|settings-developer@1280x860|dom|div.row > a[text]|1
+classic|settings-developer@1280x860|dom|div.cardtools > span.pill[text]|3
+classic|settings-developer@1280x860|dom|div.hint[text] > b[text]|6
+classic|settings-developer@1280x860|dom|div.hint[text] > code[text]|3
+classic|settings-developer@1280x860|dom|div.row > a[text]|2
 classic|settings-developer@1280x860|dom|div.row > button#ltenable.primary.sm[text]|1
-classic|settings-developer@1280x860|dom|div.row > button.ghost.sm[text]|1
-classic|settings-developer@1280x860|dom|div.setfields > div|4
-classic|settings-developer@1280x860|dom|div.setfoot > button.primary.sm[disabled text]|3
-classic|settings-developer@1280x860|dom|div.setfoot > span.setstate[text]|3
+classic|settings-developer@1280x860|dom|div.row > button.ghost.sm[text]|3
+classic|settings-developer@1280x860|dom|div.setfields > div|6
+classic|settings-developer@1280x860|dom|div.setfoot > button.primary.sm[disabled text]|4
+classic|settings-developer@1280x860|dom|div.setfoot > span.setstate[text]|4
 classic|settings-developer@1280x860|dom|div.sethead > div|1
 classic|settings-developer@1280x860|dom|div.setlayout > div#setbody.adminwrap|1
 classic|settings-developer@1280x860|dom|div.setlayout > nav.settabs[aria-label=*]|1
@@ -4256,6 +4752,8 @@ classic|settings-developer@1280x860|dom|nav > a[text]|3
 classic|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
 classic|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|9
 classic|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
+classic|settings-developer@1280x860|dom|select#ltghours > option[text]|6
+classic|settings-developer@1280x860|dom|select#ltgsrc > option[text]|3
 classic|settings-developer@1280x860|dom|select#ltheight > option[text]|2
 classic|settings-developer@1280x860|dom|select#ltlimit > option[text]|4
 classic|settings-developer@1280x860|dom|small[text] > code[text]|6
@@ -4287,9 +4785,14 @@ classic|settings-developer@1280x860|focus|021|select#ltheight "720p 1080p"
 classic|settings-developer@1280x860|focus|022|button.ghost.sm "Check saved configuration"
 classic|settings-developer@1280x860|focus|023|button#ltenable.primary.sm "Enable Live TV"
 classic|settings-developer@1280x860|focus|024|a "Browse channels"
-classic|settings-developer@1280x860|focus|025|input#pcpv1
-classic|settings-developer@1280x860|focus|026|input#phs
-classic|settings-developer@1280x860|focus|027|<wrap>
+classic|settings-developer@1280x860|focus|025|select#ltgsrc "Off HDHomeRun guide XMLTV"
+classic|settings-developer@1280x860|focus|026|select#ltghours "4 hours 8 hours 12 hours 24 hours 48 hours
+classic|settings-developer@1280x860|focus|027|button.ghost.sm "Check the guide"
+classic|settings-developer@1280x860|focus|028|button.ghost.sm "Refresh now"
+classic|settings-developer@1280x860|focus|029|a "Browse channels"
+classic|settings-developer@1280x860|focus|030|input#pcpv1
+classic|settings-developer@1280x860|focus|031|input#phs
+classic|settings-developer@1280x860|focus|032|<wrap>
 classic|settings-developer@1280x860|req|GET /api/v1/activity|2
 classic|settings-developer@1280x860|req|GET /api/v1/me|1
 classic|settings-developer@1280x860|req|GET /api/v1/server|1
@@ -4306,16 +4809,26 @@ classic|settings-developer@390x780|dom|div > div#lookmenu.amenu.lookmenu|1
 classic|settings-developer@390x780|dom|div > div#profilemenu.amenu|1
 classic|settings-developer@390x780|dom|div > div.hint[text]|1
 classic|settings-developer@390x780|dom|div > h1[text]|1
-classic|settings-developer@390x780|dom|div > h2.section[text]|5
+classic|settings-developer@390x780|dom|div > h2.section[text]|6
 classic|settings-developer@390x780|dom|div > input#ltip|1
 classic|settings-developer@390x780|dom|div > input#ltowner|1
-classic|settings-developer@390x780|dom|div > label[text]|4
-classic|settings-developer@390x780|dom|div > p.sub[text]|5
+classic|settings-developer@390x780|dom|div > label[text]|6
+classic|settings-developer@390x780|dom|div > p.sub[text]|6
 classic|settings-developer@390x780|dom|div > p[text]|1
+classic|settings-developer@390x780|dom|div > select#ltghours|1
+classic|settings-developer@390x780|dom|div > select#ltgsrc|1
 classic|settings-developer@390x780|dom|div > select#ltheight|1
 classic|settings-developer@390x780|dom|div > select#ltlimit|1
 classic|settings-developer@390x780|dom|div#app > header.top|1
 classic|settings-developer@390x780|dom|div#app > main#main|1
+classic|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > div#ltgerr.err[role=alert]|1
+classic|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > div#ltgready[aria-live=polite]|1
+classic|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > div.cardhead|1
+classic|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > div.hint[text]|1
+classic|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > div.row|1
+classic|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > div.setfields|1
+classic|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > div.setfoot|1
+classic|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > h2.section[text]|1
 classic|settings-developer@390x780|dom|div#live-tv-settings.card.setcard > div#lterr.err[role=alert]|1
 classic|settings-developer@390x780|dom|div#live-tv-settings.card.setcard > div#ltreadiness[aria-live=polite]|1
 classic|settings-developer@390x780|dom|div#live-tv-settings.card.setcard > div.cardhead|1
@@ -4324,6 +4837,8 @@ classic|settings-developer@390x780|dom|div#live-tv-settings.card.setcard > div.s
 classic|settings-developer@390x780|dom|div#live-tv-settings.card.setcard > div.setfoot|1
 classic|settings-developer@390x780|dom|div#live-tv-settings.card.setcard > p.hint[text]|2
 classic|settings-developer@390x780|dom|div#live-tv-settings.card.setcard > p[text]|1
+classic|settings-developer@390x780|dom|div#ltgready[aria-live=polite] > p.muted[text]|1
+classic|settings-developer@390x780|dom|div#setbody.adminwrap > div#live-tv-guide-settings.card.setcard|1
 classic|settings-developer@390x780|dom|div#setbody.adminwrap > div#live-tv-settings.card.setcard|1
 classic|settings-developer@390x780|dom|div#setbody.adminwrap > div.card.setcard|4
 classic|settings-developer@390x780|dom|div#setbody.adminwrap > div.sethead|1
@@ -4335,18 +4850,18 @@ classic|settings-developer@390x780|dom|div.card.setcard > div.setfoot|2
 classic|settings-developer@390x780|dom|div.card.setcard > div.tog|6
 classic|settings-developer@390x780|dom|div.card.setcard > h2.section[text]|2
 classic|settings-developer@390x780|dom|div.card.setcard > label.tog|2
-classic|settings-developer@390x780|dom|div.cardhead > div.cardtools|3
-classic|settings-developer@390x780|dom|div.cardhead > div|5
+classic|settings-developer@390x780|dom|div.cardhead > div.cardtools|4
+classic|settings-developer@390x780|dom|div.cardhead > div|6
 classic|settings-developer@390x780|dom|div.cardtools > span.pill.warn[text]|1
-classic|settings-developer@390x780|dom|div.cardtools > span.pill[text]|2
-classic|settings-developer@390x780|dom|div.hint[text] > b[text]|5
-classic|settings-developer@390x780|dom|div.hint[text] > code[text]|1
-classic|settings-developer@390x780|dom|div.row > a[text]|1
+classic|settings-developer@390x780|dom|div.cardtools > span.pill[text]|3
+classic|settings-developer@390x780|dom|div.hint[text] > b[text]|6
+classic|settings-developer@390x780|dom|div.hint[text] > code[text]|3
+classic|settings-developer@390x780|dom|div.row > a[text]|2
 classic|settings-developer@390x780|dom|div.row > button#ltenable.primary.sm[text]|1
-classic|settings-developer@390x780|dom|div.row > button.ghost.sm[text]|1
-classic|settings-developer@390x780|dom|div.setfields > div|4
-classic|settings-developer@390x780|dom|div.setfoot > button.primary.sm[disabled text]|3
-classic|settings-developer@390x780|dom|div.setfoot > span.setstate[text]|3
+classic|settings-developer@390x780|dom|div.row > button.ghost.sm[text]|3
+classic|settings-developer@390x780|dom|div.setfields > div|6
+classic|settings-developer@390x780|dom|div.setfoot > button.primary.sm[disabled text]|4
+classic|settings-developer@390x780|dom|div.setfoot > span.setstate[text]|4
 classic|settings-developer@390x780|dom|div.sethead > div|1
 classic|settings-developer@390x780|dom|div.setlayout > div#setbody.adminwrap|1
 classic|settings-developer@390x780|dom|div.setlayout > nav.settabs[aria-label=*]|1
@@ -4367,6 +4882,8 @@ classic|settings-developer@390x780|dom|nav > a[text]|3
 classic|settings-developer@390x780|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
 classic|settings-developer@390x780|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|9
 classic|settings-developer@390x780|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
+classic|settings-developer@390x780|dom|select#ltghours > option[text]|6
+classic|settings-developer@390x780|dom|select#ltgsrc > option[text]|3
 classic|settings-developer@390x780|dom|select#ltheight > option[text]|2
 classic|settings-developer@390x780|dom|select#ltlimit > option[text]|4
 classic|settings-developer@390x780|dom|small[text] > code[text]|6
@@ -4398,9 +4915,14 @@ classic|settings-developer@390x780|focus|021|select#ltheight "720p 1080p"
 classic|settings-developer@390x780|focus|022|button.ghost.sm "Check saved configuration"
 classic|settings-developer@390x780|focus|023|button#ltenable.primary.sm "Enable Live TV"
 classic|settings-developer@390x780|focus|024|a "Browse channels"
-classic|settings-developer@390x780|focus|025|input#pcpv1
-classic|settings-developer@390x780|focus|026|input#phs
-classic|settings-developer@390x780|focus|027|<wrap>
+classic|settings-developer@390x780|focus|025|select#ltgsrc "Off HDHomeRun guide XMLTV"
+classic|settings-developer@390x780|focus|026|select#ltghours "4 hours 8 hours 12 hours 24 hours 48 hours
+classic|settings-developer@390x780|focus|027|button.ghost.sm "Check the guide"
+classic|settings-developer@390x780|focus|028|button.ghost.sm "Refresh now"
+classic|settings-developer@390x780|focus|029|a "Browse channels"
+classic|settings-developer@390x780|focus|030|input#pcpv1
+classic|settings-developer@390x780|focus|031|input#phs
+classic|settings-developer@390x780|focus|032|<wrap>
 classic|settings-developer@390x780|req|GET /api/v1/activity|2
 classic|settings-developer@390x780|req|GET /api/v1/me|1
 classic|settings-developer@390x780|req|GET /api/v1/server|1
@@ -5703,27 +6225,204 @@ theater|library@390x780|req|GET /api/v1/libraries/<id>/items|1
 theater|library@390x780|req|GET /api/v1/libraries|1
 theater|library@390x780|req|GET /api/v1/me|1
 theater|library@390x780|req|GET /api/v1/server|1
+theater|live-tv-grid@1280x860|dom|^ > div#app|1
+theater|live-tv-grid@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.lookword[text]|1
+theater|live-tv-grid@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.tsw|1
+theater|live-tv-grid@1280x860|dom|button.ghost.profile.sm > span.caret[text]|1
+theater|live-tv-grid@1280x860|dom|button.ghost.profile.sm > span.pavatar[text]|1
+theater|live-tv-grid@1280x860|dom|button.ghost.profile.sm > span.pname[text]|1
+theater|live-tv-grid@1280x860|dom|div > div.lt-gridwrap|1
+theater|live-tv-grid@1280x860|dom|div#app > header.th-top|1
+theater|live-tv-grid@1280x860|dom|div#app > main#main|1
+theater|live-tv-grid@1280x860|dom|div#app > nav.th-pills[aria-label=*]|1
+theater|live-tv-grid@1280x860|dom|div#live-tv-body > div.lt-split|1
+theater|live-tv-grid@1280x860|dom|div#live-tv-toolbar > div.lt-head|1
+theater|live-tv-grid@1280x860|dom|div.lt-gcells > button.airing.lt-cell[type=button text]|2
+theater|live-tv-grid@1280x860|dom|div.lt-gcells > button.lt-cell[type=button text]|2
+theater|live-tv-grid@1280x860|dom|div.lt-gcells > div.ends.lt-cell[text]|3
+theater|live-tv-grid@1280x860|dom|div.lt-gname > span.lt-chip[text]|3
+theater|live-tv-grid@1280x860|dom|div.lt-gname > span[text]|3
+theater|live-tv-grid@1280x860|dom|div.lt-grid > div.lt-grow|3
+theater|live-tv-grid@1280x860|dom|div.lt-grid > div.lt-now|1
+theater|live-tv-grid@1280x860|dom|div.lt-grid > div.lt-times|1
+theater|live-tv-grid@1280x860|dom|div.lt-gridwrap > div.lt-grid|1
+theater|live-tv-grid@1280x860|dom|div.lt-grow > div.lt-gcells|3
+theater|live-tv-grid@1280x860|dom|div.lt-grow > div.lt-gname|3
+theater|live-tv-grid@1280x860|dom|div.lt-head > div.lt-switch[role=group aria-label=*]|2
+theater|live-tv-grid@1280x860|dom|div.lt-head > input#live-tv-search[type=search]|1
+theater|live-tv-grid@1280x860|dom|div.lt-head > label.muted[text]|1
+theater|live-tv-grid@1280x860|dom|div.lt-head > label.tog|1
+theater|live-tv-grid@1280x860|dom|div.lt-head > span.muted[text]|1
+theater|live-tv-grid@1280x860|dom|div.lt-nowbar > span.grow.muted[text]|1
+theater|live-tv-grid@1280x860|dom|div.lt-split > div.lt-stage|1
+theater|live-tv-grid@1280x860|dom|div.lt-split > div|1
+theater|live-tv-grid@1280x860|dom|div.lt-stage > div#live-tv-slot.lt-slot|1
+theater|live-tv-grid@1280x860|dom|div.lt-stage > div.lt-nowbar|1
+theater|live-tv-grid@1280x860|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=false type=button text]|2
+theater|live-tv-grid@1280x860|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=true type=button text]|2
+theater|live-tv-grid@1280x860|dom|div.lt-times > div.pad|1
+theater|live-tv-grid@1280x860|dom|div.lt-times > div.t[text]|8
+theater|live-tv-grid@1280x860|dom|div.th-ctl > div.th-pop|2
+theater|live-tv-grid@1280x860|dom|div.th-pop > button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*]|1
+theater|live-tv-grid@1280x860|dom|div.th-pop > button.ghost.profile.sm|1
+theater|live-tv-grid@1280x860|dom|div.th-pop > div#lookmenu.amenu.lookmenu|1
+theater|live-tv-grid@1280x860|dom|div.th-pop > div#profilemenu.amenu|1
+theater|live-tv-grid@1280x860|dom|header.th-top > a.logo[text]|1
+theater|live-tv-grid@1280x860|dom|header.th-top > div.th-ctl|1
+theater|live-tv-grid@1280x860|dom|header.th-top > input#q.search[aria-label=*]|1
+theater|live-tv-grid@1280x860|dom|header.th-top > nav.th-nav[aria-label=*]|1
+theater|live-tv-grid@1280x860|dom|header.th-top > span#activity.activity|1
+theater|live-tv-grid@1280x860|dom|header.th-top > span.spacer|1
+theater|live-tv-grid@1280x860|dom|label.tog > input#lt-hideprot[type=checkbox]|1
+theater|live-tv-grid@1280x860|dom|label.tog > span[text]|1
+theater|live-tv-grid@1280x860|dom|main#main > div#live-tv-body|1
+theater|live-tv-grid@1280x860|dom|main#main > div#live-tv-toolbar|1
+theater|live-tv-grid@1280x860|dom|main#main > h1[text]|1
+theater|live-tv-grid@1280x860|dom|main#main > p#live-tv-message[role=status aria-live=polite text]|1
+theater|live-tv-grid@1280x860|dom|main#main > p.sub[text]|1
+theater|live-tv-grid@1280x860|dom|nav.th-nav[aria-label=*] > a.on[aria-current=page text]|1
+theater|live-tv-grid@1280x860|dom|nav.th-nav[aria-label=*] > a[text]|3
+theater|live-tv-grid@1280x860|dom|nav.th-pills[aria-label=*] > a.on[aria-current=page text]|1
+theater|live-tv-grid@1280x860|dom|nav.th-pills[aria-label=*] > a[text]|3
+theater|live-tv-grid@1280x860|dom|span[text] > span.lt-star[text]|1
+theater|live-tv-grid@1280x860|focus|000|a.logo "cinema"
+theater|live-tv-grid@1280x860|focus|001|a "Home"
+theater|live-tv-grid@1280x860|focus|002|a.on "Live TV"
+theater|live-tv-grid@1280x860|focus|003|a "Activity"
+theater|live-tv-grid@1280x860|focus|004|a "Settings"
+theater|live-tv-grid@1280x860|focus|005|input#q.search "Search cinema"
+theater|live-tv-grid@1280x860|focus|006|button.ghost.sm.lookbtn "Appearance"
+theater|live-tv-grid@1280x860|focus|007|button.ghost.sm.profile "Account"
+theater|live-tv-grid@1280x860|focus|008|button "≡ List"
+theater|live-tv-grid@1280x860|focus|009|button "▦ Grid"
+theater|live-tv-grid@1280x860|focus|010|button "All"
+theater|live-tv-grid@1280x860|focus|011|button "Favorites"
+theater|live-tv-grid@1280x860|focus|012|input#lt-hideprot
+theater|live-tv-grid@1280x860|focus|013|input#live-tv-search "Number, name, or what is on"
+theater|live-tv-grid@1280x860|focus|014|button.lt-cell.airing "Evening Edition · 12:00 PM–12:30 PM"
+theater|live-tv-grid@1280x860|focus|015|button.lt-cell "Harbor Lights · 12:30 PM–1:30 PM"
+theater|live-tv-grid@1280x860|focus|016|button.lt-cell.airing "The Long Game · 12:00 PM–1:00 PM"
+theater|live-tv-grid@1280x860|focus|017|button.lt-cell "Studio Sessions · 1:00 PM–2:00 PM"
+theater|live-tv-grid@1280x860|focus|018|<wrap>
+theater|live-tv-grid@1280x860|req|GET /api/v1/activity|2
+theater|live-tv-grid@1280x860|req|GET /api/v1/live-tv/channels|1
+theater|live-tv-grid@1280x860|req|GET /api/v1/live-tv/guide|1
+theater|live-tv-grid@1280x860|req|GET /api/v1/me|1
+theater|live-tv-grid@1280x860|req|GET /api/v1/server|1
+theater|live-tv-grid@390x780|dom|^ > div#app|1
+theater|live-tv-grid@390x780|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.lookword[text]|1
+theater|live-tv-grid@390x780|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.tsw|1
+theater|live-tv-grid@390x780|dom|button.ghost.profile.sm > span.caret[text]|1
+theater|live-tv-grid@390x780|dom|button.ghost.profile.sm > span.pavatar[text]|1
+theater|live-tv-grid@390x780|dom|button.ghost.profile.sm > span.pname[text]|1
+theater|live-tv-grid@390x780|dom|div > div.lt-gridwrap|1
+theater|live-tv-grid@390x780|dom|div#app > header.th-top|1
+theater|live-tv-grid@390x780|dom|div#app > main#main|1
+theater|live-tv-grid@390x780|dom|div#app > nav.th-pills[aria-label=*]|1
+theater|live-tv-grid@390x780|dom|div#live-tv-body > div.lt-split|1
+theater|live-tv-grid@390x780|dom|div#live-tv-toolbar > div.lt-head|1
+theater|live-tv-grid@390x780|dom|div.lt-gcells > button.airing.lt-cell[type=button text]|2
+theater|live-tv-grid@390x780|dom|div.lt-gcells > button.lt-cell[type=button text]|2
+theater|live-tv-grid@390x780|dom|div.lt-gcells > div.ends.lt-cell[text]|3
+theater|live-tv-grid@390x780|dom|div.lt-gname > span.lt-chip[text]|3
+theater|live-tv-grid@390x780|dom|div.lt-gname > span[text]|3
+theater|live-tv-grid@390x780|dom|div.lt-grid > div.lt-grow|3
+theater|live-tv-grid@390x780|dom|div.lt-grid > div.lt-now|1
+theater|live-tv-grid@390x780|dom|div.lt-grid > div.lt-times|1
+theater|live-tv-grid@390x780|dom|div.lt-gridwrap > div.lt-grid|1
+theater|live-tv-grid@390x780|dom|div.lt-grow > div.lt-gcells|3
+theater|live-tv-grid@390x780|dom|div.lt-grow > div.lt-gname|3
+theater|live-tv-grid@390x780|dom|div.lt-head > div.lt-switch[role=group aria-label=*]|2
+theater|live-tv-grid@390x780|dom|div.lt-head > input#live-tv-search[type=search]|1
+theater|live-tv-grid@390x780|dom|div.lt-head > label.muted[text]|1
+theater|live-tv-grid@390x780|dom|div.lt-head > label.tog|1
+theater|live-tv-grid@390x780|dom|div.lt-head > span.muted[text]|1
+theater|live-tv-grid@390x780|dom|div.lt-nowbar > span.grow.muted[text]|1
+theater|live-tv-grid@390x780|dom|div.lt-split > div.lt-stage|1
+theater|live-tv-grid@390x780|dom|div.lt-split > div|1
+theater|live-tv-grid@390x780|dom|div.lt-stage > div#live-tv-slot.lt-slot|1
+theater|live-tv-grid@390x780|dom|div.lt-stage > div.lt-nowbar|1
+theater|live-tv-grid@390x780|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=false type=button text]|2
+theater|live-tv-grid@390x780|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=true type=button text]|2
+theater|live-tv-grid@390x780|dom|div.lt-times > div.pad|1
+theater|live-tv-grid@390x780|dom|div.lt-times > div.t[text]|8
+theater|live-tv-grid@390x780|dom|div.th-ctl > div.th-pop|2
+theater|live-tv-grid@390x780|dom|div.th-pop > button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*]|1
+theater|live-tv-grid@390x780|dom|div.th-pop > button.ghost.profile.sm|1
+theater|live-tv-grid@390x780|dom|div.th-pop > div#lookmenu.amenu.lookmenu|1
+theater|live-tv-grid@390x780|dom|div.th-pop > div#profilemenu.amenu|1
+theater|live-tv-grid@390x780|dom|header.th-top > a.logo[text]|1
+theater|live-tv-grid@390x780|dom|header.th-top > div.th-ctl|1
+theater|live-tv-grid@390x780|dom|header.th-top > input#q.search[aria-label=*]|1
+theater|live-tv-grid@390x780|dom|header.th-top > nav.th-nav[aria-label=*]|1
+theater|live-tv-grid@390x780|dom|header.th-top > span#activity.activity|1
+theater|live-tv-grid@390x780|dom|header.th-top > span.spacer|1
+theater|live-tv-grid@390x780|dom|label.tog > input#lt-hideprot[type=checkbox]|1
+theater|live-tv-grid@390x780|dom|label.tog > span[text]|1
+theater|live-tv-grid@390x780|dom|main#main > div#live-tv-body|1
+theater|live-tv-grid@390x780|dom|main#main > div#live-tv-toolbar|1
+theater|live-tv-grid@390x780|dom|main#main > h1[text]|1
+theater|live-tv-grid@390x780|dom|main#main > p#live-tv-message[role=status aria-live=polite text]|1
+theater|live-tv-grid@390x780|dom|main#main > p.sub[text]|1
+theater|live-tv-grid@390x780|dom|nav.th-nav[aria-label=*] > a.on[aria-current=page text]|1
+theater|live-tv-grid@390x780|dom|nav.th-nav[aria-label=*] > a[text]|3
+theater|live-tv-grid@390x780|dom|nav.th-pills[aria-label=*] > a.on[aria-current=page text]|1
+theater|live-tv-grid@390x780|dom|nav.th-pills[aria-label=*] > a[text]|3
+theater|live-tv-grid@390x780|dom|span[text] > span.lt-star[text]|1
+theater|live-tv-grid@390x780|focus|000|a.logo "cinema"
+theater|live-tv-grid@390x780|focus|001|input#q.search "Search cinema"
+theater|live-tv-grid@390x780|focus|002|button.ghost.sm.lookbtn "Appearance"
+theater|live-tv-grid@390x780|focus|003|button.ghost.sm.profile "Account"
+theater|live-tv-grid@390x780|focus|004|button "≡ List"
+theater|live-tv-grid@390x780|focus|005|button "▦ Grid"
+theater|live-tv-grid@390x780|focus|006|button "All"
+theater|live-tv-grid@390x780|focus|007|button "Favorites"
+theater|live-tv-grid@390x780|focus|008|input#lt-hideprot
+theater|live-tv-grid@390x780|focus|009|input#live-tv-search "Number, name, or what is on"
+theater|live-tv-grid@390x780|focus|010|button.lt-cell.airing "Evening Edition · 12:00 PM–12:30 PM"
+theater|live-tv-grid@390x780|focus|011|button.lt-cell "Harbor Lights · 12:30 PM–1:30 PM"
+theater|live-tv-grid@390x780|focus|012|button.lt-cell.airing "The Long Game · 12:00 PM–1:00 PM"
+theater|live-tv-grid@390x780|focus|013|button.lt-cell "Studio Sessions · 1:00 PM–2:00 PM"
+theater|live-tv-grid@390x780|focus|014|a "Home"
+theater|live-tv-grid@390x780|focus|015|a.on "Live TV"
+theater|live-tv-grid@390x780|focus|016|a "Activity"
+theater|live-tv-grid@390x780|focus|017|a "Settings"
+theater|live-tv-grid@390x780|focus|018|<wrap>
+theater|live-tv-grid@390x780|req|GET /api/v1/activity|2
+theater|live-tv-grid@390x780|req|GET /api/v1/live-tv/channels|1
+theater|live-tv-grid@390x780|req|GET /api/v1/live-tv/guide|1
+theater|live-tv-grid@390x780|req|GET /api/v1/me|1
+theater|live-tv-grid@390x780|req|GET /api/v1/server|1
 theater|live-tv@1280x860|dom|^ > div#app|1
 theater|live-tv@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.lookword[text]|1
 theater|live-tv@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.tsw|1
 theater|live-tv@1280x860|dom|button.ghost.profile.sm > span.caret[text]|1
 theater|live-tv@1280x860|dom|button.ghost.profile.sm > span.pavatar[text]|1
 theater|live-tv@1280x860|dom|button.ghost.profile.sm > span.pname[text]|1
+theater|live-tv@1280x860|dom|button.locked.lt-row[role=option aria-selected=false disabled type=button] > span.lt-chip[text]|1
+theater|live-tv@1280x860|dom|button.locked.lt-row[role=option aria-selected=false disabled type=button] > span[text]|1
+theater|live-tv@1280x860|dom|button.locked.lt-row[role=option aria-selected=false disabled type=button] > span|1
+theater|live-tv@1280x860|dom|button.lt-row[role=option aria-selected=false type=button] > span.lt-chip[text]|2
+theater|live-tv@1280x860|dom|button.lt-row[role=option aria-selected=false type=button] > span|4
 theater|live-tv@1280x860|dom|div#app > header.th-top|1
 theater|live-tv@1280x860|dom|div#app > main#main|1
 theater|live-tv@1280x860|dom|div#app > nav.th-pills[aria-label=*]|1
-theater|live-tv@1280x860|dom|div#live-tv-channels > div.card|3
-theater|live-tv@1280x860|dom|div.card > button.ghost.sm[disabled text]|1
-theater|live-tv@1280x860|dom|div.card > button.primary.sm[text]|2
-theater|live-tv@1280x860|dom|div.card > h2[text]|3
-theater|live-tv@1280x860|dom|div.card > p[text]|3
-theater|live-tv@1280x860|dom|div.row > a[text]|1
-theater|live-tv@1280x860|dom|div.row > button.ghost.sm[text]|6
-theater|live-tv@1280x860|dom|div.row > button.primary.sm[text]|1
-theater|live-tv@1280x860|dom|div.row > input#live-tv-search[type=search]|1
-theater|live-tv@1280x860|dom|div.row > label[text]|1
-theater|live-tv@1280x860|dom|div.row > span.pill[text]|1
-theater|live-tv@1280x860|dom|div.row > strong#live-tv-title|1
+theater|live-tv@1280x860|dom|div#live-tv-body > div.lt-split|1
+theater|live-tv@1280x860|dom|div#live-tv-toolbar > div.lt-head|1
+theater|live-tv@1280x860|dom|div.lt-head > div.lt-switch[role=group aria-label=*]|2
+theater|live-tv@1280x860|dom|div.lt-head > input#live-tv-search[type=search]|1
+theater|live-tv@1280x860|dom|div.lt-head > label.muted[text]|1
+theater|live-tv@1280x860|dom|div.lt-head > label.tog|1
+theater|live-tv@1280x860|dom|div.lt-head > span.muted[text]|1
+theater|live-tv@1280x860|dom|div.lt-list[role=listbox aria-label=*] > button.locked.lt-row[role=option aria-selected=false disabled type=button]|1
+theater|live-tv@1280x860|dom|div.lt-list[role=listbox aria-label=*] > button.lt-row[role=option aria-selected=false type=button]|2
+theater|live-tv@1280x860|dom|div.lt-nowbar > span.grow.muted[text]|1
+theater|live-tv@1280x860|dom|div.lt-split > div.lt-list[role=listbox aria-label=*]|1
+theater|live-tv@1280x860|dom|div.lt-split > div.lt-stage|1
+theater|live-tv@1280x860|dom|div.lt-stage > div#live-tv-slot.lt-slot|1
+theater|live-tv@1280x860|dom|div.lt-stage > div.lt-nowbar|1
+theater|live-tv@1280x860|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=false type=button text]|2
+theater|live-tv@1280x860|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=true type=button text]|2
 theater|live-tv@1280x860|dom|div.th-ctl > div.th-pop|2
 theater|live-tv@1280x860|dom|div.th-pop > button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*]|1
 theater|live-tv@1280x860|dom|div.th-pop > button.ghost.profile.sm|1
@@ -5735,18 +6434,23 @@ theater|live-tv@1280x860|dom|header.th-top > input#q.search[aria-label=*]|1
 theater|live-tv@1280x860|dom|header.th-top > nav.th-nav[aria-label=*]|1
 theater|live-tv@1280x860|dom|header.th-top > span#activity.activity|1
 theater|live-tv@1280x860|dom|header.th-top > span.spacer|1
-theater|live-tv@1280x860|dom|main#main > div#live-tv-channels|1
-theater|live-tv@1280x860|dom|main#main > div.row|1
+theater|live-tv@1280x860|dom|label.tog > input#lt-hideprot[type=checkbox]|1
+theater|live-tv@1280x860|dom|label.tog > span[text]|1
+theater|live-tv@1280x860|dom|main#main > div#live-tv-body|1
+theater|live-tv@1280x860|dom|main#main > div#live-tv-toolbar|1
 theater|live-tv@1280x860|dom|main#main > h1[text]|1
 theater|live-tv@1280x860|dom|main#main > p#live-tv-message[role=status aria-live=polite text]|1
 theater|live-tv@1280x860|dom|main#main > p.sub[text]|1
-theater|live-tv@1280x860|dom|main#main > section#live-tv-player.card[aria-label=* hidden]|1
 theater|live-tv@1280x860|dom|nav.th-nav[aria-label=*] > a.on[aria-current=page text]|1
 theater|live-tv@1280x860|dom|nav.th-nav[aria-label=*] > a[text]|3
 theater|live-tv@1280x860|dom|nav.th-pills[aria-label=*] > a.on[aria-current=page text]|1
 theater|live-tv@1280x860|dom|nav.th-pills[aria-label=*] > a[text]|3
-theater|live-tv@1280x860|dom|section#live-tv-player.card[aria-label=* hidden] > div.row|2
-theater|live-tv@1280x860|dom|section#live-tv-player.card[aria-label=* hidden] > video#live-tv-video[aria-label=*]|1
+theater|live-tv@1280x860|dom|span > b[text]|3
+theater|live-tv@1280x860|dom|span > span.lt-mini|2
+theater|live-tv@1280x860|dom|span > span.lt-star[text]|1
+theater|live-tv@1280x860|dom|span > span.next[text]|2
+theater|live-tv@1280x860|dom|span > span.prog[text]|3
+theater|live-tv@1280x860|dom|span.lt-mini > i|2
 theater|live-tv@1280x860|focus|000|a.logo "cinema"
 theater|live-tv@1280x860|focus|001|a "Home"
 theater|live-tv@1280x860|focus|002|a.on "Live TV"
@@ -5755,15 +6459,18 @@ theater|live-tv@1280x860|focus|004|a "Settings"
 theater|live-tv@1280x860|focus|005|input#q.search "Search cinema"
 theater|live-tv@1280x860|focus|006|button.ghost.sm.lookbtn "Appearance"
 theater|live-tv@1280x860|focus|007|button.ghost.sm.profile "Account"
-theater|live-tv@1280x860|focus|008|input#live-tv-search "Number or name"
-theater|live-tv@1280x860|focus|009|button.ghost.sm "Refresh channels"
-theater|live-tv@1280x860|focus|010|button.ghost.sm "Stop / retry cleanup"
-theater|live-tv@1280x860|focus|011|a "Configure HDHomeRun"
-theater|live-tv@1280x860|focus|012|button.primary.sm "Watch live"
-theater|live-tv@1280x860|focus|013|button.primary.sm "Watch live"
-theater|live-tv@1280x860|focus|014|<wrap>
+theater|live-tv@1280x860|focus|008|button "≡ List"
+theater|live-tv@1280x860|focus|009|button "▦ Grid"
+theater|live-tv@1280x860|focus|010|button "All"
+theater|live-tv@1280x860|focus|011|button "Favorites"
+theater|live-tv@1280x860|focus|012|input#lt-hideprot
+theater|live-tv@1280x860|focus|013|input#live-tv-search "Number, name, or what is on"
+theater|live-tv@1280x860|focus|014|button.lt-row "Local 7.1 · Local News Evening Edition 12:30
+theater|live-tv@1280x860|focus|015|button.lt-row "Publi 10.2 · Public Television The Long Game
+theater|live-tv@1280x860|focus|016|<wrap>
 theater|live-tv@1280x860|req|GET /api/v1/activity|2
 theater|live-tv@1280x860|req|GET /api/v1/live-tv/channels|1
+theater|live-tv@1280x860|req|GET /api/v1/live-tv/guide|1
 theater|live-tv@1280x860|req|GET /api/v1/me|1
 theater|live-tv@1280x860|req|GET /api/v1/server|1
 theater|live-tv@390x780|dom|^ > div#app|1
@@ -5772,21 +6479,30 @@ theater|live-tv@390x780|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-labe
 theater|live-tv@390x780|dom|button.ghost.profile.sm > span.caret[text]|1
 theater|live-tv@390x780|dom|button.ghost.profile.sm > span.pavatar[text]|1
 theater|live-tv@390x780|dom|button.ghost.profile.sm > span.pname[text]|1
+theater|live-tv@390x780|dom|button.locked.lt-row[role=option aria-selected=false disabled type=button] > span.lt-chip[text]|1
+theater|live-tv@390x780|dom|button.locked.lt-row[role=option aria-selected=false disabled type=button] > span[text]|1
+theater|live-tv@390x780|dom|button.locked.lt-row[role=option aria-selected=false disabled type=button] > span|1
+theater|live-tv@390x780|dom|button.lt-row[role=option aria-selected=false type=button] > span.lt-chip[text]|2
+theater|live-tv@390x780|dom|button.lt-row[role=option aria-selected=false type=button] > span|4
 theater|live-tv@390x780|dom|div#app > header.th-top|1
 theater|live-tv@390x780|dom|div#app > main#main|1
 theater|live-tv@390x780|dom|div#app > nav.th-pills[aria-label=*]|1
-theater|live-tv@390x780|dom|div#live-tv-channels > div.card|3
-theater|live-tv@390x780|dom|div.card > button.ghost.sm[disabled text]|1
-theater|live-tv@390x780|dom|div.card > button.primary.sm[text]|2
-theater|live-tv@390x780|dom|div.card > h2[text]|3
-theater|live-tv@390x780|dom|div.card > p[text]|3
-theater|live-tv@390x780|dom|div.row > a[text]|1
-theater|live-tv@390x780|dom|div.row > button.ghost.sm[text]|6
-theater|live-tv@390x780|dom|div.row > button.primary.sm[text]|1
-theater|live-tv@390x780|dom|div.row > input#live-tv-search[type=search]|1
-theater|live-tv@390x780|dom|div.row > label[text]|1
-theater|live-tv@390x780|dom|div.row > span.pill[text]|1
-theater|live-tv@390x780|dom|div.row > strong#live-tv-title|1
+theater|live-tv@390x780|dom|div#live-tv-body > div.lt-split|1
+theater|live-tv@390x780|dom|div#live-tv-toolbar > div.lt-head|1
+theater|live-tv@390x780|dom|div.lt-head > div.lt-switch[role=group aria-label=*]|2
+theater|live-tv@390x780|dom|div.lt-head > input#live-tv-search[type=search]|1
+theater|live-tv@390x780|dom|div.lt-head > label.muted[text]|1
+theater|live-tv@390x780|dom|div.lt-head > label.tog|1
+theater|live-tv@390x780|dom|div.lt-head > span.muted[text]|1
+theater|live-tv@390x780|dom|div.lt-list[role=listbox aria-label=*] > button.locked.lt-row[role=option aria-selected=false disabled type=button]|1
+theater|live-tv@390x780|dom|div.lt-list[role=listbox aria-label=*] > button.lt-row[role=option aria-selected=false type=button]|2
+theater|live-tv@390x780|dom|div.lt-nowbar > span.grow.muted[text]|1
+theater|live-tv@390x780|dom|div.lt-split > div.lt-list[role=listbox aria-label=*]|1
+theater|live-tv@390x780|dom|div.lt-split > div.lt-stage|1
+theater|live-tv@390x780|dom|div.lt-stage > div#live-tv-slot.lt-slot|1
+theater|live-tv@390x780|dom|div.lt-stage > div.lt-nowbar|1
+theater|live-tv@390x780|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=false type=button text]|2
+theater|live-tv@390x780|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=true type=button text]|2
 theater|live-tv@390x780|dom|div.th-ctl > div.th-pop|2
 theater|live-tv@390x780|dom|div.th-pop > button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*]|1
 theater|live-tv@390x780|dom|div.th-pop > button.ghost.profile.sm|1
@@ -5798,35 +6514,43 @@ theater|live-tv@390x780|dom|header.th-top > input#q.search[aria-label=*]|1
 theater|live-tv@390x780|dom|header.th-top > nav.th-nav[aria-label=*]|1
 theater|live-tv@390x780|dom|header.th-top > span#activity.activity|1
 theater|live-tv@390x780|dom|header.th-top > span.spacer|1
-theater|live-tv@390x780|dom|main#main > div#live-tv-channels|1
-theater|live-tv@390x780|dom|main#main > div.row|1
+theater|live-tv@390x780|dom|label.tog > input#lt-hideprot[type=checkbox]|1
+theater|live-tv@390x780|dom|label.tog > span[text]|1
+theater|live-tv@390x780|dom|main#main > div#live-tv-body|1
+theater|live-tv@390x780|dom|main#main > div#live-tv-toolbar|1
 theater|live-tv@390x780|dom|main#main > h1[text]|1
 theater|live-tv@390x780|dom|main#main > p#live-tv-message[role=status aria-live=polite text]|1
 theater|live-tv@390x780|dom|main#main > p.sub[text]|1
-theater|live-tv@390x780|dom|main#main > section#live-tv-player.card[aria-label=* hidden]|1
 theater|live-tv@390x780|dom|nav.th-nav[aria-label=*] > a.on[aria-current=page text]|1
 theater|live-tv@390x780|dom|nav.th-nav[aria-label=*] > a[text]|3
 theater|live-tv@390x780|dom|nav.th-pills[aria-label=*] > a.on[aria-current=page text]|1
 theater|live-tv@390x780|dom|nav.th-pills[aria-label=*] > a[text]|3
-theater|live-tv@390x780|dom|section#live-tv-player.card[aria-label=* hidden] > div.row|2
-theater|live-tv@390x780|dom|section#live-tv-player.card[aria-label=* hidden] > video#live-tv-video[aria-label=*]|1
+theater|live-tv@390x780|dom|span > b[text]|3
+theater|live-tv@390x780|dom|span > span.lt-mini|2
+theater|live-tv@390x780|dom|span > span.lt-star[text]|1
+theater|live-tv@390x780|dom|span > span.next[text]|2
+theater|live-tv@390x780|dom|span > span.prog[text]|3
+theater|live-tv@390x780|dom|span.lt-mini > i|2
 theater|live-tv@390x780|focus|000|a.logo "cinema"
 theater|live-tv@390x780|focus|001|input#q.search "Search cinema"
 theater|live-tv@390x780|focus|002|button.ghost.sm.lookbtn "Appearance"
 theater|live-tv@390x780|focus|003|button.ghost.sm.profile "Account"
-theater|live-tv@390x780|focus|004|input#live-tv-search "Number or name"
-theater|live-tv@390x780|focus|005|button.ghost.sm "Refresh channels"
-theater|live-tv@390x780|focus|006|button.ghost.sm "Stop / retry cleanup"
-theater|live-tv@390x780|focus|007|a "Configure HDHomeRun"
-theater|live-tv@390x780|focus|008|button.primary.sm "Watch live"
-theater|live-tv@390x780|focus|009|button.primary.sm "Watch live"
-theater|live-tv@390x780|focus|010|a "Home"
-theater|live-tv@390x780|focus|011|a.on "Live TV"
-theater|live-tv@390x780|focus|012|a "Activity"
-theater|live-tv@390x780|focus|013|a "Settings"
-theater|live-tv@390x780|focus|014|<wrap>
+theater|live-tv@390x780|focus|004|button "≡ List"
+theater|live-tv@390x780|focus|005|button "▦ Grid"
+theater|live-tv@390x780|focus|006|button "All"
+theater|live-tv@390x780|focus|007|button "Favorites"
+theater|live-tv@390x780|focus|008|input#lt-hideprot
+theater|live-tv@390x780|focus|009|input#live-tv-search "Number, name, or what is on"
+theater|live-tv@390x780|focus|010|button.lt-row "Local 7.1 · Local News Evening Edition 12:30
+theater|live-tv@390x780|focus|011|button.lt-row "Publi 10.2 · Public Television The Long Game
+theater|live-tv@390x780|focus|012|a "Home"
+theater|live-tv@390x780|focus|013|a.on "Live TV"
+theater|live-tv@390x780|focus|014|a "Activity"
+theater|live-tv@390x780|focus|015|a "Settings"
+theater|live-tv@390x780|focus|016|<wrap>
 theater|live-tv@390x780|req|GET /api/v1/activity|2
 theater|live-tv@390x780|req|GET /api/v1/live-tv/channels|1
+theater|live-tv@390x780|req|GET /api/v1/live-tv/guide|1
 theater|live-tv@390x780|req|GET /api/v1/me|1
 theater|live-tv@390x780|req|GET /api/v1/server|1
 theater|player@1280x860|dom|^ > div#app|1
@@ -6229,17 +6953,27 @@ theater|settings-developer@1280x860|dom|button.ghost.profile.sm > span.pavatar[t
 theater|settings-developer@1280x860|dom|button.ghost.profile.sm > span.pname[text]|1
 theater|settings-developer@1280x860|dom|div > div.hint[text]|1
 theater|settings-developer@1280x860|dom|div > h1[text]|1
-theater|settings-developer@1280x860|dom|div > h2.section[text]|5
+theater|settings-developer@1280x860|dom|div > h2.section[text]|6
 theater|settings-developer@1280x860|dom|div > input#ltip|1
 theater|settings-developer@1280x860|dom|div > input#ltowner|1
-theater|settings-developer@1280x860|dom|div > label[text]|4
-theater|settings-developer@1280x860|dom|div > p.sub[text]|5
+theater|settings-developer@1280x860|dom|div > label[text]|6
+theater|settings-developer@1280x860|dom|div > p.sub[text]|6
 theater|settings-developer@1280x860|dom|div > p[text]|1
+theater|settings-developer@1280x860|dom|div > select#ltghours|1
+theater|settings-developer@1280x860|dom|div > select#ltgsrc|1
 theater|settings-developer@1280x860|dom|div > select#ltheight|1
 theater|settings-developer@1280x860|dom|div > select#ltlimit|1
 theater|settings-developer@1280x860|dom|div#app > header.th-top|1
 theater|settings-developer@1280x860|dom|div#app > main#main|1
 theater|settings-developer@1280x860|dom|div#app > nav.th-pills[aria-label=*]|1
+theater|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > div#ltgerr.err[role=alert]|1
+theater|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > div#ltgready[aria-live=polite]|1
+theater|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > div.cardhead|1
+theater|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > div.hint[text]|1
+theater|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > div.row|1
+theater|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > div.setfields|1
+theater|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > div.setfoot|1
+theater|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > h2.section[text]|1
 theater|settings-developer@1280x860|dom|div#live-tv-settings.card.setcard > div#lterr.err[role=alert]|1
 theater|settings-developer@1280x860|dom|div#live-tv-settings.card.setcard > div#ltreadiness[aria-live=polite]|1
 theater|settings-developer@1280x860|dom|div#live-tv-settings.card.setcard > div.cardhead|1
@@ -6248,6 +6982,8 @@ theater|settings-developer@1280x860|dom|div#live-tv-settings.card.setcard > div.
 theater|settings-developer@1280x860|dom|div#live-tv-settings.card.setcard > div.setfoot|1
 theater|settings-developer@1280x860|dom|div#live-tv-settings.card.setcard > p.hint[text]|2
 theater|settings-developer@1280x860|dom|div#live-tv-settings.card.setcard > p[text]|1
+theater|settings-developer@1280x860|dom|div#ltgready[aria-live=polite] > p.muted[text]|1
+theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div#live-tv-guide-settings.card.setcard|1
 theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div#live-tv-settings.card.setcard|1
 theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div.card.setcard|4
 theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div.sethead|1
@@ -6259,18 +6995,18 @@ theater|settings-developer@1280x860|dom|div.card.setcard > div.setfoot|2
 theater|settings-developer@1280x860|dom|div.card.setcard > div.tog|6
 theater|settings-developer@1280x860|dom|div.card.setcard > h2.section[text]|2
 theater|settings-developer@1280x860|dom|div.card.setcard > label.tog|2
-theater|settings-developer@1280x860|dom|div.cardhead > div.cardtools|3
-theater|settings-developer@1280x860|dom|div.cardhead > div|5
+theater|settings-developer@1280x860|dom|div.cardhead > div.cardtools|4
+theater|settings-developer@1280x860|dom|div.cardhead > div|6
 theater|settings-developer@1280x860|dom|div.cardtools > span.pill.warn[text]|1
-theater|settings-developer@1280x860|dom|div.cardtools > span.pill[text]|2
-theater|settings-developer@1280x860|dom|div.hint[text] > b[text]|5
-theater|settings-developer@1280x860|dom|div.hint[text] > code[text]|1
-theater|settings-developer@1280x860|dom|div.row > a[text]|1
+theater|settings-developer@1280x860|dom|div.cardtools > span.pill[text]|3
+theater|settings-developer@1280x860|dom|div.hint[text] > b[text]|6
+theater|settings-developer@1280x860|dom|div.hint[text] > code[text]|3
+theater|settings-developer@1280x860|dom|div.row > a[text]|2
 theater|settings-developer@1280x860|dom|div.row > button#ltenable.primary.sm[text]|1
-theater|settings-developer@1280x860|dom|div.row > button.ghost.sm[text]|1
-theater|settings-developer@1280x860|dom|div.setfields > div|4
-theater|settings-developer@1280x860|dom|div.setfoot > button.primary.sm[disabled text]|3
-theater|settings-developer@1280x860|dom|div.setfoot > span.setstate[text]|3
+theater|settings-developer@1280x860|dom|div.row > button.ghost.sm[text]|3
+theater|settings-developer@1280x860|dom|div.setfields > div|6
+theater|settings-developer@1280x860|dom|div.setfoot > button.primary.sm[disabled text]|4
+theater|settings-developer@1280x860|dom|div.setfoot > span.setstate[text]|4
 theater|settings-developer@1280x860|dom|div.sethead > div|1
 theater|settings-developer@1280x860|dom|div.setlayout > div#setbody.adminwrap|1
 theater|settings-developer@1280x860|dom|div.setlayout > nav.settabs[aria-label=*]|1
@@ -6297,6 +7033,8 @@ theater|settings-developer@1280x860|dom|nav.th-nav[aria-label=*] > a.on[aria-cur
 theater|settings-developer@1280x860|dom|nav.th-nav[aria-label=*] > a[text]|3
 theater|settings-developer@1280x860|dom|nav.th-pills[aria-label=*] > a.on[aria-current=page text]|1
 theater|settings-developer@1280x860|dom|nav.th-pills[aria-label=*] > a[text]|3
+theater|settings-developer@1280x860|dom|select#ltghours > option[text]|6
+theater|settings-developer@1280x860|dom|select#ltgsrc > option[text]|3
 theater|settings-developer@1280x860|dom|select#ltheight > option[text]|2
 theater|settings-developer@1280x860|dom|select#ltlimit > option[text]|4
 theater|settings-developer@1280x860|dom|small[text] > code[text]|6
@@ -6328,9 +7066,14 @@ theater|settings-developer@1280x860|focus|021|select#ltheight "720p 1080p"
 theater|settings-developer@1280x860|focus|022|button.ghost.sm "Check saved configuration"
 theater|settings-developer@1280x860|focus|023|button#ltenable.primary.sm "Enable Live TV"
 theater|settings-developer@1280x860|focus|024|a "Browse channels"
-theater|settings-developer@1280x860|focus|025|input#pcpv1
-theater|settings-developer@1280x860|focus|026|input#phs
-theater|settings-developer@1280x860|focus|027|<wrap>
+theater|settings-developer@1280x860|focus|025|select#ltgsrc "Off HDHomeRun guide XMLTV"
+theater|settings-developer@1280x860|focus|026|select#ltghours "4 hours 8 hours 12 hours 24 hours 48 hours
+theater|settings-developer@1280x860|focus|027|button.ghost.sm "Check the guide"
+theater|settings-developer@1280x860|focus|028|button.ghost.sm "Refresh now"
+theater|settings-developer@1280x860|focus|029|a "Browse channels"
+theater|settings-developer@1280x860|focus|030|input#pcpv1
+theater|settings-developer@1280x860|focus|031|input#phs
+theater|settings-developer@1280x860|focus|032|<wrap>
 theater|settings-developer@1280x860|req|GET /api/v1/activity|2
 theater|settings-developer@1280x860|req|GET /api/v1/me|1
 theater|settings-developer@1280x860|req|GET /api/v1/server|1
@@ -6343,17 +7086,27 @@ theater|settings-developer@390x780|dom|button.ghost.profile.sm > span.pavatar[te
 theater|settings-developer@390x780|dom|button.ghost.profile.sm > span.pname[text]|1
 theater|settings-developer@390x780|dom|div > div.hint[text]|1
 theater|settings-developer@390x780|dom|div > h1[text]|1
-theater|settings-developer@390x780|dom|div > h2.section[text]|5
+theater|settings-developer@390x780|dom|div > h2.section[text]|6
 theater|settings-developer@390x780|dom|div > input#ltip|1
 theater|settings-developer@390x780|dom|div > input#ltowner|1
-theater|settings-developer@390x780|dom|div > label[text]|4
-theater|settings-developer@390x780|dom|div > p.sub[text]|5
+theater|settings-developer@390x780|dom|div > label[text]|6
+theater|settings-developer@390x780|dom|div > p.sub[text]|6
 theater|settings-developer@390x780|dom|div > p[text]|1
+theater|settings-developer@390x780|dom|div > select#ltghours|1
+theater|settings-developer@390x780|dom|div > select#ltgsrc|1
 theater|settings-developer@390x780|dom|div > select#ltheight|1
 theater|settings-developer@390x780|dom|div > select#ltlimit|1
 theater|settings-developer@390x780|dom|div#app > header.th-top|1
 theater|settings-developer@390x780|dom|div#app > main#main|1
 theater|settings-developer@390x780|dom|div#app > nav.th-pills[aria-label=*]|1
+theater|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > div#ltgerr.err[role=alert]|1
+theater|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > div#ltgready[aria-live=polite]|1
+theater|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > div.cardhead|1
+theater|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > div.hint[text]|1
+theater|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > div.row|1
+theater|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > div.setfields|1
+theater|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > div.setfoot|1
+theater|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > h2.section[text]|1
 theater|settings-developer@390x780|dom|div#live-tv-settings.card.setcard > div#lterr.err[role=alert]|1
 theater|settings-developer@390x780|dom|div#live-tv-settings.card.setcard > div#ltreadiness[aria-live=polite]|1
 theater|settings-developer@390x780|dom|div#live-tv-settings.card.setcard > div.cardhead|1
@@ -6362,6 +7115,8 @@ theater|settings-developer@390x780|dom|div#live-tv-settings.card.setcard > div.s
 theater|settings-developer@390x780|dom|div#live-tv-settings.card.setcard > div.setfoot|1
 theater|settings-developer@390x780|dom|div#live-tv-settings.card.setcard > p.hint[text]|2
 theater|settings-developer@390x780|dom|div#live-tv-settings.card.setcard > p[text]|1
+theater|settings-developer@390x780|dom|div#ltgready[aria-live=polite] > p.muted[text]|1
+theater|settings-developer@390x780|dom|div#setbody.adminwrap > div#live-tv-guide-settings.card.setcard|1
 theater|settings-developer@390x780|dom|div#setbody.adminwrap > div#live-tv-settings.card.setcard|1
 theater|settings-developer@390x780|dom|div#setbody.adminwrap > div.card.setcard|4
 theater|settings-developer@390x780|dom|div#setbody.adminwrap > div.sethead|1
@@ -6373,18 +7128,18 @@ theater|settings-developer@390x780|dom|div.card.setcard > div.setfoot|2
 theater|settings-developer@390x780|dom|div.card.setcard > div.tog|6
 theater|settings-developer@390x780|dom|div.card.setcard > h2.section[text]|2
 theater|settings-developer@390x780|dom|div.card.setcard > label.tog|2
-theater|settings-developer@390x780|dom|div.cardhead > div.cardtools|3
-theater|settings-developer@390x780|dom|div.cardhead > div|5
+theater|settings-developer@390x780|dom|div.cardhead > div.cardtools|4
+theater|settings-developer@390x780|dom|div.cardhead > div|6
 theater|settings-developer@390x780|dom|div.cardtools > span.pill.warn[text]|1
-theater|settings-developer@390x780|dom|div.cardtools > span.pill[text]|2
-theater|settings-developer@390x780|dom|div.hint[text] > b[text]|5
-theater|settings-developer@390x780|dom|div.hint[text] > code[text]|1
-theater|settings-developer@390x780|dom|div.row > a[text]|1
+theater|settings-developer@390x780|dom|div.cardtools > span.pill[text]|3
+theater|settings-developer@390x780|dom|div.hint[text] > b[text]|6
+theater|settings-developer@390x780|dom|div.hint[text] > code[text]|3
+theater|settings-developer@390x780|dom|div.row > a[text]|2
 theater|settings-developer@390x780|dom|div.row > button#ltenable.primary.sm[text]|1
-theater|settings-developer@390x780|dom|div.row > button.ghost.sm[text]|1
-theater|settings-developer@390x780|dom|div.setfields > div|4
-theater|settings-developer@390x780|dom|div.setfoot > button.primary.sm[disabled text]|3
-theater|settings-developer@390x780|dom|div.setfoot > span.setstate[text]|3
+theater|settings-developer@390x780|dom|div.row > button.ghost.sm[text]|3
+theater|settings-developer@390x780|dom|div.setfields > div|6
+theater|settings-developer@390x780|dom|div.setfoot > button.primary.sm[disabled text]|4
+theater|settings-developer@390x780|dom|div.setfoot > span.setstate[text]|4
 theater|settings-developer@390x780|dom|div.sethead > div|1
 theater|settings-developer@390x780|dom|div.setlayout > div#setbody.adminwrap|1
 theater|settings-developer@390x780|dom|div.setlayout > nav.settabs[aria-label=*]|1
@@ -6411,6 +7166,8 @@ theater|settings-developer@390x780|dom|nav.th-nav[aria-label=*] > a.on[aria-curr
 theater|settings-developer@390x780|dom|nav.th-nav[aria-label=*] > a[text]|3
 theater|settings-developer@390x780|dom|nav.th-pills[aria-label=*] > a.on[aria-current=page text]|1
 theater|settings-developer@390x780|dom|nav.th-pills[aria-label=*] > a[text]|3
+theater|settings-developer@390x780|dom|select#ltghours > option[text]|6
+theater|settings-developer@390x780|dom|select#ltgsrc > option[text]|3
 theater|settings-developer@390x780|dom|select#ltheight > option[text]|2
 theater|settings-developer@390x780|dom|select#ltlimit > option[text]|4
 theater|settings-developer@390x780|dom|small[text] > code[text]|6
@@ -6438,13 +7195,18 @@ theater|settings-developer@390x780|focus|017|select#ltheight "720p 1080p"
 theater|settings-developer@390x780|focus|018|button.ghost.sm "Check saved configuration"
 theater|settings-developer@390x780|focus|019|button#ltenable.primary.sm "Enable Live TV"
 theater|settings-developer@390x780|focus|020|a "Browse channels"
-theater|settings-developer@390x780|focus|021|input#pcpv1
-theater|settings-developer@390x780|focus|022|input#phs
-theater|settings-developer@390x780|focus|023|a "Home"
-theater|settings-developer@390x780|focus|024|a "Live TV"
-theater|settings-developer@390x780|focus|025|a "Activity"
-theater|settings-developer@390x780|focus|026|a.on "Settings"
-theater|settings-developer@390x780|focus|027|<wrap>
+theater|settings-developer@390x780|focus|021|select#ltgsrc "Off HDHomeRun guide XMLTV"
+theater|settings-developer@390x780|focus|022|select#ltghours "4 hours 8 hours 12 hours 24 hours 48 hours
+theater|settings-developer@390x780|focus|023|button.ghost.sm "Check the guide"
+theater|settings-developer@390x780|focus|024|button.ghost.sm "Refresh now"
+theater|settings-developer@390x780|focus|025|a "Browse channels"
+theater|settings-developer@390x780|focus|026|input#pcpv1
+theater|settings-developer@390x780|focus|027|input#phs
+theater|settings-developer@390x780|focus|028|a "Home"
+theater|settings-developer@390x780|focus|029|a "Live TV"
+theater|settings-developer@390x780|focus|030|a "Activity"
+theater|settings-developer@390x780|focus|031|a.on "Settings"
+theater|settings-developer@390x780|focus|032|<wrap>
 theater|settings-developer@390x780|req|GET /api/v1/activity|2
 theater|settings-developer@390x780|req|GET /api/v1/me|1
 theater|settings-developer@390x780|req|GET /api/v1/server|1
