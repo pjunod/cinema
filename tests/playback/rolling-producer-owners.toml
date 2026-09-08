@@ -1248,7 +1248,16 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # each running one `create` concurrently so the other side can move the ask
 # underneath it. Both are joined before the test ends, so neither outlives
 # its test and neither owns a producer.
-expected_occurrences = 439
+# 439 -> 440 with the Live TV programme-guide refresh loop: one `tokio::spawn`
+# in `spawn_background_loops`, beside the two Live TV loops already there and
+# cancelled by the same `BackgroundLoopGuard` token. It owns no producer, no
+# process and no media session. It reads settings, fetches a read-only guide
+# document over HTTP, and writes an in-memory cache; it starts nothing, selects
+# no recipe, and cannot open a tuner — a guide refresh reads the *cached*
+# lineup precisely so it can never be a reason to talk to the device. It also
+# refuses to run off the configured owner node and while serving authority is
+# not admitted, so a fenced node's loop does nothing but sleep.
+expected_occurrences = 440
 
 [[module_structures]]
 id = "method-spawn"
@@ -1459,7 +1468,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # bound at all. The bound exists so a wedged Store degrades the two Store-free
 # cluster recovery reads to a named refusal instead of hanging the request that
 # reports the wedge.
-expected_occurrences = 645
+# 645 -> 646 with the Live TV guide refresh loop's own cadence: one
+# `tokio::time::sleep` in the `tokio::select!` that paces it against its
+# shutdown token, the same shape as `scratch_sweep_loop` and `metrics_loop`
+# beside it. It bounds nothing and can cancel nothing — it is the interval
+# between refreshes, not a deadline over any work. The guide's actual request
+# deadlines are the `timeout` parameter of `fetch_bounded`, which is the
+# existing lineup fetch's bound made a parameter rather than a new constructor.
+expected_occurrences = 646
 
 [[module_structures]]
 id = "bare-time-constructor"

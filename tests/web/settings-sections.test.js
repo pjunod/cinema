@@ -238,7 +238,7 @@ test("Playback saves per card, and each card writes only its own fields", () => 
 test("Developer is where the switches that cost something live", () => {
   const panel = new Function(
     "setHead", "setCard", "cardHead", "togRow", "setCardFoot", "esc",
-    `${shippedSource("liveTvSettingsCard")}${shippedSource("developerPanel")} return developerPanel;`,
+    `${shippedSource("liveTvSettingsCard")}${shippedSource("liveTvGuideCard")}${shippedSource("developerPanel")} return developerPanel;`,
   )(
     (title, sub) => `HEAD:${title}|${sub}`,
     (body) => `CARD[${body}]`,
@@ -247,7 +247,12 @@ test("Developer is where the switches that cost something live", () => {
     (fn) => `FOOT:${fn}`,
     esc,
   );
-  const html = panel({ playback_control_protocol_v1: true, hls_typeless_sliding: false });
+  const html = panel({
+    playback_control_protocol_v1: true,
+    hls_typeless_sliding: false,
+    live_tv_guide_source: "hdhomerun",
+    live_tv_guide_hours: 24,
+  });
   for (const id of ["pcpv1", "phs"]) {
     assert.match(html, new RegExp(`TOG:${id}\\|`), `Developer is missing the ${id} switch`);
   }
@@ -270,6 +275,45 @@ test("Developer is where the switches that cost something live", () => {
   assert.doesNotMatch(html, /special build/);
   assert.match(html, /HDHomeRun Live TV/);
   assert.match(html, /Save the configuration, check readiness, then enable/);
+  // Readiness is advice, not a gate (2026-09-07). The card has to say so where
+  // the operator is standing, or the next person reads a red row as a refusal.
+  assert.match(html, /Readiness is advice, not a gate/);
+  // The programme guide has its own enable section beside the tuner card, and
+  // it names the credential it sends and the one host it sends it to.
+  assert.match(html, /Programme guide/);
+  assert.match(html, /What must be true to enable it safely/);
+  assert.match(html, /api\.hdhomerun\.com/);
+  assert.match(html, /never stores, logs or relays that credential/);
+  assert.match(html, /FOOT:saveLiveTvGuide/);
+  // Nothing here may imply the guide is a code-level gate or a build variant.
+  assert.doesNotMatch(html, /program-guide scheduling are not supported/);
+});
+
+test("the guide's readiness rows are advisory and never disable the save", () => {
+  const view = new Function(
+    "esc",
+    `${shippedSource("liveTvGuideReadyView")} return liveTvGuideReadyView;`,
+  )(esc);
+  const html = view({
+    source: "xmltv",
+    freshness: "unavailable",
+    age_seconds: 0,
+    matched_channels: 0,
+    lineup_channels: 12,
+    programmes: 0,
+    refresh_interval_seconds: 1200,
+    refresh_error: "the XMLTV host refused the connection",
+    checks: [
+      { id: "live_tv_enabled", ready: false, message: "Live TV is off." },
+      { id: "outbound_host", ready: true, message: "The owner can reach the URL." },
+    ],
+  });
+  assert.match(html, /Not met yet/);
+  assert.match(html, /Met/);
+  assert.match(html, /None of this blocks the switch/);
+  assert.match(html, /matched 0 of 12 lineup channels/);
+  assert.match(html, /Last refresh failed/);
+  assert.doesNotMatch(html, /disabled/, "an advisory panel must not render a disabled control");
 });
 
 test("Maintenance owns the timers, and each of its cards saves its own fields", () => {
