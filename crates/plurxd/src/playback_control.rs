@@ -4332,7 +4332,12 @@ impl InitialProducerPolicy {
         {
             return Err(ProducerAttemptRejection::InvalidPolicy);
         }
-        if let Some(recipe) = &self.retry_recipe {
+        // Both recipes, by the same rule. A session can install either, so an
+        // invariant that held for one of them is not an invariant.
+        for recipe in [self.retry_recipe.as_ref(), self.decode_alternate.as_ref()]
+            .into_iter()
+            .flatten()
+        {
             if recipe.identity.is_empty()
                 || recipe.identity.len() > MAX_RECIPE_IDENTITY_BYTES
                 || recipe.fingerprint.is_empty()
@@ -8513,21 +8518,42 @@ impl RollingControlActor {
         // `UnsupportedOnly` never installs an alternate for a timing reason it
         // would not have retried anyway. The alternate widens what a retry
         // *does*, never when one is permitted.
-        let decode_alternate = policy
-            .decode_alternate
-            .as_ref()
-            .filter(|_| {
-                !producer_media_published
-                    && reason.yields_to_decode_evidence()
-                    && latched_fault
-                        .as_ref()
-                        .is_some_and(|(_, _, _, action_qualified)| *action_qualified)
-            })
-            .filter(|alternate| {
-                alternate.presentation_contract_fingerprint
-                    == policy.presentation_contract_fingerprint
-            })
-            .cloned();
+        let decode_alternate = policy.decode_alternate.as_ref().and_then(|alternate| {
+            // Named rather than chained, because "the alternate was not
+            // installed" is four different findings and an operator watching
+            // the recovery this effort exists for needs to know which. The
+            // sibling failing branch logs its own decision; this is the other
+            // half of that record.
+            let withheld = if producer_media_published {
+                Some("media_published")
+            } else if !reason.yields_to_decode_evidence() {
+                Some("reason_is_not_decode_evidence")
+            } else if !latched_fault
+                .as_ref()
+                .is_some_and(|(_, _, _, action_qualified)| *action_qualified)
+            {
+                Some("no_qualified_fault")
+            } else if alternate.presentation_contract_fingerprint
+                != policy.presentation_contract_fingerprint
+            {
+                Some("presentation_contract")
+            } else {
+                None
+            };
+            match withheld {
+                Some(withheld) => {
+                    tracing::debug!(
+                        producer_attempt = failed_attempt,
+                        decision_sequence,
+                        observed_reason = ?reason,
+                        withheld,
+                        "a software-decode alternate was held back"
+                    );
+                    None
+                }
+                None => Some(alternate.clone()),
+            }
+        });
         let retry_recipe = match &control.retry_state {
             PrepublicationRetryState::Available(recipe)
                 if !producer_media_published
@@ -8542,6 +8568,13 @@ impl RollingControlActor {
                 // reaches the client as a terminal answer while this very
                 // successor is coming up.
                 if let Some(alternate) = decode_alternate {
+                    tracing::warn!(
+                        producer_attempt = failed_attempt,
+                        decision_sequence,
+                        replaced_reason = ?reason,
+                        recipe = %alternate.identity,
+                        "installing the software-decode alternate for a qualified decode fault"
+                    );
                     reason = ProducerDecisionReason::SourceDecodeRetry;
                     Some(alternate)
                 } else {
@@ -25191,13 +25224,22 @@ mod tests {
         assert_eq!(*reason, ProducerDecisionReason::StartupDeadline);
     }
 
-    /// An alternate written for a different presentation is not this
-    /// session's, and the fence that says so is the same one the colour-safe
-    /// recipe passes through.
+    /// An alternate written for a different presentation is refused before the
+    /// session starts, not quietly at the decision.
+    ///
+    /// This is the fence `validate` already applied to the colour-safe recipe,
+    /// now applied to both — because a session can install either, and an
+    /// invariant that held for one of them is not an invariant. Failing closed
+    /// at admission is the right end to fail at: a policy carrying a recipe
+    /// from another presentation contract is a caller bug, and discovering it
+    /// at decision time means discovering it during a recovery.
+    ///
+    /// The decision keeps its own presentation filter as a second fence, for a
+    /// policy assembled by hand rather than through a constructor. Nothing in
+    /// production can reach it, which is the point.
     #[test]
     fn an_alternate_from_another_presentation_contract_is_refused() {
         let started = Instant::now();
-        let deadline = started + PREPUBLICATION_HARDWARE_STARTUP_BUDGET;
         let mut actor = registered_prepublication_actor(started);
         assert_eq!(
             actor.begin_initial_producer_attempt_at(
@@ -25210,18 +25252,25 @@ mod tests {
                         ProducerStartupKind::MixedSoftwareDecode,
                     ))),
             ),
-            Ok(1)
+            Err(ProducerAttemptRejection::InvalidPolicy),
+            "an alternate is held to the presentation fence the colour-safe \
+             recipe has always been held to"
         );
-        assert!(actor.observe_producer_decode_fault(decode_fault_qualified(1, 5, true)));
-        assert!(actor.settle_due_deadlines_at(deadline).is_some());
-        let Some(ProducerDecision::Retry { reason, .. }) = actor.pending_decision.as_deref() else {
-            panic!("the colour-safe retry is still available");
-        };
+
+        // And an empty identity or fingerprint is refused by the same loop,
+        // which is the half a decision-time filter could never have caught.
         assert_eq!(
-            *reason,
-            ProducerDecisionReason::StartupDeadline,
-            "an alternate that fails the presentation fence is not installed, and the \
-             decision falls back to the recipe that passed it"
+            actor.begin_initial_producer_attempt_at(
+                started,
+                hardware_policy("presentation-m5c2d-fence", "recipe-m5c2d-fence")
+                    .with_decode_alternate(Some(ValidatedRetryRecipe::new(
+                        String::new(),
+                        "alternate-fingerprint".to_owned(),
+                        "presentation-m5c2d-fence".to_owned(),
+                        ProducerStartupKind::MixedSoftwareDecode,
+                    ))),
+            ),
+            Err(ProducerAttemptRejection::InvalidPolicy),
         );
     }
 
