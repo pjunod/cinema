@@ -491,7 +491,7 @@ final class PlaybackControlReporterTests: XCTestCase {
         XCTAssertEqual(request.proto, PlaybackControl.protocolName)
         XCTAssertEqual(
             request.supportedActions,
-            ["hold", "retry_resource", "terminal"],
+            ["hold", "retry_resource", "terminal", "prepare_replacement"],
             "the server sends only actions this client has declared"
         )
         XCTAssertEqual(request.sequence, 1)
@@ -630,14 +630,196 @@ final class PlaybackControlReporterTests: XCTestCase {
         ))
     }
 
+    /// The fixture is deliberately a type no server will ever send.
+    ///
+    /// It used to be the literal `prepare_replacement`, which was a correct
+    /// test right up to the moment this client learned to prepare — and then
+    /// would have gone on passing while its name and its intent became false,
+    /// because the wire tag for that action is `prepare`, not the name it is
+    /// declared under. The property being protected is that an unrecognised
+    /// action is fatal, and that property has to be tested with something
+    /// genuinely unrecognised.
     func testAnUndeclaredActionIsTerminalRatherThanObeyed() async throws {
         try await assertTerminal(response: ControlResponse(
             proto: PlaybackControl.protocolName,
             generation: bootstrap().generation,
             controlEpoch: 7,
             acceptedSequence: 1,
-            action: ControlAction(type: "prepare_replacement")
+            action: ControlAction(type: "conjure_replacement")
         ))
+    }
+
+    /// The declared name is not the tag, and neither spelling is optional.
+    func testTheDeclaredNameAndTheWireTagAreTheTwoDifferentStringsTheServerUses() {
+        XCTAssertEqual(PlaybackControl.prepareReplacementAction, "prepare_replacement")
+        XCTAssertEqual(PlaybackControl.prepareActionType, "prepare")
+        XCTAssertTrue(
+            PlaybackControl.supportedActions.contains(PlaybackControl.prepareReplacementAction),
+            "the server offers only actions named in supported_actions, by their declared name"
+        )
+        XCTAssertFalse(
+            PlaybackControl.supportedActions.contains(PlaybackControl.prepareActionType),
+            "declaring the tag instead of the name is never matched, and fails silently"
+        )
+    }
+
+    /// The `prepare` arm is fatal, and it is the higher-consequence half.
+    ///
+    /// An action *outside* the vocabulary was always fatal; this one is inside
+    /// it and would be acted on, so a half-parsed payload would build a second
+    /// decode pipeline against an address nothing validated. Each of these is
+    /// one field the server's own `prepared_payload_is_valid` requires.
+    func testAMalformedPrepareStopsTheReporterRatherThanBeingActedOn() async throws {
+        let sessionId = "0a9b8c7d-6e5f-4a3b-8c2d-1e0f9a8b7c6d"
+        func prepare(_ mutate: (inout ControlAction) -> Void) -> ControlResponse {
+            var action = ControlAction(
+                type: PlaybackControl.prepareActionType,
+                actionId: "6f1d2a44-2b7e-4a1c-9f3e-2c5a7b8d9e01",
+                sessionId: sessionId,
+                playlistUrl: "/api/v1/hls/\(sessionId)/index.m3u8",
+                mediaOriginMs: 0,
+                effectiveSelection: EffectiveSelection(
+                    qualityAuto: true, height: 1_080, audioTrack: nil, subtitleBurn: nil,
+                    audioOffsetMs: 0, codec: "server_selected", dynamicRange: "sdr"
+                )
+            )
+            mutate(&action)
+            return ControlResponse(
+                proto: PlaybackControl.protocolName,
+                generation: bootstrap().generation,
+                controlEpoch: 7,
+                acceptedSequence: 1,
+                action: action
+            )
+        }
+        try await assertTerminal(response: prepare { $0.actionId = nil })
+        try await assertTerminal(response: prepare { $0.effectiveSelection = nil })
+        try await assertTerminal(response: prepare { $0.mediaOriginMs = -1 })
+        try await assertTerminal(response: prepare {
+            $0.playlistUrl = "http://elsewhere.example/api/v1/hls/\(sessionId)/index.m3u8"
+        })
+    }
+
+    /// A whole `prepare` is accepted and reported, and nothing about it stops
+    /// the reporter — the failure mode of the arm above, in the other
+    /// direction.
+    func testAWholePrepareIsAcceptedAndReachesTheExchange() async throws {
+        let sessionId = "0a9b8c7d-6e5f-4a3b-8c2d-1e0f9a8b7c6d"
+        let harness = Harness()
+        harness.enqueue([.success(ControlResponse(
+            proto: PlaybackControl.protocolName,
+            generation: bootstrap().generation,
+            controlEpoch: 7,
+            acceptedSequence: 1,
+            action: ControlAction(
+                type: PlaybackControl.prepareActionType,
+                actionId: "6f1d2a44-2b7e-4a1c-9f3e-2c5a7b8d9e01",
+                sessionId: sessionId,
+                playlistUrl: "/api/v1/hls/\(sessionId)/master.m3u8?native=1",
+                mediaOriginMs: 600_000,
+                effectiveSelection: EffectiveSelection(
+                    qualityAuto: false, height: 720, audioTrack: nil, subtitleBurn: nil,
+                    audioOffsetMs: 0, codec: "source", dynamicRange: nil
+                )
+            )
+        ))])
+        let reporter = try XCTUnwrap(makeReporter(harness))
+        await reporter.start()
+        XCTAssertTrue(harness.awaitExchanges(1))
+        let stopped = await reporter.stopped
+        XCTAssertFalse(stopped, "a whole prepare is not a protocol violation")
+        let action = try XCTUnwrap(harness.exchanges.first?.response?.action)
+        let prepared = try XCTUnwrap(PreparedReplacementAction(action))
+        XCTAssertEqual(prepared.mediaOriginMs, 600_000)
+        XCTAssertEqual(prepared.effectiveSelection.height, 720)
+        await reporter.stop()
+    }
+
+    /// §C12.6 and the stickiness rule, on the wire rather than in the ledger.
+    ///
+    /// The settlement rides the snapshot, so the only proof that matters is
+    /// the encoded body of the request the reporter actually sent — and that
+    /// it keeps riding every request until the exchange carrying it comes
+    /// back, because the reporter coalesces and a settlement it dropped would
+    /// hold the server's preparation slot for 330 seconds.
+    func testASettlementRidesTheEncodedRequestUntilItsExchangeReturns() async throws {
+        let harness = Harness()
+        let owed = ActionAcknowledgement(
+            actionId: "6f1d2a44-2b7e-4a1c-9f3e-2c5a7b8d9e01",
+            state: .committed,
+            committedMediaOriginMs: 600_000,
+            firstFrameUnixMs: 1_788_000_000_000
+        )
+        var carrying = snapshot()
+        carrying.acknowledgement = owed
+        harness.setSnapshot(carrying)
+        let reporter = try XCTUnwrap(makeReporter(harness))
+        await reporter.start()
+        XCTAssertTrue(harness.awaitExchanges(1))
+        let body = try XCTUnwrap(
+            try JSONSerialization.jsonObject(
+                with: PlaybackControl.encoder.encode(try XCTUnwrap(harness.requests.first))
+            ) as? [String: Any]
+        )
+        let sent = try XCTUnwrap(body["acknowledgement"] as? [String: Any])
+        XCTAssertEqual(sent["action_id"] as? String, owed.actionId)
+        XCTAssertEqual(sent["state"] as? String, "committed")
+        XCTAssertEqual(sent["committed_media_origin_ms"] as? Int, 600_000)
+        XCTAssertEqual(sent["first_frame_unix_ms"] as? Int, 1_788_000_000_000)
+        XCTAssertNil(sent["buffered_through_ms"])
+
+        // A newer position replaces the snapshot; the settlement is still owed
+        // and still rides it.
+        var moved = snapshot(position: 9_000)
+        moved.acknowledgement = owed
+        harness.setSnapshot(moved)
+        await reporter.notify()
+        XCTAssertTrue(harness.waitUntil { harness.requests.contains { $0.positionMs == 9_000 } })
+        await reporter.stop()
+        // Every request, not just the next one: the pump's own cadence sends
+        // more than the test asks for, and a settlement that survived only the
+        // exchange it was attached to would still be lost by the one after it.
+        XCTAssertGreaterThan(harness.requests.count, 1)
+        for request in harness.requests {
+            XCTAssertEqual(
+                request.acknowledgement, owed,
+                "a position update replaces the snapshot; it must not replace the settlement"
+            )
+        }
+    }
+
+    /// The one body the server refuses outright, never built.
+    func testAnEndingExchangeNeverCarriesACommit() async throws {
+        let harness = Harness()
+        var ending = snapshot(demand: .end)
+        ending.acknowledgement = ActionAcknowledgement(
+            actionId: "6f1d2a44-2b7e-4a1c-9f3e-2c5a7b8d9e01",
+            state: .committed,
+            committedMediaOriginMs: 0,
+            firstFrameUnixMs: 1_788_000_000_000
+        )
+        harness.setSnapshot(ending)
+        let reporter = try XCTUnwrap(makeReporter(harness))
+        await reporter.start()
+        XCTAssertTrue(harness.awaitExchanges(1))
+        XCTAssertEqual(harness.requests.first?.demand, .end)
+        XCTAssertNil(
+            harness.requests.first?.acknowledgement,
+            "demand `end` may not carry `committed`, and the server answers 400"
+        )
+        // An abort may end the session in the same breath.
+        let harness2 = Harness()
+        var aborting = snapshot(demand: .end)
+        let aborted = ActionAcknowledgement(
+            actionId: "6f1d2a44-2b7e-4a1c-9f3e-2c5a7b8d9e01", state: .aborted
+        )
+        aborting.acknowledgement = aborted
+        harness2.setSnapshot(aborting)
+        let reporter2 = try XCTUnwrap(makeReporter(harness2))
+        await reporter2.start()
+        XCTAssertTrue(harness2.awaitExchanges(1))
+        XCTAssertEqual(harness2.requests.first?.acknowledgement, aborted)
+        await reporter2.stop()
     }
 
     func testATerminalVerdictEndsReportingWithoutAProtocolError() async throws {
@@ -1114,7 +1296,14 @@ final class PlaybackControlReporterTests: XCTestCase {
         XCTAssertTrue(json.contains("\"render_state\":\"waiting\""))
         XCTAssertTrue(json.contains("\"demand\":\"hold\""))
         XCTAssertTrue(
-            json.contains("\"supported_actions\":[\"hold\",\"retry_resource\",\"terminal\"]")
+            json.contains(
+                "\"supported_actions\":[\"hold\",\"retry_resource\",\"terminal\","
+                    + "\"prepare_replacement\"]"
+            )
+        )
+        XCTAssertFalse(
+            json.contains("\"acknowledgement\""),
+            "a request that settles nothing omits the key rather than sending null"
         )
         XCTAssertFalse(json.contains("\"proto\""), "the wire name is protocol, not proto")
     }
@@ -1140,12 +1329,22 @@ final class PlaybackControlReporterTests: XCTestCase {
          "control_epoch":7,"accepted_sequence":4,"server_time_unix_ms":1,
          "lease":{"state":"active","renew_after_ms":5000,"expires_at_unix_ms":2},
          "delivery":{"subtitle_readiness":"warming"},
-         "effective_selection":{},"action":{"type":"none"}}
+         "effective_selection":{"quality_auto":true,"height":1080,"audio_track":null,
+           "subtitle_burn":null,"audio_offset_ms":0,"codec":"server_selected",
+           "dynamic_range":"sdr"},
+         "action":{"type":"none"}}
         """
         let decoded = try PlaybackControl.decoder.decode(ControlResponse.self, from: Data(json.utf8))
         XCTAssertEqual(decoded.acceptedSequence, 4)
         XCTAssertEqual(decoded.delivery?.subtitleReadiness, "warming")
         XCTAssertEqual(decoded.action.type, "none")
+        // The fixture used to carry `"effective_selection":{}` because nothing
+        // read it. It is a whole object on the wire and this client now
+        // compares it against a successor's, so an empty one is not a
+        // placeholder any more — it is a body the decoder rejects.
+        XCTAssertEqual(decoded.effectiveSelection?.height, 1_080)
+        XCTAssertEqual(decoded.effectiveSelection?.codec, "server_selected")
+        XCTAssertEqual(decoded.effectiveSelection?.qualityAuto, true)
     }
 
     func testSubtitleReadinessDecisionAndTransitionAreClosedAndSingleShot() {

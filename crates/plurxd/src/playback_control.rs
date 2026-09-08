@@ -1270,14 +1270,18 @@ pub(crate) enum FallbackReason {
     /// from `ThroughputInsufficient` because the two are opposite findings
     /// that a single `throughput_unproven` would report as one number.
     ///
-    /// This is the common case and will be for some time: both native clients
-    /// hardcode `observed_download_bps` null
-    /// (`PlayerController.swift`, `Controller.kt` — only the web client fills
-    /// it, from `hls.bandwidthEstimate`), and `DeliveryView::from_status`
-    /// leaves `delivered_bps` `None` on every VOD session, which is most of
-    /// them. A counter that booked all of that as "the link was too tight"
-    /// would read as evidence for the throughput rule while measuring only its
-    /// own missing inputs.
+    /// This was the common case and is no longer, which matters because the
+    /// sentence it replaces was read by a client author as a reason to
+    /// disable the capability on VOD. Both halves have since been filled: all
+    /// three clients report `observed_download_bps` — web from
+    /// `hls.bandwidthEstimate`, Apple from
+    /// `AVPlayerItem.accessLog().observedBitrate`, Android from its own
+    /// observed rate — and `DeliveryView::from_status` no longer leaves
+    /// `delivered_bps` `None` on VOD, which is what the arm above says in as
+    /// many words. What is left is the honest reading: a window that has not
+    /// closed yet, and a client that cannot measure. A counter that booked
+    /// those as "the link was too tight" would read as evidence for the
+    /// throughput rule while measuring only its own missing inputs.
     ThroughputUnreported,
     /// The link *was* measured and does not carry a second pipeline. M6
     /// handoff §8: dual preparation doubles network demand and the constrained

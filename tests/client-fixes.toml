@@ -804,3 +804,27 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "func selectQuality(_ height: Int?)"
 test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "testQualityAudioAndSubtitleCommandsCreateANewPresentationDestinationSynchronously"
+
+[[fixes]]
+id = "apple.prepared-successor-that-cannot-be-primed"
+commits = ["a9b4933f"]
+source = "clients/apple/Sources/PreparedReplacement.swift"
+source_anchor = "private(set) var canOfferPreparation = true"
+test = "clients/apple/Tests/PreparedReplacementTests.swift"
+test_anchor = "testASuccessorThatNeverBecomesPlayableStopsTheAskingForThisPlayer"
+
+[[fixes]]
+id = "apple.commit-carries-the-compared-origin"
+commits = ["c7cf38bd"]
+source = "clients/apple/Sources/PlaybackControlReporter.swift"
+source_anchor = "var committedMediaOriginMs: Int? = nil"
+test = "clients/apple/Tests/PreparedReplacementTests.swift"
+test_anchor = "testACommitEchoesTheOffersOriginRatherThanRecomputingIt"
+
+[[fixes]]
+id = "apple.prepared-switch-is-a-critical-section"
+commits = ["594daea1"]
+source = "clients/apple/Sources/PreparedReplacement.swift"
+source_anchor = "mutating func noteSwitching(_ action: PreparedReplacementAction) -> Bool"
+test = "clients/apple/Tests/PreparedReplacementTests.swift"
+test_anchor = "testACommitSettlesTheStagingItWasCalledForRatherThanWhateverIsCurrent"

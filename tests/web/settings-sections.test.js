@@ -258,6 +258,23 @@ test("Developer is where the switches that cost something live", () => {
   assert.match(html, /twenty consecutive commits/);
   assert.match(html, /Android and web remain unqualified/);
   assert.match(html, /no separate hidden server flag/);
+  // The prepared card says what has to be true *and whether it is*, because
+  // a requirement an operator cannot check is a requirement they will skip.
+  // None of it gates the toggle: the switch is in the card above and this one
+  // has no input at all.
+  assert.match(html, /What must be true first, and whether it is/);
+  assert.match(html, /The server primes the successor it stages/);
+  assert.match(html, /503 media_owner_transition/);
+  assert.match(html, /nothing on this card prevents you enabling it now/);
+  const preparedCard = html.slice(html.indexOf("Enable prepared quality handoff"));
+  assert.doesNotMatch(
+    preparedCard.slice(0, preparedCard.indexOf("Experimental delivery")),
+    /TOG:|FOOT:/,
+    "the prepared card is advisory: it carries no switch and no save",
+  );
+  const off = panel({ playback_control_protocol_v1: false, hls_typeless_sliding: false });
+  assert.match(html, /The control endpoint is advertised<small>[\s\S]*?<span class="pill" style="color:var\(--good\)/);
+  assert.match(off, /The control endpoint is advertised<small>[\s\S]*?<span class="pill warn">not met<\/span>/);
   assert.match(html, /Enable cluster transport recovery/);
   assert.match(html, /there is no hidden production feature flag/);
   assert.match(html, /Keep a ready voter majority/);

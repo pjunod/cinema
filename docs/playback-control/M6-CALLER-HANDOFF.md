@@ -477,7 +477,7 @@ a tight link, and on today's fleet **the values are missing almost everywhere**:
 
 | input | who fills it | who does not |
 |---|---|---|
-| `observed_download_bps` | the web client, from `hls.bandwidthEstimate` | Apple (`PlayerController.swift`) and Android (`Controller.kt`) both send null |
+| `observed_download_bps` | ~~the web client alone~~ **all three clients** — web from `hls.bandwidthEstimate`, Apple from `AVPlayerItem.accessLog().observedBitrate`, Android from its own observed rate | *(corrected 2026-09-07: Apple and Android both filled this after this table was written. `PlayerController.observedDownloadBps(fromObservedBitrate:)` and `Controller.kt`'s `observedBitsPerSecond` are the two implementations; a captured request body on either platform now carries a number.)* |
 | `delivered_bps` | Live sessions | every VOD session — `DeliveryView::from_status` leaves it `None`, and VOD serves most sessions |
 
 Folded into one `throughput_unproven`, that would have published a counter
