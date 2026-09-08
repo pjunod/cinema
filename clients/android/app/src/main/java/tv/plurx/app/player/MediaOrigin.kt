@@ -124,7 +124,22 @@ internal fun mediaOriginMsFromHeaders(headers: Map<String, List<String>>): Long?
  * Not thread-safe on its own; [ProgressiveMediaOrigin] holds its monitor,
  * because Media3 calls a transfer listener from its loader threads.
  */
-internal class ThroughputWindow(private val windowNanos: Long = 1_000_000_000L) {
+internal class ThroughputWindow(
+    private val windowNanos: Long = 1_000_000_000L,
+    /**
+     * Longer than any real fetch, and the bound on how wrong a missing
+     * `onTransferEnd` can make this.
+     *
+     * A transfer that starts and never ends leaves the clock running, and every
+     * later window then accrues wall time — which is precisely the average this
+     * class exists to stop reporting, except silently, permanently, and with no
+     * recovery short of a new stream. `TransferListener` is attached to a
+     * factory, so a wrapping data source anywhere in the chain is enough to
+     * lose the pairing. This turns that from a permanent wrong answer into one
+     * blip.
+     */
+    private val staleTransferNanos: Long = 30_000_000_000L,
+) {
     /**
      * How many transfers are open. Media3 fetches a playlist and a segment
      * concurrently, so this is a count rather than a flag: the link is busy
@@ -134,6 +149,14 @@ internal class ThroughputWindow(private val windowNanos: Long = 1_000_000_000L) 
     private var busySinceNanos = 0L
     private var activeNanos = 0L
     private var bytes = 0L
+    /**
+     * Volatile because the reader is the main thread and every writer is a
+     * Media3 loader thread. Published rather than locked: the arithmetic below
+     * runs under [ProgressiveMediaOrigin]'s monitor, and there is no reason for
+     * the thread that draws frames to wait on a thread that fetches bytes just
+     * to read one number.
+     */
+    @Volatile
     private var bitsPerSecond: Long? = null
 
     /** A new stream. The rate belongs to the one that produced it. */
@@ -146,6 +169,12 @@ internal class ThroughputWindow(private val windowNanos: Long = 1_000_000_000L) 
     }
 
     fun transferStarted(nowNanos: Long) {
+        // A start arriving while a clock has been running longer than any real
+        // fetch means an end this class never saw. Reset rather than go on
+        // accruing.
+        if (inFlight > 0 && nowNanos - busySinceNanos > staleTransferNanos) {
+            inFlight = 0
+        }
         if (inFlight == 0) busySinceNanos = nowNanos
         inFlight += 1
     }
@@ -229,7 +258,12 @@ internal class ProgressiveMediaOrigin : TransferListener {
 
     fun currentOriginMs(): Long = originMs
 
-    fun currentObservedBitsPerSecond(): Long? = synchronized(this) { throughput.bitsPerSecond() }
+    /**
+     * Read without the monitor. The value is published volatile by the window,
+     * and the reader is the main thread — blocking it on a loader thread to
+     * fetch one `Long?` is a cost with nothing on the other side of it.
+     */
+    fun currentObservedBitsPerSecond(): Long? = throughput.bitsPerSecond()
 
     internal fun acceptResponse(uri: String, headers: Map<String, List<String>>): Boolean {
         val resolved = mediaOriginMsFromHeaders(headers) ?: return false

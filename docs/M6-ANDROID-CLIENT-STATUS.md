@@ -255,6 +255,25 @@ takes to accumulate. Lifted out of the transfer listener so it has no Media3 in
 it: the arithmetic was untestable while it lived there, and it was wrong the
 whole time.
 
+**And the tests were checked against the code they replaced.** The first draft
+of them passed against the old algorithm eight times out of nine, because the
+old reading *oscillated* — roughly the link speed at the end of a burst, a
+fraction of it on the first byte after a gap — and every case sampled at the
+end. They sample at the gap now, and the old algorithm was reinstated behind
+the same API to prove it: eight of ten reject it, and the two that do not are
+named in the file with what they do pin instead.
+
+**What this does not fix, and nothing client-side can.** A CDN that paces a
+segment — dripping it at some multiple of the bitrate rather than as fast as
+the link allows — keeps the transfer open for most of the window, so active
+time is close to wall time and the measured rate is the paced rate rather than
+the link's capacity. On such a server `observed` can sit below `2 × delivered`
+on a link with ample headroom, and the refusal is indistinguishable from a
+tight link. TCP slow start biases the same way. Both under-report, which is the
+safe direction for a floor that authorises priming a second decoder on a
+viewer's device — but read the `throughput_insufficient` counter with this in
+mind rather than concluding Android has no headroom.
+
 ---
 
 ## What a parallel effort is about to change, and what to do about it
@@ -282,8 +301,10 @@ document is the bug. Re-derive every mirrored rule from the Rust at build time.
 
 - The lab re-run in §1 of the brief. Highest-value item and not code.
 - ~~The three documents naming a stale AGP version.~~ Done: `README.md` and
-  `docs/PUBLISHING.md` quote the catalog now, a check keeps every document that
-  names one honest, and the Dockerfile's comment is left alone on purpose — its
-  hash keys CI's pre-pulled image, so a tidy-up there costs every Android job a
-  full SDK re-download.
+  `docs/PUBLISHING.md` quote the catalog now, and a check keeps every document
+  that names one honest. The Dockerfile's comment is left alone on purpose: the
+  Android CI job pulls a tag that *is* `sha256sum clients/android/Dockerfile`,
+  so editing it costs the next Android job a full SDK re-download and a push.
+  One job, not every job — but a poor trade for a comment on a runner whose
+  registry access has already been seen to fail.
 - A narrower capability keyed by axis and device class — protocol v2.

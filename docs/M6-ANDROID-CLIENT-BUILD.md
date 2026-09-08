@@ -100,12 +100,15 @@ Three documents named an AGP version older than the catalog's. Two of them —
 and `tests/operations/test_mobile_build_claims.py` keeps every document that
 names one honest.
 
-**`clients/android/Dockerfile` still names the old one, deliberately.** CI
-pre-pulls the Android build image keyed on that file's *hash* (`Makefile`,
-`android-image`), so editing it — even a comment — makes every Android job miss
-the pre-pull and fall through to a full `docker build` that re-downloads the
-whole SDK from Google. A stale comment is cheaper than that until the image is
-rebuilt for a real reason. The check excludes it by name and says why.
+**`clients/android/Dockerfile` still names the old one, deliberately.** The
+Android CI job pulls
+`noirr/android-build:$(sha256sum clients/android/Dockerfile | cut -c1-16)`, so
+editing that file — even a comment — is a tag miss: the next Android job falls
+through to a full `docker build` that re-downloads the whole SDK from Google,
+then pushes the new tag. One job pays for it rather than every job, and on a
+runner whose registry access has already been seen to fail that is still a poor
+trade for a comment. The check excludes it by name and says why, and fails if
+the Dockerfile ever stops naming a version.
 
 **The control plane** is three files mirroring web's reference implementation,
 which `PlaybackControlReporter.kt:20-24` states as an explicit contract —

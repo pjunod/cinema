@@ -294,13 +294,18 @@ class AndroidToolchainClaimCase(unittest.TestCase):
     document instead of from the catalog.
 
     **`clients/android/Dockerfile` is deliberately excluded, and the exclusion
-    is the interesting part.** CI pre-pulls the Android build image from the
-    registry keyed on that file's *hash* (`Makefile`, `android-image`), so
-    editing it -- even a comment -- makes every Android job miss the pre-pull
-    and fall through to a full `docker build` that re-downloads the whole SDK
-    from Google. A stale comment is cheaper than that, so it stays until the
-    image is rebuilt for a real reason. Correcting it in passing is exactly the
-    tidy-up that costs a fleet an afternoon.
+    is the interesting part.** The Android CI job pulls
+    `noirr/android-build:$(sha256sum clients/android/Dockerfile | cut -c1-16)`,
+    so editing that file -- even a comment -- is a tag miss: the next Android
+    job falls through to a full `docker build` that re-downloads the whole SDK
+    from Google, then pushes the new tag. One job pays for it, not every job,
+    and on a runner whose registry access has already been seen to fail that is
+    still a poor trade for a comment. So it stays until the image is rebuilt for
+    a real reason.
+
+    The check therefore names the exclusion rather than implying it, and a
+    second case fails if the Dockerfile ever stops naming a version -- so the
+    exclusion cannot outlive its reason.
     """
 
     CATALOG = "clients/android/gradle/libs.versions.toml"
