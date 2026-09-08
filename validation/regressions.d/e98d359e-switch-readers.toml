@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["e98d359e"]
+points = ["playback.pipeline", "server.api", "web.experience"]
+checks = ["rust-gate", "rust-gate-ci", "web-static"]
+reason = "The commit before this one moved two feature switches out of environment variables and into settings, and left four ways the move was less complete than it looked. The fragment indexer still read the boot value, so turning the Profile 7 conversion on produced a decision path that named an identity nothing would ever build. One stored string was parsed in three places and only two case-folded, so a hand-edited value made the server and the Settings card disagree. A failed store read answered overlay-off, which is the expensive answer -- a selected PGS track then becomes a burn-in that re-encodes to SDR. And the test that walks every switch to prove no prerequisite refuses one was passing by writing nothing, because it carried store keys while the update request takes named API fields. Covered by a_hand_written_switch_value_reads_the_same_everywhere, turning_a_switch_on_needs_no_restart, the_switch_seed_writes_once_and_never_over_an_operator, an_unconfigured_node_does_not_claim_the_conversion_key, and the read-back in an_unmet_prerequisite_does_not_block_the_switch."
