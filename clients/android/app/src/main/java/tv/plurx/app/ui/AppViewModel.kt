@@ -426,6 +426,18 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setPlaybackInfoMode(mode: String) = updatePreferences { copy(playbackInfoMode = mode) }
 
+    /**
+     * Settings → Developer → "Prepared replacement".
+     *
+     * The switch is never gated on the requirements shown beside it: they are
+     * measurements, and an operator who can read them is better placed than a
+     * literal to decide what their own device should claim. It takes effect on
+     * the next playback, because the capability document is sent on the first
+     * exchange of a session and retained by the server thereafter.
+     */
+    fun setPreparedReplacement(enabled: Boolean) =
+        updatePreferences { copy(preparedReplacement = enabled) }
+
     fun setOfflineQuality(quality: OfflineQuality) =
         updatePreferences { copy(offlineQuality = quality) }
 

@@ -525,5 +525,5 @@ obligation = "implement and physically qualify two-player replacement"
 id = "client.android_actions"
 kind = "client_capability"
 source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackControlReporter.kt"
-anchor = 'val SUPPORTED_ACTIONS = listOf("hold", "retry_resource", "terminal")'
-obligation = "implement and physically qualify two-player replacement"
+anchor = 'listOf("hold", "retry_resource", "terminal", "prepare_replacement")'
+obligation = "physically qualify two-player replacement per device class: the vocabulary, the prepare handler, the successor pipeline and the acknowledgement ladder are implemented, and the capability defaults to false because M5.5 measured it per device class while protocol v1 freezes it per platform"

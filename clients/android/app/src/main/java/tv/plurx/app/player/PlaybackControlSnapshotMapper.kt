@@ -56,6 +56,12 @@ object PlaybackControlMapping {
             selection = observation.selection,
             capabilities = observation.capabilities,
             observation = clientObservation(observation, render),
+            // Carried through untouched. The acknowledgement is a fact about a
+            // transaction, not a reading of the player, so nothing here is
+            // entitled to derive or adjust it — the one rule that does apply to
+            // it (no `committed` on an ending exchange) belongs to the request
+            // the reporter builds, where the demand is final.
+            acknowledgement = observation.acknowledgement,
         )
     }
 
@@ -217,6 +223,11 @@ data class PlayerControlObservation(
      * same reason.
      */
     val renderOverride: RenderState? = null,
+    /**
+     * How the prepared replacement this client was offered is going, when it
+     * has something to say. Owned by [Controller]'s ledger, not derived here.
+     */
+    val acknowledgement: ActionAcknowledgement? = null,
     val selection: ClientSelection,
     val capabilities: DynamicCapabilities,
 ) {
@@ -236,7 +247,10 @@ data class PlayerControlObservation(
  * eventually disagree, and then the server would be told one thing when it
  * decided and another while it played.
  */
-fun controlCapabilities(query: Map<String, String>): DynamicCapabilities {
+fun controlCapabilities(
+    query: Map<String, String>,
+    preparedReplacementEnabled: Boolean = false,
+): DynamicCapabilities {
     val codecs = query["vcodec"].orEmpty().split(",")
         .mapNotNull { name ->
             when (name.trim().lowercase()) {
@@ -273,6 +287,27 @@ fun controlCapabilities(query: Map<String, String>): DynamicCapabilities {
         maxHeight = PlaybackControl.MAX_HEIGHT,
         codecs = codecs,
         dynamicRanges = ranges,
-        dualPlayerPreparation = false,
+        // Off unless the viewer turned it on in Settings → Developer, and off
+        // is what every device that touches nothing reports.
+        //
+        // This is a hardware claim — "this platform can hold two live decode
+        // pipelines" — and M5.5 measured it per device class, not per platform.
+        // Both phones passed same-codec dual preparation 20 of 20; the tunneled
+        // Google TV failed that same case 0 of 3, and same-codec is the *only*
+        // kind of change the server ever prepares. So a platform-wide `true`
+        // would authorise the server to prime a second pipeline on the one
+        // device with a measured hard failure, and a platform-wide `false`
+        // throws away two phones that passed. Protocol v1 has no way to say
+        // "yes on phones, no on tunneled televisions" — that is a v2 decision
+        // (`docs/M6-IMPLEMENTATION-HANDOFF.md` §3).
+        //
+        // Which leaves the narrowest honest answer available today: the person
+        // holding the device decides, with the measurements in front of them.
+        // The Developer screen lists what M5.5 found and whether this device
+        // meets it, advisory and never blocking, so an operator on a phone can
+        // have the feature and an operator on a television can see exactly what
+        // they are taking on. The default is unchanged, which is what the
+        // frozen literal was protecting.
+        dualPlayerPreparation = preparedReplacementEnabled,
     )
 }

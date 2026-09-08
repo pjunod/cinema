@@ -190,15 +190,47 @@ class ControlRequestWireCase(unittest.TestCase):
 
     def test_the_request_itself(self) -> None:
         rust = rust_struct_fields(self.rust, "ControlRequestV1")
-        # The server accepts an acknowledgement M2 clients never send: they
-        # consume no action, so they have nothing to acknowledge.
-        rust.discard("acknowledgement")
+        self.assertIn(
+            "acknowledgement", rust, "the server no longer accepts an acknowledgement"
+        )
+        swift = swift_coding_keys(self.apple, "ControlRequest")
+        kotlin = kotlin_fields(self.android, "ControlRequest")
+        # `acknowledgement` is the one field a port may legitimately carry or
+        # not, and which it is is decided by something this file can read.
+        # A passive M2 reporter consumes no action and so has nothing to
+        # acknowledge; a port that has implemented the prepared replacement must
+        # carry it, or it settles nothing and every preparation it is offered
+        # holds that session's one preparation slot until the server's deadline
+        # reaps it. Discarding the field from every set was the right answer
+        # while no port sent it and becomes a permanent hole the moment one
+        # does — so it is compared out here and pinned below against the
+        # vocabulary that decides it.
         self.assertSameWire(
             "ControlRequestV1",
-            rust,
-            swift_coding_keys(self.apple, "ControlRequest"),
-            kotlin_fields(self.android, "ControlRequest"),
+            rust - {"acknowledgement"},
+            swift - {"acknowledgement"},
+            kotlin - {"acknowledgement"},
         )
+        for label, fields, source, pattern in (
+            ("apple", swift, self.apple, r"supportedActions\s*=\s*\[([^\]]*)\]"),
+            ("android", kotlin, self.android, r"SUPPORTED_ACTIONS\s*=\s*listOf\(([^)]*)\)"),
+        ):
+            declared = re.search(pattern, source)
+            self.assertIsNotNone(
+                declared, f"{label} no longer declares an action vocabulary"
+            )
+            prepares = "prepare_replacement" in re.findall(
+                r'"([^"]+)"', declared.group(1)
+            )
+            self.assertEqual(
+                "acknowledgement" in fields,
+                prepares,
+                f"{label} declares prepare_replacement={prepares} but its request "
+                f"{'carries' if 'acknowledgement' in fields else 'omits'} "
+                "acknowledgement; a client that is offered a preparation it cannot "
+                "settle holds that session's only preparation slot until the "
+                "server's 330 s deadline",
+            )
 
     def test_the_selection(self) -> None:
         self.assertSameWire(
