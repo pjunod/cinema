@@ -7204,6 +7204,14 @@ function preparedHlsAttach(p,state,spare){
     // avoid.
     startPosition:state.startAtSec>0?state.startAtSec:-1,
     xhrSetup:x=>{ if(TOKEN) x.setRequestHeader("authorization","Bearer "+TOKEN); }});
+  // The EWMA the incumbent paid to learn, so the successor's first rung choice
+  // is not a cold guess on a link this client has been measuring all along.
+  // Deliberately one-way: what the successor measures is not written back, so
+  // a pipeline that fails on its way up cannot drag the incumbent's estimate
+  // down with it.
+  const seed=PlaybackPolicy.bandwidthSeedBps({
+    outgoingEstimateBps:p&&p.bandwidthSeedBps, priorKbps:p&&p.priorKbps});
+  if(seed) try{ hls.bandwidthEstimate=seed; }catch(e){}
   state.hls=hls;
   hls.loadSource(state.playlistUrl);
   hls.attachMedia(spare);
@@ -7308,6 +7316,11 @@ function commitPreparedReplacement(p,state){
   p.probeUrl=state.playlistUrl;
   p.offset=state.mediaOriginMs/1000;
   p.prepared=null;
+  // Still this player's business until its first frame settles: the watchdog
+  // below has to be cancellable by a teardown, or it fires eight seconds after
+  // the player is gone and files a `failed` against a staging nobody is
+  // watching any more.
+  p.preparedCommitting=state;
   markPreparedSettlement(p,state.actionId);
   spare.muted=false;
   try{ spare.volume=retired.volume; }catch(e){}
@@ -7345,6 +7358,7 @@ function commitPreparedReplacement(p,state){
   renderPlayerInfo();
   preparedFirstFrame(p,state,spare,unixMs=>{
     state.state="committed";
+    if(p.preparedCommitting===state) p.preparedCommitting=null;
     queuePlaybackControlAcknowledgement(p,state.actionId,"committed",
       {first_frame_unix_ms:unixMs,committed_media_origin_ms:state.offeredOriginMs});
     clientLog(Object.assign({level:"info",event:"prepared_replacement",detail:"committed",
@@ -7356,6 +7370,7 @@ function commitPreparedReplacement(p,state){
     // not happen would write it to a durable row and move the playback pointer
     // to a session showing the viewer nothing.
     state.state="failed";
+    if(p.preparedCommitting===state) p.preparedCommitting=null;
     queuePlaybackControlAcknowledgement(p,state.actionId,"failed");
     clientLog(Object.assign({level:"error",event:"prepared_replacement",detail:"no_first_frame",
       message:`successor ${state.sessionId} rendered no frame within ${PREPARED_FIRST_FRAME_MS}ms`},
@@ -7510,6 +7525,7 @@ function stopPlaybackControl(p){
   // so stopping in the same turn is how a settlement is silently lost and a
   // staging left to burn its 330-second deadline.
   abandonPreparedReplacement(p,"aborted","the control reporter stopped");
+  cancelPreparedFirstFrame(p);
   const reporter=p&&p.controlReporter;
   if(reporter){
     const flushed=flushPreparedSettlement(p,reporter);
@@ -7519,6 +7535,20 @@ function stopPlaybackControl(p){
   }
   clearPlaybackControlWaiters(p);
   if(p) p.controlAcknowledgements=[];
+}
+// A switch whose first frame is still pending when the player goes away. The
+// watchdog is the only thing still holding that staging, and left armed it
+// reports a failure against a session that ended for an unrelated reason.
+function cancelPreparedFirstFrame(p){
+  const state=p&&p.preparedCommitting;
+  if(!state) return;
+  p.preparedCommitting=null;
+  if(state.frameTimer!=null){ clearTimeout(state.frameTimer); state.frameTimer=null; }
+  const spare=document.getElementById("video");
+  if(state.frameListener&&spare){
+    try{ spare.removeEventListener("timeupdate",state.frameListener); }catch(e){}
+  }
+  state.frameListener=null;
 }
 // One last exchange for a settlement that has nowhere else to go.
 //
@@ -14451,8 +14481,11 @@ function readinessRow(row){
 // THIS machine, and a fleet-wide value would be a claim about all of them.
 function setPreparedHandoff(on){
   setPreparedHandoffEnabled(!!on);
+  // Honest about when: the capability is read on every exchange and the server
+  // keeps the newest document it was sent, so this reaches it on the next
+  // exchange of whatever is playing — not at the next stream.
   toast(on
-    ?"This browser will offer prepared handoff on the next stream you start"
+    ?"This browser now offers prepared handoff — from the next control exchange"
     :"Prepared handoff switched off for this browser");
 }
 function developerPanel(settings){

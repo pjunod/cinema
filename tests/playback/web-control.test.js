@@ -1729,6 +1729,7 @@ async function main() {
   for (const [label, patch] of [
     ["a missing action_id", { action_id: undefined }],
     ["a non-UUID action_id", { action_id: "not-a-uuid" }],
+    ["a truncated action_id", { action_id: "3333-4333-8333-333333333333" }],
     ["an empty session_id", { session_id: "" }],
     ["a negative media_origin_ms", { media_origin_ms: -1 }],
     ["a fractional media_origin_ms", { media_origin_ms: 1.5 }],
@@ -1749,6 +1750,13 @@ async function main() {
   // carries no `deny_unknown_fields`, so a later server may add one.
   assert.equal(control.validPreparation(
     Object.assign({}, PREPARE_FIXTURE, { a_field_from_next_year: 7 })), true);
+  // …and so is an `action_id` from a later UUID version. The server accepts
+  // whatever `uuid::Uuid::parse_str` takes and only mints v4 today; refusing a
+  // v7 here would turn a legitimate staging into a protocol error that stops
+  // this reporter for the rest of the session.
+  assert.equal(control.validPreparation(Object.assign({}, PREPARE_FIXTURE,
+    { action_id: "01930000-0000-7000-a000-000000000000" })), true,
+    "a v7 action_id is a staging, not a protocol error");
   assert.equal(control.validPreparation(Object.assign({}, PREPARE_FIXTURE, {
     effective_selection: { ...PREPARE_FIXTURE.effective_selection, later_key: 1 } })), true);
 
@@ -2058,7 +2066,7 @@ async function main() {
         shippedSource("queuePlaybackControlAcknowledgement"),
         shippedSource("pendingPlaybackControlAcknowledgement"),
         shippedSource("settlePlaybackControlAcknowledgement"),
-        shippedSource("flushPreparedSettlement"),
+        shippedSource("flushPreparedSettlement"), shippedSource("cancelPreparedFirstFrame"),
         shippedSource("destroyHlsInstance"),
         shippedSource("freePreparedReplacement"), shippedSource("abandonPreparedReplacement"),
         // The dispatch under test: a `prepare` answer must reach the player's
@@ -2069,7 +2077,7 @@ async function main() {
         shippedSource("askPlaybackControl"),
         shippedSource("settlePlaybackControlWaiters"),
         shippedSource("clearPlaybackControlWaiters"),
-        shippedSource("flushPreparedSettlement"),
+        shippedSource("flushPreparedSettlement"), shippedSource("cancelPreparedFirstFrame"),
         shippedSource("stopPlaybackControl"),
         shippedSource("startPlaybackControl"),
         shippedSource("persistentWait"),
@@ -2733,7 +2741,7 @@ async function main() {
         shippedSource("queuePlaybackControlAcknowledgement"),
         shippedSource("pendingPlaybackControlAcknowledgement"),
         shippedSource("settlePlaybackControlAcknowledgement"),
-        shippedSource("flushPreparedSettlement"),
+        shippedSource("flushPreparedSettlement"), shippedSource("cancelPreparedFirstFrame"),
         shippedSource("destroyHlsInstance"),
         shippedSource("freePreparedReplacement"), shippedSource("abandonPreparedReplacement"),
         shippedSource("askPlaybackControl"),
@@ -3154,7 +3162,8 @@ async function main() {
         shippedSource("notePreparedMetadata"), shippedSource("preparedBufferedThroughMs"),
         shippedSource("notePreparedBuffer"), shippedSource("commitPreparedReplacement"),
         shippedSource("adoptPlaybackMediaElement"), shippedSource("disposeRetiredMediaElement"),
-        shippedSource("preparedFirstFrame"), shippedSource("failPreparedReplacement"),
+        shippedSource("preparedFirstFrame"), shippedSource("cancelPreparedFirstFrame"),
+        shippedSource("failPreparedReplacement"),
         shippedSource("abandonPreparedReplacement"), shippedSource("freePreparedReplacement"),
         shippedSource("destroyHlsInstance"),
         shippedSource("resetPlaybackTransportEvents"), shippedSource("playbackTransportEvents"),
@@ -3167,6 +3176,7 @@ async function main() {
         " handle(action){return handlePreparedReplacementAction(PLAYER,action);},",
         " abandon(state,reason){return abandonPreparedReplacement(PLAYER,state,reason);},",
         " teardown(){return teardownHls();},",
+        " cancelFrame(){return cancelPreparedFirstFrame(PLAYER);},",
         " pending(demand){return pendingPlaybackControlAcknowledgement(PLAYER,demand);},",
         " settle(request){return settlePlaybackControlAcknowledgement(PLAYER,request);},",
         " origin:sessionMediaOriginMs, film:realMediaPositionMs, local:preparedLocalPositionMs};",
@@ -3756,6 +3766,26 @@ async function main() {
     h.handle(prepareAction({ action_id: second }));
     assert.notEqual(h.spare, h.live, "a second preparation never restages the retired element");
     assert.equal(h.created.length, 2, "it gets a clean one");
+  }
+  {
+    // A commit whose first frame never arrives, on a player that goes away
+    // first. The watchdog is the only thing still holding that staging, and
+    // left armed it files a failure against a session that ended for an
+    // unrelated reason — on a player whose queue has already been cleared.
+    const h = preparedHarness();
+    const p = h.set(preparedPlayer({ hls: { bandwidthEstimate: 1, destroy() {} } }));
+    h.handle(prepareAction());
+    h.instances[0].events.manifest();
+    h.spare.ranges = [[0, 30]];
+    h.instances[0].events.append();
+    assert.ok(p.preparedCommitting, "the staging is still this player's until a frame settles");
+    assert.equal(h.timers.size, 1, "…and the watchdog is armed");
+    h.cancelFrame();
+    assert.equal(p.preparedCommitting, null);
+    assert.equal(h.timers.size, 0, "a teardown disarms it");
+    h.fireAll();
+    assert.equal(latest(h).state, "buffer_ready",
+      "so nothing files a failure after the player is gone");
   }
   {
     // A staging this client settled is replayed until the server processes the

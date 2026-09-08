@@ -102,10 +102,17 @@
   // A malformed preparation is fatal, exactly like any other malformed action.
   // Softening it into an ignore would leave this client half-understanding a
   // staging the server is holding a real encoder open for.
+  // The server accepts anything `uuid::Uuid::parse_str` takes for an
+  // `action_id` — any version, any variant, and the braced, simple and URN
+  // forms — while today it only ever mints a v4. Matching its shape rather
+  // than the strict RFC one is deliberate: refusing a legitimate staging is a
+  // protocol error that stops this reporter for the rest of the session, and a
+  // relayed action minted by a peer on a later version would do exactly that.
+  const ACTION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   function validPreparation(action) {
     return !!action
       && action.type === PREPARE_ACTION_TAG
-      && typeof action.action_id === "string" && UUID_RE.test(action.action_id)
+      && typeof action.action_id === "string" && ACTION_ID_RE.test(action.action_id)
       && typeof action.session_id === "string" && action.session_id !== ""
       && preparedPlaylistUrl(action.session_id, action.playlist_url) !== null
       && boundedInteger(action.media_origin_ms, 0, MAX_MEDIA_MS)
@@ -130,7 +137,7 @@
   function validAcknowledgement(value, demand) {
     return !!value
       && typeof value === "object"
-      && typeof value.action_id === "string" && UUID_RE.test(value.action_id)
+      && typeof value.action_id === "string" && ACTION_ID_RE.test(value.action_id)
       && ACKNOWLEDGEMENT_STATES.includes(value.state)
       && (value.buffered_through_ms == null
         || boundedInteger(value.buffered_through_ms, 0, MAX_MEDIA_MS))
