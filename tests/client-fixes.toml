@@ -725,3 +725,11 @@ source_anchor = "if (!canOfferPreparation) return PreparationOffer.Refuse"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedReplacementTest.kt"
 test_anchor = "a successor that was never playable ends the offers for this playback"
 
+[[fixes]]
+id = "android.observed-throughput-is-headroom"
+commits = ["24dd3c58"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/MediaOrigin.kt"
+source_anchor = "internal class ThroughputWindow"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/MediaOriginTest.kt"
+test_anchor = "idleTimeBetweenSegmentsIsNotInTheDenominator"
+

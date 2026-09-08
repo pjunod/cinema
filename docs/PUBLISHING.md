@@ -357,7 +357,7 @@ before you need it.
 
 The target-SDK gap is closed. `clients/android/app/build.gradle.kts` now pins
 `compileSdk`/`targetSdk` **37** (Android 17), ahead of the August 2026 API 36
-Play requirement. The pinned JDK 25 / AGP 9.3.1 / SDK 37.0 image is documented
+Play requirement. The pinned JDK 25 / AGP 9.3.2 / SDK 37.0 image is documented
 in [clients/android/README.md](../clients/android/README.md), and
 `make android-test` proves its JVM suite and lint in that image.
 

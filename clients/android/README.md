@@ -246,7 +246,7 @@ the "Command line tools only" box at <https://developer.android.com/studio>.
 Open `clients/android/` in **Android Studio** (Quail 2 / 2026.1.2+) and Run —
 it provisions the SDK for you.
 
-**Toolchain** (pinned): AGP 9.3.1, Gradle 9.6.1, built-in Kotlin
+**Toolchain** (pinned): AGP 9.3.2, Gradle 9.6.1, built-in Kotlin
 2.3.10, JDK 25, Compose BOM 2026.06.01, Media3 1.10.1,
 `compileSdk`/`targetSdk` 37, `minSdk` 23. The Gradle daemon runs on
 Java 25 while Android source and bytecode stay at Java 17 for device
