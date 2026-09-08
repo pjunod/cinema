@@ -1711,6 +1711,153 @@ mod tests {
         body["token"].as_str().expect("token").to_owned()
     }
 
+    /// Encoder capacity is settable, and the number the page saves is the
+    /// number admission reads.
+    ///
+    /// Both keys were settings the admission path already read and no page
+    /// ever showed. Giving them a control is the easy half; the half that has
+    /// gone wrong before is the *reader*, so the round trip ends at
+    /// `TranscodeManager`, which is what actually refuses a start, rather than
+    /// at the DTO that reports it.
+    ///
+    /// Zero is asserted on both keys and means different things on each. The
+    /// hardware cap honours a stored zero — a node whose GPU is doing
+    /// something else — so the DTO must report zero rather than the default,
+    /// or the page would claim capacity the node will never admit. The
+    /// software pool refuses to *store* one, because `try_admit_software`
+    /// admits nothing against a budget of zero and a node with no hardware
+    /// encoder would then refuse every session.
+    #[tokio::test]
+    async fn encoder_capacity_is_settable_and_the_admission_path_reads_what_was_saved() {
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+
+        let (_, before) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+        assert_eq!(
+            before["transcode_max_hw_sessions"],
+            crate::admission::DEFAULT_MAX_HW_SESSIONS as i64,
+            "an untouched node reports the cap it is actually running"
+        );
+        assert_eq!(
+            before["transcode_software_pool_threads"],
+            crate::admission::software_budget() as i64
+        );
+
+        let (status, after) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({ "transcode_max_hw_sessions": 6,
+                        "transcode_software_pool_threads": 12 }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{after}");
+        assert_eq!(after["transcode_max_hw_sessions"], 6);
+        assert_eq!(after["transcode_software_pool_threads"], 12);
+        assert_eq!(
+            state.transcode.max_hw_sessions().await,
+            6,
+            "the admission path reads the saved cap, not a boot-time copy of it"
+        );
+        assert_eq!(state.transcode.software_budget().await, 12);
+        assert_eq!(
+            state.transcode.hardware_slots().await.1,
+            6,
+            "System's read-only pair reports the same cap the control writes"
+        );
+
+        // Zero hardware encoders is a supported answer, and has to survive
+        // the round trip in both directions.
+        let (status, off) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({ "transcode_max_hw_sessions": 0 }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{off}");
+        assert_eq!(
+            off["transcode_max_hw_sessions"], 0,
+            "a deliberate zero must read back as zero, not as the default"
+        );
+        assert_eq!(state.transcode.max_hw_sessions().await, 0);
+
+        for (field, value) in [
+            ("transcode_max_hw_sessions", -1),
+            ("transcode_max_hw_sessions", 65),
+            ("transcode_software_pool_threads", 0),
+            ("transcode_software_pool_threads", 257),
+        ] {
+            let (status, body) = call(
+                &app,
+                put("/api/v1/settings", Some(&admin), json!({ field: value })),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{field}={value} was accepted: {body}"
+            );
+        }
+        assert_eq!(
+            state.transcode.software_budget().await,
+            12,
+            "a refused write leaves the running budget alone"
+        );
+    }
+
+    /// One parser owns the stored offline switch, and it is the same one at
+    /// every reader.
+    ///
+    /// Three copies of a negated `matches!` existed — the settings DTO, the
+    /// preparer, and the offline API boundary — and none of them trimmed or
+    /// folded case, so a value written by hand or by an older client could
+    /// read as *enabled* at all three while saying `OFF`. That is the defect
+    /// #141 found in the subtitle overlay switch, in a different file.
+    #[tokio::test]
+    async fn a_stored_offline_switch_reads_the_same_way_wherever_it_is_read() {
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+
+        for (stored, expected) in [
+            ("0", false),
+            ("false", false),
+            ("off", false),
+            ("no", false),
+            (" OFF ", false),
+            ("True", true),
+            ("1", true),
+            ("on", true),
+            ("", true),
+        ] {
+            state
+                .store
+                .put_setting(plurx_core::store::keys::OFFLINE_ENABLED, stored)
+                .await
+                .expect("store the switch");
+            let (_, settings) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+            assert_eq!(
+                settings["offline_enabled"], expected,
+                "the settings page reads {stored:?} as {expected}"
+            );
+            // The offline API checks the switch before it looks at anything
+            // else, so a file that does not exist still separates the two
+            // answers: refused for the switch, or refused for the file.
+            let (status, body) =
+                call(&app, get("/api/v1/files/1/offline-options", Some(&admin))).await;
+            let disabled_here =
+                status == StatusCode::SERVICE_UNAVAILABLE && body["code"] == "offline_disabled";
+            assert_eq!(
+                !disabled_here, expected,
+                "the offline API answers {stored:?} the same way the page renders it: {body}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn health_endpoints() {
         let app = test_app();

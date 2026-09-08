@@ -773,12 +773,12 @@ Not done here: removing the engine. §5 conditions that on real VOD recipe
 coverage replacing it, and the coverage row exists precisely so someone can
 tell when that is true.
 
-Still open here: the remaining hidden gates in the inventory below, and the
-qualification/promotion run.
+Still open here: the qualification/promotion run. The hidden-gate inventory
+below is closed — every entry in it now has a visible control — and is kept
+for what each one cost, because the shape repeats.
 
-**The rest of the hidden-gate inventory**, found while doing the above and not
-yet addressed. Each is a switch that changes product behaviour with no visible
-control:
+**The hidden-gate inventory**, found while doing the above. Each was a switch
+that changed product behaviour with no visible control:
 
 - ~~`PLURX_PGS_OVERLAY`~~ — **done.** It is `subtitles.pgs_overlay`, read at
   the request boundary, with a Settings → Developer card carrying the switch
@@ -793,11 +793,25 @@ control:
   value before believing the move is complete, and make one parser own the
   stored string: three parses of it meant a hand-edited `TRUE` served overlays
   while the card said off.
-- `OFFLINE_ENABLED` — master kill switch for offline packages; reaches the
-  settings API and renders nowhere.
-- `SW_POOL_THREADS` — a settings key with no DTO field at all.
-  `MAX_HW_SESSIONS` has none either, though it is at least visible read-only as
-  `hw_slots_max`. **`LIBRARY_DV_DISK_CONVERT` is not one of these** — it has a
+- ~~`OFFLINE_ENABLED`~~ — **done.** It had a settings-API field and no
+  control, along with the three offline budgets beside it; all four now render
+  as an Offline downloads card in Maintenance. The same three-parsers defect
+  #141 found in the overlay switch was here too — the DTO, the preparer and
+  the offline API each ran their own negated `matches!`, none trimming or
+  folding case, so a hand-written ` OFF ` read as *enabled* at all three. One
+  `stored_switch` now, asserted at every reader in the same test.
+- ~~`SW_POOL_THREADS`~~ and ~~`MAX_HW_SESSIONS`~~ — **done.** Both are fields
+  on the settings DTO and selects in Playback → Streaming. Two things worth
+  knowing if you touch them: the DTO reads them exactly the way
+  `TranscodeManager::num_setting` does, *including a stored zero*, because a
+  zero hardware cap is a supported answer and coercing it to the default would
+  make the page claim capacity the node will never admit; and the API refuses
+  to write a zero software pool, because `try_admit_software` admits nothing
+  against a budget of zero, so on a node with no hardware encoder that setting
+  means "no playback" while reading like "unlimited". The round-trip test ends
+  at `TranscodeManager`, not at the DTO — the expensive half of moving a
+  switch is always the reader.
+  **`LIBRARY_DV_DISK_CONVERT` is not one of these** — it has a
   dedicated API in `http/dv_disk.rs` and a per-library select in the web UI
   (`dvModeSelect`). It was listed here in a first draft and is recorded as a
   correction so the next reader does not build a control that already ships.

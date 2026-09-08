@@ -211,7 +211,7 @@ test("Playback saves per card, and each card writes only its own fields", () => 
   // The two switches that are off on purpose moved to Developer, so Streaming
   // no longer writes them: a card that saves a field it does not show can turn
   // something back on that an operator deliberately turned off.
-  const streaming = ["prr", "pabr", "phr", "phb", "pha", "pvod", "pvlr", "pvws", "pvmb", "pvbg", "serr"];
+  const streaming = ["prr", "pabr", "phr", "phb", "pha", "pvod", "pvlr", "pvws", "pvmb", "pvbg", "phw", "psw", "serr"];
   const developer = ["pcpv1", "dverr"];
   const experimental = ["phs", "dxerr"];
   return Promise.all([
@@ -223,7 +223,9 @@ test("Playback saves per card, and each card writes only its own fields", () => 
     assert.deepEqual(Object.keys(writes.savePlaybackDefaults.body).sort(), ["default_audio_lang", "default_sub_lang", "sub_mode"]);
     assert.deepEqual(Object.keys(writes.saveStreaming.body).sort(), [
       "hls_ahead_max_secs", "hls_burst_secs", "hls_readrate", "playback_auto_abr",
-      "stream_readrate", "vod_block_budget_secs", "vod_blocked_get_cap",
+      "stream_readrate", "transcode_max_hw_sessions",
+      "transcode_software_pool_threads", "vod_block_budget_secs",
+      "vod_blocked_get_cap",
       "vod_live_recovery", "vod_materialize_budget_secs", "vod_presentation",
       "vod_working_set_bytes",
     ]);
@@ -462,7 +464,7 @@ test("A failed prerequisite reading says so instead of reading as satisfied", ()
 
 test("Maintenance owns the timers, and each of its cards saves its own fields", () => {
   const panel = shippedSource("maintenancePanel");
-  for (const card of ["precachePanel", "dvDiskPanel", "telemetryPanel"]) assert.match(panel, new RegExp(`${card}\\(`));
+  for (const card of ["precachePanel", "offlinePanel", "dvDiskPanel", "telemetryPanel"]) assert.match(panel, new RegExp(`${card}\\(`));
   for (const id of ["job-probe", "job-art", "job-clean", "job-boot"]) assert.match(panel, new RegExp(`"${id}"`));
   const libraries = shippedSource("librariesPanel");
   for (const gone of ["maintenancePanel", "dvDiskPanel", "precachePanel", "telemetry"])
@@ -475,7 +477,14 @@ test("Maintenance owns the timers, and each of its cards saves its own fields", 
   assert.deepEqual(fields("savePrecache"), ["cache_max_gb", "cache_produce_mins"]);
   assert.deepEqual(fields("saveTelemetry"), ["telemetry_retain_days"]);
   assert.deepEqual(fields("saveDvDiskSettings"), ["dv_disk_convert_parallel", "dv_disk_keep_original"]);
-  for (const fn of ["saveMaintenance", "savePrecache", "saveTelemetry", "saveDvDiskSettings"])
+  // The offline budgets reached the settings API long before they reached a
+  // control, so the card is asserted by the fields it writes rather than only
+  // by its presence: a card that renders the switch and saves three budgets
+  // without it would look right and turn nothing off.
+  assert.deepEqual(fields("saveOffline"), [
+    "offline_enabled", "offline_max_gb", "offline_max_gb_per_user", "offline_max_rows_per_user",
+  ]);
+  for (const fn of ["saveMaintenance", "savePrecache", "saveTelemetry", "saveDvDiskSettings", "saveOffline"])
     assert.doesNotMatch(shippedSource(fn), /\brender\(\)/, `${fn} no longer repaints the whole app to show a save`);
 });
 

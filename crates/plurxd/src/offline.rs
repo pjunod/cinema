@@ -504,14 +504,17 @@ impl OfflineManager {
     }
 
     async fn enabled(&self) -> bool {
-        !matches!(
+        // `stored_switch` is the one parser for a stored boolean. This site
+        // read the string itself until three copies of that match existed and
+        // none of them trimmed or folded case.
+        plurx_core::store::stored_switch(
             self.store
                 .get_setting(keys::OFFLINE_ENABLED)
                 .await
                 .ok()
                 .flatten()
                 .as_deref(),
-            Some("0" | "false" | "off" | "no")
+            true,
         )
     }
 

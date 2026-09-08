@@ -1681,6 +1681,18 @@ pub struct SettingsDto {
     /// Let the web client's Auto controller change rungs after playback starts.
     /// Explicit opt-in; missing is false.
     pub playback_auto_abr: bool,
+    /// How many sessions may hold a hardware encoder at once
+    /// (`transcode.max_hw_sessions`), and how many threads the software pool
+    /// may use (`transcode.software_pool_threads`).
+    ///
+    /// Both were settings the admission path already read and no page ever
+    /// showed. The hardware cap is the more consequential of the two: it is
+    /// what a start is refused against, and it is also what a predecessor
+    /// holds for the length of its drain, so an operator who cannot see it
+    /// cannot tell a saturated encoder from a refused one. `hw_slots_max` on
+    /// System reports the same number, read-only; this is the control.
+    pub transcode_max_hw_sessions: i64,
+    pub transcode_software_pool_threads: i64,
     /// App-managed offline preparation has a separate reservation budget from
     /// the opportunistic playback cache above.
     pub offline_enabled: bool,
@@ -1802,9 +1814,31 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         setting(keys::PLAYBACK_NETWORK_PRIORS).is_some_and(|value| value.trim() == "1");
     let playback_auto_abr =
         setting(keys::PLAYBACK_AUTO_ABR).is_some_and(|value| value.trim() == "1");
-    let offline_enabled = !matches!(
-        setting(keys::OFFLINE_ENABLED).as_deref(),
-        Some("0" | "false" | "off" | "no")
+    // One parser owns the stored string. Three copies of this negated match
+    // existed — here, in the preparer, and at the offline API boundary — and
+    // none of them trimmed or folded case, so a hand-edited ` OFF ` read as
+    // *enabled* on all three.
+    let offline_enabled =
+        plurx_core::store::stored_switch(setting(keys::OFFLINE_ENABLED).as_deref(), true);
+    // Read exactly the way `TranscodeManager::num_setting` reads them, zero
+    // included. A stored zero is a real answer for the hardware cap — "this
+    // GPU is doing something else" — and the admission path already honours
+    // it, so coercing it to the default here would make the page report
+    // capacity a node does not have. Anything the reader would fall back on,
+    // this falls back on too.
+    let transcode_stored = |value: Option<String>, default: usize| {
+        value
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            .filter(|value| *value >= 0)
+            .unwrap_or(default as i64)
+    };
+    let transcode_max_hw_sessions = transcode_stored(
+        setting(keys::MAX_HW_SESSIONS),
+        crate::admission::DEFAULT_MAX_HW_SESSIONS,
+    );
+    let transcode_software_pool_threads = transcode_stored(
+        setting(keys::SW_POOL_THREADS),
+        crate::admission::software_budget(),
     );
     let offline_integer = |value: Option<String>, default: i64| {
         value
@@ -1929,6 +1963,8 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         telemetry_retain_days,
         playback_network_priors,
         playback_auto_abr,
+        transcode_max_hw_sessions,
+        transcode_software_pool_threads,
         offline_enabled,
         offline_max_gb,
         offline_max_gb_per_user,
@@ -2033,6 +2069,13 @@ pub struct UpdateSettings {
     pub telemetry_retain_days: Option<i64>,
     pub playback_network_priors: Option<bool>,
     pub playback_auto_abr: Option<bool>,
+    /// Encoder capacity. Bounded rather than free-form, because both numbers
+    /// buy hardware that does not exist if they are wrong: a hardware cap
+    /// above the encoders a node has admits sessions that then fail at
+    /// `ffmpeg`, and a software pool wider than the machine turns one stream's
+    /// stall into every stream's.
+    pub transcode_max_hw_sessions: Option<i64>,
+    pub transcode_software_pool_threads: Option<i64>,
     pub offline_enabled: Option<bool>,
     pub offline_max_gb: Option<i64>,
     pub offline_max_gb_per_user: Option<i64>,
@@ -2142,6 +2185,8 @@ impl UpdateSettings {
             || self.telemetry_retain_days.is_some()
             || self.playback_network_priors.is_some()
             || self.playback_auto_abr.is_some()
+            || self.transcode_max_hw_sessions.is_some()
+            || self.transcode_software_pool_threads.is_some()
             || self.offline_enabled.is_some()
             || self.offline_max_gb.is_some()
             || self.offline_max_gb_per_user.is_some()
@@ -2499,6 +2544,43 @@ pub async fn update_settings(
             Some(Some(parsed))
         }
     };
+    // Encoder capacity. The two bounds differ at zero, and deliberately.
+    //
+    // Zero hardware sessions is a supported answer — `max_hw_sessions` says
+    // so at its own definition, for a box whose GPU is doing something else —
+    // and software encoding still serves every start. Zero software threads
+    // is not the same shape at all: `try_admit_software` admits nothing
+    // against a budget of zero, so on a node with no hardware encoder it
+    // refuses every session, and the setting that reads like "unlimited"
+    // would mean "no playback". A stored zero there is still *reported*, so
+    // the page tells the truth about a node that already has one; it is
+    // simply not a value this API will write.
+    //
+    // The ceilings are generous rather than derived from this node's CPU
+    // count: a container's visible cores are not the operator's licence, and
+    // a number that refuses to save is worse than one that is optimistic.
+    for (label, value, min, max) in [
+        (
+            "transcode_max_hw_sessions",
+            req.transcode_max_hw_sessions,
+            0_i64,
+            64_i64,
+        ),
+        (
+            "transcode_software_pool_threads",
+            req.transcode_software_pool_threads,
+            1_i64,
+            256_i64,
+        ),
+    ] {
+        if let Some(value) = value {
+            if !(min..=max).contains(&value) {
+                return Err(ApiError::BadRequest(format!(
+                    "{label} must be between {min} and {max}"
+                )));
+            }
+        }
+    }
     let stream_readrate = if let Some(raw) = req.stream_readrate.as_deref() {
         let parsed: f64 = raw
             .trim()
@@ -2975,6 +3057,14 @@ pub async fn update_settings(
             .store
             .put_setting(keys::OFFLINE_MAX_ROWS_PER_USER, &rows.to_string())
             .await?;
+    }
+    for (key, value) in [
+        (keys::MAX_HW_SESSIONS, req.transcode_max_hw_sessions),
+        (keys::SW_POOL_THREADS, req.transcode_software_pool_threads),
+    ] {
+        if let Some(value) = value {
+            state.store.put_setting(key, &value.to_string()).await?;
+        }
     }
     if let Some(on) = req.offline_enabled {
         state
