@@ -392,7 +392,7 @@ test_anchor = "testDeliveryStarvationNeverFiresOnAHealthyBufferedPlayer"
 [[fixes]]
 id = "apple.build-65-release-claims"
 commits = ["9989092"]
-source = "docs/APPLE-CLIENT-PARITY.md"
+source = "docs/clients/APPLE-CLIENT-PARITY.md"
 source_anchor = ", Apple build"
 test = "tests/operations/test_mobile_build_claims.py"
 test_anchor = "test_repository_build_claims_match_release_inputs"
@@ -811,12 +811,102 @@ commits = ["1865c051"]
 source = "clients/android/app/src/main/java/tv/plurx/app/player/PreparedReplacement.kt"
 source_anchor = "fun committed("
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedReplacementTest.kt"
-test_anchor = "commit rejection settles while the current capture is cleared"
+test_anchor = "nothing may replace a preparation the viewer is already watching"
 
 [[fixes]]
 id = "apple.prepared-switch-lifecycle-hardening"
 commits = ["638ac998"]
+source = "clients/apple/Sources/PreparedReplacement.swift"
+source_anchor = "var pendingAcknowledgement: ActionAcknowledgement?"
+test = "clients/apple/Tests/PreparedReplacementTests.swift"
+test_anchor = "testASettlementStaysPendingUntilItsExchangeReturns"
+
+[[fixes]]
+# `LiveTvInputPolicy.route` had exactly one call site in the repository and it
+# was its own test, so the transcribed routing table governed nothing: no key
+# handling, no four-second auto-hide, no channel up/down, and a television
+# showing the phone layout behind a Fullscreen button. A D-pad press reached
+# whichever of two overlapping channel lists the focus engine happened to pick.
+id = "android.live-tv-television-routes-every-press-through-the-table"
+commits = ["c0347847"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvScreen.kt"
+source_anchor = "applyOutcome(LiveTvInputPolicy.route(surface, inputState(), input))"
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvInputPolicyTest.kt"
+test_anchor = "every press goes through the shared table"
+
+[[fixes]]
+# The screen set the retention flag before calling `enterPictureInPictureMode`
+# and discarded the Boolean it returns. The system refuses PiP whenever the
+# user has turned it off for the app, and on that path no mode-changed callback
+# ever fires — so the flag latched true for the life of the process and every
+# lifecycle release path was disabled. The client then kept renewing the lease
+# on the household's only tuner against a screen nobody was on, with no way
+# back to the Stop button.
+id = "android.live-tv-refused-pip-must-not-latch-retention"
+commits = ["01413da4"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvScreen.kt"
+source_anchor = "controller.setRetained(entered)"
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvInputPolicyTest.kt"
+test_anchor = "a refused picture-in-picture never latches the retention flag"
+
+[[fixes]]
+# Nothing in the tvOS live surface was focusable while the overlay was hidden.
+# tvOS delivers move/exit/playPause only to the focused view and its ancestors,
+# and PlayerSurfaceView refuses focus — so the overlay's own four-second
+# auto-hide removed the last focusable view from the presented cover and the
+# surface went permanently deaf. Every `hidden -> reveal` row of the contract
+# was unreachable, with no way back to any chrome.
+id = "apple.live-tv-ten-foot-surface-keeps-something-focusable"
+commits = ["9268f5f6"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = ".focused($focusedControl, equals: FocusTarget.reveal)"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testTheTenFootSurfaceKeepsSomethingFocusableWhileTheOverlayIsHidden"
+
+[[fixes]]
+# Entering picture-in-picture backgrounds the app, and the release rule read
+# only the scene phase — so the one case picture-in-picture exists for would
+# have released the tuner underneath its own window. Every release path now
+# asks whether PiP is running, or about to be: automatic PiP starts on
+# background and iOS publishes `.inactive` first, so `isActive` alone still
+# released the tuner in the window before the window appeared. And the reverse
+# gap was worse — nothing observed PiP *ending* off-screen, so a closed PiP
+# window left the lease renewed forever.
+id = "apple.live-tv-picture-in-picture-keeps-its-tuner"
+commits = ["08e610d0"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = "private var mayRelease: Bool { !pictureInPicture.isActive && !pictureInPicture.isStarting }"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testTheLiveSurfaceAllowsPictureInPictureAndReleasesOnlyWhenItIsNotActive"
+
+[[fixes]]
+id = "apple.prepared-successor-that-cannot-be-primed"
+commits = ["a9b4933f"]
+source = "clients/apple/Sources/PreparedReplacement.swift"
+source_anchor = "private(set) var canOfferPreparation = true"
+test = "clients/apple/Tests/PreparedReplacementTests.swift"
+test_anchor = "testASuccessorThatNeverBecomesPlayableStopsTheAskingForThisPlayer"
+
+[[fixes]]
+id = "apple.commit-carries-the-compared-origin"
+commits = ["c7cf38bd"]
 source = "clients/apple/Sources/PlaybackControlReporter.swift"
-source_anchor = "private var pendingAcknowledgements: [ActionAcknowledgement] = []"
-test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
-test_anchor = "testRapidPreparedProgressQueuesInOrderAndCommitStopsThePredecessor"
+source_anchor = "var committedMediaOriginMs: Int? = nil"
+test = "clients/apple/Tests/PreparedReplacementTests.swift"
+test_anchor = "testACommitEchoesTheOffersOriginRatherThanRecomputingIt"
+
+[[fixes]]
+id = "apple.prepared-switch-is-a-critical-section"
+commits = ["594daea1"]
+source = "clients/apple/Sources/PreparedReplacement.swift"
+source_anchor = "mutating func noteSwitching(_ action: PreparedReplacementAction) -> Bool"
+test = "clients/apple/Tests/PreparedReplacementTests.swift"
+test_anchor = "testACommitSettlesTheStagingItWasCalledForRatherThanWhateverIsCurrent"
+
+[[fixes]]
+id = "android.settled-reporter-keeps-its-last-word"
+commits = ["0cf61d93"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackControlReporter.kt"
+source_anchor = "val newest = if (settled) pending else newestCapture(pending)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "a teardown outlives the source that handed it over"

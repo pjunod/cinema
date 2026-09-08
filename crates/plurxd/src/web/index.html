@@ -325,6 +325,149 @@
   th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);font-size:14px}
   th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.05em}
 
+  /* ---- Live TV host: one media element for the document's lifetime --------
+     It lives outside #app so layoutChrome() cannot destroy it, which is what
+     lets the stream survive a route change and keep playing in a dock. Three
+     geometries, one element: `slot` (positioned over the page's empty slot),
+     `dock` (fixed, draggable), `full` (the fullscreen element, so the overlay
+     is inside the fullscreen tree — a bare <video> cannot show a channel
+     strip). #modal already proves the pattern for VOD. */
+  .lth{position:fixed;z-index:40;background:#000;overflow:hidden;border-radius:var(--radius)}
+  .lth[hidden]{display:none}
+  .lth video{display:block;width:100%;height:100%;background:#000;object-fit:contain}
+  .lth[data-mode="slot"]{border-radius:var(--radius)}
+  .lth[data-mode="dock"]{
+    right:24px;bottom:24px;width:384px;height:auto;
+    border:1px solid var(--line);box-shadow:0 18px 48px rgba(0,0,0,.45);
+  }
+  .lth[data-mode="dock"] video{height:216px}
+  .lth[data-mode="full"]{inset:0;width:100vw;height:100dvh;border-radius:0}
+  .lth[data-mode="full"] video{height:100dvh;max-height:100dvh}
+
+  .lth-overlay{position:absolute;inset:0;pointer-events:none;transition:opacity .2s ease-out}
+  .lth-overlay > *{pointer-events:auto}
+  .lth.idle{cursor:none}
+  .lth.idle .lth-overlay{opacity:0;pointer-events:none;visibility:hidden;transition:opacity .2s,visibility 0s .2s}
+  .lth[data-mode="slot"] .lth-overlay,.lth[data-mode="dock"] .lth-overlay{display:none}
+  .lth[data-mode="full"] .lth-overlay{display:block}
+
+  .lth-top{position:absolute;left:0;right:0;top:0;display:flex;justify-content:space-between;
+    align-items:flex-start;gap:16px;padding:20px 24px;color:#fff;
+    background:linear-gradient(to bottom,rgba(0,0,0,.76),rgba(0,0,0,0))}
+  .lth-now{display:flex;gap:12px;align-items:flex-start;min-width:0}
+  .lth-chip{flex:none;width:52px;height:34px;display:grid;place-items:center;border-radius:4px;
+    background:rgba(255,255,255,.14);font-size:11px;font-weight:700;letter-spacing:.04em}
+  .lth-title{font-size:19px;font-weight:600;line-height:1.2;text-shadow:0 1px 5px rgba(0,0,0,.85)}
+  .lth-sub{font-size:12.5px;opacity:.86;margin-top:3px;text-shadow:0 1px 5px rgba(0,0,0,.85)}
+  .lth-live{display:inline-flex;align-items:center;gap:5px;font-size:10.5px;font-weight:700;
+    letter-spacing:.09em;padding:2px 7px;border-radius:999px;background:#c0392b;color:#fff;margin-left:8px}
+  .lth-acts{display:flex;gap:8px;flex:none}
+  .lth-acts button{background:rgba(0,0,0,.5);border:1px solid rgba(255,255,255,.28);color:#fff;
+    border-radius:6px;padding:6px 10px;font-size:12.5px;cursor:pointer}
+  .lth-acts button:hover{background:rgba(0,0,0,.72)}
+  .lth-acts button:focus-visible{outline:2px solid #fff;outline-offset:2px}
+
+  .lth-bottom{position:absolute;left:0;right:0;bottom:0;padding:16px 24px 20px;color:#fff;
+    background:linear-gradient(to top,rgba(0,0,0,.82),rgba(0,0,0,0))}
+  .lth-bar{height:4px;border-radius:2px;background:rgba(255,255,255,.26);overflow:hidden;margin-bottom:8px}
+  .lth-bar i{display:block;height:100%;background:#fff}
+  .lth-left{font-size:12px;opacity:.86;margin-bottom:12px;text-shadow:0 1px 4px rgba(0,0,0,.8)}
+  .lth-strip{display:flex;gap:8px;overflow-x:auto;scrollbar-width:none;padding-bottom:2px}
+  .lth-strip::-webkit-scrollbar{display:none}
+  .lth-card{flex:none;width:170px;padding:9px 11px;border-radius:6px;cursor:pointer;text-align:left;
+    background:rgba(0,0,0,.52);border:1px solid rgba(255,255,255,.16);color:#fff}
+  .lth-card.on{border-color:#fff;background:rgba(255,255,255,.16)}
+  .lth-card.prev{outline:2px solid var(--accent);outline-offset:1px}
+  .lth-card b{display:block;font-size:12.5px}
+  .lth-card small{display:block;font-size:11px;opacity:.8;margin-top:2px;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .lth-hints{margin-top:10px;font-size:11.5px;opacity:.62;letter-spacing:.02em}
+  .lth-sheet{position:absolute;left:0;right:0;bottom:0;height:70%;overflow:auto;z-index:3;
+    background:rgba(8,9,12,.94);padding:20px 24px;color:#fff}
+  .lth-sheet[hidden]{display:none}
+
+  /* the dock's caption bar: what is playing, and the three ways out */
+  .lth-cap{display:flex;align-items:center;gap:10px;padding:9px 12px;height:48px;
+    background:var(--panel);border-top:1px solid var(--line);color:var(--text);font-size:12.5px}
+  .lth[data-mode="slot"] .lth-cap,.lth[data-mode="full"] .lth-cap{display:none}
+  .lth-cap .grow{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .lth-cap button{background:none;border:1px solid var(--line);border-radius:5px;color:var(--text);
+    cursor:pointer;padding:4px 8px;font-size:12px}
+  .lth-cap button:hover{border-color:var(--accent)}
+
+  /* ---- the page: list view and grid view, one render tree ---------------- */
+  .lt-head{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:0 0 14px}
+  .lt-switch{display:inline-flex;border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}
+  .lt-switch button{background:var(--panel);border:0;color:var(--muted);cursor:pointer;
+    padding:6px 13px;font-size:13px;font-family:inherit}
+  .lt-switch button[aria-pressed="true"]{background:var(--panel2);color:var(--text)}
+  .lt-switch button:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+
+  .lt-split{display:grid;grid-template-columns:400px minmax(0,1fr);gap:20px;align-items:start}
+  @media (max-width:1100px){.lt-split{grid-template-columns:minmax(0,1fr)}}
+  .lt-list{border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;background:var(--panel)}
+  .lt-row{display:grid;grid-template-columns:52px minmax(0,1fr) auto;gap:10px;align-items:start;
+    width:100%;text-align:left;background:none;border:0;border-top:1px solid var(--line);
+    color:var(--text);cursor:pointer;padding:12px 14px;min-height:78px;font-family:inherit;font-size:13.5px}
+  .lt-row:first-child{border-top:0}
+  .lt-row:hover{background:var(--panel2)}
+  .lt-row:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+  .lt-row.on{background:var(--panel2);box-shadow:inset 3px 0 0 var(--accent)}
+  .lt-row.locked{opacity:.55;cursor:not-allowed}
+  .lt-chip{width:52px;height:32px;display:grid;place-items:center;border-radius:4px;
+    background:var(--panel2);border:1px solid var(--line);font-size:10.5px;font-weight:700;
+    letter-spacing:.04em;color:var(--muted)}
+  .lt-row b{font-size:13.5px}
+  .lt-row .prog{display:block;margin-top:3px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .lt-row .next{display:block;margin-top:2px;color:var(--muted);font-size:12px;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .lt-mini{height:3px;border-radius:2px;background:var(--line);margin:6px 0 2px;overflow:hidden}
+  .lt-mini i{display:block;height:100%;background:var(--accent)}
+  .lt-star{color:var(--accent);font-size:13px}
+
+  .lt-stage{border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;background:var(--panel)}
+  .lt-slot{width:100%;aspect-ratio:16/9;background:#000}
+  .lt-nowbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 14px;
+    border-top:1px solid var(--line);font-size:13px}
+  .lt-nowbar .grow{flex:1;min-width:120px}
+  .lt-nowbar button{background:var(--panel2);border:1px solid var(--line);border-radius:6px;
+    color:var(--text);cursor:pointer;padding:5px 9px;font-size:12.5px;font-family:inherit}
+  .lt-nowbar button:hover{border-color:var(--accent)}
+  .lt-tonight{display:flex;gap:6px;overflow-x:auto;padding:12px 14px;border-top:1px solid var(--line)}
+  .lt-tonight .cell{flex:none;padding:8px 10px;border:1px solid var(--line);border-radius:6px;
+    background:var(--panel);font-size:12px;min-width:96px}
+  .lt-tonight .cell.on{border-color:var(--accent);background:var(--panel2)}
+  .lt-tonight .cell small{display:block;color:var(--muted);font-size:11px}
+
+  /* the grid: sticky channel column, sticky time header, one now line */
+  .lt-gridwrap{border:1px solid var(--line);border-radius:var(--radius);overflow:auto;
+    background:var(--panel);max-height:64vh;position:relative}
+  .lt-grid{position:relative;min-width:max-content}
+  .lt-times{display:flex;position:sticky;top:0;z-index:3;background:var(--panel);
+    border-bottom:1px solid var(--line)}
+  .lt-times .pad{position:sticky;left:0;z-index:4;width:180px;flex:none;background:var(--panel);
+    border-right:1px solid var(--line)}
+  .lt-times .t{flex:none;padding:8px 10px;font-size:12px;color:var(--muted);border-left:1px solid var(--line)}
+  .lt-grow{display:flex;align-items:stretch;border-bottom:1px solid var(--line);height:52px}
+  .lt-gname{position:sticky;left:0;z-index:2;width:180px;flex:none;background:var(--panel);
+    border-right:1px solid var(--line);display:flex;align-items:center;gap:8px;padding:0 10px;font-size:12.5px}
+  .lt-gcells{position:relative;flex:none}
+  .lt-cell{position:absolute;top:5px;bottom:5px;border:1px solid var(--line);border-radius:5px;
+    background:var(--panel);color:var(--text);font-size:12px;padding:5px 8px;text-align:left;
+    overflow:hidden;white-space:nowrap;text-overflow:ellipsis;cursor:pointer;font-family:inherit}
+  .lt-cell.airing{background:var(--panel2)}
+  .lt-cell.playing{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+  .lt-cell:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+  .lt-cell.ends{background:repeating-linear-gradient(45deg,var(--panel),var(--panel) 6px,var(--panel2) 6px,var(--panel2) 12px);
+    color:var(--muted);cursor:default}
+  .lt-now{position:absolute;top:0;bottom:0;width:2px;background:var(--bad);z-index:1;pointer-events:none}
+  .lt-pop{position:fixed;z-index:60;max-width:340px;background:var(--panel);border:1px solid var(--line);
+    border-radius:var(--radius);box-shadow:0 18px 44px rgba(0,0,0,.4);padding:14px 16px;font-size:13px}
+  .lt-pop[hidden]{display:none}
+  .lt-pop h3{margin:0 0 4px;font-size:14.5px}
+  .lt-pop p{margin:6px 0 0;color:var(--muted);font-size:12.5px}
+  .lt-pop .pills{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+  @media(prefers-reduced-motion:reduce){.lth-overlay{transition:none}}
   .modal{position:fixed;inset:0;background:#000;z-index:50;display:none;place-items:center;padding:0}
   .modal.open{display:grid}
   /* borderless "projection" player: true black, title + option buttons
@@ -3191,6 +3334,11 @@ if(window.matchMedia){ try{ window.matchMedia("(prefers-color-scheme: dark)").ad
 <body>
 <div id="app"></div>
 <div class="modal" id="modal" role="dialog" aria-modal="true" aria-label="Player"><div class="player" id="player"><video id="video" autoplay playsinline x-webkit-airplay="allow"></video><div class="pbar" id="pbar"><div class="ptitle" id="playTitle"></div><div class="row"><button class="pbtn" id="statsbtn" aria-haspopup="dialog" aria-expanded="false" title="Playback info (i)" onclick="toggleStats()">ⓘ Playback info</button><button class="pbtn" id="apbtn" style="display:none" title="AirPlay">📺 AirPlay</button><button class="pbtn" id="pbclose" title="Close (Esc)" onclick="closePlayer()">✕ Close</button></div></div><div class="ptimeline" id="ptimeline"><span class="ptime" id="ptcur" aria-hidden="true">0:00</span><div class="pseek" id="pseek" role="slider" tabindex="0" aria-label="Playback position" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="0:00"><div class="pseek-buf" id="pseekbuf" aria-hidden="true"></div><div class="pseek-fill" id="pseekfill" aria-hidden="true"></div><div class="pseek-thumb" id="pseekthumb" aria-hidden="true"></div></div><span class="ptime" id="ptdur" aria-hidden="true">0:00</span></div><div class="ptransport" id="ptransport"><button class="picon" id="pbback" aria-label="Back 10 seconds" title="Back 10s (←)" onclick="nudge(-10)">↺</button><button class="picon" id="pbplay" aria-label="Play" title="Play / Pause (space)" onclick="togglePlay()">▶</button><button class="picon" id="pbforward" aria-label="Forward 10 seconds" title="Forward 10s (→)" onclick="nudge(10)">↻</button><span class="ptransport-spacer" aria-hidden="true"></span><button class="picon paud" id="pbaudio" aria-haspopup="menu" aria-expanded="false" aria-label="Audio track" title="Audio track" style="display:none" onclick="toggleMenu('audio',1)">🔊</button><button class="picon pcc" id="pbsubs" aria-haspopup="menu" aria-expanded="false" aria-label="Subtitles" title="Subtitles (c)" style="display:none" onclick="toggleMenu('subs',1)">CC</button><button class="picon" id="pbquality" aria-haspopup="menu" aria-expanded="false" aria-label="Playback quality" title="Playback quality" onclick="toggleMenu('quality',1)">◆</button><button class="picon" id="pbsettings" aria-haspopup="menu" aria-expanded="false" aria-label="Playback settings" title="Playback settings" onclick="toggleMenu('settings',1)">⚙</button><button class="picon" id="pbinfo" aria-label="Title info" title="Show title, synopsis & release info" onclick="togglePlayerInfo()">≡</button><button class="picon" id="pbpip" aria-label="Picture in picture" title="Picture-in-picture" style="display:none" onclick="togglePip()">◲</button><button class="picon" id="pbfs" aria-label="Fullscreen" title="Fullscreen (f)" onclick="toggleFullscreen()">⛶</button></div><div class="pinfo" id="pinfo"></div><div class="pskip" id="pskip"></div><div class="ploading" id="ploading"><div class="pspin"></div><div class="ploadText" id="ploadText">Loading…</div><div class="ploadSub" id="ploadSub"></div><div class="ploadAct" id="ploadAct"></div></div><div class="statsov" id="statsov" data-mode="standard"><div class="statshd"><span id="statstitle">Playback info</span><div class="statsmodes" role="radiogroup" aria-label="Playback info size"><button type="button" data-stats-mode="mini" role="radio" onclick="setStatsMode('mini')">Mini</button><button type="button" data-stats-mode="standard" role="radio" onclick="setStatsMode('standard')">Standard</button><button type="button" data-stats-mode="debug" role="radio" onclick="setStatsMode('debug')">Debug</button></div><button class="statsx" aria-label="Close playback info" title="Close (i)" onclick="toggleStats()">✕</button></div><div class="statsbody" id="statsbody"></div></div><div class="pmenu" id="pmenu" role="menu"></div></div></div>
+<div id="live-tv-host" class="lth" data-mode="slot" hidden>
+  <video id="live-tv-video" playsinline aria-label="Live television"></video>
+  <div class="lth-overlay" id="live-tv-overlay"></div>
+  <div class="lth-cap" id="live-tv-caption"></div>
+</div>
 <div class="toast" id="toast"></div>
 
 <script src="/assets/cluster-panel.js"></script>
@@ -3240,7 +3388,7 @@ async function startNativeReader(token,itemId,fileId){
 window.startNativeReader=startNativeReader;
 
 // ---- api helpers ----------------------------------------------------------
-async function api(path, {method="GET", body=null, raw=false, signal=null}={}){
+async function api(path, {method="GET", body=null, raw=false, signal=null, keepSessionOn401=false}={}){
   const authGeneration=AUTH_GENERATION;
   const headers={};
   if(TOKEN) headers["authorization"]="Bearer "+TOKEN;
@@ -3250,7 +3398,27 @@ async function api(path, {method="GET", body=null, raw=false, signal=null}={}){
     const error=new Error("stale authorization"); error.status=401; error.staleAuth=true;
     throw error;
   }
-  if(res.status===401){
+  // `keepSessionOn401` belongs to the two cluster recovery reads, whose guard
+  // answers from a process-local proof cache. A closed cache there is a
+  // statement about the cluster, not about this credential, and ending the
+  // session over it is how a stuck protocol activation threw an administrator
+  // at the login screen on every visit to Settings.
+  //
+  // So don't guess: ask. `/me` is the credential's own route and has no
+  // cluster opinion. If it answers, the session is alive and the refusal
+  // belongs to the panel; if it refuses, that call ends the session on the
+  // ordinary path and this one just reports. Guessing either way is wrong in
+  // a real case — a node still running the old build refuses these reads with
+  // 401 while the credential is fine, and a token that genuinely died mid-tick
+  // must not leave the Cluster tab painting forever.
+  if(res.status===401&&keepSessionOn401&&authGeneration===AUTH_GENERATION){
+    // The probe is the whole mechanism: `/me` refused by an expired credential
+    // ends the session on the ordinary path above, inside this very call, and
+    // `/me` answered means the session is alive and the refusal is the
+    // cluster's. Either way this request then reports its own refusal to its
+    // caller, and the panel paints it.
+    try{ await api("/me"); }catch(probe){ void probe; }
+  }else if(res.status===401){
     // Parallel requests from an expired credential may finish after the user
     // has already signed in again. Only the credential generation that sent
     // this request may clear the current session.
@@ -6789,7 +6957,7 @@ function playbackControlCapabilities(){
   const decoderPx=Number(PLAY_CAPS&&PLAY_CAPS.maxheight)||displayPx;
   const px=Math.min(displayPx||decoderPx,decoderPx||displayPx);
   return {platform:"web",max_height:Math.max(144,Math.min(2160,Math.round(px)||1080)),
-    codecs,dynamic_ranges:ranges,dual_player_preparation:false};
+    codecs,dynamic_ranges:ranges,dual_player_preparation:preparedHandoffOffered(PLAYER)};
 }
 function playbackControlSelection(p){
   const requested=playQuality();
@@ -6905,9 +7073,597 @@ function playbackControlSnapshot(v,p){
       ? (pendingSeek?pendingSeek.targetMs:positionMs) : null,
     observed_download_bps:Number.isFinite(bps)&&bps>0?Math.round(bps):null,
     selection:playbackControlSelection(p),capabilities:playbackControlCapabilities(),
-    observation,acknowledgement:p.controlPreparation
-      ?p.controlPreparation.acknowledgement(demand):null};
+    observation,acknowledgement:pendingPlaybackControlAcknowledgement(p,demand)};
 }
+
+// ---- prepared replacement --------------------------------------------------
+//
+// The client half of a two-player handoff: the server stages a successor
+// session, tells this client where its playlist is and what source position
+// that playlist's zero maps to, and then waits. It never orders the switch —
+// there is no `commit_replacement` action — so everything below is this
+// client's decision, reported back as acknowledgement states.
+//
+// Two gates decide whether any of it ever runs, and they are independent. Gate
+// A is `capabilities.dual_player_preparation`: a hardware claim, and the
+// server stages nothing at all for a client that says false. Gate B is naming
+// `prepare_replacement` in `supported_actions`: a vocabulary claim, which this
+// build now makes unconditionally, because a client that declares it and is
+// never offered a preparation behaves exactly as it did before.
+//
+// Settings → Developer owns Gate A for this browser. It is advisory there —
+// the card lists what is measured and what is not, and whether each is
+// currently met — and it does not gate the switch: an operator who wants the
+// path on gets it on, and the readiness list is what tells them the cost.
+const PREPARED_HANDOFF_KEY="plurx.prepared_handoff";
+// How far past the incumbent's current film position the successor must be
+// buffered before this client will switch. A handoff that commits at the
+// playhead hands the viewer a decoder with nothing in front of it.
+const PREPARED_BUFFER_LEAD_MS=4000;
+// Drift the successor may carry into the switch before it is seeked onto the
+// incumbent's second. Below this a corrective seek costs more than it fixes:
+// it flushes the buffer that was the whole point of preparing.
+const PREPARED_ALIGN_SLACK_MS=250;
+// A switch that never renders is a failed preparation, and the server is owed
+// that answer rather than a 330-second silence.
+const PREPARED_FIRST_FRAME_MS=8000;
+const PREPARED_TERMINAL_STATES=["committed","failed","aborted"];
+// Unsent settlements, bounded. Two stagings can be unsettled at once — a
+// supersede queues the old one's `aborted` while the new one is already
+// reporting progress — and more than a few means the exchanges are not
+// happening at all, at which point the server's deadline has settled them.
+const PREPARED_ACK_QUEUE_MAX=4;
+// Stagings this client has settled, remembered so a replay of one is
+// recognised rather than built again. The server replays a `Prepare`
+// byte-identically until it processes the acknowledgement.
+const PREPARED_SETTLED_MEMORY=8;
+// How long a stopping reporter is left alive to deliver a final settlement.
+// One exchange, not a lease: the cadence floor is 250 ms and the deadline is
+// four seconds, so anything longer is waiting on a server that is not going to
+// answer.
+const CONTROL_SETTLE_FLUSH_MS=5000;
+// Whether this browser will OFFER to prepare, right now.
+//
+// The switch is the operator's answer; this is the player's. A successor that
+// died before it was ever playable is evidence about this playback rather than
+// about that attempt — and while staging starts no worker, that is every
+// attempt — so the offer is withdrawn for the rest of the playback instead of
+// building a doomed second pipeline on every quality change. Learned, and
+// forgotten when the player ends: no flag, nothing persisted, and nothing an
+// operator has to reset.
+function preparedHandoffOffered(p){
+  return preparedHandoffEnabled() && !(p&&p.preparedRefused);
+}
+function preparedHandoffEnabled(){
+  // Any scope without storage — a private window that refuses it, and the test
+  // harnesses that build these functions out of source — reads as off.
+  try{ return localStorage.getItem(PREPARED_HANDOFF_KEY)==="1"; }catch(e){ return false; }
+}
+function setPreparedHandoffEnabled(on){
+  try{ localStorage.setItem(PREPARED_HANDOFF_KEY,on?"1":"0"); }catch(e){}
+}
+// Source position represented by a session's own zero.
+//
+// Named after Android's `MediaOrigin.kt` and Apple's `sessionMediaOriginMs`
+// rather than inventing a third vocabulary for the same two timelines. A VOD
+// playlist is the whole immutable title, so its zero IS the source's zero; a
+// live or recovery session's zero is wherever the server started cutting, and
+// `media_origin_ms` is the server saying so. `start_seconds` is the older
+// field that says the same thing, and is the fallback.
+function sessionMediaOriginMs(session){
+  if(!session||typeof session!=="object") return 0;
+  if(session.vod) return 0;
+  const explicit=Number(session.media_origin_ms);
+  if(Number.isFinite(explicit)) return Math.max(0,Math.round(explicit));
+  const seconds=Number(session.start_seconds);
+  if(Number.isFinite(seconds)) return Math.max(0,Math.round(seconds*1000));
+  return 0;
+}
+// Film time from a player's local time. The commit boundary is expressed in
+// film time, so a handoff that reasons in local time lands the viewer at the
+// wrong second and reads as a seek bug rather than an alignment bug.
+function realMediaPositionMs(localMs,baseMs,isVod){
+  const local=Number(localMs);
+  if(!Number.isFinite(local)) return 0;
+  const base=isVod?0:Math.max(0,Number(baseMs)||0);
+  return Math.max(0,Math.round(base+local));
+}
+// The inverse: where a film position sits on a session whose zero is `baseMs`.
+// This is the only thing that puts the second pipeline on the first's second.
+function preparedLocalPositionMs(filmMs,baseMs){
+  return Math.max(0,Math.round((Number(filmMs)||0)-Math.max(0,Number(baseMs)||0)));
+}
+// Where the incumbent is, in film time, right now.
+function playbackFilmPositionMs(v,p){
+  if(!v||!p) return 0;
+  return realMediaPositionMs(Math.max(0,(v.currentTime||0)*1000),(p.offset||0)*1000,!!p.vod);
+}
+// The queued settlement, if this exchange may carry it.
+//
+// A `committed` may not share an exchange with `demand:"end"` — the server
+// answers 400 to that pair — so a commit that collides with a close waits for
+// its own exchange instead of being dropped or renamed. Switching and then
+// closing is two exchanges, in that order.
+function pendingPlaybackControlAcknowledgement(p,demand){
+  const queue=p&&p.controlAcknowledgements;
+  if(!queue||!queue.length) return null;
+  // The head, unless it is a commit and this exchange ends the session: a
+  // `committed` may not share an exchange with `demand:"end"` — the server
+  // answers 400 to the pair — so the commit waits for its own exchange instead
+  // of being dropped or renamed. Switching and then closing is two exchanges,
+  // in that order.
+  const head=queue[0];
+  if(head.state==="committed"&&demand==="end") return null;
+  return head;
+}
+
+function queuePlaybackControlAcknowledgement(p,actionId,state,extra){
+  if(!p||!actionId||!state) return null;
+  const queue=p.controlAcknowledgements||(p.controlAcknowledgements=[]);
+  // A QUEUE and not a slot, because two stagings can be unsettled at once: a
+  // second `prepare` aborts the first, and the first's `aborted` is still
+  // waiting for an exchange when the second's `metadata_ready` is queued. One
+  // slot loses the abort, and the staging it belonged to then holds the
+  // session's only preparation slot until the 330-second deadline.
+  const at=queue.findIndex(entry=>entry.action_id===actionId);
+  if(at!==-1){
+    const pending=queue[at];
+    // A terminal settlement outranks a progress one: a `failed` must not be
+    // overwritten by a `metadata_ready` that was already in flight when the
+    // pipeline died.
+    if(PREPARED_TERMINAL_STATES.includes(pending.state)
+      &&!PREPARED_TERMINAL_STATES.includes(state)) return pending;
+    queue.splice(at,1);
+  }
+  const ack=Object.assign({action_id:actionId,state},extra||{});
+  queue.push(ack);
+  // Bounded, because an unsent queue is a leak with a wire cost. The oldest
+  // goes first: a settlement nobody has managed to send in four preparations
+  // is one the server's deadline has already reaped.
+  while(queue.length>PREPARED_ACK_QUEUE_MAX) queue.shift();
+  notifyPlaybackControl();
+  return ack;
+}
+
+function settlePlaybackControlAcknowledgement(p,request){
+  const sent=request&&request.acknowledgement;
+  const queue=p&&p.controlAcknowledgements;
+  if(!sent||!queue||!queue.length) return;
+  // Matched on both fields rather than on identity: the reporter replays a
+  // retried request, and the object it replays is the one that was queued.
+  const at=queue.findIndex(entry=>entry.action_id===sent.action_id&&entry.state===sent.state);
+  if(at!==-1) queue.splice(at,1);
+}
+
+function preparedVideoElement(){
+  return document.getElementById("video-prepared");
+}
+// Created on the first preparation rather than shipped in the modal. The
+// structural golden pins what `#player` contains, and a second `<video>` that
+// exists on every page — including the ones that never prepare anything — is a
+// decoder host the page has no use for. Once a switch has happened the retired
+// element IS this element, so nothing is created twice.
+function ensurePreparedVideoElement(){
+  const existing=preparedVideoElement();
+  if(existing) return existing;
+  const v=document.getElementById("video");
+  if(!v||!v.parentNode) return null;
+  const spare=document.createElement("video");
+  spare.id="video-prepared";
+  spare.muted=true;
+  // The attributes the authoritative element carries, because after a switch
+  // this element IS the authoritative one. A successor without
+  // `x-webkit-airplay` would silently cost the viewer AirPlay for the rest of
+  // the session, and nobody would connect that to a quality change.
+  spare.setAttribute("playsinline","");
+  spare.setAttribute("x-webkit-airplay","allow");
+  spare.setAttribute("aria-hidden","true");
+  spare.setAttribute("tabindex","-1");
+  spare.style.display="none";
+  v.parentNode.appendChild(spare);
+  return spare;
+}
+
+function preparedState(p){
+  return (p&&p.prepared)||null;
+}
+// One successor at a time.
+//
+// A repeated `action_id` is the SAME staging replayed — the server replays it
+// byte-identically on every exchange until it settles — so it must not build a
+// second pipeline. A different `action_id` while one is live aborts the old
+// one first: the server allows one preparation per session, and a client that
+// silently dropped the first would hold its slot until the 330 s deadline.
+function handlePreparedReplacementAction(p,action){
+  if(!p||!action) return null;
+  if(!window.PlurxPlaybackControl||!PlurxPlaybackControl.validPreparation(action)) return null;
+  // A staging this client has already settled is replayed until the server
+  // processes the acknowledgement, which takes at least one more exchange —
+  // and `p.prepared` is cleared the moment it settles. Without this, a commit
+  // whose first frame is still pending, or an abort whose exchange has not
+  // landed, is answered by BUILDING THE SAME PREPARATION AGAIN, on the element
+  // the viewer is now watching.
+  if(preparedSettlementDone(p,action.action_id)) return null;
+  const existing=preparedState(p);
+  if(existing&&existing.actionId===action.action_id) return existing;
+  if(existing) abandonPreparedReplacement(p,"aborted","superseded by a newer preparation");
+  return beginPreparedReplacement(p,action);
+}
+// Settled stagings, so a replay is recognised rather than rebuilt. Bounded and
+// keyed by `action_id`; a session sees a handful of these at most.
+function preparedSettlementDone(p,actionId){
+  return !!(p&&p.preparedSettled&&p.preparedSettled.includes(actionId));
+}
+function markPreparedSettlement(p,actionId){
+  if(!p||!actionId) return;
+  const settled=p.preparedSettled||(p.preparedSettled=[]);
+  if(settled.includes(actionId)) return;
+  settled.push(actionId);
+  while(settled.length>PREPARED_SETTLED_MEMORY) settled.shift();
+}
+
+function beginPreparedReplacement(p,action){
+  const v=document.getElementById("video"), spare=ensurePreparedVideoElement();
+  if(!v||!spare||PLAYER!==p) return null;
+  // Two origins, and they are not the same number.
+  //
+  // `offeredOriginMs` is what the server said, echoed verbatim in the commit —
+  // it drops a commit that names a different one, silently, because the origin
+  // is how it tells "the client built what I offered" from "the client built
+  // something else and is asking me to publish it".
+  //
+  // `mediaOriginMs` is what this client aligns against, and a VOD successor's
+  // is zero: a VOD playlist is the whole immutable title, so its own zero IS
+  // the source's zero and adding the resume position would seek the successor
+  // twice. A prepared replacement never changes presentation — the successor is
+  // the predecessor's request with the selection fields overwritten — so the
+  // predecessor's `vod` is the successor's.
+  const offeredOriginMs=Math.max(0,Math.round(Number(action.media_origin_ms)||0));
+  const originMs=sessionMediaOriginMs({vod:!!p.vod,media_origin_ms:offeredOriginMs});
+  const filmMs=playbackFilmPositionMs(v,p);
+  const state={actionId:action.action_id,sessionId:action.session_id,
+    playlistUrl:action.playlist_url,mediaOriginMs:originMs,offeredOriginMs,
+    selection:action.effective_selection,
+    startAtSec:preparedLocalPositionMs(filmMs,originMs)/1000,
+    state:"building",hls:null,metadata:false,buffered:false,
+    frameTimer:null,frameListener:null,startedAt:Date.now()};
+  p.prepared=state;
+  clientLog(Object.assign({level:"info",event:"prepared_replacement",detail:"staged",
+    message:`preparing ${action.session_id} at film ${Math.round(filmMs/1000)}s `+
+      `(origin ${Math.round(offeredOriginMs/1000)}s, ${preparedSelectionText(action.effective_selection)})`},
+    playbackContext()));
+  try{
+    spare.muted=true;
+    spare.style.display="none";
+    if(preferNativeHls(spare)||!window.Hls||!Hls.isSupported()) preparedNativeAttach(p,state,spare);
+    else preparedHlsAttach(p,state,spare);
+  }catch(error){
+    failPreparedReplacement(p,state,String(error&&error.message||error));
+    return null;
+  }
+  return state;
+}
+
+function preparedSelectionText(selection){
+  if(!selection) return "unknown delivery";
+  const delivery=selection.codec==="source"?"direct":"transcode";
+  const grade=selection.dynamic_range?` ${selection.dynamic_range}`:"";
+  return `${selection.height||0}p${grade} ${delivery}${selection.quality_auto?" auto":""}`;
+}
+function preparedHlsAttach(p,state,spare){
+  const tgt=bufferTargets(p&&p.bufSegSecs);
+  const hls=new Hls({
+    enableWorker:false,
+    maxBufferLength:tgt.fwd,
+    backBufferLength:tgt.back,
+    ...(tgt.budgeted?{maxBufferSize:tgt.fwdBytes}:{}),
+    fragLoadPolicy:vodClientContract().fragLoadPolicy,
+    // Told before the first fragment, exactly as the incumbent was: seeking
+    // after attach downloads the opening of the successor and throws it away,
+    // which on a prepared handoff is the entire cost the preparation exists to
+    // avoid.
+    startPosition:state.startAtSec>0?state.startAtSec:-1,
+    xhrSetup:x=>{ if(TOKEN) x.setRequestHeader("authorization","Bearer "+TOKEN); }});
+  // The EWMA the incumbent paid to learn, so the successor's first rung choice
+  // is not a cold guess on a link this client has been measuring all along.
+  // Deliberately one-way: what the successor measures is not written back, so
+  // a pipeline that fails on its way up cannot drag the incumbent's estimate
+  // down with it.
+  const seed=PlaybackPolicy.bandwidthSeedBps({
+    outgoingEstimateBps:p&&p.bandwidthSeedBps, priorKbps:p&&p.priorKbps});
+  if(seed) try{ hls.bandwidthEstimate=seed; }catch(e){}
+  state.hls=hls;
+  hls.loadSource(state.playlistUrl);
+  hls.attachMedia(spare);
+  const current=()=>preparedState(p)===state&&PLAYER===p;
+  hls.on(Hls.Events.MANIFEST_PARSED,()=>{
+    if(!current()) return;
+    notePreparedMetadata(p,state);
+    // Muted and hidden, and playing: a paused successor's clock does not track
+    // the incumbent's, and every second of drift is a corrective seek at the
+    // switch.
+    try{ const started=spare.play(); if(started&&started.catch) started.catch(()=>{}); }catch(e){}
+  });
+  if(Hls.Events.BUFFER_APPENDED) hls.on(Hls.Events.BUFFER_APPENDED,()=>{
+    if(current()) notePreparedBuffer(p,state);
+  });
+  hls.on(Hls.Events.ERROR,(_,d)=>{
+    if(!current()||!d||!d.fatal) return;
+    failPreparedReplacement(p,state,String(d.details||d.type||"hls.js fatal error"));
+  });
+}
+// Native HLS: the session id in the URL is the credential, same as the
+// incumbent's path.
+function preparedNativeAttach(p,state,spare){
+  const current=()=>preparedState(p)===state&&PLAYER===p;
+  const onMetadata=()=>{
+    spare.removeEventListener("loadedmetadata",onMetadata);
+    if(!current()) return;
+    if(state.startAtSec>0) try{ spare.currentTime=state.startAtSec; }catch(e){}
+    notePreparedMetadata(p,state);
+    try{ const started=spare.play(); if(started&&started.catch) started.catch(()=>{}); }catch(e){}
+  };
+  const onProgress=()=>{ if(current()) notePreparedBuffer(p,state); };
+  const onError=()=>{
+    if(current()) failPreparedReplacement(p,state,"the successor element reported an error");
+  };
+  state.nativeListeners=[["loadedmetadata",onMetadata],["progress",onProgress],
+    ["timeupdate",onProgress],["error",onError]];
+  for(const pair of state.nativeListeners) spare.addEventListener(pair[0],pair[1]);
+  spare.src=tok(state.playlistUrl);
+}
+// The manifest parsed and the tracks are known. Progress states are optional —
+// the server behaves correctly without them — but they are how an operator
+// sees how far a preparation got before it died.
+function notePreparedMetadata(p,state){
+  if(state.metadata) return;
+  state.metadata=true;
+  state.state="metadata_ready";
+  queuePlaybackControlAcknowledgement(p,state.actionId,"metadata_ready");
+}
+// How far the successor is buffered, in FILM time, through the range that
+// contains its own playhead. A range that does not contain the playhead is not
+// runway; it is a gap the decoder will stop at.
+function preparedBufferedThroughMs(state,spare){
+  try{
+    const local=spare.currentTime||0;
+    for(let i=0;i<spare.buffered.length;i++){
+      if(spare.buffered.start(i)<=local+0.25&&spare.buffered.end(i)>=local){
+        return Math.max(0,Math.round(state.mediaOriginMs+spare.buffered.end(i)*1000));
+      }
+    }
+  }catch(e){}
+  return null;
+}
+function notePreparedBuffer(p,state){
+  const v=document.getElementById("video"), spare=preparedVideoElement();
+  if(!v||!spare) return;
+  const through=preparedBufferedThroughMs(state,spare);
+  if(through==null) return;
+  const target=playbackFilmPositionMs(v,p)+PREPARED_BUFFER_LEAD_MS;
+  if(through<target) return;
+  if(!state.buffered){
+    state.buffered=true;
+    state.state="buffer_ready";
+    queuePlaybackControlAcknowledgement(p,state.actionId,"buffer_ready",
+      {buffered_through_ms:through});
+  }
+  commitPreparedReplacement(p,state);
+}
+// The switch.
+//
+// Order matters and it is not negotiable: the successor becomes visible and
+// audible, the predecessor is retired, and only then — once a frame has
+// actually rendered — is `committed` sent. The commit is a claim that the
+// switch already happened, and the store CAS that follows moves the playback
+// pointer; a commit sent early moves it to a session the viewer is not
+// watching.
+function commitPreparedReplacement(p,state){
+  const v=document.getElementById("video"), spare=preparedVideoElement();
+  if(!v||!spare||PLAYER!==p||preparedState(p)!==state) return false;
+  if(state.state==="committing"||state.state==="committed") return false;
+  if(!playbackOwnsAttachedMedia(p)) return false;
+  state.state="committing";
+  const filmMs=playbackFilmPositionMs(v,p);
+  const wanted=preparedLocalPositionMs(filmMs,state.mediaOriginMs)/1000;
+  const drift=Math.abs((spare.currentTime||0)-wanted)*1000;
+  if(drift>PREPARED_ALIGN_SLACK_MS) try{ spare.currentTime=Math.max(0,wanted); }catch(e){}
+  const predecessor=p.hls, retired=v;
+  // Authoritative before visible, so anything that reads PLAYER.hls during the
+  // swap reads the instance that owns the picture.
+  p.hls=state.hls;
+  p.sessionId=state.sessionId;
+  p.probeUrl=state.playlistUrl;
+  p.offset=state.mediaOriginMs/1000;
+  p.prepared=null;
+  // Still this player's business until its first frame settles: the watchdog
+  // below has to be cancellable by a teardown, or it fires eight seconds after
+  // the player is gone and files a `failed` against a staging nobody is
+  // watching any more.
+  p.preparedCommitting=state;
+  markPreparedSettlement(p,state.actionId);
+  spare.muted=false;
+  try{ spare.volume=retired.volume; }catch(e){}
+  spare.style.display="";
+  spare.removeAttribute("aria-hidden");
+  retired.style.display="none";
+  retired.muted=true;
+  retired.setAttribute("aria-hidden","true");
+  // The element the rest of the page addresses is `#video`. Swapping the ids
+  // rather than moving nodes keeps every `getElementById("video")` correct
+  // without touching the modal's structure — but only the lookups. Everything
+  // bound to the old NODE has to move too, which is what `adoptPlaybackMediaElement`
+  // is for, and it runs before the predecessor is destroyed so the retired
+  // element is never the one the page is talking to.
+  retired.id="video-prepared";
+  spare.id="video";
+  adoptPlaybackMediaElement(p,spare);
+  // Deliberately NOT a new media attachment. `startPlaybackControl` captured
+  // the current one and refuses to capture a snapshot against any other, so
+  // beginning one here would wedge the reporter — and the `committed` this
+  // switch is about to earn would never reach an exchange.
+  resetPlaybackTransportEvents(spare);
+  p.wantsPlayback=true;
+  // Un-muting without a user gesture pauses the element on WebKit, and the
+  // last gesture was minutes ago. Ask again: a switch whose picture never
+  // advances is reported as a failure eight seconds later, after the
+  // predecessor is already gone.
+  try{ const resumed=spare.play(); if(resumed&&resumed.catch) resumed.catch(()=>{}); }catch(e){}
+  destroyHlsInstance(p,predecessor,retired);
+  disposeRetiredMediaElement(retired);
+  // The delivery badges and the info panel are painted from the session, and
+  // the session just changed. Without this they describe the predecessor for
+  // the rest of the film — on a handoff whose entire purpose was to change what
+  // is being delivered.
+  renderPlayerInfo();
+  preparedFirstFrame(p,state,spare,unixMs=>{
+    state.state="committed";
+    if(p.preparedCommitting===state) p.preparedCommitting=null;
+    queuePlaybackControlAcknowledgement(p,state.actionId,"committed",
+      {first_frame_unix_ms:unixMs,committed_media_origin_ms:state.offeredOriginMs});
+    clientLog(Object.assign({level:"info",event:"prepared_replacement",detail:"committed",
+      message:`switched to ${state.sessionId} at film ${Math.round(filmMs/1000)}s`},
+      playbackContext()));
+  },()=>{
+    // Switched, and nothing rendered. The honest answer is `failed`: the
+    // server is owed a settlement either way, and reporting a commit that did
+    // not happen would write it to a durable row and move the playback pointer
+    // to a session showing the viewer nothing.
+    state.state="failed";
+    if(p.preparedCommitting===state) p.preparedCommitting=null;
+    queuePlaybackControlAcknowledgement(p,state.actionId,"failed");
+    clientLog(Object.assign({level:"error",event:"prepared_replacement",detail:"no_first_frame",
+      message:`successor ${state.sessionId} rendered no frame within ${PREPARED_FIRST_FRAME_MS}ms`},
+      playbackContext()));
+  });
+  return true;
+}
+// Move every per-element binding onto the element that now owns the picture.
+//
+// `wirePlayerMedia` carries the listener set, and `play()` binds five more
+// things to the element it captured — the ended handler, the progress tick, the
+// hitch detector, the decode probe and the AirPlay button. A switch that
+// changed which element is `#video` and left those behind would produce a
+// player that looks fine and has no scrubber, no stall detection, no decode
+// rescue and no autoplay-next, until the page is reloaded.
+function adoptPlaybackMediaElement(p,v){
+  if(!p||!v) return;
+  wirePlayerMedia(v);
+  try{ v.onended=()=>{ handleEnded(p.fileId).catch(()=>{}); }; }catch(e){}
+  try{ v.addEventListener("loadedmetadata",probeDecode,{once:true}); }catch(e){}
+  armHitchDetector(v);
+  setupAirplay(v);
+  clearInterval(p.progressTimer);
+  p.progressTimer=setInterval(()=>playbackProgressTick(v,p),500);
+  // The subtitle selection is element state — a `<track>`, a script cue list,
+  // or an hls.js rendition index — and none of it followed the switch. Clearing
+  // the applied-offset marker is what makes the transport tick re-apply
+  // `p.curSub` to the element that now owns the picture.
+  p._subOff=null;
+  pbTick(); pbSyncPlayIcon();
+}
+// The retired element leaves the page.
+//
+// It cannot simply be kept as the next successor's host: it carries the whole
+// listener set from its time as `#video`, so restaging it would have a hidden
+// pipeline dismissing the visible stream's loading overlay, raising its
+// "Buffering…" spinner and reporting its own errors as the viewer's. Dropping
+// the node drops the listeners with it, and `ensurePreparedVideoElement` builds
+// a clean one when a successor is next staged.
+function disposeRetiredMediaElement(retired){
+  if(!retired) return;
+  try{ retired.pause(); }catch(e){}
+  try{ retired.removeAttribute("src"); retired.load(); }catch(e){}
+  try{ retired.onended=null; }catch(e){}
+  try{ if(retired.parentNode) retired.parentNode.removeChild(retired); }catch(e){}
+}
+
+function preparedFirstFrame(p,state,element,onFrame,onTimeout){
+  let settled=false;
+  const finish=(run)=>{
+    if(settled) return;
+    settled=true;
+    if(state.frameTimer!=null){ clearTimeout(state.frameTimer); state.frameTimer=null; }
+    if(state.frameListener){
+      try{ element.removeEventListener("timeupdate",state.frameListener); }catch(e){}
+      state.frameListener=null;
+    }
+    run();
+  };
+  state.frameTimer=setTimeout(()=>finish(onTimeout),PREPARED_FIRST_FRAME_MS);
+  const done=()=>finish(()=>onFrame(Date.now()));
+  // `requestVideoFrameCallback` is the only API that answers "has a frame been
+  // presented" — but it answers it for VIDEO. On an audio-only title it exists
+  // and never fires, so a healthy handoff would sit out the watchdog and report
+  // `failed`. There, the first advancing `timeupdate` is the honest substitute,
+  // and it is the only one older Safari and Firefox have either.
+  if(streamHasVideo(p,element)&&typeof element.requestVideoFrameCallback==="function"){
+    try{ element.requestVideoFrameCallback(()=>done()); return; }catch(e){}
+  }
+  state.frameListener=()=>done();
+  element.addEventListener("timeupdate",state.frameListener);
+}
+
+function failPreparedReplacement(p,state,detail){
+  if(preparedState(p)!==state) return;
+  state.state="failed";
+  // Never playable, so stop asking for the next one. `buffered` is the line: a
+  // successor that reached its buffer target and then failed says something
+  // about that successor; one that never got there says the server cannot hand
+  // this playback a usable second pipeline at all.
+  if(!state.buffered) p.preparedRefused=true;
+  queuePlaybackControlAcknowledgement(p,state.actionId,"failed");
+  clientLog(Object.assign({level:"warn",event:"prepared_replacement",detail:"failed",
+    message:`preparation of ${state.sessionId} failed: ${detail}`},playbackContext()));
+  freePreparedReplacement(p,state);
+}
+// Settle and free. Every exit path runs through here — a new attach, a seek, a
+// quality change, the player closing, the reporter going away — because a
+// preparation nobody answered holds this session's ONLY preparation slot until
+// the 330-second deadline, and that session then gets no second chance for the
+// rest of its life. A leaked instance is also a second decoder running behind
+// a closed modal.
+function abandonPreparedReplacement(p,ackState,reason){
+  const state=preparedState(p);
+  if(!state) return false;
+  if(!PREPARED_TERMINAL_STATES.includes(state.state)){
+    queuePlaybackControlAcknowledgement(p,state.actionId,ackState||"aborted");
+    clientLog(Object.assign({level:"info",event:"prepared_replacement",detail:ackState||"aborted",
+      message:`preparation of ${state.sessionId} abandoned: ${reason||"no reason given"}`},
+      playbackContext()));
+  }
+  freePreparedReplacement(p,state);
+  return true;
+}
+function freePreparedReplacement(p,state){
+  if(preparedState(p)!==state) return;
+  p.prepared=null;
+  markPreparedSettlement(p,state.actionId);
+  const spare=preparedVideoElement();
+  if(state.frameTimer!=null){ clearTimeout(state.frameTimer); state.frameTimer=null; }
+  if(state.frameListener&&spare){
+    try{ spare.removeEventListener("timeupdate",state.frameListener); }catch(e){}
+  }
+  state.frameListener=null;
+  if(state.nativeListeners&&spare){
+    for(const pair of state.nativeListeners) spare.removeEventListener(pair[0],pair[1]);
+  }
+  state.nativeListeners=null;
+  // The same teardown discipline the incumbent gets, on an instance that was
+  // never authoritative: destroy it, then clear the element, or hls.js keeps
+  // polling a playlist nothing is watching. The player is deliberately NOT
+  // passed — a pipeline that failed should not seed the incumbent's bandwidth
+  // estimate with whatever it measured on its way down.
+  destroyHlsInstance(null,state.hls,spare);
+  state.hls=null;
+  if(spare){
+    try{ spare.pause(); spare.removeAttribute("src"); spare.load(); }catch(e){}
+    spare.muted=true;
+    spare.style.display="none";
+    spare.setAttribute("aria-hidden","true");
+  }
+}
+
 async function sendPlaybackControl(url,body,signal){
   const response=await fetch(url,{method:"POST",signal,
     headers:Object.assign({"content-type":"application/json"},TOKEN?{"authorization":"Bearer "+TOKEN}:{}),
@@ -6918,8 +7674,6 @@ async function sendPlaybackControl(url,body,signal){
     const code=failure&&typeof failure.code==="string"?failure.code:null;
     const error=new Error(code?`playback control ${code}`:"playback control HTTP "+response.status);
     error.status=response.status; error.code=code;
-    if(failure&&typeof failure.message==="string")
-      error.serverMessage=failure.message.replace(/[\r\n\0]/g," ").slice(0,240);
     if(failure&&typeof failure.generation==="string") error.generation=failure.generation;
     if(failure&&Number.isSafeInteger(failure.control_epoch)) error.controlEpoch=failure.control_epoch;
     if(failure&&Number.isSafeInteger(failure.retry_after_ms)) error.retryAfterMs=failure.retry_after_ms;
@@ -6928,34 +7682,59 @@ async function sendPlaybackControl(url,body,signal){
   return response.json();
 }
 function stopPlaybackControl(p){
-  if(p&&p.controlReporter){ p.controlReporter.stop(); p.controlReporter=null; }
-  if(p&&p.controlPreparation){ p.controlPreparation.stop("control_stopped"); p.controlPreparation=null; }
+  // Settle first, then flush, then stop — in that order, because each step
+  // destroys the means of the one before it. `abandonPreparedReplacement`
+  // queues the settlement; `flushPreparedSettlement` is what actually gets it
+  // onto an exchange, because the reporter's own capture refuses once the
+  // player no longer owns the media; and `stop()` aborts whatever is in flight,
+  // so stopping in the same turn is how a settlement is silently lost and a
+  // staging left to burn its 330-second deadline.
+  abandonPreparedReplacement(p,"aborted","the control reporter stopped");
+  cancelPreparedFirstFrame(p);
+  const reporter=p&&p.controlReporter;
+  if(reporter){
+    const flushed=flushPreparedSettlement(p,reporter);
+    p.controlReporter=null;
+    if(flushed) setTimeout(()=>reporter.stop(),CONTROL_SETTLE_FLUSH_MS);
+    else reporter.stop();
+  }
   clearPlaybackControlWaiters(p);
+  if(p) p.controlAcknowledgements=[];
 }
-// Readiness callbacks for the future two-player seam. The message adapter is
-// live now, but no second media element is created until the server gives the
-// staged successor a producer and a post-commit control bootstrap.
-function advancePlaybackPreparation(p,state,fields){
-  if(!p||!p.controlPreparation) return false;
-  const advanced=p.controlPreparation.advance(state,fields,playbackControlSelection(p));
-  if(advanced&&p.controlReporter&&!p.controlReporter.stopped) p.controlReporter.notify();
-  return advanced;
+// A switch whose first frame is still pending when the player goes away. The
+// watchdog is the only thing still holding that staging, and left armed it
+// reports a failure against a session that ended for an unrelated reason.
+function cancelPreparedFirstFrame(p){
+  const state=p&&p.preparedCommitting;
+  if(!state) return;
+  p.preparedCommitting=null;
+  if(state.frameTimer!=null){ clearTimeout(state.frameTimer); state.frameTimer=null; }
+  const spare=document.getElementById("video");
+  if(state.frameListener&&spare){
+    try{ spare.removeEventListener("timeupdate",state.frameListener); }catch(e){}
+  }
+  state.frameListener=null;
 }
-function playbackPreparationMetadataReady(p){
-  return advancePlaybackPreparation(p,"metadata_ready",{});
+// One last exchange for a settlement that has nowhere else to go.
+//
+// The reporter's `capture` returns null the moment the player stops owning the
+// attached media — which is exactly the state every teardown path is in — so a
+// queued `aborted` would never be built into a request. Building the capture
+// explicitly is the difference between settling the staging and leaving the
+// server to reap it 330 seconds later, after which that session gets no second
+// preparation for the rest of its life.
+function flushPreparedSettlement(p,reporter){
+  if(!p||!reporter||reporter.stopped) return false;
+  if(!p.controlOwner||!window.PlurxPlaybackControl) return false;
+  const queue=p.controlAcknowledgements;
+  if(!queue||!queue.length) return false;
+  const v=document.getElementById("video");
+  const snapshot=playbackControlSnapshot(v,p);
+  if(!snapshot||!snapshot.acknowledgement) return false;
+  const capture=PlurxPlaybackControl.capture(snapshot,p.controlIntentGeneration||0,p.controlOwner);
+  return !!(capture&&reporter.notify(capture));
 }
-function playbackPreparationBufferReady(p,bufferedThroughMs){
-  return advancePlaybackPreparation(p,"buffer_ready",{bufferedThroughMs});
-}
-function commitPlaybackPreparation(p,firstFrameUnixMs){
-  return advancePlaybackPreparation(p,"committed",{firstFrameUnixMs});
-}
-function failPlaybackPreparation(p){
-  return advancePlaybackPreparation(p,"failed",{});
-}
-function abortPlaybackPreparation(p){
-  return advancePlaybackPreparation(p,"aborted",{});
-}
+
 function notifyPlaybackControl(renderOverride,observationOverride){
   if(!playbackOwnsAttachedMedia(PLAYER))return null;
   const p=PLAYER;
@@ -7010,7 +7789,6 @@ function controlVerdictText(message){
 // retires it and every ask that was waiting on the previous action epoch.
 function supersedePlaybackControlIntent(p){
   if(!p) return 0;
-  if(typeof abortPlaybackPreparation==="function") abortPlaybackPreparation(p);
   p.controlIntentGeneration=(p.controlIntentGeneration||0)+1;
   p.controlVerdict=null;
   p.controlVerdictExpiresAt=null;
@@ -7195,8 +7973,6 @@ function startPlaybackControl(v,p,bootstrap){
     const attachment=p.mediaAttachment;
     const owner=Object.freeze({lifecycleId:CONTROL_CLIENT_ID,
       attachmentGeneration:startPlaybackControl.captureGeneration=(startPlaybackControl.captureGeneration||0)+1});
-    const preparation=new PlurxPlaybackControl.Preparation();
-    p.controlPreparation=preparation;
     const capture=()=>p.mediaAttachment===attachment&&playbackOwnsAttachedMedia(p)
       ?PlurxPlaybackControl.capture(playbackControlSnapshot(v,p),p.controlIntentGeneration||0,owner):null;
     const reporter=new PlurxPlaybackControl.Reporter({bootstrap,
@@ -7208,24 +7984,18 @@ function startPlaybackControl(v,p,bootstrap){
           ||p.mediaAttachment!==attachment||captured.owner.lifecycleId!==owner.lifecycleId
           ||captured.owner.attachmentGeneration!==owner.attachmentGeneration) return;
         p.controlLastRequest=request;
-        const stalePrepare=!!response&&response.action&&response.action.type==="prepare"
-          &&captured.intentGeneration!==(p.controlIntentGeneration||0)
-          &&!preparation.status().active;
-        const preparationOutcome=stalePrepare
-          ?(preparation.ignore(response.action.action_id,"stale_intent")?"ignored":"invalid")
-          :preparation.settle(request,response,error);
-        if(preparationOutcome==="invalid") reporter.stop();
-        // Readiness may arrive while the prior acknowledgement is in flight.
-        // Send the next queued rung only after the server accepts this one.
-        if(preparationOutcome==="acknowledged") reporter.notify();
-        // A commit returning the same offer is a successful HTTP exchange but
-        // a discarded acknowledgement. Queue `aborted` to release the staged
-        // server slot; waiting for an error would wait forever.
-        if(preparationOutcome==="commit_discarded") reporter.notify();
-        // The commit response still describes the predecessor and provides no
-        // successor control bootstrap. Stop at the documented server seam.
-        if(preparationOutcome==="committed") reporter.stop();
         settlePlaybackControlWaiters(p,request,response,error);
+        // An acknowledgement the server accepted is spent; one whose exchange
+        // failed stays queued for the next.
+        if(response) settlePlaybackControlAcknowledgement(p,request);
+        // The wire tag is `prepare`; the DECLARED name is
+        // `prepare_replacement`, and switching on the declared name here is
+        // the mistake that produces a silent no-op rather than a failure.
+        if(response&&response.action
+          &&response.action.type===PlurxPlaybackControl.PREPARE_ACTION_TAG
+          &&captured.intentGeneration===(p.controlIntentGeneration||0)){
+          handlePreparedReplacementAction(p,response.action);
+        }
         if(captured.intentGeneration===(p.controlIntentGeneration||0)&&response&&response.delivery
           &&subtitleReadinessRetryTransition(p,response.delivery)){
           retryReadyNativeSubtitle(p);
@@ -7261,10 +8031,13 @@ function startPlaybackControl(v,p,bootstrap){
         }
       }});
     p.controlReporter=reporter;
+    // Kept so `flushPreparedSettlement` can build a capture this reporter will
+    // accept after the player has stopped owning the media. Nothing else reads
+    // it, and it is replaced with the reporter it belongs to.
+    p.controlOwner=owner;
     reporter.start();
     return reporter;
   }catch(error){
-    if(p.controlPreparation){ p.controlPreparation.stop("start_failed"); p.controlPreparation=null; }
     p.controlLastError={at:Date.now(),message:String(error&&error.message||error)};
     return null;
   }
@@ -7908,6 +8681,13 @@ function qualityLabel(){
 }
 
 async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttempt, retryIntent){
+  // Live TV holds a physical tuner and, since the dock, keeps holding it on
+  // every other route. Starting a film used to be the moment it was released
+  // (the route change stopped it); now the dock survives, so two pictures
+  // play at once and the tuner is held behind a modal with no way to reach
+  // its Stop button. `watchLiveTv` closes an open film for the same reason —
+  // this is the missing half of that pair.
+  if(typeof LIVE_TV_LEASE!=="undefined"&&(LIVE_TV_LEASE.current||LIVE_TV.starting)) stopLiveTv().catch(()=>{});
   const openAttempt=reservedOpenAttempt||PLAY_OPEN_GATE.begin("open");
   const openIsCurrent=()=>PLAY_OPEN_GATE.current(openAttempt);
   const predecessor=PLAYER?.mediaPredecessor||PLAYER;
@@ -8979,7 +9759,7 @@ function hitchBlame(){
   return bits.join(" · ");
 }
 // ---- decode margin ---------------------------------------------------------
-// The stutter investigation's verdict (docs/STUTTER-4K.md §5.3): on the 4K
+// The stutter investigation's verdict (docs/streaming/STUTTER-4K.md §5.3): on the 4K
 // HEVC remux the client's TYPICAL decode was 41.6ms against a 41.7ms frame
 // budget — the decoder running at exactly realtime, so every spike surfaced
 // as a held frame — while the same machine decodes the 1080p transcode at
@@ -9315,19 +10095,35 @@ function retuneBuffer(segSecs, force){
             `${tgt.fwd}s ahead + one ${tgt.seg}s segment + ${tgt.back}s behind = `+
             `${Math.round(tgt.peakBytes/1e6)}MB against a ${Math.round(MSE_QUOTA_BYTES/1e6)}MB quota`});
 }
+// Destroying an hls.js instance, in one place, because there are now two
+// slots that hold one: the authoritative `PLAYER.hls` and a prepared
+// successor. Both owe the same three things — keep the EWMA the instance paid
+// to learn, destroy it so it stops polling a playlist forever, and clear the
+// element's transport expectations.
+function destroyHlsInstance(p,hls,element){
+  if(!hls) return;
+  const estimate=PlaybackPolicy.bandwidthSeedBps({
+    outgoingEstimateBps:hls.bandwidthEstimate,
+    priorKbps:p&&p.priorKbps
+  });
+  if(estimate&&p) p.bandwidthSeedBps=estimate;
+  try{hls.destroy()}catch(e){}
+  resetPlaybackTransportEvents(element);
+}
 function teardownHls(){
   if(PLAYER) PLAYER.mediaAttachment=null;
+  // A staged successor belongs to the stream it was prepared against. Any new
+  // attach on the authoritative element — a seek, a quality change, a close —
+  // is that stream ending, and §C7 requires the staging be settled rather than
+  // left to the 330-second deadline: a preparation nobody answered holds this
+  // session's only preparation slot for the rest of its life.
+  abandonPreparedReplacement(PLAYER,"aborted","the playing stream was replaced");
   if(PLAYER&&PLAYER.hls){
-    rememberPlaybackTransportIntent(document.getElementById("video"),PLAYER);
+    const video=document.getElementById("video");
+    rememberPlaybackTransportIntent(video,PLAYER);
     PLAYER.internalMediaReset=true;
-    pausePlaybackInternally(document.getElementById("video"));
-    const estimate=PlaybackPolicy.bandwidthSeedBps({
-      outgoingEstimateBps:PLAYER.hls.bandwidthEstimate,
-      priorKbps:PLAYER.priorKbps
-    });
-    if(estimate) PLAYER.bandwidthSeedBps=estimate;
-    try{PLAYER.hls.destroy()}catch(e){}
-    resetPlaybackTransportEvents(document.getElementById("video"));
+    pausePlaybackInternally(video);
+    destroyHlsInstance(PLAYER,PLAYER.hls,video);
     PLAYER.hls=null;
   }
 }
@@ -10329,6 +11125,32 @@ function wirePlayer(){
   ["mousemove","pointerdown","touchstart"].forEach(ev=>window.addEventListener(ev,()=>{
     const modal=document.getElementById("modal"); if(modal&&modal.classList.contains("open")) playerActivity();
   }));
+  // Page-level, and therefore bound once here rather than per element: they
+  // read whichever element currently owns the picture.
+  document.addEventListener("visibilitychange",()=>{
+    const current=document.getElementById("video");
+    if(current) samplePlaybackPresentationClock(current,PLAYER);
+  });
+  document.addEventListener("visibilitychange",notifyPlaybackControl);
+  pbWireSeek();
+  if(document.pictureInPictureEnabled){ const pip=document.getElementById("pbpip"); if(pip) pip.style.display=""; }
+  wirePlayerMedia(v);
+}
+// Everything bound to the media element ITSELF, keyed to that element.
+//
+// This used to live inside `wirePlayer`, which runs once per page and captured
+// one element forever. That was correct while the page had exactly one
+// `<video>` for its whole life. A prepared handoff replaces which element owns
+// the picture, and a listener set that stayed on the retired node would leave
+// the scrubber frozen, the stall watchdog deaf, the decode-error rescue silent
+// and the end of the film unhandled — every one of them a symptom nobody would
+// trace back to a quality change. So the set moves with the element, and the
+// guard is on the element rather than on a page-level flag.
+function wirePlayerMedia(v){
+  if(!v||v._plurxMediaWired) return;
+  v._plurxMediaWired=true;
+  const p=document.getElementById("player");
+  if(!p) return;
   v.addEventListener("playing",()=>handlePlaybackPlaying(v,PLAYER));
   v.addEventListener("canplay",()=>{
     if(PLAYER?.started&&!playbackWaitNeedsProgress(PLAYER)) setLoading(false);
@@ -10430,8 +11252,6 @@ function wirePlayer(){
     const loading=document.getElementById("ploading"); if(loading) loading.classList.add("failed");
     toast("Playback failed — "+(names[code]||("error "+code)));
   });
-  document.addEventListener("visibilitychange",samplePresentation);
-  document.addEventListener("visibilitychange",notifyPlaybackControl);
   v.addEventListener("timeupdate",()=>{ settlePlaybackControlSeek(v,PLAYER); checkMarkers(); });
   // Click the picture to play/pause and double-click for fullscreen — the
   // behaviour the native controls used to give us, gone now that we draw our
@@ -10447,11 +11267,10 @@ function wirePlayer(){
   });
   v.addEventListener("dblclick",e=>{ e.preventDefault(); toggleFullscreen(); });
   // Custom transport: keep the scrubber, times, buffered bar, and play icon in
-  // sync; enable the drag handler and the PiP button where supported.
-  pbWireSeek();
+  // sync. The seek drag handler and the PiP button belong to the chrome, not to
+  // the element, and are wired once in `wirePlayer`.
   ["timeupdate","progress","durationchange","loadedmetadata"].forEach(ev=>v.addEventListener(ev,pbTick));
   ["play","pause","playing","ended","emptied"].forEach(ev=>v.addEventListener(ev,pbSyncPlayIcon));
-  if(document.pictureInPictureEnabled){ const pip=document.getElementById("pbpip"); if(pip) pip.style.display=""; }
 }
 function markerNowMs(){ const v=document.getElementById("video"); return ((PLAYER.offset||0)+(v?v.currentTime||0:0))*1000; }
 function markerIsEstimated(m){
@@ -12722,6 +13541,7 @@ function paintActivityBody(d){
     ${dels.length
       ? `<table class="np"><thead><tr><th>Title</th><th>User</th>${attributed?"<th>Node</th>":""}<th>Stream</th><th>Started</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
       : `<div class="empty">Nothing streaming right now. Every delivery is listed here — direct play, remux and both HLS kinds.</div>`}
+    ${liveTvActivityRows(d.live_tv,nodeNames)}
     ${d.analysis?`<h2 class="section">Content analysis</h2>${analysisSummaryCard(d.analysis,"activity")}${analysisLiveProgress(d.analysis,nodeNames)}`:""}
     <h2 class="section">Pre-transcoding</h2>
     ${produce}
@@ -12738,6 +13558,21 @@ function paintActivityBody(d){
     const summary=again&&again.querySelector("summary");
     if(summary&&summary.focus) summary.focus();
   }
+}
+function liveTvActivityRows(rows,nodeNames){
+  if(!Array.isArray(rows)||rows.length===0) return "";
+  return `<h2 class="section">Live television</h2>
+    <div class="tbl"><table><thead><tr><th>Channel</th><th>On now</th><th>Viewer</th>
+      <th>Owner</th><th>Encoder</th><th>Age</th></tr></thead><tbody>
+      ${rows.map(row=>`<tr>
+        <td><b>${esc(row.channel_number)}</b> · ${esc(row.channel_name)}</td>
+        <td>${row.programme_title?esc(row.programme_title):'<span class="muted">—</span>'}</td>
+        <td>${esc(row.user)}</td>
+        <td>${esc(nodeNames[row.owner_node_id]||row.owner_node_id)}</td>
+        <td>${esc(row.encoder)} · ${esc(row.output_height)}p</td>
+        <td>${esc(Math.round(row.age_seconds/60))} min · ${esc(row.state)}</td>
+      </tr>`).join("")}
+    </tbody></table></div>`;
 }
 async function stopSession(id){
   try{ await api(`/activity/sessions/${id}`,{method:"DELETE"}); toast("Stream stopped"); renderActivityBody(); }
@@ -12834,12 +13669,21 @@ const SETTINGS_ENDPOINTS={
   // Stamped here rather than where the value is painted: loadSettingsKey serves
   // a cached aggregate without a request, and stamping that would let a tab
   // switch every ten seconds starve the refresh indefinitely.
-  // Advisory prerequisite readings for the Developer section. Secondary on
-  // purpose: it asks membership for the local applied roster, and the tab must
-  // paint its switches without waiting for that.
-  developerReadiness:()=>api("/developer/readiness"),
-  clusterOps:()=>api("/cluster/status").then(ops=>{
+  clusterOps:()=>api("/cluster/status",{keepSessionOn401:true}).then(ops=>{
     clusterOpsStamp(); return clusterOpsReceived(ops);
+  }).catch(error=>{
+    // A request from a credential generation that has already been replaced
+    // describes nothing about the current session; let it stay an error rather
+    // than painting it into the new one.
+    if(error&&error.staleAuth) throw error;
+    // A refused recovery read is a fact about the cluster, so it is reported
+    // by the panel that reports the cluster — named, dated and retryable —
+    // rather than as a page-level failure or, as it once was, as the end of
+    // the operator's session. `clusterOperationsCard` already knows this
+    // shape; it is the same one `/cluster/nodes` uses when it cannot answer.
+    clusterOpsStamp();
+    return {unavailable:true,code:(error&&error.code)||null,
+            message:(error&&error.message)||"request failed"};
   }),
 };
 const SETTINGS_MANIFEST={
@@ -12852,7 +13696,7 @@ const SETTINGS_MANIFEST={
   system:{required:["sys"],secondary:["playbackEvents"]},
   cluster:{required:["cluster"],secondary:["clusterOps"]},
   integrations:{required:["settings","trakt"],secondary:[]},
-  developer:{required:["settings"],secondary:["developerReadiness"]},
+  developer:{required:["settings"],secondary:[]},
 };
 function cacheSettings(value){
   SETTINGS=value; SETTINGS_DATA.settings=value; SETTINGS_LOADED.add("settings");
@@ -12925,11 +13769,6 @@ function patchSettingsSecondary(tab,key,value){
     const mount=document.getElementById("settings-playback-events");
     if(mount) mount.innerHTML=playbackSummaryCard(SETTINGS_DATA.playbackEvents||[]);
   }
-  if(tab==="developer"&&key==="developerReadiness"){
-    // Patched in place rather than re-rendering the panel: a half-changed
-    // switch above must survive a reading that arrived while it was being set.
-    applyDeveloperReadiness(value);
-  }
   if(tab==="cluster"&&key==="clusterOps"){
     // The roster is already interactive while this secondary request is in
     // flight. Hold a result that arrives under an election decision rather
@@ -12952,9 +13791,6 @@ function patchSettingsSecondaryError(tab,key,error){
   if(tab==="system"&&key==="playbackEvents"){
     const mount=document.getElementById("settings-playback-events");
     if(mount) mount.innerHTML=`<div class="card"><h2 class="section" style="margin-top:0">Playback <span class="muted">(7 days)</span></h2><span class="muted">Playback history is unavailable: ${message}</span></div>`;
-  }
-  if(tab==="developer"&&key==="developerReadiness"){
-    applyDeveloperReadiness({unavailable:error&&error.message||"request failed"});
   }
   if(tab==="cluster"&&key==="clusterOps"){
     const mount=document.getElementById("cluster-operations");
@@ -13079,7 +13915,7 @@ function settingsPanel(tab,d){
   if(tab==="system")       return systemPanel(d.sys,d.playbackEvents);
   if(tab==="cluster")      return clusterPanel(d);
   if(tab==="integrations") return integrationsPanel(d.settings,d.trakt);
-  if(tab==="developer")    return developerPanel(d.settings,d.developerReadiness);
+  if(tab==="developer")    return developerPanel(d.settings);
   return librariesPanel(d.libs,d.status,d.settings,d.dvConversions);
 }
 // The section header: name, one line of summary, the section's bulk actions.
@@ -13155,37 +13991,7 @@ function maintenancePanel(settings,dv){
     ${togRow("job-boot","Scan every library at startup","About 30 seconds after the server starts — a server switched off while files landed doesn't notice them until its next scheduled run.",settings.scan_on_startup)}
     ${setCardFoot("saveMaintenance")}`);
   return `${setHead("Maintenance","Background work this node does on its own: what is scheduled, what it costs, and where to turn it off.")}
-    <div class="setgrid2">${jobs}${precachePanel(settings)}${offlinePanel(settings)}${dvDiskPanel(settings,dv)}${telemetryPanel(settings)}</div>`;
-}
-// The offline budgets have always been in the settings API and have never had
-// a control. The master switch is the one that matters: turning it off stops
-// every preparation in flight, which is not a thing to leave discoverable
-// only by reading the API.
-const OFFLINE_GB=[1,5,10,25,50,100,250,500];
-const OFFLINE_USER_GB=[1,2,5,10,15,25,50,100];
-const OFFLINE_ROWS=[1,3,5,10,25,50,100];
-function offlinePanel(settings){
-  const on=settings.offline_enabled!==false;
-  return setCard(`${cardHead("Offline downloads","Packages the apps prepare on the server and take with them. Separate from the pre-transcoding budget above — this is media a viewer asked to keep.",`<span class="pill${on?" ok":""}">${on?"on":"off"}</span>`)}
-    ${togRow("off-on","Prepare offline packages","Turning this off cancels everything being prepared right now and refuses new requests. Packages already on a device are unaffected — they are on the device.",on)}
-    <div class="setfields">
-      <div><label for="off-gb">Server budget</label><select id="off-gb" class="every" title="How much disk all prepared offline packages may occupy on this node">${presetOpts(OFFLINE_GB.map(n=>[String(n),`${n} GB`]),settings.offline_max_gb,v=>`${v} GB`)}</select></div>
-      <div><label for="off-user-gb">Per viewer</label><select id="off-user-gb" class="every" title="How much of that budget any one viewer may hold">${presetOpts(OFFLINE_USER_GB.map(n=>[String(n),`${n} GB`]),settings.offline_max_gb_per_user,v=>`${v} GB`)}</select></div>
-      <div><label for="off-user-rows">Titles per viewer</label><select id="off-user-rows" class="every" title="How many packages any one viewer may have at once">${presetOpts(OFFLINE_ROWS.map(n=>[String(n),`${n}`]),settings.offline_max_rows_per_user,v=>`${v}`)}</select></div>
-    </div>
-    <div class="hint">Preparation encodes, so it competes for the same encoders as playback and loses to it, the same way pre-transcoding does. What is being prepared right now is on Activity.</div>
-    ${setCardFoot("saveOffline")}`);
-}
-async function saveOffline(btn){
-  btn.disabled=true;
-  try{
-    cacheSettings(await api("/settings",{method:"PUT",body:{
-      offline_enabled:document.getElementById("off-on").checked,
-      offline_max_gb:Number(document.getElementById("off-gb").value),
-      offline_max_gb_per_user:Number(document.getElementById("off-user-gb").value),
-      offline_max_rows_per_user:Number(document.getElementById("off-user-rows").value)}}));
-    toast("Offline downloads saved"); setCardSaved(btn);
-  }catch(e){ toast(e.message||"Couldn't save"); btn.disabled=false; }
+    <div class="setgrid2">${jobs}${precachePanel(settings)}${dvDiskPanel(settings,dv)}${telemetryPanel(settings)}</div>`;
 }
 const PRODUCE_EVERY=[[0,"Never"],[360,"6 hours"],[720,"12 hours"],[1440,"Daily"]];
 const CACHE_SIZES=[0,10,25,50,100,250,500,1000];
@@ -13549,13 +14355,6 @@ function playbackPanel(settings){
         <div><label for="phr">Then pace at</label><select id="phr" style="min-width:200px">${presetOpts([["1.5","1.5× — gentlest"],["2","2× — recommended"],["4","4×"],["0","Unlimited"]], settings.hls_readrate, v=>`${v}×`)}</select></div>
         <div><label for="pha">Buffer limit</label><select id="pha" style="min-width:200px">${presetOpts([["60","1 minute"],["180","3 minutes — recommended"],["600","10 minutes"],["0","No limit — needs disk"]], settings.hls_ahead_max_secs, v=>`${v} seconds`)}</select></div>
       </div>
-      <h2 class="section">Encoder capacity</h2>
-      <p class="sub" style="margin:0">How many streams this node may encode at once. The hardware number is what a start is admitted or refused against.</p>
-      <div class="setfields">
-        <div><label for="phw">Hardware encoders</label><select id="phw" style="min-width:230px" title="How many sessions may hold a hardware encoder at the same time">${presetOpts([["1","1 — one stream at a time"],["2","2 — recommended"],["3","3"],["4","4"],["6","6"],["8","8 — a capable GPU"]],settings.transcode_max_hw_sessions,v=>`${v} sessions`)}</select></div>
-        <div><label for="psw">Software encoder threads</label><select id="psw" style="min-width:230px" title="How many threads the software encoder pool may use when no hardware encoder is free">${presetOpts([["2","2"],["4","4"],["8","8"],["12","12"],["16","16"],["24","24"],["32","32"]],settings.transcode_software_pool_threads,v=>`${v} threads`)}</select></div>
-      </div>
-      <div class="hint">A hardware number above the encoders this machine actually has does not buy capacity — the extra sessions start and then fail in <b>ffmpeg</b>. Raising it also raises what a <em>switch</em> costs: while a viewer changes quality, the stream they are leaving keeps its slot for a few seconds so their player never sees a gap, so two of these are held for one viewer for that moment. To stop using the hardware encoder at all, set the encoder preference itself — a cap of zero leaves every start queuing for a slot that never frees before it gives up and encodes in software.</div>
       <div class="err" id="serr"></div>
       ${setCardFoot("saveStreaming")}`);
   const local=setCard(`${cardHead("This browser only","Saved in this browser. Nothing here reaches the server or another viewer.",`<span class="pill acc">local</span>`)}
@@ -13566,7 +14365,7 @@ function playbackPanel(settings){
 }
 // Live TV owns its own media element and capability. It never enters PLAYER,
 // file progress, playback-control, watched state, autoskip, or Trakt.
-const LIVE_TV={channels:[],serial:0,hls:null,timer:null,polling:false,lastChannel:null,cleanupMarker:null,unplayedSince:null,lastPosition:0};
+const LIVE_TV={channels:[],serial:0,hls:null,timer:null,polling:false,lastChannel:null,cleanupMarker:null,unplayedSince:null,lastPosition:0,starting:null};
 function liveTvNow(){
   return performance.now();
 }
@@ -13642,35 +14441,595 @@ function liveTvFailure(error){
   liveTvMessage(`${view.title}. ${view.detail}`);
 }
 async function viewLiveTv(generation=PAGE_RENDER_GENERATION){
-  await stopLiveTv().catch(()=>{});
   if(generation!==PAGE_RENDER_GENERATION) return;
   const route=location.hash;
+  liveTvWireHost();
+  LIVE_TV.selected=LIVE_TV.selected||liveTvPref("plurx_live_tv_last",null,null);
   layoutChrome("live-tv",`<h1>Live TV</h1><p class="sub">Over-the-air channels from your HDHomeRun. Live only — no recording or rewind.</p>
-    <section id="live-tv-player" class="card" aria-label="Live television player" hidden>
-      <div class="row"><strong id="live-tv-title"></strong><span class="pill">LIVE</span></div>
-      <video id="live-tv-video" playsinline style="display:block;width:100%;max-height:65vh;background:#000" aria-label="Live television"></video>
-      <div class="row"><button class="primary sm" onclick="resumeLiveTv()">Play live</button><button class="ghost sm" onclick="pauseLiveTv()">Pause</button><button class="ghost sm" onclick="muteLiveTv(this)">Mute</button><button class="ghost sm" onclick="fullscreenLiveTv()">Fullscreen</button><button class="ghost sm" onclick="stopLiveTv().catch(liveTvFailure)">Stop</button></div>
-    </section>
     <p id="live-tv-message" role="status" aria-live="polite">Loading channels…</p>
-    <div class="row"><label for="live-tv-search">Find a channel</label><input id="live-tv-search" type="search" oninput="renderLiveTvChannels()" placeholder="Number or name"><button class="ghost sm" onclick="viewLiveTv()">Refresh channels</button><button class="ghost sm" onclick="stopLiveTv().then(()=>liveTvMessage('Stopped')).catch(liveTvFailure)">Stop / retry cleanup</button>${ME.is_admin?'<a href="#/settings/developer">Configure HDHomeRun</a>':""}</div>
-    <div id="live-tv-channels" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px;margin-top:20px"></div>`);
+    <div id="live-tv-toolbar"></div>
+    <div id="live-tv-body"></div>`);
   setPagePhase(route,generation,"shell");
+  // The host follows the route back into its slot; a dock returning here
+  // never restarts the stream, it just moves.
+  liveTvSetMode("slot");
+  const host=liveTvHost(); if(host) host.hidden=!LIVE_TV_LEASE.current;
   try{
     const result=await api("/live-tv/channels",{signal:AbortSignal.timeout(30000)});
     if(generation!==PAGE_RENDER_GENERATION||location.hash!==route) return;
-    LIVE_TV.channels=result.channels; renderLiveTvChannels();
-    liveTvMessage(result.freshness==="stale"?`Showing a cached lineup (${result.age_seconds} seconds old). The tuner is currently unreachable; starting a channel requires a fresh check.`:`${result.channels.length} channels. Choose an unprotected channel to watch.`);
+    LIVE_TV.channels=result.channels;
+    if(!liveTvChannelById(LIVE_TV.selected)) LIVE_TV.selected=null;
+    const toolbar=document.getElementById("live-tv-toolbar");
+    if(toolbar) toolbar.innerHTML=liveTvToolbar();
+    renderLiveTvChannels();
+    liveTvMessage(result.freshness==="stale"
+      ?`Showing a cached lineup (${result.age_seconds} seconds old). The tuner is currently unreachable; starting a channel requires a fresh check.`
+      :`${result.channels.length} channels. Choose an unprotected channel to watch.`);
   }catch(e){ if(generation===PAGE_RENDER_GENERATION) liveTvFailure(e); }
   finally{ if(generation===PAGE_RENDER_GENERATION){ setPagePhase(route,generation,"content"); setPagePhase(route,generation,"settled"); } }
+  // The guide is the second read and never gates the first: the page is
+  // usable, and a channel is tunable, before it answers.
+  loadLiveTvGuide(generation,route);
+  // Everything on this page is a statement about the present tense — the red
+  // now line, every progress bar, "18 min left", which programme is "on now".
+  // Without a tick they were all frozen at first paint, so a page left open
+  // kept insisting a programme that ended an hour ago was still on. A minute
+  // is the resolution the page actually displays; it repaints from state and
+  // fetches nothing.
+  setPageTimer(()=>{
+    if(location.hash!==route) return;
+    renderLiveTvChannels();
+  },60000,generation);
+}
+function liveTvHost(){
+  return document.getElementById("live-tv-host");
+}
+function liveTvPref(key,fallback,allowed){
+  let value=null; try{ value=localStorage.getItem(key); }catch(e){}
+  return allowed&&!allowed.includes(value)?fallback:(value===null?fallback:value);
+}
+function liveTvSetPref(key,value){
+  try{ localStorage.setItem(key,value); }catch(e){}
+}
+function liveTvView(){ return liveTvPref("plurx_live_tv_view","list",["list","grid"]); }
+function liveTvFilter(){ return liveTvPref("plurx_live_tv_filter","all",["all","favorites"]); }
+function liveTvHideProtected(){ return liveTvPref("plurx_live_tv_hide_protected","0",["0","1"])==="1"; }
+function liveTvNowSeconds(){ return Math.floor(Date.now()/1000); }
+function liveTvSlotSeconds(){ return 1800; }
+function liveTvPxPerSlot(){ return 240; }
+function liveTvClock(unix){
+  return new Date(unix*1000).toLocaleTimeString([],{hour:"numeric",minute:"2-digit"});
+}
+function liveTvChannelById(id){
+  return LIVE_TV.channels.find(channel=>channel.id===id)||null;
+}
+function liveTvVisible(){
+  return PlurxLiveTv.filterChannels(LIVE_TV.channels,LIVE_TV.guide,
+    {query:LIVE_TV.query||"",filter:liveTvFilter(),hideProtected:liveTvHideProtected()},liveTvNowSeconds());
+}
+// The host is fixed and outside #app, so in `slot` mode the page draws an
+// empty box and the host is positioned over it. One observer for the
+// document's lifetime, rebound whenever the slot is re-rendered — the same
+// discipline the rails use.
+function liveTvTrackSlot(){
+  const host=liveTvHost(); if(!host) return;
+  const slot=document.getElementById("live-tv-slot");
+  if(!slot||host.dataset.mode!=="slot"){ return; }
+  const box=slot.getBoundingClientRect();
+  host.style.left=`${box.left}px`; host.style.top=`${box.top}px`;
+  host.style.width=`${box.width}px`; host.style.height=`${box.height}px`;
+  host.hidden=false;
+}
+function liveTvWireSlot(){
+  const slot=document.getElementById("live-tv-slot"); if(!slot) return;
+  if(!LIVE_TV.slotObserver&&window.ResizeObserver){
+    LIVE_TV.slotObserver=new ResizeObserver(()=>liveTvTrackSlot());
+  }
+  if(LIVE_TV.slotObserver){ LIVE_TV.slotObserver.disconnect(); LIVE_TV.slotObserver.observe(slot); }
+  if(!LIVE_TV.slotWired){
+    LIVE_TV.slotWired=true;
+    window.addEventListener("scroll",()=>liveTvTrackSlot(),{passive:true});
+    window.addEventListener("resize",()=>liveTvTrackSlot(),{passive:true});
+  }
+  liveTvTrackSlot();
+}
+function liveTvSetMode(mode){
+  const host=liveTvHost(); if(!host) return;
+  host.dataset.mode=mode;
+  if(mode!=="slot"){ host.style.left=""; host.style.top=""; host.style.width=""; host.style.height=""; }
+  if(mode==="dock"){
+    let saved=null; try{ saved=JSON.parse(localStorage.getItem("plurx_live_tv_dock")||"null"); }catch(e){}
+    if(saved&&Number.isFinite(saved.x)&&Number.isFinite(saved.y)){
+      host.style.left=`${saved.x}px`; host.style.top=`${saved.y}px`; host.style.right="auto"; host.style.bottom="auto";
+    }
+  }
+  host.hidden=false;
+  if(mode==="slot") liveTvTrackSlot();
+  liveTvPaint();
+}
+// Leaving the route no longer tears the stream down: it moves the picture into
+// a dock. Stopping stays explicit — the stop button here, on the overlay, or
+// the existing watchdogs.
+function liveTvLeaveRoute(){
+  const host=liveTvHost(); if(!host) return;
+  // `LIVE_TV.starting` matters as much as a current lease: during the start
+  // POST there is no `current` yet, and hiding the host here left a tuner
+  // about to be granted with nowhere to appear and no Stop control.
+  if(LIVE_TV_LEASE.current||LIVE_TV.starting){ liveTvSetMode("dock"); return; }
+  host.hidden=true;
+}
+function liveTvInPip(){
+  const video=document.getElementById("live-tv-video");
+  if(!video) return false;
+  return document.pictureInPictureElement===video||video.webkitPresentationMode==="picture-in-picture";
+}
+function liveTvPipSupported(){
+  const video=document.getElementById("live-tv-video");
+  return !!(document.pictureInPictureEnabled||(video&&video.webkitSupportsPresentationMode));
+}
+async function toggleLiveTvPip(){
+  const video=document.getElementById("live-tv-video"); if(!video) return;
+  try{
+    if(document.pictureInPictureElement===video){ await document.exitPictureInPicture(); }
+    else if(video.webkitPresentationMode==="picture-in-picture"){ video.webkitSetPresentationMode("inline"); }
+    else if(video.requestPictureInPicture){ await video.requestPictureInPicture(); }
+    else if(video.webkitSetPresentationMode){ video.webkitSetPresentationMode("picture-in-picture"); }
+  }catch(e){}
+  liveTvPaint();
+}
+function liveTvProgramme(channelId){
+  return PlurxLiveTv.programmeAt(LIVE_TV.guide,channelId,liveTvNowSeconds());
+}
+function liveTvRowMarkup(channel,selectedId){
+  const view=PlurxLiveTv.channelView(channel);
+  const at=liveTvProgramme(channel.id);
+  const pct=at.progress===null?0:Math.round(at.progress*100);
+  const classes=["lt-row"];
+  if(channel.id===selectedId) classes.push("on");
+  if(view.disabled) classes.push("locked");
+  const line=view.disabled?'<span class="prog">Protected channel · not playable</span>'
+    :at.now?`<span class="prog">${esc(at.now.title)}</span>
+       <span class="lt-mini"><i style="width:${pct}%"></i></span>
+       <span class="next">${esc(liveTvClock(at.now.end))}${at.next?" · Next: "+esc(at.next.title):""}</span>`
+    :'<span class="prog muted">No programme information</span>';
+  return `<button type="button" class="${classes.join(" ")}" role="option" aria-selected="${channel.id===selectedId}"
+      data-channel="${esc(channel.id)}" onclick="liveTvSelect('${esc(channel.id)}')"${view.disabled?' disabled':''}>
+    <span class="lt-chip">${esc(channel.guide_name.slice(0,5))}</span>
+    <span><b>${esc(channel.guide_number)} · ${esc(channel.guide_name)}</b>${line}</span>
+    <span>${channel.favorite?'<span class="lt-star" title="Favorite">★</span>':""}${view.disabled?" 🔒":""}</span>
+  </button>`;
+}
+function liveTvToolbar(){
+  const counts=`${LIVE_TV.channels.length} channels`;
+  const tuners=LIVE_TV.tuners?` · ${esc(LIVE_TV.tuners)}`:"";
+  const view=liveTvView();
+  return `<div class="lt-head">
+    <div class="lt-switch" role="group" aria-label="Live TV layout">
+      <button type="button" aria-pressed="${view==="list"}" onclick="liveTvSetView('list')">≡ List</button>
+      <button type="button" aria-pressed="${view==="grid"}" onclick="liveTvSetView('grid')">▦ Grid</button>
+    </div>
+    <span class="muted">${counts}${tuners}</span>
+    <div class="lt-switch" role="group" aria-label="Channel filter">
+      <button type="button" aria-pressed="${liveTvFilter()==="all"}" onclick="liveTvSetFilter('all')">All</button>
+      <button type="button" aria-pressed="${liveTvFilter()==="favorites"}" onclick="liveTvSetFilter('favorites')">Favorites</button>
+    </div>
+    <label class="tog" for="lt-hideprot" style="border:0;padding:0;gap:8px"><span>Hide protected</span>
+      <input type="checkbox" id="lt-hideprot"${liveTvHideProtected()?" checked":""} onchange="liveTvSetHideProtected(this.checked)"></label>
+    <label for="live-tv-search" class="muted" style="font-size:12.5px">Find a channel</label>
+    <input id="live-tv-search" type="search" value="${esc(LIVE_TV.query||"")}" oninput="liveTvSearch(this.value)" placeholder="Number, name, or what is on">
+  </div>`;
+}
+function liveTvNowBar(channel){
+  if(!channel) return `<div class="lt-nowbar"><span class="grow muted">Select a channel to watch.</span></div>`;
+  const at=liveTvProgramme(channel.id);
+  const pct=at.progress===null?0:Math.round(at.progress*100);
+  const playing=!!LIVE_TV_LEASE.current;
+  const left=at.now?Math.max(0,Math.round((at.now.end-liveTvNowSeconds())/60)):null;
+  return `<div class="lt-nowbar">
+    <span class="grow"><b>${at.now?esc(at.now.title):esc(channel.guide_name)}</b>
+      ${playing?'<span class="pill" style="color:var(--bad)">● LIVE</span>':""}
+      <br><span class="muted">${esc(channel.guide_number)} · ${esc(channel.guide_name)}${at.now?" · "+esc(liveTvClock(at.now.start))+"–"+esc(liveTvClock(at.now.end)):""}${left!==null?" · "+left+" min left":""}${at.next?" · Next: "+esc(at.next.title):""}</span>
+    </span>
+    <span class="lt-mini" style="width:120px"><i style="width:${pct}%"></i></span>
+    <button type="button" onclick="pauseLiveTv()" title="Pause" aria-label="Pause">⏸</button>
+    <button type="button" onclick="muteLiveTv(this)" title="Mute" aria-label="Mute">🔇</button>
+    ${liveTvPipSupported()?'<button type="button" onclick="toggleLiveTvPip()" title="Picture-in-picture (P)" aria-label="Picture-in-picture">⧉</button>':""}
+    <button type="button" onclick="fullscreenLiveTv()" title="Fullscreen (F)" aria-label="Fullscreen">⛶</button>
+    <button type="button" onclick="stopLiveTv().catch(liveTvFailure)" title="Stop" aria-label="Stop">■</button>
+  </div>`;
+}
+function liveTvTonight(channel){
+  if(!channel) return "";
+  const source=(LIVE_TV.guide&&LIVE_TV.guide.channels||[]).find(entry=>entry.id===channel.id);
+  const rows=source&&source.programmes?source.programmes:[];
+  if(rows.length===0) return `<div class="lt-tonight"><span class="muted">No guide data for this channel.</span></div>`;
+  const now=liveTvNowSeconds();
+  return `<div class="lt-tonight" aria-label="Tonight on ${esc(channel.guide_name)}">${rows.map(row=>{
+    const on=row.start<=now&&now<row.end;
+    return `<div class="cell${on?" on":""}" title="${esc(liveTvClock(row.start))}–${esc(liveTvClock(row.end))}">
+      <b>${esc(row.title)}</b><small>${esc(liveTvClock(row.start))}${on?" · NOW":""}</small></div>`;
+  }).join("")}</div>`;
+}
+function liveTvListMarkup(visible,selected){
+  return `<div class="lt-split">
+    <div class="lt-list" role="listbox" aria-label="Channels">${
+      visible.length?visible.map(channel=>liveTvRowMarkup(channel,selected&&selected.id)).join("")
+        :'<div style="padding:18px" class="muted">No matching channels.</div>'}</div>
+    <div class="lt-stage">
+      <div class="lt-slot" id="live-tv-slot"></div>
+      ${liveTvNowBar(selected)}
+      ${liveTvTonight(selected)}
+    </div>
+  </div>`;
+}
+function liveTvGridWindow(){
+  const slot=liveTvSlotSeconds(), now=liveTvNowSeconds();
+  const start=Math.floor(now/slot)*slot;
+  return {start,end:start+8*slot};
+}
+/// The layout the grid is currently drawn from. A click handler must resolve
+/// its cell through this, not through the guide document: the two arrays are
+/// different lengths whenever the server sends backfill, which it always does.
+function liveTvGridLayout(){
+  const visible=liveTvVisible();
+  return PlurxLiveTv.gridLayout(LIVE_TV.guide,visible,liveTvGridWindow(),liveTvNowSeconds(),
+    liveTvSlotSeconds(),liveTvPxPerSlot());
+}
+function liveTvGridMarkup(visible,selected){
+  const slot=liveTvSlotSeconds(), px=liveTvPxPerSlot(), now=liveTvNowSeconds();
+  const window=liveTvGridWindow();
+  const layout=PlurxLiveTv.gridLayout(LIVE_TV.guide,visible,window,now,slot,px);
+  const times=PlurxLiveTv.gridSlots(window,slot).map(at=>
+    `<div class="t" style="width:${px}px">${esc(liveTvClock(at))}</div>`).join("");
+  const rows=layout.rows.map(row=>{
+    const ends=PlurxLiveTv.guideEnds(LIVE_TV.guide,row.channel.id,window);
+    const cells=row.cells.map((cell,index)=>{
+      const playing=selected&&selected.id===row.channel.id&&cell.airing;
+      return `<button type="button" class="lt-cell${cell.airing?" airing":""}${playing?" playing":""}"
+        style="left:${cell.left}px;width:${Math.max(cell.width-4,12)}px"
+        title="${esc(cell.programme.title)} · ${esc(liveTvClock(cell.programme.start))}–${esc(liveTvClock(cell.programme.end))}"
+        data-channel="${esc(row.channel.id)}" data-cell="${index}"
+        onclick="liveTvGridCell('${esc(row.channel.id)}',${index},${cell.airing})">${esc(cell.programme.title)}</button>`;
+    }).join("");
+    const marker=ends===null?"":`<div class="lt-cell ends" style="left:${((ends-window.start)/slot)*px}px;width:150px">Guide data ends ${esc(liveTvClock(ends))}</div>`;
+    return `<div class="lt-grow">
+      <div class="lt-gname"><span class="lt-chip">${esc(row.channel.guide_name.slice(0,5))}</span>
+        <span>${esc(row.channel.guide_number)}${row.channel.favorite?' <span class="lt-star">★</span>':""}</span></div>
+      <div class="lt-gcells" style="width:${layout.totalWidth}px">${cells}${marker}</div>
+    </div>`;
+  }).join("");
+  const nowLine=layout.nowX===null?"":`<div class="lt-now" style="left:${180+layout.nowX}px"></div>`;
+  return `<div class="lt-split" style="grid-template-columns:minmax(0,1fr) 400px">
+    <div>
+      <div class="lt-gridwrap"><div class="lt-grid">
+        <div class="lt-times"><div class="pad"></div>${times}</div>
+        ${rows||'<div style="padding:18px" class="muted">No matching channels.</div>'}
+        ${nowLine}
+      </div></div>
+    </div>
+    <div class="lt-stage">
+      <div class="lt-slot" id="live-tv-slot"></div>
+      ${liveTvNowBar(selected)}
+    </div>
+  </div>`;
 }
 function renderLiveTvChannels(){
-  const mount=document.getElementById("live-tv-channels"); if(!mount) return;
-  const query=(document.getElementById("live-tv-search").value||"").toLocaleLowerCase();
-  mount.innerHTML=LIVE_TV.channels.map((channel,index)=>{
-    if(!`${channel.guide_number} ${channel.guide_name}`.toLocaleLowerCase().includes(query)) return "";
-    const view=PlurxLiveTv.channelView(channel);
-    return `<div class="card"><h2 style="margin-top:0">${esc(channel.guide_number)} · ${esc(channel.guide_name)}</h2><p>${esc(view.label)}${channel.favorite?" · Favorite":""}</p><button class="${view.disabled?'ghost':'primary'} sm" onclick="watchLiveTv(${index})"${view.disabled?' disabled':''}>${view.disabled?"DRM unsupported":"Watch live"}</button></div>`;
-  }).join("")||'<p class="muted">No matching channels.</p>';
+  const mount=document.getElementById("live-tv-body"); if(!mount) return;
+  const visible=liveTvVisible();
+  const selected=liveTvChannelById(LIVE_TV.selected)||null;
+  mount.innerHTML=liveTvView()==="grid"?liveTvGridMarkup(visible,selected):liveTvListMarkup(visible,selected);
+  // The toolbar carries the state of both switches and the channel count, and
+  // it was painted once at first render — so pressing List/Grid or
+  // All/Favorites changed the body while the control kept showing, to a
+  // sighted user and to a screen reader alike, the option that was NOT chosen.
+  const head=document.getElementById("live-tv-toolbar");
+  if(head){
+    // Repainting replaces the search field, and this runs on every keystroke,
+    // so carry the caret across or typing loses focus after one character.
+    const active=document.activeElement;
+    const searching=active&&active.id==="live-tv-search";
+    const caret=searching?active.selectionStart:null;
+    head.innerHTML=liveTvToolbar();
+    if(searching){
+      const next=document.getElementById("live-tv-search");
+      if(next){ next.focus(); try{ next.setSelectionRange(caret,caret); }catch(_){} }
+    }
+  }
+  liveTvWireSlot();
+  liveTvPaint();
+}
+// Switching views is a re-render of the browse region and nothing else: it
+// never stops the stream, never restarts it, and never refetches.
+function liveTvSetView(view){
+  liveTvSetPref("plurx_live_tv_view",view); renderLiveTvChannels();
+}
+function liveTvSetFilter(filter){
+  liveTvSetPref("plurx_live_tv_filter",filter); renderLiveTvChannels();
+}
+function liveTvSetHideProtected(on){
+  liveTvSetPref("plurx_live_tv_hide_protected",on?"1":"0"); renderLiveTvChannels();
+}
+function liveTvSearch(value){
+  LIVE_TV.query=value; renderLiveTvChannels();
+}
+function liveTvSelect(id){
+  const index=LIVE_TV.channels.findIndex(channel=>channel.id===id);
+  if(index<0) return;
+  LIVE_TV.selected=id; liveTvSetPref("plurx_live_tv_last",id);
+  watchLiveTv(index);
+  renderLiveTvChannels();
+}
+function liveTvGridCell(channelId,index,airing){
+  if(airing){ liveTvSelect(channelId); return; }
+  // Index into the SAME array the cell came from. `gridLayout` clips to the
+  // drawn window while the server deliberately ships an hour of backfill, so
+  // indexing the unclipped `programmes` was reliably off by however many
+  // finished rows the server sent — every popover showed the wrong programme.
+  const layout=liveTvGridLayout();
+  const row=layout&&layout.rows?layout.rows.find(entry=>entry.channel&&entry.channel.id===channelId):null;
+  const cell=row&&row.cells?row.cells[index]:null;
+  liveTvPopover(cell?cell.programme:null,channelId);
+}
+// A future cell gets details and no actions. There is no DVR behind this, so
+// offering "record" or "remind me" would be offering something that does not
+// exist.
+function liveTvPopover(row,channelId){
+  let pop=document.getElementById("live-tv-pop");
+  if(!pop){ pop=document.createElement("div"); pop.id="live-tv-pop"; pop.className="lt-pop"; document.body.appendChild(pop); }
+  if(!row){ pop.hidden=true; return; }
+  const channel=liveTvChannelById(channelId);
+  pop.innerHTML=`<h3>${esc(row.title)}</h3>
+    <p>${esc(channel?channel.guide_number+" · "+channel.guide_name:"")} · ${esc(liveTvClock(row.start))}–${esc(liveTvClock(row.end))}${row.episode?" · "+esc(row.episode):""}</p>
+    ${row.episode_title?`<p><b>${esc(row.episode_title)}</b></p>`:""}
+    ${row.synopsis?`<p>${esc(row.synopsis)}</p>`:""}
+    ${row.filters&&row.filters.length?`<div class="pills">${row.filters.map(f=>`<span class="pill">${esc(f)}</span>`).join("")}</div>`:""}
+    <p class="hint">Live only — plurx does not record.</p>
+    <div class="row"><button class="ghost sm" onclick="liveTvPopover(null)">Close</button></div>`;
+  pop.hidden=false;
+  const box=pop.getBoundingClientRect();
+  pop.style.left=`${Math.max(12,Math.min(window.innerWidth-box.width-12,(window.innerWidth-box.width)/2))}px`;
+  pop.style.top=`${Math.max(12,(window.innerHeight-box.height)/2)}px`;
+}
+// The fullscreen overlay. Redrawn on every paint so the progress bar and the
+// neighbour strip stay honest without a second timer.
+function liveTvPaint(){
+  const host=liveTvHost(); if(!host) return;
+  const channel=liveTvChannelById(LIVE_TV.selected);
+  const caption=document.getElementById("live-tv-caption");
+  const at=channel?liveTvProgramme(channel.id):{now:null,next:null,progress:null};
+  if(caption){
+    caption.innerHTML=channel?`<span class="lt-chip">${esc(channel.guide_name.slice(0,5))}</span>
+      <span class="grow"><b>${at.now?esc(at.now.title):esc(channel.guide_name)}</b> · ${esc(channel.guide_number)}</span>
+      <button type="button" onclick="location.hash='#/live-tv'" title="Back to Live TV" aria-label="Back to Live TV">↩</button>
+      ${liveTvPipSupported()?'<button type="button" onclick="toggleLiveTvPip()" title="Picture-in-picture" aria-label="Picture-in-picture in the dock">⧉</button>':""}
+      <button type="button" onclick="stopLiveTv().catch(liveTvFailure)" title="Stop" aria-label="Stop from the dock">■</button>`:"";
+  }
+  const overlay=document.getElementById("live-tv-overlay");
+  if(!overlay||host.dataset.mode!=="full") return;
+  const visible=liveTvVisible();
+  const around=liveTvStrip(visible,channel);
+  const pct=at.progress===null?0:Math.round(at.progress*100);
+  const left=at.now?Math.max(0,Math.round((at.now.end-liveTvNowSeconds())/60)):null;
+  overlay.innerHTML=`<div class="lth-top">
+      <div class="lth-now">
+        <span class="lth-chip">${esc(channel?channel.guide_name.slice(0,5):"")}</span>
+        <span><span class="lth-title">${at.now?esc(at.now.title):esc(channel?channel.guide_name:"Live TV")}<span class="lth-live">● LIVE</span></span>
+          <span class="lth-sub">${esc(channel?channel.guide_number+" · "+channel.guide_name:"")}${at.now?" · "+esc(liveTvClock(at.now.start))+"–"+esc(liveTvClock(at.now.end)):""}${at.next?" · Next: "+esc(at.next.title):""}</span></span>
+      </div>
+      <div class="lth-acts">
+        <button type="button" onclick="muteLiveTv(this)">Mute</button>
+        ${liveTvPipSupported()?'<button type="button" onclick="toggleLiveTvPip()">PiP</button>':""}
+        <button type="button" onclick="liveTvGuideSheet()">Guide</button>
+        <button type="button" onclick="exitLiveTvPresentation()">Exit</button>
+      </div>
+    </div>
+    <div class="lth-bottom">
+      <div class="lth-bar"><i style="width:${pct}%"></i></div>
+      <div class="lth-left">${left!==null?left+" minutes left":"No programme information"}</div>
+      <div class="lth-strip">${around.map(entry=>{
+        const entryAt=liveTvProgramme(entry.id);
+        const entryPct=entryAt.progress===null?0:Math.round(entryAt.progress*100);
+        const on=channel&&entry.id===channel.id;
+        return `<button type="button" class="lth-card${on?" on":""}${LIVE_TV.preview===entry.id&&!on?" prev":""}"
+          onclick="liveTvSelect('${esc(entry.id)}')"><b>${esc(entry.guide_number)} ${esc(entry.guide_name)}</b>
+          <small>${entryAt.now?esc(entryAt.now.title):"—"}</small>
+          <span class="lth-bar" style="margin:6px 0 0"><i style="width:${entryPct}%"></i></span></button>`;
+      }).join("")}</div>
+      <div class="lth-hints">↑ ↓ change channel · ← → preview · Enter tune · F fullscreen · M mute · P picture-in-picture · G guide · Esc exit</div>
+    </div>
+    <div class="lth-sheet" id="live-tv-sheet" hidden></div>`;
+}
+// Seven cards, current centred: enough to see where you are in the lineup
+// without turning the strip into a second channel list.
+function liveTvStrip(visible,channel){
+  if(visible.length===0) return [];
+  const at=channel?visible.findIndex(entry=>entry.id===channel.id):0;
+  const centre=at<0?0:at;
+  const out=[];
+  for(let offset=-3;offset<=3;offset++){
+    const index=((centre+offset)%visible.length+visible.length)%visible.length;
+    if(!out.includes(visible[index])) out.push(visible[index]);
+  }
+  return out;
+}
+function liveTvGuideSheet(){
+  const sheet=document.getElementById("live-tv-sheet"); if(!sheet) return;
+  if(!sheet.hidden){ sheet.hidden=true; return; }
+  const visible=liveTvVisible(), now=liveTvNowSeconds();
+  sheet.innerHTML=`<h2 class="section" style="color:#fff">On now</h2>
+    ${visible.map(channel=>{
+      const at=liveTvProgramme(channel.id);
+      return `<div style="display:flex;gap:12px;padding:8px 0;border-top:1px solid rgba(255,255,255,.14)">
+        <b style="width:110px;flex:none">${esc(channel.guide_number)} ${esc(channel.guide_name)}</b>
+        <span style="flex:1">${at.now?esc(at.now.title):"—"}</span>
+        <span style="opacity:.7">${at.now?esc(liveTvClock(at.now.end)):""}</span></div>`;
+    }).join("")}
+    <p style="opacity:.7;margin-top:14px">Press G or Escape to close. ${esc(liveTvClock(now))}</p>`;
+  sheet.hidden=false;
+}
+// live-tv-input-adapter:begin
+// Live TV owns the channel keys while its host is fullscreen or focused. The
+// answers come from the shared contract table, not from this file: the same
+// fixture drives PlayerInputRouting.swift and PlayerInputPolicy.kt.
+function liveTvInputState(){
+  const host=liveTvHost();
+  if(!host||host.hidden) return null;
+  if(host.dataset.mode==="full") return host.classList.contains("idle")?"hidden":"overlay";
+  // The contract's `page` state is "inline on the Live TV page". A dock on
+  // some other route is not that, and treating it as `page` claimed Space
+  // application-wide: every button a keyboard user reached anywhere in the app
+  // went dead while a session was docked, and the film player fought the dock
+  // over the same key. Off the route and out of fullscreen, Live TV owns no
+  // keys at all — its own controls are still clickable and focusable.
+  if(location.hash!=="#/live-tv") return null;
+  // A modal owns the keyboard while it is open, exactly as handlePlayerKeydown
+  // requires for the finite player.
+  const modal=document.getElementById("modal");
+  if(modal&&!modal.hidden) return null;
+  return "page";
+}
+/// True where a key press is the element's own activation, not ours to take.
+/// `preventDefault` on Space over a focused button suppresses the activation
+/// click the browser would synthesise, which is how the overlay's own Mute,
+/// PiP, Guide and Exit buttons became unusable by keyboard.
+function liveTvTargetOwnsKey(target,key){
+  if(!target||!target.closest) return false;
+  if(key!=="Enter"&&key!==" ") return false;
+  return !!target.closest("button,a[href],select,textarea,input,summary,[role=button],[role=option],[contenteditable=''],[contenteditable=true]");
+}
+function liveTvInputSurface(){
+  return window.matchMedia&&window.matchMedia("(pointer:coarse)").matches?"touch":"desktop";
+}
+function liveTvChangeChannel(delta){
+  const visible=liveTvVisible();
+  // Step from where the held key has already got to, not from the channel
+  // still on screen. Reading `selected` on every repeat made ten presses
+  // resolve to the one adjacent channel: the coalesce was right, the
+  // accumulator was missing, and surfing by holding the key was impossible.
+  const from=LIVE_TV.pendingChannel||LIVE_TV.preview||LIVE_TV.selected;
+  const id=PlurxLiveTv.adjacentChannel(visible,from,delta);
+  if(!id) return;
+  // Coalesce: a held key must be one tuner start, not ten. The contract's
+  // 350 ms of stillness is the whole guardrail against a channel-surf storm.
+  LIVE_TV.pendingChannel=id;
+  clearTimeout(LIVE_TV.channelTimer);
+  LIVE_TV.channelTimer=setTimeout(()=>{
+    const pending=LIVE_TV.pendingChannel; LIVE_TV.pendingChannel=null;
+    LIVE_TV.preview=null;
+    if(pending) liveTvSelect(pending);
+  },PlaybackPolicy.liveContractTiming("channel_coalesce_ms"));
+  LIVE_TV.preview=id; liveTvPaint();
+}
+function liveTvPreviewChannel(delta){
+  const visible=liveTvVisible();
+  const from=LIVE_TV.preview||LIVE_TV.selected;
+  LIVE_TV.preview=PlurxLiveTv.adjacentChannel(visible,from,delta);
+  liveTvReveal(); liveTvPaint();
+}
+function liveTvApplyOutcome(outcome){
+  switch(outcome){
+    case "reveal": liveTvReveal(); return true;
+    case "hide": liveTvIdle(); return true;
+    case "toggle_chrome":
+      if(liveTvHost().classList.contains("idle")) liveTvReveal(); else liveTvIdle();
+      return true;
+    case "channel_up": liveTvChangeChannel(-1); return true;
+    case "channel_down": liveTvChangeChannel(1); return true;
+    case "strip_prev": liveTvPreviewChannel(-1); return true;
+    case "strip_next": liveTvPreviewChannel(1); return true;
+    case "tune": if(LIVE_TV.preview) liveTvSelect(LIVE_TV.preview); return true;
+    case "toggle_play": {
+      const video=document.getElementById("live-tv-video");
+      if(video&&video.paused) resumeLiveTv(); else pauseLiveTv();
+      return true;
+    }
+    case "exit": exitLiveTvPresentation(); return true;
+    case "activate": return true;
+    case "focus_row": return true;
+    default: return false;
+  }
+}
+function liveTvKeydown(event){
+  const state=liveTvInputState();
+  if(state===null) return;
+  if(event.target&&/^(INPUT|TEXTAREA|SELECT)$/.test(event.target.tagName)) return;
+  if(liveTvTargetOwnsKey(event.target,event.key)) return;
+  const hotkey=PlaybackPolicy.liveHotkey(event.key);
+  if(hotkey&&state!=="page"){
+    event.preventDefault();
+    if(hotkey==="fullscreen") fullscreenLiveTv();
+    else if(hotkey==="mute"){ const v=document.getElementById("live-tv-video"); if(v) v.muted=!v.muted; }
+    else if(hotkey==="picture_in_picture") toggleLiveTvPip();
+    else if(hotkey==="guide_sheet") liveTvGuideSheet();
+    else if(hotkey==="exit") exitLiveTvPresentation();
+    return;
+  }
+  const input={ArrowLeft:"left",ArrowRight:"right",ArrowUp:"up",ArrowDown:"down",
+    Enter:"select",Escape:"back"," ":"play_pause"}[event.key];
+  if(!input) return;
+  const outcome=PlaybackPolicy.routeLiveInput(liveTvInputSurface(),state,input);
+  if(outcome==="ignore") return;
+  if(liveTvApplyOutcome(outcome)) event.preventDefault();
+}
+function liveTvWireKeys(){
+  window.addEventListener("keydown",liveTvKeydown);
+}
+// live-tv-input-adapter:end
+function liveTvReveal(){
+  const host=liveTvHost(); if(!host) return;
+  host.classList.remove("idle");
+  clearTimeout(LIVE_TV.idleTimer);
+  const video=document.getElementById("live-tv-video");
+  if(host.dataset.mode!=="full"||!video||video.paused) return;
+  LIVE_TV.idleTimer=setTimeout(()=>{
+    const still=document.getElementById("live-tv-video");
+    if(still&&!still.paused&&!still.ended) liveTvIdle();
+  },PlaybackPolicy.liveContractTiming("hide_after_ms"));
+}
+function liveTvIdle(){
+  const host=liveTvHost(); if(host) host.classList.add("idle");
+}
+function liveTvWireHost(){
+  if(LIVE_TV.hostWired) return;
+  LIVE_TV.hostWired=true;
+  // Deliberately no "keydown" here: the routing table is the one answer to
+  // what a key does, and a second listener that also reveals would give every
+  // `ignore` row an effect. Same choice the finite player made.
+  ["mousemove","pointerdown","touchstart"].forEach(event=>window.addEventListener(event,()=>{
+    if(liveTvInputState()==="hidden"||liveTvInputState()==="overlay") liveTvReveal();
+  },{passive:true}));
+  liveTvWireKeys();
+  const video=document.getElementById("live-tv-video");
+  if(video){
+    video.addEventListener("leavepictureinpicture",()=>liveTvPaint());
+    video.addEventListener("enterpictureinpicture",()=>liveTvPaint());
+  }
+  document.addEventListener("fullscreenchange",()=>{
+    const host=liveTvHost();
+    if(!host) return;
+    if(document.fullscreenElement===host){ liveTvSetMode("full"); liveTvReveal(); }
+    else if(host.dataset.mode==="full"){ liveTvSetMode(location.hash==="#/live-tv"?"slot":"dock"); }
+  });
+}
+function liveTvShowHost(){
+  const host=liveTvHost(); if(!host) return;
+  host.hidden=false;
+  if(host.dataset.mode==="slot") liveTvTrackSlot();
+  liveTvPaint();
+}
+async function loadLiveTvGuide(generation,route){
+  try{
+    const guide=await api("/live-tv/guide",{signal:AbortSignal.timeout(20000)});
+    if(generation!==PAGE_RENDER_GENERATION||location.hash!==route) return;
+    LIVE_TV.guide=guide;
+    renderLiveTvChannels();
+    if(guide.source!=="off"&&guide.freshness==="unavailable"){
+      liveTvMessage(`${LIVE_TV.channels.length} channels. The programme guide has no data yet${guide.refresh_error?": "+guide.refresh_error:"."}`);
+    }
+  }catch(e){
+    // A guide that will not load is a degraded page, never a broken one.
+    if(generation===PAGE_RENDER_GENERATION&&location.hash===route) LIVE_TV.guide=null;
+  }
 }
 function detachLiveTvMedia(){
   clearInterval(LIVE_TV.timer); LIVE_TV.timer=null;
@@ -13680,31 +15039,46 @@ function detachLiveTvMedia(){
 }
 async function stopLiveTv(){
   ++LIVE_TV.serial; exitLiveTvPresentation(); detachLiveTvMedia();
-  const panel=document.getElementById("live-tv-player"); if(panel) panel.hidden=true;
+  const host=document.getElementById("live-tv-host"); if(host) host.hidden=true;
   return LIVE_TV_LEASE.stop();
 }
 async function watchLiveTv(index){
   const channel=LIVE_TV.channels[index];
   if(!channel||PlurxLiveTv.channelView(channel).disabled||location.hash!=="#/live-tv") return;
   const serial=++LIVE_TV.serial, generation=PAGE_RENDER_GENERATION;
-  const current=()=>serial===LIVE_TV.serial&&generation===PAGE_RENDER_GENERATION&&location.hash==="#/live-tv";
+  // Two different questions, and conflating them is what stopped the tuner
+  // watchdog the moment the picture docked. `owned` asks "is this still the
+  // session I started" — the only thing the keepalive, the status poll and the
+  // 30-second no-progress release should ever depend on, because they own a
+  // physical tuner and the tuner does not care which route is showing.
+  // `onPage` additionally asks whether this render is still the one on screen,
+  // and gates writes into page DOM that no longer exists.
+  const owned=()=>serial===LIVE_TV.serial;
+  const onPage=()=>owned()&&generation===PAGE_RENDER_GENERATION&&location.hash==="#/live-tv";
+  const current=onPage;
   detachLiveTvMedia();
   if(PLAYER&&PLAYER.fileId) closePlayer();
   LIVE_TV.lastChannel=index; liveTvMessage(`Starting ${channel.guide_number} · ${channel.guide_name}…`);
+  LIVE_TV.starting=serial;
   try{
     const info=await LIVE_TV_LEASE.start(channel.id);
-    if(!info||!current()) return;
+    // Deliberately `owned`, not `onPage`. Navigating away during the ~45 s
+    // start window used to abandon the reply: the lease landed with no media,
+    // no poll and no keepalive attached, and the tuner was held with nothing
+    // on screen able to release it. A start that completes is always wired up;
+    // if the route moved on, it is wired up into the dock.
+    if(!info||!owned()) return;
     const video=document.getElementById("live-tv-video");
     LIVE_TV.unplayedSince=liveTvNow(); LIVE_TV.lastPosition=0; LIVE_TV.lastFrames=0;
-    document.getElementById("live-tv-player").hidden=false;
-    document.getElementById("live-tv-title").textContent=`${channel.guide_number} · ${channel.guide_name}`;
+    LIVE_TV.selected=channel.id;
+    if(onPage()) liveTvShowHost(); else liveTvSetMode("dock");
     // Ignore the wire URL: the capability only grants same-origin live resources.
     const playlist=API+`/live-tv/sessions/${encodeURIComponent(info.session_id)}/index.m3u8`;
-    const play=()=>{ if(current()) video.play().then(()=>{ if(current()) liveTvMessage("Playing live"); }).catch(()=>{ if(current()) liveTvMessage("Ready — press Play live within 30 seconds to start audio and video."); }); };
+    const play=()=>{ if(owned()) video.play().then(()=>{ if(owned()) liveTvMessage("Playing live"); }).catch(()=>{ if(owned()) liveTvMessage("Ready — press Play live within 30 seconds to start audio and video."); }); };
     const failed=async error=>{
-      if(!current()) return;
+      if(!owned()) return;
       try{ await LIVE_TV_LEASE.status(); }catch(typed){ error=typed; }
-      if(!current()) return;
+      if(!owned()) return;
       liveTvFailure(error);
       stopLiveTv().catch(()=>liveTvMessage("Stream stopped. Owner cleanup is unconfirmed; retry Stop before opening another channel."));
     };
@@ -13720,7 +15094,7 @@ async function watchLiveTv(index){
       video.src=playlist; play();
     }else{ await failed({code:"codec_unsupported"}); return; }
     LIVE_TV.timer=setInterval(async()=>{
-      if(!current()||LIVE_TV.polling) return;
+      if(!owned()||LIVE_TV.polling) return;
       LIVE_TV.polling=true;
       try{
         // Decoded frames, not position. A live-window slide, a gap jump or a
@@ -13742,13 +15116,14 @@ async function watchLiveTv(index){
         }
         if(frames!==null) LIVE_TV.lastFrames=frames;
         LIVE_TV.lastPosition=position; LIVE_TV.unplayedSince=liveTvNow();
-        if(document.visibilityState!=="hidden") await LIVE_TV_LEASE.keepalive();
+        if(document.visibilityState!=="hidden"||liveTvInPip()) await LIVE_TV_LEASE.keepalive();
         const status=await LIVE_TV_LEASE.status();
         if(status&&status.state!=="active") await failed({code:"stream_failed"});
       }catch(e){ await failed(e); }
       finally{ LIVE_TV.polling=false; }
     },10000);
-  }catch(e){ if(current()) liveTvFailure(e); }
+  }catch(e){ if(onPage()) liveTvFailure(e); }
+  finally{ if(LIVE_TV.starting===serial) LIVE_TV.starting=null; }
 }
 function resumeLiveTv(){
   const video=document.getElementById("live-tv-video");
@@ -13762,7 +15137,7 @@ function muteLiveTv(button){
   const video=document.getElementById("live-tv-video"); if(video){ video.muted=!video.muted; button.textContent=video.muted?"Unmute":"Mute"; }
 }
 function fullscreenLiveTv(){
-  const panel=document.getElementById("live-tv-player"), video=document.getElementById("live-tv-video");
+  const panel=document.getElementById("live-tv-host"), video=document.getElementById("live-tv-video");
   try{
     if(document.fullscreenElement===panel||document.webkitFullscreenElement===panel||(video&&video.webkitDisplayingFullscreen)){ exitLiveTvPresentation(); return; }
     if(panel&&panel.requestFullscreen){ const r=panel.requestFullscreen(); if(r&&r.catch) r.catch(()=>{}); }
@@ -13771,7 +15146,7 @@ function fullscreenLiveTv(){
   }catch(e){}
 }
 function exitLiveTvPresentation(){
-  const panel=document.getElementById("live-tv-player"), video=document.getElementById("live-tv-video");
+  const panel=document.getElementById("live-tv-host"), video=document.getElementById("live-tv-video");
   try{
     const full=document.fullscreenElement||document.webkitFullscreenElement;
     if(panel&&full&&(full===panel||panel.contains(full))){
@@ -13793,167 +15168,197 @@ window.addEventListener("pagehide",()=>{
   LIVE_TV.unloading=true;
   stopLiveTv().catch(()=>{});
 });
-window.addEventListener("storage",event=>{
-  if(event.key===null||event.key.startsWith(LIVE_TV_BARRIER.prefix)){ try{ LIVE_TV_BARRIER.sync(); }catch(e){} }
+// The parameter is named `change` because this is a StorageEvent. The input
+// fence reads the ordinary spelling as a keyboard decode wherever it appears,
+// and naming this one for what it actually is removes a standing false
+// positive rather than adding an exemption for it.
+window.addEventListener("storage",change=>{
+  if(change.key===null||change.key.startsWith(LIVE_TV_BARRIER.prefix)){ try{ LIVE_TV_BARRIER.sync(); }catch(e){} }
 });
 document.addEventListener("visibilitychange",()=>{
-  if(document.visibilityState==="hidden"&&location.hash==="#/live-tv"){
+  if(document.visibilityState==="hidden"&&location.hash==="#/live-tv"&&!liveTvInPip()){
     stopLiveTv().catch(()=>{}); liveTvMessage("Live TV stopped while the page was in the background. Select a channel to resume.");
   }
 });
 
-// Whether the server can currently see each prerequisite holding.
-//
-// Advisory, and the word is load-bearing: nothing in this file disables a
-// control because a row says "not met". The operator can see the deployment
-// and this process cannot, so an unmet row is information, not a refusal — a
-// switch that had to be argued past its own UI would just be a gate wearing a
-// different hat.
-//
-// "not observable" is the third answer and it is the reason the readings are
-// worth showing at all. A fleet qualification receipt lives in a CI artifact
-// the daemon has never held; a green tick meaning "not checked" is exactly
-// what these rows replace.
-const DEV_READINESS_LABEL={met:"met",unmet:"not met",unobservable:"not observable"};
-function devReadinessRow(readiness,itemId,reqId){
-  if(!readiness||!Array.isArray(readiness.items)) return null;
-  const item=readiness.items.find(row=>row&&row.id===itemId);
-  if(!item||!Array.isArray(item.requirements)) return null;
-  return item.requirements.find(row=>row&&row.id===reqId)||null;
+function setPreparedHandoff(on){
+  setPreparedHandoffEnabled(!!on);
+  // Honest about when: the capability is read on every exchange and the server
+  // keeps the newest document it was sent, so this reaches it on the next
+  // exchange of whatever is playing — not at the next stream.
+  toast(on
+    ?"This browser now offers prepared handoff — from the next control exchange"
+    :"Prepared handoff switched off for this browser");
 }
-function devReadinessPill(found,readiness){
-  if(readiness&&readiness.unavailable) return `<span class="pill warn">unavailable</span>`;
-  // A reading arrived and did not carry this row: the server does not know
-  // about it. "checking…" forever would be its own green tick that means
-  // nothing was checked, which is the thing this section exists to stop.
-  if(!found) return readiness?`<span class="pill warn">not reported</span>`:`<span class="pill">checking…</span>`;
-  const label=DEV_READINESS_LABEL[found.status]||"unknown";
-  if(found.status==="met") return `<span class="pill" style="color:var(--good);border-color:var(--good)">${esc(label)}</span>`;
-  if(found.status==="unmet") return `<span class="pill warn">${esc(label)}</span>`;
-  return `<span class="pill">${esc(label)}</span>`;
-}
-function devReadinessEvidence(found,readiness){
-  if(readiness&&readiness.unavailable) return `The prerequisite reading failed: ${readiness.unavailable}`;
-  if(found) return found.evidence;
-  return readiness?"This server did not report on this prerequisite.":"";
-}
-// One prerequisite: the fixed explanation of what it means, then what this
-// server actually read. The explanation stays here because it is UI copy; the
-// reading comes from the daemon because it is a fact.
-function devReq(readiness,itemId,reqId,title,detail){
-  const found=devReadinessRow(readiness,itemId,reqId);
-  const key=`${itemId}:${reqId}`;
-  return `<div class="tog"><span>${title} <span data-devstat="${esc(key)}">${devReadinessPill(found,readiness)}</span><small>${detail}</small><small class="hint" data-devev="${esc(key)}">${esc(devReadinessEvidence(found,readiness))}</small></span></div>`;
-}
-function applyDeveloperReadiness(readiness){
-  document.querySelectorAll("[data-devstat]").forEach(node=>{
-    const [itemId,reqId]=String(node.getAttribute("data-devstat")).split(":");
-    node.innerHTML=devReadinessPill(devReadinessRow(readiness,itemId,reqId),readiness);
-  });
-  document.querySelectorAll("[data-devev]").forEach(node=>{
-    const [itemId,reqId]=String(node.getAttribute("data-devev")).split(":");
-    node.textContent=devReadinessEvidence(devReadinessRow(readiness,itemId,reqId),readiness);
-  });
-}
-
-// Everything that is off on purpose, in one place.
-//
-// These are switches with a cost or an unfinished half, not preferences: each
-// one names what it spends and what is still missing, because "experimental"
-// on its own tells an operator nothing about whether turning it on will cost
-// them a stream.
-function developerPanel(settings,readiness){
-  const advisory=`<div class="hint">Each reading below says what <b>this server</b> can currently see. They are advisory: nothing here disables a switch, and “not observable” means the fact lives somewhere a running daemon cannot reach, not that it failed.</div>`;
+function developerPanel(settings){
   const transportRecovery=setCard(`${cardHead("Enable cluster transport recovery","The corrected transport is compiled in and activates automatically on clustered nodes; there is no hidden production feature flag.",`<span class="pill" style="color:var(--good);border-color:var(--good)">automatic</span>`)}
       <div class="hint"><b>Safe enablement means deployment qualification, not flipping a code gate.</b> Keep a ready voter majority, deploy one node at a time, and leave the cluster API listener reachable only on the trusted cluster network. Cache-only recovery authorization stays disabled until every current committed node has heartbeat-proven the cache revocation capability and the automatic guarded activation has cleared cached proofs cluster-wide; a rollback closes it again.</div>
       <h2 class="section">What must be true first</h2>
-      ${advisory}
-      ${devReq(readiness,"cluster_transport_recovery","recovery_budgets","Recovery budgets fit the deployment","Keep chunk, whole-transfer, final-install, startup, and container health allowances aligned. The defaults are 30 s, 1,200 s, and 120 s; the rollout may use a longer final-install allowance when measured state size requires it.")}
-      ${devReq(readiness,"cluster_transport_recovery","cluster_api_advertised","Authenticated diagnostics are reachable","Every node must advertise its private Hiqlite API address, share the cluster API credential, and keep <code>/cluster/transport/sqlite</code> off the public Internet. Port 32400 may remain closed while a learner catches up.")}
-      ${devReq(readiness,"cluster_transport_recovery","cache_revocation_capability","Every committed node proves cache revocation","Cache-only recovery authorization stays closed until every member of the exact committed configuration writes the capability inside its current heartbeat.")}
-      ${devReq(readiness,"cluster_transport_recovery","recovery_receipt","The recovery receipt passes","Require the real-TLS 3 MiB transport matrix, acknowledged-write verification, and twenty learner plus twenty voter recovery cycles on the supported Linux path before fleet rollout.")}
+      <div class="tog"><span>Recovery budgets fit the deployment<small>Keep chunk, whole-transfer, final-install, startup, and container health allowances aligned. The defaults are 30 s, 1,200 s, and 120 s; the rollout may use a longer final-install allowance when measured state size requires it.</small></span></div>
+      <div class="tog"><span>Authenticated diagnostics are reachable<small>Every node must advertise its private Hiqlite API address, share the cluster API credential, and keep <code>/cluster/transport/sqlite</code> off the public Internet. Port 32400 may remain closed while a learner catches up.</small></span></div>
+      <div class="tog"><span>The recovery receipt passes<small>Require the real-TLS 3 MiB transport matrix, acknowledged-write verification, and twenty learner plus twenty voter recovery cycles on the supported Linux path before fleet rollout.</small></span></div>
       <div class="hint"><b>Enable path after those checks pass:</b> use the supported one-node-at-a-time cluster deployment. The recovery code and read-only status route are always present; failed readiness remains fail-closed.</div>`);
   const preview=setCard(`${cardHead("Playback control protocol","The additive control endpoint clients use to report what they are playing and ask for changes. Off by default until every client has a passive reporter.")}
       ${togRow("pcpv1",`Advertise playback control protocol v1 <span class="pill">preview</span>`,"New sessions advertise the control endpoint. Passive on its own: the server measures what a quality change would cost, and takes no automatic action.",settings.playback_control_protocol_v1)}
-      <h2 class="section">What must be true first</h2>
-      ${advisory}
-      ${devReq(readiness,"playback_control_protocol_v1","clients_report","Every client has a passive reporter","A client that does not declare the vocabulary is told nothing, so the server measures a fleet it cannot manage. The reading counts exchanges since this process started and resets when it restarts.")}
       <div class="err" id="dverr"></div>
       ${setCardFoot("saveDeveloper")}`);
-  const prepared=setCard(`${cardHead("Enable prepared quality handoff","The server can announce, acknowledge, commit, and abort a staged successor. It does not yet start or prime that successor's encoder.",`<span class="pill warn">integration only</span>`)}
-      <div class="hint"><b>Do not enable this for viewers yet.</b> The staged route still reports <code>encoder: staged</code> and has no worker behind its playlist. Committing it is useful for protocol and Store integration tests, not playback.</div>
-      <h2 class="section">What must be true first</h2>
-      ${advisory}
-      ${devReq(readiness,"prepared_quality_handoff","server_preparation_is_real","Server preparation is real","A later build must reserve capacity, start the unpublished successor, bound every Store write and teardown, and prove abort releases both the worker and the actor slot.")}
-      ${devReq(readiness,"prepared_quality_handoff","client_two_player_handoff","The client owns a measured two-player handoff","It must advertise <code>prepare_replacement</code>, align the second timeline with <code>media_origin_ms</code>, report metadata and buffer readiness, switch visibly, then send <code>committed</code> with the first qualifying frame timestamp. Failed setup must send <code>failed</code> or <code>aborted</code>.")}
-      ${devReq(readiness,"prepared_quality_handoff","fleet_receipt","The fleet receipt is complete","Require twenty consecutive commits on the corrected realistic-runway instrument with stable memory. Apple is the measured candidate; Android and web remain unqualified.")}
-      <div class="hint"><b>Enable path after those checks pass:</b> turn on <b>Advertise playback control protocol v1</b> above and deploy only a qualified client that declares the action. There is no separate hidden server flag.</div>`);
-  // The retained engine is not off — it is on by default and always compiled.
-  // It is here because it spends real encode time and, until this card, said
-  // so nowhere an operator would look. The switch itself stays in Playback →
-  // Streaming, where a delivery choice belongs; duplicating a control in two
-  // sections is how they drift.
-  const retained=setCard(`${cardHead("Retained live-HLS engine","The growing recovery stream that serves a title immutable VOD cannot yet. Always compiled; on unless you turn it off.",`<span class="pill">${settings.vod_live_recovery===false?"off":"on"}</span>`)}
-      <div class="hint">This is the older engine, kept so a missing or stale analysis index never makes a playable title unavailable. It transcodes, so a session here costs encode time on this node. What it has served since this server started is below; <a href="#/settings/playback">Settings → Playback → Streaming</a> holds the switch that stops the fallback.</div>
-      <h2 class="section">What must be true first</h2>
-      ${advisory}
-      ${devReq(readiness,"live_hls_recovery","vod_coverage_replaces_it","Real VOD recipe coverage has replaced it","Turning the fallback off refuses any title whose VOD prerequisites are missing, rather than serving it the old way. The count below is what that would have refused.")}
-      ${devReq(readiness,"live_hls_recovery","no_session_bypasses_the_switch","Nothing reaches the live engine past the switch","A request that already names the live presentation — the peer takeover path — never consults the setting. Sessions counted here keep running with the fallback off.")}`);
-  const overlay=setCard(`${cardHead("Image subtitles without burning them in","PGS subtitle tracks served as timed images the player draws over the video, instead of being hidden or burned into the picture.",`<span class="pill">${settings.pgs_overlay?"on":"off"}</span>`)}
-      <div class="hint">Applies to PGS only; other bitmap subtitle formats still burn in. With this off, a PGS track is not offered to the client at all, and choosing one forces a burn-in — which re-encodes the video and costs a transcode session. With it on, the same track is served through the authenticated <code>pgs-v1</code> overlay API and the video is left alone. This was an environment variable read once at startup; it is a setting now, so it can be answered here instead of in a compose file.</div>
-      ${togRow("pgso","Serve PGS subtitles as an overlay","Applies to the next request. Clients that do not implement pgs-v1 keep the burn-in path.",settings.pgs_overlay)}
-      <h2 class="section">What must be true first</h2>
-      ${advisory}
-      ${devReq(readiness,"pgs_overlay","clients_render_overlays","A client in the fleet renders pgs-v1","A client that cannot draw the overlay is offered a subtitle track it will not show. The reading counts overlay manifests fetched since this process started and resets when it restarts.")}
-      ${devReq(readiness,"pgs_overlay","overlay_acceptance","Physical-client acceptance is complete","Timing, positioning and scaling of image subtitles are judged on a screen, not by a passing test. The daemon never holds that receipt.")}
-      <div class="err" id="dserr"></div>
-      ${setCardFoot("saveSubtitleOverlay")}`);
-  const dvconvert=setCard(`${cardHead("Dolby Vision Profile 7 conversion","Profile 7 titles converted to Profile 8.1 so a Dolby Vision client sees Dolby Vision instead of HDR10.",`<span class="pill">${settings.dolby_vision_convert===false?"off":"on"}</span>`)}
-      <div class="hint">On unless you turn it off, which is the opposite of everything else in this section: a Profile 7 title reaching a Dolby Vision client as HDR10 is the thing this stops. It costs encode time only when such a title is actually played. This was an environment variable, so a server that had it turned off said so nowhere.</div>
-      ${togRow("dvcv","Convert Profile 7 to 8.1","Applies to new sessions. Turning it off delivers those titles as HDR10.",settings.dolby_vision_convert!==false)}
-      <div class="hint">Nothing has to be true first. There is no reading for this switch because there is nothing to read: the conversion is plurx's own code, it runs wherever this build runs, and the only question is whether you have turned it off.</div>
-      <div class="err" id="dcerr"></div>
-      ${setCardFoot("saveDolbyVisionConvert")}`);
+  // Advisory, never a gate. Each requirement says what it is and whether it
+  // is true right now, because "experimental" on its own tells an operator
+  // nothing about whether turning something on will cost them a stream. The
+  // toggle above is not disabled by anything here: an operator who reads this
+  // and enables it anyway is making an informed choice, which is the point.
+  const req=(state,label,note)=>{
+    const pill=state==="met"?`<span class="pill" style="color:var(--good);border-color:var(--good)">met</span>`
+      :state==="partly"?`<span class="pill warn">partly met</span>`
+      :`<span class="pill warn">not met</span>`;
+    return `<div class="tog"><span>${label}<small>${note}</small></span>${pill}</div>`;
+  };
+  const prepared=setCard(`${cardHead("Enable prepared quality handoff","The server announces, acknowledges, commits and aborts a staged successor, and the Apple client now drives one. It does not yet start or prime that successor's encoder.",`<span class="pill warn">integration only</span>`)}
+      <div class="hint"><b>Do not enable this for viewers yet.</b> The staged route still reports <code>encoder: staged</code> and has no worker behind its playlist: a client that opens the successor's playlist before commit is answered <code>503 media_owner_transition</code> on every request. Committing it is useful for protocol and Store integration tests, not playback.</div>
+      <h2 class="section">What must be true first, and whether it is</h2>
+      ${req(settings.playback_control_protocol_v1?"met":"unmet","The control endpoint is advertised","New sessions carry the control block only while <b>Advertise playback control protocol v1</b> above is on. Nothing is staged for a session that never had one.")}
+      ${req("unmet","The server primes the successor it stages","<code>stage_prepared_successor</code> is stage-only: a durable row and the actor's one successor slot, nothing produced. The <i>reserve and prime</i> phase must reserve capacity, start the unpublished successor, bound every Store write and teardown, and prove abort releases both the worker and the slot.")}
+      ${req("partly","A client owns a measured two-player handoff","Apple build 119 advertises <code>prepare_replacement</code>, aligns the second timeline with <code>media_origin_ms</code>, reports metadata and buffer readiness, switches visibly, then sends <code>committed</code> with the first qualifying frame timestamp; failed setup sends <code>failed</code> or <code>aborted</code>. Android and web remain unqualified.")}
+      ${req("met","A prepared handoff can fire on the sessions you actually serve","The throughput floor needs both the client's observed rate and the server's delivered rate. Both are reported now, on VOD as well as live: the clients fill <code>observed_download_bps</code> and the VOD serving boundary measures <code>delivered_bps</code>. A window that has not closed yet still refuses, which is the honest reading rather than a missing input.")}
+      ${req("unmet","The fleet receipt is complete","Requires twenty consecutive commits on the corrected realistic-runway instrument with stable memory, and a measured fallback interruption on at least one Apple device. Apple is the measured candidate for two live pipelines; neither of these numbers exists yet.")}
+      ${togRow("pdp",`Tell the server this browser can prepare a second player <span class="pill warn">unqualified</span>`,"Sets <code>dual_player_preparation</code> on this browser's control exchanges, which is the only thing that lets the server stage a successor for it. Nothing above blocks this switch — the list is what tells you the cost. It reaches the server on the next control exchange, and a playback whose successor was never playable stops offering for the rest of that playback.",preparedHandoffEnabled(),'onchange="setPreparedHandoff(this.checked)"')}
+      <div class="hint"><b>Enable path after those checks pass:</b> turn on <b>Advertise playback control protocol v1</b> above and deploy only a qualified client that declares the action. There is no separate hidden server flag, and nothing on this card prevents you enabling it now — a client that is offered a successor it cannot prime settles it and falls back to the ordinary in-place change.</div>`);
   const experimental=setCard(`${cardHead("Experimental delivery","Changes the shape of the stream itself. Applies to new sessions only.")}
       ${togRow("phs",`Typeless sliding HLS <span class="pill warn">experimental</span>`,"Only for the iPad control comparison.",settings.hls_typeless_sliding)}
       <div class="err" id="dxerr"></div>
       ${setCardFoot("saveExperimental")}`);
-  return `${setHead("Developer","Switches that are off on purpose — previews, unfinished halves, and anything that costs more than it looks. Nothing here is needed for ordinary playback.")}${transportRecovery}${liveTvSettingsCard(settings)}${preview}${prepared}${retained}${overlay}${dvconvert}${experimental}`;
+  return `${setHead("Developer","Switches that are off on purpose — previews, unfinished halves, and anything that costs more than it looks. Nothing here is needed for ordinary playback.")}${transportRecovery}${liveTvSettingsCard(settings)}${liveTvGuideCard(settings)}${preview}${prepared}${experimental}`;
+}
+// The unsaved state of the guide panel. `null` means "no edit yet, show what
+// is saved"; a value means the operator has chosen something the server has
+// not been told about.
+const LIVE_TV_GUIDE_DRAFT={source:null,url:null,checked:null};
+function liveTvGuideSourceDraft(value){
+  const url=document.getElementById("ltgurl");
+  if(url) LIVE_TV_GUIDE_DRAFT.url=url.value;
+  LIVE_TV_GUIDE_DRAFT.source=value;
+  renderSettings();
+}
+function liveTvGuideCard(s){
+  // The guide's own enable section. Everything here is advisory: it says what
+  // has to be true for a source to work and whether it is true right now, and
+  // then it lets the operator turn it on anyway. A feature that refuses to
+  // switch on is a feature nobody can diagnose, and the guide takes no tuner
+  // and changes no playback — a wrong setting leaves the rows blank, nothing
+  // more. (Keep this comment inside the body: a leading comment lands in the
+  // previous function's slice in tests/web/settings-sections.test.js.)
+  // The dropdown edits a draft, not the saved settings. `onchange` repaints
+  // this panel from `SETTINGS_DATA`, so reading the saved value here snapped
+  // the control straight back and the XMLTV URL field — which only exists
+  // while the draft says xmltv — could never be reached at all.
+  const source=(LIVE_TV_GUIDE_DRAFT.source!==null?LIVE_TV_GUIDE_DRAFT.source:s.live_tv_guide_source)||"off";
+  const on=source!=="off";
+  const pill=on?`<span class="pill acc">${source==="xmltv"?"XMLTV":"HDHomeRun guide"}</span>`:`<span class="pill">Off</span>`;
+  const opt=(value,label)=>`<option value="${value}"${source===value?' selected':''}>${label}</option>`;
+  // The panel said "Checking…" forever because nothing ever checked. Do it
+  // once per settings render — not on every draft keystroke, since readiness
+  // builds a guide document on the owner.
+  const renderId=typeof PAGE_RENDER_GENERATION==="undefined"?null:PAGE_RENDER_GENERATION;
+  if(renderId!==null&&LIVE_TV_GUIDE_DRAFT.checked!==renderId){
+    LIVE_TV_GUIDE_DRAFT.checked=renderId;
+    queueMicrotask(()=>{ const mount=document.getElementById("ltgready"); if(mount&&mount.isConnected) checkLiveTvGuide(); });
+  }
+  return setCard(`${cardHead("Programme guide","What is on each channel now and next. Read-only: no recording, no reminders, no scheduling.",pill)}
+    <div class="hint"><b>This is the first outbound internet request the tuner owner makes on your behalf</b>, which is why it is off until you turn it on. The HDHomeRun guide reads your device's <code>DeviceAuth</code> fresh at each refresh, sends it to <code>api.hdhomerun.com</code> over TLS, and forgets it — plurx never stores, logs or relays that credential, and only the owner node ever holds it. XMLTV fetches the one URL you give and nothing else.</div>
+    <div class="setfields">
+      <div><label for="ltgsrc">Source</label><select id="ltgsrc" onchange="liveTvGuideSourceDraft(this.value)">${opt("off","Off")}${opt("hdhomerun","HDHomeRun guide")}${opt("xmltv","XMLTV")}</select></div>
+      ${source==="xmltv"?`<div style="flex:1 1 340px"><label for="ltgurl">XMLTV URL</label><input id="ltgurl" value="${esc(LIVE_TV_GUIDE_DRAFT.url!==null?LIVE_TV_GUIDE_DRAFT.url:(s.live_tv_xmltv_url||""))}" placeholder="https://example/guide.xml.gz" maxlength="1024"><div class="hint">Plain or gzipped. Matched to your lineup by display name, then LCN, then callsign.</div></div>`:""}
+      <div><label for="ltghours">Look ahead</label><select id="ltghours">${[4,8,12,24,48,72].map(n=>`<option value="${n}"${n===Number(s.live_tv_guide_hours)?' selected':''}>${n} hours</option>`).join("")}</select></div>
+    </div>
+    <h2 class="section">What must be true to enable it safely</h2>
+    <div id="ltgready" aria-live="polite"><p class="muted">Checking…</p></div>
+    <div class="err" id="ltgerr" role="alert"></div>
+
+    ${setCardFoot("saveLiveTvGuide")}
+    <div class="row"><button class="ghost sm" onclick="checkLiveTvGuide(this)">Check the guide</button><button class="ghost sm" onclick="refreshLiveTvGuide(this)">Refresh now</button><a href="#/live-tv">Browse channels</a></div>`,{id:"live-tv-guide-settings"});
+}
+async function saveLiveTvGuide(button){
+  const source=document.getElementById("ltgsrc").value;
+  const url=document.getElementById("ltgurl");
+  const saved=await liveTvSettingsWrite({live_tv_config_generation:SETTINGS.live_tv_config_generation,
+    live_tv_guide_source:source,
+    live_tv_xmltv_url:url?url.value.trim():(SETTINGS.live_tv_xmltv_url||""),
+    live_tv_guide_hours:Number(document.getElementById("ltghours").value)},button,"ltgerr");
+  // Only a save that landed retires the draft; a refused one keeps what the
+  // operator typed so they can correct it rather than retype it.
+  if(saved){ LIVE_TV_GUIDE_DRAFT.source=null; LIVE_TV_GUIDE_DRAFT.url=null; }
+  return saved;
+}
+function liveTvGuideReadyView(r){
+  // Advisory rendering: a red row is a sentence, never a disabled Save.
+  const rows=(r.checks||[]).map(c=>`<div class="tog"><span>${c.ready?"Met":"Not met yet"}<small>${esc(c.message)}</small></span></div>`).join("");
+  const fresh=r.freshness==="fresh"?`<span class="pill ok">fresh · ${Math.round(r.age_seconds/60)} min old</span>`
+    :r.freshness==="stale"?`<span class="pill warn">stale · ${Math.round(r.age_seconds/60)} min old</span>`
+    :`<span class="pill">no data cached</span>`;
+  const counts=r.source==="off"?"":`<p>${fresh} · matched ${r.matched_channels} of ${r.lineup_channels} lineup channels · ${r.programmes} programmes cached · refreshes every ${Math.round(r.refresh_interval_seconds/60)} minutes.</p>`;
+  const error=r.refresh_error?`<p class="hint"><b>Last refresh failed:</b> ${esc(r.refresh_error)}</p>`:"";
+  return `${rows}${counts}${error}<div class="hint"><b>None of this blocks the switch.</b> Every row above is advice. Save any source you like and read the result here; the guide takes no tuner, so a wrong setting leaves channel rows blank and nothing else.</div>`;
+}
+async function checkLiveTvGuide(button){
+  const generation=PAGE_RENDER_GENERATION;
+  const mount=document.getElementById("ltgready");
+  if(button) button.disabled=true;
+  try{
+    const r=await api("/live-tv/guide/readiness",{signal:AbortSignal.timeout(30000)});
+    if(!settingsCurrent(generation,"developer")||!mount||!mount.isConnected) return;
+    mount.innerHTML=liveTvGuideReadyView(r);
+  }catch(e){ if(settingsCurrent(generation,"developer")&&mount&&mount.isConnected) mount.textContent=e.message; }
+  finally{ if(button&&button.isConnected) button.disabled=false; }
+}
+async function refreshLiveTvGuide(button){
+  const generation=PAGE_RENDER_GENERATION;
+  const error=document.getElementById("ltgerr"); if(error) error.textContent="";
+  button.disabled=true;
+  try{
+    await api("/live-tv/guide/refresh",{method:"POST",signal:AbortSignal.timeout(45000)});
+    if(settingsCurrent(generation,"developer")) await checkLiveTvGuide(null);
+  }catch(e){ if(settingsCurrent(generation,"developer")&&error) error.textContent=e.message; }
+  finally{ if(button.isConnected) button.disabled=false; }
 }
 function liveTvSettingsCard(s){
   const enabled=!!s.live_tv_enabled, disabled=enabled?' disabled':'';
   const barrier=!!s.live_tv_transition_from_owner_node_id;
   return setCard(`${cardHead("HDHomeRun Live TV","Watch unprotected antenna channels from one network tuner.",`<span class="pill">${enabled?"Enabled":"Disabled"}</span>`)}
     <p>Before enabling: complete the HDHomeRun channel scan; use a stable private IPv4 address; choose one reachable, committed tuner-owner node; and keep every serving node on a compatible plurx version. The owner needs network access to the tuner, writable scratch space, and working FFmpeg H.264/AAC encoding. Each viewer uses one physical tuner and one encoder slot.</p>
-    <p class="hint">Start with 720p and two sessions. ATSC 3.0 may require HEVC and AC-4 decoders your FFmpeg does not include. DRM, recording, rewind, captions, and program-guide scheduling are not supported. A readiness check tests the output graph, not every broadcast codec.</p>
+    <p class="hint">Start with 720p and two sessions. ATSC 3.0 may require HEVC and AC-4 decoders your FFmpeg does not include. DRM, recording, rewind and captions are not supported. A read-only programme guide is configured separately below; there is no recording or scheduling behind it. A readiness check tests the output graph, not every broadcast codec.</p>
     <div class="setfields">
       <div><label for="ltip">Tuner private IPv4</label><input id="ltip" value="${esc(s.live_tv_device_ipv4||"")}" placeholder="192.168.4.100" inputmode="decimal"${disabled}></div>
       <div><label for="ltowner">Tuner-owner node ID</label><input id="ltowner" value="${esc(s.live_tv_owner_node_id||"")}" maxlength="256"${disabled}><div class="hint">Use the node ID shown in Settings → Cluster.</div></div>
       <div><label for="ltlimit">Maximum sessions</label><select id="ltlimit"${disabled}>${[1,2,3,4].map(n=>`<option value="${n}"${n===Number(s.live_tv_max_sessions)?' selected':''}>${n}</option>`).join("")}</select></div>
       <div><label for="ltheight">Output height</label><select id="ltheight"${disabled}>${[720,1080].map(n=>`<option value="${n}"${n===Number(s.live_tv_output_height)?' selected':''}>${n}p</option>`).join("")}</select></div>
     </div>
-    <p class="hint">${enabled?"Disable before changing the device, owner, or profile. Disabling stops current Live TV sessions.":"Save the configuration, check readiness, then enable. Saving never enables playback."}</p>
+    <p class="hint">${enabled?"Disable before changing the device, owner, or profile. Disabling stops current Live TV sessions.":"Save the configuration, check readiness, then enable. Readiness is advice, not a gate — you can enable with a red check and find out what breaks. Saving never enables playback."}</p>
     <div id="ltreadiness" aria-live="polite"></div>
     <div class="err" id="lterr" role="alert"></div>
     ${!enabled?setCardFoot("saveLiveTvSettings"):""}
     <div class="row"><button class="ghost sm" onclick="checkLiveTvReadiness(this)">Check saved configuration</button><button id="ltenable" class="${enabled?'ghost':'primary'} sm" onclick="setLiveTvEnabled(${!enabled},this)">${enabled?"Disable Live TV":"Enable Live TV"}</button><a href="#/live-tv">Browse channels</a></div>
     ${barrier?`<div class="card"><h3>Previous owner cleanup required</h3><p>Owner <strong>${esc(s.live_tv_transition_from_owner_node_id)}</strong> has not confirmed cleanup before generation ${esc(s.live_tv_transition_drain_before)}. Save again to retry authenticated cleanup. An unreachable node is not proof that its tuner streams stopped.</p><label class="tog" for="ltfenced"><span>I have stopped or powered off the previous owner and prevented it from restarting until it can synchronize the current configuration.</span><input id="ltfenced" type="checkbox"></label><button class="ghost sm" onclick="recoverLiveTvOwner(this)">Confirm physical fencing — keep Live TV disabled</button></div>`:""}`,{id:"live-tv-settings"});
 }
-async function liveTvSettingsWrite(body,button){
-  if(!ME||!ME.is_admin) return;
+async function liveTvSettingsWrite(body,button,errorId){
+  if(!ME||!ME.is_admin) return false;
   const generation=PAGE_RENDER_GENERATION;
   if(button) button.disabled=true;
-  const error=document.getElementById("lterr"); if(error) error.textContent="";
+  // The caller names its own error slot: a failed guide save was reporting
+  // itself under the tuner card, which is a different card about a different
+  // setting.
+  const error=document.getElementById(errorId||"lterr"); if(error) error.textContent="";
   try{
     const result=await api("/settings",{method:"PUT",body,signal:AbortSignal.timeout(45000)});
     if(settingsCurrent(generation,"developer")){
       cacheSettings(result); renderSettings(); toast("Live TV settings saved");
     }
+    return true;
   }catch(e){
     if(settingsCurrent(generation,"developer")){
       if(error) error.textContent=e.code==="settings_conflict"?"The configuration changed elsewhere. Reload this section before trying again.":e.message;
       if(button) button.disabled=false;
     }
+    return false;
   }
 }
 async function saveLiveTvSettings(button){
@@ -13984,7 +15389,7 @@ async function checkLiveTvReadiness(button){
   try{
     const r=await api("/live-tv/readiness/refresh",{method:"POST",signal:AbortSignal.timeout(40000)});
     if(!settingsCurrent(generation,"developer")||!mount.isConnected) return;
-    mount.innerHTML=`<h3>${r.ready?"Ready to enable":"Needs attention"}</h3><ul>${r.checks.map(c=>`<li><strong>${c.ready?"Pass":"Not ready"}:</strong> ${esc(c.message)}</li>`).join("")}</ul>${r.snapshot?`<p>${esc(r.snapshot.device.friendly_name)} · ${esc(r.snapshot.device.model_number)} · ${esc(r.snapshot.device.tuner_count)} tuners</p>`:""}<p class="hint">This result describes saved generation ${esc(r.generation)}. Enabling always rechecks safety on the server.</p>`;
+    mount.innerHTML=`<h3>${r.ready?"Ready to enable":"Needs attention"}</h3><ul>${r.checks.map(c=>`<li><strong>${c.ready?"Pass":"Not ready"}:</strong> ${esc(c.message)}</li>`).join("")}</ul>${r.snapshot?`<p>${esc(r.snapshot.device.friendly_name)} · ${esc(r.snapshot.device.model_number)} · ${esc(r.snapshot.device.tuner_count)} tuners</p>`:""}<p class="hint">This result describes saved generation ${esc(r.generation)}. It is advisory: enabling is not blocked by a red check. Structural problems — an address that is not private, an unresolved previous owner, a stale generation — still refuse the save.</p>`;
   }catch(e){ if(settingsCurrent(generation,"developer")&&mount.isConnected) mount.textContent=e.message; }
   finally{ if(button.isConnected) button.disabled=false; }
 }
@@ -14212,7 +15617,7 @@ function systemPanel(sys,playbackEvents){
 // what it refuses, and this renders the refusal in words somebody can act on.
 //
 // The one thing this panel must never do is present two voters as redundancy.
-// docs/CLUSTERING-PLAN.md §7.2 makes two-node HA a stated non-goal because two
+// docs/cluster/CLUSTERING-PLAN.md §7.2 makes two-node HA a stated non-goal because two
 // voters need *both* machines for every write and therefore survive no failure
 // — strictly worse than one node, while looking like an upgrade. A settings
 // screen is the surface most likely to imply otherwise, so the wording below is
@@ -14699,7 +16104,7 @@ async function pollLocalRestart(nodeId,generation){
     await new Promise(resolve=>setTimeout(resolve,2000));
     if(!settingsCurrent(generation,"cluster")) return;
     try{
-      const ops=clusterOpsReceived(await api("/cluster/status"));
+      const ops=clusterOpsReceived(await api("/cluster/status",{keepSessionOn401:true}));
       if(!settingsCurrent(generation,"cluster")) return;
       // The restart poll owns freshness while it runs, so it stamps the same
       // clock the tick reads: the two never probe the fan-out at once. It
@@ -14721,7 +16126,7 @@ async function pollLocalRestart(nodeId,generation){
 async function downloadClusterSupportBundle(btn){
   if(btn) btn.disabled=true;
   try{
-    const response=await api("/cluster/support-bundle",{raw:true});
+    const response=await api("/cluster/support-bundle",{raw:true,keepSessionOn401:true});
     const blob=await response.blob();
     const url=URL.createObjectURL(blob), link=document.createElement("a");
     link.href=url; link.download="plurx-cluster-support.zip"; link.style.display="none";
@@ -15311,7 +16716,7 @@ async function settingsTick(generation=PAGE_RENDER_GENERATION,tab=settingsTab())
         clusterOpsStamp();
         try{
           const previous=SETTINGS_DATA.clusterOps;
-          const ops=clusterOpsReceived(await api("/cluster/status"));
+          const ops=clusterOpsReceived(await api("/cluster/status",{keepSessionOn401:true}));
           if(!settingsCurrent(generation,tab)) return;
           const changed=PlurxClusterPanel.clusterOpsProjection(previous)
             !==PlurxClusterPanel.clusterOpsProjection(ops);
@@ -15326,7 +16731,11 @@ async function settingsTick(generation=PAGE_RENDER_GENERATION,tab=settingsTab())
             else patchClusterReadingAge();
           }
         }catch(error){
-          if(error&&error.status===401) throw error;
+          // No refusal here ends the session any more, including a 401: the
+          // guard on this read answers from a process-local proof cache, so
+          // its refusal describes the cluster and not the credential. Every
+          // failure takes the same path — keep the retained evidence, keep
+          // its age honest, and let the next tick try again.
           if(!settingsCurrent(generation,tab)) return;
           // Retained transport evidence advances locally even when the refresh
           // fails: active work crosses its deadline into Stalled and eventually
@@ -15468,13 +16877,6 @@ async function savePlaybackDefaults(btn){
     toast("Playback defaults saved"); if(btn) setCardSaved(btn);
   }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
 }
-function capacityIfChanged(id,field){
-  const el=document.getElementById(id);
-  const value=Number(el&&el.value);
-  if(!Number.isFinite(value)) return {};
-  const loaded=SETTINGS?Number(SETTINGS[field]):NaN;
-  return value===loaded?{}:{[field]:value};
-}
 async function saveStreaming(btn){
   const err=document.getElementById("serr"); err.textContent="";
   if(btn) btn.disabled=true;
@@ -15490,37 +16892,10 @@ async function saveStreaming(btn){
       vod_working_set_bytes:document.getElementById("pvws").value,
       vod_block_budget_secs:"8",
       vod_materialize_budget_secs:document.getElementById("pvmb").value,
-      vod_blocked_get_cap:document.getElementById("pvbg").value,
-      // Only when they moved. Both defaults are derived from the machine the
-      // page happens to be talking to — the software one is its core count —
-      // and the settings store is shared by the cluster, so writing an
-      // unchanged value would pin one node's hardware on every node, from an
-      // edit that was about the buffer limit.
-      ...capacityIfChanged("phw","transcode_max_hw_sessions"),
-      ...capacityIfChanged("psw","transcode_software_pool_threads")}}));
+      vod_blocked_get_cap:document.getElementById("pvbg").value}}));
     if(SERVER) SERVER.playback_auto_abr=SETTINGS.playback_auto_abr;
     toast("Streaming settings saved"); if(btn) setCardSaved(btn);
   }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
-}
-async function saveDolbyVisionConvert(btn){
-  const err=document.getElementById("dcerr"); err.textContent="";
-  if(btn) btn.disabled=true;
-  try{
-    cacheSettings(await api("/settings",{method:"PUT",body:{
-      dolby_vision_convert:document.getElementById("dvcv").checked}}));
-    toast("Dolby Vision conversion saved");
-    if(btn) setCardSaved(btn);
-  }catch(e){ err.textContent=e.message||String(e); if(btn) btn.disabled=false; }
-}
-async function saveSubtitleOverlay(btn){
-  const err=document.getElementById("dserr"); err.textContent="";
-  if(btn) btn.disabled=true;
-  try{
-    cacheSettings(await api("/settings",{method:"PUT",body:{
-      pgs_overlay:document.getElementById("pgso").checked}}));
-    toast("Subtitle overlay saved");
-    if(btn) setCardSaved(btn);
-  }catch(e){ err.textContent=e.message||String(e); if(btn) btn.disabled=false; }
 }
 async function saveDeveloper(btn){
   const err=document.getElementById("dverr"); err.textContent="";
@@ -17230,6 +18605,7 @@ window.addEventListener("beforeunload",()=>{ if(READER){ readerFlushKeepalive(RE
 // One page-scoped poller at a time; routing away always clears it.
 let PAGE_TIMER=null, PAGE_RENDER_GENERATION=0;
 function pagePhaseName(route){
+  if(route==="#/live-tv") return "live-tv";
   if(route==="#/activity") return "activity";
   if(route==="#/analysis") return "analysis";
   if(isSettingsRoute(route)) return "settings";
@@ -17283,7 +18659,7 @@ async function render(){
   clearInterval(PAGE_TIMER); PAGE_TIMER=null;
   if(!ACT_TIMER) ACT_TIMER=setInterval(pollActivity,4000);
   let h=location.hash||"#/";
-  if(h!=="#/live-tv") stopLiveTv().catch(()=>{});
+  if(h!=="#/live-tv") liveTvLeaveRoute();
   if(!h.startsWith("#/read/")&&READER) destroyReader(true);
   // A join token is bearer authority, so leaving Settings drops the only
   // in-memory copy even before a later Settings visit clears it again.

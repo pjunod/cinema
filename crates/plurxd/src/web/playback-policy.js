@@ -51,6 +51,14 @@
   const CONTRACT_STEPS = {"skip_seconds":10,"preview_step_seconds":10,"preview_acceleration":[{"from_repeat":0,"step_seconds":10},{"from_repeat":5,"step_seconds":30},{"from_repeat":10,"step_seconds":60}],"vertical_seek_seconds":null,"notes":["skip_seconds is the only immediate seek step: the two transport buttons and the FF/REW media keys.","preview_acceleration applies to a HELD direction while scrubbing: repeats 0–4 move 10 s, 5–9 move 30 s, 10+ move 60 s. A released key resets the ladder.","vertical_seek_seconds is null: Up/Down never seek. Vertical is navigation between rows on every surface."]};
   // ---- end generated ----
 
+  // ---- generated from the `live` section of
+  // tests/playback/player-input-contract.json by scripts/player-contract-table
+  // --embed; do not edit by hand ----
+  const LIVE_INPUT_ROUTING = {"ten-foot":{"hidden":{"left":"reveal","right":"reveal","up":"reveal","down":"reveal","select":"reveal","back":"exit","play_pause":"toggle_play","tap_surface":"reveal","idle":"ignore"},"overlay":{"left":"focus_row","right":"focus_row","up":"focus_row","down":"focus_row","select":"activate","back":"hide","play_pause":"toggle_play","tap_surface":"ignore","idle":"hide"},"page":{"left":"ignore","right":"ignore","up":"ignore","down":"ignore","select":"ignore","back":"ignore","play_pause":"ignore","tap_surface":"ignore","idle":"ignore"}},"desktop":{"hidden":{"left":"strip_prev","right":"strip_next","up":"channel_up","down":"channel_down","select":"ignore","back":"exit","play_pause":"toggle_play","tap_surface":"reveal","idle":"ignore"},"overlay":{"left":"strip_prev","right":"strip_next","up":"channel_up","down":"channel_down","select":"tune","back":"exit","play_pause":"toggle_play","tap_surface":"ignore","idle":"hide"},"page":{"left":"ignore","right":"ignore","up":"ignore","down":"ignore","select":"ignore","back":"ignore","play_pause":"toggle_play","tap_surface":"ignore","idle":"ignore"}},"touch":{"hidden":{"left":"ignore","right":"ignore","up":"ignore","down":"ignore","select":"ignore","back":"exit","play_pause":"ignore","tap_surface":"toggle_chrome","idle":"ignore"},"overlay":{"left":"ignore","right":"ignore","up":"ignore","down":"ignore","select":"activate","back":"exit","play_pause":"ignore","tap_surface":"toggle_chrome","idle":"hide"},"page":{"left":"ignore","right":"ignore","up":"ignore","down":"ignore","select":"ignore","back":"ignore","play_pause":"ignore","tap_surface":"ignore","idle":"ignore"}}};
+  const LIVE_CONTRACT_TIMINGS = {"hide_after_ms":4000,"hidden_only_while_playing":true,"channel_coalesce_ms":350,"preview_auto_commit_ms":null,"notes":["hide_after_ms and hidden_only_while_playing are the finite player's values unchanged: the overlay hides this long after the last input while playing, and never while paused or failed.","channel_coalesce_ms: a held channel key accumulates and starts ONE session after this much quiet. Ten presses must not be ten tuner GETs.","preview_auto_commit_ms is null: the neighbour strip's preview commits on select or a click, never on a timer."]};
+  const LIVE_HOTKEYS = {"f":"fullscreen","m":"mute","p":"picture_in_picture","g":"guide_sheet","escape":"exit"};
+  // ---- end generated live table ----
+
   function qualityForce(quality) {
     if (quality === "auto") return "auto";
     return quality === "original" || quality === "nomse"
@@ -796,6 +804,29 @@
     return row[input];
   }
 
+  // Live TV is a surface without a timeline: the same rulings, minus every
+  // seek. Routed from the same fixture as the finite player so the web, Apple
+  // and Android reducers cannot drift from one another.
+  function routeLiveInput(surface, state, input) {
+    const row = LIVE_INPUT_ROUTING[surface] && LIVE_INPUT_ROUTING[surface][state];
+    if (!row || !(input in row)) {
+      throw new Error(`no live route for ${surface}/${state}/${input}`);
+    }
+    return row[input];
+  }
+
+  function liveContractTiming(name) {
+    if (!(name in LIVE_CONTRACT_TIMINGS)) throw new Error(`unknown live timing ${name}`);
+    return LIVE_CONTRACT_TIMINGS[name];
+  }
+
+  // A desktop hotkey is only ours while the live host owns the keyboard. The
+  // caller decides that; this only answers what the key means.
+  function liveHotkey(key) {
+    const name = String(key || "").toLowerCase();
+    return Object.prototype.hasOwnProperty.call(LIVE_HOTKEYS, name) ? LIVE_HOTKEYS[name] : null;
+  }
+
   function previewStepSeconds(repeatCount) {
     let step = contractStep("preview_step_seconds");
     for (const rung of contractStep("preview_acceleration")) {
@@ -1071,6 +1102,10 @@
     contractTiming,
     contractStep,
     routeInput,
+    LIVE_INPUT_ROUTING,
+    routeLiveInput,
+    liveContractTiming,
+    liveHotkey,
     seekDeltaSeconds,
     previewStepSeconds,
     lostFrameRate,

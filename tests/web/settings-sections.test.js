@@ -79,7 +79,7 @@ test("every section is a route, grouped in the rail's order", () => {
     system: "systemPanel(d.sys,d.playbackEvents)",
     cluster: "clusterPanel(d)",
     integrations: "integrationsPanel(d.settings,d.trakt)",
-    developer: "developerPanel(d.settings,d.developerReadiness)",
+    developer: "developerPanel(d.settings)",
   };
   const panel = shippedSource("settingsPanel");
   for (const [id] of r.SET_TABS) {
@@ -199,23 +199,19 @@ test("a card's Save wakes on a change and sleeps again once saved", () => {
 
 test("Playback saves per card, and each card writes only its own fields", () => {
   const writes = {};
-  // The two capacity selects hold numbers and Streaming compares them against
-  // what was loaded, so they need a numeric stub and a SETTINGS to differ
-  // from. Everything else is still the flat "v".
-  const NUMERIC = { phw: "6", psw: "12" };
-  const run = (fn, ids, settings) => new Function(
+  const run = (fn, ids) => new Function(
     "api", "document", "cacheSettings", "toast", "setCardSaved", "SERVER", "SETTINGS",
-    `${shippedSource("capacityIfChanged")} ${shippedSource(fn)} return ${fn};`,
+    `${shippedSource(fn)} return ${fn};`,
   )(
     async (path, opts) => { writes[fn] = { path, body: opts.body }; return {}; },
-    { getElementById: (id) => { assert.ok(ids.includes(id), `${fn} reads ${id}`); return { value: NUMERIC[id] || "v", checked: true, textContent: "" }; } },
-    (v) => v, () => {}, () => {}, {}, settings || {},
+    { getElementById: (id) => { assert.ok(ids.includes(id), `${fn} reads ${id}`); return { value: "v", checked: true, textContent: "" }; } },
+    (v) => v, () => {}, () => {}, {}, {},
   );
   const defaults = ["pal", "psl", "psm", "perr"];
   // The two switches that are off on purpose moved to Developer, so Streaming
   // no longer writes them: a card that saves a field it does not show can turn
   // something back on that an operator deliberately turned off.
-  const streaming = ["prr", "pabr", "phr", "phb", "pha", "pvod", "pvlr", "pvws", "pvmb", "pvbg", "phw", "psw", "serr"];
+  const streaming = ["prr", "pabr", "phr", "phb", "pha", "pvod", "pvlr", "pvws", "pvmb", "pvbg", "serr"];
   const developer = ["pcpv1", "dverr"];
   const experimental = ["phs", "dxerr"];
   return Promise.all([
@@ -227,9 +223,7 @@ test("Playback saves per card, and each card writes only its own fields", () => 
     assert.deepEqual(Object.keys(writes.savePlaybackDefaults.body).sort(), ["default_audio_lang", "default_sub_lang", "sub_mode"]);
     assert.deepEqual(Object.keys(writes.saveStreaming.body).sort(), [
       "hls_ahead_max_secs", "hls_burst_secs", "hls_readrate", "playback_auto_abr",
-      "stream_readrate", "transcode_max_hw_sessions",
-      "transcode_software_pool_threads", "vod_block_budget_secs",
-      "vod_blocked_get_cap",
+      "stream_readrate", "vod_block_budget_secs", "vod_blocked_get_cap",
       "vod_live_recovery", "vod_materialize_budget_secs", "vod_presentation",
       "vod_working_set_bytes",
     ]);
@@ -238,132 +232,71 @@ test("Playback saves per card, and each card writes only its own fields", () => 
     assert.equal(writes.savePlaybackDefaults.path, "/settings");
     assert.equal(writes.saveStreaming.path, "/settings");
     assert.equal(writes.saveDeveloper.path, "/settings");
-  }).then(() => {
-    // Encoder capacity is written only when the operator moved it. Both of
-    // its defaults are derived from whichever node answered — the software
-    // one is that node's core count — and the settings store is shared, so a
-    // card that always wrote them would pin one machine's hardware on the
-    // whole cluster from an edit about the buffer limit.
-    delete writes.saveStreaming;
-    return run("saveStreaming", streaming, {
-      transcode_max_hw_sessions: 6,
-      transcode_software_pool_threads: 12,
-    })({ disabled: false });
-  }).then(() => {
-    const written = Object.keys(writes.saveStreaming.body);
-    assert.ok(written.length, "the rest of the card still saves");
-    for (const field of ["transcode_max_hw_sessions", "transcode_software_pool_threads"])
-      assert.ok(!written.includes(field), `${field} was written without being changed`);
   });
 });
 
-// Every stub takes ...args and serialises all of them. The first version took
-// the arguments it expected — `togRow(id,label,note)` against a shipped
-// `togRow(id,label,note,checked,attrs)` — and silently dropped `checked` and
-// `attrs`, which is where a `disabled` flag would go. A reviewer disabled the
-// switch through `attrs` and the "gates nothing" test passed. A stub that
-// discards arguments cannot prove anything about them.
-function developerPanelUnder(readiness) {
-  const record = (kind) => (...args) => `${kind}(${JSON.stringify(args)})`;
+test("Developer is where the switches that cost something live", () => {
   const panel = new Function(
     "setHead", "setCard", "cardHead", "togRow", "setCardFoot", "esc",
+    // Joined with newlines, never bare interpolation: `shippedSource` here
+    // stops at the next `\nfunction `, so a fragment can end inside a trailing
+    // `//` comment and swallow whatever follows it.
     [
-      // Newline-joined: a shipped declaration is sliced with the comment block
-      // that follows it, so concatenating two of them directly comments the
-      // second one out. That failure looks like "index.html no longer declares
-      // X" and is not one.
-      shippedConst("DEV_READINESS_LABEL"),
-      shippedSource("devReadinessRow"),
-      shippedSource("devReadinessPill"),
-      shippedSource("devReadinessEvidence"),
-      shippedSource("devReq"),
-      shippedSource("liveTvSettingsCard"),
-      shippedSource("developerPanel"),
-      "return developerPanel;",
+      shippedSource("preparedHandoffEnabled"), shippedSource("liveTvSettingsCard"),
+      shippedSource("liveTvGuideCard"),
+      shippedSource("developerPanel"), "return developerPanel;",
     ].join("\n"),
   )(
     (title, sub) => `HEAD:${title}|${sub}`,
     (body) => `CARD[${body}]`,
     (title, sub) => `CARDHEAD:${title}|${sub || ""}`,
-    record("TOG"),
-    record("FOOT"),
+    // Every argument, because the last two are the switch's state and the
+    // handler that makes it do anything — a stub that drops them lets an inert
+    // control pass as a working one.
+    (id, label, note, checked, attrs) =>
+      `TOG:${id}|${label}|${note}|checked=${!!checked}|${attrs || ""}`,
+    (fn) => `FOOT:${fn}`,
     esc,
   );
-  return panel({ playback_control_protocol_v1: true, hls_typeless_sliding: false }, readiness);
-}
-
-// Everything the panel emits except the readings themselves. Comparing this
-// across readings is stronger than comparing the controls: it also catches a
-// `<fieldset disabled>` wrapper, an added `title="prerequisites not met"`, a
-// whole card removed, or a Save button that disappears — none of which pass
-// through `togRow`.
-function developerPanelSkeleton(readiness) {
-  return developerPanelUnder(readiness)
-    .replace(/<span data-devstat=[\s\S]*?<\/span>/g, "«pill»")
-    .replace(/<small class="hint" data-devev="[^"]*">[\s\S]*?<\/small>/g, "«evidence»");
-}
-
-// The panel-skeleton comparison below proves the Developer panel gates
-// nothing. It proves nothing about the other three places a gate is cheapest
-// to add: a different panel, a different switch, or a save function that
-// returns early. Each of those needs a reading to gate on, and none of them
-// can have one — so pin that they cannot reach it, which is a stronger claim
-// than pinning what they currently render.
-test("nothing outside the Developer readings can reach a reading", () => {
-  // `pvlr` — the retained live-HLS fallback — lives here, and it is the one
-  // switch a `vod_coverage_replaces_it` reading is literally about. The
-  // "don't strand viewers" gate would go on this panel, and the Developer
-  // skeleton comparison would never see it.
-  const playback = shippedSource("playbackPanel");
-  assert.match(
-    playback,
-    /^function playbackPanel\(settings\)\{/,
-    "playbackPanel takes settings and nothing else; a readiness argument is how a gate arrives",
-  );
-  assert.doesNotMatch(
-    playback,
-    /readiness|devReq|DEV_READINESS/i,
-    "the Playback panel must not be able to read a prerequisite",
-  );
-
-  // A save function that early-returns on an unmet reading is invisible to
-  // any comparison of rendered markup: the stub records the function name,
-  // so the skeleton is byte-identical whatever the function does.
-  for (const name of ["saveDeveloper", "saveExperimental", "saveStreaming", "saveSubtitleOverlay", "saveDolbyVisionConvert"]) {
-    assert.doesNotMatch(
-      shippedSource(name),
-      /readiness|devReq|DEV_READINESS/i,
-      `${name} must not consult a prerequisite before writing a setting`,
-    );
-  }
-
-  // And the reading only reaches the tab that renders it. A route that loads
-  // it is a route that could gate on it.
-  const manifest = SHIPPED_UI.match(/\nconst SETTINGS_MANIFEST=\{[\s\S]*?\n\};/);
-  assert.ok(manifest, "index.html no longer declares SETTINGS_MANIFEST");
-  const carries = manifest[0]
-    .split("\n")
-    .filter((line) => line.includes("developerReadiness"))
-    .map((line) => line.trim().split(":")[0]);
-  assert.deepEqual(
-    carries,
-    ["developer"],
-    "only the Developer tab may load the readiness reading",
-  );
-});
-
-test("Developer is where the switches that cost something live", () => {
-  const html = developerPanelUnder(undefined);
+  const html = panel({
+    playback_control_protocol_v1: true,
+    hls_typeless_sliding: false,
+    live_tv_guide_source: "hdhomerun",
+    live_tv_guide_hours: 24,
+  });
   for (const id of ["pcpv1", "phs"]) {
-    assert.match(html, new RegExp(`TOG\\(\\["${id}"`), `Developer is missing the ${id} switch`);
+    assert.match(html, new RegExp(`TOG:${id}\\|`), `Developer is missing the ${id} switch`);
   }
-  assert.match(html, /FOOT\(\["saveDeveloper"/);
-  assert.match(html, /FOOT\(\["saveExperimental"/);
+  assert.match(html, /FOOT:saveDeveloper/);
+  assert.match(html, /FOOT:saveExperimental/);
   assert.match(html, /Enable prepared quality handoff/);
   assert.match(html, /encoder: staged/);
   assert.match(html, /twenty consecutive commits/);
   assert.match(html, /Android and web remain unqualified/);
   assert.match(html, /no separate hidden server flag/);
+  // The prepared card says what has to be true *and whether it is*, because
+  // a requirement an operator cannot check is a requirement they will skip.
+  // None of it gates the toggle: the switch is in the card above and this one
+  // has no input at all.
+  assert.match(html, /What must be true first, and whether it is/);
+  assert.match(html, /The server primes the successor it stages/);
+  assert.match(html, /503 media_owner_transition/);
+  assert.match(html, /nothing on this card prevents you enabling it now/);
+  // The card is advisory AND it carries the switch. Those are not in tension:
+  // the list says what enabling costs and whether each part is true, and
+  // nothing in it disables the control. A page that refuses to let an operator
+  // turn something on tells them less than one that says what will happen.
+  const preparedCard = html
+    .slice(html.indexOf("Enable prepared quality handoff"))
+    .split("Experimental delivery")[0];
+  assert.match(preparedCard, /TOG:pdp\|/, "the prepared card carries the enable switch");
+  assert.doesNotMatch(preparedCard, /FOOT:/,
+    "…and no save: the switch is this browser's, not a server setting");
+  assert.doesNotMatch(preparedCard, /disabled/,
+    "nothing in the readiness list disables it");
+  const off = panel({ playback_control_protocol_v1: false, hls_typeless_sliding: false });
+  assert.match(html, /The control endpoint is advertised<small>[\s\S]*?<span class="pill" style="color:var\(--good\)/);
+  assert.match(off, /The control endpoint is advertised<small>[\s\S]*?<span class="pill warn">not met<\/span>/);
   assert.match(html, /Enable cluster transport recovery/);
   assert.match(html, /there is no hidden production feature flag/);
   assert.match(html, /Keep a ready voter majority/);
@@ -374,117 +307,69 @@ test("Developer is where the switches that cost something live", () => {
   // transport is always compiled and automatic; this must not imply a gate.
   assert.match(html, /compiled in and activates automatically/);
   assert.doesNotMatch(html, /special build/);
-  // The retained live-HLS engine costs encode time and used to say so only in
-  // a log line. It belongs in the section for things that cost more than they
-  // look, with its switch named rather than duplicated.
-  assert.match(html, /Retained live-HLS engine/);
-  assert.match(html, /costs encode time on this node/);
-  assert.match(html, /#\/settings\/playback/);
-  assert.doesNotMatch(html, /TOG\(\["pvlr"/, "the switch stays in Playback; two copies drift");
+  // The switch has to be wired to something. A control that renders and does
+  // nothing is worse than no control: it reports a capability to the operator
+  // that the server never hears about.
+  assert.match(html, /TOG:pdp\|[^|]*\|[^|]*\|checked=false\|onchange="setPreparedHandoff\(this\.checked\)"/,
+    "the prepared-handoff switch reflects the stored state and sets it");
+  assert.match(html, /dual_player_preparation/,
+    "…and says which field it sets, because that is the whole of Gate A");
+  assert.match(html, /Nothing above blocks this switch/);
+  // Readiness pills, counted rather than matched, because "not met" contains
+  // "met": an assertion that only looks for the word cannot tell a met row from
+  // an unmet one, and would pass with the two renderings swapped.
+  const pills = html.match(/>(met|not met|partly met)<\/span>/g) || [];
+  const counted = (word) => pills.filter((pill) => pill === `>${word}</span>`).length;
+  assert.ok(counted("not met") >= 2,
+    "the unmet requirements say so beside the switch — the staged route has no worker");
+  assert.ok(counted("met") >= 2, "…and the ones this page checked and found true say that");
+  assert.ok(counted("partly met") >= 1, "…and a half-answered one is not rounded either way");
   assert.match(html, /HDHomeRun Live TV/);
   assert.match(html, /Save the configuration, check readiness, then enable/);
+  // Readiness is advice, not a gate (2026-09-07). The card has to say so where
+  // the operator is standing, or the next person reads a red row as a refusal.
+  assert.match(html, /Readiness is advice, not a gate/);
+  // The programme guide has its own enable section beside the tuner card, and
+  // it names the credential it sends and the one host it sends it to.
+  assert.match(html, /Programme guide/);
+  assert.match(html, /What must be true to enable it safely/);
+  assert.match(html, /api\.hdhomerun\.com/);
+  assert.match(html, /never stores, logs or relays that credential/);
+  assert.match(html, /FOOT:saveLiveTvGuide/);
+  // Nothing here may imply the guide is a code-level gate or a build variant.
+  assert.doesNotMatch(html, /program-guide scheduling are not supported/);
 });
 
-// The readings are the half the section was missing: it listed what must be
-// true and then left the operator with no way to find out. These pin the three
-// answers the daemon can give and, more importantly, that a bad one changes
-// nothing about the controls.
-// Every row the panel asks for, forced to one status. Written from the ids the
-// shipped panel actually requests so a new row cannot slip past these tests
-// with no coverage.
-const DEV_REQUIREMENT_IDS = {
-  cluster_transport_recovery: ["recovery_budgets", "cluster_api_advertised", "cache_revocation_capability", "recovery_receipt"],
-  playback_control_protocol_v1: ["clients_report"],
-  prepared_quality_handoff: ["server_preparation_is_real", "client_two_player_handoff", "fleet_receipt"],
-  live_hls_recovery: ["vod_coverage_replaces_it", "no_session_bypasses_the_switch"],
-  pgs_overlay: ["clients_render_overlays", "overlay_acceptance"],
-};
-function statuses(status) {
-  return {
-    items: Object.entries(DEV_REQUIREMENT_IDS).map(([id, requirements]) => ({
-      id,
-      requirements: requirements.map((rid) => ({ id: rid, title: rid, status, evidence: `read: ${rid}` })),
-    })),
-  };
-}
-
-test("the panel asks for exactly the rows the server reports", () => {
-  const html = developerPanelUnder(statuses("met"));
-  const asked = [...html.matchAll(/data-devstat="([^"]+)"/g)].map((m) => m[1]).sort();
-  const offered = Object.entries(DEV_REQUIREMENT_IDS)
-    .flatMap(([item, reqs]) => reqs.map((rid) => `${item}:${rid}`)).sort();
-  assert.deepEqual(asked, offered,
-    "a row the server does not report renders 'not reported' to an operator forever");
-  assert.doesNotMatch(html, /not reported/);
-  // And a row that really is missing says so rather than reading as pending.
-  const short = statuses("met");
-  short.items[1].requirements = [];
-  assert.match(developerPanelUnder(short), /not reported/);
-});
-
-test("Developer prerequisites report what the server can see, and gate nothing", () => {
-  const readiness = {
-    items: [
-      {
-        id: "playback_control_protocol_v1",
-        enabled: true,
-        requirements: [
-          { id: "clients_report", title: "x", status: "unmet", evidence: "9 exchanges since start, none complete." },
-        ],
-      },
-      {
-        id: "cluster_transport_recovery",
-        requirements: [
-          { id: "recovery_budgets", title: "x", status: "met", evidence: "chunk 30 s, whole transfer 1,200 s." },
-          { id: "recovery_receipt", title: "x", status: "unobservable", evidence: "The daemon never receives it." },
-        ],
-      },
+test("the guide's readiness rows are advisory and never disable the save", () => {
+  const view = new Function(
+    "esc",
+    `${shippedSource("liveTvGuideReadyView")} return liveTvGuideReadyView;`,
+  )(esc);
+  const html = view({
+    source: "xmltv",
+    freshness: "unavailable",
+    age_seconds: 0,
+    matched_channels: 0,
+    lineup_channels: 12,
+    programmes: 0,
+    refresh_interval_seconds: 1200,
+    refresh_error: "the XMLTV host refused the connection",
+    checks: [
+      { id: "live_tv_enabled", ready: false, message: "Live TV is off." },
+      { id: "outbound_host", ready: true, message: "The owner can reach the URL." },
     ],
-  };
-  const html = developerPanelUnder(readiness);
-
-  assert.match(html, /9 exchanges since start, none complete\./);
-  assert.match(html, /chunk 30 s, whole transfer 1,200 s\./);
-  assert.match(html, /The daemon never receives it\./);
-  assert.match(html, />not met</, "an unmet reading has to say so in words, not only a colour");
-  assert.match(html, />met</);
-  assert.match(html, />not observable</, "a fact the daemon cannot reach is its own answer");
-
-  // The switch is still a switch. If a later change disables a control because
-  // a reading is unmet, this fails — which is the whole point of the section
-  // being advisory rather than a gate with extra steps.
-  // The switches are still switches. Everything this panel emits apart from
-  // the readings themselves must be byte-identical whichever way the readings
-  // go — every row met, every row unmet, no reading at all. If a later change
-  // makes any control depend on a reading, this is what catches it, and the
-  // section stops being advisory the moment it does.
-  const allMet = statuses("met"), allUnmet = statuses("unmet");
-  assert.equal(developerPanelSkeleton(allUnmet), developerPanelSkeleton(undefined),
-    "an unmet reading changed something other than the reading");
-  assert.equal(developerPanelSkeleton(allMet), developerPanelSkeleton(allUnmet),
-    "the panel differs between a satisfied and a refused prerequisite");
-  assert.equal(developerPanelSkeleton({ unavailable: "boom" }), developerPanelSkeleton(undefined),
-    "a failed reading changed something other than the reading");
-
-  // A prerequisite the reading does not cover keeps its explanation and says
-  // the server did not report it, rather than silently rendering as satisfied.
-  assert.match(html, /not reported/);
-  const missing = developerPanelUnder(undefined);
-  assert.match(missing, /twenty consecutive commits/, "the explanation survives a missing reading");
-  assert.doesNotMatch(missing, />met</);
-});
-
-test("A failed prerequisite reading says so instead of reading as satisfied", () => {
-  const html = developerPanelUnder({ unavailable: "membership unavailable" });
-  assert.match(html, />unavailable</);
-  assert.match(html, /The prerequisite reading failed: membership unavailable/);
-  assert.doesNotMatch(html, />met</);
-  assert.match(html, /TOG\(\["pcpv1"/, "a failed reading still leaves every switch usable");
+  });
+  assert.match(html, /Not met yet/);
+  assert.match(html, /Met/);
+  assert.match(html, /None of this blocks the switch/);
+  assert.match(html, /matched 0 of 12 lineup channels/);
+  assert.match(html, /Last refresh failed/);
+  assert.doesNotMatch(html, /disabled/, "an advisory panel must not render a disabled control");
 });
 
 test("Maintenance owns the timers, and each of its cards saves its own fields", () => {
   const panel = shippedSource("maintenancePanel");
-  for (const card of ["precachePanel", "offlinePanel", "dvDiskPanel", "telemetryPanel"]) assert.match(panel, new RegExp(`${card}\\(`));
+  for (const card of ["precachePanel", "dvDiskPanel", "telemetryPanel"]) assert.match(panel, new RegExp(`${card}\\(`));
   for (const id of ["job-probe", "job-art", "job-clean", "job-boot"]) assert.match(panel, new RegExp(`"${id}"`));
   const libraries = shippedSource("librariesPanel");
   for (const gone of ["maintenancePanel", "dvDiskPanel", "precachePanel", "telemetry"])
@@ -497,14 +382,7 @@ test("Maintenance owns the timers, and each of its cards saves its own fields", 
   assert.deepEqual(fields("savePrecache"), ["cache_max_gb", "cache_produce_mins"]);
   assert.deepEqual(fields("saveTelemetry"), ["telemetry_retain_days"]);
   assert.deepEqual(fields("saveDvDiskSettings"), ["dv_disk_convert_parallel", "dv_disk_keep_original"]);
-  // The offline budgets reached the settings API long before they reached a
-  // control, so the card is asserted by the fields it writes rather than only
-  // by its presence: a card that renders the switch and saves three budgets
-  // without it would look right and turn nothing off.
-  assert.deepEqual(fields("saveOffline"), [
-    "offline_enabled", "offline_max_gb", "offline_max_gb_per_user", "offline_max_rows_per_user",
-  ]);
-  for (const fn of ["saveMaintenance", "savePrecache", "saveTelemetry", "saveDvDiskSettings", "saveOffline"])
+  for (const fn of ["saveMaintenance", "savePrecache", "saveTelemetry", "saveDvDiskSettings"])
     assert.doesNotMatch(shippedSource(fn), /\brender\(\)/, `${fn} no longer repaints the whole app to show a save`);
 });
 

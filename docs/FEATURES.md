@@ -391,7 +391,7 @@ and delivers it. Full decision logic is [ARCHITECTURE.md](ARCHITECTURE.md) §3.
   H.264 copy session, plurx does the segmenting itself and places a boundary
   only in front of a keyframe with no leading picture to discard — every
   ordinary boundary on an open-GOP disc remux costs exactly one frame
-  ([STUTTER-4K.md](STUTTER-4K.md) §5.6). Where no such keyframe appears
+  ([STUTTER-4K.md](streaming/STUTTER-4K.md) §5.6). Where no such keyframe appears
   within 48 MB or 15 s the cut is taken anyway and counted; the decoded
   frames are bit-identical either way, and a stream the reader cannot follow
   falls back to ffmpeg's own muxer automatically.
@@ -430,6 +430,31 @@ decoding shows what the file is versus what your browser is actually rendering.
 on the same screens that play the library — the web app, iOS, tvOS, and
 Android. It is off until an administrator turns it on, and it is a *viewer*,
 not a DVR: nothing is recorded, nothing is scheduled, and nothing is kept.
+
+- **The page says what is on.** A channel row carries the network chip, the
+  number and callsign, the programme on now with a bar running to its end,
+  and what is next. Two views of the same page share every piece of state
+  behind one switch: a dense **list** beside the player for surfing, and the
+  classic half-hour **grid** with a red now line for planning. Switching views
+  never stops the stream and never refetches — it is a re-render of the browse
+  region. A protected channel is dimmed rather than hidden, with a
+  `Hide protected` filter for a lineup that is mostly DRM.
+- **The programme data is a feed, not a dependency.** It comes from the
+  HDHomeRun's own guide service by default, or from an XMLTV document an
+  administrator configures. It is read-only: a future programme has a details
+  popover and nothing else, because there is no DVR behind it. Every failure
+  mode is *rendered* — off, empty, stale or erroring all leave a working page
+  and a tunable channel, because the channel list and session start never
+  consult guide state and never wait on a guide fetch.
+- **The player follows you.** Leaving the Live TV page with a channel playing
+  moves the picture into a dock rather than tearing it down; the lease, the
+  keepalive and the watchdogs continue exactly as on the page. Fullscreen is a
+  surface rather than a bare video element — channel and programme in the
+  corner, a strip of neighbouring channels along the bottom, a progress bar,
+  all auto-hiding after four seconds. Native picture-in-picture hands the same
+  element to the browser, and the "stop when the page hides" rule is narrowed
+  to *hidden and not in picture-in-picture*, because a PiP window is playing
+  and its tuner is in use.
 
 - **One device, named by hand.** An administrator types the tuner's private
   IPv4 into Settings → Developer. There is no broadcast discovery: a server
@@ -523,7 +548,7 @@ behave exactly like the flagged ones: the device accepts the connection and
 returns nothing after a flat ten seconds, while reporting 98% signal quality —
 so that is the device declining to hand over protected content, not a weak
 signal, and not something plurx can fix. See
-[HDHOMERUN-LIVE-TV-STATUS.md](HDHOMERUN-LIVE-TV-STATUS.md).
+[HDHOMERUN-LIVE-TV-STATUS.md](features/HDHOMERUN-LIVE-TV-STATUS.md).
 
 **What else is limited, honestly.** Losing the owner node ends the live session
 in flight;
@@ -677,7 +702,7 @@ backend (hiqlite, raft-replicated SQLite) and the transcode-failover mechanic
 (session restart-at-boundary, any node serves segment N) are **decided and
 validated**, not yet wired into a running cluster. Today plurx runs as a single
 node; the cluster is the next phase. Detail: [ARCHITECTURE.md](ARCHITECTURE.md)
-§2, [PHASE3-SPIKE.md](PHASE3-SPIKE.md).
+§2, [PHASE3-SPIKE.md](cluster/PHASE3-SPIKE.md).
 
 ---
 
@@ -847,7 +872,10 @@ Listed so the inventory above is unambiguous — these are deliberate, with reas
   monarr for its calendar if you paired one. plurx never tells another
   application to do something. Pushing watch state back to monarr is on the
   roadmap and is not built.
-- **Does not record television.** Live TV (§4a) plays one HDHomeRun tuner
+- **Does not record television, or schedule anything.** The programme guide in
+  §4a is information: it says what is on and what is next, and offers no
+  recording, no reminders and no "tune at 9", because there is nothing behind
+  those. Live TV (§4a) plays one HDHomeRun tuner
   and keeps nothing: no recording, no scheduling, no retention, no series
   rules, no conflict resolution. It is also not a channel aggregator — no
   streaming services, no discovery feed. DRM-flagged channels are listed and

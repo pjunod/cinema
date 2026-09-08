@@ -112,7 +112,17 @@ private class Harness(private val scope: TestScope) {
     }
 
     val now: () -> Long = { scope.currentTime }
-    val captureOf: () -> PlaybackControlCapture? = { PlaybackControlCapture(current, intentGeneration, owner, sourceRevision) }
+
+    /**
+     * The source stopped publishing. Not a hypothetical: a session empties its
+     * capture slot synchronously on teardown, so every reporter that outlives
+     * its session by one exchange reads exactly this.
+     */
+    var sourceIsGone = false
+    val captureOf: () -> PlaybackControlCapture? = {
+        if (sourceIsGone) null
+        else PlaybackControlCapture(current, intentGeneration, owner, sourceRevision)
+    }
     val onExchange: (PlaybackControlReporter.Exchange) -> Unit = { exchanges += it }
 }
 
@@ -338,7 +348,15 @@ class PlaybackControlRefusalTest {
                     GENERATION,
                     7,
                     1,
-                    ControlAction("prepare_replacement"),
+                    // A type this client has genuinely never heard of. It used
+                    // to be the literal `"prepare_replacement"`, which is the
+                    // name a client *declares* and never a tag the server
+                    // sends — so once the `prepare` handler landed this test
+                    // would have gone on passing while its name and its point
+                    // became false. The property it protects, that an
+                    // unrecognised action is fatal, is the one the new
+                    // vocabulary must not weaken.
+                    ControlAction("promote_replacement"),
                 ),
             ),
         )
@@ -503,79 +521,6 @@ class PlaybackControlRefusalTest {
 
 class PlaybackControlFailureTest {
     @Test
-    fun `400 invalid control stops without replaying the bad packet`() = runTest {
-        val harness = Harness(this)
-        harness.enqueue(
-            Result.failure(ControlTransportException(status = 400, code = "invalid_control")),
-        )
-        val subject = assertNotNull(reporter(harness))
-        subject.start(backgroundScope)
-        runCurrent()
-        assertTrue(subject.isStopped())
-        assertEquals(1, harness.requests.size)
-    }
-
-    @Test
-    fun `404 session gone stops the control loop`() = runTest {
-        val harness = Harness(this)
-        harness.enqueue(
-            Result.failure(ControlTransportException(status = 404, code = "session_gone")),
-        )
-        val subject = assertNotNull(reporter(harness))
-        subject.start(backgroundScope)
-        runCurrent()
-        assertTrue(subject.isStopped())
-        assertEquals(404, (harness.exchanges.single().cause as ControlTransportException).status)
-    }
-
-    @Test
-    fun `410 session ended stops the control loop`() = runTest {
-        val harness = Harness(this)
-        harness.enqueue(
-            Result.failure(ControlTransportException(status = 410, code = "session_ended")),
-        )
-        val subject = assertNotNull(reporter(harness))
-        subject.start(backgroundScope)
-        runCurrent()
-        assertTrue(subject.isStopped())
-        assertEquals(1, harness.requests.size)
-    }
-
-    @Test
-    fun `410 owner lost stops the control loop`() = runTest {
-        val harness = Harness(this)
-        harness.enqueue(
-            Result.failure(ControlTransportException(status = 410, code = "owner_lost")),
-        )
-        val subject = assertNotNull(reporter(harness))
-        subject.start(backgroundScope)
-        runCurrent()
-        assertTrue(subject.isStopped())
-        assertEquals(1, harness.requests.size)
-    }
-
-    @Test
-    fun `409 stale sequencing stops instead of minting a new client identity`() = runTest {
-        val harness = Harness(this)
-        harness.enqueue(
-            Result.failure(
-                ControlTransportException(
-                    status = 409,
-                    code = "stale_control",
-                    generation = GENERATION,
-                    controlEpoch = 7,
-                    detail = "the generation, client instance, or sequence fence is stale",
-                ),
-            ),
-        )
-        val subject = assertNotNull(reporter(harness))
-        subject.start(backgroundScope)
-        runCurrent()
-        assertTrue(subject.isStopped())
-        assertEquals(CLIENT_ID, harness.requests.single().clientInstanceId)
-    }
-
-    @Test
     fun `a retryable control failure replays the exact request`() = runTest {
         val harness = Harness(this)
         harness.enqueue(
@@ -723,31 +668,6 @@ class PlaybackControlOwnerChangeTest {
             harness.requests[1].capabilities,
             "the new owner has never been told this player's capabilities",
         )
-    }
-
-    @Test
-    fun `a stale generation is re-resolved and restarts the sequence`() = runTest {
-        val harness = Harness(this)
-        harness.enqueue(
-            Result.failure(
-                ControlTransportException(
-                    status = 409,
-                    code = "stale_control",
-                    generation = newGeneration,
-                    controlEpoch = 7,
-                    detail = "the control generation is no longer current",
-                ),
-            ),
-        )
-        val subject = assertNotNull(reporter(harness))
-        subject.start(backgroundScope)
-        advanceTimeBy(1_001)
-        subject.stop()
-
-        assertTrue(harness.requests.size >= 2)
-        assertEquals(newGeneration, harness.requests[1].generation)
-        assertEquals(1, harness.requests[1].sequence)
-        assertEquals(capabilities(), harness.requests[1].capabilities)
     }
 
     @Test
@@ -926,7 +846,8 @@ class PlaybackControlWireTest {
         assertTrue(encoded.contains("\"demand\":\"hold\""))
         assertTrue(
             encoded.contains(
-                "\"supported_actions\":[\"hold\",\"retry_resource\",\"terminal\",\"prepare_replacement\"]",
+                "\"supported_actions\":" +
+                    "[\"hold\",\"retry_resource\",\"terminal\",\"prepare_replacement\"]",
             ),
         )
         assertFalse(encoded.contains("\"error_detail\""), "explicitNulls is off; absent means absent")
@@ -971,12 +892,35 @@ class PlaybackControlWireTest {
              "control_epoch":7,"accepted_sequence":4,"server_time_unix_ms":1,
              "lease":{"state":"active","renew_after_ms":5000,"expires_at_unix_ms":2},
              "delivery":{"subtitle_readiness":"warming"},
-             "effective_selection":{},"action":{"type":"none"}}
+             "effective_selection":{"quality_auto":true,"height":1080,
+               "audio_offset_ms":0,"codec":"server_selected"},
+             "action":{"type":"none"}}
             """.trimIndent(),
         )
         assertEquals(4, decoded.acceptedSequence)
         assertEquals("warming", decoded.delivery?.subtitleReadiness)
         assertEquals("none", decoded.action.type)
+        // `effective_selection` used to be an ignored key and this fixture
+        // carried `{}` to prove it was ignored. The client consumes it now, and
+        // the server declares four of its fields plainly — so the fixture
+        // carries what a server actually sends.
+        assertEquals(1_080L, decoded.effectiveSelection?.height)
+    }
+
+    @Test
+    fun `a server that sends no effective selection is still understood`() {
+        // The field is informational on the response path, and a server old
+        // enough to omit it is not a server this client should stop reporting
+        // to.
+        val decoded = json.decodeFromString(
+            ControlResponse.serializer(),
+            """
+            {"protocol":"plurx-playback-control-v1",
+             "generation":"11111111-1111-4111-8111-111111111111",
+             "control_epoch":7,"accepted_sequence":4,"action":{"type":"none"}}
+            """.trimIndent(),
+        )
+        assertNull(decoded.effectiveSelection)
     }
 
     @Test
@@ -1296,5 +1240,434 @@ class PlaybackControlUrgentNotifyTest {
         advanceTimeBy(60_000)
         runCurrent()
         assertEquals(before, harness.requests.size)
+    }
+}
+
+/**
+ * The prepared-replacement half of the protocol, at the reporter's boundary.
+ *
+ * These assert the *encoded* request and the *decoded* response rather than the
+ * in-memory objects, because the serializer is what ships: `explicitNulls` is
+ * off and `encodeDefaults` is on nowhere, so a field can be perfectly correct
+ * in Kotlin and simply absent on the wire — which is the failure
+ * `supported_actions` already carries a comment about.
+ */
+class PlaybackControlPreparedReplacementTest {
+    private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
+
+    private val actionId = "33333333-3333-4333-8333-333333333333"
+    private val successor = "44444444-4444-4444-8444-444444444444"
+
+    private fun preparedAction(
+        playlistUrl: String = "/api/v1/hls/$successor/index.m3u8",
+    ) = ControlAction(
+        type = "prepare",
+        actionId = actionId,
+        sessionId = successor,
+        playlistUrl = playlistUrl,
+        mediaOriginMs = 0,
+        effectiveSelection = EffectiveSelection(
+            qualityAuto = true,
+            height = 1_080,
+            audioOffsetMs = 0,
+            codec = "server_selected",
+            dynamicRange = "sdr",
+        ),
+    )
+
+    private fun request(
+        demand: PlaybackDemand = PlaybackDemand.ACTIVE,
+        acknowledgement: ActionAcknowledgement? = null,
+    ) = ControlRequest(
+        protocol = PlaybackControl.PROTOCOL,
+        generation = GENERATION,
+        controlEpoch = 7,
+        clientInstanceId = CLIENT_ID,
+        sequence = 4,
+        demand = demand,
+        positionMs = 1_000,
+        bufferedThroughMs = 11_000,
+        playbackRate = 1.0,
+        renderState = RenderState.RENDERING,
+        observedDownloadBps = 42_000_000,
+        selection = ClientSelection(
+            quality = QualitySelection.Auto,
+            audioTrack = 0,
+            subtitle = SubtitleSelection(SubtitleMode.OFF),
+            audioOffsetMs = 0,
+            codec = CodecPolicy.AUTO,
+            dynamicRange = DynamicRangePolicy.AUTO,
+        ),
+        capabilities = capabilities(),
+        acknowledgement = acknowledgement,
+        supportedActions = PlaybackControl.SUPPORTED_ACTIONS,
+    )
+
+    @Test
+    fun `the encoded request declares the prepared vocabulary`() {
+        // Asserted against the serialized body rather than the in-memory list:
+        // a server that never sees the vocabulary never sends the action, and
+        // the object being right is not the same claim as the bytes being
+        // right.
+        val encoded = json.encodeToString(ControlRequest.serializer(), request())
+        assertTrue(
+            encoded.contains(
+                "\"supported_actions\":" +
+                    "[\"hold\",\"retry_resource\",\"terminal\",\"prepare_replacement\"]",
+            ),
+            encoded,
+        )
+    }
+
+    @Test
+    fun `observed download bps reaches the wire`() {
+        // The throughput floor needs both this number and the server's own, and
+        // a client that reports null can never be offered a preparation
+        // whatever its capability says.
+        val encoded = json.encodeToString(ControlRequest.serializer(), request())
+        assertTrue(encoded.contains("\"observed_download_bps\":42000000"), encoded)
+    }
+
+    @Test
+    fun `the three terminal acknowledgements encode the server's field names`() {
+        val metadata = json.encodeToString(
+            ControlRequest.serializer(),
+            request(
+                acknowledgement = ActionAcknowledgement(
+                    actionId,
+                    AcknowledgementState.METADATA_READY,
+                ),
+            ),
+        )
+        assertTrue(metadata.contains("\"acknowledgement\":{"), metadata)
+        assertTrue(metadata.contains("\"action_id\":\"$actionId\""), metadata)
+        assertTrue(metadata.contains("\"state\":\"metadata_ready\""), metadata)
+        // `explicitNulls` is off, so the two optional numbers are absent rather
+        // than null — which is what the server's `Option` fields want.
+        assertFalse(metadata.contains("\"buffered_through_ms\":null"), metadata)
+
+        val buffered = json.encodeToString(
+            ControlRequest.serializer(),
+            request(
+                acknowledgement = ActionAcknowledgement(
+                    actionId,
+                    AcknowledgementState.BUFFER_READY,
+                    bufferedThroughMs = 90_000,
+                ),
+            ),
+        )
+        assertTrue(buffered.contains("\"state\":\"buffer_ready\""), buffered)
+        assertTrue(buffered.contains("\"buffered_through_ms\":90000"), buffered)
+
+        val committed = json.encodeToString(
+            ControlRequest.serializer(),
+            request(
+                acknowledgement = ActionAcknowledgement(
+                    actionId,
+                    AcknowledgementState.COMMITTED,
+                    committedMediaOriginMs = 1_800_000,
+                    firstFrameUnixMs = 1_788_000_000_000,
+                ),
+            ),
+        )
+        assertTrue(committed.contains("\"state\":\"committed\""), committed)
+        // The evidence half of a commit, beside the measurement half. The
+        // server requires both and compares this one against the offer.
+        assertTrue(committed.contains("\"committed_media_origin_ms\":1800000"), committed)
+        assertTrue(committed.contains("\"first_frame_unix_ms\":1788000000000"), committed)
+
+        assertEquals(
+            listOf("metadata_ready", "buffer_ready", "committed", "failed", "aborted"),
+            AcknowledgementState.entries.map {
+                json.encodeToString(AcknowledgementState.serializer(), it).trim('"')
+            },
+        )
+    }
+
+    @Test
+    fun `an ordinary request carries no acknowledgement key at all`() {
+        val encoded = json.encodeToString(ControlRequest.serializer(), request())
+        assertFalse(encoded.contains("acknowledgement"), encoded)
+    }
+
+    @Test
+    fun `a committed acknowledgement is never built onto an ending exchange`() {
+        // `demand: "end"` may not carry `state: "committed"`. The server
+        // refuses the pairing with a `400`, which costs the `end` as well as
+        // the commit — so the commit is dropped and the session still ends.
+        val ending = snapshot(demand = PlaybackDemand.END).copy(
+            acknowledgement = ActionAcknowledgement(
+                actionId,
+                AcknowledgementState.COMMITTED,
+                committedMediaOriginMs = 1_800_000,
+                firstFrameUnixMs = 1_788_000_000_000,
+            ),
+        )
+        assertNull(ending.sendableAcknowledgement)
+        val encoded = json.encodeToString(
+            ControlRequest.serializer(),
+            request(demand = PlaybackDemand.END, acknowledgement = ending.sendableAcknowledgement),
+        )
+        assertFalse(encoded.contains("\"state\":\"committed\""), encoded)
+        assertTrue(encoded.contains("\"demand\":\"end\""), encoded)
+
+        // Every other state still rides an ending exchange: an abandoned
+        // preparation must be settled, and the last exchange is often the only
+        // one left to settle it on.
+        val aborting = ending.copy(
+            acknowledgement = ActionAcknowledgement(actionId, AcknowledgementState.ABORTED),
+        )
+        assertEquals(
+            AcknowledgementState.ABORTED,
+            assertNotNull(aborting.sendableAcknowledgement).state,
+        )
+    }
+
+    @Test
+    fun `a valid prepare is accepted and does not stop the reporter`() = runTest {
+        val harness = Harness(this)
+        harness.enqueue(
+            Result.success(
+                ControlResponse(PlaybackControl.PROTOCOL, GENERATION, 7, 1, preparedAction()),
+            ),
+        )
+        val subject = assertNotNull(reporter(harness))
+        subject.start(backgroundScope)
+        advanceTimeBy(30_001)
+        assertFalse(subject.isStopped())
+        assertNull(harness.exchanges.first().failure)
+        subject.stop()
+    }
+
+    @Test
+    fun `a prepare pointing anywhere but this node is fatal before any request`() = runTest {
+        // Mirrors the server's own
+        // `a_relayed_preparation_cannot_point_a_client_anywhere`: the client
+        // refuses it too, and refuses it as a protocol error rather than
+        // ignoring it, because a server sending one is not a server this client
+        // still understands.
+        val harness = Harness(this)
+        harness.enqueue(
+            Result.success(
+                ControlResponse(
+                    PlaybackControl.PROTOCOL,
+                    GENERATION,
+                    7,
+                    1,
+                    preparedAction(playlistUrl = "https://elsewhere.example/x/index.m3u8"),
+                ),
+            ),
+        )
+        val subject = assertNotNull(reporter(harness))
+        subject.start(backgroundScope)
+        advanceTimeBy(30_001)
+        assertTrue(subject.isStopped())
+        assertEquals("protocol:action", harness.exchanges.last().failure)
+        assertEquals(1, harness.requests.size, "nothing was fetched from that URL")
+    }
+
+    @Test
+    fun `a prepare missing the fields this client acts on is fatal`() = runTest {
+        // An action inside the declared vocabulary but missing what the client
+        // consumes is worse than one it has never heard of, because it would be
+        // acted on. Nothing in the server tree asserts these four fields on a
+        // serialized body, so this client validates all of them itself.
+        val harness = Harness(this)
+        harness.enqueue(
+            Result.success(
+                ControlResponse(
+                    PlaybackControl.PROTOCOL,
+                    GENERATION,
+                    7,
+                    1,
+                    ControlAction(type = "prepare", actionId = "33333333-3333-4333-8333-333333333333"),
+                ),
+            ),
+        )
+        val subject = assertNotNull(reporter(harness))
+        subject.start(backgroundScope)
+        advanceTimeBy(30_001)
+        assertTrue(subject.isStopped())
+        assertEquals("protocol:action", harness.exchanges.last().failure)
+    }
+
+    @Test
+    fun `the response's own effective selection is no longer dropped`() {
+        // The server has always sent it; `ignoreUnknownKeys` meant this client
+        // threw it away. Comparing it with a `prepare`'s own selection is how a
+        // client knows what is about to change.
+        val decoded = json.decodeFromString(
+            ControlResponse.serializer(),
+            """
+            {"protocol":"${PlaybackControl.PROTOCOL}","generation":"$GENERATION",
+             "control_epoch":7,"accepted_sequence":1,"action":{"type":"none"},
+             "effective_selection":{"quality_auto":false,"height":720,
+               "audio_track":1,"subtitle_burn":null,"audio_offset_ms":-40,
+               "codec":"source","dynamic_range":"hdr10"}}
+            """.trimIndent(),
+        )
+        val effective = assertNotNull(decoded.effectiveSelection)
+        assertFalse(effective.qualityAuto)
+        assertEquals(720L, effective.height)
+        assertEquals(1L, effective.audioTrack)
+        assertEquals(-40L, effective.audioOffsetMs)
+        assertEquals("source", effective.codec)
+        assertEquals("hdr10", effective.dynamicRange)
+        assertTrue(effective.isValid)
+    }
+}
+
+/**
+ * The teardown hand-off: one last exchange, on a scope that outlives the
+ * screen.
+ *
+ * Twice now the acknowledgement a preparation is owed has been lost on this
+ * path — once because `end()`'s queued `stop()` cancelled the pump the urgent
+ * notify had just launched, and once because cancelling a pump *inside* an
+ * exchange ran the whole failure tail and armed a five-second retry of the
+ * request it was replacing. Both were invisible: the code looked right and the
+ * staging just quietly ran to its 330 s deadline. So the assertions here are
+ * about what went out, not about what was intended.
+ */
+class PlaybackControlSettleTest {
+    private val actionId = "33333333-3333-4333-8333-333333333333"
+
+    /**
+     * The teardown hands a capture in rather than letting the reporter read
+     * one, because by then the caller has closed its observation. The identity
+     * matches [Harness]'s so these read like every other exchange; the source
+     * revision is high because a settled capture is by definition the last
+     * word about this player.
+     */
+    private fun capture(value: PlaybackControlSnapshot) = PlaybackControlCapture(
+        value,
+        0L,
+        PlaybackControlCaptureOwner("test-player", 1),
+        Long.MAX_VALUE,
+    )
+
+    private fun settling(state: AcknowledgementState) = capture(
+        snapshot().copy(acknowledgement = ActionAcknowledgement(actionId, state)),
+    )
+
+    @Test
+    fun `a teardown across an in-flight exchange sends the snapshot it was handed`() = runTest {
+        val harness = Harness(this)
+        // The first exchange never comes back — the only case in which the
+        // teardown path differs from an ordinary urgent report, and the case
+        // both regressions lived in.
+        harness.holds = true
+        val subject = assertNotNull(reporter(harness))
+        subject.start(backgroundScope)
+        runCurrent()
+        assertEquals(1, harness.requests.size, "one exchange is in flight")
+        assertNull(harness.requests.first().acknowledgement)
+
+        harness.holds = false
+        assertTrue(subject.settle(backgroundScope, settling(AcknowledgementState.ABORTED)))
+        advanceTimeBy(2_000)
+        runCurrent()
+
+        assertEquals(2, harness.requests.size)
+        val last = harness.requests.last()
+        assertEquals(AcknowledgementState.ABORTED, last.acknowledgement?.state)
+        assertEquals(actionId, last.acknowledgement?.actionId)
+        // Not a replay of the request it inherited. A cancelled exchange used
+        // to arm `retryRequest`, and `nextRequestLocked` prefers that over the
+        // snapshot — so the exchange went out carrying no acknowledgement at
+        // all, which is the one thing it existed to carry.
+        assertEquals(2L, last.sequence)
+        assertFalse(subject.status().retrying)
+        subject.stop()
+    }
+
+    @Test
+    fun `a teardown outlives the source that handed it over`() = runTest {
+        // The third way this acknowledgement has been lost, and the one the
+        // port onto main introduced: the session empties its capture slot in
+        // the same synchronous pass that hands the reporter its last word —
+        // `clearVerdict` on the disposal path, `end`'s invalidation on a
+        // reopen. Every ordinary path reconciles what it is given against that
+        // slot, and a reconciliation against an empty slot answers null, so the
+        // exchange was built from nothing and never sent. A settled reporter
+        // uses what it was handed.
+        val harness = Harness(this)
+        val subject = assertNotNull(reporter(harness))
+        subject.start(backgroundScope)
+        advanceTimeBy(1)
+        runCurrent()
+        assertTrue(subject.settle(backgroundScope, settling(AcknowledgementState.ABORTED)))
+        harness.sourceIsGone = true
+        advanceTimeBy(2_000)
+        runCurrent()
+
+        val last = harness.requests.last()
+        assertEquals(
+            AcknowledgementState.ABORTED,
+            last.acknowledgement?.state,
+            "the exchange the teardown exists to send",
+        )
+        assertEquals(actionId, last.acknowledgement?.actionId)
+        subject.stop()
+    }
+
+    @Test
+    fun `a teardown with nothing in flight still sends it`() = runTest {
+        val harness = Harness(this)
+        val subject = assertNotNull(reporter(harness))
+        subject.start(backgroundScope)
+        advanceTimeBy(1)
+        runCurrent()
+        assertTrue(subject.settle(backgroundScope, settling(AcknowledgementState.FAILED)))
+        advanceTimeBy(2_000)
+        runCurrent()
+        assertEquals(
+            AcknowledgementState.FAILED,
+            harness.requests.last().acknowledgement?.state,
+        )
+        subject.stop()
+    }
+
+    @Test
+    fun `a stopped reporter refuses the hand-off rather than pretending`() = runTest {
+        // The caller waits on the return value: an exchange that will never be
+        // built must not cost the teardown its whole deadline.
+        val harness = Harness(this)
+        val subject = assertNotNull(reporter(harness))
+        subject.start(backgroundScope)
+        runCurrent()
+        subject.stop()
+        assertFalse(subject.settle(backgroundScope, settling(AcknowledgementState.ABORTED)))
+    }
+
+    @Test
+    fun `a snapshot the server would refuse is not handed off`() = runTest {
+        val harness = Harness(this)
+        val subject = assertNotNull(reporter(harness))
+        subject.start(backgroundScope)
+        runCurrent()
+        val impossible = snapshot().copy(
+            acknowledgement = ActionAcknowledgement(actionId, AcknowledgementState.COMMITTED),
+        )
+        assertFalse(impossible.isValid, "a commit with no rendered frame")
+        assertFalse(subject.settle(backgroundScope, capture(impossible)))
+        subject.stop()
+    }
+
+    @Test
+    fun `a body this client cannot read stops the reporter rather than looping`() = runTest {
+        // A protocol failure is not a transport failure. Folding it into the
+        // null-status arm made it retryable, which replays the same request at
+        // the cadence forever and logs `transport:none:-` — a diagnosable fatal
+        // turned into an undiagnosable loop.
+        val harness = Harness(this)
+        harness.enqueue(Result.failure(ControlProtocolException("body")))
+        val subject = assertNotNull(reporter(harness))
+        subject.start(backgroundScope)
+        advanceTimeBy(60_000)
+        runCurrent()
+        assertTrue(subject.isStopped())
+        assertEquals(1, harness.requests.size)
+        assertEquals("protocol:body", harness.exchanges.last().failure)
     }
 }

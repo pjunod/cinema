@@ -2,7 +2,7 @@
 "use strict";
 
 // Render the two player contracts as the markdown blocks
-// docs/PLAYER-INPUT-CONTRACT.md embeds:
+// docs/clients/PLAYER-INPUT-CONTRACT.md embeds:
 //
 //   tests/playback/player-input-contract.json  → contract:routing:begin/end
 //   tests/playback/playback-info-fields.json   → contract:info:begin/end
@@ -20,8 +20,16 @@ const path = require("node:path");
 const ROOT = path.join(__dirname, "..");
 const FIXTURE = path.join(ROOT, "tests/playback/player-input-contract.json");
 const FIELDS = path.join(ROOT, "tests/playback/playback-info-fields.json");
-const DOC = path.join(ROOT, "docs/PLAYER-INPUT-CONTRACT.md");
+const DOC = path.join(ROOT, "docs/clients/PLAYER-INPUT-CONTRACT.md");
 const POLICY = path.join(ROOT, "crates/plurxd/src/web/playback-policy.js");
+// The generated blocks cite the fixtures with a link relative to the doc, so
+// the citation stays correct when the doc moves: docs/clients/PLAYER-INPUT-CONTRACT.md
+// needed "../tests/…", docs/clients/ needs "../../tests/…". Deriving it means
+// a move never silently desynchronizes the doc from this generator.
+const fromDoc = (target) =>
+  path.relative(path.dirname(DOC), target).split(path.sep).join("/");
+const FIXTURE_LINK = fromDoc(FIXTURE);
+const FIELDS_LINK = fromDoc(FIELDS);
 const WEB = path.join(ROOT, "crates/plurxd/src/web/index.html");
 const BEGIN = "<!-- contract:routing:begin -->";
 const END = "<!-- contract:routing:end -->";
@@ -31,8 +39,12 @@ const OUTCOMES_BEGIN = "<!-- contract:outcomes:begin -->";
 const OUTCOMES_END = "<!-- contract:outcomes:end -->";
 const ROWS_BEGIN = "<!-- contract:rows:begin -->";
 const ROWS_END = "<!-- contract:rows:end -->";
+const LIVE_BEGIN = "<!-- contract:live:begin -->";
+const LIVE_END = "<!-- contract:live:end -->";
 const TIMINGS_BEGIN = "<!-- contract:timings:begin -->";
 const TIMINGS_END = "<!-- contract:timings:end -->";
+const LIVE_EMBED_BEGIN = "  // ---- generated from the `live` section of\n  // tests/playback/player-input-contract.json by scripts/player-contract-table\n  // --embed; do not edit by hand ----";
+const LIVE_EMBED_END = "  // ---- end generated live table ----";
 const EMBED_BEGIN = "  // ---- generated from tests/playback/player-input-contract.json by\n  // scripts/player-contract-table --embed; do not edit by hand ----";
 const EMBED_END = "  // ---- end generated ----";
 const FIELDS_EMBED_BEGIN = "// ---- generated from tests/playback/playback-info-fields.json by\n// scripts/player-contract-table --embed; do not edit by hand ----";
@@ -43,7 +55,7 @@ function renderBlock(contract) {
   out.push(BEGIN);
   out.push("");
   out.push(
-    `_Generated from [\`tests/playback/player-input-contract.json\`](../tests/playback/player-input-contract.json) by \`scripts/player-contract-table\`; do not edit by hand._`,
+    `_Generated from [\`tests/playback/player-input-contract.json\`](${FIXTURE_LINK}) by \`scripts/player-contract-table\`; do not edit by hand._`,
   );
   for (const surface of Object.keys(contract.routing)) {
     out.push("");
@@ -63,10 +75,58 @@ function renderBlock(contract) {
   return out.join("\n");
 }
 
+// The Live TV table is a sibling of the finite-player table in the same
+// fixture, not a fourth surface in it: a live stream has no timeline, so a
+// `live` entry under `surfaces` would have to invent `timeline`, `scrub`,
+// `menu` and `info` states it can never enter. One fixture, two tables, three
+// clients — which is the property that mattered.
+function renderLiveBlock(contract) {
+  const live = contract.live;
+  const out = [LIVE_BEGIN, ""];
+  out.push(
+    `_Generated from the \`live\` section of [\`tests/playback/player-input-contract.json\`](${FIXTURE_LINK}) by \`scripts/player-contract-table\`; do not edit by hand._`,
+  );
+  for (const surface of Object.keys(live.routing)) {
+    out.push("");
+    out.push(`**Surface \`${surface}\`** — ${live.surfaces[surface]}`);
+    out.push("");
+    out.push(`| state \\ input | ${live.inputs.map((i) => `\`${i}\``).join(" | ")} |`);
+    out.push(`|---|${live.inputs.map(() => "---").join("|")}|`);
+    for (const state of Object.keys(live.states)) {
+      const row = live.routing[surface][state];
+      out.push(`| \`${state}\` | ${live.inputs.map((i) => `\`${row[i]}\``).join(" | ")} |`);
+    }
+  }
+  out.push("");
+  out.push("| Outcome | What the client does |");
+  out.push("|---|---|");
+  for (const [name, meaning] of Object.entries(live.outcomes)) out.push(`| \`${name}\` | ${meaning} |`);
+  out.push("");
+  out.push("| Timing | Value |");
+  out.push("|---|---|");
+  const show = (value) => (value === null ? "none" : String(value));
+  for (const [name, value] of Object.entries(live.timings)) {
+    if (name === "notes") continue;
+    out.push(`| \`${name}\` | ${show(value)} |`);
+  }
+  out.push("");
+  out.push(
+    `**Hotkeys** (desktop, only while the live host is fullscreen or focused): ${Object.entries(live.hotkeys)
+      .map(([key, action]) => `\`${key}\` ${action}`)
+      .join(" · ")}.`,
+  );
+  out.push("");
+  for (const note of live.notes || []) out.push(`- ${note}`);
+  for (const [surface, note] of Object.entries(live.surface_notes || {})) out.push(`- \`${surface}\`: ${note}`);
+  out.push("");
+  out.push(LIVE_END);
+  return out.join("\n");
+}
+
 function renderOutcomesBlock(contract) {
   const out = [OUTCOMES_BEGIN, ""];
   out.push(
-    `_Generated from [\`tests/playback/player-input-contract.json\`](../tests/playback/player-input-contract.json) by \`scripts/player-contract-table\`; do not edit by hand._`,
+    `_Generated from [\`tests/playback/player-input-contract.json\`](${FIXTURE_LINK}) by \`scripts/player-contract-table\`; do not edit by hand._`,
   );
   out.push("");
   out.push("| Outcome | What the client does |");
@@ -82,7 +142,7 @@ function renderOutcomesBlock(contract) {
 function renderRowsBlock(contract) {
   const out = [ROWS_BEGIN, ""];
   out.push(
-    `_Generated from [\`tests/playback/player-input-contract.json\`](../tests/playback/player-input-contract.json) by \`scripts/player-contract-table\`; do not edit by hand._`,
+    `_Generated from [\`tests/playback/player-input-contract.json\`](${FIXTURE_LINK}) by \`scripts/player-contract-table\`; do not edit by hand._`,
   );
   out.push("");
   out.push("| Row | Items in order | Surfaces | Focusable | Notes |");
@@ -115,7 +175,7 @@ function renderRowsBlock(contract) {
 function renderTimingsBlock(contract) {
   const out = [TIMINGS_BEGIN, ""];
   out.push(
-    `_Generated from [\`tests/playback/player-input-contract.json\`](../tests/playback/player-input-contract.json) by \`scripts/player-contract-table\`; do not edit by hand._`,
+    `_Generated from [\`tests/playback/player-input-contract.json\`](${FIXTURE_LINK}) by \`scripts/player-contract-table\`; do not edit by hand._`,
   );
   out.push("");
   out.push("| Name | Value |");
@@ -144,7 +204,7 @@ function renderInfoBlock(fields) {
   out.push(INFO_BEGIN);
   out.push("");
   out.push(
-    `_Generated from [\`tests/playback/playback-info-fields.json\`](../tests/playback/playback-info-fields.json) by \`scripts/player-contract-table\`; do not edit by hand._`,
+    `_Generated from [\`tests/playback/playback-info-fields.json\`](${FIELDS_LINK}) by \`scripts/player-contract-table\`; do not edit by hand._`,
   );
   const modes = Object.keys(fields.modes);
   for (const section of fields.sections) {
@@ -187,6 +247,16 @@ function renderEmbedBlock(contract) {
   ].join("\n");
 }
 
+function renderLiveEmbedBlock(contract) {
+  return [
+    LIVE_EMBED_BEGIN,
+    `  const LIVE_INPUT_ROUTING = ${JSON.stringify(contract.live.routing)};`,
+    `  const LIVE_CONTRACT_TIMINGS = ${JSON.stringify(contract.live.timings)};`,
+    `  const LIVE_HOTKEYS = ${JSON.stringify(contract.live.hotkeys)};`,
+    LIVE_EMBED_END,
+  ].join("\n");
+}
+
 function renderFieldsEmbedBlock(fields) {
   return `${FIELDS_EMBED_BEGIN}\nconst PLAYBACK_INFO_FIELDS=${JSON.stringify(fields.fields)};\n${FIELDS_EMBED_END}`;
 }
@@ -199,6 +269,7 @@ function main() {
   if (process.argv.includes("--embed")) {
     let policy = fs.readFileSync(POLICY, "utf8");
     policy = replaceBlock(policy, EMBED_BEGIN, EMBED_END, renderEmbedBlock(contract), "web routing embed");
+    policy = replaceBlock(policy, LIVE_EMBED_BEGIN, LIVE_EMBED_END, renderLiveEmbedBlock(contract), "web live routing embed");
     fs.writeFileSync(POLICY, policy);
     let web = fs.readFileSync(WEB, "utf8");
     web = replaceBlock(web, FIELDS_EMBED_BEGIN, FIELDS_EMBED_END, renderFieldsEmbedBlock(fields), "web playback-info embed");
@@ -206,6 +277,7 @@ function main() {
     process.stdout.write(`rewrote the routing table in ${path.relative(ROOT, POLICY)} and playback-info fields in ${path.relative(ROOT, WEB)}\n`);
     return;
   }
+  const liveBlock = renderLiveBlock(contract);
   const outcomes = renderOutcomesBlock(contract);
   const rows = renderRowsBlock(contract);
   const timings = renderTimingsBlock(contract);
@@ -215,16 +287,18 @@ function main() {
     doc = replaceBlock(doc, OUTCOMES_BEGIN, OUTCOMES_END, outcomes, "outcomes");
     doc = replaceBlock(doc, ROWS_BEGIN, ROWS_END, rows, "rows");
     doc = replaceBlock(doc, TIMINGS_BEGIN, TIMINGS_END, timings, "timings");
+    doc = replaceBlock(doc, LIVE_BEGIN, LIVE_END, liveBlock, "live");
     doc = replaceBlock(doc, INFO_BEGIN, INFO_END, info, "info");
     fs.writeFileSync(DOC, doc);
-    process.stdout.write(`rewrote the routing, outcome, row, timing and info blocks in ${path.relative(ROOT, DOC)}\n`);
+    process.stdout.write(`rewrote the routing, outcome, row, timing, live and info blocks in ${path.relative(ROOT, DOC)}\n`);
     return;
   }
-  process.stdout.write([block, outcomes, rows, timings, info].join("\n\n") + "\n");
+  process.stdout.write([block, outcomes, rows, timings, liveBlock, info].join("\n\n") + "\n");
 }
 
 module.exports = {
   renderBlock,
+  renderLiveBlock,
   renderOutcomesBlock,
   renderRowsBlock,
   renderTimingsBlock,
@@ -241,6 +315,10 @@ module.exports = {
   ROWS_END,
   TIMINGS_BEGIN,
   TIMINGS_END,
+  LIVE_BEGIN,
+  LIVE_END,
+  LIVE_EMBED_BEGIN,
+  LIVE_EMBED_END,
   FIELDS_EMBED_BEGIN,
   FIELDS_EMBED_END,
   FIXTURE,
@@ -249,6 +327,7 @@ module.exports = {
   POLICY,
   WEB,
   renderEmbedBlock,
+  renderLiveEmbedBlock,
   renderFieldsEmbedBlock,
 };
 

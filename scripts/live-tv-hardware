@@ -731,6 +731,50 @@ def main(argv):
         except Unexercisable as reason:
             evidence["not_exercisable"]["device_side_tuner_proof"] = str(reason)
 
+        # --- the programme guide, on the real device -------------------------
+        #
+        # The one step that reads the tuner's own `DeviceAuth` and sends it to
+        # Silicondust. Two things have to be observed rather than asserted from
+        # a fixture: which host actually answers with the documented shape, and
+        # that the credential is nowhere in anything plurx then serves.
+        try:
+            generation = client.api("/settings")["live_tv_config_generation"]
+            client.api("/settings", "PUT", {
+                "live_tv_config_generation": generation,
+                "live_tv_guide_source": "hdhomerun",
+            })
+            refreshed = client.api("/live-tv/guide/refresh", "POST")
+            evidence["guide"] = {
+                "source": refreshed.get("source"),
+                "freshness": refreshed.get("freshness"),
+                "matched_channels": refreshed.get("matched_channels"),
+                "lineup_channels": refreshed.get("lineup_channels"),
+            }
+            served = client.api("/live-tv/guide")
+            programmes = sum(len(row.get("programmes") or []) for row in served.get("channels") or [])
+            evidence["guide"]["programmes"] = programmes
+            # The observed row shape, recorded verbatim for the STATUS doc:
+            # Silicondust publishes no schema, so what the hardware answers is
+            # the only authority there is.
+            first = next((row for row in (served.get("channels") or [])
+                          if row.get("programmes")), None)
+            if first:
+                evidence["guide"]["observed_row"] = first["programmes"][0]
+            assert programmes > 0, (
+                "the guide refreshed but carries no programmes; the host answered with a shape "
+                "this build does not read")
+            body = json.dumps(served)
+            assert "DeviceAuth" not in body, (
+                "the served guide document contains the string DeviceAuth")
+            for row in client.api("/activity/detail").get("live_tv") or []:
+                assert "DeviceAuth" not in json.dumps(row), (
+                    "an activity row carries the guide credential")
+        except (ApiRefusal, AssertionError, KeyError) as reason:
+            evidence["not_exercisable"]["programme_guide"] = (
+                "the HDHomeRun guide step did not complete: %s. A device without a guide "
+                "subscription, or one whose DeviceAuth the service does not recognise, cannot "
+                "prove this here" % reason)
+
         # --- filling the tuners, and the refusal after that ------------------
         others = [c for c in playable if c["id"] != channel["id"]]
         if sessions < 2:

@@ -6,7 +6,7 @@
 // What this file is actually protecting: the WORDS. The membership API already
 // has its own Rust gate for lifecycle, admin gating, and refusal codes. The
 // thing only this surface can get wrong is telling an operator that two voters
-// are redundancy — docs/CLUSTERING-PLAN.md §7.2 makes two-node HA a stated
+// are redundancy — docs/cluster/CLUSTERING-PLAN.md §7.2 makes two-node HA a stated
 // non-goal precisely because two voters need both machines for every write and
 // therefore survive no failure. A settings screen that renders that as a green
 // "highly available" is the single most damaging bug this panel can ship, and
@@ -2734,7 +2734,7 @@ test("the Cluster tab is registered and dispatched", () => {
   // absent from every other tab's dependency wave.
   assert.match(SHIPPED_UI, /cluster:\{required:\["cluster"\],secondary:\["clusterOps"\]\}/);
   assert.match(SHIPPED_UI, /cluster:\(\)=>api\("\/cluster\/nodes"\)/);
-  assert.match(SHIPPED_UI, /clusterOps:\(\)=>api\("\/cluster\/status"\)/);
+  assert.match(SHIPPED_UI, /clusterOps:\(\)=>api\("\/cluster\/status",\{keepSessionOn401:true\}\)/);
   assert.equal(
     /Promise\.all\(\[[^\]]*cluster\/nodes/.test(SHIPPED_UI),
     false,
@@ -4143,14 +4143,34 @@ test("a refused collection repaints retained transport unless a dialog owns the 
   assert.deepEqual(painted, ["render", "render"]);
   assert.deepEqual(paintedTransport, ["stalled", "unavailable"]);
 
-  // A 401 is not an ordinary refusal: it belongs to the logout transition, and
-  // swallowing it here would leave the tab rendering after auth is gone.
+  // A 401 from THIS read is not the logout transition. Its guard answers from
+  // a process-local proof cache, so a refusal describes the cluster — and when
+  // the cluster had not finished activating its credential-revocation protocol
+  // the refusal was permanent, arrived on every tick, and used to end the
+  // operator's session on a Settings page they had every right to be on.
+  // It takes the ordinary path now: keep the evidence, keep its age honest,
+  // try again on the next gate.
   now.value += 15_000;
   const unauthorized = harness.settingsTick(1, "cluster");
+  readingAge.innerHTML = "frozen after a refusal";
   requests[3].reject(Object.assign(new Error("unauthorized"), { status: 401 }));
   await unauthorized;
-  assert.deepEqual(painted, ["render", "render"], "a 401 paints nothing here");
-  assert.match(shippedSource("settingsTick"), /if\(error&&error\.status===401\) throw error;/);
+  assert.deepEqual(
+    painted,
+    ["render", "render", "render"],
+    "a refused recovery read repaints like any other refusal",
+  );
+  assert.notEqual(readingAge.innerHTML, "frozen after a refusal");
+  // Scoped to this branch: the sibling branches poll ordinary admin routes,
+  // where a 401 really is the credential and must still end the session.
+  const clusterBranch = shippedSource("settingsTick")
+    .split('api("/cluster/status"')[1]
+    .split("await Promise.all(secondary)")[0];
+  assert.doesNotMatch(
+    clusterBranch,
+    /status===401\) throw error;/,
+    "rethrowing here only ever existed to reach a logout that must not happen",
+  );
 });
 
 test("the two-second roster poll holds its sample under a dialog too", async () => {
@@ -4405,15 +4425,15 @@ test("a failed manual refresh ages transport unless force election opens after r
 test("every cluster status success receives a client-local monotonic baseline", () => {
   assert.match(
     SHIPPED_UI,
-    /clusterOps:\(\)=>api\("\/cluster\/status"\)\.then\(ops=>\{\s*clusterOpsStamp\(\); return clusterOpsReceived\(ops\);/,
+    /clusterOps:\(\)=>api\("\/cluster\/status",\{keepSessionOn401:true\}\)\.then\(ops=>\{\s*clusterOpsStamp\(\); return clusterOpsReceived\(ops\);/,
   );
   assert.match(
     shippedSource("settingsTick"),
-    /const ops=clusterOpsReceived\(await api\("\/cluster\/status"\)\);/,
+    /const ops=clusterOpsReceived\(await api\("\/cluster\/status",\{keepSessionOn401:true\}\)\);/,
   );
   assert.match(
     shippedSource("pollLocalRestart"),
-    /const ops=clusterOpsReceived\(await api\("\/cluster\/status"\)\);/,
+    /const ops=clusterOpsReceived\(await api\("\/cluster\/status",\{keepSessionOn401:true\}\)\);/,
   );
   assert.doesNotMatch(shippedSource("clusterOpsReceived"), /observed_at_unix_ms|Object\.defineProperty/);
 });
@@ -4596,10 +4616,17 @@ test("the ledger's freshness cell is addressable, and the clock is stamped where
   // Stamped where the request happens. loadSettingsKey serves a cached
   // aggregate without a request, so stamping where the value is PAINTED would
   // let a tab switch every ten seconds starve the refresh indefinitely.
+  const clusterOpsEndpoint = SHIPPED_UI
+    .split("clusterOps:()=>")[1]
+    .split("\n};")[0];
   assert.match(
-    SHIPPED_UI,
-    /clusterOps:\(\)=>api\("\/cluster\/status"\)\.then\(ops=>\{\s*clusterOpsStamp\(\); return clusterOpsReceived\(ops\);\s*\}\)/,
+    clusterOpsEndpoint,
+    /^api\("\/cluster\/status",\{keepSessionOn401:true\}\)\.then\(ops=>\{\s*clusterOpsStamp\(\); return clusterOpsReceived\(ops\);\s*\}\)/,
   );
+  // A refused fan-out stamps too: the retry is the next gate, not the next
+  // tick, and the age of the reading on screen still has to move.
+  assert.match(clusterOpsEndpoint, /\.catch\(error=>\{[\s\S]*clusterOpsStamp\(\);/);
+  assert.match(clusterOpsEndpoint, /unavailable:true/);
   assert.doesNotMatch(shippedSource("patchSettingsSecondary"), /clusterOpsStamp\(\)/);
 });
 

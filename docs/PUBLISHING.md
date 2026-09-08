@@ -277,7 +277,7 @@ what a user might load into their server. plurx ships no content.
 asks for at upload time. As of now that's one 6.9" iPhone set (1290×2796 or
 1320×2868), one 13" iPad set (2064×2752 or 2048×2732), and — because the tvOS
 target is part of the same record — an Apple TV set at 1920×1080 or 3840×2160.
-The screenshots in [docs/img/](img/) are of the web UI and are the wrong
+The screenshots in [docs/img/](img) are of the web UI and are the wrong
 aspect for all three; these have to be captured from the Simulator.
 
 **Review notes** — the highest-leverage text box in the whole submission:
@@ -424,7 +424,7 @@ Ordered by what blocks a submission soonest.
       in a plaintext plist
 - [ ] tvOS launch storyboard (cosmetic)
 - [ ] Complete the P1 viewer items in the
-      [Apple parity matrix](APPLE-CLIENT-PARITY.md), especially free text
+      [Apple parity matrix](clients/APPLE-CLIENT-PARITY.md), especially free text
       subtitles and audio-sync controls
 
 ## 7. Non-goals

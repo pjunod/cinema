@@ -3524,13 +3524,49 @@ mod tests {
         assert!(!support_handler.contains("collect_peer_statuses"));
 
         let extractor_source = include_str!("extract.rs");
+        // Scoped to the impl block itself, not "everything until the tests":
+        // a helper added between the two would silently join the slice and
+        // make the counting assertion below fail for the wrong reason.
         let cache_extractor = extractor_source
             .split("impl FromRequestParts<AppState> for CacheOnlyAdminUser")
             .nth(1)
-            .and_then(|tail| tail.split("#[cfg(test)]").next())
+            .and_then(|tail| tail.split("\n}\n").next())
             .expect("cache-only admin extractor source");
-        assert!(!cache_extractor.contains("state.store"));
-        assert!(!cache_extractor.contains(".await"));
+        // The Store may be a fallback and may never be a prerequisite. The
+        // cached answer has to be reached, and returned, before the source
+        // mentions the Store at all — otherwise a wedged Store would delay the
+        // one read whose purpose is to describe the wedge.
+        let cache_answer = cache_extractor
+            .find("cache_only_admin_proofs.authenticate(&digest)")
+            .expect("cache-only answer");
+        let early_return = cache_extractor
+            .find("return Ok(Self);")
+            .expect("cache-only early return");
+        let store_read = cache_extractor
+            .find("state.store.user_for_token(&digest)")
+            .expect("bounded Store fallback");
+        assert!(cache_answer < early_return);
+        assert!(early_return < store_read);
+        // The publication ticket is captured before the Store read and not
+        // after it. Taking it afterwards compiles, passes every test in the
+        // suite, and reintroduces the stale-proof race the cache generation
+        // exists to close: a proof derived from a pre-revocation Store read
+        // would publish once the revocation's generation bump had settled.
+        let ticket = cache_extractor
+            .find("authentication_ticket()")
+            .expect("publication ticket");
+        assert!(ticket < store_read);
+        // And the fallback is bounded, so a Store that never answers becomes a
+        // named refusal rather than a hung request.
+        assert!(cache_extractor.contains("CACHE_ONLY_ADMIN_STORE_FALLBACK_TIMEOUT,"));
+        assert!(cache_extractor.contains("tokio::time::timeout("));
+        // A caller the Store recognises is never told its credential is bad:
+        // the only Unauthorized answers here are a request with no token at
+        // all and a token the Store has no row for. A known non-admin gets
+        // Forbidden, and an unanswerable Store gets the named 503.
+        assert_eq!(cache_extractor.matches("ApiError::Unauthorized").count(), 2);
+        assert!(cache_extractor.contains("Err(ApiError::Forbidden)"));
+        assert!(cache_extractor.contains("cache_only_admin_unavailable()"));
     }
 
     #[tokio::test]

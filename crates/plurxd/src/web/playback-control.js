@@ -9,11 +9,37 @@
   const MIN_EXCHANGE_MS = 250;
   const MAX_EXCHANGE_MS = 60_000;
   const EXCHANGE_DEADLINE_MS = 6_000;
-  const PREPARATION_TTL_MS = 330_000;
-  const MAX_MEDIA_MILLIS = 366 * 24 * 60 * 60 * 1_000;
-  const PREPARATION_REJECTED_MESSAGE =
-    "the preparation acknowledgement lost its commit or deadline fence";
   const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+  // The only action whose declared name and wire tag differ, and the one
+  // mistake in this protocol that fails silently in both directions.
+  // `prepare_replacement` is the transaction (roadmap §3.1) and is what
+  // `supported_actions` must carry: `accepts()` on the server is a literal
+  // string comparison, so a client that declares `prepare` is simply never
+  // offered a successor. `prepare` is the moment, and is what arrives as
+  // `action.type`: a client that switches on `prepare_replacement` never
+  // fires. Neither failure produces an error anywhere.
+  const PREPARE_REPLACEMENT_ACTION = "prepare_replacement";
+  const PREPARE_ACTION_TAG = "prepare";
+  // Bounds the server already enforces, restated here so a malformed
+  // preparation is refused before it reaches a second decode pipeline rather
+  // than after. Sources: crates/plurxd/src/transcode.rs MAX_HEIGHT, and
+  // playback_control.rs MAX_MEDIA_MILLIS / EffectiveSelection / is_node_relative_playlist.
+  const MAX_HEIGHT = 2160;
+  const MAX_MEDIA_MS = 366 * 24 * 60 * 60 * 1_000;
+  const MAX_AUDIO_OFFSET_MS = 15_000;
+  const MAX_TRACK_INDEX = 1_024;
+  const MAX_PLAYLIST_URL_BYTES = 512;
+  // Not codec names. `source` and `server_selected` distinguish
+  // direct-play/remux from transcode — the DeliveryMethod axis — and a client
+  // that renders either to a viewer as a codec is wrong.
+  const DELIVERY_CODECS = Object.freeze(["source", "server_selected"]);
+  const DYNAMIC_RANGES = Object.freeze(["dolby_vision", "hdr10", "hlg", "sdr"]);
+  // Exactly five. A sixth is a serde error on the server, which answers 400
+  // with no `invalid_field` at all, so the client gets no help identifying it.
+  const ACKNOWLEDGEMENT_STATES = Object.freeze([
+    "metadata_ready", "buffer_ready", "committed", "failed", "aborted",
+  ]);
 
   // The actions this client will accept from the server, and the only ones the
   // server will send it. Naming an action here is a promise that receiving it
@@ -21,7 +47,7 @@
   // authority still belongs to this client's own timers until the milestone
   // that moves it.
   const SUPPORTED_ACTIONS = Object.freeze([
-    "hold", "retry_resource", "terminal", "prepare_replacement",
+    "hold", "retry_resource", "terminal", PREPARE_REPLACEMENT_ACTION,
   ]);
 
   function defaultNow() {
@@ -36,6 +62,93 @@
     return Number.isSafeInteger(value) && value >= 0 && value <= MAX_EXCHANGE_MS
       ? Math.max(MIN_EXCHANGE_MS, value)
       : fallback;
+  }
+
+  function boundedInteger(value, min, max) {
+    return Number.isSafeInteger(value) && value >= min && value <= max;
+  }
+
+  // A preparation's playlist is node-relative and belongs to the successor
+  // session named in the same action: exactly
+  // `/api/v1/hls/{session_id}/index.m3u8` or `.../master.m3u8`, with a query
+  // or fragment allowed and ignored. Anything else is refused here, without a
+  // request — the relay path already refuses to point a client at another
+  // origin, and a client that resolved an absolute URL would undo that.
+  function preparedPlaylistUrl(sessionId, url) {
+    if (typeof sessionId !== "string" || !sessionId || sessionId.includes("/")) return null;
+    if (typeof url !== "string" || !url || url.length > MAX_PLAYLIST_URL_BYTES) return null;
+    const cut = url.search(/[?#]/);
+    const path = cut === -1 ? url : url.slice(0, cut);
+    const base = `/api/v1/hls/${sessionId}/`;
+    return path === `${base}index.m3u8` || path === `${base}master.m3u8` ? url : null;
+  }
+
+  // What the successor will deliver — the server's answer, not what was asked
+  // for. Unknown keys are tolerated: `ControlAction` carries no
+  // `deny_unknown_fields`, so a later server may add one and this client must
+  // not refuse the preparation over a field it does not read.
+  function validEffectiveSelection(value) {
+    return !!value
+      && typeof value === "object"
+      && typeof value.quality_auto === "boolean"
+      && boundedInteger(value.height, 0, MAX_HEIGHT)
+      && (value.audio_track == null || boundedInteger(value.audio_track, 0, MAX_TRACK_INDEX))
+      && (value.subtitle_burn == null || boundedInteger(value.subtitle_burn, 0, MAX_TRACK_INDEX))
+      && boundedInteger(value.audio_offset_ms, -MAX_AUDIO_OFFSET_MS, MAX_AUDIO_OFFSET_MS)
+      && DELIVERY_CODECS.includes(value.codec)
+      && (value.dynamic_range == null || DYNAMIC_RANGES.includes(value.dynamic_range));
+  }
+
+  // A malformed preparation is fatal, exactly like any other malformed action.
+  // Softening it into an ignore would leave this client half-understanding a
+  // staging the server is holding a real encoder open for.
+  // The server accepts anything `uuid::Uuid::parse_str` takes for an
+  // `action_id` — any version, any variant, and the braced, simple and URN
+  // forms — while today it only ever mints a v4. Matching its shape rather
+  // than the strict RFC one is deliberate: refusing a legitimate staging is a
+  // protocol error that stops this reporter for the rest of the session, and a
+  // relayed action minted by a peer on a later version would do exactly that.
+  const ACTION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  function validPreparation(action) {
+    return !!action
+      && action.type === PREPARE_ACTION_TAG
+      && typeof action.action_id === "string" && ACTION_ID_RE.test(action.action_id)
+      && typeof action.session_id === "string" && action.session_id !== ""
+      && preparedPlaylistUrl(action.session_id, action.playlist_url) !== null
+      && boundedInteger(action.media_origin_ms, 0, MAX_MEDIA_MS)
+      && validEffectiveSelection(action.effective_selection);
+  }
+
+  // The four rules a careless client hits as 400s, and one that is a design
+  // rule rather than a field check: a `committed` may not share an exchange
+  // with `demand: "end"`. Switching and then closing is two exchanges — the
+  // commit, then the end — in that order.
+  //
+  // `committed_media_origin_ms` is the one a client will get wrong by omission
+  // rather than by error, because it is easy to read the state machine and
+  // conclude the commit only owes a timestamp. It owes both, and the reason is
+  // that `action_id` says *which offer* is being answered while the origin says
+  // *what was built*: a successor prepared for one point in the film and
+  // committed after the viewer seeked elsewhere is otherwise indistinguishable
+  // from a correct commit, and the server would publish it on the strength of
+  // this acknowledgement alone. It must equal the `media_origin_ms` of the
+  // offer verbatim — the server drops a commit that names a different one,
+  // silently — so echo the field, never a recomputed value.
+  function validAcknowledgement(value, demand) {
+    return !!value
+      && typeof value === "object"
+      && typeof value.action_id === "string" && ACTION_ID_RE.test(value.action_id)
+      && ACKNOWLEDGEMENT_STATES.includes(value.state)
+      && (value.buffered_through_ms == null
+        || boundedInteger(value.buffered_through_ms, 0, MAX_MEDIA_MS))
+      && (value.first_frame_unix_ms == null
+        || (Number.isSafeInteger(value.first_frame_unix_ms) && value.first_frame_unix_ms > 0))
+      && (value.committed_media_origin_ms == null
+        || boundedInteger(value.committed_media_origin_ms, 0, MAX_MEDIA_MS))
+      && (value.state !== "buffer_ready" || value.buffered_through_ms != null)
+      && (value.state !== "committed" || value.first_frame_unix_ms != null)
+      && (value.state !== "committed" || value.committed_media_origin_ms != null)
+      && (value.state !== "committed" || demand !== "end");
   }
 
   function validBootstrap(value) {
@@ -68,27 +181,8 @@
       && value.playback_rate >= 0
       && !!value.selection
       && !!value.capabilities
-      && validAcknowledgement(value.acknowledgement)
-      && !(value.demand === "end" && value.acknowledgement
-        && value.acknowledgement.state === "committed");
-  }
-
-  function validAcknowledgement(value) {
-    if (value == null) return true;
-    if (!value || typeof value !== "object" || !UUID_RE.test(value.action_id)
-        || !["metadata_ready", "buffer_ready", "committed", "failed", "aborted"]
-          .includes(value.state)) return false;
-    const buffered = value.buffered_through_ms;
-    const origin = value.committed_media_origin_ms;
-    const firstFrame = value.first_frame_unix_ms;
-    if (buffered != null && (!Number.isSafeInteger(buffered)
-        || buffered < 0 || buffered > MAX_MEDIA_MILLIS)) return false;
-    if (origin != null && (!Number.isSafeInteger(origin)
-        || origin < 0 || origin > MAX_MEDIA_MILLIS)) return false;
-    if (firstFrame != null && (!Number.isSafeInteger(firstFrame) || firstFrame <= 0)) return false;
-    if (value.state === "buffer_ready" && buffered == null) return false;
-    if (value.state === "committed" && (origin == null || firstFrame == null)) return false;
-    return true;
+      && (value.acknowledgement == null
+        || validAcknowledgement(value.acknowledgement, value.demand));
   }
 
   function boundedObservation(value) {
@@ -170,301 +264,14 @@
     if (action.type === "terminal") {
       return typeof action.code === "string" && typeof action.message === "string";
     }
+    if (action.type === PREPARE_ACTION_TAG) return validPreparation(action);
     if (action.type === "retry_resource") {
       return typeof action.reason === "string"
         && Number.isSafeInteger(action.after_ms)
         && action.after_ms > 0
         && action.after_ms <= MAX_EXCHANGE_MS;
     }
-    if (action.type === "prepare") return validPrepareAction(action);
     return false;
-  }
-
-  function validPrepareAction(action) {
-    if (!action || typeof action !== "object" || !UUID_RE.test(action.action_id)
-        || !UUID_RE.test(action.session_id) || typeof action.playlist_url !== "string"
-        || action.playlist_url.length > 512 || !Number.isSafeInteger(action.media_origin_ms)
-        || action.media_origin_ms < 0 || action.media_origin_ms > MAX_MEDIA_MILLIS) return false;
-    const path = action.playlist_url.split(/[?#]/, 1)[0];
-    const root = `/api/v1/hls/${action.session_id}/`;
-    if (path !== root + "index.m3u8" && path !== root + "master.m3u8") return false;
-    const selection = action.effective_selection;
-    if (!selection || typeof selection !== "object"
-        || Object.keys(selection).length !== 7
-        || typeof selection.quality_auto !== "boolean"
-        || !Number.isSafeInteger(selection.height) || selection.height < 0 || selection.height > 2160
-        || (selection.audio_track !== null && (!Number.isSafeInteger(selection.audio_track)
-          || selection.audio_track < 0 || selection.audio_track > 1024))
-        || (selection.subtitle_burn !== null && (!Number.isSafeInteger(selection.subtitle_burn)
-          || selection.subtitle_burn < 0 || selection.subtitle_burn > 1024))
-        || !Number.isSafeInteger(selection.audio_offset_ms)
-        || selection.audio_offset_ms < -15_000 || selection.audio_offset_ms > 15_000
-        || !["source", "server_selected"].includes(selection.codec)
-        || (selection.dynamic_range !== null
-          && !["dolby_vision", "hdr10", "hlg", "sdr"].includes(selection.dynamic_range))) {
-      return false;
-    }
-    return true;
-  }
-
-  function sameJson(left, right) {
-    try { return JSON.stringify(left) === JSON.stringify(right); } catch (_) { return false; }
-  }
-
-  // The protocol state for a prepared successor. This deliberately owns no
-  // media element: the server does not produce the staged playlist yet. The
-  // later two-player work can attach one resource and drive the readiness
-  // methods without changing the exchange or teardown rules implemented here.
-  class Preparation {
-    constructor(options) {
-      const value = options || {};
-      this.now = typeof value.now === "function" ? value.now : defaultNow;
-      this.active = null;
-      this.ignoredActionId = null;
-      this.lastOutcome = null;
-    }
-
-    adopt(action, request) {
-      if (!validPrepareAction(action)) return false;
-      const receivedAt = this.now();
-      this.active = {
-        offer: immutableCopy(action),
-        requestedSelection: immutableCopy(request && request.selection),
-        receivedAt,
-        expiresAt: receivedAt + PREPARATION_TTL_MS,
-        progress: null,
-        acknowledgement: null,
-        queuedAcknowledgements: [],
-        terminal: null,
-        resource: null,
-        release: null,
-      };
-      this.ignoredActionId = null;
-      this.lastOutcome = "offered";
-      return true;
-    }
-
-    ignore(actionId, reason) {
-      if (typeof actionId !== "string" || !UUID_RE.test(actionId)) return false;
-      if (this.active && this.active.offer.action_id === actionId) {
-        this.drop(reason || "ignored", true);
-      } else {
-        this.ignoredActionId = actionId;
-        this.lastOutcome = reason || "ignored";
-      }
-      return true;
-    }
-
-    attachResource(actionId, resource, release) {
-      if (!this.active || this.active.offer.action_id !== actionId
-          || this.active.resource !== null || typeof release !== "function") return false;
-      this.active.resource = resource;
-      this.active.release = release;
-      return true;
-    }
-
-    releaseResource(reason) {
-      const current = this.active;
-      if (!current || current.resource === null) return;
-      const resource = current.resource;
-      const release = current.release;
-      current.resource = null;
-      current.release = null;
-      try { release(resource, reason, current.offer); } catch (_) {}
-    }
-
-    drop(reason, ignore) {
-      if (!this.active) return false;
-      if (ignore) this.ignoredActionId = this.active.offer.action_id;
-      this.releaseResource(reason);
-      this.active = null;
-      this.lastOutcome = reason;
-      return true;
-    }
-
-    expired() {
-      return !!this.active && this.now() >= this.active.expiresAt;
-    }
-
-    acknowledgement(demand) {
-      if (!this.active) return null;
-      if (this.expired()) {
-        this.drop("expired", true);
-        return null;
-      }
-      const acknowledgement = this.active.acknowledgement;
-      if (demand === "end" && acknowledgement && acknowledgement.state === "committed") {
-        return null;
-      }
-      return acknowledgement;
-    }
-
-    advance(state, fields, currentSelection) {
-      if (!this.active || this.expired()) {
-        if (this.active) this.drop("expired", true);
-        return false;
-      }
-      const current = this.active;
-      const value = fields || {};
-      if (current.terminal !== null) return false;
-      const newest = current.queuedAcknowledgements.length
-        ? current.queuedAcknowledgements[current.queuedAcknowledgements.length - 1]
-        : current.acknowledgement;
-      const latestState = newest ? newest.state : current.progress;
-      if (state === "metadata_ready") {
-        if (latestState !== null) return false;
-      } else if (state === "buffer_ready") {
-        if (latestState !== "metadata_ready") return false;
-        if (!Number.isSafeInteger(value.bufferedThroughMs)
-            || value.bufferedThroughMs < 0 || value.bufferedThroughMs > MAX_MEDIA_MILLIS) return false;
-      } else if (state === "committed") {
-        if (latestState !== "buffer_ready") return false;
-        if (!Number.isSafeInteger(value.firstFrameUnixMs) || value.firstFrameUnixMs <= 0) return false;
-        if (!sameJson(current.requestedSelection, currentSelection)) {
-          this.releaseResource("selection_changed");
-          current.terminal = "aborted";
-          current.queuedAcknowledgements = [];
-          current.acknowledgement = immutableCopy({
-            action_id: current.offer.action_id,
-            state: "aborted",
-            buffered_through_ms: null,
-            committed_media_origin_ms: null,
-            first_frame_unix_ms: null,
-          });
-          this.lastOutcome = "selection_changed";
-          return true;
-        }
-      } else if (state !== "failed" && state !== "aborted") {
-        return false;
-      }
-      const acknowledgement = {
-        action_id: current.offer.action_id,
-        state,
-        buffered_through_ms: state === "buffer_ready" ? value.bufferedThroughMs : null,
-        committed_media_origin_ms: state === "committed" ? current.offer.media_origin_ms : null,
-        first_frame_unix_ms: state === "committed" ? value.firstFrameUnixMs : null,
-      };
-      if (!validAcknowledgement(acknowledgement)) return false;
-      const immutableAcknowledgement = immutableCopy(acknowledgement);
-      if (state === "failed" || state === "aborted") {
-        current.terminal = state;
-        current.queuedAcknowledgements = [];
-        current.acknowledgement = immutableAcknowledgement;
-        this.releaseResource(state);
-      } else if (current.acknowledgement === null) {
-        current.acknowledgement = immutableAcknowledgement;
-      } else {
-        current.queuedAcknowledgements.push(immutableAcknowledgement);
-      }
-      return true;
-    }
-
-    settle(request, response, error) {
-      const acknowledgement = request && request.acknowledgement;
-      if (error) {
-        if (error.name === "PlaybackControlProtocolError") {
-          this.drop("invalid_response", false);
-          return "failed";
-        }
-        const retryable = (error.status === 425 && error.code === "owner_transition")
-          || (error.status === 429 && error.code === "control_rate_limited")
-          || (error.status === 503 && error.code === "control_unavailable")
-          || error.status === 408 || error.status === 0 || !Number.isFinite(error.status);
-        if (retryable) return "retrying";
-        const rejectedCommit = error.status === 409 && error.code === "stale_control"
-          && acknowledgement && acknowledgement.state === "committed"
-          && this.active && acknowledgement.action_id === this.active.offer.action_id
-          && error.generation === request.generation
-          && error.controlEpoch === request.control_epoch
-          && error.serverMessage === PREPARATION_REJECTED_MESSAGE;
-        if (rejectedCommit) {
-          this.drop("commit_rejected", false);
-          return "commit_rejected";
-        }
-        this.drop(String(error.code || "exchange_failed"), false);
-        return "failed";
-      }
-
-      const action = response && response.action;
-      if (action && action.type === "prepare") {
-        if (this.ignoredActionId === action.action_id) return "ignored";
-        if (this.expired()) {
-          this.drop("expired", true);
-          return "expired";
-        }
-        if (!this.active) return this.adopt(action, request) ? "offered" : "invalid";
-        if (this.active.offer.action_id !== action.action_id) {
-          this.drop("replaced", false);
-          return this.adopt(action, request) ? "replaced" : "invalid";
-        }
-        if (!sameJson(this.active.offer, action)) {
-          this.drop("invalid_repeat", true);
-          return "invalid";
-        }
-        if (acknowledgement && acknowledgement.action_id === action.action_id) {
-          if (acknowledgement.state === "committed") {
-            if (!sameJson(this.active.acknowledgement, acknowledgement)) return "repeated";
-            this.releaseResource("commit_discarded");
-            this.active.terminal = "aborted";
-            this.active.queuedAcknowledgements = [];
-            this.active.acknowledgement = immutableCopy({
-              action_id: action.action_id,
-              state: "aborted",
-              buffered_through_ms: null,
-              committed_media_origin_ms: null,
-              first_frame_unix_ms: null,
-            });
-            this.lastOutcome = "commit_discarded";
-            return "commit_discarded";
-          }
-          if (["metadata_ready", "buffer_ready"].includes(acknowledgement.state)) {
-            const rank = acknowledgement.state === "metadata_ready" ? 1 : 2;
-            const progressRank = this.active.progress === "metadata_ready" ? 1
-              : (this.active.progress === "buffer_ready" ? 2 : 0);
-            if (rank > progressRank) this.active.progress = acknowledgement.state;
-            if (sameJson(this.active.acknowledgement, acknowledgement)) {
-              this.active.acknowledgement = this.active.queuedAcknowledgements.shift() || null;
-              if (this.active.acknowledgement !== null) return "acknowledged";
-            }
-          }
-        }
-        return "repeated";
-      }
-
-      this.ignoredActionId = null;
-      if (!this.active) return "none";
-      if (acknowledgement && acknowledgement.action_id === this.active.offer.action_id) {
-        if (acknowledgement.state === "committed") {
-          this.drop("committed", false);
-          return "committed";
-        }
-        if (acknowledgement.state === "failed" || acknowledgement.state === "aborted") {
-          const outcome = acknowledgement.state;
-          this.drop(outcome, false);
-          return outcome;
-        }
-      }
-      this.drop("withdrawn", false);
-      return "withdrawn";
-    }
-
-    stop(reason) {
-      this.drop(reason || "stopped", false);
-      this.ignoredActionId = null;
-    }
-
-    status() {
-      const current = this.active;
-      return {
-        active: !!current,
-        offer: current ? current.offer : null,
-        progress: current ? current.progress : null,
-        acknowledgement: current ? current.acknowledgement : null,
-        expires_at_ms: current ? current.expiresAt : null,
-        ignored_action_id: this.ignoredActionId,
-        last_outcome: this.lastOutcome,
-      };
-    }
   }
 
   class Reporter {
@@ -655,27 +462,12 @@
             && reportedError.name === "PlaybackControlProtocolError";
           const ownerChanged = status === 409 && reportedError.code === "owner_changed"
             && this.resetForOwner(reportedError);
-          const staleGeneration = status === 409 && reportedError.code === "stale_control"
-            && reportedError.generation !== request.generation
-            && this.resetForOwner(reportedError);
-          // A rejected commit has already torn the staged successor down. It
-          // is the one stale-control answer this reporter can recover from:
-          // v1 carries no typed subcode, so retain and match the server's
-          // bounded message; the other same-fence answer is a sequencing bug.
-          const preparationRejected = status === 409 && reportedError.code === "stale_control"
-            && request.acknowledgement && request.acknowledgement.state === "committed"
-            && reportedError.generation === request.generation
-            && reportedError.controlEpoch === request.control_epoch
-            && reportedError.serverMessage === PREPARATION_REJECTED_MESSAGE;
           const retryableControl = (status === 425 && reportedError.code === "owner_transition")
             || (status === 429 && reportedError.code === "control_rate_limited")
             || (status === 503 && reportedError.code === "control_unavailable");
           const retryableTransport = status === 408 || status === 0 || !Number.isFinite(status);
-          if (ownerChanged || staleGeneration) {
+          if (ownerChanged) {
             this.nextAllowedAt = this.now() + retryDelay(reportedError, MIN_EXCHANGE_MS);
-          } else if (preparationRejected) {
-            this.retryRequest = null;
-            this.retryCapture = null;
           } else if (!terminalProtocolError && (retryableControl || retryableTransport)) {
             this.retryRequest = request;
             this.retryCapture = requestCapture;
@@ -771,8 +563,7 @@
     }
   }
 
-  return Object.freeze({
-    PROTOCOL, Preparation, Reporter, capture, sameIntent, validBootstrap, validResponse,
-    validPrepareAction,
-  });
+  return Object.freeze({ PROTOCOL, PREPARE_REPLACEMENT_ACTION, PREPARE_ACTION_TAG,
+    SUPPORTED_ACTIONS, Reporter, capture, sameIntent, validBootstrap, validResponse,
+    validPreparation, validAcknowledgement, preparedPlaylistUrl });
 });

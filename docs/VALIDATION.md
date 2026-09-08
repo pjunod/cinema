@@ -183,7 +183,7 @@ one baseline job. Browser layout, Android JVM, Apple simulator, Android device,
 release-build, and container checks run as parallel jobs only when the diff can
 affect their contracts. Coverage runs after merge on `main`, where its badge is
 published; a pull request does not rerun the Rust suite merely to discard the
-number. [CI_TEST_OVERHAUL_PLAN.md](CI_TEST_OVERHAUL_PLAN.md) records the
+number. [CI_TEST_OVERHAUL_PLAN.md](ci/CI_TEST_OVERHAUL_PLAN.md) records the
 measured failure history and the remaining suite-splitting, invalidation,
 rebase-evidence, and telemetry milestones.
 
@@ -769,7 +769,7 @@ evidence:
   the production-to-test relationship;
 - for other runtime corrections after that baseline, an explicit regression
   mapping or anchor names the current evidence; or
-- a fragment in [`validation/regressions.d/`](../validation/regressions.d/)
+- a fragment in [`validation/regressions.d/`](../validation/regressions.d)
   explicitly maps the commit to a current functionality point and runnable
   check.
 
@@ -909,7 +909,7 @@ exactly the ones the sweep above already reads:
 | --- | --- |
 | `clients/apple/project.yml` | `CURRENT_PROJECT_VERSION` — the only load-bearing claim |
 | `clients/apple/README.md` | the anchored `> Status:` line |
-| `docs/APPLE-CLIENT-PARITY.md` | the anchored `> Status (date):` line |
+| `docs/clients/APPLE-CLIENT-PARITY.md` | the anchored `> Status (date):` line |
 | `docs/STATUS.html` | the viewers tile and the `👤 Paul` TestFlight upload item |
 
 Per-build narrative is **not** one of them. It lives in `docs/apple-builds/`,

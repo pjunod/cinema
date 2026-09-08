@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """M0-P0/P1 harness for the VOD presentation plan.
 
-Runs the four proofs docs/VOD-PRESENTATION-PLAN.md §8 M0-P0 demands, and times
+Runs the four proofs docs/streaming/VOD-PRESENTATION-PLAN.md §8 M0-P0 demands, and times
 the index build P1 prices:
 
   (a) determinism  — two runs of the production-shaped VIDEO-ONLY copy pipe

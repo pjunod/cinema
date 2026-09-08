@@ -16191,7 +16191,7 @@ impl TranscodeManager {
             }
         };
         // Take over the cutting when the source is one whose keyframes can be
-        // read (docs/SEGMENTER-PLAN.md). ffmpeg then writes one continuous
+        // read (docs/streaming/SEGMENTER-PLAN.md). ffmpeg then writes one continuous
         // fragmented stream down a pipe and `copyseg` decides where the
         // segments end — in front of a keyframe no player will discard a
         // leading picture at. A structural Unsupported result may ask the

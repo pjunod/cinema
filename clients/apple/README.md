@@ -12,7 +12,7 @@ anything it can't (MKV, DTS/TrueHD, …) is delivered as the server's on-the-fly
 HDR display at runtime and sends that to `/decision`, so the server transcodes
 only what this hardware genuinely can't play.
 
-> Status: **v0.3.0**, build `118` in [`project.yml`](project.yml) — working
+> Status: **v0.3.0**, build `120` in [`project.yml`](project.yml) — working
 > development client. Browse, resume, discover, and play on both iOS and tvOS.
 > Both targets compile against the iOS/tvOS 26.5 SDKs and share the same
 > regression suite.
@@ -194,7 +194,7 @@ Both targets share everything under `Sources/`; `project.yml` is the single plac
 that defines them (bundle id `tv.plurx.app`, deployment target 17.0). The native
 subtitle design, deployment record, and remaining physical Dolby Vision failure
 are documented in
-[`docs/APPLE-NATIVE-SUBTITLES-HANDOFF.md`](../../docs/APPLE-NATIVE-SUBTITLES-HANDOFF.md).
+[`docs/clients/APPLE-NATIVE-SUBTITLES-HANDOFF.md`](../../docs/clients/APPLE-NATIVE-SUBTITLES-HANDOFF.md).
 
 ### Live validation harnesses: the fencing rule
 
@@ -221,7 +221,7 @@ does not get added:
    overrides down as parameters; it may not put them through `SettingsStore`.
 
 The same rule is recorded as a standing non-goal in
-[CLIENTS-REMEDIATION-PLAN.md](../../docs/CLIENTS-REMEDIATION-PLAN.md) §10.
+[CLIENTS-REMEDIATION-PLAN.md](../../docs/clients/CLIENTS-REMEDIATION-PLAN.md) §10.
 
 ## Test
 
@@ -361,7 +361,7 @@ both accepted by the server's `AuthUser` extractor.
 ## Feature parity
 
 The implementation and prioritized remaining work are tracked in
-[Apple client feature parity](../../docs/APPLE-CLIENT-PARITY.md). In short,
+[Apple client feature parity](../../docs/clients/APPLE-CLIENT-PARITY.md). In short,
 browse/search/play/resume, sorting and watch filters, full-film seek, explicit
 transport controls, Now Playing, native text subtitles, track and quality
 selection, playback stats, markers, PiP, and next-episode autoplay are present.

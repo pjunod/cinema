@@ -523,7 +523,7 @@ data class DecisionSelection(
  * `DecisionResponse.source` — what the file actually is. `height` is the one
  * the player owes back to the server whenever its own height is a *promise*
  * rather than a transcode rung (a burn, or Quality = Original): §3.2 of
- * docs/CLIENTS-REMEDIATION-PLAN.md, and `hls.rs`'s "the source's own height
+ * docs/clients/CLIENTS-REMEDIATION-PLAN.md, and `hls.rs`'s "the source's own height
  * is the Original/forced-burn promise" escape from ladder snapping.
  */
 @Serializable
@@ -707,7 +707,7 @@ data class PlaybackSessionStatus(
 
 /**
  * Why a session is being reopened — typed so the server can tell a stall
- * downgrade from an ordinary seek. See docs/ADAPTIVE-QUALITY.md §"Native
+ * downgrade from an ordinary seek. See docs/streaming/ADAPTIVE-QUALITY.md §"Native
  * stall-reopen server boundary".
  */
 @Serializable

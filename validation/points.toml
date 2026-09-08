@@ -25,7 +25,7 @@ audit_paths = [
   "vendor/**",
 ]
 audit_exclude = []
-allow_unmatched_globs = ["docs/METADATA*.md"]
+allow_unmatched_globs = ["docs/features/METADATA*.md"]
 
 [[checks]]
 id = "catalog-contract"
@@ -610,7 +610,7 @@ paths = [
   "crates/plurx-core/src/metadata/**",
   "crates/plurx-core/tests/audiobook_artwork.rs",
   "crates/plurxd/src/http/items.rs",
-  "docs/METADATA*.md",
+  "docs/features/METADATA*.md",
 ]
 checks = ["rust-gate", "rust-gate-ci"]
 depends_on = ["core.media", "server.api", "library.catalog"]
@@ -618,7 +618,7 @@ depends_on = ["core.media", "server.api", "library.catalog"]
 [[points]]
 id = "identity.access"
 title = "Accounts, tokens, and authorization boundaries"
-contract = "Only authenticated users can cross protected API and media boundaries, with admin operations kept separate; cache-only recovery authorization is published only from a current Store-backed admin read, is invalidated around credential mutations, and fails closed on every committed peer until its signed begin/end revocation fence is acknowledged or expires at the proof TTL."
+contract = "Only authenticated users can cross protected API and media boundaries, with admin operations kept separate; cache-only recovery authorization is published only from a current Store-backed admin read, is invalidated around credential mutations, and fails closed on every committed peer until its signed begin/end revocation fence is acknowledged or expires at the proof TTL. A closed or empty proof cache is that node's condition and never a verdict on the caller: the recovery guard answers its cached proof first and without touching the Store, and on a miss falls back to one bounded Store read, so a Store-known administrator is admitted, a Store-known non-admin is refused as forbidden, only a credential the Store has no row for is unauthorized, and a node that cannot find out answers a named service-unavailable refusal rather than a 401 that ends a working session. The one-time revocation-protocol activation names the precondition blocking it and retries on a bounded backoff."
 paths = [
   "crates/plurx-core/src/auth.rs",
   "crates/plurx-core/src/secrets.rs",
@@ -651,8 +651,11 @@ paths = [
   "crates/plurxd/src/http/{hls,network,pgs_overlay,stream}.rs",
   "crates/plurxd/src/web/playback-policy.js",
   "crates/plurxd/src/web/playback-control.js",
-  "docs/PLAYBACK*.md",
-  "docs/STUTTER-4K.md",
+  "docs/PLAYBACK.md",
+  "docs/PLAYBACK-TESTING.md",
+  "docs/playback-control/**",
+  "docs/streaming/PLAYBACK-CAPS-V2-*.md",
+  "docs/streaming/STUTTER-4K.md",
   "scripts/dv-evidence",
   "scripts/verify-dv-timeline",
   "scripts/dv-timeline-check",
@@ -684,9 +687,10 @@ depends_on = ["core.media", "server.api", "library.catalog"]
 [[points]]
 id = "live-tv.integration"
 title = "HDHomeRun live television"
-contract = "The always-compiled Live TV runtime accepts only an explicit private or link-local IPv4 device, ignores advertised hostnames, refuses proxies and redirects, bounds device and peer documents, publishes one generation-fenced settings tuple, and obtains readiness plus a sanitized non-DRM channel lineup from one committed voter owner. Live HLS sessions preserve capability, cleanup, and finite-file-state boundaries through every ingress and first-party client."
+contract = "The always-compiled Live TV runtime accepts only an explicit private or link-local IPv4 device, ignores advertised hostnames, refuses proxies and redirects, bounds device and peer documents, publishes one generation-fenced settings tuple, and obtains readiness plus a sanitized non-DRM channel lineup from one committed voter owner. Programme-guide data is a read-only owner-side feed the tuner contract never depends on: it is off until an administrator selects a source, bounds every document and string from an untrusted guide host, uses the device credential in flight without ever storing, logging, relaying or returning it, and degrades to an unavailable rendering rather than failing a channel list or a session start. Live HLS sessions preserve capability, cleanup, and finite-file-state boundaries through every ingress and first-party client."
 paths = [
   "crates/plurxd/src/live_tv.rs",
+  "crates/plurxd/src/live_tv/guide.rs",
   "crates/plurxd/src/http/live_tv.rs",
   "crates/plurxd/src/http/internal_live_tv.rs",
   "crates/plurxd/src/web/live-tv.js",
@@ -695,7 +699,9 @@ paths = [
   "scripts/live-tv-endless",
   "crates/plurxd/tests/live_tv_two_node.rs",
   "scripts/live-tv-hardware",
-  "docs/HDHOMERUN-LIVE-TV-*.md",
+  "docs/features/HDHOMERUN-LIVE-TV-*.md",
+  "docs/features/LIVE-TV-GUIDE-AND-UI-PLAN.md",
+  "tests/playback/live-tv-guide-cases.json",
 ]
 checks = ["rust-gate", "rust-gate-ci", "security-boundaries", "resource-bounds", "operations-contract", "web-static", "web-layout", "live-tv-two-node", "live-tv-hardware"]
 depends_on = ["server.api", "identity.access", "playback.pipeline"]
@@ -722,7 +728,7 @@ paths = [
   "crates/plurx-core/src/store/sqlite/offline.rs",
   "crates/plurxd/src/offline.rs",
   "crates/plurxd/src/http/offline.rs",
-  "docs/OFFLINE-VIEWING-PLAN.md",
+  "docs/clients/OFFLINE-VIEWING-PLAN.md",
 ]
 checks = [
   "offline-contract",
@@ -761,13 +767,13 @@ depends_on = ["server.api", "api.contract", "playback.pipeline"]
 [[points]]
 id = "web.experience"
 title = "Embedded web player and administration UI"
-contract = "The shipped one-file web app remains syntactically valid, readable in every theme, and structurally stable across layouts. Its Activity warning names incomplete nodes and renders a missing Activity origin, authentication refusal, HTTP failure, transport unreachability, timeout, and invalid response as distinct plain-language outcomes. Its admin cluster panel separates health, node cards, direct all-voter evidence, an operations rail whose membership controls are expansions of the rows that state their preconditions, and diagnostics; keeps the direct all-voter status current on a gate of its own while the tab is open, repainting only on a change it renders and never under an open modal; presents two voters as a reconfiguration waypoint rather than redundancy; renders the server's conservative restart verdict plus process, serving, Raft, WAL, snapshot, media, build, and protocol evidence; keeps unreachable voters explicit blockers; binds restart prepare/cancel controls to the current backend; renders maintenance acknowledgement, handoff, catch-up, and session drain as explicit preflights; permits a bounded election only with quorum; turns lost quorum into an original-voter restoration and preservation workspace without unsafe force reconfiguration; renders every typed refusal as an actionable sentence; uses the authenticated redacted support-bundle route; stays absent for a non-admin; holds a minted join token in memory only — never in browser storage, a URL, or a log; and its playback-control reporter completes real exchanges in a real browser rather than only satisfying source-level assertions in Node."
+contract = "The shipped one-file web app remains syntactically valid, readable in every theme, and structurally stable across layouts. Its Activity warning names incomplete nodes and renders a missing Activity origin, authentication refusal, HTTP failure, transport unreachability, timeout, and invalid response as distinct plain-language outcomes. Its admin cluster panel separates health, node cards, direct all-voter evidence, an operations rail whose membership controls are expansions of the rows that state their preconditions, and diagnostics; keeps the direct all-voter status current on a gate of its own while the tab is open, repainting only on a change it renders and never under an open modal; presents two voters as a reconfiguration waypoint rather than redundancy; renders the server's conservative restart verdict plus process, serving, Raft, WAL, snapshot, media, build, and protocol evidence; keeps unreachable voters explicit blockers; binds restart prepare/cancel controls to the current backend; renders maintenance acknowledgement, handoff, catch-up, and session drain as explicit preflights; permits a bounded election only with quorum; turns lost quorum into an original-voter restoration and preservation workspace without unsafe force reconfiguration; renders every typed refusal as an actionable sentence; uses the authenticated redacted support-bundle route; stays absent for a non-admin; holds a minted join token in memory only — never in browser storage, a URL, or a log; and its playback-control reporter completes real exchanges in a real browser rather than only satisfying source-level assertions in Node. A refusal of either Store-free cluster recovery read — the direct all-voter status and the support bundle — is reported in the panel that reports the cluster and never ends the operator's session, including a 401, because that guard answers from a process-local proof cache whose closure describes the cluster; every other route's 401 still ends it."
 paths = [
   "brand/tokens.css",
   "crates/plurxd/src/http/web.rs",
   "crates/plurxd/src/web/**",
-  "docs/UI-*.md",
-  "docs/PLAYER-INPUT-CONTRACT*.md",
+  "docs/clients/UI-*.md",
+  "docs/clients/PLAYER-INPUT-CONTRACT*.md",
   "scripts/contrast-*",
   "scripts/player-contract-table",
   "scripts/player-input-fence",
@@ -792,7 +798,7 @@ paths = [
   "clients/apple/Sources/**",
   "clients/apple/Resources/**",
   "clients/apple/project.yml",
-  "docs/APPLE-CLIENT-PARITY.md",
+  "docs/clients/APPLE-CLIENT-PARITY.md",
   "docs/STATUS.html",
   "docs/apple-builds/**",
   "clients/android/app/src/main/**",
@@ -840,6 +846,7 @@ paths = [
   "scripts/ci-cache-prune",
   "scripts/ci-buildkit-prune",
   "scripts/ci-require-disk",
+  "scripts/ci-runner-cache-audit",
   "scripts/release-package-candidate",
   "scripts/{bench,dv-evidence,gop-census,mkpgs,perf-report,perf2-rate-control-n1-corpus.json,perf2-rate-control-smoke-corpus.json,ship,ship-physical}",
   "scripts/container-smoke",
@@ -859,7 +866,7 @@ paths = [
   ".github/workflows/**",
   "Makefile",
   "docs/VALIDATION.md",
-  "docs/CI_EXECUTION_ACCELERATION_PLAN.md",
+  "docs/ci/CI_EXECUTION_ACCELERATION_PLAN.md",
   "scripts/pre-commit",
   "scripts/ci-flake-report",
   "scripts/history-audit",

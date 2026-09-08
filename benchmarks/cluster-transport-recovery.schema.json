@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://plurx.dev/schemas/cluster-transport-recovery-v1.json",
+  "$id": "https://plurx.dev/schemas/cluster-transport-recovery-v2.json",
   "title": "Plurx cluster transport recovery qualification evidence",
   "type": "object",
   "additionalProperties": false,
@@ -13,16 +13,16 @@
     "finished_at_unix_ms",
     "snapshot_policy",
     "transport",
-    "resource_thread_margin",
-    "resource_socket_margin",
-    "resource_owned_async_task_margin",
+    "resource_thread_envelope_allowance",
+    "resource_socket_envelope_allowance",
+    "resource_owned_async_task_envelope_allowance",
     "resource_cleanup_horizon_millis",
     "resource_stable_samples",
     "learner",
     "voter"
   ],
   "properties": {
-    "schema_version": { "const": 1 },
+    "schema_version": { "const": 2 },
     "evidence_scope": { "const": "linux_separate_process_recovery" },
     "build_sha": { "$ref": "#/$defs/gitSha" },
     "platform": { "const": "linux" },
@@ -30,9 +30,9 @@
     "finished_at_unix_ms": { "type": "integer", "minimum": 0 },
     "snapshot_policy": { "$ref": "#/$defs/snapshotPolicy" },
     "transport": { "$ref": "#/$defs/transport" },
-    "resource_thread_margin": { "const": 0 },
-    "resource_socket_margin": { "const": 0 },
-    "resource_owned_async_task_margin": { "const": 0 },
+    "resource_thread_envelope_allowance": { "const": 2 },
+    "resource_socket_envelope_allowance": { "const": 0 },
+    "resource_owned_async_task_envelope_allowance": { "const": 0 },
     "resource_cleanup_horizon_millis": { "const": 60000 },
     "resource_stable_samples": { "const": 2 },
     "learner": { "$ref": "#/$defs/roleCampaign" },
@@ -268,10 +268,58 @@
         "install_millis": { "type": "integer", "minimum": 1 }
       }
     },
+    "resourceBand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["floor", "ceiling"],
+      "properties": {
+        "floor": { "$ref": "#/$defs/resources" },
+        "ceiling": { "$ref": "#/$defs/resources" }
+      }
+    },
+    "nodeResourceEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node_id", "kind", "opening", "closing"],
+      "properties": {
+        "node_id": { "type": "integer", "minimum": 1, "maximum": 4 },
+        "kind": { "$ref": "#/$defs/resourceNodeKind" },
+        "opening": { "$ref": "#/$defs/resourceBand" },
+        "closing": { "$ref": "#/$defs/resourceBand" }
+      }
+    },
+    "resourceEnvelopes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "opening_window_last_cycle",
+        "closing_window_samples",
+        "closing_ceiling_sustained_samples",
+        "nodes"
+      ],
+      "properties": {
+        "opening_window_last_cycle": { "const": 10 },
+        "closing_window_samples": { "const": 10 },
+        "closing_ceiling_sustained_samples": { "const": 4 },
+        "nodes": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": { "$ref": "#/$defs/nodeResourceEnvelope" }
+        }
+      }
+    },
     "roleCampaign": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["role", "cycles_required", "minimum_sqlite_bytes", "cycles", "worst_durations"],
+      "required": [
+        "role",
+        "cycles_required",
+        "minimum_sqlite_bytes",
+        "cycles",
+        "worst_durations",
+        "resource_envelopes"
+      ],
       "properties": {
         "role": { "$ref": "#/$defs/role" },
         "cycles_required": { "const": 20 },
@@ -282,7 +330,8 @@
           "maxItems": 20,
           "items": { "$ref": "#/$defs/cycle" }
         },
-        "worst_durations": { "$ref": "#/$defs/worst" }
+        "worst_durations": { "$ref": "#/$defs/worst" },
+        "resource_envelopes": { "$ref": "#/$defs/resourceEnvelopes" }
       }
     }
   }

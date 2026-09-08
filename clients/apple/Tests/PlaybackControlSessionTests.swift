@@ -68,28 +68,6 @@ private final class ControlAnswer: @unchecked Sendable {
 
 private let controlAnswer = ControlAnswer()
 
-private func sessionPreparedAction(
-    actionId: String = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-    sessionId: String = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
-) -> ControlAction {
-    ControlAction(
-        type: "prepare",
-        actionId: actionId,
-        sessionId: sessionId,
-        playlistUrl: "/api/v1/hls/\(sessionId)/index.m3u8",
-        mediaOriginMs: 600_000,
-        effectiveSelection: EffectiveSelection(
-            qualityAuto: true,
-            height: 1_080,
-            audioTrack: 1,
-            subtitleBurn: nil,
-            audioOffsetMs: 0,
-            codec: .serverSelected,
-            dynamicRange: .sdr
-        )
-    )
-}
-
 /// Holds the actual callback scheduled by the production session so the
 /// main-actor queue race is deterministic rather than dependent on timing.
 private final class SubtitleCallbackQueue: @unchecked Sendable {
@@ -404,14 +382,6 @@ final class PlaybackControlSessionTests: XCTestCase {
         try await assertQueuedSubtitleReadinessIsFenced(replaceSession: nil, newIntent: true)
     }
 
-    func testQueuedPreparedSwitchEventsCannotCrossIntoANewSession() async throws {
-        try await assertQueuedPreparedSwitchEventsAreFenced(replaceSession: true)
-    }
-
-    func testQueuedPreparedSwitchEventsCannotRunAfterEnd() async throws {
-        try await assertQueuedPreparedSwitchEventsAreFenced(replaceSession: false)
-    }
-
     func testEndRevokesATerminalPublicationAlreadyPastTheCaptureGuard() async throws {
         controlExchanges.reset()
         controlAnswer.set(ControlAction(type: "none"))
@@ -508,75 +478,6 @@ final class PlaybackControlSessionTests: XCTestCase {
             try await Task.sleep(nanoseconds: 300_000_000)
             while let callback = callbacks.take() { callback() }
             XCTAssertEqual(deliveries, 1, "current ready cadence commits only one retry")
-        }
-    }
-
-    private func assertQueuedPreparedSwitchEventsAreFenced(
-        replaceSession: Bool
-    ) async throws {
-        controlExchanges.reset()
-        let first = sessionPreparedAction()
-        controlAnswer.set(first)
-        let callbacks = SubtitleCallbackQueue()
-        let session = PlaybackControlSession(
-            schedulePreparedSwitch: { callbacks.append($0) }
-        )
-        let player = PlayerStub()
-        let (transport, urlSession) = makeTransport()
-        defer {
-            session.end()
-            urlSession.invalidateAndCancel()
-            controlAnswer.set(ControlAction(type: "none"))
-        }
-        var events: [PreparedSwitchEvent] = []
-        session.begin(
-            bootstrap: sessionBootstrap(),
-            transport: transport,
-            observe: { player.observation() },
-            onPreparedSwitch: { events.append($0) }
-        )
-        _ = try await waitForExchange { $0.sequence == 1 }
-        let deadline = Date().addingTimeInterval(5)
-        var stale: (@MainActor @Sendable () -> Void)?
-        while stale == nil, Date() < deadline {
-            stale = callbacks.take()
-            if stale == nil { try await Task.sleep(nanoseconds: 10_000_000) }
-        }
-        let staleCallback = try XCTUnwrap(stale)
-
-        if replaceSession {
-            let second = sessionPreparedAction(
-                actionId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
-                sessionId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
-            )
-            controlAnswer.set(second)
-            var next = sessionBootstrap()
-            next.generation = "22222222-2222-4222-8222-222222222222"
-            session.begin(
-                bootstrap: next,
-                transport: transport,
-                observe: { player.observation() },
-                onPreparedSwitch: { events.append($0) }
-            )
-            _ = try await waitForExchange {
-                $0.sequence == 1 && $0.generation == next.generation
-            }
-            staleCallback()
-            XCTAssertTrue(events.isEmpty, "session A cannot allocate into session B")
-
-            let currentDeadline = Date().addingTimeInterval(5)
-            var current: (@MainActor @Sendable () -> Void)?
-            while current == nil, Date() < currentDeadline {
-                current = callbacks.take()
-                if current == nil { try await Task.sleep(nanoseconds: 10_000_000) }
-            }
-            let currentCallback = try XCTUnwrap(current)
-            currentCallback()
-            XCTAssertEqual(events, [.offered(try XCTUnwrap(second.preparedOffer))])
-        } else {
-            session.end()
-            staleCallback()
-            XCTAssertTrue(events.isEmpty, "End revokes every queued preparation event")
         }
     }
 

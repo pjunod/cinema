@@ -1053,6 +1053,16 @@ pub mod keys {
     /// named prior owner proves a drain or an administrator attests physical fencing.
     pub const LIVE_TV_TRANSITION_FROM_OWNER_NODE_ID: &str = "live_tv.transition_from_owner_node_id";
     pub const LIVE_TV_TRANSITION_DRAIN_BEFORE: &str = "live_tv.transition_drain_before";
+    /// Programme-guide feed. These three are *information* settings, not tuner
+    /// settings: they select a read-only source the tuner contract never
+    /// depends on, so unlike the tuple above they stay editable while Live TV
+    /// is enabled. An operator must be able to turn a guide on without
+    /// draining every viewer. Absent is `off` — the guide is the first
+    /// outbound internet call the tuner owner makes on the operator's behalf,
+    /// so it never starts itself.
+    pub const LIVE_TV_GUIDE_SOURCE: &str = "live_tv.guide_source";
+    pub const LIVE_TV_XMLTV_URL: &str = "live_tv.xmltv_url";
+    pub const LIVE_TV_GUIDE_HOURS: &str = "live_tv.guide_hours";
     /// Opt in to remote media-session placement only after every committed
     /// voter is publishing the current media protocol. Absent is deliberately
     /// off so rolling upgrades keep all starts local.
@@ -1827,7 +1837,7 @@ pub trait MediaStore: Send + Sync + 'static {
         edit: &ItemEdit,
     ) -> Result<Option<Item>, StoreError>;
     /// Record that an NFO sidecar has been consumed for this item. Seeding
-    /// happens at most once, ever (docs/HOMEVIDEO-PLAN.md §4.3) — after this
+    /// happens at most once, ever (docs/features/HOMEVIDEO-PLAN.md §4.3) — after this
     /// the sidecar is dead to plurx, so a user's edits can never be clobbered.
     async fn set_nfo_seeded(&self, item_id: i64) -> Result<(), StoreError>;
 

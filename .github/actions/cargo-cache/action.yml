@@ -7,14 +7,6 @@ inputs:
   lane:
     description: Stable, filesystem-safe name for this Cargo compilation lane.
     required: true
-  execution-mode:
-    description: CI execution rollout mode; local state is disabled in legacy mode.
-    required: false
-    default: legacy
-  persistent-eligible:
-    description: Explicit non-voter scheduling proof; defaults off.
-    required: false
-    default: "false"
   disk-gb:
     description: >-
       Free space required before this job starts, in whole gigabytes. A full
@@ -36,10 +28,10 @@ outputs:
     description: Absolute Cargo target directory selected for this lane.
     value: ${{ steps.configure.outputs.target_dir }}
   cache-root:
-    description: Canonical persistent Cargo root, empty for legacy/hosted jobs.
+    description: Canonical persistent Cargo root, empty for hosted jobs.
     value: ${{ steps.configure.outputs.cache_root }}
   budget-gb:
-    description: Enforced persistent Cargo budget, empty for legacy/hosted jobs.
+    description: Enforced persistent Cargo budget, empty for hosted jobs.
     value: ${{ steps.configure.outputs.budget_gb }}
   last-used:
     description: Explicit LRU marker for the selected persistent lane.
@@ -55,8 +47,6 @@ runs:
         CACHE_BUDGET_GB: ${{ inputs.budget-gb }}
         DISK_GB: ${{ inputs.disk-gb }}
         CACHE_LANE: ${{ inputs.lane }}
-        EXECUTION_MODE: ${{ inputs.execution-mode }}
-        PERSISTENT_ELIGIBLE: ${{ inputs.persistent-eligible }}
       run: |
         set -euo pipefail
         # First, and before the cache mode is even chosen. A runner that
@@ -84,15 +74,52 @@ runs:
         #
         # A lane that genuinely needs more says so; `vod-web` asks for 45G
         # because it carries Playwright browsers and an ffmpeg build on top.
+        # The audit runs FIRST, and this ordering is the point of it. It
+        # reports the one cache on this runner that no job can bound -- the
+        # runner's own `actions/cache` server, which evicts nothing, ever --
+        # and `ci-require-disk` below ends in `exit 1`. Run the refusal first
+        # and the audit never runs on the hosts where its number is the only
+        # thing that answers "can the janitor reclaim enough here?". Three
+        # refusals on `gha-nuc4-general-01` on 2026-09-08 all said `18G
+        # available` and none of them carried a cache figure.
+        if [ -n "${RUNNER_TOOL_CACHE:-}" ]; then
+          "$GITHUB_WORKSPACE/scripts/ci-runner-cache-audit" \
+            "$(dirname -- "$RUNNER_TOOL_CACHE")" 20 || true
+        fi
         "$GITHUB_WORKSPACE/scripts/ci-require-disk" \
           "${RUNNER_WORKSPACE:-$GITHUB_WORKSPACE}" "${DISK_GB:-25}"
         [[ "$CACHE_LANE" =~ ^[a-z0-9][a-z0-9.-]*$ ]] || {
           echo "::error::Cargo cache lane must be filesystem-safe"
           exit 1
         }
+        # Where the cache lives follows the RUNNER, not a rollout flag.
+        #
+        # This gate used to also require an explicit non-voter scheduling
+        # proof from the caller and a rollout mode of shadow or accelerated.
+        # The repository variable that carries that mode has
+        # never been set on this repository, so the condition was false on every
+        # job, and every job took the branch below: `Swatinem/rust-cache`,
+        # writing a compressed copy of the target directory into the Forgejo
+        # runner's internal cache server.
+        #
+        # That server has no eviction of any kind — `forgejo-runner` 13.1.0's
+        # own `generate-config` offers `enabled`, `dir`, `host`, `proxy_port`
+        # and the secrets, and nothing else: no size cap, no TTL, no GC. So
+        # every entry it is ever handed is permanent. Measured on
+        # `gha-m6-general-01` on 2026-09-07: 118 entries, 41G, every one of them
+        # created in the previous three days, on a 78G disk. The whole fleet
+        # was carrying ~167G of cache blobs that nothing would ever delete, and
+        # runners were failing jobs for want of space while a bounded cache
+        # implementation sat in this repository behind a flag nobody had set.
+        #
+        # A bound that a configuration variable can switch off is not a bound.
+        # The runner-local path below is bounded by construction — an LRU budget
+        # enforced before and after every job, under a filesystem floor — so it
+        # is what a self-hosted runner gets, always. The hosted service is for
+        # hosted runners, which evict on their own, and for the rare self-hosted
+        # runner that exposes no tool cache to put a bounded cache in.
         if [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ] \
-          || [ "$PERSISTENT_ELIGIBLE" != true ] \
-          || [ "$EXECUTION_MODE" != shadow -a "$EXECUTION_MODE" != accelerated ]; then
+          || [ -z "${RUNNER_TOOL_CACHE:-}" ]; then
           target_dir="$GITHUB_WORKSPACE/target"
           echo "CARGO_TARGET_DIR=$target_dir" >> "$GITHUB_ENV"
           echo "local=false" >> "$GITHUB_OUTPUT"
@@ -102,14 +129,35 @@ runs:
           echo "last_used=" >> "$GITHUB_OUTPUT"
           exit 0
         fi
-        test -n "${RUNNER_TOOL_CACHE:-}"
-        runner_name=$(printf '%s' "$RUNNER_NAME" | tr -c 'A-Za-z0-9_.-' '-')
+        # Forgejo's runner does not export RUNNER_NAME -- that is a GitHub
+        # Actions variable, and under `set -u` reading it aborted the step with
+        # `RUNNER_NAME: unbound variable`. Nothing caught it because this branch
+        # had never executed on any job: the gate above sent every one of them
+        # down the hosted path instead.
+        #
+        # The fallback has to stay unique per runner INSTANCE, not per host:
+        # nynuc runs four runners and rogg16 five, and two of them sharing a
+        # Cargo cache root would have them pruning each other's target
+        # directories mid-build. Each instance already has its own runner root
+        # -- /opt/forgejo-runner, -02, -03 -- and RUNNER_TOOL_CACHE sits inside
+        # it, so the root's name is that identity.
+        runner_name=${RUNNER_NAME:-}
+        if [ -z "$runner_name" ]; then
+          runner_name="$(hostname -s)-$(basename -- "$(dirname -- "$RUNNER_TOOL_CACHE")")"
+        fi
+        runner_name=$(printf '%s' "$runner_name" | tr -c 'A-Za-z0-9_.-' '-')
         toolchain=$(rustc -Vv | sed -n 's/^release: //p')
         [[ "$toolchain" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
           echo "::error::Cannot derive the pinned Rust toolchain"
           exit 1
         }
-        mapfile -t cache_paths < <(
+        # macOS still ships Bash 3.2, which has arrays and process
+        # substitution but not `mapfile`. Keep this action runnable on every
+        # self-hosted runner rather than making the cache lane Linux-only.
+        cache_paths=()
+        while IFS= read -r cache_path; do
+          cache_paths[${#cache_paths[@]}]=$cache_path
+        done < <(
           "$GITHUB_WORKSPACE/scripts/ci-cargo-cache-prepare" \
             "$RUNNER_TOOL_CACHE" "$runner_name" "$toolchain" "$CACHE_LANE"
         )

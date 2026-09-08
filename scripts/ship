@@ -19,7 +19,7 @@
 #   scripts/ship --all                   # check, push, deploy, apple, android
 #   scripts/ship --deploy --dry-run      # print the commands, run nothing
 #
-# Ladder rungs for the DV investigation (docs/APPLE-NATIVE-SUBTITLES-PLAN.md
+# Ladder rungs for the DV investigation (docs/clients/APPLE-NATIVE-SUBTITLES-PLAN.md
 # §5.4) — ONE per deploy, then observe on the device:
 #   scripts/ship --deploy --rung closed-captions
 #   scripts/ship --deploy --rung forced-autoselect

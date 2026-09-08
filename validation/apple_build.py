@@ -41,7 +41,7 @@ NOTES_NON_FRAGMENTS = frozenset({"README.md", "history-through-build-78.md"})
 PROJECT = "clients/apple/project.yml"
 CARGO = "Cargo.toml"
 APPLE_README = "clients/apple/README.md"
-PARITY = "docs/APPLE-CLIENT-PARITY.md"
+PARITY = "docs/clients/APPLE-CLIENT-PARITY.md"
 STATUS = "docs/STATUS.html"
 
 # The documents whose *status blockquote* must carry no per-build narrative.

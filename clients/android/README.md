@@ -20,9 +20,16 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `73` — native viewer parity across phone, foldable,
-> and TV. Build 73 carries the streaming-reliability effort's client half on
-> current `main`; it adds no viewer-visible behaviour of its own. Build 70 gives
+> Status: **v0.3.0**, build `75` — native viewer parity across phone, foldable,
+> and TV. Build 75 gives Live TV a programme guide: channel rows say what is on
+> now with a bar to its end and what is next, a phone or tablet can switch to a
+> half-hour grid, and picture-in-picture keeps playing when the app goes to the
+> background rather than releasing the tuner. Build 74 speaks the M6
+> prepared-replacement protocol: it declares the vocabulary, accepts a
+> `prepare`, primes a second pipeline against the playhead, reports readiness
+> and commits — off by default, behind an enable in Settings' Developer section.
+> Build 73 carries the streaming-reliability effort's client half; it adds no
+> viewer-visible behaviour of its own. Build 70 gives
 > the library, search and settings screens a starting
 > focus and puts every layout's cards and episode rows in the D-pad's reach.
 > Build 66 retries the selected native subtitle once when its demanded
@@ -94,7 +101,7 @@ recomputed on every decision, because unplugging HDMI changes the answer.
 > death. DRM, DVR, captions and guide scheduling are not supported.
 > General server administration remains in the web app; the viewing, discovery, and
 > playback surfaces are native here. The capability matrix is in
-> [Android client parity](../../docs/ANDROID-CLIENT-PARITY.md).
+> [Android client parity](../../docs/clients/ANDROID-CLIENT-PARITY.md).
 
 ## What works
 
@@ -102,7 +109,7 @@ recomputed on every decision, because unplugging HDMI changes the answer.
   stop on a dedicated H.264/AAC live player. No library watch-progress writes.
   Settings → Developer documents the required private IPv4 tuner, committed
   owner node, compatible fleet, FFmpeg, scratch space and session budget before
-  runtime enablement. [The Live TV plan](../../docs/HDHOMERUN-LIVE-TV-PLAN.md)
+  runtime enablement. [The Live TV plan](../../docs/features/HDHOMERUN-LIVE-TV-PLAN.md)
   records limits and acceptance; source tests are not physical playback proof.
 - **Connect & sign in** to any plurx server by address (`http://192.168.1.10:32400`); the
   session is remembered so the app reconnects silently on next launch.
@@ -248,7 +255,7 @@ the "Command line tools only" box at <https://developer.android.com/studio>.
 Open `clients/android/` in **Android Studio** (Quail 2 / 2026.1.2+) and Run —
 it provisions the SDK for you.
 
-**Toolchain** (pinned): AGP 9.3.1, Gradle 9.6.1, built-in Kotlin
+**Toolchain** (pinned): AGP 9.3.1, Gradle 9.7.1, built-in Kotlin
 2.3.10, JDK 25, Compose BOM 2026.06.01, Media3 1.10.1,
 `compileSdk`/`targetSdk` 37, `minSdk` 23. The Gradle daemon runs on
 Java 25 while Android source and bytecode stay at Java 17 for device

@@ -149,7 +149,7 @@ pub async fn sections(
 ) -> Result<Response, ApiError> {
     let libs = state.catalogue.list_libraries().await?;
     // Home libraries are skipped: the façade has no honest Plex section type
-    // for a folder tree of camera files (see docs/HOMEVIDEO-PLAN.md §2).
+    // for a folder tree of camera files (see docs/features/HOMEVIDEO-PLAN.md §2).
     let dirs = libs.iter().filter_map(map::section_directory).collect();
     Ok(xml(plex::container(dirs)))
 }

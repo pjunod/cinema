@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * Web half of the M0-P2 and M0-P3 probes in docs/VOD-PRESENTATION-PLAN.md §8 M0.
+ * Web half of the M0-P2 and M0-P3 probes in docs/streaming/VOD-PRESENTATION-PLAN.md §8 M0.
  *
  * P2 asks whether a VOD playlist whose `#EXTINF`s are the plan's nominal 2.0 s
  * survives segments whose real durations jitter around that grid (§2.2,
@@ -1826,7 +1826,7 @@ async function main() {
     schema_version: 1,
     generated_at: new Date().toISOString(),
     command,
-    plan_section: "docs/VOD-PRESENTATION-PLAN.md §8 M0 (P2, P3)",
+    plan_section: "docs/streaming/VOD-PRESENTATION-PLAN.md §8 M0 (P2, P3)",
     complete: runs.length === specs.length,
     planned_runs: specs.length,
     fixtures: {

@@ -77,22 +77,16 @@ class PlaybackControlTransport(
             var generation: String? = null
             var epoch: Long? = null
             var retryAfter: Long? = null
-            var detail: String? = null
-            var invalidField: String? = null
             try {
                 val fields = json.parseToJsonElement(body).jsonObject
                 code = fields["code"]?.jsonPrimitive?.contentOrNullSafe()
                 generation = fields["generation"]?.jsonPrimitive?.contentOrNullSafe()
                 epoch = fields["control_epoch"]?.jsonPrimitive?.longOrNull
                 retryAfter = fields["retry_after_ms"]?.jsonPrimitive?.longOrNull
-                detail = fields["message"]?.jsonPrimitive?.contentOrNullSafe()
-                invalidField = fields["invalid_field"]?.jsonPrimitive?.contentOrNullSafe()
             } catch (_: Exception) {
                 // Status only. That is still enough to classify.
             }
-            return ControlTransportException(
-                status, code, generation, epoch, retryAfter, detail, invalidField,
-            )
+            return ControlTransportException(status, code, generation, epoch, retryAfter)
         }
 
         /** `null` for a JSON null or a non-string, rather than the text "null". */
@@ -124,8 +118,17 @@ class PlaybackControlSession(
     // reporter reads this immutable envelope, including on cadence/retry.
     private val latest = AtomicReference<PlaybackControlCapture?>(null)
     private var captureRevision = 0L
-    private val prepared = PreparedReplacementCoordinator()
-    private var onPreparedEvent: (PreparedReplacementEvent) -> Unit = {}
+
+    /**
+     * Whether an exchange coming back is still allowed to reach the player.
+     *
+     * Cleared before the player is torn down, and never set again. A stop is
+     * asynchronous and an exchange can be in flight across it, so a callback
+     * that acquires resources — `onPrepare` builds an ExoPlayer — needs a
+     * switch as well as the generation fence.
+     */
+    @Volatile
+    private var dispatching = true
 
     /**
      * One identity per player instance, not per session: a reopen is the same
@@ -300,11 +303,15 @@ class PlaybackControlSession(
         observe: () -> PlayerControlObservation?,
         transport: PlaybackControlTransport = PlaybackControlTransport(Session.origin),
         onSubtitleReady: () -> Unit = {},
-        onPreparedEvent: (PreparedReplacementEvent) -> Unit = {},
+        onPrepare: (ControlAction) -> Unit = {},
+        onAcknowledged: (ActionAcknowledgement) -> Unit = {},
     ) {
         end()
         this.observe = observe
-        this.onPreparedEvent = onPreparedEvent
+        // `end()` closed the dispatch switch on the generation that just
+        // finished. This one is open again; the generation below is what keeps
+        // the two apart.
+        dispatching = true
         // A generation, not a reset. `end()` stops the old reporter in a
         // launched coroutine, so the stop does not necessarily land before
         // this begin — and an old in-flight exchange completing in that window
@@ -337,18 +344,11 @@ class PlaybackControlSession(
             // already honours them; a player acting on them here would be
             // deciding, which is the next slice.
             onExchange = { exchange ->
-                if (exchange.capture.owner != owner ||
-                    synchronized(verdictLock) { generation != verdictGeneration }
+                if (exchange.capture.owner != PlaybackControlCaptureOwner(clientInstanceId, generation) ||
+                    latest.get()?.owner != exchange.capture.owner
                 ) {
                     return@create
                 }
-                // Preparation settlement belongs to the session generation,
-                // not to the transient capture slot. A routine mutation clears
-                // that slot while its new source is being attached, but an
-                // in-flight acknowledgement still has to be retired exactly
-                // once during that gap.
-                handlePreparedExchange(exchange)
-                if (latest.get()?.owner != exchange.capture.owner) return@create
                 // Every exchange advances the counter, including a failed one:
                 // an owner that asked must not wait out its whole bound for an
                 // exchange that has already come back with nothing.
@@ -380,7 +380,34 @@ class PlaybackControlSession(
                         }
                     }
                 }
+                // An acknowledgement rides on the request, so its delivery is
+                // an answer to *this* exchange rather than a separate reply.
+                // Only an exchange the server actually answered clears it: a
+                // retry replays the exact request, which is what makes a lost
+                // commit go again instead of vanishing.
+                if (exchange.response != null && generation == answerGeneration) {
+                    exchange.request.acknowledgement?.let { onAcknowledged(it) }
+                }
                 val action = exchange.response?.action
+                // A staged successor is named on an ordinary exchange, not only
+                // on a stall ask, so the dispatch is here rather than in the
+                // player's stall path. The reporter has already refused a
+                // malformed payload — this only ever sees one that validated.
+                //
+                // Behind the generation fence and the dispatch switch, like its
+                // neighbours and for a sharper reason than either: this
+                // callback *builds an ExoPlayer*. An exchange that was already
+                // in flight when the session ended, or when the player was
+                // released, would otherwise stand a second pipeline up against
+                // a session that no longer exists — with nothing left running
+                // to release it.
+                if (action != null &&
+                    action.type == PlaybackControl.PREPARE_ACTION_TYPE &&
+                    generation == answerGeneration &&
+                    dispatching
+                ) {
+                    onPrepare(action)
+                }
                 if (action != null &&
                     action.type == "terminal" &&
                     !action.message.isNullOrEmpty()
@@ -409,7 +436,6 @@ class PlaybackControlSession(
      * but replaces what the next exchange will carry.
      */
     fun playerChanged() {
-        applyPreparedEvents(prepared.expire(monotonicNowMs()))
         val capture = publish() ?: return
         val subject = reporter ?: return
         scope.launch { subject.notify(capture) }
@@ -430,46 +456,6 @@ class PlaybackControlSession(
         scope.launch { subject.notifyUrgently(scope, capture) }
     }
 
-    /** The later presentation path calls this after parsing the successor manifest. */
-    fun preparedMetadataReady(actionId: String): Boolean =
-        queuePreparedAcknowledgement { prepared.metadataReady(actionId) }
-
-    /** [bufferedThroughMs] is source/film time, matching the offered origin. */
-    fun preparedBufferReady(actionId: String, bufferedThroughMs: Long): Boolean =
-        queuePreparedAcknowledgement { prepared.bufferReady(actionId, bufferedThroughMs) }
-
-    /**
-     * Queue the durable commit. The origin is intentionally not an argument:
-     * it is echoed byte-for-byte from the retained offer and cannot be
-     * recomputed from a playhead by the presentation path.
-     */
-    fun preparedCommitted(actionId: String, firstFrameUnixMs: Long): Boolean {
-        if (reporter == null) return false
-        val snapshot = latest.get()?.snapshot
-        val result = prepared.committed(
-            actionId,
-            firstFrameUnixMs,
-            snapshot?.selection,
-            snapshot?.demand,
-        )
-        if (!result.queued && result.released == null) return false
-        refreshPreparedCapture()
-        result.released?.let { applyPreparedEvents(listOf(it)) }
-        sendPreparedAcknowledgementUrgently()
-        return result.queued
-    }
-
-    fun preparedFailed(actionId: String): Boolean = queuePreparedTerminal {
-        prepared.failed(actionId)
-    }
-
-    fun preparedAborted(actionId: String): Boolean = queuePreparedTerminal {
-        prepared.aborted(actionId)
-    }
-
-    internal fun pendingPreparedAcknowledgementForTest(): ActionAcknowledgement? =
-        prepared.nextAcknowledgement
-
     /**
      * Publish a viewer destination before the media item or server session is
      * replaced. The pending target lives in [PlaybackIntent], so the snapshot
@@ -486,29 +472,45 @@ class PlaybackControlSession(
     }
 
     /** Called synchronously by the player dispatcher; never by the reporter. */
-    private fun publish(): PlaybackControlCapture? {
-        val observed = observe?.invoke()?.let(PlaybackControlMapping::snapshot)
-        val release = observed?.let { prepared.reconcile(it.selection, it.demand) }
-        release?.let { applyPreparedEvents(listOf(it)) }
-        return synchronized(verdictLock) {
-            val snapshot = observed?.copy(acknowledgement = prepared.nextAcknowledgement)
-            val capture = snapshot?.let {
-                PlaybackControlCapture(
-                    it,
-                    verdictIntentGeneration,
-                    PlaybackControlCaptureOwner(clientInstanceId, verdictGeneration),
-                    ++captureRevision,
-                )
-            }
+    private fun publish(): PlaybackControlCapture? = synchronized(verdictLock) {
+        val snapshot = observe?.invoke()?.let(PlaybackControlMapping::snapshot)
+        val capture = snapshot?.let {
+            PlaybackControlCapture(
+                it,
+                verdictIntentGeneration,
+                PlaybackControlCaptureOwner(clientInstanceId, verdictGeneration),
+                ++captureRevision,
+            )
+        }
+        latest.set(capture)
+        capture
+    }
+
+    /**
+     * Stamp the current authority onto a snapshot the caller already holds.
+     *
+     * [publish] cannot serve the teardown exchange: it reads through `observe`,
+     * and the caller closed that observation before calling — deliberately,
+     * because every read past that point is against a player being released.
+     * The identity is still this session's, so it is taken from the same place
+     * [publish] takes it, under the same lock.
+     */
+    private fun captureOf(snapshot: PlaybackControlSnapshot): PlaybackControlCapture =
+        synchronized(verdictLock) {
+            val capture = PlaybackControlCapture(
+                snapshot,
+                verdictIntentGeneration,
+                PlaybackControlCaptureOwner(clientInstanceId, verdictGeneration),
+                ++captureRevision,
+            )
             latest.set(capture)
             capture
         }
-    }
 
     fun end() {
-        applyPreparedEvents(prepared.reset(PreparedReplacementReleaseReason.SESSION_ENDED))
         // Stopping the coroutine is asynchronous. Invalidate every callback
         // synchronously, including an exchange already returning from HTTP.
+        dispatching = false
         val generation = synchronized(verdictLock) {
             latest.set(null)
             ++verdictGeneration
@@ -523,68 +525,78 @@ class PlaybackControlSession(
         if (subject != null) scope.launch { subject.stop() }
     }
 
-    private fun handlePreparedExchange(exchange: PlaybackControlReporter.Exchange) {
-        val events = exchange.response?.let { response ->
-            prepared.receive(
-                response.action,
-                exchange.request.acknowledgement,
-                exchange.request.selection,
-                monotonicNowMs(),
-            )
-        } ?: prepared.failure(
-            exchange.cause,
-            exchange.request.acknowledgement,
-            exchange.request.generation,
-        )
-        val next = prepared.nextAcknowledgement
-        if (exchange.request.acknowledgement != next) {
-            refreshPreparedCapture()
-        }
-        applyPreparedEvents(events)
-        if (next != null && next != exchange.request.acknowledgement) {
-            sendPreparedAcknowledgementUrgently()
-        }
-    }
-
-    private fun queuePreparedAcknowledgement(update: () -> Boolean): Boolean {
-        if (reporter == null || !update()) return false
-        refreshPreparedCapture()
-        sendPreparedAcknowledgementUrgently()
-        return true
-    }
-
-    private fun queuePreparedTerminal(
-        update: () -> PreparedReplacementEvent.Released?,
-    ): Boolean {
-        if (reporter == null) return false
-        val event = update() ?: return false
-        refreshPreparedCapture()
-        applyPreparedEvents(listOf(event))
-        sendPreparedAcknowledgementUrgently()
-        return true
-    }
-
-    /** Rewrite only the immutable envelope; never sample Media3 on the return path. */
-    private fun refreshPreparedCapture(): PlaybackControlCapture? = synchronized(verdictLock) {
-        val current = latest.get() ?: return@synchronized null
-        val refreshed = PlaybackControlCapture(
-            current.snapshot.copy(acknowledgement = prepared.nextAcknowledgement),
-            current.intentGeneration,
-            current.owner,
-            ++captureRevision,
-        )
-        latest.set(refreshed)
-        refreshed
-    }
-
-    private fun sendPreparedAcknowledgementUrgently() {
-        val capture = latest.get() ?: return
+    /**
+     * Send one last exchange, then stop — on a scope that outlives the screen.
+     *
+     * [end] cannot do this and the difference is not a detail. `end()` queues a
+     * `stop()`, and a `stop()` queued after an urgent notify still runs before
+     * the pump it was meant to let finish: the notify sets `pending` and
+     * launches `run()`, `stop()` clears `pending` and cancels that job, and the
+     * exchange is never built. On the disposal path it is worse — the
+     * composition's scope is cancelled in the same synchronous pass, so nothing
+     * launched on it runs at all.
+     *
+     * That matters for exactly one thing: the terminal acknowledgement a
+     * preparation is owed. Leaving it unsent hands the staging to the server's
+     * 330 s deadline, which means a real encoder and an actor slot held for
+     * five and a half minutes after the viewer closed the player.
+     *
+     * [finalSnapshot] is captured by the caller *before* it tears its player
+     * down, because this exchange outlives that player.
+     */
+    fun endAfterFinalExchange(
+        outerScope: CoroutineScope,
+        finalSnapshot: PlaybackControlSnapshot,
+    ) {
+        dispatching = false
         val subject = reporter ?: return
-        scope.launch { subject.notifyUrgently(scope, capture) }
-    }
-
-    private fun applyPreparedEvents(events: List<PreparedReplacementEvent>) {
-        events.forEach(onPreparedEvent)
+        // Stamped before the invalidation below, from the identity the reporter
+        // was built with — it is answering for that session, not for whatever
+        // replaces it.
+        val settling = captureOf(finalSnapshot)
+        // The same synchronous invalidation [end] performs, and for the same
+        // reason twice over. A reopen calls this and then begins a new session
+        // immediately, so an exchange still returning from HTTP on the old
+        // reporter must not reach a callback that would act on it — least of
+        // all `onPrepare`, which builds a player. The exchange itself survives
+        // the invalidation because a settled reporter reads what it was handed
+        // rather than the slot this empties.
+        //
+        // What does not survive is the delivery callback for the
+        // acknowledgement this carries: it is fenced by the generation being
+        // bumped here, so the acknowledgement stays pending and may ride the
+        // next session's first exchange as well. That duplicate is inert — the
+        // server ignores an `action_id` not bound to the session it arrives on
+        // — and the alternative is leaving a live reporter un-fenced across a
+        // reopen, which is not a trade.
+        val generation = synchronized(verdictLock) {
+            latest.set(null)
+            ++verdictGeneration
+        }
+        synchronized(answerLock) {
+            answerGeneration = generation
+            ownerChangesSeen += 1
+        }
+        reporter = null
+        observe = null
+        outerScope.launch {
+            // `settle`, not `notifyUrgently`. The urgent path deliberately
+            // leaves an in-flight exchange alone, because `run()` picks the
+            // new snapshot up straight after it — but the pump running that
+            // exchange is on the scope that is being cancelled right now, so
+            // "straight after it" never arrives, and the coroutine dies inside
+            // `send` without ever clearing `inFlight`. Re-homing
+            // unconditionally is what makes this path work at all.
+            val handed = subject.settle(outerScope, settling)
+            val deadline = monotonicNowMs() + FINAL_EXCHANGE_MS
+            while (handed && monotonicNowMs() < deadline) {
+                val status = subject.status()
+                if (status.stopped) break
+                if (!status.inFlight && !status.pending && !status.retrying) break
+                kotlinx.coroutines.delay(ASK_POLL_MS)
+            }
+            subject.stop()
+        }
     }
 
     private companion object {
@@ -598,6 +610,13 @@ class PlaybackControlSession(
          * where the Android framework stubs throw.
          */
         const val ASK_POLL_MS = 25L
+
+        /**
+         * How long a teardown waits for its last exchange. Bounded because the
+         * viewer has already left: past this the server's own deadline is the
+         * fallback, which is the behaviour without this path at all.
+         */
+        const val FINAL_EXCHANGE_MS = 3_000L
     }
 
 }

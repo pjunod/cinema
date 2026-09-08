@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["57e03a6b"]
+points = ["cluster.membership", "live-tv.integration"]
+checks = ["rust-gate"]
+reason = "The Rust gate runs a_voter_that_was_never_promoted_can_own_live_tv, which states the property the guard got wrong: a node that joined as a voter carries NULL in cluster_nodes.role, because only promote_learner writes that column, and such a node must still be able to own Live TV; a promoted learner must too, and a learner must not. Restoring owner.role = voter fails it. The same commit corrects the fixture that hid the defect — it declared role TEXT NOT NULL in a column order production does not have and inserted positionally, so it could only ever hold rows the guard already accepted."

@@ -182,7 +182,7 @@ internal fun nativeSubtitleOrdinal(index: Long, tracks: List<SubTrack>): Int? =
  * viewer never asked to have re-encoded. A *forced* track is the carve-out —
  * a handful of signage cues the film is unwatchable without — and when that
  * burn alone replaces copyable video, it preserves source height
- * (docs/CLIENTS-REMEDIATION-PLAN.md §3.1, owner policy).
+ * (docs/clients/CLIENTS-REMEDIATION-PLAN.md §3.1, owner policy).
  */
 internal fun autoSubtitleSelection(tracks: List<SubTrack>): Long? {
     val pick = tracks.firstOrNull { it.default } ?: return null
@@ -258,7 +258,7 @@ internal fun sessionHeight(
  * omission belongs only to legacy clients, whose server-side fallback treats
  * a heightless copy session as automatic. Explicit false is therefore what
  * keeps Original distinct from Auto on that exact body shape.
- * See docs/ADAPTIVE-QUALITY.md §"Native stall-reopen server boundary".
+ * See docs/streaming/ADAPTIVE-QUALITY.md §"Native stall-reopen server boundary".
  */
 internal fun qualityAuto(
     quality: PlaybackQuality,

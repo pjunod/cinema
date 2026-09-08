@@ -15,7 +15,7 @@
 //! Why bother: every boundary on an open-GOP copy costs exactly one dropped
 //! frame, because a player treats a segment's first keyframe as a
 //! random-access point and the HEVC spec says to discard the leading pictures
-//! there (docs/STUTTER-4K.md §5.3ter). The cutting is the only part of a copy
+//! there (docs/streaming/STUTTER-4K.md §5.3ter). The cutting is the only part of a copy
 //! that plurx can change, so the cutting is what changes.
 //!
 //! The decision logic is all in [`plurx_core::fmp4`] and is pure. The growing

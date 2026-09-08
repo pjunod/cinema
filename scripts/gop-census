@@ -6,7 +6,7 @@ PLAN.md). The segmenter only publishes a segment boundary in front of a
 fragment whose first frame is a true random-access point — an IDR, or a CRA
 carrying no leading pictures — because any other boundary costs exactly one
 dropped frame in Chrome's MSE and in Safari's native player alike
-(docs/STUTTER-4K.md §5.3ter). How much that is worth on a given library is a
+(docs/streaming/STUTTER-4K.md §5.3ter). How much that is worth on a given library is a
 property of the *source encodes*, and no synthetic fixture can answer it: a
 container with x265 test patterns has whatever GOP structure the test asked
 for, while a Blu-ray remux has whatever the studio's encoder did.

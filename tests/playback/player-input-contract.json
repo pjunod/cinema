@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "title": "Player input contract — one routing table every client's reducer must reproduce",
-  "documented_in": "docs/PLAYER-INPUT-CONTRACT.md",
+  "title": "Player input contract \u2014 one routing table every client's reducer must reproduce",
+  "documented_in": "docs/clients/PLAYER-INPUT-CONTRACT.md",
   "ruled": "2026-09-02",
   "surfaces": {
     "ten-foot": "Directional input moves focus: Siri Remote (tvOS), D-pad (Android TV / Google TV), keyboard arrows on a TV browser, and keyboard arrows on the web when the timeline has focus.",
@@ -16,7 +16,7 @@
     "notes": [
       "hide_after_ms: chrome hides this long after the last input while playing. Never while paused, failed, scrubbing, or with a menu or the info panel open.",
       "preview_auto_commit_ms is null: a pending preview commits only on `select` (ten-foot) or pointer release (touch); it never commits on a timer.",
-      "desktop_hotkey_coalesce_ms: arrow hotkeys on the desktop body accumulate against one frozen base and issue one seek after this much quiet — the shipped web `nudge()` behaviour, kept."
+      "desktop_hotkey_coalesce_ms: arrow hotkeys on the desktop body accumulate against one frozen base and issue one seek after this much quiet \u2014 the shipped web `nudge()` behaviour, kept."
     ]
   },
   "steps": {
@@ -39,7 +39,7 @@
     "vertical_seek_seconds": null,
     "notes": [
       "skip_seconds is the only immediate seek step: the two transport buttons and the FF/REW media keys.",
-      "preview_acceleration applies to a HELD direction while scrubbing: repeats 0–4 move 10 s, 5–9 move 30 s, 10+ move 60 s. A released key resets the ladder.",
+      "preview_acceleration applies to a HELD direction while scrubbing: repeats 0\u20134 move 10 s, 5\u20139 move 30 s, 10+ move 60 s. A released key resets the ladder.",
       "vertical_seek_seconds is null: Up/Down never seek. Vertical is navigation between rows on every surface."
     ]
   },
@@ -56,10 +56,10 @@
           "touch"
         ],
         "conditional": {
-          "close": "touch and desktop only — a ten-foot player exits with `back`",
+          "close": "touch and desktop only \u2014 a ten-foot player exits with `back`",
           "airplay": "web, and only while the browser reports an AirPlay target"
         },
-        "notes": "A corner strip over the picture, not a row in the chrome: every client that has a Close puts it there — top-trailing on the web, top-leading on iOS and on Android, where a television cannot focus it at all. `close` is last here for the same reason it was last in the transport row: the control that ends the session is the one you should not land on by accident. Nothing here is a horizontal neighbour of a transport button."
+        "notes": "A corner strip over the picture, not a row in the chrome: every client that has a Close puts it there \u2014 top-trailing on the web, top-leading on iOS and on Android, where a television cannot focus it at all. `close` is last here for the same reason it was last in the transport row: the control that ends the session is the one you should not land on by accident. Nothing here is a horizontal neighbour of a transport button."
       },
       {
         "id": "marker",
@@ -78,7 +78,7 @@
         "focusable": [
           "timeline"
         ],
-        "notes": "Its own full-width row. The timeline is never a horizontal neighbour of a button — Left/Right on it belong to scrubbing, so a button beside it would be unreachable without a seek."
+        "notes": "Its own full-width row. The timeline is never a horizontal neighbour of a button \u2014 Left/Right on it belong to scrubbing, so a button beside it would be unreachable without a seek."
       },
       {
         "id": "transport",
@@ -101,10 +101,10 @@
           "subtitles": "at least one subtitle track",
           "quality": "server ladder has rungs",
           "pip": "platform reports picture-in-picture possible (never tvOS)",
-          "title_info": "web only — the native clients put title and synopsis on the detail screen",
-          "fullscreen": "web only — a native player is already full screen"
+          "title_info": "web only \u2014 the native clients put title and synopsis on the detail screen",
+          "fullscreen": "web only \u2014 a native player is already full screen"
         },
-        "notes": "One row on ten-foot and on wide touch/desktop. Narrow touch splits it after `spacer` into a transport line and an options line; order within each line is unchanged. `surface_placement` names the one control a surface renders somewhere else: the web puts `info` in the `bar` row, where its ✕ already lives, and the native clients keep it here.",
+        "notes": "One row on ten-foot and on wide touch/desktop. Narrow touch splits it after `spacer` into a transport line and an options line; order within each line is unchanged. `surface_placement` names the one control a surface renders somewhere else: the web puts `info` in the `bar` row, where its \u2715 already lives, and the native clients keep it here.",
         "surface_placement": {
           "info": {
             "desktop": {
@@ -144,7 +144,7 @@
     "timeline": "Chrome visible; focus on the timeline; no preview pending.",
     "scrub": "Chrome visible; focus on the timeline; a preview position is pending and shown in `time_elapsed` and on the bar.",
     "menu": "An audio/subtitles/quality/settings menu or panel is open; focus is inside it.",
-    "info": "The playback-info (stats) panel is open in Standard or Debug mode; focus is inside it. Mini mode does not enter this state — it is a strip and the transport stays live.",
+    "info": "The playback-info (stats) panel is open in Standard or Debug mode; focus is inside it. Mini mode does not enter this state \u2014 it is a strip and the transport stays live.",
     "failed": "The failure view (retry/close) is showing."
   },
   "outcomes": {
@@ -154,7 +154,7 @@
     "focus_transport": "Move focus to the transport row, restoring the last transport control (initially `play_pause`).",
     "activate": "Press the focused control.",
     "toggle_play": "Play/pause. Chrome reveals if hidden and the hide timer restarts.",
-    "skip": "Immediate relative seek of ±`steps.skip_seconds`. Chrome reveals if hidden.",
+    "skip": "Immediate relative seek of \u00b1`steps.skip_seconds`. Chrome reveals if hidden.",
     "preview": "Enter or continue `scrub`: move the pending position by the acceleration ladder; no seek, no network.",
     "commit": "Seek to the pending position; return to `timeline` with chrome visible.",
     "cancel": "Discard the pending position; return to `timeline`.",
@@ -163,7 +163,7 @@
     "commit_then_toggle_play": "`commit`, then `toggle_play`.",
     "close_menu": "Close the open menu; focus returns to the control that opened it.",
     "close_info": "Close the info panel; focus returns to `info`.",
-    "menu_focus": "Focus stays inside the menu (trapped) — the platform moves it among the menu's own items.",
+    "menu_focus": "Focus stays inside the menu (trapped) \u2014 the platform moves it among the menu's own items.",
     "hide": "Hide chrome; remember the focused control; focus the surface.",
     "exit": "Leave the player.",
     "toggle_chrome": "Touch: hide chrome if visible, else reveal.",
@@ -451,7 +451,7 @@
     }
   },
   "close_control": {
-    "notes": "The `close` control (the iOS ✕, the Android phone's back arrow, the web's ✕ Close) is not `back`. `back` is a key — Menu, BACK, Escape — and with chrome visible on ten-foot and touch it hides the chrome, which is the right answer for a key and the wrong one for a button whose only purpose is to leave: routed through `back`, the iOS ✕ hid the chrome in `transport`, closed the panel in `info`, cancelled in `scrub`, and exited in no state a viewer could tap it from, so the only way out of a film was to force-quit the app (Paul, 2026-09-03). `close` runs these outcomes in order — close whatever is open, then leave — and every row ends in `exit`. The `menu` and `info` rows say what `close` does when it is reached; a client's own modal may take the tap first — on iOS the panel's backdrop lies over the ✕, so that tap is `info × tap_surface` (`close_info`) and the ✕ exits on the next one, and Android composes no arrow while a panel is open.",
+    "notes": "The `close` control (the iOS \u2715, the Android phone's back arrow, the web's \u2715 Close) is not `back`. `back` is a key \u2014 Menu, BACK, Escape \u2014 and with chrome visible on ten-foot and touch it hides the chrome, which is the right answer for a key and the wrong one for a button whose only purpose is to leave: routed through `back`, the iOS \u2715 hid the chrome in `transport`, closed the panel in `info`, cancelled in `scrub`, and exited in no state a viewer could tap it from, so the only way out of a film was to force-quit the app (Paul, 2026-09-03). `close` runs these outcomes in order \u2014 close whatever is open, then leave \u2014 and every row ends in `exit`. The `menu` and `info` rows say what `close` does when it is reached; a client's own modal may take the tap first \u2014 on iOS the panel's backdrop lies over the \u2715, so that tap is `info \u00d7 tap_surface` (`close_info`) and the \u2715 exits on the next one, and Android composes no arrow while a panel is open.",
     "hidden": [
       "exit"
     ],
@@ -477,23 +477,198 @@
       "exit"
     ]
   },
+  "live": {
+    "title": "Live TV input contract \u2014 the same rulings applied to a surface with no timeline",
+    "ruled": "2026-09-07",
+    "surfaces": {
+      "ten-foot": "Siri Remote (tvOS) and D-pad (Android TV / Google TV) over a live stream that is always fullscreen. Directional input moves focus; it never changes channel on its own.",
+      "desktop": "Pointer plus keyboard on the web while the Live TV host is fullscreen or focused. A keyboard user has no focus ring to preview with, so vertical tunes directly.",
+      "touch": "iPhone/iPad and Android phones/tablets. Focus states do not apply; tapping the picture is the whole contract."
+    },
+    "states": {
+      "hidden": "The bare live picture; the overlay is not drawn.",
+      "overlay": "The live overlay is drawn: channel and programme, the neighbour strip, the progress bar and the controls.",
+      "page": "The player is inline on the Live TV page rather than fullscreen. Browsing owns the keyboard; only the transport key belongs to the player."
+    },
+    "inputs": [
+      "left",
+      "right",
+      "up",
+      "down",
+      "select",
+      "back",
+      "play_pause",
+      "tap_surface",
+      "idle"
+    ],
+    "outcomes": {
+      "reveal": "Draw the overlay and restart the auto-hide timer. Nothing else happens \u2014 the press that reveals never also acts.",
+      "hide": "Hide the overlay and drop focus back to the picture.",
+      "focus_row": "Move focus within the overlay: vertically through the channel list, horizontally across the control row.",
+      "activate": "Activate the focused overlay control. On a focused channel row that means tune it.",
+      "strip_prev": "Move the neighbour strip's preview one channel earlier and reveal the overlay if it was hidden. Previewing never opens a tuner.",
+      "strip_next": "Move the neighbour strip's preview one channel later and reveal the overlay if it was hidden.",
+      "tune": "Open the previewed channel: release the current lease and start one session on the new channel.",
+      "channel_up": "Tune the previous channel in the visible order directly, subject to the 350 ms coalescing rule.",
+      "channel_down": "Tune the next channel in the visible order directly, subject to the 350 ms coalescing rule.",
+      "toggle_play": "Pause or resume the live picture. Pausing does not rewind and does not hold the tuner past the no-progress release.",
+      "toggle_chrome": "Show the overlay if it is hidden, hide it if it is shown.",
+      "exit": "Leave the presentation: exit fullscreen on the desktop, leave the live surface on a television.",
+      "ignore": "Do nothing. The input belongs to another owner in this state."
+    },
+    "timings": {
+      "hide_after_ms": 4000,
+      "hidden_only_while_playing": true,
+      "channel_coalesce_ms": 350,
+      "preview_auto_commit_ms": null,
+      "notes": [
+        "hide_after_ms and hidden_only_while_playing are the finite player's values unchanged: the overlay hides this long after the last input while playing, and never while paused or failed.",
+        "channel_coalesce_ms: a held channel key accumulates and starts ONE session after this much quiet. Ten presses must not be ten tuner GETs.",
+        "preview_auto_commit_ms is null: the neighbour strip's preview commits on select or a click, never on a timer."
+      ]
+    },
+    "hotkeys": {
+      "f": "fullscreen",
+      "m": "mute",
+      "p": "picture_in_picture",
+      "g": "guide_sheet",
+      "escape": "exit"
+    },
+    "routing": {
+      "ten-foot": {
+        "hidden": {
+          "left": "reveal",
+          "right": "reveal",
+          "up": "reveal",
+          "down": "reveal",
+          "select": "reveal",
+          "back": "exit",
+          "play_pause": "toggle_play",
+          "tap_surface": "reveal",
+          "idle": "ignore"
+        },
+        "overlay": {
+          "left": "focus_row",
+          "right": "focus_row",
+          "up": "focus_row",
+          "down": "focus_row",
+          "select": "activate",
+          "back": "hide",
+          "play_pause": "toggle_play",
+          "tap_surface": "ignore",
+          "idle": "hide"
+        },
+        "page": {
+          "left": "ignore",
+          "right": "ignore",
+          "up": "ignore",
+          "down": "ignore",
+          "select": "ignore",
+          "back": "ignore",
+          "play_pause": "ignore",
+          "tap_surface": "ignore",
+          "idle": "ignore"
+        }
+      },
+      "desktop": {
+        "hidden": {
+          "left": "strip_prev",
+          "right": "strip_next",
+          "up": "channel_up",
+          "down": "channel_down",
+          "select": "ignore",
+          "back": "exit",
+          "play_pause": "toggle_play",
+          "tap_surface": "reveal",
+          "idle": "ignore"
+        },
+        "overlay": {
+          "left": "strip_prev",
+          "right": "strip_next",
+          "up": "channel_up",
+          "down": "channel_down",
+          "select": "tune",
+          "back": "exit",
+          "play_pause": "toggle_play",
+          "tap_surface": "ignore",
+          "idle": "hide"
+        },
+        "page": {
+          "left": "ignore",
+          "right": "ignore",
+          "up": "ignore",
+          "down": "ignore",
+          "select": "ignore",
+          "back": "ignore",
+          "play_pause": "toggle_play",
+          "tap_surface": "ignore",
+          "idle": "ignore"
+        }
+      },
+      "touch": {
+        "hidden": {
+          "left": "ignore",
+          "right": "ignore",
+          "up": "ignore",
+          "down": "ignore",
+          "select": "ignore",
+          "back": "exit",
+          "play_pause": "ignore",
+          "tap_surface": "toggle_chrome",
+          "idle": "ignore"
+        },
+        "overlay": {
+          "left": "ignore",
+          "right": "ignore",
+          "up": "ignore",
+          "down": "ignore",
+          "select": "activate",
+          "back": "exit",
+          "play_pause": "ignore",
+          "tap_surface": "toggle_chrome",
+          "idle": "hide"
+        },
+        "page": {
+          "left": "ignore",
+          "right": "ignore",
+          "up": "ignore",
+          "down": "ignore",
+          "select": "ignore",
+          "back": "ignore",
+          "play_pause": "ignore",
+          "tap_surface": "ignore",
+          "idle": "ignore"
+        }
+      }
+    },
+    "surface_notes": {
+      "ten-foot": "A television never shows an inline player, so `page` exists only to keep the three surfaces one shape; every row in it is `ignore`.",
+      "desktop": "`up`/`down` tune directly because a keyboard user has no focus ring to preview with and the mouse already drives the neighbour strip. On the ten-foot surface the same keys only move focus \u2014 the 2026-09-02 ruling, unchanged.",
+      "touch": "`play_pause` is `ignore`: a phone has no hardware transport key over this surface and the tap answer is the whole contract."
+    },
+    "notes": [
+      "This table is the finite player's ten-foot/desktop/touch tables with `skip`, `preview`, `commit` and every timeline state removed, and `channel` added. A live stream has no timeline, so no row here seeks.",
+      "A directional press on a hidden ten-foot overlay only reveals it. This is the 2026-09-02 ruling applied unchanged.",
+      "The channel list inside the overlay is preview-then-commit on the ten-foot surface: move focus, `select` tunes, `back` hides."
+    ]
+  },
   "surface_notes": {
     "desktop": [
-      "`left`/`right` outside the timeline are the coalesced ±10 s hotkeys (`timings.desktop_hotkey_coalesce_ms`); `up`/`down` are no longer seeks.",
-      "`back` is Escape. With chrome visible it exits rather than hides: a pointer user has no Menu-hide idiom and the chrome hides itself. Precedence is scrub → menu → info → exit, so Escape with a menu open closes the menu, not the player.",
+      "`left`/`right` outside the timeline are the coalesced \u00b110 s hotkeys (`timings.desktop_hotkey_coalesce_ms`); `up`/`down` are no longer seeks.",
+      "`back` is Escape. With chrome visible it exits rather than hides: a pointer user has no Menu-hide idiom and the chrome hides itself. Precedence is scrub \u2192 menu \u2192 info \u2192 exit, so Escape with a menu open closes the menu, not the player.",
       "`select` on the timeline is Enter or Space with the timeline focused. `tap_surface` is a pointer click on the video.",
       "Tab leaves the timeline; leaving while a preview is pending is a `cancel`.",
       "Touch on the desktop page (a tablet browser) follows the `touch` table for `tap_surface` and pointer scrubbing."
     ],
     "touch": [
       "Scrubbing is a drag on the timeline: pointer down = `preview` at the touch position (continuous while dragging), pointer up = `commit`. A plain tap on the bar is a `preview` + `commit` at the tap position.",
-      "`back` is the system back gesture or button (Android). iOS has no back key, and the ✕ is not `back` on either phone: it is the `close` control, which exits regardless of state after closing whatever is open — see `close_control`.",
+      "`back` is the system back gesture or button (Android). iOS has no back key, and the \u2715 is not `back` on either phone: it is the `close` control, which exits regardless of state after closing whatever is open \u2014 see `close_control`.",
       "`play_pause`, `skip_back`, `skip_forward` are the headset/lock-screen/notification media commands, which work in every state."
     ],
     "ten-foot": [
-      "`select` on the timeline (no preview pending) is play/pause, the same as clicking the bar in the Apple TV system player. It does not \"engage\" anything — there is no engaged state any more; a preview exists only while a pending position exists.",
+      "`select` on the timeline (no preview pending) is play/pause, the same as clicking the bar in the Apple TV system player. It does not \"engage\" anything \u2014 there is no engaged state any more; a preview exists only while a pending position exists.",
       "`play_pause` is the hardware Play/Pause button and must work in every state that lists `toggle_play`, including `transport` (today tvOS drops it while chrome is visible).",
-      "`skip_back`/`skip_forward` are MEDIA_REWIND / MEDIA_FAST_FORWARD (Android TV) — the Siri Remote has none, so tvOS has no producer for them.",
+      "`skip_back`/`skip_forward` are MEDIA_REWIND / MEDIA_FAST_FORWARD (Android TV) \u2014 the Siri Remote has none, so tvOS has no producer for them.",
       "`idle` fires only while playing (`timings.hidden_only_while_playing`) and only in the states that list `hide`. A paused film keeps its chrome."
     ]
   }

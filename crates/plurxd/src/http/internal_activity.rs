@@ -397,6 +397,10 @@ fn snapshot_is_bounded(snapshot: &ActivitySnapshot, expected_node_id: &str) -> b
                 && live.user.len() <= MAX_USER_BYTES
                 && live.encoder.len() <= 32
                 && live.state.len() <= 32
+                && live
+                    .programme_title
+                    .as_ref()
+                    .is_none_or(|title| title.len() <= 256)
         })
         && snapshot.deliveries.iter().all(|delivery| {
             delivery.method.len() <= 32
@@ -850,6 +854,7 @@ mod tests {
             age_seconds: u64::MAX,
             output_height: 1080,
             state: "\0".repeat(32),
+            programme_title: Some("\0".repeat(256)),
         };
         let delivery = ActivityDelivery {
             method: "direct".into(),

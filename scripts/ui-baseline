@@ -6,7 +6,7 @@ layout arc rearranges it. There is no component test to lean on and no design
 system to diff, so the only honest way to say "this refactor changed nothing"
 is to photograph the app before and after and prove the photographs are
 identical. That was G0's contract, and G3 found two holes in it (see
-docs/UI-LAYOUTS-G3-DECISION.md §3 and §5/R1):
+docs/clients/UI-LAYOUTS-G3-DECISION.md §3 and §5/R1):
 
   * it captured and exited — the comparison was a `sha256sum` a human ran by
     hand, so nothing ever failed;
@@ -172,7 +172,7 @@ SEED_PASSWORD = "baseline-password"
 # rewrite rows nothing renders. `after-quiescence` aborts an activation attempt
 # after its marker is fsynced and before any incoming target exists, which buys
 # the one SQLite recovery boot `seed()` and `freeze_database()` need. See
-# docs/CLUSTERING-PLAN.md §4 and `select_daemon_store`.
+# docs/cluster/CLUSTERING-PLAN.md §4 and `select_daemon_store`.
 ACTIVATION_FAILPOINT_ENV = "PLURX_CLUSTER_ACTIVATION_FAILPOINT"
 ACTIVATION_FAILPOINT = "after-quiescence"
 # `ActivationFailpoint::crash_if` exits with this. Requiring it is what keeps a
@@ -995,6 +995,11 @@ def discover_routes(base_url, token, args, preferred_library=None, preferred_ite
         "settings": {"hash": "#/settings"},
         "settings-developer": {"hash": "#/settings/developer"},
         "live-tv": {"hash": "#/live-tv"},
+        # The switch is a persisted preference, so the grid is a different
+        # first paint of the same route rather than a different route. Both
+        # views ship, so both are swept — a golden that only ever saw the list
+        # would let the grid rot without a diff.
+        "live-tv-grid": {"hash": "#/live-tv", "prefs": {"plurx_live_tv_view": "grid"}},
         # No token in localStorage, so `boot()` falls through to the sign-in
         # card. The only route whose container is #app: there is no #main
         # until somebody is signed in.
@@ -1097,6 +1102,8 @@ ACTIVITY_CAPTURE_JS = """
   const schedule = window.setInterval.bind(window);
   window.__plurxActivityCaptureTick = false;
   window.__plurxGlobalActivityCaptureTick = false;
+  window.__plurxSettingsScanTicks = 0;
+  window.__plurxSettingsScanCaptureTick = false;
   window.setInterval = (callback, delay, ...args) => {
     if (typeof callback !== "function") return schedule(callback, delay, ...args);
     const timer = schedule(function (...values) {
@@ -1111,6 +1118,23 @@ ACTIVITY_CAPTURE_JS = """
         clearInterval(timer);
         ACT_TIMER = null;
         window.__plurxGlobalActivityCaptureTick = true;
+      }
+      if (delay === 2000 &&
+          (location.hash === "#/settings" || location.hash === "#/settings/libraries") &&
+          typeof PAGE_TIMER !== "undefined" && PAGE_TIMER === timer) {
+        // The Libraries tab fetches scan status once on render, then polls
+        // every 2s. The golden records three calls: that render plus two
+        // ticks. Retain exactly two and stop the interval synchronously
+        // before the second one runs, so a third can never be scheduled no
+        // matter how far behind the harness has fallen. Counting requests
+        // from Python instead puts round-trip latency in charge of a number
+        // the golden treats as structure.
+        window.__plurxSettingsScanTicks += 1;
+        if (window.__plurxSettingsScanTicks >= 2) {
+          clearInterval(timer);
+          PAGE_TIMER = null;
+          window.__plurxSettingsScanCaptureTick = true;
+        }
       }
       return callback.apply(this, values);
     }, delay, ...args);
@@ -1479,7 +1503,7 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
     page.on("console", note_console)
     page.on("pageerror", lambda e: problems.append(f"pageerror: {e}"))
 
-    if name == "live-tv":
+    if name in {"live-tv", "live-tv-grid"}:
         # Layout captures never lease a household tuner. The browser fixture
         # separately exercises media and session lifecycle.
         page.route("**/api/v1/live-tv/channels", lambda route: route.fulfill(
@@ -1492,6 +1516,33 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
                      "favorite": False, "drm": False, "support": "ready"},
                     {"id": "107.1", "guide_number": "107.1", "guide_name": "Protected Channel",
                      "favorite": False, "drm": True, "support": "drm_unsupported"},
+                ],
+            })))
+        # The guide is a second, independent read. Mocking it is what makes the
+        # layout sweep cover the rows and cells a real lineup draws; without it
+        # every channel row would capture in its degraded "no programme
+        # information" state, which is the one state the golden least needs to
+        # pin. Times are anchored to FROZEN_EPOCH so the capture never moves.
+        guide_start = FROZEN_EPOCH - FROZEN_EPOCH % 1800
+        page.route("**/api/v1/live-tv/guide*", lambda route: route.fulfill(
+            status=200, content_type="application/json", body=json.dumps({
+                "source": "hdhomerun", "freshness": "fresh", "age_seconds": 300,
+                "fetched_at": guide_start, "refresh_error": None,
+                "window": {"start": guide_start - 1800, "end": guide_start + 4 * 1800},
+                "matched_channels": 2, "lineup_channels": 3,
+                "channels": [
+                    {"id": "7.1", "guide_number": "7.1", "affiliate": "NEWS", "programmes": [
+                        {"start": guide_start - 1800, "end": guide_start, "title": "Morning Edition"},
+                        {"start": guide_start, "end": guide_start + 1800, "title": "Evening Edition",
+                         "episode": "E812", "synopsis": "The evening edition.", "filters": ["News"]},
+                        {"start": guide_start + 1800, "end": guide_start + 3 * 1800,
+                         "title": "Harbor Lights", "episode": "S2E03", "filters": ["Drama"]},
+                    ]},
+                    {"id": "10.2", "guide_number": "10.2", "affiliate": "PBS", "programmes": [
+                        {"start": guide_start, "end": guide_start + 2 * 1800, "title": "The Long Game"},
+                        {"start": guide_start + 2 * 1800, "end": guide_start + 4 * 1800,
+                         "title": "Studio Sessions"},
+                    ]},
                 ],
             })))
 
@@ -1548,7 +1599,8 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
         # /scan/status calls. The phase is product state, so synchronizing on it
         # preserves the request-count contract without baking a count or an
         # endpoint into this harness.
-        if name in {"home", "activity", "analysis", "settings", "settings-developer", "live-tv"}:
+        if name in {"home", "activity", "analysis", "settings", "settings-developer",
+                    "live-tv", "live-tv-grid"}:
             page.wait_for_selector(
                 f'{container}[data-phase="settled"]', timeout=args.timeout)
         if activity_poll_paused:
@@ -1565,22 +1617,37 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
             }""")
         if name == "settings":
             # The Libraries tab loads scan status once, then polls every 2s.
-            # A fixed sleep lets an overloaded event loop enqueue a third tick
-            # before the sleep callback, changing an unchanged request golden
-            # from three calls to four. Observe exactly two production ticks,
-            # then stop this route's timer at that named boundary.
-            deadline = time.time() + args.timeout / 1000
-            while (api_calls.count("GET /api/v1/scan/status") < 3 or
-                   api_calls.count("GET /api/v1/activity") < 2):
-                if time.time() >= deadline:
-                    raise Fail("settings did not complete its scan-status and activity polling ticks")
-                page.wait_for_timeout(50)
-            page.evaluate("""() => {
-              if (PAGE_TIMER) clearInterval(PAGE_TIMER);
-              PAGE_TIMER = null;
-              if (ACT_TIMER) clearInterval(ACT_TIMER);
-              ACT_TIMER = null;
-            }""")
+            # The two ticks the golden records are retained and stopped inside
+            # the page by ACTIVITY_CAPTURE_JS, so wait for that named boundary
+            # rather than counting requests from here: a Python-side count is
+            # decided by round-trip latency, and on a starved runner it can see
+            # the target only after the interval has already fired again. The
+            # count it then reads is the one the golden fails on.
+            page.wait_for_function(
+                "() => window.__plurxSettingsScanCaptureTick === true",
+                timeout=args.timeout,
+            )
+            # Say so here, at the route, rather than letting it surface thirty
+            # routes later as a bare `3 -> 4` in a golden diff. That is how the
+            # 2026-09-07 failure arrived, and it is why it could not be
+            # reproduced: by the time anyone saw the number, everything that
+            # would explain it was gone.
+            retained = page.evaluate("() => window.__plurxSettingsScanTicks")
+            if retained != 2:
+                raise Fail(
+                    f"settings retained {retained} scan-status ticks, expected "
+                    "exactly 2 — the in-page clamp did not hold, so this route's "
+                    "request inventory is not a fixed observation")
+            observed = api_calls.count("GET /api/v1/scan/status")
+            if observed != 3:
+                # Not a failure: the golden is the authority on how many calls
+                # the route makes, and `--update` has to be able to record a
+                # new one. But two retained ticks and a total that is not
+                # render-plus-two means a call came from somewhere this harness
+                # does not control, which is worth naming while the run is here.
+                print(f"NOTE    settings: {observed} GET /api/v1/scan/status "
+                      f"(one render + {retained} retained ticks should be 3)",
+                      flush=True)
             # Waiting for those two 2s ticks already spans one complete 4s
             # activity period. A second full settle window would add another
             # activity request only on Settings and lengthen the sweep without
@@ -1592,12 +1659,20 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
         # lands on the same steady state instead of on whichever half of the
         # cycle happened to be showing.
         page.wait_for_timeout(settle_ms)
-        if activity_poll_paused and name != "settings":
+        if activity_poll_paused:
             # The wrapper clears ACT_TIMER synchronously before its first real
             # callback. Requiring that callback (and its request completion)
             # retains one complete production period without allowing runner
             # starvation to squeeze a second 4s tick ahead of Python's 4.5s
             # sleep callback.
+            #
+            # Settings is no longer excluded. It used to reach this line having
+            # only observed that the activity request was *issued*, so the
+            # recorders could run while its response was still in flight — and
+            # a response that lands after the 200ms settle re-renders the page
+            # under the tab walk, which is the exact failure freeze_timers()
+            # exists to prevent. `!ACT_POLLING` is the condition that says the
+            # fetch is done, and every other route already waits for it.
             page.wait_for_function(
                 "() => window.__plurxGlobalActivityCaptureTick === true && !ACT_POLLING",
                 timeout=args.timeout,
@@ -1754,7 +1829,13 @@ def context_prefs(args, layout_id, token, route):
         # dismissed keeps Home's first row from depending on the browser's PWA
         # opinion.
         "plurx_getapp_dismissed": "1",
+        # Live TV's own persisted choices. Pinned for the same reason as the
+        # theme: a default that moves would silently redecorate the baseline.
+        "plurx_live_tv_view": "list",
+        "plurx_live_tv_filter": "all",
+        "plurx_live_tv_hide_protected": "0",
     }
+    prefs.update(route.get("prefs") or {})
     if not route.get("anonymous"):
         prefs["plurx_token"] = token
     return prefs

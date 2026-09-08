@@ -629,7 +629,7 @@ pub(crate) struct ActionAcknowledgement {
     /// *proof* — a wall clock from an unsynchronised device establishes
     /// neither ownership nor freshness nor that what was displayed is what
     /// was offered — but it is a measurement, frozen against a corrected
-    /// hardware instrument (`docs/M6-CALLER-HANDOFF.md`), and dropping it
+    /// hardware instrument (`docs/playback-control/M6-CALLER-HANDOFF.md`), and dropping it
     /// would delete the only signal that instrument produces.
     ///
     /// So the change here is additive: `committed_media_origin_ms` is the
@@ -708,7 +708,7 @@ pub(crate) enum AcknowledgementState {
     /// release teaches every node the word, and only a later one teaches a
     /// client to say it. How a client will learn which build it is talking to
     /// is that later release's problem — see the note under §4 step 2 in
-    /// `docs/STREAMING-RELIABILITY-HANDOFF.md`, which cannot be solved by
+    /// `docs/streaming/STREAMING-RELIABILITY-HANDOFF.md`, which cannot be solved by
     /// adding a response field while `ControlResponseV1` still carries
     /// `deny_unknown_fields`.
     Switched,
@@ -1313,14 +1313,18 @@ pub(crate) enum FallbackReason {
     /// from `ThroughputInsufficient` because the two are opposite findings
     /// that a single `throughput_unproven` would report as one number.
     ///
-    /// This is the common case and will be for some time: both native clients
-    /// hardcode `observed_download_bps` null
-    /// (`PlayerController.swift`, `Controller.kt` — only the web client fills
-    /// it, from `hls.bandwidthEstimate`), and `DeliveryView::from_status`
-    /// leaves `delivered_bps` `None` on every VOD session, which is most of
-    /// them. A counter that booked all of that as "the link was too tight"
-    /// would read as evidence for the throughput rule while measuring only its
-    /// own missing inputs.
+    /// This was the common case and is no longer, which matters because the
+    /// sentence it replaces was read by a client author as a reason to
+    /// disable the capability on VOD. Both halves have since been filled: all
+    /// three clients report `observed_download_bps` — web from
+    /// `hls.bandwidthEstimate`, Apple from
+    /// `AVPlayerItem.accessLog().observedBitrate`, Android from its own
+    /// observed rate — and `DeliveryView::from_status` no longer leaves
+    /// `delivered_bps` `None` on VOD, which is what the arm above says in as
+    /// many words. What is left is the honest reading: a window that has not
+    /// closed yet, and a client that cannot measure. A counter that booked
+    /// those as "the link was too tight" would read as evidence for the
+    /// throughput rule while measuring only its own missing inputs.
     ThroughputUnreported,
     /// The link *was* measured and does not carry a second pipeline. M6
     /// handoff §8: dual preparation doubles network demand and the constrained
@@ -1592,7 +1596,7 @@ const _: () = assert!(
 /// admissions, zero predecessor and post-commit stalls, on a 40 Mbit/s link —
 /// 2.20× the predecessor's 18.183 Mbit/s, above the floor
 /// `headroom_refusal` enforces. See
-/// [`M6-AXIS-CASE-HANDOFF.md`](../../../docs/M6-AXIS-CASE-HANDOFF.md).
+/// [`M6-AXIS-CASE-HANDOFF.md`](../../../docs/playback-control/M6-AXIS-CASE-HANDOFF.md).
 ///
 /// **Why this list and not a rule.** Shadow mode measured that a pure
 /// resolution change does not occur on a real library at all — the top rung
@@ -23387,6 +23391,34 @@ mod tests {
         // the publication fence is still at the sentinel, and arming it is
         // `arm_media_session_handoff`'s job, exactly as it is for an
         // activated replacement.
+        //
+        // **And nothing calls it, which is a hole rather than a design.** An
+        // activation has `settle_activation_predecessor` to finish the job; a
+        // commit has no equivalent, so the successor this test just made
+        // current is refused on both planes from its very first request —
+        // `classify_durable_route` answers `OwnerTransition` for any non-zero
+        // fence and `control_owner_refusal` refuses control on the same
+        // predicate. The pointer moved and the viewer got nothing.
+        //
+        // **Do not fix that by publishing here.** Publishing is only half the
+        // transaction and the wrong half first. A committed successor has no
+        // local worker, because nothing primes one — `stage_prepared_successor`
+        // is stage-only. Moving the row off the sentinel puts it into
+        // `owned_media_sessions`, and the lease loop renews only sessions that
+        // are *live*: `take_stale_settlement_candidates` selects exactly the
+        // inventory rows that are not, and `end_media_session_if_owner` ends
+        // them `replaced` **and deletes the playback pointer in the same
+        // transaction**. Publishing a workerless successor therefore trades a
+        // stalled pointer for a deleted one, seconds after the commit instead
+        // of minutes. That was measured, not reasoned about: the call was
+        // written, the suite passed, and an adversarial pass found the sweep.
+        //
+        // The publication belongs to §5.1's phase 3 alongside the priming that
+        // gives the successor a worker, and it needs the predecessor's
+        // terminal projection that `settle_activation_predecessor` waits for
+        // before it may use `PredecessorAcknowledged` at all.
+        // `docs/playback-control/M6-SERVER-PRIME-HANDOFF.md` §4 carries the
+        // whole shape.
         let committed = store
             .media_session_route_by_incarnation(&successor)
             .await

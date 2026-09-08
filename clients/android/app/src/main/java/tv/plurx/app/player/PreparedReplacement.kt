@@ -1,362 +1,485 @@
 package tv.plurx.app.player
 
-/** The client-side lifetime used when the server gives no exact expiry timestamp. */
-internal const val PREPARED_OFFER_TTL_MS = 330_000L
-
-/** A validated `prepare` action, kept intact so its origin can be echoed verbatim. */
-data class PreparedReplacementOffer(
-    val actionId: String,
-    val sessionId: String,
-    val playlistUrl: String,
-    val mediaOriginMs: Long,
-    val effectiveSelection: EffectiveSelection,
-) {
-    companion object {
-        internal fun from(action: ControlAction): PreparedReplacementOffer? {
-            if (!action.preparedPayloadIsValid) return null
-            return PreparedReplacementOffer(
-                actionId = action.actionId ?: return null,
-                sessionId = action.sessionId ?: return null,
-                playlistUrl = action.playlistUrl ?: return null,
-                mediaOriginMs = action.mediaOriginMs ?: return null,
-                effectiveSelection = action.effectiveSelection ?: return null,
-            )
-        }
-    }
-}
-
-enum class PreparedReplacementReleaseReason {
-    COMMITTED,
-    FAILED,
-    ABORTED,
-    WITHDRAWN,
-    EXPIRED,
-    SUPERSEDED,
-    COMMIT_DISCARDED,
-    ACKNOWLEDGEMENT_REJECTED,
-    OWNER_CHANGED,
-    SESSION_GONE,
-    SESSION_ENDED,
-    OWNER_LOST,
-    PROTOCOL_REFUSED,
-}
+/**
+ * The client half of a prepared replacement, with no player in it.
+ *
+ * A prepared handoff is a transaction: the server stages a successor and
+ * names it once, the client primes a second pipeline, reports how far it got,
+ * switches, and settles. Every rule about *when* an acknowledgement may be sent
+ * and *which* one lives here rather than beside the ExoPlayer instances,
+ * because none of those rules needs a player to be wrong — and on Android the
+ * whole path is unreachable in production today (see
+ * [controlCapabilities]'s `dualPlayerPreparation`), so a test is the only place
+ * it is ever exercised.
+ *
+ * `docs/playback-control/M6-CLIENT-REPLACEMENT-CONTRACT.md` §C7 and §C8 are what this encodes.
+ */
 
 /**
- * The marked seam for the later presentation PR.
+ * How long a successor gets to become playable before it is abandoned.
  *
- * This release never builds a second player. A future presentation owner may
- * build on [Offered] and must settle its preparation exactly once on
- * [Released].
+ * Short enough that a viewer never waits on a preparation that is not going to
+ * arrive, and far inside the server's 330 s reaping deadline so the client is
+ * always the one that settles the transaction rather than the deadline.
  */
-sealed interface PreparedReplacementEvent {
-    data class Offered(val offer: PreparedReplacementOffer) : PreparedReplacementEvent
+internal const val PREPARED_READINESS_BOUND_MS = 20_000L
 
-    data class Released(
-        val offer: PreparedReplacementOffer,
-        val reason: PreparedReplacementReleaseReason,
-    ) : PreparedReplacementEvent
-}
+/**
+ * How much contiguous runway the successor must hold *ahead of the incumbent's
+ * current film position* before it is worth switching to.
+ *
+ * The switch is only better than the fallback if the successor can carry the
+ * viewer through the moment the predecessor stops. Below this the honest answer
+ * is to keep priming; a switch onto a pipeline with nothing behind it buys a
+ * shorter interruption than the fallback's measured 353–766 ms only by luck.
+ */
+internal const val PREPARED_SWITCH_RUNWAY_MS = 3_000L
 
-private enum class PreparedPhase {
+/**
+ * How long a commit waits for the successor's own first rendered frame before
+ * settling with the wall clock instead.
+ *
+ * A prepared successor has no surface, so it renders nothing until the switch
+ * puts it on one; `first_frame_unix_ms` is therefore always a moment *after*
+ * the swap. If the frame never comes the switch still happened — the viewer is
+ * looking at the successor either way — so the commit goes out with a less
+ * precise number rather than not at all, which would hold the session's one
+ * preparation slot until the server's 330 s deadline.
+ */
+internal const val PREPARED_COMMIT_FRAME_BOUND_MS = 5_000L
+
+/**
+ * How long a retired predecessor may sit parked before the watchdog collects it
+ * without waiting for the composition.
+ *
+ * The surface owner normally collects it within a frame, which is the only
+ * deterministic answer and the fast one. But a recomposer stops issuing frames
+ * whenever the window is not visible, and a paused ExoPlayer still holds its
+ * renderers — so a couple of ticks is the bound on how long two live decoders
+ * may overlap on a device class M5.5 measured as failing at exactly two.
+ */
+internal const val PREPARED_RETIRED_COLLECT_MS = 2_500L
+
+/** Where a preparation is on the ladder. Terminal states are absorbing. */
+internal enum class PreparationPhase {
+    /** Named by the server, pipeline being built. Nothing reported yet. */
     STAGED,
     METADATA_READY,
     BUFFER_READY,
-    COMMITTING,
+
+    /**
+     * The successor is on the surface and the predecessor is gone, but the
+     * commit has not been sent because it is still owed the wall clock of a
+     * frame the successor actually rendered.
+     *
+     * Not terminal — a terminal state is still owed — and **not abortable**:
+     * the viewer is looking at this pipeline. Without this phase the window
+     * between the swap and the first frame is one where a Back press or a seek
+     * publishes `aborted` for the staging the client is at that moment playing,
+     * which tells the server to tear down the incarnation its pointer is about
+     * to move to.
+     */
+    SWITCHED,
+    COMMITTED,
+    FAILED,
+    ABORTED,
+    ;
+
+    val isTerminal: Boolean
+        get() = this == COMMITTED || this == FAILED || this == ABORTED
 }
 
-internal data class PreparedCommitResult(
-    val queued: Boolean,
-    val released: PreparedReplacementEvent.Released? = null,
+/** What [PreparedReplacementLedger.offer] decided about an inbound `prepare`. */
+internal sealed class PreparationOffer {
+    /**
+     * The same `action_id` as the live preparation. The server replays a
+     * staging byte-identically on every exchange until it settles, so this is
+     * the ordinary case and it must build nothing: one preparation, one
+     * pipeline.
+     */
+    data object Same : PreparationOffer()
+
+    /**
+     * A new preparation. [supersedes] is the acknowledgement owed to the one it
+     * replaces — `aborted`, because the client abandoned it — and is null when
+     * there was nothing live.
+     */
+    data class Start(
+        val action: ControlAction,
+        val supersedes: ActionAcknowledgement?,
+    ) : PreparationOffer()
+
+    /**
+     * The payload did not validate. The reporter refuses such an action before
+     * this is ever reached; this arm exists so a caller that reaches the ledger
+     * by another route cannot prime a pipeline on it either.
+     */
+    data object Refuse : PreparationOffer()
+}
+
+/**
+ * One live preparation at a time, and the acknowledgements it owes.
+ *
+ * Not thread-safe by design: it is owned by [Controller], which touches it only
+ * from the player's own scope.
+ */
+internal class PreparedReplacementLedger {
+    var actionId: String? = null
+        private set
+    var phase: PreparationPhase = PreparationPhase.ABORTED
+        private set
+    var action: ControlAction? = null
+        private set
+
+    /** True while a preparation is live and still owed a terminal state. */
+    val isLive: Boolean
+        get() = actionId != null && !phase.isTerminal
+
+    /**
+     * True once the switch has happened and only the commit is outstanding.
+     * Nothing may abandon a preparation in this state.
+     */
+    val isSwitched: Boolean
+        get() = phase == PreparationPhase.SWITCHED
+
+    /**
+     * Whether this playback is still willing to be offered a preparation.
+     *
+     * Learned, not configured, and deliberately not a flag anyone sets: it goes
+     * false the first time a successor dies **before it was ever playable**,
+     * and it is forgotten with the ledger when the player ends.
+     *
+     * The case it exists for is not hypothetical. `stage_prepared_successor` is
+     * stage-only — its own comment says "a durable row and the actor's one
+     * successor slot, nothing produced yet" — and the third of the roadmap's
+     * eight phases, *reserve and prime*, is not implemented. The staged row
+     * carries `publication_ready_at_ms = MEDIA_SESSION_PUBLICATION_BLOCKED`, so
+     * a GET of the successor's playlist answers `503 media_owner_transition`
+     * until the pointer moves, and commit does not publish it either. A client
+     * that keeps trying therefore builds a second pipeline that can never
+     * become playable, on *every* selection change, for the whole film.
+     *
+     * One attempt is evidence about this playback, not about this attempt.
+     */
+    var canOfferPreparation: Boolean = true
+        private set
+
+    fun offer(inbound: ControlAction): PreparationOffer {
+        if (!inbound.preparedPayloadIsValid) return PreparationOffer.Refuse
+        // A successor already died before it was ever playable on this
+        // playback. The server will go on offering, and the honest answer is
+        // to stop building.
+        if (!canOfferPreparation) return PreparationOffer.Refuse
+        // Nothing replaces a preparation the viewer is already watching. Without
+        // this the switched-but-unsettled window takes the "supersedes" branch,
+        // where `terminal()` correctly refuses to abort it and the branch then
+        // reads that refusal as "nothing was owed" — silently discarding a
+        // commit and stamping the *next* preparation's id with it.
+        if (isSwitched) return PreparationOffer.Refuse
+        // Identity first, liveness second. The server replays a staging until
+        // it settles, and an exchange that was already in flight when the
+        // client settled comes back carrying that same `action_id` — so
+        // checking liveness first makes the *ordinary commit* look like a new
+        // preparation and builds a third pipeline over the one the viewer is
+        // watching. A repeat of an id this ledger has seen is the same
+        // preparation whatever became of it.
+        if (inbound.actionId == actionId) return PreparationOffer.Same
+        // A live preparation the viewer never got is abandoned explicitly.
+        // Leaving it to the 330 s deadline holds this session's one preparation
+        // slot for the rest of the session, so it gets exactly one, ever.
+        val owed = if (isLive) terminal(PreparationPhase.ABORTED) else null
+        actionId = inbound.actionId
+        action = inbound
+        phase = PreparationPhase.STAGED
+        return PreparationOffer.Start(inbound, owed)
+    }
+
+    /**
+     * The successor is playable and its tracks are known.
+     *
+     * Progress states are optional to the server and are sent anyway: they are
+     * how an operator sees how far a preparation got before it died. Null when
+     * the ladder has already passed this rung — progress is monotonic, and the
+     * server rejects a step backwards by ignoring it.
+     */
+    fun metadataReady(): ActionAcknowledgement? {
+        if (phase != PreparationPhase.STAGED) return null
+        phase = PreparationPhase.METADATA_READY
+        return acknowledgement(AcknowledgementState.METADATA_READY)
+    }
+
+    /**
+     * The successor holds enough runway to be worth switching to.
+     *
+     * [bufferedThroughMs] is film time, not player time: the commit boundary is
+     * expressed in film time and so is this.
+     */
+    fun bufferReady(bufferedThroughMs: Long): ActionAcknowledgement? {
+        if (phase != PreparationPhase.STAGED && phase != PreparationPhase.METADATA_READY) {
+            return null
+        }
+        if (bufferedThroughMs < 0) return null
+        phase = PreparationPhase.BUFFER_READY
+        return acknowledgement(
+            AcknowledgementState.BUFFER_READY,
+            bufferedThroughMs = bufferedThroughMs.coerceAtMost(PlaybackControl.MAX_MEDIA_MILLIS),
+        )
+    }
+
+    /**
+     * The switch happened: the successor took the surface and the volume.
+     *
+     * Separate from [committed] because the commit is owed a rendered frame
+     * that cannot have happened yet, and the gap between the two is a window
+     * nothing may abort.
+     */
+    fun switched(): Boolean {
+        if (!isLive || isSwitched) return false
+        phase = PreparationPhase.SWITCHED
+        return true
+    }
+
+    /**
+     * The successor rendered, and the transaction can settle.
+     *
+     * [firstFrameUnixMs] must be the wall clock of a frame the successor
+     * actually rendered. A timer would answer the question the server asked
+     * with a number about something else.
+     */
+    fun committed(firstFrameUnixMs: Long): ActionAcknowledgement? {
+        if (!isLive) return null
+        if (firstFrameUnixMs <= 0) return null
+        // Read off the offer, not off the player. The server compares this
+        // against the staged successor's own `media_origin_ms` and refuses a
+        // mismatch — that refusal is what makes a commit evidence, and a number
+        // this client derived for itself would only ever agree with itself.
+        val origin = action?.mediaOriginMs ?: return null
+        phase = PreparationPhase.COMMITTED
+        return acknowledgement(
+            AcknowledgementState.COMMITTED,
+            firstFrameUnixMs = firstFrameUnixMs,
+            committedMediaOriginMs = origin,
+        )
+    }
+
+    /**
+     * The successor could not be made ready.
+     *
+     * Failing while still [PreparationPhase.STAGED] means it was never playable
+     * at all — the pipeline errored or the readiness bound elapsed before a
+     * single track was published — which is a fact about this playback rather
+     * than about this attempt. Failing later, from a rung it had reached, is
+     * an ordinary failure and the next offer is still worth taking.
+     */
+    fun failed(): ActionAcknowledgement? {
+        val neverPlayable = phase == PreparationPhase.STAGED && isLive
+        val settlement = terminal(PreparationPhase.FAILED)
+        if (neverPlayable) canOfferPreparation = false
+        return settlement
+    }
+
+    /** The viewer seeked, changed quality again, or left. */
+    fun aborted(): ActionAcknowledgement? = terminal(PreparationPhase.ABORTED)
+
+    private fun terminal(state: PreparationPhase): ActionAcknowledgement? {
+        if (!isLive) return null
+        // You cannot abandon what is already on the screen. A switched
+        // preparation is settled by its commit or by nothing.
+        if (isSwitched) return null
+        phase = state
+        return acknowledgement(
+            when (state) {
+                PreparationPhase.FAILED -> AcknowledgementState.FAILED
+                else -> AcknowledgementState.ABORTED
+            },
+        )
+    }
+
+    private fun acknowledgement(
+        state: AcknowledgementState,
+        bufferedThroughMs: Long? = null,
+        firstFrameUnixMs: Long? = null,
+        committedMediaOriginMs: Long? = null,
+    ): ActionAcknowledgement? {
+        val id = actionId ?: return null
+        return ActionAcknowledgement(
+            actionId = id,
+            state = state,
+            bufferedThroughMs = bufferedThroughMs,
+            committedMediaOriginMs = committedMediaOriginMs,
+            firstFrameUnixMs = firstFrameUnixMs,
+        ).takeIf { it.isValid }
+    }
+}
+
+/**
+ * Whether the successor has primed far enough to be switched to.
+ *
+ * [successorBufferedThroughMs] and [incumbentPositionMs] are both film time, so
+ * this is one subtraction and not a timeline conversion — which is exactly why
+ * `media_origin_ms` is on the action at all.
+ */
+internal fun successorIsBuffered(
+    successorBufferedThroughMs: Long,
+    incumbentPositionMs: Long,
+    runwayMs: Long = PREPARED_SWITCH_RUNWAY_MS,
+): Boolean = successorBufferedThroughMs - incumbentPositionMs >= runwayMs
+
+/**
+ * What the dev-tab enable section says about this device, and why.
+ *
+ * Advisory, never a gate: the switch enables the capability whatever these say.
+ * The point of showing them is that a viewer who turns it on can see which of
+ * the conditions M5.5 measured their device actually meets, rather than
+ * discovering it as a stall.
+ */
+internal data class PreparedReplacementRequirement(
+    val label: String,
+    /**
+     * Null where this screen cannot honestly answer.
+     *
+     * Two of the four conditions are properties of a *session*, and Settings is
+     * not inside one. Reporting them as unmet would read as "your device
+     * fails", which is a different claim; reporting them as met would be a
+     * guess. Unknown is the true answer and the row still says what the
+     * condition is.
+     */
+    val met: Boolean?,
+    val detail: String,
+) {
+    val status: String
+        get() = when (met) {
+            true -> "Met"
+            false -> "Not met"
+            null -> "Checked during playback"
+        }
+}
+
+/**
+ * The requirement list, derived rather than typed twice.
+ *
+ * [isTelevision] is the axis M5.5's only hard failure sat on: both phones
+ * passed same-codec dual prime 20/20, and the tunneled Google TV failed it 0/3
+ * with two successor-prime timeouts and an `ERROR_CODE_AUDIO_TRACK_WRITE_FAILED`
+ * — and same-codec is the only kind of change the server ever prepares.
+ * [tunnelingEnabled] is the suspected cause rather than a measured one: the
+ * re-run that would name it (same-codec dual prime with tunneling forced off)
+ * has not been taken.
+ */
+internal fun preparedReplacementRequirements(
+    isTelevision: Boolean,
+    tunnelingEnabled: Boolean,
+    sessionIsLive: Boolean?,
+    observedDownloadBps: Long?,
+    throughputKnown: Boolean = true,
+): List<PreparedReplacementRequirement> = listOf(
+    PreparedReplacementRequirement(
+        label = "Device class measured to pass",
+        met = !isTelevision,
+        detail = if (isTelevision) {
+            "Televisions are the class that failed. A tunneled Google TV failed " +
+                "same-codec dual preparation 0 of 3 — and same-codec is the only " +
+                "change the server ever prepares. Phones passed 20 of 20."
+        } else {
+            "Both measured phones passed same-codec and codec/HDR dual " +
+                "preparation, 20 of 20."
+        },
+    ),
+    PreparedReplacementRequirement(
+        label = "Tunneled decoding off",
+        met = !tunnelingEnabled,
+        detail = if (tunnelingEnabled) {
+            "Tunneling was on for the failure. Two identical tunneled pipelines " +
+                "appear to contend where two different codecs get distinct " +
+                "decoder instances. Suspected, not measured: the re-run that " +
+                "would settle it has not been taken."
+        } else {
+            "Not requested on this device, so two pipelines get distinct " +
+                "decoder instances."
+        },
+    ),
+    PreparedReplacementRequirement(
+        label = "Server reports delivered throughput",
+        met = sessionIsLive,
+        detail = when (sessionIsLive) {
+            true -> "The server is reporting delivered throughput for this " +
+                "session, which is half of what the preparation floor needs."
+            false -> "This server reports no delivered throughput for the " +
+                "session you are watching, and the preparation floor needs " +
+                "both that number and this device's. Nothing on this screen " +
+                "changes that."
+            null -> "The preparation floor needs a delivered-throughput " +
+                "number from the server as well as this device's. A server " +
+                "that does not measure it for the presentation you are " +
+                "watching will never offer a handoff, whatever this switch " +
+                "says."
+        },
+    ),
+    PreparedReplacementRequirement(
+        label = "Throughput reported",
+        met = if (throughputKnown) observedDownloadBps != null && observedDownloadBps > 0 else null,
+        detail = when {
+            !throughputKnown ->
+                "This device counts bytes off the wire over a rolling window " +
+                    "and reports the rate on every exchange. The server wants " +
+                    "at least twice what the session is already delivering " +
+                    "before it will prime a second pipeline."
+            observedDownloadBps != null && observedDownloadBps > 0 ->
+                "Measuring ${observedDownloadBps / 1_000_000} Mbit/s off the " +
+                    "wire. The server wants at least twice what this session " +
+                    "is already delivering."
+            else ->
+                "Nothing measured yet. A client that reports no throughput is " +
+                    "never offered a preparation, whatever its capability says."
+        },
+    ),
 )
 
 /**
- * One offer and one ordered acknowledgement ladder.
+ * The delivered grade after a prepared handoff.
  *
- * There is intentionally no ExoPlayer here. The coordinator owns only protocol
- * state: repeated-offer identity, exact origin echoing, selection fencing,
- * silent-discard detection, expiry, and exactly-once teardown notifications.
+ * Lifted out of [Controller] so the rule has one statement and one test rather
+ * than being spelled at each call site. `adoptSessionDelivery`'s own doc makes
+ * the argument for that: two independent `?.let`s keep the predecessor's Dolby
+ * Vision profile through a change of grade and paint "SDR - Profile 8" over a
+ * handover to a transcode, and each half looks correct on its own.
+ *
+ * An [EffectiveSelection] carries no profile field, so when the grade moves the
+ * only honest profile is "no answer". When the successor names no grade,
+ * neither half moves.
  */
-internal class PreparedReplacementCoordinator {
-    private var offer: PreparedReplacementOffer? = null
-    private var phase: PreparedPhase? = null
-    private var offeredAtMs = 0L
-    private var stagedSelection: ClientSelection? = null
-    private var releasedActionId: String? = null
-    private val pending = ArrayDeque<ActionAcknowledgement>()
+internal data class DeliveredGrade(
+    val range: String?,
+    val dolbyVisionProfile: Int?,
+)
 
-    @get:Synchronized
-    val nextAcknowledgement: ActionAcknowledgement?
-        get() = pending.firstOrNull()
+internal fun adoptedGrade(
+    current: DeliveredGrade,
+    successor: EffectiveSelection?,
+): DeliveredGrade {
+    val range = successor?.dynamicRange ?: return current
+    return DeliveredGrade(range, null)
+}
 
-    @get:Synchronized
-    val activeOffer: PreparedReplacementOffer?
-        get() = offer
-
-    @Synchronized
-    fun receive(
-        action: ControlAction,
-        sent: ActionAcknowledgement?,
-        requestSelection: ClientSelection,
-        nowMs: Long,
-    ): List<PreparedReplacementEvent> {
-        val events = expireLocked(nowMs).toMutableList()
-        val inbound = if (action.type == PlaybackControl.PREPARE_ACTION_TYPE) {
-            PreparedReplacementOffer.from(action)
-        } else {
-            null
-        }
-        val queued = pending.firstOrNull()
-        val sentMatches = sent != null &&
-            queued?.actionId == sent.actionId &&
-            queued.state == sent.state
-        val current = offer
-
-        if (current != null && sentMatches && sent.state == AcknowledgementState.COMMITTED) {
-            if (inbound?.actionId == current.actionId) {
-                // A successful commit response cannot retain the offer. Its
-                // persistence is the server's silent discard signal, most
-                // importantly for an origin mismatch. Release once and ask
-                // the server to abort whatever it still has staged.
-                pending.clear()
-                pending += ActionAcknowledgement(
-                    actionId = current.actionId,
-                    state = AcknowledgementState.ABORTED,
-                )
-                events += releaseActive(
-                    PreparedReplacementReleaseReason.COMMIT_DISCARDED,
-                    keepPending = true,
-                )
-                return events
-            }
-            pending.removeFirst()
-            events += releaseActive(PreparedReplacementReleaseReason.COMMITTED)
-        } else if (sentMatches) {
-            pending.removeFirst()
-        }
-
-        if (action.type != PlaybackControl.PREPARE_ACTION_TYPE) {
-            offer?.let {
-                events += releaseActive(PreparedReplacementReleaseReason.WITHDRAWN)
-            }
-            if (pending.isEmpty()) releasedActionId = null
-            return events
-        }
-
-        val prepared = inbound ?: return events
-        val active = offer
-        if (active == null) {
-            // A terminal acknowledgement is delivered after its local
-            // preparation has already been released. If an old owner repeats
-            // that same action in the response, it is not a new offer.
-            if (prepared.actionId == releasedActionId) return events
-            start(prepared, requestSelection, nowMs)
-            events += PreparedReplacementEvent.Offered(prepared)
-            return events
-        }
-        if (active.actionId != prepared.actionId) {
-            events += releaseActive(PreparedReplacementReleaseReason.SUPERSEDED)
-            start(prepared, requestSelection, nowMs)
-            events += PreparedReplacementEvent.Offered(prepared)
-        }
-        return events
-    }
-
-    @Synchronized
-    fun failure(
-        failure: Throwable?,
-        sent: ActionAcknowledgement?,
-        requestGeneration: String,
-    ): List<PreparedReplacementEvent> {
-        val transport = failure as? ControlTransportException ?: run {
-            return releaseForTerminalFailure(PreparedReplacementReleaseReason.PROTOCOL_REFUSED)
-        }
-        val retryable = (transport.status == 425 && transport.code == "owner_transition") ||
-            (transport.status == 429 && transport.code == "control_rate_limited") ||
-            (transport.status == 503 && transport.code == "control_unavailable") ||
-            transport.status == 408 ||
-            transport.status == null
-        if (retryable) return emptyList()
-
-        val reason = when {
-            transport.isPreparationAcknowledgementRejected && sent != null ->
-                PreparedReplacementReleaseReason.ACKNOWLEDGEMENT_REJECTED
-            transport.status == 409 && transport.code == "owner_changed" ->
-                PreparedReplacementReleaseReason.OWNER_CHANGED
-            transport.status == 409 &&
-                transport.code == "stale_control" &&
-                transport.generation != null &&
-                transport.generation != requestGeneration ->
-                PreparedReplacementReleaseReason.OWNER_CHANGED
-            transport.status == 404 && transport.code == "session_gone" ->
-                PreparedReplacementReleaseReason.SESSION_GONE
-            transport.status == 410 && transport.code == "session_ended" ->
-                PreparedReplacementReleaseReason.SESSION_ENDED
-            transport.status == 410 && transport.code == "owner_lost" ->
-                PreparedReplacementReleaseReason.OWNER_LOST
-            else -> PreparedReplacementReleaseReason.PROTOCOL_REFUSED
-        }
-        return releaseForTerminalFailure(reason)
-    }
-
-    @Synchronized
-    fun metadataReady(actionId: String): Boolean {
-        if (offer?.actionId != actionId || phase != PreparedPhase.STAGED) return false
-        phase = PreparedPhase.METADATA_READY
-        pending += ActionAcknowledgement(actionId, AcknowledgementState.METADATA_READY)
-        return true
-    }
-
-    @Synchronized
-    fun bufferReady(actionId: String, bufferedThroughMs: Long): Boolean {
-        if (offer?.actionId != actionId || phase != PreparedPhase.METADATA_READY) return false
-        val acknowledgement = ActionAcknowledgement(
-            actionId,
-            AcknowledgementState.BUFFER_READY,
-            bufferedThroughMs = bufferedThroughMs,
-        )
-        if (!acknowledgement.isValid) return false
-        phase = PreparedPhase.BUFFER_READY
-        pending += acknowledgement
-        return true
-    }
-
-    @Synchronized
-    fun committed(
-        actionId: String,
-        firstFrameUnixMs: Long,
-        currentSelection: ClientSelection?,
-        demand: PlaybackDemand?,
-    ): PreparedCommitResult {
-        val current = offer ?: return PreparedCommitResult(false)
-        if (current.actionId != actionId || phase != PreparedPhase.BUFFER_READY) {
-            return PreparedCommitResult(false)
-        }
-        if (currentSelection == null ||
-            currentSelection != stagedSelection ||
-            demand == PlaybackDemand.END
-        ) {
-            return PreparedCommitResult(
-                queued = false,
-                released = releaseWithTerminalAcknowledgement(
-                    if (demand == PlaybackDemand.END) {
-                        PreparedReplacementReleaseReason.SESSION_ENDED
-                    } else {
-                        PreparedReplacementReleaseReason.ABORTED
-                    },
-                ),
-            )
-        }
-        val acknowledgement = ActionAcknowledgement(
-            actionId,
-            AcknowledgementState.COMMITTED,
-            committedMediaOriginMs = current.mediaOriginMs,
-            firstFrameUnixMs = firstFrameUnixMs,
-        )
-        if (!acknowledgement.isValid) return PreparedCommitResult(false)
-        phase = PreparedPhase.COMMITTING
-        pending += acknowledgement
-        return PreparedCommitResult(true)
-    }
-
-    @Synchronized
-    fun reconcile(
-        currentSelection: ClientSelection,
-        demand: PlaybackDemand,
-    ): PreparedReplacementEvent.Released? {
-        if (offer == null) return null
-        val reason = when {
-            demand == PlaybackDemand.END -> PreparedReplacementReleaseReason.SESSION_ENDED
-            currentSelection != stagedSelection -> PreparedReplacementReleaseReason.ABORTED
-            else -> return null
-        }
-        return releaseWithTerminalAcknowledgement(reason)
-    }
-
-    @Synchronized
-    fun failed(actionId: String): PreparedReplacementEvent.Released? =
-        terminal(actionId, AcknowledgementState.FAILED, PreparedReplacementReleaseReason.FAILED)
-
-    @Synchronized
-    fun aborted(actionId: String): PreparedReplacementEvent.Released? =
-        terminal(actionId, AcknowledgementState.ABORTED, PreparedReplacementReleaseReason.ABORTED)
-
-    @Synchronized
-    fun expire(nowMs: Long): List<PreparedReplacementEvent> = expireLocked(nowMs)
-
-    @Synchronized
-    fun reset(reason: PreparedReplacementReleaseReason): List<PreparedReplacementEvent> {
-        val event = offer?.let { releaseActive(reason) }
-        clearAll()
-        return listOfNotNull(event)
-    }
-
-    private fun terminal(
-        actionId: String,
-        state: AcknowledgementState,
-        reason: PreparedReplacementReleaseReason,
-    ): PreparedReplacementEvent.Released? {
-        val current = offer ?: return null
-        if (current.actionId != actionId || phase == PreparedPhase.COMMITTING) return null
-        return releaseWithTerminalAcknowledgement(reason, state)
-    }
-
-    private fun releaseWithTerminalAcknowledgement(
-        reason: PreparedReplacementReleaseReason,
-        state: AcknowledgementState = AcknowledgementState.ABORTED,
-    ): PreparedReplacementEvent.Released {
-        val current = checkNotNull(offer)
-        pending.clear()
-        pending += ActionAcknowledgement(current.actionId, state)
-        return releaseActive(reason, keepPending = true)
-    }
-
-    private fun expireLocked(nowMs: Long): List<PreparedReplacementEvent> {
-        val current = offer ?: return emptyList()
-        if (nowMs - offeredAtMs < PREPARED_OFFER_TTL_MS) return emptyList()
-        return listOf(releaseActive(PreparedReplacementReleaseReason.EXPIRED))
-    }
-
-    private fun releaseForTerminalFailure(
-        reason: PreparedReplacementReleaseReason,
-    ): List<PreparedReplacementEvent> {
-        val event = offer?.let { releaseActive(reason) }
-        clearAll()
-        return listOfNotNull(event)
-    }
-
-    private fun releaseActive(
-        reason: PreparedReplacementReleaseReason,
-        keepPending: Boolean = false,
-    ): PreparedReplacementEvent.Released {
-        val current = checkNotNull(offer)
-        offer = null
-        phase = null
-        offeredAtMs = 0
-        stagedSelection = null
-        releasedActionId = current.actionId
-        if (!keepPending) pending.clear()
-        return PreparedReplacementEvent.Released(current, reason)
-    }
-
-    private fun start(
-        inbound: PreparedReplacementOffer,
-        requestSelection: ClientSelection,
-        nowMs: Long,
-    ) {
-        offer = inbound
-        phase = PreparedPhase.STAGED
-        offeredAtMs = nowMs
-        stagedSelection = requestSelection
-        releasedActionId = null
-        pending.clear()
-    }
-
-    private fun clearAll() {
-        offer = null
-        phase = null
-        offeredAtMs = 0
-        stagedSelection = null
-        releasedActionId = null
-        pending.clear()
-    }
+/**
+ * The snapshot a teardown settles a commit on.
+ *
+ * A viewer who closes at the end of a title maps to `demand: end`, and an
+ * ending exchange may not carry a `committed` — the pairing is a `400` that
+ * costs both. This exchange is not what ends the session (`endHlsSession` is,
+ * on its own route), so it does not claim to.
+ *
+ * The rate moves with the demand because the mapper derives one from the other:
+ * a held player reports the rate it actually has, which at the end of a title is
+ * zero, and the server refuses `active` below 0.25 outright — refusing the whole
+ * exchange and the commit with it. `render_state` is left alone, so the one
+ * field still saying what the player is doing goes on saying it.
+ */
+internal fun settlingSnapshot(snapshot: PlaybackControlSnapshot): PlaybackControlSnapshot {
+    if (snapshot.acknowledgement?.state != AcknowledgementState.COMMITTED) return snapshot
+    if (snapshot.demand != PlaybackDemand.END) return snapshot
+    return snapshot.copy(
+        demand = PlaybackDemand.ACTIVE,
+        playbackRate = maxOf(PlaybackControlMapping.MIN_ACTIVE_RATE, snapshot.playbackRate),
+    )
 }

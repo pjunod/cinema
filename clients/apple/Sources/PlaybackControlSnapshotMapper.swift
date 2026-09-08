@@ -73,6 +73,10 @@ struct PlayerControlObservation: Equatable {
     var renderOverride: RenderState?
     var selection: ClientSelection
     var capabilities: DynamicCapabilities
+    /// What this player owes a staged successor, if anything. Carried through
+    /// the mapping untouched: it is a settlement the player already decided,
+    /// not a state to derive, and every rule about it is the reporter's.
+    var acknowledgement: ActionAcknowledgement? = nil
 
     /// The runway ahead of the playhead, in milliseconds. Zero when nothing
     /// contiguous is loaded.
@@ -108,7 +112,8 @@ extension PlaybackControlMapping {
                 .flatMap { $0 > 0 ? $0 : nil },
             selection: observation.selection,
             capabilities: observation.capabilities,
-            observation: clientObservation(observation, render: render)
+            observation: clientObservation(observation, render: render),
+            acknowledgement: observation.acknowledgement
         )
     }
 

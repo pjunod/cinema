@@ -1437,7 +1437,7 @@ fn admit_restart(
 /// Shared by `resolve_plan` and by M6's candidate, because it is the one part
 /// of resolving a recipe that needs the store, the ladder ceiling and the
 /// network prior — see
-/// [M6-CALLER-HANDOFF.md](../../../../docs/M6-CALLER-HANDOFF.md) §3.3 on why
+/// [M6-CALLER-HANDOFF.md](../../../../docs/playback-control/M6-CALLER-HANDOFF.md) §3.3 on why
 /// the rest of `resolve_plan` is not what a candidate wants.
 pub(crate) async fn resolve_height(
     state: &AppState,
@@ -1466,7 +1466,7 @@ pub(crate) async fn resolve_height(
 /// honoured, what would we deliver?"* without creating anything, and that is
 /// the same question `create` answers on its way to admission. Answered once,
 /// here, rather than twice in two places that agree today —
-/// [M6-CALLER-HANDOFF.md](../../../../docs/M6-CALLER-HANDOFF.md) §3.2. **Do
+/// [M6-CALLER-HANDOFF.md](../../../../docs/playback-control/M6-CALLER-HANDOFF.md) §3.2. **Do
 /// not grow a second resolver.** The drift would be invisible, because both
 /// sides would look correct in isolation.
 pub(crate) struct ResolvedPlan {
@@ -6758,12 +6758,29 @@ async fn process_preparation_candidate(state: AppState, exchange: PreparationCan
 /// behaving exactly as the protocol permits. One lease plus a margin covers a
 /// slow client without covering a gone one.
 ///
-/// **This bound is enforced here, not by the store.** Maintenance retires an
-/// expired row only `TAKEOVER_RECOVERY_MS` after its lease lapses and ticks
-/// every five minutes, so waiting for it would hold a successor's admission
-/// slot and the playback's one preparation slot for several minutes past the
-/// deadline — and would never free the actor's slot at all, because nothing
-/// in that path settles it. The timer armed at stage time does both.
+/// **Correction, 2026-09-08: the store does enforce this bound, and this
+/// paragraph used to say it did not.** It read *"This bound is enforced here,
+/// not by the store. Maintenance retires an expired row only
+/// `TAKEOVER_RECOVERY_MS` after its lease lapses…"*, and that was
+/// **already false when it was committed**: `1d55c976`, "a preparation expires
+/// on its own deadline", landed at 02:47:33 and `27e77824`, which added this
+/// paragraph, at 04:14:45 the same morning — eighty-seven minutes later. The
+/// belief was true when its author formed it; the tree moved underneath them
+/// before they wrote it down, which is the ordinary way a comment is born
+/// wrong rather than a way it goes stale.
+///
+/// `sqlite/sessions.rs` ends a staged row keyed on `deadline_ms` directly, and
+/// `hiqlite_sessions.rs` mirrors it — *"A preparation expires on **its own
+/// deadline**"* — and the lease loop refuses
+/// to renew any incarnation carrying a preparation row, so the deadline cannot
+/// be postponed.
+///
+/// So what the timer below is actually for is narrower than it looks: it frees
+/// **the actor's in-memory slot**, which nothing in the store path settles,
+/// and it shaves up to one maintenance tick (five minutes) off the durable
+/// reap. Both are worth having. Neither is "the only thing enforcing the
+/// bound", and building on that belief is how a reader concludes the durable
+/// side is unprotected.
 const PREPARATION_DEADLINE_MS: i64 = crate::playback_control::VOD_LEASE_TIMEOUT_MS as i64 + 30_000;
 
 /// M6 §3.4 — stage the successor the decision just admitted.
@@ -6982,6 +6999,21 @@ async fn stage_prepared_successor(
 /// committed — the store's abort names an incarnation that is no longer
 /// staged and changes nothing — so the timer does not race the commit path
 /// §3.5 will add.
+///
+/// **What this does NOT protect, and why it is not urgent (2026-09-08).** The
+/// spawn is detached and its timer is monotonic and in-memory, so a process
+/// restart loses it. That is survivable today for two reasons that will both
+/// stop being true: the store enforces `deadline_ms` on its own (see the
+/// constant above), and a restart discards the actor slot along with the whole
+/// `ControlState`, so there is nothing left to free. `abort_inherited_preparation`
+/// handles the durable remnant on takeover.
+///
+/// It stops being survivable the day *reserve and prime* exists, because then
+/// a staged successor owns a worker and an ffmpeg, and a lost timer leaks them
+/// until the idle sweep. `M6-SERVER-PRIME-HANDOFF.md` §6 step 1 is that move —
+/// fold the deadline into the actor's `next_deadline()` — and it is
+/// deliberately ordered before the thing that needs it. Do not read it as
+/// fixing a live leak: **there is no worker here today.**
 fn arm_preparation_deadline(
     executor: crate::playback_control::PreparationExecutor,
     staged_incarnation_id: String,
@@ -9132,7 +9164,7 @@ fn advertises_dolby_vision(context: &crate::transcode::HlsContext) -> bool {
 /// in between, so this is where it is caught. Chrome ignores the box;
 /// VideoToolbox honours it, and Safari answers 4K10 HEVC so labelled with a
 /// software decode on hardware that has a dedicated block for it
-/// (`docs/STUTTER-4K.md` §6).
+/// (`docs/streaming/STUTTER-4K.md` §6).
 ///
 /// Gated on what the playlist says rather than on how the session was built,
 /// deliberately. The serve path has no copy options in hand, and the question

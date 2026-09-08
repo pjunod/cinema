@@ -1,7 +1,7 @@
 //! EXIF capture dates for photos in home libraries.
 //!
 //! This is priority 1 of the recorded-date ladder for stills
-//! (docs/HOMEVIDEO-PLAN.md §4.4): the camera's own idea of when the shutter
+//! (docs/features/HOMEVIDEO-PLAN.md §4.4): the camera's own idea of when the shutter
 //! fired beats anything a filename or an mtime can tell us — mtime in
 //! particular lies the moment a folder is copied off an SD card.
 //!

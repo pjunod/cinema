@@ -2,7 +2,7 @@
 
 Companion to [ARCHITECTURE.md](ARCHITECTURE.md) §3 (the *founding* decisions —
 why the pipeline exists and how it fails over) and
-[ADAPTIVE-QUALITY.md](ADAPTIVE-QUALITY.md) (the height/bitrate ladder). This
+[ADAPTIVE-QUALITY.md](streaming/ADAPTIVE-QUALITY.md) (the height/bitrate ladder). This
 doc is the **end-to-end map**: every path a file can take from "press Play" to
 pixels, the choice made at each fork, and *why*. If a delivery path isn't drawn
 here, the player doesn't use it.
@@ -720,7 +720,7 @@ ffmpeg writes one continuous fragmented stream down a pipe and
 [`copyseg`](../crates/plurxd/src/copyseg.rs) publishes a boundary only in front
 of a keyframe a player will not discard a leading picture at, because on an
 open-GOP remux every ordinary boundary costs exactly one frame
-([STUTTER-4K.md](STUTTER-4K.md) §5.6). Everything downstream is unchanged —
+([STUTTER-4K.md](streaming/STUTTER-4K.md) §5.6). Everything downstream is unchanged —
 same `init.mp4`, same `segNNNNN.m4s`, same append-only EVENT writer history —
 and a stream the reader cannot follow falls back to ffmpeg's own muxer once,
 automatically, so the worst case is the behaviour above. The HTTP view becomes
@@ -930,7 +930,7 @@ first leaves a monotonic lifetime verdict that refuses any later replacement.
 
 Nothing below serves a viewer today. It is written down here because it is
 running on the server as of 2026-08-23 and an operator reading logs will see
-it, and because [VOD-PRESENTATION-PLAN.md](VOD-PRESENTATION-PLAN.md) §2.2 is
+it, and because [VOD-PRESENTATION-PLAN.md](streaming/VOD-PRESENTATION-PLAN.md) §2.2 is
 the contract it exists to satisfy.
 
 **What it is.** One row per fragment of a file, produced by the production copy
@@ -1144,7 +1144,7 @@ outage.
 
 The error fallback catches streams the browser *refuses*. This one catches
 streams the browser accepts and then cannot present smoothly — found the
-hard way ([STUTTER-4K.md](STUTTER-4K.md) §5.3): a client whose median
+hard way ([STUTTER-4K.md](streaming/STUTTER-4K.md) §5.3): a client whose median
 decode of a 4K HEVC remux was 41.6 ms against a 41.7 ms frame budget. Read
 that number carefully — it is **slack, not capability**. A median pinned to
 the frame budget is a pipeline delivering frames just-in-time (the client
@@ -1319,7 +1319,7 @@ perf report are the same events server-side.
 ## Reading the stats overlay
 
 Player navigation follows the shared
-[player input contract](PLAYER-INPUT-CONTRACT.md): hidden chrome reveals before
+[player input contract](clients/PLAYER-INPUT-CONTRACT.md): hidden chrome reveals before
 it can seek, the timeline previews Left/Right and commits only on Select, and
 Back resolves by the same state precedence on web, Android, and Apple.
 
@@ -1464,7 +1464,7 @@ is reclaimed by the server whether or not any client ever comes back.
   ladder.** The web controller consumes the server ladder and changes the one
   active transcode when bandwidth, runway, or classified supply stalls demand
   it. The switch is visible and bounded; seamless per-segment switching stays
-  behind [ADAPTIVE-QUALITY.md](ADAPTIVE-QUALITY.md) Phase 3's decision gate.
+  behind [ADAPTIVE-QUALITY.md](streaming/ADAPTIVE-QUALITY.md) Phase 3's decision gate.
 - **Burn-only bitmap subs cost a stream restart.** VobSub and PGS without a
   client-recognized overlay capability can't be copied or `<track>`'d — a
   picture has no text to send — so selecting one re-opens the

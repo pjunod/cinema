@@ -1,0 +1,355 @@
+# Android client parity
+
+The Android client is the native plurx **viewer** for phones, foldables,
+tablets, Android TV, and Google TV. This page records what “web parity” means
+for that viewer and keeps server administration out of the comparison.
+
+> Status (2026-08-02): native text subtitles landed — Android takes the same
+> WebVTT renditions the Apple client does, selects them in place on a
+> direct-played file, and opens a video-recipe-preserving session on a remux
+> or transcode. Burn is now reserved for bitmap and styled tracks. **Not yet
+> verified on hardware:** the §5.4 acceptance cases (no video encoder on a 4K
+> HDR remux, PGS burn at 2160, a forced track auto-shown on a remux, no new
+> session when toggling two text tracks) still need a device pass. The rest of
+> the remediation handoff is
+> [CLIENTS-REMEDIATION-PLAN.md](CLIENTS-REMEDIATION-PLAN.md) §5.
+> Status: viewer parity exists and both the playback-negotiation arc
+> ([CLIENTS-REMEDIATION-PLAN.md](CLIENTS-REMEDIATION-PLAN.md) §4.2–§4.5,
+> §5.1–§5.6) and the P2 pass (§7.1–§7.3, §7.5, §7.6) have landed: Dolby Vision
+> and route-aware audio caps, `force` and height promises, native text
+> subtitles, `vod` sessions, the server's ladder, a TV focus graph whose
+> destinations survive scrolling on both axes, rollup-aware watch filters, parallel first paint, the lifecycle-edge
+> hygiene pass, and an R8-minified release build. The dynamic-range badge also
+> reports what is being *delivered and rendered*, not only what the file
+> carries ([MEDIA-BADGES-PLAN.md](../streaming/MEDIA-BADGES-PLAN.md) §6).
+> Android build 42 preserves full signed 64-bit reader item/file routes across
+> the native-to-JavaScript handoff. Build 41 compacts the shared Mini, Standard,
+> and Debug playback-info modes, bounds Debug to the available screen, and uses
+> severity colors for starvation, stalls, idle delivery, slow encoding, and
+> unhealthy player state.
+>
+> Two acceptance checks remain device-only and unproven in CI: `ShelfFocusTest`
+> (needs a TV emulator or device) and the badge's on-screen behaviour on an HDR
+> panel.
+>
+> Performance II N0 source parity is included in Android build 25: the Media3 controller
+> posts authenticated `ttff`, passive six-second `stall`, and
+> `playback_error` events through the shared client, with attempt and live HLS
+> session identity. TTFF starts before the detail/decision requests. A stall is
+> emitted with its final duration only after established, requested playback
+> recovers; startup, paused buffering, and seek waits are excluded. Unit tests
+> and lint prove the wire, controller wiring, reason, and timing contracts; a
+> physical Android play producing a joined `ttff` row remains an explicit,
+> unclaimed acceptance run.
+>
+> Build 25 also replaces Android 14+ boot-time `dataSync` service recovery with
+> a persisted user-initiated data-transfer job. The local intent and selected
+> network constraint are committed synchronously; Media3 stays paused and its
+> HTTP source fails closed until the job supplies a network for both socket and
+> DNS resolution. Android 6–13 retain the boot/Media3-restart service path.
+> Task Manager and timeout stops persist as an explicit Resume state. An active
+> build-24 transfer cannot be retroactively given a persisted UIDT registration
+> after upgrade without a foreground user action, so it needs one Resume tap.
+>
+> Build 34 adds app-managed offline EPUB reading on phones and tablets. The
+> download owner is separate from Media3, records intent before I/O, verifies
+> the exact publication revision after transferring the original, and
+> atomically publishes only bounded declared resources. The local WebView has
+> no bearer or network fallback: every request to its synthetic HTTPS origin is
+> intercepted from packaged assets or app-private files, and all other origins
+> receive a local denial. JVM, lint, instrumentation-build, and APK-asset checks
+> are green; the physical airplane-mode/reconnect drill remains unclaimed.
+
+## Viewer surface
+
+| Web viewer capability | Android implementation |
+|---|---|
+| Connect, login, remembered session | Native connect/login screens and DataStore session |
+| Continue Watching, Next Up, Recently Added | Adaptive home rails |
+| Category- or library-grouped home | Home grouping preference |
+| Browse, pagination, sort, watch filters | Adaptive library grid; pages paint as they arrive, sort is client-side, and containers classify by `rollup` |
+| Cross-library search | Native search screen |
+| Movie/show/season/episode hierarchy | Native detail and episode rows |
+| Home-video folders and photos | Folder navigation and photo viewer |
+| Resume, restart, watched/unwatched | Detail actions and progress sync |
+| In-app EPUB Read/Resume | Phone/tablet detail opens the shared bounded reader in an isolated same-origin WebView; television surfaces expose no action |
+| App-managed offline EPUB | Profile/revision catalogue, atomic private publication, token-free synthetic-origin reader, process-death reconciliation, and newest-dated exact-edition replay |
+| Direct, remux, HLS transcode | Media3/ExoPlayer delivery-plan execution |
+| Audio/subtitle choice | Embedded tracks are native; tracks the server marks `native` arrive as HLS renditions, and everything else burns on a session |
+| Detail-screen track facts | Every audio and subtitle track with language, format, and forced/SDH markers, the server's default markers, and its five-state preferred-language verdict |
+| Pre-play audio/subtitle choice | Both are chosen on the detail screen and applied on the first session open, with any burn-in cost disclosed before playback starts |
+| Auto/original/fixed playback quality | Viewer preference and an in-player selector built from the server's advertised ladder |
+| Bound stall downgrade | Android detects stalls via `PlaybackTelemetry`'s passive buffering-stall beacon and reopens the session with `previous_session_id`, `reopen_reason: "stall"`, and the server's normalized `StartResponse.height`. An Auto viewer with a burned subtitle sends `quality_auto: true` so the promise-height does not make the session sticky. The client enforces a retry budget of 3 consecutive reopen attempts at the ladder floor; at that point the session keeps playing at the floor rung without further reopen attempts. A seek, quality switch, or track change resets the budget. |
+| Intro/credits markers | Manual skip or automatic skip; estimated credits markers are visibly labelled while chapter-derived markers keep their exact label |
+| Autoplay next episode | Ordered season/show traversal |
+| A/V sync correction | Persistent per-file correction |
+| Playback decision/stats | Shared compact Mini, Standard, and Debug modes. Mini keeps playback visible, Standard groups source/playing/server facts, and responsive Debug groups every build, transport, player, network, and live HLS-session field without exceeding the available screen. Severity colors identify starvation, stalls, idle delivery, slow encoding, and unhealthy player state. |
+| Durable playback telemetry | TTFF, passive buffering-stall, Media3 playback-error beacons with attempt/session context, and redacted pre-Media3 plan-load or session-create failures that name the failed stage and exception type; HTTP session failures also retain their status code |
+| Source-vs-delivered media badges | Dynamic-range chip dims and names what is on screen (`DV → HDR10`) |
+| Classic, Terminal, noirr | Matching palettes, shapes, and typography |
+| System, light, dark appearance | Independent appearance preference |
+
+Android also adds platform-native behavior that the browser does not provide:
+MediaSession integration, picture-in-picture, immersive playback, hardware
+media keys, and D-pad focus states.
+
+## Apple parity handoff
+
+The handoff in [CLIENTS-REMEDIATION-PLAN.md](CLIENTS-REMEDIATION-PLAN.md) pins
+the wire contracts, exact files, milestones, tests, hardware matrix, rollout
+evidence, and non-goals. These are the subtitle outcomes it required, now
+implemented and pinned by `PlaybackPolicyTest`:
+
+- SRT/SubRip/WebVTT sends `native_subtitles = true`, `subtitle = <index>`,
+  and no `subtitle_burn`; the selected quality and video recipe do not change.
+- Media3 switches native text tracks with `TrackSelectionOverride` and turns
+  them off by disabling `C.TRACK_TYPE_TEXT`; neither action creates a new HLS
+  session.
+- PGS, VobSub, `mov_text`, and styled ASS/SSA use `subtitle_burn` at source
+  height. `/decision` reports `text: true` for `mov_text` and ASS/SSA — neither
+  is a bitmap — but the session endpoint rejects both as native renditions and
+  the master never advertises them. The client therefore routes on
+  `SubTrackDto.native` (the server's own `is_native_text_subtitle`), falling
+  back to a codec table only for a server that predates the field, and never on
+  `text`. A 2160p WEB-DL MP4 with 23 `mov_text` tracks is what the distinction
+  costs when it is missing: every track offered, every explicit pick a 400.
+- The HDR burn guard follows `delivered_dynamic_range`. When an HDR source is
+  already tone-mapped to SDR by the base plan, the burn body includes
+  `subtitle_burn_sdr: true`; the server accepts the forced subtitle without
+  treating it as permission to downgrade a genuinely HDR delivery.
+- On direct play those same tracks are free — the player reads the container's
+  own track, and `/files/{id}/subs/{index}.vtt` would extract either format if
+  asked, since that endpoint turns away only bitmaps
+  (`plurxd/src/http/stream.rs:770`). Only a *session* has to burn them.
+- Viewer-language automatic selection treats a forced disposition and a
+  case-insensitive `Forced` title as equivalent signals. For file 5615 with
+  English preferences, subtitle index 2 wins over the Italian container
+  default.
+- The shared authenticated OkHttp data source fetches capability playlist and
+  WebVTT URLs. HLS sessions anchor to `media_origin_ms`; progressive remuxes
+  read `X-Plurx-Media-Origin-Ms`, with `start_seconds` retained only as the
+  old-server fallback. VOD state, resume, and seek handling retain that source
+  timeline.
+
+Do not side-load `/files/{id}/subs/{index}.vtt` into an offset HLS session: the
+whole-file endpoint has no resume offset and would make cue timing incorrect.
+
+## Detail-screen track facts and pre-play selection
+
+The detail screen answers "does this have my audio and subtitles?" before
+anything is decoded, and lets the viewer choose both. The whole policy boundary
+is [CLIENTS.md](../CLIENTS.md) §"Shared track facts — clients render the server's
+answer"; nothing below re-derives it.
+
+- Each media card lists every `audio_streams` and `subtitle_streams` entry.
+  Audio rows carry language, title, channels, and codec; subtitle rows carry
+  language, title, format (`SRT`, `PGS`, `VobSub`, `ASS`, `MOV Text`), and the
+  forced and SDH markers. An untagged track is named `Unknown language` rather
+  than left blank — that track is the reason a status can be `unknown`. A file
+  with no subtitle tracks says "No subtitles in this file."
+- The server's own picks — `playback_defaults.audio.selected_index` and
+  `.subtitle.selected_index` — carry a **Default** chip, and each list is
+  followed by one sentence for its `preferred_language_status`. All five states
+  are distinct: `selected` ("English audio."), `available` ("English audio
+  available — Japanese plays by default.", the dual-audio anime case),
+  `missing` ("No English subtitles."), `unknown` ("Can't tell whether this has
+  English subtitles — a track has no language tag.") and `no_tracks`. `unknown`
+  is never folded into `missing`; a status this build does not recognize, and a
+  server that omits `playback_defaults` entirely, print no sentence at all
+  rather than an invented one.
+- A choice is per playback. It is held per file, keyed on the item, and travels
+  as optional `?audio=`/`?subtitle=` arguments on the player route — `-1` is
+  Off, and an omitted argument means "no choice, keep the server's policy". It
+  is never written back as a Playback setting, and the next item, the next
+  episode, and Play-next all start from their own defaults.
+- The choice reaches the **first** `/decision`, so the plan that comes back
+  already carries it and no restart or re-buffer is needed to apply it. That
+  plan is executed as given: the remux URL's `?audio=` is the server's, and the
+  client normalizes rather than appends that one parameter so a later in-player
+  switch cannot leave two of them on the wire. The subtitle travels in the HLS
+  session-create body, and `delivery.audio` is repeated there. A choice other
+  than the container's own default is never answered `direct`, so the verdict
+  is re-read from every selection-aware decision instead of assumed stable.
+- Direct play is the one transport that hands Media3 the whole container, so
+  the selected audio track is pinned there with a `TrackSelectionOverride`
+  matched by language and then by order within it. Without that pin ExoPlayer's
+  own `setPreferredAudioLanguage` could put a different track on the speakers
+  than the one the detail screen marks — the same reason text selection has
+  always been carried by the controller rather than by the selector.
+- Burn-in cost is disclosed before playback starts, from a selection-aware
+  `/decision` preflight rather than a codec table: bitmap tracks are priced by
+  `selection.subtitle_requires_burn_in`, and text tracks keep the existing
+  `native` flag because ASS/SSA and `mov_text` carry text and still burn. A true
+  `selection.subtitle_burn_in_blocked_by_hdr` is reported as "HDR playback is
+  kept unchanged, so they will not be shown" — not as subtitles-on. A preflight
+  that fails claims nothing; the in-player path still discloses the burn.
+
+`TrackFactsTest` and `TrackSelectionTest` (JVM) pin the vocabulary, the route
+encoding, the plan execution, and the pricing; `DetailTrackFactsTest`
+(androidTest) pins the rendering and the click behavior.
+
+## Administrative boundary
+
+The embedded web app remains plurx's administrative control plane: first-server
+setup, libraries, users, metadata keys, integrations, scan control, and system
+logs. Keeping those mutations in one surface avoids reproducing high-impact
+server administration on a TV remote. The Android Settings screen is primarily
+for device-local viewer and playback preferences plus sign-out/change-server.
+HDHomeRun is the deliberate exception: Settings → Developer exposes its safety
+requirements, saved configuration, readiness and separate runtime enablement.
+Every mutation requires server-enforced administrator access and an exact
+settings generation. Previous-owner recovery carries the original owner and
+drain cutoff, and requires an explicit physical-fencing attestation. No build
+feature switch hides Live TV from the navigation.
+
+The dedicated Media3 live player has channel selection, pause/resume, mute,
+fullscreen and stop, without invoking the finite-media controller or writing
+watch progress. Actual rendered frames renew its no-progress budget: Media3's
+[window-relative live position](https://developer.android.com/media/media3/exoplayer/live-streaming)
+can move backward while healthy. A token-free durable marker preserves start
+and cleanup uncertainty across process death and profile changes. Fourteen
+focused `LiveTvTest` cases cover these contracts; physical decode and remote
+navigation remain separate acceptance evidence. DRM, DVR, rewind and captions
+are deliberately unsupported.
+
+**Build 75 adds the programme guide.** Channel rows carry the programme on now,
+a bar running to its end and what is next; a phone or tablet can switch to a
+half-hour grid with a red now line; search matches the number, the callsign and
+the programme on now. The guide is read-only: a future cell opens details and
+offers nothing else, because there is no recording and no scheduling behind it.
+Every guide state is *rendered* — off, empty, stale or erroring all leave a
+working screen and a tunable channel, because the lineup and the session start
+never consult guide state and never wait on a guide fetch. The reducers are
+pure functions in `LiveTvGuide.kt`, checked by `LiveTvGuideTest` against
+`tests/playback/live-tv-guide-cases.json`, which the web and Apple suites read
+too.
+
+**Picture-in-picture, and the release rule it forced.** Entering PiP drives this
+activity to `ON_STOP`, and the old rule released the tuner there — which would
+have killed the exact case PiP exists for. Both teardown paths, the
+`DisposableEffect` and the `ON_STOP` effect, now go through
+`LiveTvPlayer.stopUnlessRetained()`, and the controller owns the predicate
+because the screen is precisely the thing that is going away when it matters.
+An ordinary back-out, with no PiP, still releases the tuner immediately. The
+guide refresh runs on the controller's own scope beside the heartbeat rather
+than in a `LaunchedEffect`, for the same reason — and it ends when the profile
+does, so a sign-out cannot leave it reading the guide with the previous
+account's token.
+
+The flag is set from the mode-changed callback and from a confirmed
+`enterPictureInPictureMode`, never before the call. Android refuses PiP
+whenever the user has turned it off for an app, and no callback fires on that
+path: setting the flag first and discarding the Boolean latched it for the
+life of the process and disabled every release path there is. **There is no
+in-app dock on Android in this effort** — leaving Live TV releases the tuner,
+and picture-in-picture is the only thing that retains it.
+
+**Television is one surface, not the phone layout with a button.** On
+`FormFactor.Television` the video is fullscreen whenever a session is playing,
+and every D-pad press is routed through the `live` table in
+`tests/playback/player-input-contract.json` via `LiveTvInputPolicy`: a
+direction on a hidden overlay reveals it and never changes channel, the
+channel list is preview-then-commit, and four seconds of no input hides the
+overlay again. A phone in fullscreen gets the touch rows of the same table —
+a tap toggles the chrome.
+
+**One input table for the ten-foot overlay.** `LiveTvInputPolicy` transcribes
+the `live` section of `tests/playback/player-input-contract.json`, and
+`LiveTvInputPolicyTest` walks every cell against the fixture. The 2026-09-02
+rulings hold: a direction on a hidden overlay only reveals it, and the channel
+list is preview-then-commit. There is no half-hour grid on Android TV — a
+focus-navigable grid is a milestone of its own on each ten-foot platform, and
+until then the television gets the list, which the focus engine already
+handles.
+
+### Live TV
+
+The Android Live TV surface is a dedicated Media3 player rather than the finite
+-media controller: channel selection, pause/resume, mute, fullscreen and stop,
+with no scrubber, no resume point and no progress write. It renews its session
+on **rendered frame count** rather than playback position, because a Media3 live
+window's position can move backwards during healthy playback — a frozen picture
+expires, a shuffling live edge does not.
+
+`LiveTvLease` carries the same uncertainty barrier as the other clients: only a
+failure decided before a tuner can open (`live_tv_disabled`,
+`live_tv_protocol_unready`, `drm_unsupported`, `channel_not_found`,
+`settings_conflict`, `tuner_capacity`, `admin_required`, `invalid_settings`)
+clears the durable ownership marker; anything else holds it for 90 s, because
+an unrecognised failure may mean a tuner did open. The marker is an `AtomicFile`
+written before the POST and refreshed in-process during playback — the
+heartbeat deliberately does **not** rewrite it, since an `fsync` every five
+seconds on the main thread during live video costs frames and buys nothing an
+observer could see.
+
+**Proved:** 16 focused unit tests and four instrumentation tests (two
+`LiveTvUiTest`, two `LiveTvFileBarrierStoreTest`) pass on an API 36 x86_64
+phone emulator under the exact JDK 25 / SDK 37 build. **Not proved:** the
+television profile. Initial D-pad focus is the 10-foot contract and its
+assertion is scoped to television `uiMode`; the AOSP Android TV system image
+enforces adb authorization, which a headless container cannot grant, so that
+half needs one of the arm64 AVDs on the Mac. The server side is now proved
+against a real HDHomeRun FLEX 4K over an antenna — see
+[HDHOMERUN-LIVE-TV-STATUS.md](../features/HDHOMERUN-LIVE-TV-STATUS.md) — but playback on a
+physical phone or Google TV against that tuner has not been run, so whether
+Media3 holds a 4 s-segment live window on real hardware is still open.
+
+## Layout verification
+
+The shared Compose UI has compact, expanded, and television form factors. The
+v0.1 pass was built and exercised on API 36 AOSP profiles matching:
+
+- Pixel 10 Pro XL — `1344×2992`, 480 dpi.
+- Pixel 10 Pro Fold, open — `2076×2152`, 390 dpi.
+- Android TV 1080p — `1920×1080`, 320 dpi.
+
+The test gate is:
+
+```bash
+cd clients/android
+./gradlew testDebugUnitTest :app:assembleDebug :app:lintDebug
+./gradlew :app:connectedDebugAndroidTest  # once per running profile
+```
+
+The connected Compose test renders a core card/control surface under all three
+themes. The manual pass uses a disposable plurx library to verify real home,
+settings, detail, photo, and playback content rather than empty previews.
+
+## D-pad focus
+
+`ShelfFocusTest` (androidTest) is the reproduction
+[CLIENTS-REMEDIATION-PLAN.md](CLIENTS-REMEDIATION-PLAN.md) §7.1 asked for
+before the fix. Every movement in it is a real D-pad key event; a bare
+`FocusRequester.requestFocus()` would prove nothing, because it consults
+neither the declared order nor whether the destination is still attached.
+
+**The requester lives on the container; the `up`/`down` order lives on the
+card.** A shelf's `FocusRequester` used to ride on the card at index 0, which a
+`LazyRow` disposes as soon as the viewer scrolls past it — every neighbouring
+shelf then aimed `up`/`down` at a requester attached to nothing. It now rides on
+the row's `LazyRow` behind a `focusGroup()`, which a horizontal scroll cannot
+dispose. The `up`/`down` overrides cannot follow it there: a card collects focus
+properties with `visitSelfAndAncestors(FocusProperties, untilType = FocusTarget)`,
+and `LazyRow` carries a focus target of its own inside it (`ScrollableNode`
+delegates a `FocusTargetModifierNode(Focusability.Never)`), so a block declared
+on the row modifier is invisible to every card in the row. They are declared per
+card, pointing at the *neighbour's* container.
+
+**The vertical list is scrolled, not lazy.** Home's shelf list is a
+`Column(verticalScroll)`: in a `LazyColumn` a shelf scrolled out of the window
+detached its requester and the next press towards it threw
+`IllegalStateException: FocusRequester is not initialized`. Spatial focus search
+composes beyond-bounds lazy items to avoid exactly that, but a custom `up`/`down`
+destination bypasses spatial search, so the rescue never runs. Three hub shelves,
+the picker and one shelf per library (or per kind) is a small enough list to
+compose eagerly; each shelf is still a `LazyRow`.
+
+Poster cards and pickers carry one focus target apiece (`clickable` is already
+focusable — hygiene, not a behaviour fix), and the "Group by" picker is a stop on
+the vertical chain rather than a touch-only control: right-aligned, it is outside
+the beam of a card on the left of the shelf above, so spatial search alone steps
+straight past it.
+
+**Run it on a TV profile.** It cannot run in CI or in a cloud sandbox — there
+is no device — so it is written, compiled, and unproven until someone runs it
+against `plurx_android_tv_1080p_api36`.

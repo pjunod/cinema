@@ -1,0 +1,373 @@
+#!/usr/bin/env bash
+# Bound the one CI cache a job cannot bound: the Forgejo runner's own.
+#
+# A Forgejo runner serves `actions/cache` out of `cache.dir` from its
+# config.yml -- a `bolt.db` index beside a tree of blobs. `forgejo-runner`
+# 13.1.0 evicts nothing from it: its `generate-config` offers `enabled`, `dir`,
+# `host`, `proxy_port` and the shared secrets, and nothing else. No size cap, no
+# TTL, no garbage collection. So the directory only grows, and on 2026-09-07 it
+# had grown to 41G on `gha-m6-general-01`'s 78G disk while the fleet failed jobs
+# with linker bus errors, which is what a full disk looks like from inside a
+# build.
+#
+# A CI job cannot fix that. Deleting an entry means deleting its index row and
+# its blob together -- leave the row and the next job matching that key is
+# promised an entry it cannot download -- and deleting them together means
+# stopping the runner, which a job running on that runner cannot do. So it is
+# done from outside, here, on a timer.
+#
+# The eviction is the whole directory, not the oldest entries, because `bolt.db`
+# is the only thing that knows which blob belongs to which key and it is not a
+# format this can safely edit. Wiping index and blobs together is always
+# consistent; the cost is a cold cache for the next few jobs, and nothing in
+# that directory is not reproducible. It is affordable because it should almost
+# never happen: once plurx's own caches are runner-local and bounded, what is
+# left here are Gradle, Playwright, DerivedData and AVD entries whose keys
+# change with build configuration rather than with every commit.
+#
+# What it will not do: touch `_work`. That holds other jobs' checkouts, several
+# repositories deep, and nothing outside a job can tell which trees are
+# finished. It is also small: the preflight's own diagnostic on
+# `gha-nuc4-general-01`, 2026-09-08, listed the whole checkout at about 58 MB
+# (`20M docs`, `19M crates`, `4.6M brand`, and down from there). A reaper for
+# it was written and withdrawn on that measurement -- see the reserve below for
+# what was actually wrong, and do not rewrite it without measuring `_work`
+# first. `18G available at .../_work/<hash>/hostexecutor` is `df` on the
+# filesystem, not a size of that directory, and reading it as one is how the
+# wrong fix gets built.
+set -euo pipefail
+
+BUDGET_GB=${PLURX_JANITOR_BUDGET_GB:-20}
+# What a job is refused for not having. This is the same number
+# `.github/actions/cargo-cache/action.yml` passes to `scripts/ci-require-disk`
+# as `disk-gb`, and `tests/operations/test_ci_janitor.py` fails if the two ever
+# drift, because a janitor whose reserve is below the bar jobs are held to is a
+# janitor that reports every runner healthy while the fleet refuses work.
+REQUIRED_GB=${PLURX_JANITOR_REQUIRED_GB:-25}
+STOP_TIMEOUT=${PLURX_JANITOR_STOP_TIMEOUT:-1200}
+IMAGE_AGE=${PLURX_JANITOR_IMAGE_AGE:-336h}
+BUILD_CACHE_AGE=${PLURX_JANITOR_BUILD_CACHE_AGE:-168h}
+STATE_DIR=${PLURX_JANITOR_STATE_DIR:-/var/lib/plurx-ci-janitor}
+# Overridable only so the contract test can build a cgroup tree it owns.
+CGROUP_ROOT=${PLURX_JANITOR_CGROUP_ROOT:-/sys/fs/cgroup}
+dry_run=false
+
+say() { printf 'plurx-ci-janitor: %s\n' "$*"; }
+
+usage() {
+  cat <<'EOF'
+Usage: plurx-ci-janitor [--dry-run] [--budget-gb N]
+
+Resets any Forgejo runner cache server on this host that is over budget, or
+whose filesystem is below its reserve, and prunes Docker when the disk is still
+short. Reports what it did to the journal and to
+/var/lib/plurx-ci-janitor/last-run.json.
+
+  --dry-run      decide and report, delete nothing
+  --budget-gb N  cache-server budget in whole gigabytes (default 20)
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --dry-run) dry_run=true; shift ;;
+    --budget-gb) BUDGET_GB=${2:-}; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "plurx-ci-janitor: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+[[ "$BUDGET_GB" =~ ^[1-9][0-9]*$ ]] || {
+  echo "plurx-ci-janitor: budget must be whole gigabytes" >&2; exit 2
+}
+# Same guard, and it matters more: an empty or negative REQUIRED_GB does not
+# fail, it quietly degrades the reserve back to the 20 % rule that let
+# `gha-nuc4-general-01` sit refused at 18 G free while this reported healthy.
+# A bound that silently cannot be met is the failure this whole change is about.
+[[ "$REQUIRED_GB" =~ ^[1-9][0-9]*$ ]] || {
+  echo "plurx-ci-janitor: required space must be whole gigabytes" >&2; exit 2
+}
+
+# The reserve, which is the whole point of the janitor and was the whole bug.
+#
+# It started as 20 % of the filesystem with a 10 GiB minimum capped at a quarter
+# -- the cap because a *fixed* reserve was the previous bug, 100 GiB on a 78 GB
+# runner guest being a rule that can never be satisfied, so the pruner deleted
+# everything it was allowed to and failed anyway.
+#
+# What that missed is that a job is refused against a different number. The
+# preflight demands REQUIRED_GB (25) and this reserved 20 % -- 15.6 G on a 78 GB
+# guest -- so between those two figures the fleet refuses jobs while the janitor
+# reports every runner healthy and reclaims nothing. `gha-nuc4-general-01` sat
+# in that band on 2026-09-08 with 18 G free: two jobs refused, `18G >= 15.6G`,
+# nothing done, and the same failure on every re-push because the labels pin the
+# job to that guest. The band is the defect.
+#
+# So the reserve is at least what a job is required to have. The half-filesystem
+# cap keeps the original lesson: a requirement larger than that cannot be freed
+# by deleting caches, and chasing it would delete everything and fail anyway --
+# it is said out loud instead, because a bound that silently cannot be met is
+# how this went wrong the first time.
+floor_kb_for() {
+  local path filesystem_kb percent minimum quarter required half
+  path=$1
+  filesystem_kb=$(df -Pk "$path" | awk 'NR == 2 { print $2 }')
+  percent=$(((filesystem_kb + 4) / 5))
+  minimum=$((10 * 1024 * 1024))
+  quarter=$(((filesystem_kb + 3) / 4))
+  [ "$minimum" -le "$quarter" ] || minimum=$quarter
+  [ "$percent" -ge "$minimum" ] || percent=$minimum
+
+  # A demand the filesystem cannot meet is dropped -- it does not become the
+  # reserve. Capping it to half the disk instead was worse than doing nothing:
+  # on any volume under 50 GiB, `min(25G, half)` IS half, so the smallest hosts
+  # in the fleet would carry the most aggressive reserve this script has ever
+  # kept, and would prune hourly, forever, chasing a figure the message in the
+  # same breath calls unreachable. A host that cannot free enough for a lane is
+  # a placement problem, not a pruning one.
+  #
+  # `-gt`, not `-ge`: at exactly half, the demand IS meetable -- a 50 GiB
+  # volume can hold under 25 G -- and dropping it there would silently return
+  # this host to the 20 % rule that caused the incident.
+  #
+  # Saying so is `note_unreachable_demand`'s job, not this function's. This one
+  # is only ever called as `$(floor_kb_for ...)`, and a command substitution is
+  # a subshell: a "have I said this already" flag set in here never reaches the
+  # parent, so the message would repeat once per runner plus once for Docker
+  # while a test with one runner and no Docker saw it exactly once and passed.
+  required=$((REQUIRED_GB * 1024 * 1024))
+  half=$((filesystem_kb / 2))
+  [ "$required" -gt "$half" ] && required=0
+  [ "$percent" -ge "$required" ] && { echo "$percent"; return; }
+  echo "$required"
+}
+
+available_kb_for() { df -Pk "$1" | awk 'NR == 2 { print $4 }'; }
+
+# Said once per pass, from the parent shell, because `floor_kb_for` cannot say
+# it (see the note there). A filesystem in this state is running on the 20 %
+# rule rather than the reserve that was configured for it, which is the
+# original defect narrowed to one volume -- so it is named out loud rather than
+# left in the difference between two numbers nobody prints.
+#
+# It takes the floor that was actually used rather than recomputing it. An
+# earlier version re-derived `percent` here and skipped the 10 GiB minimum that
+# `floor_kb_for` applies, so on a 40 GiB volume it announced an 8 G reserve
+# while the script kept 10 G -- two copies of the same rule, disagreeing on
+# their first outing, on exactly the small hosts the message exists for.
+unreachable_reported=false
+# Counts CHECKS, not distinct filesystems: once per runner instance plus once
+# for Docker. Runners sharing one volume -- the ordinary shape -- are counted
+# once each, so a four-runner host on a single short volume reads 5. Deduping
+# by mount point would need a fifth `df` per instance to buy a number nobody
+# acts on differently: non-zero already means "something here is on the
+# percentage rule", which is the whole signal. Named for what it is instead.
+demand_dropped=0
+note_unreachable_demand() {
+  local path floor_kb filesystem_kb half
+  path=$1
+  floor_kb=$2
+  filesystem_kb=$(df -Pk "$path" | awk 'NR == 2 { print $2 }')
+  half=$((filesystem_kb / 2))
+  [ "$((REQUIRED_GB * 1024 * 1024))" -gt "$half" ] || return 0
+  demand_dropped=$((demand_dropped + 1))
+  [ "$unreachable_reported" = false ] || return 0
+  say "a job needs ${REQUIRED_GB}G and $path holds $((filesystem_kb / 1024 / 1024))G; no amount of pruning reaches that, so this filesystem keeps its $((floor_kb / 1024 / 1024))G reserve and cannot run that lane" >&2
+  unreachable_reported=true
+}
+
+# Idle means the unit's cgroup holds nothing but the daemon itself. A running
+# job is a tree of shells and compilers under that same cgroup, so this is a
+# local answer that needs no API token on a runner host.
+unit_is_idle() {
+  local unit main_pid procs
+  unit=$1
+  main_pid=$(systemctl show -p MainPID --value "$unit" 2>/dev/null || echo 0)
+  [ "$main_pid" != 0 ] || return 1
+  procs=$(systemctl show -p ControlGroup --value "$unit" 2>/dev/null)
+  [ -n "$procs" ] || return 1
+  procs="${CGROUP_ROOT}${procs}/cgroup.procs"
+  [ -r "$procs" ] || return 1
+  [ "$(wc -l < "$procs")" -eq 1 ] && [ "$(cat "$procs")" = "$main_pid" ]
+}
+
+# `cache.dir` out of the runner's own config.yml, so this follows a runner that
+# was deployed somewhere unusual rather than guessing a path.
+cache_dir_for_config() {
+  awk '
+    /^[a-z]/ { in_cache = ($0 ~ /^cache:/) }
+    in_cache && /^[[:space:]]+dir:/ {
+      sub(/^[[:space:]]+dir:[[:space:]]*/, "")
+      gsub(/^"|"$|^'"'"'|'"'"'$/, "")
+      print
+      exit
+    }
+  ' "$1"
+}
+
+stop_runner() {
+  local unit
+  unit=$1
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$STOP_TIMEOUT" systemctl stop "$unit"
+  else
+    # GNU coreutils `timeout` is present on the Linux runner hosts. macOS does
+    # not provide it, so keep the script testable and operable there while
+    # retaining the production stop bound wherever the command exists.
+    systemctl stop "$unit"
+  fi
+}
+
+reset_cache() {
+  local unit dir used_kb
+  unit=$1
+  dir=$2
+  used_kb=$3
+
+  if ! unit_is_idle "$unit"; then
+    say "$unit is running a job; leaving its $((used_kb / 1024 / 1024))G cache for the next pass"
+    return 0
+  fi
+  if [ "$dry_run" = true ]; then
+    say "would reset $dir ($((used_kb / 1024 / 1024))G) with $unit stopped"
+    return 0
+  fi
+
+  # Whatever happens between here and the end, the runner comes back. A janitor
+  # that leaves a runner stopped has taken a slot out of the fleet, which is a
+  # worse outcome than the disk it was reclaiming.
+  trap 'systemctl start "$unit" >/dev/null 2>&1 || true' RETURN
+  say "stopping $unit (graceful; up to ${STOP_TIMEOUT}s if a job is finishing)"
+  stop_runner "$unit" || {
+    say "$unit did not stop in ${STOP_TIMEOUT}s; leaving its cache alone"
+    return 0
+  }
+  # `set -e` would abort here on a delete that fails -- EBUSY on a leftover
+  # mount, EACCES on a file another uid owns -- and a RETURN trap does not run
+  # on shell exit, so the runner would stay stopped. That is the one invariant
+  # this script promises unconditionally, so the failure is reported and the
+  # restart happens either way.
+  rm -rf -- "$dir" || say "could not fully delete $dir; restarting $unit anyway"
+  systemctl start "$unit"
+  trap - RETURN
+  say "reset $dir, reclaimed $((used_kb / 1024 / 1024))G, $unit restarted"
+  reclaimed_kb=$((reclaimed_kb + used_kb))
+  reset_count=$((reset_count + 1))
+  return 0
+}
+
+reclaimed_kb=0
+instances=0
+over_budget=0
+reset_count=0
+short_after=0
+
+while IFS= read -r unit; do
+  [ -n "$unit" ] || continue
+  config=$(systemctl show -p ExecStart --value "$unit" 2>/dev/null |
+    tr ' ' '\n' | awk '/^-c$/ { want = 1; next } want { print; exit }')
+  [ -n "${config:-}" ] && [ -f "$config" ] || continue
+  dir=$(cache_dir_for_config "$config")
+  [ -n "${dir:-}" ] || continue
+
+  # Only ever a runner's cache server. Three things have to agree: the path
+  # names a runner root and ends in `cache`, it holds the bolt index that no
+  # other directory has, and it is not a symlink pointing somewhere else. A
+  # config that names anything else is skipped rather than trusted -- this
+  # deletes a directory whole, so the check is the whole safety argument.
+  case "$dir" in */*runner*/cache) ;; *) continue ;; esac
+  [ ! -L "$dir" ] && [ -d "$dir" ] || continue
+  # The index or the blob tree -- either proves what this directory is, and
+  # requiring both was wrong: `gha-nuc4-general-01` was carrying 13G of blobs
+  # with no `bolt.db` beside them, and the janitor walked straight past the
+  # fullest runner in the fleet reporting nothing at all.
+  [ -f "$dir/bolt.db" ] || [ -d "$dir/cache" ] || continue
+
+  instances=$((instances + 1))
+  used_kb=$(du -sk "$dir" | awk '{ print $1 }')
+  floor_kb=$(floor_kb_for "$dir")
+  note_unreachable_demand "$dir" "$floor_kb"
+  available_kb=$(available_kb_for "$dir")
+  budget_kb=$((BUDGET_GB * 1024 * 1024))
+
+  if [ "$used_kb" -le "$budget_kb" ] && [ "$available_kb" -ge "$floor_kb" ]; then
+    say "$unit: $((used_kb / 1024 / 1024))G cached, $((available_kb / 1024 / 1024))G free — within budget"
+    continue
+  fi
+  over_budget=$((over_budget + 1))
+  reset_before=$reset_count
+  reset_cache "$unit" "$dir" "$used_kb"
+
+  # And the part that was invisible: a reset that does not reach the floor. The
+  # janitor can only free the cache and Docker -- the OS, the toolchains and
+  # the 30 G Cargo cache are not its to take -- so a host whose freeable bytes
+  # are smaller than the gap will be stopped, wiped cold and left short, every
+  # hour, while `done:` reports a successful reset each time. Say it, and put
+  # it in the receipt.
+  #
+  # Only when a reset actually happened. `reset_cache` returns 0 whether it
+  # deleted anything or declined -- a busy runner, a stop that timed out -- and
+  # checking free space after a decline reported "still short after resetting
+  # what it may" about a cache that was never touched. A runner merely busy at
+  # the top of every hour would have carried `reset: 0, short_after: 1`
+  # forever, which reads as a host to re-provision and is the opposite
+  # conclusion.
+  if [ "$dry_run" != true ] && [ "$reset_count" -gt "$reset_before" ]; then
+    available_kb=$(available_kb_for "$dir")
+    if [ "$available_kb" -lt "$floor_kb" ]; then
+      say "$unit: still $((available_kb / 1024 / 1024))G free against a $((floor_kb / 1024 / 1024))G reserve after resetting what it may — this host cannot reach it by pruning" >&2
+      short_after=$((short_after + 1))
+    fi
+  fi
+done < <(systemctl list-units --type=service --no-legend --all 'forgejo-runner*' |
+  awk '{ print $1 }')
+
+# Docker last, and only under pressure. Nothing bounds the image store: every
+# packaging job loads a new `plurx/plurxd:ci-<arch>`, and nynuc was carrying
+# 101G of images with four of a hundred and thirty-one in use. The named
+# BuildKit builders are bounded per job, so only cache older than a week is
+# taken here — pruning it wholesale would throw away exactly the state the
+# packaging lane keeps warm on purpose.
+docker_pruned=false
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+  root=$(docker info --format '{{.DockerRootDir}}')
+  if [ -d "$root" ]; then
+    floor_kb=$(floor_kb_for "$root")
+    # Docker is usually on its own filesystem, and a demand dropped there was
+    # completely silent: a 45 GiB Docker volume drops a 25 G demand, falls back
+    # to the 10 G minimum, and reports "within reserve" at 12 G free while the
+    # configured reserve says otherwise. That is this branch's own defect, on
+    # the deleter with the widest blast radius. `unreachable_reported` makes
+    # this a no-op when Docker shares the runner volume.
+    note_unreachable_demand "$root" "$floor_kb"
+    available_kb=$(available_kb_for "$root")
+    if [ "$available_kb" -lt "$floor_kb" ]; then
+      if [ "$dry_run" = true ]; then
+        say "would prune Docker: $((available_kb / 1024 / 1024))G free, reserve $((floor_kb / 1024 / 1024))G"
+      else
+        say "pruning Docker: $((available_kb / 1024 / 1024))G free, reserve $((floor_kb / 1024 / 1024))G"
+        docker container prune -f >/dev/null || true
+        docker image prune -af --filter "until=$IMAGE_AGE" >/dev/null || true
+        docker builder prune -f --filter "until=$BUILD_CACHE_AGE" >/dev/null || true
+        docker_pruned=true
+        after_kb=$(available_kb_for "$root")
+        reclaimed_kb=$((reclaimed_kb + after_kb - available_kb))
+        say "Docker pruned, $((after_kb / 1024 / 1024))G free"
+      fi
+    else
+      say "Docker within reserve: $((available_kb / 1024 / 1024))G free"
+    fi
+  fi
+fi
+
+# The run is attributable afterwards, not only in the journal: what it looked
+# at, what it decided, and what that cost.
+if [ "$dry_run" != true ]; then
+  mkdir -p "$STATE_DIR"
+  printf '{"finished":"%s","host":"%s","instances":%d,"over_budget":%d,"reset":%d,"short_after":%d,"demand_dropped":%d,"reclaimed_gb":%d,"docker_pruned":%s,"budget_gb":%d,"required_gb":%d}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(hostname -s)" \
+    "$instances" "$over_budget" "$reset_count" "$short_after" "$demand_dropped" \
+    "$((reclaimed_kb / 1024 / 1024))" \
+    "$docker_pruned" "$BUDGET_GB" "$REQUIRED_GB" \
+    > "$STATE_DIR/last-run.json"
+fi
+say "done: $instances runner cache servers, $over_budget over budget, $reset_count reset, $short_after still short, $demand_dropped on the percentage rule, $((reclaimed_kb / 1024 / 1024))G reclaimed"

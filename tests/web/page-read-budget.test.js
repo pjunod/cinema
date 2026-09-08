@@ -651,6 +651,105 @@ test("Home render generations refuse out-of-order route completions", async () =
     "fifty libraries retain the same three-request Home budget as one library");
 });
 
+test("Live TV issues exactly two authoritative reads, and the guide never gates the first", async () => {
+  // The lineup is what makes the page usable and a channel tunable; the guide
+  // only fills in what is on. A page that waited on the guide would be a page
+  // that cannot tune while a guide host is slow.
+  const view = shippedSource("viewLiveTv");
+  assert.match(view, /setPagePhase\(route,generation,"shell"\)/);
+  assert.match(view, /setPagePhase\(route,generation,"settled"\)/);
+  // The guide load is issued without `await`, after the phase is settled.
+  const settledAt = view.indexOf('setPagePhase(route,generation,"settled")');
+  const guideAt = view.indexOf("loadLiveTvGuide(");
+  assert.ok(guideAt > settledAt, "the guide read must not delay the settled phase");
+  assert.doesNotMatch(view, /await\s+loadLiveTvGuide/);
+
+  const reads = [];
+  const api = (url) => { reads.push(url); return Promise.resolve({ channels: [], freshness: "fresh", age_seconds: 0 }); };
+  const nodes = {};
+  const element = () => ({ innerHTML: "", hidden: false, dataset: {}, style: {},
+    classList: { add() {}, remove() {}, contains: () => false },
+    getBoundingClientRect: () => ({ left: 0, top: 0, width: 640, height: 360 }) });
+  const document = { getElementById: (id) => (nodes[id] = nodes[id] || element()) };
+  const harness = new Function(
+    "document", "api", "esc", "AbortSignal",
+    `let PAGE_RENDER_GENERATION=1;
+     const location={hash:"#/live-tv"};
+     const LIVE_TV={channels:[],guide:null,selected:null};
+     const LIVE_TV_LEASE={current:null};
+     function layoutChrome(){} function setPagePhase(){} function liveTvWireHost(){}
+     function liveTvPref(){ return null; } function liveTvSetMode(){}
+     function liveTvHost(){ return document.getElementById("live-tv-host"); }
+     function liveTvChannelById(){ return null; }
+     function liveTvToolbar(){ return ""; }
+     function renderLiveTvChannels(){}
+     function setPageTimer(){}
+     function liveTvMessage(){} function liveTvFailure(){}
+     ${shippedTopLevelSource("viewLiveTv")};
+     ${shippedTopLevelSource("loadLiveTvGuide")};
+     return viewLiveTv;`,
+  )(document, api, (v) => String(v), { timeout: () => null });
+
+  await harness(1);
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(reads, ["/live-tv/channels", "/live-tv/guide"],
+    "the page reads the lineup and the guide, in that order, and nothing else");
+});
+
+test("Live TV docks on leaving the route instead of tearing the stream down", () => {
+  const leave = shippedTopLevelSource("liveTvLeaveRoute");
+  const host = { hidden: false, dataset: { mode: "slot" }, style: {} };
+  const modes = [];
+  const make = (playing, starting) => new Function(
+    "document", "LIVE_TV_LEASE", "LIVE_TV", "liveTvSetMode",
+    `function liveTvHost(){ return document.getElementById("live-tv-host"); }
+     ${leave} return liveTvLeaveRoute;`,
+  )({ getElementById: () => host }, { current: playing ? { session_id: "cap" } : null },
+    { starting: starting ? 1 : null }, (mode) => modes.push(mode));
+
+  make(true, false)();
+  assert.deepEqual(modes, ["dock"], "a playing stream follows the viewer off the route");
+  assert.equal(host.hidden, false);
+
+  // A start still in flight has no lease yet and must dock all the same: the
+  // tuner it is about to be granted needs somewhere to appear and a Stop.
+  modes.length = 0;
+  host.hidden = false;
+  make(false, true)();
+  assert.deepEqual(modes, ["dock"], "a tuner about to be granted is not abandoned");
+  assert.equal(host.hidden, false);
+
+  modes.length = 0;
+  make(false, false)();
+  assert.deepEqual(modes, [], "nothing playing and nothing starting means nothing to dock");
+  assert.equal(host.hidden, true);
+
+  // And the router calls it instead of stopping, which is the whole change.
+  assert.match(SHIPPED_UI, /if\(h!=="#\/live-tv"\) liveTvLeaveRoute\(\);/);
+  // Stopping stays explicit and still takes the picture away.
+  assert.match(shippedSource("stopLiveTv"), /getElementById\("live-tv-host"\).*hidden=true/s);
+});
+
+test("picture-in-picture keeps the lease alive that hiding would have dropped", () => {
+  // Entering PiP hides the document. The old rule stopped Live TV on hide,
+  // which would have killed the one case PiP exists for; the keepalive guard
+  // had the same shape and would have stopped renewing a tuner that is in use.
+  assert.match(SHIPPED_UI,
+    /visibilityState==="hidden"&&location\.hash==="#\/live-tv"&&!liveTvInPip\(\)/);
+  assert.match(SHIPPED_UI,
+    /document\.visibilityState!=="hidden"\|\|liveTvInPip\(\)\) await LIVE_TV_LEASE\.keepalive\(\)/);
+
+  const video = { webkitPresentationMode: "inline" };
+  const isPip = new Function(
+    "document",
+    `${shippedTopLevelSource("liveTvInPip")} return liveTvInPip;`,
+  )({ getElementById: () => video, pictureInPictureElement: null });
+  assert.equal(isPip(), false);
+  video.webkitPresentationMode = "picture-in-picture";
+  assert.equal(isPip(), true, "Safari reports PiP on the element, not the document");
+});
+
 test("Activity stale loads cannot install the page timer", async () => {
   const activityLocation = { hash: "#/activity" };
   const activityLoads = [];

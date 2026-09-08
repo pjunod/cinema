@@ -99,6 +99,9 @@ pub fn router(state: AppState) -> Router {
             post(live_tv::refresh_readiness),
         )
         .route("/live-tv/channels", get(live_tv::channels))
+        .route("/live-tv/guide", get(live_tv::guide_document))
+        .route("/live-tv/guide/refresh", post(live_tv::refresh_guide))
+        .route("/live-tv/guide/readiness", get(live_tv::guide_readiness))
         .route(
             "/live-tv/channels/{channel}/sessions",
             post(live_tv::start_session),
@@ -499,6 +502,12 @@ pub fn router(state: AppState) -> Router {
         .route(
             crate::live_tv::DRAIN_PATH,
             post(internal_live_tv::drain).layer(DefaultBodyLimit::max(
+                crate::live_tv::MAX_INTERNAL_BODY_BYTES,
+            )),
+        )
+        .route(
+            crate::live_tv::GUIDE_PATH,
+            post(internal_live_tv::guide).layer(DefaultBodyLimit::max(
                 crate::live_tv::MAX_INTERNAL_BODY_BYTES,
             )),
         )
@@ -1071,7 +1080,9 @@ mod tests {
             (Method::GET, "/api/v1/settings"),
             (Method::GET, "/api/v1/live-tv/readiness"),
             (Method::GET, "/api/v1/live-tv/channels"),
+            (Method::GET, "/api/v1/live-tv/guide"),
             (Method::POST, "/api/v1/live-tv/readiness/refresh"),
+            (Method::POST, "/api/v1/live-tv/guide/refresh"),
             (Method::POST, crate::live_tv::SNAPSHOT_PATH),
             // Advisory administration, and its cluster rows read the local
             // applied roster. A learner answering it would report a roster
@@ -1194,12 +1205,15 @@ mod tests {
             (Method::POST, crate::media_sessions::ACTIVATE_PATH),
             (Method::GET, "/api/v1/live-tv/readiness"),
             (Method::GET, "/api/v1/live-tv/channels"),
+            (Method::GET, "/api/v1/live-tv/guide"),
             (Method::POST, "/api/v1/live-tv/readiness/refresh"),
             (Method::GET, "/api/v1/developer/readiness"),
+            (Method::POST, "/api/v1/live-tv/guide/refresh"),
             (Method::POST, crate::live_tv::SNAPSHOT_PATH),
             (Method::POST, crate::live_tv::START_PATH),
             (Method::POST, crate::live_tv::ACTIVATE_PATH),
             (Method::POST, crate::live_tv::DRAIN_PATH),
+            (Method::POST, crate::live_tv::GUIDE_PATH),
             (Method::POST, "/api/v1/cluster/join-tokens"),
             (Method::DELETE, "/api/v1/cluster/nodes/node-b"),
             (Method::POST, "/api/v1/libraries"),
@@ -1639,6 +1653,7 @@ mod tests {
             "/library/metadata/7/thumb",
             "/photo/:/transcode",
             "/api/v1/live-tv/channels",
+            "/api/v1/live-tv/guide",
         ] {
             let response = app
                 .clone()
@@ -3732,6 +3747,180 @@ mod tests {
         assert_eq!(status, StatusCode::CONFLICT, "{mixed_enable}");
     }
 
+    /// Readiness is advisory (2026-09-07). Structural invariants still refuse:
+    /// an enable with no address is a 400 above, and a stale generation is a
+    /// 409. But "the tuner did not answer just now" is a thing the operator is
+    /// *told*, not a thing they are held to — a feature nobody can switch on
+    /// is a feature nobody can diagnose.
+    #[tokio::test]
+    async fn live_tv_enable_reports_unmet_readiness_without_refusing_the_enable() {
+        let (app, _state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        let (status, initial) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{initial}");
+        let owner = initial["live_tv_owner_node_id"]
+            .as_str()
+            .expect("owner node");
+
+        let (status, saved) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({
+                    "live_tv_device_ipv4": "192.168.4.20",
+                    "live_tv_owner_node_id": owner,
+                    "live_tv_config_generation": 0
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+
+        // Nothing on 192.168.4.20 answers in a test process, so every device
+        // readiness check is red. The enable still lands.
+        let (status, enabled) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({
+                    "live_tv_enabled": true,
+                    "live_tv_config_generation": 1
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "an unreachable tuner must not be able to hold the switch down: {enabled}"
+        );
+        assert_eq!(enabled["live_tv_enabled"], json!(true));
+        assert_eq!(enabled["live_tv_config_generation"], json!(2));
+
+        // And the structural refusals are untouched by that change.
+        let (status, no_address) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({
+                    "live_tv_enabled": false,
+                    "live_tv_device_ipv4": "",
+                    "live_tv_config_generation": 2
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{no_address}");
+    }
+
+    /// The three guide keys are information settings: same generation CAS,
+    /// but they do not have to wait for a maintenance window, because turning
+    /// a read-only feed on cannot take a tuner away from anybody.
+    #[tokio::test]
+    async fn live_tv_guide_settings_save_while_enabled_and_are_still_validated() {
+        let (app, _state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        let (_, initial) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+        assert_eq!(initial["live_tv_guide_source"], json!("off"));
+        assert_eq!(initial["live_tv_guide_hours"], json!(24));
+        let owner = initial["live_tv_owner_node_id"]
+            .as_str()
+            .expect("owner node");
+
+        let (status, _) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({
+                    "live_tv_device_ipv4": "192.168.4.20",
+                    "live_tv_owner_node_id": owner,
+                    "live_tv_config_generation": 0
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({"live_tv_enabled": true, "live_tv_config_generation": 1}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, guide) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({
+                    "live_tv_guide_source": "hdhomerun",
+                    "live_tv_guide_hours": 48,
+                    "live_tv_config_generation": 2
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "an information setting must not require draining viewers: {guide}"
+        );
+        assert_eq!(guide["live_tv_guide_source"], json!("hdhomerun"));
+        assert_eq!(guide["live_tv_guide_hours"], json!(48));
+        assert_eq!(guide["live_tv_enabled"], json!(true));
+        assert_eq!(guide["live_tv_config_generation"], json!(3));
+
+        // A tuner setting still cannot ride along while enabled.
+        let (status, tuner) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({"live_tv_max_sessions": 1, "live_tv_config_generation": 3}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{tuner}");
+
+        for (body, reason) in [
+            (
+                json!({"live_tv_guide_source": "sideloaded", "live_tv_config_generation": 3}),
+                "unknown source",
+            ),
+            (
+                json!({"live_tv_guide_source": "xmltv", "live_tv_config_generation": 3}),
+                "xmltv with no URL",
+            ),
+            (
+                json!({"live_tv_xmltv_url": "file:///etc/passwd", "live_tv_config_generation": 3}),
+                "non-http URL",
+            ),
+            (
+                json!({"live_tv_xmltv_url": "https://u:p@x.invalid/g.xml", "live_tv_config_generation": 3}),
+                "URL with userinfo",
+            ),
+            (
+                json!({"live_tv_guide_hours": 200, "live_tv_config_generation": 3}),
+                "look-ahead out of range",
+            ),
+        ] {
+            let (status, refused) = call(&app, put("/api/v1/settings", Some(&admin), body)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{reason}: {refused}");
+        }
+
+        let (_, unchanged) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+        assert_eq!(unchanged["live_tv_guide_source"], json!("hdhomerun"));
+        assert_eq!(unchanged["live_tv_config_generation"], json!(3));
+    }
+
     #[tokio::test]
     async fn live_tv_dead_owner_disable_preserves_barrier_across_edits_and_exact_recovery() {
         use plurx_core::store::keys;
@@ -4206,6 +4395,90 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    /// The Settings→login-page bounce, as a request pair.
+    ///
+    /// `/cluster/status` is guarded by the Store-free proof cache. When the
+    /// cluster has not finished activating the credential-revocation protocol
+    /// that cache is fenced closed on every node and holds nothing at all, and
+    /// the guard used to read that emptiness as a verdict on the caller: it
+    /// answered 401, the web client answered a 401 by ending the session, and
+    /// an administrator whose Settings page remembered the Cluster section was
+    /// thrown at the login screen on every attempt — with a valid credential,
+    /// over a fault in the cluster they were opening the page to look at.
+    ///
+    /// Three callers, three different answers, and only one of them is 401.
+    #[tokio::test]
+    async fn a_closed_recovery_proof_refuses_by_condition_never_by_credential() {
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        call(
+            &app,
+            post(
+                "/api/v1/users",
+                Some(&admin),
+                json!({ "username": "viewer", "password": "longenough" }),
+            ),
+        )
+        .await;
+        let (_, login) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({ "username": "viewer", "password": "longenough" }),
+            ),
+        )
+        .await;
+        let viewer = login["token"].as_str().expect("viewer token").to_owned();
+
+        // Close the cache the way the fleet closed it: the protocol readiness
+        // projection answered false, which clears every proof and refuses to
+        // publish another.
+        state
+            .cache_only_admin_proofs
+            .set_cluster_revocation_capability_ready(false);
+
+        let (status, body) = call(&app, get("/api/v1/cluster/status", Some(&admin))).await;
+        assert_ne!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "a closed proof cache is this node's condition, not a bad credential — \
+             answering 401 is what ended the operator's session: {body}"
+        );
+        assert_ne!(
+            status,
+            StatusCode::FORBIDDEN,
+            "the Store still knows this admin: {body}"
+        );
+        // Past the guard and inside the handler: this standalone test state has
+        // no committed roster to report, and that refusal — the handler's own,
+        // named — is the proof the request was authorized.
+        assert_eq!(
+            body["code"], "cluster_roster_unavailable",
+            "the recovery read reached its handler: {body}"
+        );
+
+        let (status, _) = call(&app, get("/api/v1/cluster/status", Some(&viewer))).await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "a viewer is refused for who they are, and that is not a session-ending answer"
+        );
+
+        let (status, _) = call(&app, get("/api/v1/cluster/status", Some("not-a-token"))).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "only a credential the Store has no row for is unauthorized"
+        );
+
+        // The support bundle carries the same guard and must answer the same
+        // way; it is the other half of what an operator reaches for here.
+        let (status, body) = call(&app, get("/api/v1/cluster/support-bundle", Some(&admin))).await;
+        assert_ne!(status, StatusCode::UNAUTHORIZED, "{body}");
+        assert_ne!(status, StatusCode::FORBIDDEN, "{body}");
     }
 
     #[tokio::test]

@@ -170,7 +170,6 @@ jobs:
         uses: ./.github/actions/cargo-cache
         with:
           lane: rust-gate
-          execution-mode: ${{ needs.scope.outputs.execution_mode }}
       - name: Run format, Clippy, unit, and SQLite contracts
         run: make ci-rust-gate
       - name: Enforce persistent Cargo bounds
@@ -196,8 +195,6 @@ jobs:
         uses: ./.github/actions/cargo-cache
         with:
           lane: cluster-store-legacy
-          execution-mode: ${{ needs.scope.outputs.execution_mode }}
-          persistent-eligible: "true"
       - name: Run replicated Store contracts
         id: store_contracts
         continue-on-error: true
@@ -327,8 +324,6 @@ jobs:
         uses: ./.github/actions/cargo-cache
         with:
           lane: cluster-topology
-          execution-mode: ${{ needs.scope.outputs.execution_mode }}
-          persistent-eligible: "true"
       - name: Run replicated topology contracts
         id: topology_contracts
         continue-on-error: true
@@ -421,7 +416,12 @@ jobs:
     needs: [scope, preflight]
     if: needs.scope.outputs.cluster_auth == 'true'
     runs-on: [self-hosted, Linux, X64, lab, ci-topology]
-    timeout-minutes: 120
+    # A voter recovery is ~4.7 min on this two-core runner (main run 4284:
+    # cycles at 16:38, 16:43, 16:47, 16:52), so the twenty-one voter cycles
+    # alone are ~100 min and the learner half follows them. No Forgejo run
+    # of this lane has ever reached the learner campaign, so 120 would have
+    # timed out the first campaign that got past the resource check.
+    timeout-minutes: 240
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v4
       - uses: https://github.com/dtolnay/rust-toolchain@1.97.1
@@ -429,8 +429,6 @@ jobs:
         uses: ./.github/actions/cargo-cache
         with:
           lane: cluster-transport-recovery
-          execution-mode: ${{ needs.scope.outputs.execution_mode }}
-          persistent-eligible: "true"
       - name: Run 20 learner and 20 voter snapshot recovery cycles
         id: transport_recovery
         continue-on-error: true
@@ -491,7 +489,6 @@ jobs:
         uses: ./.github/actions/cargo-cache
         with:
           lane: cluster-wal
-          execution-mode: ${{ needs.scope.outputs.execution_mode }}
       - name: Run exact Hiqlite and WAL recovery regressions
         run: make cluster-wal-check
       - name: Enforce persistent Cargo bounds
@@ -515,7 +512,6 @@ jobs:
         uses: ./.github/actions/cargo-cache
         with:
           lane: cluster-daemon
-          execution-mode: ${{ needs.scope.outputs.execution_mode }}
       - uses: ./.github/actions/ffmpeg
         with:
           major: "6"
@@ -548,7 +544,6 @@ jobs:
         uses: ./.github/actions/cargo-cache
         with:
           lane: web-layout
-          execution-mode: ${{ needs.scope.outputs.execution_mode }}
       # Pinned so the browser-bundle cache key below is meaningful; bump both
       # together. A cache hit skips the ~150 MB Chromium download every run.
       - name: Cache Playwright browsers
@@ -595,7 +590,6 @@ jobs:
         uses: ./.github/actions/cargo-cache
         with:
           lane: vod-web
-          execution-mode: ${{ needs.scope.outputs.execution_mode }}
           # This lane carries Playwright browsers and an ffmpeg build on top
           # of the 21G workspace tree, and it is the one that passed the
           # default check and then filled the disk mid-build.
@@ -623,9 +617,9 @@ jobs:
           scripts/playback-lab run --suite vod --case suspend-resume --browser chrome \
             --chrome "$chrome" --json target/playback-lab/acceptance/vod.json
           # Steady, seek-storm, and stall-recovery are intentionally out of CI.
-          # See docs/VOD-STEADY-ACCEPTANCE-HANDOFF.md,
-          # docs/VOD-SEEK-STORM-ACCEPTANCE-HANDOFF.md, and
-          # docs/VOD-STALL-ACCEPTANCE-HANDOFF.md for restoration prompts.
+          # See docs/streaming/VOD-STEADY-ACCEPTANCE-HANDOFF.md,
+          # docs/streaming/VOD-SEEK-STORM-ACCEPTANCE-HANDOFF.md, and
+          # docs/streaming/VOD-STALL-ACCEPTANCE-HANDOFF.md for restoration prompts.
       - name: Enforce persistent Cargo bounds
         if: always() && steps.cargo-cache.outputs.local == 'true'
         uses: ./.github/actions/cargo-cache-finalize
@@ -879,7 +873,6 @@ jobs:
         uses: ./.github/actions/cargo-cache
         with:
           lane: coverage
-          execution-mode: ${{ needs.scope.outputs.execution_mode }}
       - uses: https://github.com/taiki-e/install-action@cargo-llvm-cov
       # Instrumented or not, this runs the same suite as the check job, so it
       # needs the same ffmpeg.
@@ -975,8 +968,6 @@ jobs:
         uses: ./.github/actions/buildx-cache
         with:
           lane: package-smoke-${{ matrix.arch }}
-          execution-mode: ${{ needs.scope.outputs.execution_mode }}
-          persistent-eligible: ${{ matrix.arch == 'arm64' && 'true' || 'false' }}
       - name: Derive the binary-only Bookworm build
         run: >-
           python3 -m validation.release_dockerfile --binary-export

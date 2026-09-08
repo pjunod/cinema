@@ -171,16 +171,47 @@ class OperationsContractCase(unittest.TestCase):
     def test_ui_baseline_starts_poll_observation_after_route_settles(self):
         script = read("scripts/ui-baseline")
 
-        self.assertIn(
-            'if name in {"home", "activity", "analysis", "settings", "settings-developer", "live-tv"}:', script
+        # The contract is that every route publishing a settled phase is waited
+        # on before the polling observation window opens — not that the set is
+        # spelled on one line. Pinning the literal made adding a route a
+        # two-file edit whose second file had nothing to do with the change.
+        settled_gate = re.search(
+            r"if name in \{([^}]*)\}:\s*\n\s*page\.wait_for_selector\(", script
         )
+        self.assertIsNotNone(settled_gate, "ui-baseline no longer gates on the settled phase")
+        waited = set(re.findall(r'"([^"]+)"', settled_gate.group(1)))
+        for route in ("home", "activity", "analysis", "settings", "settings-developer",
+                      "live-tv", "live-tv-grid"):
+            self.assertIn(route, waited, f"{route} publishes a settled phase but is not waited on")
         self.assertIn('[data-phase="settled"]', script)
         self.assertIn('wait_until="domcontentloaded"', script)
         self.assertIn("activity_poll_paused = pause_activity_polling", script)
         self.assertIn('page.wait_for_load_state("networkidle"', script)
         self.assertIn("resume_activity_polling(page)", script)
-        self.assertIn('api_calls.count("GET /api/v1/scan/status") < 3', script)
-        self.assertIn('api_calls.count("GET /api/v1/activity") < 2', script)
+        # The settings tick budget is enforced inside the page, not by counting
+        # requests from Python. A count read over a round trip cannot bound a
+        # 2s timer: on a starved runner it is handed the total only after the
+        # interval has fired again, and the golden then fails on
+        # `GET /api/v1/scan/status 3 -> 4` with nothing about the page changed.
+        # So what this pins is the clamp and the boundary the capture waits on.
+        self.assertIn("window.__plurxSettingsScanTicks >= 2", script)
+        self.assertIn("window.__plurxSettingsScanCaptureTick = true", script)
+        self.assertIn(
+            '"() => window.__plurxSettingsScanCaptureTick === true"', script
+        )
+        self.assertNotIn(
+            'api_calls.count("GET /api/v1/scan/status") <', script,
+            "the settings poll budget must not go back to a Python-side count",
+        )
+        # Settings waits for the activity fetch to finish like every other
+        # route. It used to be excluded, so the recorders could run while the
+        # response was in flight and re-render the page under the tab walk.
+        self.assertIn("if activity_poll_paused:", script)
+        self.assertIn(
+            "window.__plurxGlobalActivityCaptureTick === true && !ACT_POLLING",
+            script,
+        )
+        self.assertNotIn('if activity_poll_paused and name != "settings":', script)
         self.assertIn('if name == "analysis":', script)
         self.assertIn("if (PAGE_TIMER) clearInterval(PAGE_TIMER);", script)
         self.assertIn("if (ACT_TIMER) clearInterval(ACT_TIMER);", script)
@@ -1283,7 +1314,7 @@ assert.equal(context.ACT_TIMER, null);
         self.assertNotIn("group: plurx-browser-heavy", web_layout)
         self.assertNotIn("group: plurx-browser-heavy", vod_web)
         self.assertIn("--case suspend-resume", vod_web)
-        self.assertIn("docs/VOD-STEADY-ACCEPTANCE-HANDOFF.md", vod_web)
+        self.assertIn("docs/streaming/VOD-STEADY-ACCEPTANCE-HANDOFF.md", vod_web)
         self.assertIn(
             "if: needs.scope.outputs.release_build == 'true' || "
             "needs.scope.outputs.container == 'true'",
@@ -2178,7 +2209,10 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("runs-on: [self-hosted, Linux, X64, lab, ci-store]", job)
         self.assertIn("uses: https://github.com/dtolnay/rust-toolchain@1.97.1", job)
         self.assertIn("lane: cluster-store-backstop", job)
-        self.assertIn('persistent-eligible: "true"', job)
+        # No eligibility input any more: a self-hosted runner always gets the
+        # bounded runner-local cache, and always enforces it on the way out.
+        self.assertNotIn("persistent-eligible", job)
+        self.assertIn("uses: ./.github/actions/cargo-cache-finalize", job)
         self.assertEqual(job.count("make cluster-store-check"), 2)
         self.assertNotIn("validation.store_shard run", job)
         self.assertNotIn("--exact", job)
@@ -2232,9 +2266,9 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("DOCKER_ARCH: ${{ matrix.docker_machine }}", package)
         self.assertIn("docker_machine: aarch64", package)
         self.assertIn("linux/$DOCKER_ARCH", proof)
+        self.assertNotIn("persistent-eligible", package)
         self.assertIn(
-            "persistent-eligible: ${{ matrix.arch == 'arm64' && 'true' || 'false' }}",
-            package,
+            'run: scripts/ci-buildkit-prune "$BUILDER_NAME" 50', package
         )
         self.assertIn("package_smoke", workflow_job_needs(pr_gate))
         self.assertNotIn("native_arm_shadow", jobs)
@@ -2403,10 +2437,12 @@ assert.equal(context.ACT_TIMER, null);
         )[0]
         self.assertIn("uses: ./.github/actions/cargo-cache", store)
         self.assertIn("lane: cluster-store-legacy", store)
-        self.assertIn('persistent-eligible: "true"', store)
+        self.assertNotIn("persistent-eligible", store)
+        self.assertIn("uses: ./.github/actions/cargo-cache-finalize", store)
         self.assertIn("uses: ./.github/actions/cargo-cache", topology)
         self.assertIn("lane: cluster-topology", topology)
-        self.assertIn('persistent-eligible: "true"', topology)
+        self.assertNotIn("persistent-eligible", topology)
+        self.assertIn("uses: ./.github/actions/cargo-cache-finalize", topology)
         self.assertIn(
             "Resolve pinned Rust executables for the long contract run", topology
         )
@@ -2441,7 +2477,7 @@ assert.equal(context.ACT_TIMER, null);
 
         self.assertEqual(len(make_commands), 15)
         self.assertEqual(make_commands[0], 'test "$(uname -s)" = Linux')
-        self.assertIn("PLURX_EXPECT_TEST_COUNT=27", make_commands[1])
+        self.assertIn("PLURX_EXPECT_TEST_COUNT=40", make_commands[1])
         self.assertIn("scripts/require-test-count", make_commands[1])
         self.assertIn("transport_recovery::tests --lib", make_commands[1])
         exact_regressions = (
@@ -2476,7 +2512,8 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("runs-on: [self-hosted, Linux, X64, lab, ci-topology]", recovery)
         self.assertIn("rust-toolchain@1.97.1", recovery)
         self.assertIn("lane: cluster-transport-recovery", recovery)
-        self.assertIn('persistent-eligible: "true"', recovery)
+        self.assertNotIn("persistent-eligible", recovery)
+        self.assertIn("uses: ./.github/actions/cargo-cache-finalize", recovery)
         self.assertIn("make cluster-transport-recovery-check", recovery)
         self.assertIn("PLURX_BUILD_SHA: ${{ github.sha }}", recovery)
         self.assertIn("cluster-transport-recovery-receipt.json", recovery)

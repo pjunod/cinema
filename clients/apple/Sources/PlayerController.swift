@@ -564,7 +564,7 @@ struct StallReopenTicket: Equatable {
 /// at or below the ladder floor is answered with the rung it is already on,
 /// every time, and the server counts nothing and raises no terminal error —
 /// bounding it there would need the per-playback retry state the contract
-/// forbids (docs/ADAPTIVE-QUALITY.md, "Native stall-reopen server boundary").
+/// forbids (docs/streaming/ADAPTIVE-QUALITY.md, "Native stall-reopen server boundary").
 /// Without a budget here a starved link reopens the floor rung forever.
 ///
 /// The floor is the predecessor's own rung, never 360: a sub-360 source and a
@@ -1732,6 +1732,41 @@ final class PlayerController: ObservableObject {
     private var seekPresentationLifecycle: [AnyCancellable] = []
     private var seekPresentationBackgrounded = false
     private var seekVideoOutput: AVPlayerItemVideoOutput?
+    // MARK: the second pipeline
+    //
+    //  player          -- authoritative, audible, on the layer --> viewer
+    //  preparedPlayer  -- muted, no layer, priming ------------->  nothing
+    //
+    // The incumbent stays authoritative until the moment of commit. The
+    // successor is never audible and never on a layer, because two audible
+    // streams is the failure viewers report as an echo and nobody reproduces.
+    /// The muted, layer-less second `AVPlayer`. Nil whenever no staging is
+    /// live, and every exit sets it back to nil — dismiss, background, session
+    /// end, seek, another quality change. On tvOS a leaked second player
+    /// survives screensaver activation.
+    private var preparedPlayer: AVPlayer?
+    /// The successor's item, which is what the incumbent adopts at commit.
+    private var preparedItem: AVPlayerItem?
+    private var preparedMonitor: Task<Void, Never>?
+    private var preparedLifecycle: [AnyCancellable] = []
+    /// The film position the successor was primed to, and the boundary the
+    /// commit's first qualifying frame has to reach or pass.
+    private var preparedFilmPositionMs = 0
+    /// The item-local seek the successor still owes. An `AVPlayerItem` one
+    /// statement old has status `.unknown` and silently drops a seek, which
+    /// would leave the successor primed to its own zero and commit a stream
+    /// that replays film the viewer has already watched. Nil once it has been
+    /// issued, which is also what lets the readiness monitor move on.
+    private var preparedSeekMs: Int?
+    /// How long the viewer's picture was interrupted the last time a prepared
+    /// handoff fell back, in milliseconds. Nil until one does. Published so
+    /// the developer surfaces can show the number that is currently missing
+    /// from every Apple record of this capability.
+    @Published private(set) var preparedFallbackInterruptionMs: Int?
+    /// The whole client-side transaction: which staging is live, what is owed
+    /// about it, and whether an offered one is a replay. `lazy` because it
+    /// holds this controller as its host.
+    private(set) lazy var preparedReplacement = PreparedReplacementCoordinator(host: self)
     private var endObserver: NSObjectProtocol?
     private var itemStatusObservation: NSKeyValueObservation?
     private var statusTask: Task<Void, Never>?
@@ -2363,6 +2398,11 @@ final class PlayerController: ObservableObject {
         viewerActionEpoch &+= 1
         playbackControl.clearVerdict()
         deferredStall = nil
+        // A seek, a second quality change, an audio change: the viewer has
+        // moved on from whatever was being staged for them, so it is owed
+        // `aborted` and its pipeline freed. Without a fallback, because the
+        // command that got here is itself the change now being made.
+        preparedReplacement.abandonWithoutFallback(.aborted)
         return viewerActionEpoch
     }
 
@@ -2836,12 +2876,16 @@ final class PlayerController: ObservableObject {
             return
         }
         Task {
-            retainControlSequence(await playbackControl.reportIntent())
+            let prepared = await offerPreparedQualityChange()
             guard actionEpoch == viewerActionEpoch,
                   destination.generation == seekState.generation,
                   selectedHeight == height,
                   !selectedQualityIsOriginal
             else { return }
+            // The prepared path owns this change now: it will either commit a
+            // successor or fall back to exactly the reopen below. Doing both
+            // would change the stream twice for one tap.
+            guard !prepared else { return }
             await reopen(at: destination.target)
         }
     }
@@ -2864,14 +2908,81 @@ final class PlayerController: ObservableObject {
             return
         }
         Task {
-            retainControlSequence(await playbackControl.reportIntent())
+            let prepared = await offerPreparedQualityChange()
             guard actionEpoch == viewerActionEpoch,
                   destination.generation == seekState.generation,
                   selectedHeight == nil,
                   selectedQualityIsOriginal
             else { return }
+            guard !prepared else { return }
             await reopen(at: destination.target)
         }
+    }
+
+    /// Publish the viewer's new selection, and — only where a prepared handoff
+    /// could actually happen — wait briefly for the server to offer one.
+    ///
+    /// Returns true when the prepared path has taken ownership of this change,
+    /// in which case the caller must not also reopen in place.
+    ///
+    /// **VOD is not excluded, and an earlier draft of this excluded it.** The
+    /// contract says `DeliveryView::from_status` leaves `delivered_bps` `None`
+    /// on every VOD session, so the throughput floor can never be met there.
+    /// That was true when it was written and `f2fecc98` — "measure what a VOD
+    /// session actually delivers", an ancestor of `main` — fixed it, saying in
+    /// as many words that a `None` there "is what made preparation unreachable
+    /// on the primary presentation". Excluding VOD would have disabled this on
+    /// the presentation the server had just enabled it for. The code is the
+    /// authority; the contract is stale, and is corrected beside its claim.
+    ///
+    /// What bounds the cost instead is `canOfferPreparation`, which is about
+    /// evidence rather than presentation: a playback that proves it cannot
+    /// prime a successor stops asking, whatever it is playing.
+    ///
+    /// The bound is the one this platform already uses for "publish evidence
+    /// and wait briefly for the verdict", and the contract records how long a
+    /// client may wait as an open question rather than settling it. 1.5 s is
+    /// defensible here for a reason it is not defensible everywhere: the
+    /// alternative this wait might avoid is a full reopen, which costs the
+    /// viewer seconds of black and a rebuffer. It is spent only on a live
+    /// session whose client declares the capability.
+    private func offerPreparedQualityChange() async -> Bool {
+        guard Caps.controlCapabilities().dualPlayerPreparation,
+              // A successor that never became playable once will not become
+              // playable on the next tap either, and the viewer already paid
+              // for finding that out. See `canOfferPreparation`.
+              preparedReplacement.shouldAskForPreparation,
+              // A paused viewer's change cannot be committed — no rate means
+              // no new frame to prove the switch — so it is not worth a wait.
+              wantsPlayback,
+              await playbackControl.isActivelyReporting
+        else {
+            retainControlSequence(await playbackControl.reportIntent())
+            return false
+        }
+        // The floor `reportIntent` would have returned, read before the ask
+        // publishes anything — `notifyUrgently` returns `sequence + 1`, and
+        // `controlSequence` is nil until the first exchange, which is the same
+        // floor of 1. Reading it after the ask instead would retain a *lower*
+        // number whenever the ask bails without building a request, and order
+        // the reopen's create as more superseded than it is.
+        let floor = ((await playbackControl.controlSequence) ?? 0) + 1
+        let answer = await playbackControl.askForAction(
+            bound: Self.controlAskSeconds,
+            cap: Self.controlAskCapSeconds,
+            publish: { [weak self] in self?.playbackControl.reportEvidence() }
+        )
+        retainControlSequence(max(floor, (await playbackControl.controlSequence) ?? 0))
+        guard let answer, let prepared = PreparedReplacementAction(answer) else { return false }
+        // Idempotent against the reporter's own return path, which offers the
+        // same staging from `onPreparedReplacement`: whichever arrives second
+        // is a replay and builds nothing. The answer decides whether the
+        // prepared path actually took the change — a staging this client has
+        // already settled, or one offered while a switch is in flight, changes
+        // nothing, and returning true for those would drop the viewer's tap.
+        return preparedReplacement.offer(
+            prepared, filmPositionMs: positionForPlaybackIntent()
+        ).ownsTheChange
     }
 
     /// The link rate AVFoundation itself measured, in bits per second.
@@ -2978,6 +3089,12 @@ final class PlayerController: ObservableObject {
         recoveryTask = nil
         clearPGSOverlaySelection()
         pgsOverlayItemGeneration &+= 1
+        // Before the reporter goes, not after: a staging still live is owed
+        // `aborted`, and the second player must be freed whether or not that
+        // exchange makes it out. A settlement that misses its window costs the
+        // server one preparation slot on a session that is ending anyway; a
+        // leaked `AVPlayer` costs the device.
+        preparedReplacement.playerIsEnding()
         playbackControl.end()
         playbackControlSummary = nil
         // A verdict survives a reopen because the failure it explains usually
@@ -6198,9 +6315,31 @@ final class PlayerController: ObservableObject {
     /// echo remains the compatibility fallback. Cached whole-title sessions
     /// use direct timeline semantics and always begin at zero.
     nonisolated static func sessionMediaOriginMs(_ hls: HlsStart, requestedStartMs: Int) -> Int {
-        if hls.vod == true { return 0 }
-        if let mediaOriginMs = hls.mediaOriginMs { return max(0, mediaOriginMs) }
-        return Int((hls.startSeconds ?? Double(requestedStartMs) / 1000.0) * 1000)
+        sessionMediaOriginMs(
+            vod: hls.vod == true,
+            mediaOriginMs: hls.mediaOriginMs,
+            startSeconds: hls.startSeconds,
+            requestedStartMs: requestedStartMs
+        )
+    }
+
+    /// The same rule over a raw origin rather than an `HlsStart`.
+    ///
+    /// A prepared successor arrives as four fields on a control action, not as
+    /// a create response, and it still has to be aligned by exactly the
+    /// arithmetic a created session is. Generalising rather than writing a
+    /// second copy is the whole point: two alignment implementations that
+    /// disagree produce a handoff that lands a few hundred milliseconds off
+    /// and looks like a stutter nobody can attribute.
+    nonisolated static func sessionMediaOriginMs(
+        vod: Bool,
+        mediaOriginMs: Int?,
+        startSeconds: Double?,
+        requestedStartMs: Int
+    ) -> Int {
+        if vod { return 0 }
+        if let mediaOriginMs { return max(0, mediaOriginMs) }
+        return Int((startSeconds ?? Double(requestedStartMs) / 1000.0) * 1000)
     }
 
     /// Item-local seek needed after a live copy session opens on a keyframe
@@ -6871,6 +7010,22 @@ extension PlayerController {
             observe: { [weak self] in self?.playbackControlObservation() },
             onSubtitleReady: { [weak self] in
                 self?.retryNativeSubtitleAfterReadiness()
+            },
+            // Deliberately ungated at this call site. Everything that could
+            // refuse a staging — one already live, one already settled, a
+            // switch in flight, a playback that has proved it cannot prime one
+            // — is decided inside `offer`, so the server-pushed path and the
+            // viewer-initiated path cannot disagree. A refusal here still
+            // settles the staging: an unanswered one holds the server's only
+            // preparation slot for 330 seconds.
+            onPreparedReplacement: { [weak self] action in
+                guard let self else { return }
+                self.preparedReplacement.offer(
+                    action, filmPositionMs: self.positionForPlaybackIntent()
+                )
+            },
+            onAcknowledgementDelivered: { [weak self] acknowledgement in
+                self?.preparedReplacement.acknowledgementDelivered(acknowledgement)
             }
         )
         playbackControlSummary = "Owner epoch \(bootstrap.controlEpoch) · reporting"
@@ -6946,7 +7101,11 @@ extension PlayerController {
             observationOverride: controlObservationOverride,
             renderOverride: controlRenderOverride,
             selection: playbackControlSelection(),
-            capabilities: Caps.controlCapabilities()
+            capabilities: Caps.controlCapabilities(),
+            // Sticky until the exchange that carried it comes back: the
+            // reporter coalesces, so a settlement parked anywhere but the
+            // newest snapshot is the one thing a position update can drop.
+            acknowledgement: preparedReplacement.pendingAcknowledgement
         )
     }
 
@@ -7032,5 +7191,343 @@ extension PlayerController {
         controlRenderOverride = render
         controlEvidencePositionMs = realPositionMs()
         playbackControl.reportEvidence()
+    }
+}
+
+// MARK: - The prepared successor
+
+/// The AVFoundation half of a prepared quality handoff.
+///
+/// Everything policy-shaped — which acknowledgement is owed, whether an
+/// offered staging is a replay, when a bound has elapsed — lives in
+/// `PreparedReplacementCoordinator`, where it is provable without a device.
+/// What is left here is the part that genuinely needs AVFoundation, and it is
+/// written on the assumption that **the fallback is ordinary**: M5.5 proved
+/// two `AVPlayer`s coexist on both Apple devices, and that is a logical
+/// pipeline count, not a hardware decoder-slot count. A design in which
+/// failing to prime a successor is an error branch produces a stuck player on
+/// the first device that has one slot.
+extension PlayerController: PreparedSuccessorHost {
+    /// Build the muted, layer-less second pipeline and prime it to the film
+    /// position the viewer is watching.
+    func startPreparedSuccessor(
+        _ action: PreparedReplacementAction,
+        filmPositionMs: Int
+    ) -> Bool {
+        discardPreparedSuccessor()
+        // `playlistUrl` was proven node-relative before this action reached
+        // the player, so this join cannot reach another origin — the same
+        // property the control bootstrap's path check gives the reporter.
+        guard started,
+              player.currentItem != nil,
+              let url = Session.shared.url(action.playlistUrl)
+        else { return false }
+        let item = AVPlayerItem(url: url)
+        Self.configureBuffering(item, growingHLS: true)
+        let successor = AVPlayer(playerItem: item)
+        // Never audible, never on a layer, and never asked to play: the
+        // predecessor is the authoritative stream until the moment of commit.
+        // The audio session itself is deliberately untouched — the successor
+        // gets whatever the incumbent already established.
+        successor.isMuted = true
+        successor.volume = 0
+        preparedPlayer = successor
+        preparedItem = item
+        preparedFilmPositionMs = max(0, filmPositionMs)
+        // The successor's session-relative zero is not the film's. This is the
+        // same arithmetic a created session gets, over a raw origin — and it
+        // is *recorded* here rather than performed, because the item is one
+        // statement old, its status is `.unknown`, and AVFoundation drops a
+        // seek on an item that cannot yet honour it. The created-session path
+        // has the same problem and solves it the same way, by waiting for
+        // readiness first (`seekWhenReady`).
+        preparedSeekMs = Self.sessionAttachSeekMs(
+            requestedStartMs: preparedFilmPositionMs,
+            mediaOriginMs: action.mediaOriginMs
+        )
+        observePreparedLifecycle()
+        beginPreparedReadinessMonitor()
+        return true
+    }
+
+    /// Backgrounding is an exit like any other. On tvOS a leaked second player
+    /// survives screensaver activation, and on iOS the app's audio background
+    /// mode would keep it alive behind the viewer's back.
+    private func observePreparedLifecycle() {
+        preparedLifecycle = [
+            NotificationCenter.default
+                .publisher(for: UIApplication.didEnterBackgroundNotification)
+                .sink { [weak self] _ in
+                    MainActor.assumeIsolated {
+                        self?.preparedReplacement.abandonWithoutFallback(.aborted)
+                    }
+                }
+        ]
+    }
+
+    func discardPreparedSuccessor() {
+        preparedMonitor?.cancel()
+        preparedMonitor = nil
+        preparedLifecycle.removeAll()
+        preparedPlayer?.replaceCurrentItem(with: nil)
+        preparedPlayer = nil
+        preparedItem = nil
+        preparedFilmPositionMs = 0
+        preparedSeekMs = nil
+    }
+
+    /// Watch the second pipeline until it is worth switching to, gives up, or
+    /// runs out of time.
+    private func beginPreparedReadinessMonitor() {
+        preparedMonitor?.cancel()
+        preparedMonitor = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                guard let self, let item = self.preparedItem else { return }
+                if item.status == .failed {
+                    self.preparedReplacement.abandon(.failed)
+                    return
+                }
+                if self.preparedReplacement.readinessBoundElapsed() {
+                    self.preparedReplacement.abandon(.failed)
+                    return
+                }
+                // `.readyToPlay` is AVFoundation saying the item is playable
+                // and its tracks and duration are known — the whole of what
+                // `metadata_ready` claims.
+                if item.status == .readyToPlay {
+                    self.preparedReplacement.successorIsMetadataReady()
+                    // The seek the successor owes, issued exactly once and
+                    // only now that the item can honour it. Runway measured
+                    // before it lands is runway from the successor's own zero,
+                    // which is a different point in the film.
+                    if let seekMs = self.preparedSeekMs {
+                        // Cleared before the await, not after: this loop runs
+                        // every 100 ms and a flag set on the far side of a
+                        // suspension would issue the same seek repeatedly.
+                        // Awaited rather than given a completion handler
+                        // because AVFoundation calls those on a queue of its
+                        // choosing, and asserting main-actor isolation inside
+                        // one is what killed every play on build 90.
+                        self.preparedSeekMs = nil
+                        _ = await item.seek(
+                            to: CMTime(value: CMTimeValue(seekMs), timescale: 1_000),
+                            toleranceBefore: .zero,
+                            toleranceAfter: .zero
+                        )
+                        continue
+                    } else if let throughMs = self.preparedBufferedThroughMs(item),
+                              throughMs >= self.preparedFilmPositionMs
+                                  + PreparedReplacementBounds.switchRunwayMs {
+                        self.preparedReplacement.successorIsBuffered(throughMs: throughMs)
+                        await self.preparedReplacement.commit()
+                        return
+                    }
+                }
+                try? await Task.sleep(
+                    nanoseconds: UInt64(PreparedReplacementBounds.pollMs) * 1_000_000
+                )
+            }
+        }
+    }
+
+    /// How far the successor is buffered, in film time.
+    ///
+    /// Its loaded ranges are in its own item time, and its zero is the film
+    /// position its `media_origin_ms` names — which is exactly why the
+    /// protocol carries that field.
+    private func preparedBufferedThroughMs(_ item: AVPlayerItem) -> Int? {
+        guard let action = preparedReplacement.activeAction else { return nil }
+        let playhead = item.currentTime().seconds
+        guard playhead.isFinite else { return nil }
+        let ranges = item.loadedTimeRanges.compactMap { value -> ClosedRange<Double>? in
+            let range = value.timeRangeValue
+            let start = range.start.seconds
+            let end = CMTimeRangeGetEnd(range).seconds
+            guard start.isFinite, end.isFinite, end >= start else { return nil }
+            return start...end
+        }
+        let runway = Self.bufferedRunwaySeconds(playheadSeconds: playhead, ranges: ranges)
+        guard runway > 0 else { return nil }
+        return action.mediaOriginMs + Int(((playhead + runway) * 1_000).rounded())
+    }
+
+    /// Put the primed successor in front of the viewer, and report the wall
+    /// clock of its own first qualifying frame.
+    ///
+    /// The item moves rather than the player: the incumbent `AVPlayer` owns
+    /// the layer, Picture in Picture, the periodic time observer, and every
+    /// KVO this controller installed, and swapping the player object would
+    /// have to re-establish all of it at the exact instant a viewer is
+    /// watching. Reassociating an item is the narrower change — and it is
+    /// guarded, because AVFoundation raises rather than returns when an item
+    /// is handed to a second player while the first still holds it.
+    func commitPreparedSuccessor(
+        _ action: PreparedReplacementAction
+    ) async -> PreparedCommitOutcome {
+        guard started,
+              let successor = preparedPlayer,
+              let item = preparedItem,
+              player.currentItem != nil,
+              // A paused viewer produces no new frame, ever: the item's output
+              // clock does not advance at rate zero, so a switch made while
+              // paused could only ever time out — and timing out after the
+              // swap means telling the server to abort a session the viewer is
+              // looking at. A quality change made while paused takes the
+              // in-place path, which costs a paused viewer nothing.
+              wantsPlayback,
+              !isChangingStream
+        else { return .refused }
+        // Dropped rather than cancelled: this runs *inside* the readiness
+        // monitor's own task, and cancelling it here would make every
+        // `Task.isCancelled` check below — including the first-frame wait —
+        // answer true immediately and turn every commit into a `failed`. The
+        // monitor returns as soon as this call does.
+        preparedMonitor = nil
+        preparedLifecycle.removeAll()
+        // Release the successor's claim, and *prove* it was released before
+        // handing the item over. `currentItem` is the association itself, so
+        // a nil here is the guard rather than an assumption about timing.
+        successor.replaceCurrentItem(with: nil)
+        guard successor.currentItem == nil else {
+            discardPreparedSuccessor()
+            return .refused
+        }
+        preparedPlayer = nil
+        preparedItem = nil
+        // From here the incumbent's item is being replaced, so every monitor
+        // that would otherwise read a not-yet-ready item as a stall has to
+        // know a change is in flight — the same flag, for the same window,
+        // that `open()` holds across its own attach. Without it the end-of-
+        // item handler, the stall recovery and `positionForPlaybackIntent`
+        // all act on a stream that is mid-switch.
+        isChangingStream = true
+        defer { isChangingStream = false }
+
+        // The film position the switch happens at. A first frame whose own
+        // display time falls before this boundary is a pixel buffer that
+        // predates the switch, and reporting it as `first_frame_unix_ms` would
+        // be worse than reporting nothing: it is the instrument that could not
+        // separate a codec change from no change.
+        let boundaryMs = max(preparedFilmPositionMs, realPositionMs())
+        let superseded = sessionId
+        stopStatusPolling()
+        installSeekVideoOutput(on: item)
+        #if os(iOS)
+        item.externalMetadata = [titleMetadata(title)]
+        #endif
+        observeEnd(of: item)
+        observeStatus(of: item)
+        pgsOverlayItemGeneration &+= 1
+        pgsOverlayWindowTask?.cancel()
+        pgsOverlayWindow = nil
+        stallObservation.reset()
+        player.replaceCurrentItem(with: item)
+        // The successor is a full session in every respect but its pointer, so
+        // everything keyed on "which session am I playing" moves with it.
+        sessionId = action.sessionId
+        baseMs = action.mediaOriginMs
+        activeMediaPath = clusterRelativeMediaPath(action.playlistUrl)
+        activeMediaAuthenticated = false
+        serverServesNativeSubtitles = Self.playlistAdvertisesNativeSubtitles(action.playlistUrl)
+        if action.effectiveSelection.height > 0 {
+            sessionHeight = action.effectiveSelection.height
+        }
+        isDirectPlayback = false
+        startStatusPolling()
+        player.play()
+        if !wantsPlayback { player.pause() }
+        isPlaying = wantsPlayback
+        refreshPGSOverlayWindow(at: boundaryMs, force: true)
+        ttffMeasurement.rebasePosition(at: realPositionMs())
+        let firstFrameUnixMs = await awaitPreparedFirstFrame(boundaryMs: boundaryMs)
+        // The predecessor goes only once its successor is the thing on screen.
+        // Its encoder slot comes back at once rather than at the idle reaper's
+        // convenience — the same order `open()` uses, for the same reason.
+        // Unconditionally: the swap has already happened, so the predecessor
+        // is not what the viewer is watching whether or not a qualifying frame
+        // arrived. Holding its encoder open would spend hardware on a session
+        // nobody can see.
+        if superseded != action.sessionId {
+            await release(session: superseded)
+        }
+        guard let firstFrameUnixMs else { return .switchedWithoutAFrame }
+        return .committed(firstFrameUnixMs: firstFrameUnixMs)
+    }
+
+    /// Wall clock at the successor's first frame that is actually at or past
+    /// the switch boundary.
+    ///
+    /// Taken from the item's own video output rather than a timer, because a
+    /// timer measures how long this code took, not when the viewer's picture
+    /// changed. `AVPlayerItemVideoOutput` does not acknowledge physical
+    /// display by `AVPlayerLayer` — the same caveat the seek monitor carries —
+    /// so device qualification still has to verify the final boundary.
+    private func awaitPreparedFirstFrame(boundaryMs: Int) async -> Int? {
+        guard let output = preparedSeekVideoOutput() else { return nil }
+        let deadline = ProcessInfo.processInfo.systemUptime
+            + Double(PreparedReplacementBounds.firstFrameMs) / 1_000
+        while ProcessInfo.processInfo.systemUptime < deadline {
+            if Task.isCancelled { return nil }
+            let itemTime = output.itemTime(forHostTime: ProcessInfo.processInfo.systemUptime)
+            var displayTime = CMTime.invalid
+            if itemTime.isValid,
+               itemTime.seconds.isFinite,
+               output.hasNewPixelBuffer(forItemTime: itemTime),
+               output.copyPixelBuffer(
+                   forItemTime: itemTime, itemTimeForDisplay: &displayTime
+               ) != nil,
+               displayTime.isValid,
+               displayTime.seconds.isFinite {
+                let presentedMs = baseMs + max(0, Int(displayTime.seconds * 1_000))
+                if presentedMs + Self.preparedFirstFrameToleranceMs >= boundaryMs {
+                    return Int(Date().timeIntervalSince1970 * 1_000)
+                }
+            }
+            try? await Task.sleep(
+                nanoseconds: UInt64(PreparedReplacementBounds.pollMs) * 1_000_000
+            )
+        }
+        return nil
+    }
+
+    /// A frame may legitimately land a keyframe's worth before the boundary
+    /// after a seek within the successor; the tolerance is small enough that a
+    /// buffer from before the switch cannot satisfy it.
+    static var preparedFirstFrameToleranceMs: Int { 250 }
+
+    private func preparedSeekVideoOutput() -> AVPlayerItemVideoOutput? {
+        // An audio-only source produces no pixel buffer, ever, so waiting for
+        // one would turn every such commit into a `failed`. There is no
+        // prepared handoff for audio-only sources today; this is the guard
+        // that says so out loud rather than hanging on it.
+        guard decision?.source?.videoCodec != nil else { return nil }
+        return seekVideoOutput
+    }
+
+    /// The in-place quality change this platform has always done.
+    ///
+    /// Not an error branch. It is what happens whenever the second pipeline
+    /// cannot be made ready — including on a device with one hardware decoder
+    /// slot, which M5.5 did not rule out — and it has to be as ordinary as the
+    /// path it replaces.
+    func fallBackToInPlaceReplacement(_ action: PreparedReplacementAction) {
+        let actionEpoch = viewerActionEpoch
+        Task { @MainActor [weak self] in
+            guard let self, self.started, self.viewerActionEpoch == actionEpoch else { return }
+            await self.reopen(at: self.positionForPlaybackIntent())
+        }
+    }
+
+    func preparedSuccessorOwesAnExchange() {
+        playbackControl.reportEvidence()
+    }
+
+    /// How long the viewer's picture was interrupted by a fallback.
+    ///
+    /// Apple's fallback interruption is unmeasured, because Apple passed dual
+    /// preparation and never exercised the fallback. Recording it here is what
+    /// turns the first device that takes this path into the measurement.
+    func recordPreparedFallbackInterruption(ms: Int) {
+        preparedFallbackInterruptionMs = ms
     }
 }
