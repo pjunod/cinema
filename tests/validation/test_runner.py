@@ -821,10 +821,18 @@ marker.write_text("survived", encoding="utf-8")
             ):
                 root = Path(directory)
                 marker = root / "survived"
+                child_pid = root / "child.pid"
                 timed_tree = dataclasses.replace(
                     catalog.check_map["baseline"],
                     command=(
-                        f"sleep 1.5; printf survived > {shlex.quote(str(marker))}"
+                        f"{shlex.quote(sys.executable)} -c "
+                        + shlex.quote(
+                            "from pathlib import Path; import os, time; "
+                            f"Path({str(child_pid)!r}).write_text(str(os.getpid()), "
+                            "encoding='utf-8'); time.sleep(1.5); "
+                            f"Path({str(marker)!r}).write_text('survived', "
+                            "encoding='utf-8')"
+                        )
                     ),
                     timeout_seconds=1,
                 )
@@ -862,6 +870,13 @@ marker.write_text("survived", encoding="utf-8")
 
                 time.sleep(0.75)
                 self.assertFalse(marker.exists())
+                pid = int(child_pid.read_text(encoding="utf-8"))
+                record = validation_runner._read_linux_process_record(pid)
+                self.assertTrue(
+                    record is None or record.state.startswith("Z"),
+                    f"cleanup abandoned pid {pid} in state "
+                    f"{getattr(record, 'state', 'gone')}",
+                )
 
     @unittest.skipIf(os.name == "nt", "POSIX process cleanup contract")
     def test_timeout_never_resumes_a_term_handler(self):
@@ -1312,7 +1327,7 @@ time.sleep(30)
             identities.add(identity)
 
         with (
-            mock.patch.object(validation_runner.os, "killpg"),
+            mock.patch.object(validation_runner.os, "killpg") as killpg,
             mock.patch.object(validation_runner, "_freeze_process_tree", side_effect=freeze),
             mock.patch.object(validation_runner, "_kill_frozen_groups", return_value=[]),
             mock.patch.object(validation_runner, "_reap_owned_process", return_value=None),
@@ -1330,7 +1345,7 @@ time.sleep(30)
         process.wait.return_value = 0
 
         with (
-            mock.patch.object(validation_runner.os, "killpg"),
+            mock.patch.object(validation_runner.os, "killpg") as killpg,
             mock.patch.object(validation_runner, "_freeze_process_tree"),
             mock.patch.object(
                 validation_runner,
@@ -1344,7 +1359,8 @@ time.sleep(30)
                 process, time.monotonic() + 1
             )
 
-        process.kill.assert_called_once_with()
+        self.assertIn(mock.call(100, signal.SIGKILL), killpg.call_args_list)
+        process.kill.assert_not_called()
         process.wait.assert_called_once()
         verify.assert_not_called()
 
@@ -1376,7 +1392,7 @@ time.sleep(30)
 
         with (
             mock.patch.object(validation_runner.sys, "platform", "linux"),
-            mock.patch.object(validation_runner.os, "killpg"),
+            mock.patch.object(validation_runner.os, "killpg") as killpg,
             mock.patch.object(
                 validation_runner, "_freeze_process_tree", side_effect=freeze
             ),
@@ -1404,7 +1420,8 @@ time.sleep(30)
 
         pidfd_signal.assert_not_called()
         close.assert_called_once_with(9)
-        process.kill.assert_called_once_with()
+        self.assertIn(mock.call(100, signal.SIGKILL), killpg.call_args_list)
+        process.kill.assert_not_called()
         process.wait.assert_called_once()
 
     @unittest.skipIf(os.name == "nt", "POSIX process cleanup contract")
@@ -1444,7 +1461,8 @@ time.sleep(30)
             )
 
         self.assertIn(mock.call(200, signal.SIGKILL), killpg.call_args_list)
-        process.kill.assert_called_once_with()
+        self.assertIn(mock.call(100, signal.SIGKILL), killpg.call_args_list)
+        process.kill.assert_not_called()
         process.wait.assert_called_once()
 
     def test_reused_process_group_is_not_killed(self):
