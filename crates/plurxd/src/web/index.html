@@ -13019,7 +13019,32 @@ function developerPanel(settings){
       ${togRow("phs",`Typeless sliding HLS <span class="pill warn">experimental</span>`,"Only for the iPad control comparison.",settings.hls_typeless_sliding)}
       <div class="err" id="dxerr"></div>
       ${setCardFoot("saveExperimental")}`);
-  return `${setHead("Developer","Switches that are off on purpose — previews, unfinished halves, and anything that costs more than it looks. Nothing here is needed for ordinary playback, and none of it is a different binary: these are runtime settings; no special build is needed.")}${liveTvSettingsCard(settings)}${preview}${verifiedDecodeCard(settings)}${prepared}${experimental}`;
+  return `${setHead("Developer","Switches that are off on purpose — previews, unfinished halves, and anything that costs more than it looks. Nothing here is needed for ordinary playback, and none of it is a different binary: these are runtime settings; no special build is needed.")}${liveTvSettingsCard(settings)}${preview}${verifiedDecodeCard(settings)}${decodeRecoveryCard(settings)}${prepared}${experimental}`;
+}
+// Automatic decode recovery.
+//
+// The one card in this panel that describes something an operator cannot turn
+// on. That is deliberate: a decoder feature behind a code gate is a decoder
+// feature nobody runs, so this one is not gated. What the card can do is say
+// what has to be true before the recovery is reachable at all — and one of
+// those things is not true on any node today, which belongs at the top of the
+// card rather than in a footnote.
+function decodeRecoveryCard(s){
+  const q=s.decoder_health_qualification||{};
+  // FFmpeg's strings again — a build banner and decoder names.
+  const list=v=>(v&&v.length)?v.map(x=>`<code>${esc(x)}</code>`).join(" "):"<i>none</i>";
+  const ok=b=>b?"✓":"✗";
+  return setCard(`${cardHead("Automatic decode recovery","A producer that says out loud it could not decode the source is answered once — by a successor that decodes in software behind the same hardware encoder — instead of being answered with the command that just failed. Every timing verdict tells a client to try again, so without this a file that cannot be decoded is a reopen loop.",`<span class="pill warn">prerequisites unmet</span>`)}
+      <div class="hint"><b>There is no switch here.</b> This recovery is not behind a build flag or a setting; it fires when the conditions below hold and does nothing when they do not. The list is what has to become true, not what you have to click.</div>
+      <h2 class="section">What must be true first</h2>
+      <div class="tog"><span>${ok(!!q.measured_build)} This node measured its own FFmpeg<small>${q.measured_build?`<code>${esc(q.measured_build)}</code>`:"Not measured. Nothing this build prints can be matched to a contract, so nothing it prints is evidence, and a decode failure is indistinguishable from a stall."}</small></span></div>
+      <div class="tog"><span>${ok((q.covered_decoders||[]).length>0)} A retained contract covers this build's software decoders<small>${list(q.covered_decoders)}<br>The successor decodes in software, so this build's software decode has to be the measured and covered one — otherwise the recovery installs a producer nobody can certify.</small></span></div>
+      <div class="tog"><span>✗ A diagnostic contract is qualified against a <i>hardware</i> decoder<small><b>Not true on any node today, and it is what blocks the path.</b> A fault can only be latched by a plan whose decoder is named, and only software-decode plans name theirs — so a hardware decode, which is the only kind this recovery has an answer for, cannot produce the evidence that triggers it. Qualifying a contract against the hardware decoder names is the remaining work; until it lands the recovery is built, tested and unreachable.</small></span></div>
+      <div class="tog"><span>The session carries a durable recovery budget<small>Cluster sessions do. A legacy process-local start, a relayed worker start, and any session predating the recovery epoch keep the older in-process limit — one recovery per <i>session</i> rather than one per playback, which a reopen resets.</small></span></div>
+      <h2 class="section">What it costs when it does fire</h2>
+      <div class="hint"><b>One recovery per playback, and it is never given back.</b> The budget is durable and keyed by the playback, so a reopen, a seek or a track change does not buy another. A playback that has spent it is told its source did not decode — a permanent answer the client shows once, rather than an impermanent one it will follow forever. Two paths give a budget up without using it, both on purpose: an executor cancelled mid-install, and a node that cannot read the budget. Each costs that playback its automatic recovery and nothing else.</div>
+      <div class="hint">The successor keeps the hardware encoder and its slot; what grows is the CPU the pipeline spends decoding. That difference has to be available on the node at the moment of the recovery, and a recovery that cannot get it fails rather than waiting on a viewer's behalf indefinitely.</div>
+      <div class="hint"><b>Enable path:</b> qualify a diagnostic contract against this node's hardware decoders, then turn on <b>Require a producer health receipt</b> above, so that what a producer reports about its own decode is treated as evidence. There is no separate switch for the recovery itself, and none is coming.</div>`,{id:"drcard"});
 }
 // Verified decode artifacts.
 //

@@ -2682,6 +2682,69 @@ without it, and the cache must not serve one for the other. It also changes
 `TranscodeResourceEstimate::of`, because forcing software decode can rewrite
 the renderer — so admission has to be re-asked, not adjusted.
 
+## M7a — the enable section, and the prerequisite that is not met
+
+The effort was required to add an enable section to **Settings → Developer**
+explaining what safe enablement depends on. Writing it forced the question
+"what actually has to be true for this recovery to fire", and the answer is
+that on this build nothing makes it fire. Two code sites make the two halves
+mutually exclusive:
+
+- `DiagnosticObservation::resolve` refuses a grammar to any plan whose
+  `DecodeBackend` is not `Software`. Without a grammar there is no fault sink,
+  so a hardware decode can never latch a `ProducerDecodeFault`, and
+  `action_qualified` is never set. This is not an oversight: a contract is
+  qualified against a *named* decoder, a hardware backend substitutes
+  `<codec>_qsv` or its equivalent, and M3a's review established that guessing
+  the name yields a grammar matching nothing — which certifies every stream as
+  clean. The refusal is right; it is its consequence that was not followed
+  through.
+- `PrepublicationTranscodeRetry::prepare_decode_restricted` answers `Ok(None)`
+  when the alternate's plan digest equals the delivered one, which is exactly
+  when the delivered plan already decodes in software. A software-decode plan
+  has no software-decode alternate, because it would be the same command.
+
+So a hardware decode can never produce the evidence, and a software decode has
+nothing to be given. There is no plan in between, and the recovery M5c2 built
+is unreachable on every node. Nothing built for it is wrong — the bounded
+vocabulary, the two frozen recipes, the durable budget, the client contract,
+and the tests all hold, and all of them are exercised. What is missing is the
+one input none of them can manufacture.
+
+**What closes it.** A diagnostic contract qualified against the hardware
+decoder names, and an inventory that measures them, the way M3d measured the
+software ones. `DiagnosticObservation::resolve` then admits a plan whose
+hardware decoder is named and covered, on the same terms it admits a software
+one: the same binary, the same decoder, the same qualified log flags. That is
+new measurement work against real hardware on the qualifying hosts, not a
+change of rule — which is why it is named here as remaining evidence rather
+than attempted as a code change on this branch.
+
+**Why it is recorded rather than worked around.** The temptation is to relax
+the backend test so a hardware plan gets *some* grammar. That is the exact
+substitution M3a rejected, one layer down: a grammar built from a guessed
+decoder name matches nothing, and a grammar that matches nothing reports every
+stream as clean — which would make the recovery fire never while reporting
+that it could, and would also certify unhealthy artifacts as healthy under the
+qualified identity. The unreachable path is the safe failure.
+
+### The card
+
+`decodeRecoveryCard` sits in Settings → Developer between the verified-decode
+card and the prepared-handoff card. It states, in this order: that there is no
+switch and none is coming, because a decoder feature behind a code gate is a
+decoder feature nobody runs; the four things that must be true, of which two
+are read from what this node measured, one is the hardware-decoder contract
+above and is shown failing, and one is whether the session carries a durable
+budget at all; what the recovery costs when it fires — one per playback, never
+refunded, with the two fail-closed paths named; and the enable path, which
+ends at the hardware contract rather than at a control.
+
+The sentence "Not true on any node today" is asserted by
+`tests/web/settings-sections.test.js`. That is deliberate: when the hardware
+contract lands, the card becomes wrong, and the assertion is what says so
+rather than leaving a stale claim in an operator-facing surface.
+
 ## M4 working tree — a hardware encoder is not evidence of an idle CPU
 
 Admission decided what a session would cost from the encoder's name. A
@@ -3548,6 +3611,11 @@ lane and focused tests provide earlier feedback.
 - Original #913 media on an Apple VideoToolbox node, compared with software
   decode while retaining the hardware encoder.
 - Qualified FFmpeg diagnostic output from each supported build/backend class.
+- A diagnostic contract qualified against this fleet's *hardware* decoder
+  names, and an inventory that measures them. Until it exists the automatic
+  decode recovery cannot fire on any node, because only a software-decode plan
+  names its decoder and only a hardware-decode plan has an alternate to be
+  given. Recorded in full under "M7a".
 - Pixel, metadata, startup, concurrency, and recovery-latency evidence for the
   fleet workload matrix.
 - Web, Apple, and Android prepare/readiness/commit/retirement runs with one

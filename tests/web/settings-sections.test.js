@@ -255,7 +255,7 @@ test("Developer is where the switches that cost something live", () => {
     // Joined with newlines, not concatenated: `shippedSource` returns
     // everything up to the next declaration, which may end inside a trailing
     // line comment — and that would swallow whatever is glued after it.
-    `${["liveTvSettingsCard", "verifiedDecodeCard", "developerPanel"].map(shippedSource).join("\n")}\nreturn developerPanel;`,
+    `${["liveTvSettingsCard", "verifiedDecodeCard", "decodeRecoveryCard", "developerPanel"].map(shippedSource).join("\n")}\nreturn developerPanel;`,
   )(
     (title, sub) => `HEAD:${title}|${sub}`,
     (body) => `CARD[${body}]`,
@@ -275,6 +275,18 @@ test("Developer is where the switches that cost something live", () => {
   assert.match(html, /twenty consecutive commits/);
   assert.match(html, /Android and web remain unqualified/);
   assert.match(html, /no separate hidden server flag/);
+  // Automatic decode recovery. The section exists because the effort that
+  // built the recovery was required to say what safe enablement depends on,
+  // and the honest answer today starts with "it cannot fire yet".
+  assert.match(html, /Automatic decode recovery/);
+  assert.match(html, /There is no switch here/);
+  assert.match(html, /reopen loop/);
+  // The tripwire. This sentence is true only while no contract is qualified
+  // against a hardware decoder; when one is, this card is wrong and this
+  // assertion is what says so.
+  assert.match(html, /Not true on any node today/);
+  assert.match(html, /One recovery per playback, and it is never given back/);
+  assert.match(html, /qualify a diagnostic contract against this node's hardware decoders/);
   // The section says what it is for, so a switch that costs something has
   // somewhere honest to land rather than being buried under Streaming.
   assert.match(html, /runtime settings; no special build/);
