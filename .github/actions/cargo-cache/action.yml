@@ -74,16 +74,20 @@ runs:
         #
         # A lane that genuinely needs more says so; `vod-web` asks for 45G
         # because it carries Playwright browsers and an ffmpeg build on top.
-        "$GITHUB_WORKSPACE/scripts/ci-require-disk" \
-          "${RUNNER_WORKSPACE:-$GITHUB_WORKSPACE}" "${DISK_GB:-25}"
-        # Then the one cache on this runner that no job can bound: the
-        # runner's own `actions/cache` server, which evicts nothing, ever.
-        # Reported so the growth is visible while it is still cheap; deleting
-        # from it needs the runner stopped, which is the fleet janitor's job.
+        # The audit runs FIRST, and this ordering is the point of it. It
+        # reports the one cache on this runner that no job can bound -- the
+        # runner's own `actions/cache` server, which evicts nothing, ever --
+        # and `ci-require-disk` below ends in `exit 1`. Run the refusal first
+        # and the audit never runs on the hosts where its number is the only
+        # thing that answers "can the janitor reclaim enough here?". Three
+        # refusals on `gha-nuc4-general-01` on 2026-09-08 all said `18G
+        # available` and none of them carried a cache figure.
         if [ -n "${RUNNER_TOOL_CACHE:-}" ]; then
           "$GITHUB_WORKSPACE/scripts/ci-runner-cache-audit" \
             "$(dirname -- "$RUNNER_TOOL_CACHE")" 20 || true
         fi
+        "$GITHUB_WORKSPACE/scripts/ci-require-disk" \
+          "${RUNNER_WORKSPACE:-$GITHUB_WORKSPACE}" "${DISK_GB:-25}"
         [[ "$CACHE_LANE" =~ ^[a-z0-9][a-z0-9.-]*$ ]] || {
           echo "::error::Cargo cache lane must be filesystem-safe"
           exit 1
