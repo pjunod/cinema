@@ -1,0 +1,232 @@
+#!/usr/bin/env bash
+# Bound the one CI cache a job cannot bound: the Forgejo runner's own.
+#
+# A Forgejo runner serves `actions/cache` out of `cache.dir` from its
+# config.yml -- a `bolt.db` index beside a tree of blobs. `forgejo-runner`
+# 13.1.0 evicts nothing from it: its `generate-config` offers `enabled`, `dir`,
+# `host`, `proxy_port` and the shared secrets, and nothing else. No size cap, no
+# TTL, no garbage collection. So the directory only grows, and on 2026-09-07 it
+# had grown to 41G on `gha-m6-general-01`'s 78G disk while the fleet failed jobs
+# with linker bus errors, which is what a full disk looks like from inside a
+# build.
+#
+# A CI job cannot fix that. Deleting an entry means deleting its index row and
+# its blob together -- leave the row and the next job matching that key is
+# promised an entry it cannot download -- and deleting them together means
+# stopping the runner, which a job running on that runner cannot do. So it is
+# done from outside, here, on a timer.
+#
+# The eviction is the whole directory, not the oldest entries, because `bolt.db`
+# is the only thing that knows which blob belongs to which key and it is not a
+# format this can safely edit. Wiping index and blobs together is always
+# consistent; the cost is a cold cache for the next few jobs, and nothing in
+# that directory is not reproducible. It is affordable because it should almost
+# never happen: once plurx's own caches are runner-local and bounded, what is
+# left here are Gradle, Playwright, DerivedData and AVD entries whose keys
+# change with build configuration rather than with every commit.
+#
+# What it will not do: touch `_work`. That holds other jobs' checkouts, several
+# repositories deep, and nothing outside a job can tell which trees are
+# finished. It is also under 2G on every runner measured.
+set -euo pipefail
+
+BUDGET_GB=${PLURX_JANITOR_BUDGET_GB:-20}
+STOP_TIMEOUT=${PLURX_JANITOR_STOP_TIMEOUT:-1200}
+IMAGE_AGE=${PLURX_JANITOR_IMAGE_AGE:-336h}
+BUILD_CACHE_AGE=${PLURX_JANITOR_BUILD_CACHE_AGE:-168h}
+STATE_DIR=${PLURX_JANITOR_STATE_DIR:-/var/lib/plurx-ci-janitor}
+# Overridable only so the contract test can build a cgroup tree it owns.
+CGROUP_ROOT=${PLURX_JANITOR_CGROUP_ROOT:-/sys/fs/cgroup}
+dry_run=false
+
+usage() {
+  cat <<'EOF'
+Usage: plurx-ci-janitor [--dry-run] [--budget-gb N]
+
+Resets any Forgejo runner cache server on this host that is over budget, or
+whose filesystem is below its reserve, and prunes Docker when the disk is still
+short. Reports what it did to the journal and to
+/var/lib/plurx-ci-janitor/last-run.json.
+
+  --dry-run      decide and report, delete nothing
+  --budget-gb N  cache-server budget in whole gigabytes (default 20)
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --dry-run) dry_run=true; shift ;;
+    --budget-gb) BUDGET_GB=${2:-}; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "plurx-ci-janitor: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+[[ "$BUDGET_GB" =~ ^[1-9][0-9]*$ ]] || {
+  echo "plurx-ci-janitor: budget must be whole gigabytes" >&2; exit 2
+}
+
+say() { printf 'plurx-ci-janitor: %s\n' "$*"; }
+
+# The same reserve the in-job pruners keep: 20 % of the filesystem, with a
+# 10 GiB minimum that can never exceed a quarter of it. A fixed reserve was the
+# previous bug -- 100 GiB on a 78 GB runner guest is a rule that can never be
+# satisfied, so the pruner deleted everything it was allowed to and failed
+# anyway.
+floor_kb_for() {
+  local path filesystem_kb percent minimum quarter
+  path=$1
+  filesystem_kb=$(df -Pk "$path" | awk 'NR == 2 { print $2 }')
+  percent=$(((filesystem_kb + 4) / 5))
+  minimum=$((10 * 1024 * 1024))
+  quarter=$(((filesystem_kb + 3) / 4))
+  [ "$minimum" -le "$quarter" ] || minimum=$quarter
+  [ "$percent" -ge "$minimum" ] && { echo "$percent"; return; }
+  echo "$minimum"
+}
+
+available_kb_for() { df -Pk "$1" | awk 'NR == 2 { print $4 }'; }
+
+# Idle means the unit's cgroup holds nothing but the daemon itself. A running
+# job is a tree of shells and compilers under that same cgroup, so this is a
+# local answer that needs no API token on a runner host.
+unit_is_idle() {
+  local unit main_pid procs
+  unit=$1
+  main_pid=$(systemctl show -p MainPID --value "$unit" 2>/dev/null || echo 0)
+  [ "$main_pid" != 0 ] || return 1
+  procs=$(systemctl show -p ControlGroup --value "$unit" 2>/dev/null)
+  [ -n "$procs" ] || return 1
+  procs="${CGROUP_ROOT}${procs}/cgroup.procs"
+  [ -r "$procs" ] || return 1
+  [ "$(wc -l < "$procs")" -eq 1 ] && [ "$(cat "$procs")" = "$main_pid" ]
+}
+
+# `cache.dir` out of the runner's own config.yml, so this follows a runner that
+# was deployed somewhere unusual rather than guessing a path.
+cache_dir_for_config() {
+  awk '
+    /^[a-z]/ { in_cache = ($0 ~ /^cache:/) }
+    in_cache && /^[[:space:]]+dir:/ {
+      sub(/^[[:space:]]+dir:[[:space:]]*/, "")
+      gsub(/^"|"$|^'"'"'|'"'"'$/, "")
+      print
+      exit
+    }
+  ' "$1"
+}
+
+reset_cache() {
+  local unit dir used_kb
+  unit=$1
+  dir=$2
+  used_kb=$3
+
+  if ! unit_is_idle "$unit"; then
+    say "$unit is running a job; leaving its $((used_kb / 1024 / 1024))G cache for the next pass"
+    return 0
+  fi
+  if [ "$dry_run" = true ]; then
+    say "would reset $dir ($((used_kb / 1024 / 1024))G) with $unit stopped"
+    return 0
+  fi
+
+  # Whatever happens between here and the end, the runner comes back. A janitor
+  # that leaves a runner stopped has taken a slot out of the fleet, which is a
+  # worse outcome than the disk it was reclaiming.
+  trap 'systemctl start "$unit" >/dev/null 2>&1 || true' RETURN
+  say "stopping $unit (graceful; up to ${STOP_TIMEOUT}s if a job is finishing)"
+  timeout "$STOP_TIMEOUT" systemctl stop "$unit" || {
+    say "$unit did not stop in ${STOP_TIMEOUT}s; leaving its cache alone"
+    return 0
+  }
+  rm -rf -- "$dir"
+  systemctl start "$unit"
+  trap - RETURN
+  say "reset $dir, reclaimed $((used_kb / 1024 / 1024))G, $unit restarted"
+  reclaimed_kb=$((reclaimed_kb + used_kb))
+  reset_count=$((reset_count + 1))
+  return 0
+}
+
+reclaimed_kb=0
+instances=0
+over_budget=0
+reset_count=0
+
+while IFS= read -r unit; do
+  [ -n "$unit" ] || continue
+  config=$(systemctl show -p ExecStart --value "$unit" 2>/dev/null |
+    tr ' ' '\n' | awk '/^-c$/ { want = 1; next } want { print; exit }')
+  [ -n "${config:-}" ] && [ -f "$config" ] || continue
+  dir=$(cache_dir_for_config "$config")
+  [ -n "${dir:-}" ] || continue
+
+  # Only ever a runner's cache server. Three things have to agree: the path
+  # names a runner root and ends in `cache`, it holds the bolt index that no
+  # other directory has, and it is not a symlink pointing somewhere else. A
+  # config that names anything else is skipped rather than trusted -- this
+  # deletes a directory whole, so the check is the whole safety argument.
+  case "$dir" in */*runner*/cache) ;; *) continue ;; esac
+  [ ! -L "$dir" ] && [ -d "$dir" ] || continue
+  # The index or the blob tree -- either proves what this directory is, and
+  # requiring both was wrong: `gha-nuc4-general-01` was carrying 13G of blobs
+  # with no `bolt.db` beside them, and the janitor walked straight past the
+  # fullest runner in the fleet reporting nothing at all.
+  [ -f "$dir/bolt.db" ] || [ -d "$dir/cache" ] || continue
+
+  instances=$((instances + 1))
+  used_kb=$(du -sk "$dir" | awk '{ print $1 }')
+  floor_kb=$(floor_kb_for "$dir")
+  available_kb=$(available_kb_for "$dir")
+  budget_kb=$((BUDGET_GB * 1024 * 1024))
+
+  if [ "$used_kb" -le "$budget_kb" ] && [ "$available_kb" -ge "$floor_kb" ]; then
+    say "$unit: $((used_kb / 1024 / 1024))G cached, $((available_kb / 1024 / 1024))G free — within budget"
+    continue
+  fi
+  over_budget=$((over_budget + 1))
+  reset_cache "$unit" "$dir" "$used_kb"
+done < <(systemctl list-units --type=service --no-legend --all 'forgejo-runner*' |
+  awk '{ print $1 }')
+
+# Docker last, and only under pressure. Nothing bounds the image store: every
+# packaging job loads a new `plurx/plurxd:ci-<arch>`, and nynuc was carrying
+# 101G of images with four of a hundred and thirty-one in use. The named
+# BuildKit builders are bounded per job, so only cache older than a week is
+# taken here — pruning it wholesale would throw away exactly the state the
+# packaging lane keeps warm on purpose.
+docker_pruned=false
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+  root=$(docker info --format '{{.DockerRootDir}}')
+  if [ -d "$root" ]; then
+    floor_kb=$(floor_kb_for "$root")
+    available_kb=$(available_kb_for "$root")
+    if [ "$available_kb" -lt "$floor_kb" ]; then
+      if [ "$dry_run" = true ]; then
+        say "would prune Docker: $((available_kb / 1024 / 1024))G free, reserve $((floor_kb / 1024 / 1024))G"
+      else
+        say "pruning Docker: $((available_kb / 1024 / 1024))G free, reserve $((floor_kb / 1024 / 1024))G"
+        docker container prune -f >/dev/null || true
+        docker image prune -af --filter "until=$IMAGE_AGE" >/dev/null || true
+        docker builder prune -f --filter "until=$BUILD_CACHE_AGE" >/dev/null || true
+        docker_pruned=true
+        after_kb=$(available_kb_for "$root")
+        reclaimed_kb=$((reclaimed_kb + after_kb - available_kb))
+        say "Docker pruned, $((after_kb / 1024 / 1024))G free"
+      fi
+    else
+      say "Docker within reserve: $((available_kb / 1024 / 1024))G free"
+    fi
+  fi
+fi
+
+# The run is attributable afterwards, not only in the journal: what it looked
+# at, what it decided, and what that cost.
+if [ "$dry_run" != true ]; then
+  mkdir -p "$STATE_DIR"
+  printf '{"finished":"%s","host":"%s","instances":%d,"over_budget":%d,"reset":%d,"reclaimed_gb":%d,"docker_pruned":%s,"budget_gb":%d}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(hostname -s)" \
+    "$instances" "$over_budget" "$reset_count" "$((reclaimed_kb / 1024 / 1024))" \
+    "$docker_pruned" "$BUDGET_GB" > "$STATE_DIR/last-run.json"
+fi
+say "done: $instances runner cache servers, $over_budget over budget, $reset_count reset, $((reclaimed_kb / 1024 / 1024))G reclaimed"

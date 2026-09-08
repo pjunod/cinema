@@ -7,14 +7,6 @@ inputs:
   lane:
     description: Stable, filesystem-safe lane name used to validate callers.
     required: true
-  execution-mode:
-    description: CI execution rollout mode; local state is disabled in legacy mode.
-    required: false
-    default: legacy
-  persistent-eligible:
-    description: Explicit non-voter scheduling proof; defaults off.
-    required: false
-    default: "false"
 
 outputs:
   builder-name:
@@ -32,22 +24,41 @@ runs:
       shell: bash
       env:
         CACHE_LANE: ${{ inputs.lane }}
-        EXECUTION_MODE: ${{ inputs.execution-mode }}
-        PERSISTENT_ELIGIBLE: ${{ inputs.persistent-eligible }}
       run: |
         set -euo pipefail
         [[ "$CACHE_LANE" =~ ^[a-z0-9][a-z0-9.-]*$ ]] || {
           echo "::error::BuildKit cache lane must be filesystem-safe"
           exit 1
         }
-        if [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ] \
-          || [ "$PERSISTENT_ELIGIBLE" != true ] \
-          || [ "$EXECUTION_MODE" != shadow -a "$EXECUTION_MODE" != accelerated ]; then
+        # The same rule the Cargo cache follows, for the same reason.
+        #
+        # When this returns `local=false` the caller passes `type=gha` to
+        # BuildKit, which writes its layer blobs into the Forgejo runner's
+        # internal cache server — the one with no eviction — and the
+        # `ci-buildkit-prune` step that bounds the builder is skipped, because
+        # it only runs when the builder is named. So the branch that was
+        # supposed to be the safe one was the unbounded one, and it was the only
+        # branch any job ever took: `bolt.db` on `gha-m6-general-01` held 15
+        # `buildkit-blob-1-sha256` entries beside the Cargo tarballs.
+        #
+        # A self-hosted runner gets the named builder, whose state is pruned to
+        # a budget after every packaging job. Hosted runners keep the ephemeral
+        # builder and the hosted cache, which is evicted for them.
+        if [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ]; then
           echo "local=false" >> "$GITHUB_OUTPUT"
           echo "builder_name=" >> "$GITHUB_OUTPUT"
           exit 0
         fi
-        runner_name=$(printf '%s' "$RUNNER_NAME" \
+        # RUNNER_NAME is a GitHub Actions variable and Forgejo's runner does
+        # not export it; under `set -u` this aborted the step. See the same
+        # note in the Cargo cache action. The builder must be unique per runner
+        # instance, because several runners on one host share one Docker
+        # daemon and a shared builder would have them pruning each other.
+        runner_name=${RUNNER_NAME:-}
+        if [ -z "$runner_name" ]; then
+          runner_name="$(hostname -s)-$(basename -- "$(dirname -- "${RUNNER_TOOL_CACHE:-$PWD}")")"
+        fi
+        runner_name=$(printf '%s' "$runner_name" \
           | tr '[:upper:]' '[:lower:]' \
           | tr -c 'a-z0-9_.-' '-')
         echo "local=true" >> "$GITHUB_OUTPUT"
