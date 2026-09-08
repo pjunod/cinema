@@ -258,15 +258,36 @@ fixed 100 GiB reserve on a 78 GB guest could never be satisfied, so the pruner
 deleted everything it was permitted to and failed anyway.
 
 The janitor is installed standalone per host and cannot read the workflow at
-run time, so contract tests hold the figures level instead of an import — and
-the first version of that test was itself a decoration, reading the
-`"${DISK_GB:-25}"` fallback in the step body when `action.yml` sets `DISK_GB`
-unconditionally and that literal can never fire. It reads `inputs.disk-gb`'s
-default now, proven by mutating the default and watching it fail. **The band
-is closed for the default bar and not for every lane:** `disk-gb` is per-lane
-and `vod_web` asks for 45 G, which raising `REQUIRED_GB` cannot cover because
-45 G is over half a 78 GB guest. That lane is named as a known exception and a
-second one fails the test rather than passing unnoticed.
+run time, so contract tests hold the figures level instead of an import.
+**Two of those guards were decorations and the review caught both** — which is
+the more useful part of this entry. The first read the `"${DISK_GB:-25}"`
+fallback in the step body, and `action.yml` sets `DISK_GB` unconditionally, so
+that literal can never fire and the test stayed green while the governing
+default moved; it reads `inputs.disk-gb`'s own default now, proven by mutating
+it. The second was a "said once per pass" flag set inside a function that is
+only ever called as `$(...)` — a command substitution is a subshell, so the
+flag never reached the parent, and the assertion counting the message passed
+because the fixture had one runner and no Docker. The reporting moved to the
+parent shell and the fixture grew a second runner; the sample receipt in
+`docs/ci/RUNNER-DISK.md` has said `"instances":4` all along, so one runner was
+never the case to test against.
+
+**The band is closed for the default bar and not for every lane:** `disk-gb`
+is per-lane and `vod_web` asks for 45 G, which raising `REQUIRED_GB` cannot
+cover because 45 G is over half a 78 GB guest. That lane is named as a known
+exception, counted rather than merely named — a second lane copying `45` was
+the likeliest way another one appears — and the scan no longer misses a value
+hidden behind a trailing comment.
+
+**And the loop that reported success while achieving nothing.** The janitor can
+free the cache and Docker; the OS, the toolchains and the 30 G Cargo cache are
+not its to take. A host whose freeable bytes are smaller than its gap was being
+stopped, wiped cold and left short every hour, with `done:` reporting a
+successful reset each time. Free space is re-read after a reset now, the
+shortfall is said out loud, and `short_after` is in the receipt beside
+`required_gb` and the `reserve_gb` actually kept — because a bound that
+silently cannot be met is the failure this whole entry is about, and the
+janitor had a second one of its own.
 
 **A wrong fix was built first, and the way it was wrong is the lesson.** The
 error message names a path under `_work`, so `_work` was taken to be the full

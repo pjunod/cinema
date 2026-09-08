@@ -224,13 +224,29 @@ record to `/var/lib/plurx-ci-janitor/last-run.json`:
 
 ```json
 {"finished":"2026-09-07T22:00:04Z","host":"nynuc","instances":4,
- "over_budget":1,"reset":1,"reclaimed_gb":16,"docker_pruned":false,
- "budget_gb":20}
+ "over_budget":1,"reset":1,"short_after":0,"reclaimed_gb":16,
+ "docker_pruned":false,"budget_gb":20,"required_gb":25,"reserve_gb":19}
 ```
 
 `over_budget` and `reset` are deliberately separate: a runner that is over
 budget every hour and never idle enough to reset is a real condition, and it
 should be visible rather than silently skipped forever.
+
+**`short_after` is the field to watch, and it exists because the alternative
+was invisible.** The janitor can free the cache and Docker; the OS, the
+toolchains and the 30 G Cargo cache are not its to take. A host whose freeable
+bytes are smaller than its gap gets stopped, wiped cold and left short — every
+hour, with the summary reporting a successful reset each time. The heuristic
+cannot predict that from disk size, so the janitor re-reads free space after a
+reset and says so when it did not reach the floor. A `short_after` that is
+non-zero hour after hour is a host to give more disk or fewer lanes, not a
+janitor to tune.
+
+**`required_gb` and `reserve_gb` are both there** because they can differ: the
+reserve is what was actually kept, and when a demand is larger than half the
+filesystem it is dropped rather than met (below), so a host can be running on
+the 20 % rule while `required_gb` says 25. Two numbers, because one would hide
+which.
 
 ### The reserve has to clear the bar jobs are held to
 
@@ -246,8 +262,8 @@ about it.
 job's labels pin it to that guest and a re-push lands on the same disk. So the
 reserve is now `max(20 % of the filesystem, REQUIRED_GB)`.
 
-A demand the filesystem cannot meet is **reported and then ignored** — it does
-not become the reserve. Capping it to half the disk was tried and is worse than
+A demand **larger than half the filesystem** is reported and then ignored — it
+does not become the reserve. Capping it to half was tried and is worse than
 doing nothing: `min(25 G, half)` *is* half for every volume under 50 GiB, so
 the smallest hosts in the fleet would carry the most aggressive reserve this
 script has ever kept, and prune hourly forever chasing a figure the same
@@ -255,6 +271,11 @@ message calls unreachable. **A host that cannot free enough for a lane is a
 placement problem, not a pruning one.** The underlying lesson is the original
 bug here: a fixed 100 GiB reserve on a 78 GB guest could never be satisfied, so
 the pruner deleted everything it was allowed to and failed anyway.
+
+*Larger than* half, not *at least* half: 25 G on a 50 GiB volume is entirely
+attainable — the host need only hold under 25 G — and dropping the demand there
+would return that host to the 20 % rule while printing that it cannot run the
+lane, which would be false.
 
 The janitor is installed standalone on each host and cannot read the workflow
 at run time, so the figures are held level by contract tests rather than by an

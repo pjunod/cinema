@@ -107,8 +107,6 @@ done
 # by deleting caches, and chasing it would delete everything and fail anyway --
 # it is said out loud instead, because a bound that silently cannot be met is
 # how this went wrong the first time.
-capped_reported=false
-
 floor_kb_for() {
   local path filesystem_kb percent minimum quarter required half
   path=$1
@@ -119,27 +117,49 @@ floor_kb_for() {
   [ "$minimum" -le "$quarter" ] || minimum=$quarter
   [ "$percent" -ge "$minimum" ] || percent=$minimum
 
-  # A demand the filesystem cannot meet is REPORTED, and then ignored -- it
-  # does not become the reserve. Capping it to half the disk instead was worse
-  # than doing nothing: on any volume under 50 GiB, `min(25G, half)` IS half,
-  # so the smallest hosts in the fleet would carry the most aggressive reserve
-  # this script has ever kept, and would prune hourly, forever, chasing a
-  # figure the message in the same breath calls unreachable. A host that cannot
-  # free enough for a lane is a placement problem, not a pruning one.
+  # A demand the filesystem cannot meet is dropped -- it does not become the
+  # reserve. Capping it to half the disk instead was worse than doing nothing:
+  # on any volume under 50 GiB, `min(25G, half)` IS half, so the smallest hosts
+  # in the fleet would carry the most aggressive reserve this script has ever
+  # kept, and would prune hourly, forever, chasing a figure the message in the
+  # same breath calls unreachable. A host that cannot free enough for a lane is
+  # a placement problem, not a pruning one.
+  #
+  # `-gt`, not `-ge`: at exactly half, the demand IS meetable -- a 50 GiB
+  # volume can hold under 25 G -- and dropping it there would silently return
+  # this host to the 20 % rule that caused the incident.
+  #
+  # Saying so is `note_unreachable_demand`'s job, not this function's. This one
+  # is only ever called as `$(floor_kb_for ...)`, and a command substitution is
+  # a subshell: a "have I said this already" flag set in here never reaches the
+  # parent, so the message would repeat once per runner plus once for Docker
+  # while a test with one runner and no Docker saw it exactly once and passed.
   required=$((REQUIRED_GB * 1024 * 1024))
   half=$((filesystem_kb / 2))
-  if [ "$required" -ge "$half" ]; then
-    if [ "$capped_reported" = false ]; then
-      say "a job needs ${REQUIRED_GB}G and $path holds $((filesystem_kb / 1024 / 1024))G; no amount of pruning reaches that, so this host keeps its $((percent / 1024 / 1024))G reserve and cannot run that lane" >&2
-      capped_reported=true
-    fi
-    required=0
-  fi
+  [ "$required" -gt "$half" ] && required=0
   [ "$percent" -ge "$required" ] && { echo "$percent"; return; }
   echo "$required"
 }
 
 available_kb_for() { df -Pk "$1" | awk 'NR == 2 { print $4 }'; }
+
+# Said once per pass, from the parent shell, because `floor_kb_for` cannot say
+# it (see the note there). A host in this state is running on the 20 % rule
+# rather than the reserve that was configured for it, which is the original
+# defect narrowed to one machine -- so it is named out loud rather than left in
+# the difference between two numbers nobody prints.
+unreachable_reported=false
+note_unreachable_demand() {
+  local path filesystem_kb half percent
+  [ "$unreachable_reported" = false ] || return 0
+  path=$1
+  filesystem_kb=$(df -Pk "$path" | awk 'NR == 2 { print $2 }')
+  half=$((filesystem_kb / 2))
+  [ "$((REQUIRED_GB * 1024 * 1024))" -gt "$half" ] || return 0
+  percent=$(((filesystem_kb + 4) / 5))
+  say "a job needs ${REQUIRED_GB}G and $path holds $((filesystem_kb / 1024 / 1024))G; no amount of pruning reaches that, so this host keeps its $((percent / 1024 / 1024))G reserve and cannot run that lane" >&2
+  unreachable_reported=true
+}
 
 # Idle means the unit's cgroup holds nothing but the daemon itself. A running
 # job is a tree of shells and compilers under that same cgroup, so this is a
@@ -212,6 +232,8 @@ reclaimed_kb=0
 instances=0
 over_budget=0
 reset_count=0
+short_after=0
+reserve_kb=0
 
 while IFS= read -r unit; do
   [ -n "$unit" ] || continue
@@ -236,7 +258,9 @@ while IFS= read -r unit; do
 
   instances=$((instances + 1))
   used_kb=$(du -sk "$dir" | awk '{ print $1 }')
+  note_unreachable_demand "$dir"
   floor_kb=$(floor_kb_for "$dir")
+  [ "$floor_kb" -le "$reserve_kb" ] || reserve_kb=$floor_kb
   available_kb=$(available_kb_for "$dir")
   budget_kb=$((BUDGET_GB * 1024 * 1024))
 
@@ -246,6 +270,20 @@ while IFS= read -r unit; do
   fi
   over_budget=$((over_budget + 1))
   reset_cache "$unit" "$dir" "$used_kb"
+
+  # And the part that was invisible: a reset that does not reach the floor. The
+  # janitor can only free the cache and Docker -- the OS, the toolchains and
+  # the 30 G Cargo cache are not its to take -- so a host whose freeable bytes
+  # are smaller than the gap will be stopped, wiped cold and left short, every
+  # hour, while `done:` reports a successful reset each time. Say it, and put
+  # it in the receipt.
+  if [ "$dry_run" != true ]; then
+    available_kb=$(available_kb_for "$dir")
+    if [ "$available_kb" -lt "$floor_kb" ]; then
+      say "$unit: still $((available_kb / 1024 / 1024))G free against a $((floor_kb / 1024 / 1024))G reserve after resetting what it may — this host cannot reach it by pruning" >&2
+      short_after=$((short_after + 1))
+    fi
+  fi
 done < <(systemctl list-units --type=service --no-legend --all 'forgejo-runner*' |
   awk '{ print $1 }')
 
@@ -284,9 +322,11 @@ fi
 # at, what it decided, and what that cost.
 if [ "$dry_run" != true ]; then
   mkdir -p "$STATE_DIR"
-  printf '{"finished":"%s","host":"%s","instances":%d,"over_budget":%d,"reset":%d,"reclaimed_gb":%d,"docker_pruned":%s,"budget_gb":%d}\n' \
+  printf '{"finished":"%s","host":"%s","instances":%d,"over_budget":%d,"reset":%d,"short_after":%d,"reclaimed_gb":%d,"docker_pruned":%s,"budget_gb":%d,"required_gb":%d,"reserve_gb":%d}\n' \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(hostname -s)" \
-    "$instances" "$over_budget" "$reset_count" "$((reclaimed_kb / 1024 / 1024))" \
-    "$docker_pruned" "$BUDGET_GB" > "$STATE_DIR/last-run.json"
+    "$instances" "$over_budget" "$reset_count" "$short_after" \
+    "$((reclaimed_kb / 1024 / 1024))" \
+    "$docker_pruned" "$BUDGET_GB" "$REQUIRED_GB" "$((reserve_kb / 1024 / 1024))" \
+    > "$STATE_DIR/last-run.json"
 fi
-say "done: $instances runner cache servers, $over_budget over budget, $reset_count reset, $((reclaimed_kb / 1024 / 1024))G reclaimed"
+say "done: $instances runner cache servers, $over_budget over budget, $reset_count reset, $short_after still short, $((reclaimed_kb / 1024 / 1024))G reclaimed"

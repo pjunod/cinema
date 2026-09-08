@@ -29,19 +29,28 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "deploy/runner-janitor/plurx-ci-janitor"
 UNIT = "forgejo-runner-gha-test-01.service"
+UNIT2 = "forgejo-runner-gha-test-02.service"
 
 SYSTEMCTL = """#!/bin/sh
 log() { printf '%s\\n' "$*" >> "$FIXTURE_LOG"; }
 case "$1 $2" in
   "list-units --type=service")
     printf '%s loaded active running Forgejo runner\\n' "$FIXTURE_UNIT"
+    # A second runner on the same host, when a test asks for one. Four is the
+    # number `docs/ci/RUNNER-DISK.md` shows in its sample receipt, so one is
+    # the unrepresentative case and anything asserted "once per pass" has to
+    # be asserted against more than one.
+    [ -n "$FIXTURE_UNIT2" ] &&
+      printf '%s loaded active running Forgejo runner\\n' "$FIXTURE_UNIT2"
     exit 0 ;;
 esac
 if [ "$1" = show ]; then
+  config=$FIXTURE_CONFIG
+  [ "$5" = "$FIXTURE_UNIT2" ] && config=$FIXTURE_CONFIG2
   case "$3" in
-    ExecStart) printf '{ path=/usr/local/bin/forgejo-runner ; argv[]=/usr/local/bin/forgejo-runner daemon -c %s ; }\\n' "$FIXTURE_CONFIG" ;;
+    ExecStart) printf '{ path=/usr/local/bin/forgejo-runner ; argv[]=/usr/local/bin/forgejo-runner daemon -c %s ; }\\n' "$config" ;;
     MainPID) printf '%s\\n' "$FIXTURE_MAIN_PID" ;;
-    ControlGroup) printf '/system.slice/%s\\n' "$FIXTURE_UNIT" ;;
+    ControlGroup) printf '/system.slice/%s\\n' "$5" ;;
   esac
   exit 0
 fi
@@ -117,7 +126,9 @@ class JanitorContractCase(unittest.TestCase):
                 "PLURX_JANITOR_CGROUP_ROOT": str(self.cgroup),
                 "PLURX_JANITOR_STOP_TIMEOUT": "5",
                 "FIXTURE_UNIT": UNIT,
+                "FIXTURE_UNIT2": "",
                 "FIXTURE_CONFIG": str(self.config),
+                "FIXTURE_CONFIG2": "",
                 "FIXTURE_LOG": str(self.log),
                 "FIXTURE_MAIN_PID": "4242",
                 "FIXTURE_STOP_STATUS": "0",
@@ -126,6 +137,30 @@ class JanitorContractCase(unittest.TestCase):
                 "FIXTURE_USED_KB": str(4 * 1024 * 1024),
             }
         )
+
+    def add_second_runner(self):
+        """A second runner unit on the same host, with its own cache server.
+
+        `docs/ci/RUNNER-DISK.md`'s own sample receipt says `"instances":4`, so
+        a fixture with exactly one runner is the unrepresentative case, and
+        anything claimed "once per pass" is unfalsifiable against it.
+        """
+        root = self.runner_root.parent / "forgejo-runner-2"
+        cache = root / "cache"
+        (cache / "cache/0a").mkdir(parents=True)
+        (cache / "bolt.db").write_bytes(b"index")
+        config = root / "config.yml"
+        config.write_text(
+            f"runner:\n  capacity: 1\ncache:\n  enabled: true\n  dir: {cache}\n",
+            encoding="utf-8",
+        )
+        (self.cgroup / "system.slice" / UNIT2).mkdir(parents=True)
+        (self.cgroup / "system.slice" / UNIT2 / "cgroup.procs").write_text(
+            "4242\n", encoding="utf-8"
+        )
+        self.environment["FIXTURE_UNIT2"] = UNIT2
+        self.environment["FIXTURE_CONFIG2"] = str(config)
+        return cache
 
     def run_janitor(self, *arguments):
         return subprocess.run(
@@ -303,24 +338,41 @@ class JanitorContractCase(unittest.TestCase):
         ffmpeg build on top of the workspace. Nothing reclaims the gap between
         25 G and 45 G on its behalf; that lane needs a runner with the room,
         which is placement rather than pruning.
+
+        The exception is counted, not just named. Keying on the value alone
+        let a *second*, unrelated lane copy `disk-gb: "45"` and pass in
+        silence -- and copying the heavy lane that already exists is the
+        likeliest way another one appears.
         """
-        known_larger = {"45": "vod_web: Playwright browsers plus an ffmpeg build"}
+        known_larger = {"45": ("vod_web: Playwright browsers plus an ffmpeg build", 1)}
 
         reserved = int(self.janitor_required_gb())
-        asked = set(
-            re.findall(r"^\s*disk-gb:\s*[\"']?(\d+)[\"']?\s*$",
-                       self.every_workflow_source(), re.M)
+        asked = re.findall(
+            # A trailing comment must not hide a value. Requiring end-of-line
+            # straight after it meant `disk-gb: "70"  # heavy lane` was never
+            # even collected, which is worse than allowing it: the number never
+            # reached the comparison at all.
+            r"^\s*disk-gb:\s*[\"']?(\d+)[\"']?\s*(?:#.*)?$",
+            self.every_workflow_source(),
+            re.M,
         )
-        unexplained = sorted(
-            value for value in asked
-            if int(value) > reserved and value not in known_larger
-        )
+        larger = [value for value in asked if int(value) > reserved]
+
+        unexplained = sorted(set(value for value in larger if value not in known_larger))
         self.assertEqual(
             unexplained,
             [],
             "a lane asks for more free space than the janitor reserves, and is "
             "not named as a known exception: " + ", ".join(unexplained),
         )
+        for value, (reason, expected) in known_larger.items():
+            self.assertTrue(reason, "a known exception needs a reason, not a key")
+            self.assertEqual(
+                larger.count(value),
+                expected,
+                f"{larger.count(value)} lanes ask for {value}G; {expected} is "
+                f"documented ({reason}). Name the new one or lower it.",
+            )
 
     def janitor_required_gb(self):
         found = re.search(
@@ -344,9 +396,13 @@ class JanitorContractCase(unittest.TestCase):
         return block.group(1)
 
     def every_workflow_source(self):
+        # `.yaml` as well as `.yml`: none exists under `.github/` today, and a
+        # guard that silently stops covering a file the day someone spells the
+        # extension differently is not a guard.
         return "\n".join(
             path.read_text(encoding="utf-8")
-            for path in sorted((ROOT / ".github").rglob("*.yml"))
+            for extension in ("*.yml", "*.yaml")
+            for path in sorted((ROOT / ".github").rglob(extension))
         )
 
     def test_a_requirement_larger_than_the_disk_is_said_out_loud_not_chased(self):
@@ -372,9 +428,70 @@ class JanitorContractCase(unittest.TestCase):
         self.assertIn("cannot run that lane", result.stderr)
         self.assertEqual(self.systemctl_calls(), [])
         self.assertTrue((self.cache / "bolt.db").is_file())
-        # Said once per pass, not once per call: the Docker block asks for the
-        # same floor, and a small host would otherwise log it every hour twice.
+
+    def test_an_unreachable_demand_is_said_once_a_pass_across_every_runner(self):
+        """The assertion that could not fail, made able to.
+
+        A "have I said this already" flag set inside `floor_kb_for` never
+        reaches the parent, because that function is only ever called as
+        `$(floor_kb_for ...)` and a command substitution is a subshell. With
+        one runner and a `docker` fake that exits 1 the floor is computed once
+        a pass, so the message appeared once whether the flag worked or not and
+        a `count == 1` assertion passed either way. Two runners is what makes
+        it a test.
+        """
+        self.add_second_runner()
+        self.environment["PLURX_JANITOR_REQUIRED_GB"] = "60"
+        self.environment["FIXTURE_AVAIL_KB"] = str(25 * 1024 * 1024)
+
+        result = self.run_janitor()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.last_run()["instances"], 2)
         self.assertEqual(result.stderr.count("no amount of pruning"), 1)
+
+    def test_a_demand_of_exactly_half_the_disk_is_kept_not_dropped(self):
+        """`-gt`, not `-ge`, now that the branch drops instead of capping.
+
+        25 G on a 50 GiB volume is entirely attainable -- the host need only
+        hold under 25 G -- so dropping the demand at exactly half would
+        silently return that host to the 20 % rule this change exists to
+        replace, while printing "cannot run that lane", which would be false.
+        """
+        self.environment["FIXTURE_FS_KB"] = str(50 * 1024 * 1024)
+        self.environment["FIXTURE_AVAIL_KB"] = str(20 * 1024 * 1024)
+
+        result = self.run_janitor()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("no amount of pruning", result.stderr)
+        # 20 G free against a 25 G reserve: short, so it acts.
+        self.assertEqual(self.systemctl_calls(), ["stop", UNIT, "start", UNIT])
+        self.assertEqual(self.last_run()["reserve_gb"], 25)
+        self.assertEqual(self.last_run()["required_gb"], 25)
+
+    def test_a_reset_that_cannot_reach_the_floor_says_so_every_time(self):
+        """The invisible hourly loop, made visible.
+
+        The janitor can free the cache and Docker. The OS, the toolchains and
+        the 30 G Cargo cache are not its to take, so a host whose freeable
+        bytes are smaller than the gap gets stopped, wiped cold and left short
+        -- every hour, with `done:` reporting a successful reset each time. The
+        heuristic cannot predict that; the receipt can report it.
+        """
+        # 18 G free against a 25 G reserve, and a 3 G cache. The fixture's
+        # `df` is static, so the reset cannot move it -- which is exactly the
+        # host that can never reach the floor.
+        self.environment["FIXTURE_AVAIL_KB"] = str(18 * 1024 * 1024)
+        self.environment["FIXTURE_USED_KB"] = str(3 * 1024 * 1024)
+
+        result = self.run_janitor()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.last_run()["reset"], 1)
+        self.assertIn("cannot reach it by pruning", result.stderr)
+        self.assertEqual(self.last_run()["short_after"], 1)
+        self.assertIn("1 still short", result.stdout)
 
     def test_a_small_host_does_not_get_the_most_aggressive_reserve(self):
         """The pathology a half-the-disk cap would have created.
