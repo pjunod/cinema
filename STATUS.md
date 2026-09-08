@@ -4,6 +4,58 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## The transport-recovery campaign asserted a property the system does not have
+
+**Decided and built; the lane that has been red on `main` and every PR since
+`14d0519a` gets an assertion it can pass without losing its teeth.**
+`ci / cluster transport recovery campaign` compared every one of its forty
+cycles against a single warmed sample with all three margins at zero. The
+counts it samples do not sit at a value: sockets and owned async tasks
+alternate between two states one recovery apart — one connection and one
+owned task per peer, still open when `operation_owns_work` clears — and
+threads jitter on their own. Forty cycles needed forty favourable draws,
+which is why the failure moved between cycles 1, 4, 6, 9 and 13 and why
+`Main promotion gate` failed in two seconds behind it on every PR.
+
+**What it asserts now is an envelope.** The series per node is the warmup
+plus the twenty cycles, split into an opening half (cycles 0–10) and a
+closing half (11–20); neither the floor nor the ceiling of the closing half
+may exceed the opening half's by more than the allowance — zero for sockets
+and owned async tasks, two for threads. A leak that starts early adds every
+cycle and lifts the closing floor by ten or more; one that starts late puts
+most of the closing window above anything the opening half showed — the
+closing ceiling is the fourth-highest sample, because the high side is
+in-flight residue and the record already shows it wobbling by one, so three
+spikes are spikes and four are a trend. The drain visits both of its states
+within a few cycles and moves neither edge. The option first written up —
+last cycle against first cycle — was rejected on the way: two samples of a
+two-state range is the same coin flip, drawn twice instead of forty times.
+What still hides is stated, not implied, against the alternating series
+the lane samples: a single connection leaked after about cycle 13, a
+per-cycle leak that starts after about cycle 15, and a thread leak of one
+per four recoveries or slower.
+
+What moved: the sampler no longer waits for a ceiling, only for idle and two
+identical samples; the record-time bail is gone; the campaign computes and
+prints both bands per node at the end of each role and fails there, with the
+whole per-cycle series and each cycle's snapshot source in the log (a leader
+that moved between the halves is the one benign thing that looks like a
+leak); the offline validator recomputes the envelopes from the cycles and
+refuses a hand-written or reordered record. A smoke shorter than nineteen
+cycles records and prints its envelope but does not fail on it — two-sample
+windows are the coin flip again. Artifact schema is version 2
+(`resource_*_envelope_allowance`, `resource_envelopes` per role). 39 focused
+tests; the mutations prove a socket, thread or task leaked every cycle, a
+leak starting at cycle 13, and one socket leaked at cycle 15 all still fail —
+and that the measured drain and jitter pass. Decision document:
+[docs/cluster/TRANSPORT-RECOVERY-RESOURCE-CONTRACT-DECISION.md](docs/cluster/TRANSPORT-RECOVERY-RESOURCE-CONTRACT-DECISION.md)
+§0. The lane's `timeout-minutes` goes from 120 to 240 in the same change: a
+voter recovery is ~4.7 min on the two-core `ci-topology` runner, so the
+voter half alone is ~100 min, and no Forgejo run has ever reached the
+learner half to find that out. Still open: Option C there — making `idle`
+mean the transports are released, which is a vendored hiqlite change and
+helps everything that reads `operation_owns_work`, not only this lane.
+
 ## Phase 3 is buildable today, and the first answer to that question was wrong
 
 **Documentation only, and a decision taken in Paul's absence — overrule it

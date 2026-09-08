@@ -1,0 +1,5 @@
+version = 1
+[[coverage]]
+commits = ["65c752cc", "dd603c50"]
+reason = "This commit raises the cluster-transport-recovery workflow job's timeout from 120 to 240 minutes so a full twenty-plus-twenty campaign, ~4.7 minutes per voter recovery on the two-core runner, can finish; it changes no runtime behavior and no test can observe a workflow timeout. The second commit is the history mapping itself, split into this file because a fragment holds one coverage entry."
+ignore = true
