@@ -28,7 +28,11 @@ use super::{
     ClusterProcesses, NodeLaunch, NodeProcess, NodeSpec, Request, Response, API_SECRET,
 };
 
-pub const TRANSPORT_RECOVERY_ARTIFACT_SCHEMA_VERSION: u32 = 1;
+/// Version 2 replaced the per-cycle resource ceiling and its three zero
+/// margins with the campaign floor comparison and its allowances. No version 1
+/// artifact was ever produced: the per-cycle contract never completed a
+/// campaign.
+pub const TRANSPORT_RECOVERY_ARTIFACT_SCHEMA_VERSION: u32 = 2;
 pub const TRANSPORT_RECOVERY_CYCLES_PER_ROLE: u32 = 20;
 pub const TRANSPORT_RECOVERY_SMALL_IMAGE_BYTES: u64 = 88_559_616;
 pub const TRANSPORT_RECOVERY_LARGE_IMAGE_BYTES: u64 = 177_119_232;
@@ -52,9 +56,25 @@ const RESOURCE_CLEANUP_HORIZON: Duration = Duration::from_secs(60);
 const RESOURCE_SAMPLE_INTERVAL: Duration = Duration::from_secs(3);
 const RESOURCE_STABLE_SAMPLES: usize = 2;
 const RESOURCE_BASELINE_WARMUP_CYCLES: u32 = 1;
-const THREAD_MARGIN: u64 = 0;
-const SOCKET_MARGIN: u64 = 0;
-const OWNED_ASYNC_TASK_MARGIN: u64 = 0;
+/// How far a node's resource *floor* may rise between the opening and the
+/// closing half of a campaign before it is a leak.
+///
+/// The campaign does not assert that any single cycle stays under a ceiling:
+/// sockets and owned async tasks alternate between two states one recovery
+/// apart (one connection and one owned task per peer, still open when
+/// `operation_owns_work` clears), and thread counts jitter on their own with
+/// no recovery in flight. What it asserts is that the minimum observed in the
+/// closing half of the campaign does not exceed the minimum observed in the
+/// opening half by more than this. A leak adds every cycle, so it moves the
+/// closing floor by ten units or more; noise cannot move a minimum over ten
+/// samples at all. Sockets and owned tasks get no allowance — one per-peer
+/// transport that stops being released is exactly the leak this exists to
+/// catch. Threads get two, the widest swing measured with nothing in flight
+/// (`docs/cluster/TRANSPORT-RECOVERY-RESOURCE-BASELINE.md` §3); a thread that
+/// leaks every recovery still shows as +10.
+const THREAD_FLOOR_ALLOWANCE: u64 = 2;
+const SOCKET_FLOOR_ALLOWANCE: u64 = 0;
+const OWNED_ASYNC_TASK_FLOOR_ALLOWANCE: u64 = 0;
 const RECOVERY_WRITE_SQL: &str =
     "INSERT INTO settings (key, value, updated_at) VALUES ($1, $2, $3)";
 
@@ -238,6 +258,34 @@ pub struct TransportRecoveryWorstDurations {
     pub install_millis: u64,
 }
 
+/// The lowest count of each resource a node showed in one half of a campaign.
+///
+/// A floor is taken per resource, not per sample: the threads minimum and the
+/// sockets minimum may come from different cycles.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeResourceFloors {
+    pub node_id: u64,
+    pub kind: RecoveryResourceNodeKind,
+    pub opening: ProcessResourceCount,
+    pub closing: ProcessResourceCount,
+}
+
+/// The campaign's resource assertion, recorded so the artifact proves it.
+///
+/// The series for each node is the warmup baseline (cycle 0) followed by
+/// every recorded cycle's post-quiescence sample. The opening window is the
+/// first half of that series rounded up — cycles `0..=opening_window_last_cycle`
+/// — and the closing window is the rest. The campaign passes when no node's
+/// closing floor exceeds its opening floor by more than the artifact's
+/// recorded allowance for that resource.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryResourceFloors {
+    pub opening_window_last_cycle: u32,
+    pub nodes: Vec<NodeResourceFloors>,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecoveryRoleCampaign {
@@ -246,6 +294,7 @@ pub struct RecoveryRoleCampaign {
     pub minimum_sqlite_bytes: u64,
     pub cycles: Vec<RecoveryCycleEvidence>,
     pub worst_durations: TransportRecoveryWorstDurations,
+    pub resource_floors: RecoveryResourceFloors,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -259,9 +308,9 @@ pub struct ClusterTransportRecoveryArtifact {
     pub finished_at_unix_ms: i64,
     pub snapshot_policy: RecoverySnapshotPolicy,
     pub transport: RecoveryTransportContract,
-    pub resource_thread_margin: u64,
-    pub resource_socket_margin: u64,
-    pub resource_owned_async_task_margin: u64,
+    pub resource_thread_floor_allowance: u64,
+    pub resource_socket_floor_allowance: u64,
+    pub resource_owned_async_task_floor_allowance: u64,
     pub resource_cleanup_horizon_millis: u64,
     pub resource_stable_samples: usize,
     pub learner: RecoveryRoleCampaign,
@@ -416,9 +465,9 @@ pub async fn run_transport_recovery_campaign(output: &Path) -> Result<()> {
             separate_node_processes: true,
             separate_writer_process: true,
         },
-        resource_thread_margin: THREAD_MARGIN,
-        resource_socket_margin: SOCKET_MARGIN,
-        resource_owned_async_task_margin: OWNED_ASYNC_TASK_MARGIN,
+        resource_thread_floor_allowance: THREAD_FLOOR_ALLOWANCE,
+        resource_socket_floor_allowance: SOCKET_FLOOR_ALLOWANCE,
+        resource_owned_async_task_floor_allowance: OWNED_ASYNC_TASK_FLOOR_ALLOWANCE,
         resource_cleanup_horizon_millis: duration_millis(RESOURCE_CLEANUP_HORIZON),
         resource_stable_samples: RESOURCE_STABLE_SAMPLES,
         learner,
@@ -928,13 +977,9 @@ async fn exercise_role_campaign(
         } else {
             Instant::now() + RECOVERY_DEADLINE
         };
-        let post_resources = wait_for_stable_idle_resources(
-            cluster,
-            &[1, 2, 3, TARGET_NODE],
-            baseline_resources.as_deref(),
-            resource_deadline,
-        )
-        .await?;
+        let post_resources =
+            wait_for_stable_idle_resources(cluster, &[1, 2, 3, TARGET_NODE], resource_deadline)
+                .await?;
         match baseline_resources.as_deref() {
             None => println!(
                 "cluster-check: {} baseline resources {}",
@@ -977,11 +1022,37 @@ async fn exercise_role_campaign(
         });
     }
 
+    let resource_floors = resource_floors(&cycles);
+    println!(
+        "cluster-check: {} campaign resource floors {}",
+        role.label(),
+        describe_resource_floors(&resource_floors)
+    );
+    let rose = resource_floors_over_allowance(
+        &resource_floors,
+        ResourceFloorAllowances {
+            threads: THREAD_FLOOR_ALLOWANCE,
+            sockets: SOCKET_FLOOR_ALLOWANCE,
+            owned_async_tasks: OWNED_ASYNC_TASK_FLOOR_ALLOWANCE,
+        },
+    );
+    if !rose.is_empty() {
+        for line in describe_resource_series(&cycles) {
+            println!("cluster-check: {} {line}", role.label());
+        }
+        bail!(
+            "{} campaign leaked resources: {}",
+            role.label(),
+            rose.join("; ")
+        );
+    }
+
     Ok(RecoveryRoleCampaign {
         role,
         cycles_required,
         minimum_sqlite_bytes,
         worst_durations: worst_durations(&cycles),
+        resource_floors,
         cycles,
     })
 }
@@ -1297,10 +1368,20 @@ async fn wait_for_applied_index(
     }
 }
 
+/// Sample every node once it reports no transport work and its counts have
+/// held still for [`RESOURCE_STABLE_SAMPLES`] consecutive samples.
+///
+/// This is a *sample*, not a verdict. It deliberately does not wait for the
+/// counts to come under any ceiling: the per-peer transports a recovery used
+/// are still open when `operation_owns_work` clears and drain tens of seconds
+/// later, so a sample lands on one side or the other of that drain, and
+/// holding the horizon open for the low side turned every high-side cycle
+/// into a sixty-second expiry. The leak question is asked once per campaign,
+/// by [`resource_floors_over_allowance`], where a drain cannot be mistaken
+/// for growth.
 async fn wait_for_stable_idle_resources(
     cluster: &mut ClusterProcesses,
     node_ids: &[u64],
-    ceilings: Option<&[(u64, ProcessResourceCount)]>,
     deadline: Instant,
 ) -> Result<Vec<(u64, ProcessResourceCount)>> {
     const PHASE: &str = "stable idle resource sampling";
@@ -1338,10 +1419,9 @@ async fn wait_for_stable_idle_resources(
             )
         })??;
         let idle = busy_nodes.is_empty();
-        let within_limits = ceilings.is_none_or(|limits| resources_within_limits(limits, &current));
-        if idle && within_limits && previous.as_ref() == Some(&current) {
+        if idle && previous.as_ref() == Some(&current) {
             stable_samples = stable_samples.saturating_add(1);
-        } else if idle && within_limits {
+        } else if idle {
             stable_samples = 1;
         } else {
             stable_samples = 0;
@@ -1351,7 +1431,6 @@ async fn wait_for_stable_idle_resources(
         }
         waiting_on = Some(describe_resource_wait(
             &busy_nodes,
-            ceilings,
             &current,
             previous.as_deref(),
             stable_samples,
@@ -1369,13 +1448,12 @@ async fn wait_for_stable_idle_resources(
 ///
 /// The bare message — "recovery deadline expired before stable idle resource
 /// sampling" — cannot distinguish the two opposite things it means. A node
-/// still owning transport work, or holding resources above its warmed
-/// baseline, is the leak this campaign exists to catch, and must never be
-/// waited out with a longer horizon. Every node already idle and inside its
-/// baseline, with only the repeat-sample requirement outstanding, is a loaded
-/// machine, and a code change would be the wrong answer. This lane has expired
-/// here on `main` and on three pull requests without either reader ever being
-/// able to tell which it was.
+/// still owning transport work is a recovery that never finished, and must
+/// never be waited out with a longer horizon. Every node already idle, with
+/// only the repeat-sample requirement outstanding, is a loaded machine, and a
+/// code change would be the wrong answer. This lane has expired here on
+/// `main` and on three pull requests without either reader ever being able to
+/// tell which it was.
 fn annotate_resource_wait(error: anyhow::Error, waiting_on: Option<&str>) -> anyhow::Error {
     match waiting_on {
         Some(report) => error.context(format!("still waiting on {report}")),
@@ -1385,41 +1463,30 @@ fn annotate_resource_wait(error: anyhow::Error, waiting_on: Option<&str>) -> any
 
 fn describe_resource_wait(
     busy_nodes: &[u64],
-    ceilings: Option<&[(u64, ProcessResourceCount)]>,
     current: &[(u64, ProcessResourceCount)],
     previous: Option<&[(u64, ProcessResourceCount)]>,
     stable_samples: usize,
 ) -> String {
-    let mut parts = Vec::new();
     if !busy_nodes.is_empty() {
-        parts.push(format!(
+        return format!(
             "node(s) {} still owning transport work",
             busy_nodes
                 .iter()
                 .map(u64::to_string)
                 .collect::<Vec<_>>()
                 .join(", ")
-        ));
+        );
     }
-    if let Some(limits) = ceilings {
-        let over = resources_over_limits(limits, current);
-        if !over.is_empty() {
-            parts.push(format!("above the warmed baseline: {}", over.join("; ")));
-        }
-    }
-    if parts.is_empty() {
-        let moved = previous.map(|previous| sample_movement(previous, current));
-        let movement = match moved.as_deref() {
-            Some([]) => " (the last two samples were identical)".to_owned(),
-            Some(moved) => format!(" (since the last sample: {})", moved.join("; ")),
-            None => String::new(),
-        };
-        parts.push(format!(
-            "every node idle and within its baseline, with {stable_samples} of \
-             {RESOURCE_STABLE_SAMPLES} consecutive repeated samples{movement}"
-        ));
-    }
-    parts.join(", and ")
+    let moved = previous.map(|previous| sample_movement(previous, current));
+    let movement = match moved.as_deref() {
+        Some([]) => " (the last two samples were identical)".to_owned(),
+        Some(moved) => format!(" (since the last sample: {})", moved.join("; ")),
+        None => String::new(),
+    };
+    format!(
+        "every node idle, with {stable_samples} of {RESOURCE_STABLE_SAMPLES} consecutive \
+         repeated samples{movement}"
+    )
 }
 
 /// What moved between two consecutive samples, one resource at a time.
@@ -1488,65 +1555,190 @@ fn describe_resource_sample(sample: &[(u64, ProcessResourceCount)]) -> String {
         .join(", ")
 }
 
-/// Every way `current` exceeds `limits`, named one resource at a time.
+/// The floor allowances the campaign asserts against, as one value.
 ///
-/// The single source of truth for the ceiling comparison:
-/// `resources_within_limits` is this same question asked for a yes or no, so
-/// the predicate and the message it produces can never disagree about what
-/// counts as over.
-fn resources_over_limits(
-    limits: &[(u64, ProcessResourceCount)],
-    current: &[(u64, ProcessResourceCount)],
-) -> Vec<String> {
-    if limits.len() != current.len() {
-        return vec![format!(
-            "node count changed: {} baselined, {} sampled",
-            limits.len(),
-            current.len()
-        )];
+/// At run time these are the three constants; offline they are whatever the
+/// artifact recorded, which its identity check pins back to the constants.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ResourceFloorAllowances {
+    threads: u64,
+    sockets: u64,
+    owned_async_tasks: u64,
+}
+
+fn elementwise_minimum(floor: &mut ProcessResourceCount, sample: &ProcessResourceCount) {
+    floor.threads = floor.threads.min(sample.threads);
+    floor.sockets = floor.sockets.min(sample.sockets);
+    floor.owned_async_tasks = floor.owned_async_tasks.min(sample.owned_async_tasks);
+}
+
+/// Where the opening window ends for a series of `samples` observations.
+///
+/// The series is the warmup baseline followed by every recorded cycle, so the
+/// count is one more than the cycle count. The opening window is the first
+/// half rounded up: for the twenty-cycle campaign it is the baseline and
+/// cycles 1 through 10, and the closing window is cycles 11 through 20. For a
+/// three-cycle smoke it is the baseline and cycle 1 against cycles 2 and 3.
+fn opening_window_last_cycle(samples: usize) -> u32 {
+    let opening_len = samples.div_ceil(2);
+    u32::try_from(opening_len.saturating_sub(1)).unwrap_or(u32::MAX)
+}
+
+/// The per-node floors of each half of the campaign, from the recorded cycles.
+///
+/// The baseline is taken from the first cycle's record; the validator
+/// separately refuses a campaign whose baseline differs between cycles, so
+/// every cycle carries the same one. An empty campaign has no floors.
+fn resource_floors(cycles: &[RecoveryCycleEvidence]) -> RecoveryResourceFloors {
+    let Some(first) = cycles.first() else {
+        return RecoveryResourceFloors::default();
+    };
+    let opening_window_last_cycle = opening_window_last_cycle(cycles.len().saturating_add(1));
+    let nodes = first
+        .node_resources
+        .iter()
+        .enumerate()
+        .map(|(position, sample)| {
+            let mut opening = sample.baseline.clone();
+            let mut closing: Option<ProcessResourceCount> = None;
+            for cycle in cycles {
+                let Some(post_quiescence) = cycle
+                    .node_resources
+                    .get(position)
+                    .filter(|record| record.node_id == sample.node_id)
+                    .map(|record| &record.post_quiescence)
+                else {
+                    continue;
+                };
+                if cycle.cycle <= opening_window_last_cycle {
+                    elementwise_minimum(&mut opening, post_quiescence);
+                } else {
+                    match closing.as_mut() {
+                        Some(closing) => elementwise_minimum(closing, post_quiescence),
+                        None => closing = Some(post_quiescence.clone()),
+                    }
+                }
+            }
+            NodeResourceFloors {
+                node_id: sample.node_id,
+                kind: sample.kind,
+                // A campaign too short to have a closing window has nothing
+                // to compare; its closing floor is its opening floor and the
+                // comparison is vacuous, which is what one recovery can say.
+                closing: closing.unwrap_or_else(|| opening.clone()),
+                opening,
+            }
+        })
+        .collect();
+    RecoveryResourceFloors {
+        opening_window_last_cycle,
+        nodes,
     }
+}
+
+/// Every node and resource whose closing floor exceeds its opening floor by
+/// more than the allowance, named one at a time.
+///
+/// The single source of truth for the campaign's leak question: the run-time
+/// check and the offline validator both ask it here, so the verdict and the
+/// message it produces can never disagree about what counts as a leak.
+fn resource_floors_over_allowance(
+    floors: &RecoveryResourceFloors,
+    allowances: ResourceFloorAllowances,
+) -> Vec<String> {
     let mut over = Vec::new();
-    for ((limit_id, limit), (current_id, value)) in limits.iter().zip(current) {
-        if limit_id != current_id {
-            over.push(format!(
-                "node order changed: baselined {limit_id}, sampled {current_id}"
-            ));
-            continue;
-        }
-        for (resource, observed, ceiling) in [
+    for node in &floors.nodes {
+        for (resource, opening, closing, allowance) in [
             (
                 "threads",
-                value.threads,
-                limit.threads.saturating_add(THREAD_MARGIN),
+                node.opening.threads,
+                node.closing.threads,
+                allowances.threads,
             ),
             (
                 "sockets",
-                value.sockets,
-                limit.sockets.saturating_add(SOCKET_MARGIN),
+                node.opening.sockets,
+                node.closing.sockets,
+                allowances.sockets,
             ),
             (
                 "owned async tasks",
-                value.owned_async_tasks,
-                limit
-                    .owned_async_tasks
-                    .saturating_add(OWNED_ASYNC_TASK_MARGIN),
+                node.opening.owned_async_tasks,
+                node.closing.owned_async_tasks,
+                allowances.owned_async_tasks,
             ),
         ] {
-            if observed > ceiling {
-                over.push(format!("node {limit_id} {resource} {observed} > {ceiling}"));
+            if closing > opening.saturating_add(allowance) {
+                over.push(format!(
+                    "node {} {resource} floor rose {opening} -> {closing} (allowance {allowance})",
+                    node.node_id
+                ));
             }
         }
     }
     over
 }
 
-fn resources_within_limits(
-    limits: &[(u64, ProcessResourceCount)],
-    current: &[(u64, ProcessResourceCount)],
-) -> bool {
-    resources_over_limits(limits, current).is_empty()
+fn describe_resource_floors(floors: &RecoveryResourceFloors) -> String {
+    let nodes = floors
+        .nodes
+        .iter()
+        .map(|node| {
+            format!(
+                "node {} {}/{}/{} -> {}/{}/{}",
+                node.node_id,
+                node.opening.threads,
+                node.opening.sockets,
+                node.opening.owned_async_tasks,
+                node.closing.threads,
+                node.closing.sockets,
+                node.closing.owned_async_tasks
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "opening window cycles 0..={} against the rest: {nodes}",
+        floors.opening_window_last_cycle
+    )
 }
 
+/// The whole per-cycle series, one line per node, for the log of a campaign
+/// that failed its floor comparison: the floors say that a count grew, and
+/// this says at which cycle.
+fn describe_resource_series(cycles: &[RecoveryCycleEvidence]) -> Vec<String> {
+    let Some(first) = cycles.first() else {
+        return Vec::new();
+    };
+    first
+        .node_resources
+        .iter()
+        .enumerate()
+        .map(|(position, sample)| {
+            let series = std::iter::once(&sample.baseline)
+                .chain(cycles.iter().filter_map(|cycle| {
+                    cycle
+                        .node_resources
+                        .get(position)
+                        .map(|record| &record.post_quiescence)
+                }))
+                .map(|counts| {
+                    format!(
+                        "{}/{}/{}",
+                        counts.threads, counts.sockets, counts.owned_async_tasks
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!("node {} series (cycle 0 first) {series}", sample.node_id)
+        })
+        .collect()
+}
+
+/// Record every node's sample beside the warmup baseline it will be read
+/// against. Nothing here fails a cycle: a sample above the baseline is one
+/// side of the per-peer transport drain as often as it is anything else, and
+/// the campaign's leak question is asked over all the cycles at once.
 fn collect_node_resource_evidence(
     baselines: &[(u64, ProcessResourceCount)],
     post_resources: &[(u64, ProcessResourceCount)],
@@ -1560,17 +1752,6 @@ fn collect_node_resource_evidence(
     {
         if node_id != post_node_id {
             bail!("resource baseline and post-quiescence node order differs");
-        }
-        if post_quiescence.threads > baseline.threads.saturating_add(THREAD_MARGIN)
-            || post_quiescence.sockets > baseline.sockets.saturating_add(SOCKET_MARGIN)
-            || post_quiescence.owned_async_tasks
-                > baseline
-                    .owned_async_tasks
-                    .saturating_add(OWNED_ASYNC_TASK_MARGIN)
-        {
-            bail!(
-                "node {node_id} leaked resources: baseline {baseline:?}, post {post_quiescence:?}"
-            );
         }
         evidence.push(RecoveryNodeResourceEvidence {
             node_id: *node_id,
@@ -2400,9 +2581,9 @@ pub fn validate_transport_recovery_artifact(
         || !artifact.transport.tls_enabled
         || !artifact.transport.separate_node_processes
         || !artifact.transport.separate_writer_process
-        || artifact.resource_thread_margin != THREAD_MARGIN
-        || artifact.resource_socket_margin != SOCKET_MARGIN
-        || artifact.resource_owned_async_task_margin != OWNED_ASYNC_TASK_MARGIN
+        || artifact.resource_thread_floor_allowance != THREAD_FLOOR_ALLOWANCE
+        || artifact.resource_socket_floor_allowance != SOCKET_FLOOR_ALLOWANCE
+        || artifact.resource_owned_async_task_floor_allowance != OWNED_ASYNC_TASK_FLOOR_ALLOWANCE
         || artifact.resource_cleanup_horizon_millis != duration_millis(RESOURCE_CLEANUP_HORIZON)
         || artifact.resource_stable_samples != RESOURCE_STABLE_SAMPLES
     {
@@ -2443,6 +2624,7 @@ fn validate_role_campaign(
     {
         bail!("{} recovery campaign shape drifted", role.label());
     }
+    validate_campaign_resource_floors(campaign, role, artifact)?;
     let mut snapshot_ids = BTreeSet::new();
     let mut established_resource_baselines = None;
     for (position, cycle) in campaign.cycles.iter().enumerate() {
@@ -2450,7 +2632,7 @@ fn validate_role_campaign(
         let expected_marker = format!("transport-recovery-{}-image-v1", role.label());
         validate_image(&cycle.image, minimum, &expected_marker)?;
         validate_cycle_transport(cycle)?;
-        validate_cycle_resources(cycle, artifact)?;
+        validate_cycle_resources(cycle)?;
         let cycle_baselines = cycle
             .node_resources
             .iter()
@@ -2564,10 +2746,52 @@ fn validate_cycle_transport(cycle: &RecoveryCycleEvidence) -> Result<()> {
     Ok(())
 }
 
-fn validate_cycle_resources(
-    cycle: &RecoveryCycleEvidence,
+/// The campaign's leak question, asked again offline from the recorded cycles.
+///
+/// The recorded floors must be exactly what the cycles produce — a floor
+/// written by hand proves nothing — and then no closing floor may exceed its
+/// opening floor by more than the allowance the artifact recorded, which the
+/// identity check has already pinned to the constants. This is what makes
+/// the artifact self-proving without the harness: anyone holding the file can
+/// recompute both halves.
+fn validate_campaign_resource_floors(
+    campaign: &RecoveryRoleCampaign,
+    role: RecoveryRole,
     artifact: &ClusterTransportRecoveryArtifact,
 ) -> Result<()> {
+    let recomputed = resource_floors(&campaign.cycles);
+    if campaign.resource_floors != recomputed
+        || recomputed.nodes.len() != TARGET_NODE as usize
+        || recomputed.opening_window_last_cycle
+            != opening_window_last_cycle(TRANSPORT_RECOVERY_CYCLES_PER_ROLE as usize + 1)
+    {
+        bail!(
+            "{} recovery campaign resource floors do not match its cycles",
+            role.label()
+        );
+    }
+    let rose = resource_floors_over_allowance(
+        &recomputed,
+        ResourceFloorAllowances {
+            threads: artifact.resource_thread_floor_allowance,
+            sockets: artifact.resource_socket_floor_allowance,
+            owned_async_tasks: artifact.resource_owned_async_task_floor_allowance,
+        },
+    );
+    if !rose.is_empty() {
+        bail!(
+            "{} recovery campaign leaked resources: {}",
+            role.label(),
+            rose.join("; ")
+        );
+    }
+    Ok(())
+}
+
+/// Each cycle's resource record has to be complete and in order. Whether a
+/// count is high is not a per-cycle question any more; see
+/// [`validate_campaign_resource_floors`].
+fn validate_cycle_resources(cycle: &RecoveryCycleEvidence) -> Result<()> {
     if cycle.node_resources.len() != TARGET_NODE as usize {
         bail!("recovery cycle must sample all four cluster processes");
     }
@@ -2578,25 +2802,8 @@ fn validate_cycle_resources(
         } else {
             RecoveryResourceNodeKind::PersistentSourceVoter
         };
-        if sample.node_id != expected_node
-            || sample.kind != expected_kind
-            || sample.post_quiescence.threads
-                > sample
-                    .baseline
-                    .threads
-                    .saturating_add(artifact.resource_thread_margin)
-            || sample.post_quiescence.sockets
-                > sample
-                    .baseline
-                    .sockets
-                    .saturating_add(artifact.resource_socket_margin)
-            || sample.post_quiescence.owned_async_tasks
-                > sample
-                    .baseline
-                    .owned_async_tasks
-                    .saturating_add(artifact.resource_owned_async_task_margin)
-        {
-            bail!("node {expected_node} resource evidence exceeded its fixed contract");
+        if sample.node_id != expected_node || sample.kind != expected_kind {
+            bail!("node {expected_node} resource evidence is out of order or mislabelled");
         }
     }
     Ok(())
@@ -2719,7 +2926,30 @@ mod tests {
             cycles_required: TRANSPORT_RECOVERY_CYCLES_PER_ROLE,
             minimum_sqlite_bytes: minimum,
             worst_durations: worst_durations(&cycles),
+            resource_floors: resource_floors(&cycles),
             cycles,
+        }
+    }
+
+    /// Rewrite one node's post-quiescence series across a campaign and
+    /// re-derive the floors from it, the way the harness would have recorded
+    /// them. `series(cycle)` is the count for `cycle` in `1..=20`.
+    fn with_node_series(
+        campaign: &mut RecoveryRoleCampaign,
+        node_index: usize,
+        series: impl Fn(u32) -> ProcessResourceCount,
+    ) {
+        for cycle in &mut campaign.cycles {
+            cycle.node_resources[node_index].post_quiescence = series(cycle.cycle);
+        }
+        campaign.resource_floors = resource_floors(&campaign.cycles);
+    }
+
+    fn counts(threads: u64, sockets: u64, owned_async_tasks: u64) -> ProcessResourceCount {
+        ProcessResourceCount {
+            threads,
+            sockets,
+            owned_async_tasks,
         }
     }
 
@@ -2744,9 +2974,9 @@ mod tests {
                 separate_node_processes: true,
                 separate_writer_process: true,
             },
-            resource_thread_margin: THREAD_MARGIN,
-            resource_socket_margin: SOCKET_MARGIN,
-            resource_owned_async_task_margin: OWNED_ASYNC_TASK_MARGIN,
+            resource_thread_floor_allowance: THREAD_FLOOR_ALLOWANCE,
+            resource_socket_floor_allowance: SOCKET_FLOOR_ALLOWANCE,
+            resource_owned_async_task_floor_allowance: OWNED_ASYNC_TASK_FLOOR_ALLOWANCE,
             resource_cleanup_horizon_millis: duration_millis(RESOURCE_CLEANUP_HORIZON),
             resource_stable_samples: RESOURCE_STABLE_SAMPLES,
             learner: role_campaign(RecoveryRole::Learner, TRANSPORT_RECOVERY_SMALL_IMAGE_BYTES),
@@ -2981,22 +3211,150 @@ mod tests {
         assert!(validate_transport_recovery_artifact(&value).is_err());
     }
 
+    /// The fixture's baseline is 12 threads, 8 sockets, 10 owned tasks on
+    /// every node; the series below are written against it.
     #[test]
-    fn one_extra_socket_after_quiescence_is_rejected() {
+    fn a_socket_leaked_every_cycle_is_rejected() {
         let mut value = artifact();
-        value.voter.cycles[0].node_resources[0]
-            .post_quiescence
-            .sockets += 1;
-        assert!(validate_transport_recovery_artifact(&value).is_err());
+        with_node_series(&mut value.voter, 0, |cycle| {
+            counts(12, 8 + u64::from(cycle), 10)
+        });
+        let error = validate_transport_recovery_artifact(&value).expect_err("a socket leak");
+        assert!(
+            format!("{error:#}").contains("node 1 sockets floor rose 8 -> 19"),
+            "{error:#}"
+        );
     }
 
     #[test]
-    fn one_extra_thread_after_quiescence_is_rejected() {
+    fn a_thread_leaked_every_cycle_is_rejected() {
         let mut value = artifact();
-        value.voter.cycles[0].node_resources[0]
-            .post_quiescence
-            .threads += 1;
+        with_node_series(&mut value.learner, 3, |cycle| {
+            counts(12 + u64::from(cycle), 8, 10)
+        });
+        let error = validate_transport_recovery_artifact(&value).expect_err("a thread leak");
+        assert!(
+            format!("{error:#}").contains("node 4 threads floor rose 12 -> 23"),
+            "{error:#}"
+        );
+    }
+
+    /// A leak that only starts after the opening window is still a rising
+    /// closing floor: the closing window has no sample at the old floor.
+    #[test]
+    fn a_leak_that_begins_late_in_the_campaign_is_rejected() {
+        let mut value = artifact();
+        with_node_series(&mut value.voter, 1, |cycle| {
+            counts(12, 8 + u64::from(cycle.saturating_sub(10)), 10)
+        });
         assert!(validate_transport_recovery_artifact(&value).is_err());
+    }
+
+    /// Exactly the measured shape: one connection and one owned task per
+    /// peer, alternating one recovery apart, on a source with three peers.
+    /// Nothing accumulates, so nothing is a leak.
+    #[test]
+    fn the_per_peer_transport_drain_is_not_growth() {
+        let mut value = artifact();
+        with_node_series(&mut value.voter, 0, |cycle| {
+            if cycle % 2 == 1 {
+                counts(12, 8 + 3, 10 + 3)
+            } else {
+                counts(12, 8, 10)
+            }
+        });
+        validate_transport_recovery_artifact(&value).expect("a drain is not a leak");
+        assert_eq!(
+            value.voter.resource_floors.nodes[0].opening,
+            counts(12, 8, 10)
+        );
+        assert_eq!(
+            value.voter.resource_floors.nodes[0].closing,
+            counts(12, 8, 10)
+        );
+    }
+
+    /// The other measured shape: thread counts wander a couple either side
+    /// of their floor with no recovery in flight, and the floor is not seen
+    /// on every cycle.
+    #[test]
+    fn thread_jitter_inside_the_allowance_is_not_growth() {
+        let mut value = artifact();
+        with_node_series(&mut value.learner, 3, |cycle| {
+            counts(12 + [1_u64, 0, 2, 1, 1][cycle as usize % 5], 8, 10)
+        });
+        validate_transport_recovery_artifact(&value).expect("thread jitter is not a leak");
+
+        // Even a closing window that never shows the floor again stays
+        // inside the allowance.
+        let mut value = artifact();
+        with_node_series(&mut value.learner, 3, |cycle| {
+            if cycle > 10 {
+                counts(12 + THREAD_FLOOR_ALLOWANCE, 8, 10)
+            } else {
+                counts(12, 8, 10)
+            }
+        });
+        validate_transport_recovery_artifact(&value).expect("inside the thread allowance");
+    }
+
+    #[test]
+    fn a_thread_floor_past_the_allowance_is_rejected() {
+        let mut value = artifact();
+        with_node_series(&mut value.learner, 3, |cycle| {
+            if cycle > 10 {
+                counts(12 + THREAD_FLOOR_ALLOWANCE + 1, 8, 10)
+            } else {
+                counts(12, 8, 10)
+            }
+        });
+        assert!(validate_transport_recovery_artifact(&value).is_err());
+    }
+
+    /// One high sample, in either window, is recorded and is not a verdict.
+    /// This is the sample the old per-cycle ceiling failed the whole lane
+    /// on.
+    #[test]
+    fn a_single_high_sample_in_either_window_is_recorded_not_rejected() {
+        let mut value = artifact();
+        value.voter.cycles[0].node_resources[0].post_quiescence = counts(14, 11, 13);
+        value.voter.cycles[15].node_resources[2].post_quiescence = counts(14, 11, 13);
+        value.voter.resource_floors = resource_floors(&value.voter.cycles);
+        validate_transport_recovery_artifact(&value).expect("a high sample is evidence");
+    }
+
+    #[test]
+    fn recorded_resource_floors_must_match_the_cycles() {
+        let mut value = artifact();
+        value.learner.resource_floors.nodes[0].closing.sockets -= 1;
+        assert!(validate_transport_recovery_artifact(&value).is_err());
+
+        let mut value = artifact();
+        value.learner.resource_floors.opening_window_last_cycle = 15;
+        assert!(validate_transport_recovery_artifact(&value).is_err());
+    }
+
+    /// The opening window is the baseline plus the first half of the cycles,
+    /// rounded up, for any campaign length the smoke can ask for.
+    #[test]
+    fn the_opening_window_is_the_first_half_of_the_series_rounded_up() {
+        assert_eq!(opening_window_last_cycle(21), 10);
+        assert_eq!(opening_window_last_cycle(4), 1);
+        assert_eq!(opening_window_last_cycle(2), 0);
+        assert_eq!(opening_window_last_cycle(1), 0);
+
+        let mut campaign = role_campaign(RecoveryRole::Voter, TRANSPORT_RECOVERY_LARGE_IMAGE_BYTES);
+        campaign.cycles.truncate(3);
+        with_node_series(&mut campaign, 0, |cycle| {
+            counts(12, 8 + u64::from(cycle), 10)
+        });
+        assert_eq!(campaign.resource_floors.opening_window_last_cycle, 1);
+        assert_eq!(campaign.resource_floors.nodes[0].opening, counts(12, 8, 10));
+        assert_eq!(
+            campaign.resource_floors.nodes[0].closing,
+            counts(12, 10, 10)
+        );
+        assert!(resource_floors(&[]).nodes.is_empty());
     }
 
     #[test]
@@ -3094,21 +3452,21 @@ mod tests {
         )
     }
 
-    /// A leak has to be named, because a longer horizon is the wrong answer to
-    /// it and the right answer to the case below.
+    /// A recovery that never finished has to be named, because a longer
+    /// horizon is the wrong answer to it and the right answer to the case
+    /// below.
     #[test]
-    fn an_expired_resource_wait_names_the_node_and_resource_over_its_baseline() {
-        let baseline = vec![
-            resource_counts(1, 10, 10, 10),
-            resource_counts(2, 10, 10, 10),
-        ];
+    fn an_expired_resource_wait_names_every_node_still_owning_work() {
         let current = vec![
             resource_counts(1, 10, 10, 10),
-            resource_counts(2, 10, 12, 10),
+            resource_counts(3, 10, 10, 10),
         ];
-        let report = describe_resource_wait(&[], Some(&baseline), &current, None, 0);
-        assert!(report.contains("node 2 sockets 12 > 10"), "{report}");
-        assert!(!report.contains("node 1"), "{report}");
+        let report = describe_resource_wait(&[1, 3], &current, None, 0);
+        assert!(
+            report.contains("node(s) 1, 3 still owning transport work"),
+            "{report}"
+        );
+        assert!(!report.contains("every node idle"), "{report}");
 
         let error = annotate_resource_wait(
             remaining_before(Instant::now(), "stable idle resource sampling")
@@ -3116,31 +3474,16 @@ mod tests {
             Some(&report),
         );
         let rendered = format!("{error:#}");
-        assert!(rendered.contains("node 2 sockets 12 > 10"), "{rendered}");
-    }
-
-    #[test]
-    fn an_expired_resource_wait_names_every_node_still_owning_work() {
-        let baseline = vec![
-            resource_counts(1, 10, 10, 10),
-            resource_counts(3, 10, 10, 10),
-        ];
-        let report = describe_resource_wait(&[1, 3], Some(&baseline), &baseline, None, 0);
         assert!(
-            report.contains("node(s) 1, 3 still owning transport work"),
-            "{report}"
+            rendered.contains("node(s) 1, 3 still owning transport work"),
+            "{rendered}"
         );
-        assert!(!report.contains("above the warmed baseline"), "{report}");
     }
 
     /// Whether a longer horizon would help is decided by what moved, so the
     /// report has to carry the deltas and has to say when there were none.
     #[test]
     fn an_unstable_resource_wait_names_what_moved_between_the_two_samples() {
-        let baseline = vec![
-            resource_counts(1, 10, 10, 10),
-            resource_counts(2, 10, 10, 10),
-        ];
         let previous = vec![
             resource_counts(1, 10, 9, 10),
             resource_counts(2, 10, 10, 10),
@@ -3149,7 +3492,7 @@ mod tests {
             resource_counts(1, 10, 10, 10),
             resource_counts(2, 10, 10, 8),
         ];
-        let report = describe_resource_wait(&[], Some(&baseline), &current, Some(&previous), 1);
+        let report = describe_resource_wait(&[], &current, Some(&previous), 1);
         assert!(report.contains("node 1 sockets 9 -> 10"), "{report}");
         assert!(
             report.contains("node 2 owned async tasks 10 -> 8"),
@@ -3157,7 +3500,7 @@ mod tests {
         );
         assert!(!report.contains("node 1 threads"), "{report}");
 
-        let settled = describe_resource_wait(&[], Some(&baseline), &baseline, Some(&baseline), 1);
+        let settled = describe_resource_wait(&[], &current, Some(&current), 1);
         assert!(
             settled.contains("the last two samples were identical"),
             "{settled}"
@@ -3168,12 +3511,9 @@ mod tests {
     /// just too loaded for two samples in a row to match.
     #[test]
     fn an_expired_resource_wait_that_is_only_unstable_says_exactly_that() {
-        let baseline = vec![resource_counts(1, 10, 10, 10)];
-        let report = describe_resource_wait(&[], Some(&baseline), &baseline, None, 1);
-        assert!(
-            report.contains("every node idle and within its baseline"),
-            "{report}"
-        );
+        let current = vec![resource_counts(1, 10, 10, 10)];
+        let report = describe_resource_wait(&[], &current, None, 1);
+        assert!(report.contains("every node idle"), "{report}");
         assert!(
             report.contains(&format!(
                 "1 of {RESOURCE_STABLE_SAMPLES} consecutive repeated samples"
@@ -3192,26 +3532,42 @@ mod tests {
         );
     }
 
+    /// The sampler is a sample, not a verdict: a count above the warmup is
+    /// recorded as it stands, and the campaign asks the leak question once,
+    /// over the floors. An owned task that is never released moves the
+    /// closing floor by one for every cycle it survives, and the allowance
+    /// for that resource is zero, so one per-peer transport that stops being
+    /// released is exactly the size of leak this catches.
     #[test]
     fn owned_async_task_growth_has_no_resource_slack() {
         assert_eq!(RESOURCE_BASELINE_WARMUP_CYCLES, 1);
-        let limits = vec![(
-            1,
-            ProcessResourceCount {
-                threads: 10,
-                sockets: 10,
-                owned_async_tasks: 10,
-            },
-        )];
-        assert!(resources_within_limits(&limits, &limits));
-        let mut over_limit = limits.clone();
-        over_limit[0].1.owned_async_tasks += 1;
-        assert!(!resources_within_limits(&limits, &over_limit));
+        assert_eq!(OWNED_ASYNC_TASK_FLOOR_ALLOWANCE, 0);
+        assert_eq!(SOCKET_FLOOR_ALLOWANCE, 0);
+
+        let baseline = vec![resource_counts(1, 10, 10, 10)];
+        let mut high = baseline.clone();
+        high[0].1.owned_async_tasks += 1;
+        let recorded = collect_node_resource_evidence(&baseline, &high)
+            .expect("a high sample is recorded, not refused");
+        assert_eq!(recorded[0].post_quiescence.owned_async_tasks, 11);
+        assert_eq!(recorded[0].baseline.owned_async_tasks, 10);
 
         let mut value = artifact();
-        value.voter.cycles[0].node_resources[0]
-            .post_quiescence
-            .owned_async_tasks += 1;
+        with_node_series(&mut value.voter, 0, |cycle| {
+            counts(12, 8, 10 + u64::from(cycle))
+        });
+        let error = validate_transport_recovery_artifact(&value).expect_err("an owned task leak");
+        assert!(
+            format!("{error:#}").contains("node 1 owned async tasks floor rose 10 -> 21"),
+            "{error:#}"
+        );
+
+        // The smallest possible rise — the closing window never again shows
+        // the opening floor — is still a leak at zero allowance.
+        let mut value = artifact();
+        with_node_series(&mut value.voter, 0, |cycle| {
+            counts(12, 8, if cycle > 10 { 11 } else { 10 })
+        });
         assert!(validate_transport_recovery_artifact(&value).is_err());
     }
 

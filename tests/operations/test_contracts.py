@@ -2468,7 +2468,7 @@ assert.equal(context.ACT_TIMER, null);
 
         self.assertEqual(len(make_commands), 15)
         self.assertEqual(make_commands[0], 'test "$(uname -s)" = Linux')
-        self.assertIn("PLURX_EXPECT_TEST_COUNT=31", make_commands[1])
+        self.assertIn("PLURX_EXPECT_TEST_COUNT=37", make_commands[1])
         self.assertIn("scripts/require-test-count", make_commands[1])
         self.assertIn("transport_recovery::tests --lib", make_commands[1])
         exact_regressions = (
