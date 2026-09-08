@@ -76,7 +76,8 @@ const ATTEMPT_ERRORS_SCHEMA_VERSION: i64 = 26;
 const REQUEST_IDENTITY_SCHEMA_VERSION: i64 = 27;
 const DESIRED_SELECTION_SCHEMA_VERSION: i64 = 28;
 const POINTER_DESIRED_FENCE_SCHEMA_VERSION: i64 = 29;
-pub const AUTH_SCHEMA_VERSION: i64 = POINTER_DESIRED_FENCE_SCHEMA_VERSION;
+const DRAIN_DEADLINE_SCHEMA_VERSION: i64 = 30;
+pub const AUTH_SCHEMA_VERSION: i64 = DRAIN_DEADLINE_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -103,6 +104,7 @@ const ATTEMPT_ERRORS_SCHEMA_MIGRATION_SOURCE: i64 = DV_RECOVERY_GUARDS_SCHEMA_VE
 const REQUEST_IDENTITY_SCHEMA_MIGRATION_SOURCE: i64 = ATTEMPT_ERRORS_SCHEMA_VERSION;
 const DESIRED_SELECTION_SCHEMA_MIGRATION_SOURCE: i64 = REQUEST_IDENTITY_SCHEMA_VERSION;
 const POINTER_DESIRED_FENCE_SCHEMA_MIGRATION_SOURCE: i64 = DESIRED_SELECTION_SCHEMA_VERSION;
+const DRAIN_DEADLINE_SCHEMA_MIGRATION_SOURCE: i64 = POINTER_DESIRED_FENCE_SCHEMA_VERSION;
 // Session routing and shared-cache identity are additive durable state and use
 // the existing Hiqlite transport contract. Protocol 4 stays supported so a
 // healthy v9/v10 cluster can authorize the daemon that advances its schema.
@@ -2174,6 +2176,47 @@ impl HiqliteAuthStore {
                     )
                     .await?;
                 }
+                SchemaMigrationAction::MigrateFrom(DRAIN_DEADLINE_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    // One nullable column and the trigger that keeps a binary
+                    // from before it out of a draining row's ownership. Null
+                    // is "not draining", so every row already in this table
+                    // is correct the instant the column exists.
+                    let mut statements = vec![
+                        (
+                            super::MEDIA_SESSION_DRAIN_DEADLINE_COLUMN.to_owned(),
+                            params!(),
+                        ),
+                        (
+                            super::MEDIA_SESSION_DRAIN_OWNERSHIP_FENCE_TRIGGER.to_owned(),
+                            params!(),
+                        ),
+                        (
+                            "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                             WHERE singleton = 1 AND schema_version = $3"
+                                .to_owned(),
+                            params!(
+                                DRAIN_DEADLINE_SCHEMA_VERSION,
+                                now,
+                                DRAIN_DEADLINE_SCHEMA_MIGRATION_SOURCE
+                            ),
+                        ),
+                    ];
+                    // Same reason as the step above: a cluster bootstrapped
+                    // from the current install schema already has the column,
+                    // because the fresh `media_sessions` declares it, while
+                    // its marker can still name the predecessor version.
+                    // `ALTER TABLE ... ADD COLUMN` meets `duplicate column
+                    // name` there, and `settle_migration_attempt` cannot
+                    // forgive it because no other voter has advanced the
+                    // marker either.
+                    if self.drain_deadline_column_present().await? {
+                        statements.remove(0);
+                    }
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(DRAIN_DEADLINE_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
                         "cluster schema {version} has no migration implementation"
@@ -2201,6 +2244,23 @@ impl HiqliteAuthStore {
             .query_consistent_map::<CountRow, _>(
                 "SELECT COUNT(*) AS count FROM pragma_table_info('media_playback_pointers') \
                  WHERE name = 'desired_revision'",
+                params!(),
+            )
+            .await?;
+        Ok(rows.first().is_some_and(|row| row.count > 0))
+    }
+
+    /// Whether `media_sessions` already carries `drain_deadline_ms`.
+    ///
+    /// A fresh install declares the column in the table; an upgrade adds it.
+    /// Both are correct and both are reachable from the same marker, so the
+    /// migration asks rather than assumes.
+    async fn drain_deadline_column_present(&self) -> Result<bool, StoreError> {
+        let rows = self
+            .client()
+            .query_consistent_map::<CountRow, _>(
+                "SELECT COUNT(*) AS count FROM pragma_table_info('media_sessions') \
+                 WHERE name = 'drain_deadline_ms'",
                 params!(),
             )
             .await?;
@@ -3890,7 +3950,8 @@ fn schema_migration_action(
         | ATTEMPT_ERRORS_SCHEMA_MIGRATION_SOURCE
         | REQUEST_IDENTITY_SCHEMA_MIGRATION_SOURCE
         | DESIRED_SELECTION_SCHEMA_MIGRATION_SOURCE
-        | POINTER_DESIRED_FENCE_SCHEMA_MIGRATION_SOURCE => {
+        | POINTER_DESIRED_FENCE_SCHEMA_MIGRATION_SOURCE
+        | DRAIN_DEADLINE_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -5693,9 +5754,18 @@ mod tests {
             "v28 must advance exactly one step to the pointer fence schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 24,
+            DRAIN_DEADLINE_SCHEMA_MIGRATION_SOURCE, POINTER_DESIRED_FENCE_SCHEMA_VERSION,
+            "the drain deadline migration must start from the exact v29 shape"
+        );
+        assert_eq!(
+            DRAIN_DEADLINE_SCHEMA_MIGRATION_SOURCE + 1,
+            DRAIN_DEADLINE_SCHEMA_VERSION,
+            "v29 must advance exactly one step to the drain deadline schema"
+        );
+        assert_eq!(
+            AUTH_SCHEMA_MIGRATION_SOURCE + 25,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v29 step"
+            "this implementation contains every additive v5→v30 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,

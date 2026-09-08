@@ -301,6 +301,101 @@ pub(crate) const MEDIA_PLAYBACK_POINTER_DESIRED_FENCE_INSERT_TRIGGER: &str =
 pub(crate) const MEDIA_PLAYBACK_POINTER_DESIRED_FENCE_UPDATE_TRIGGER: &str =
     pointer_desired_fence_update_trigger!();
 
+/// When a predecessor kept alive on purpose stops being kept.
+///
+/// Null means "not draining", which is every row that exists today and every
+/// row a session starts life as. A non-null value is a deadline in the same
+/// milliseconds every other clock column here uses: past it, the session is
+/// over regardless of what its lease says.
+///
+/// The column exists because three earlier attempts tried to *infer* "this
+/// session is draining" — from the playback pointer, and through the session
+/// lease — and each inference was already carrying a different meaning for
+/// somebody else. The pointer is deleted by an ordinary viewer action, so a
+/// drain keyed on it never ends; the lease is what the owner's renewal loop
+/// reads as liveness, so a drain keyed on it kills the worker in one tick.
+/// Neither is a fact about draining. This is, and it is durable, so it
+/// survives the restart of the node that set it and is visible to the node
+/// that inherits the work when that node does not come back.
+///
+/// Deliberately nullable rather than `NOT NULL DEFAULT 0`: a zero would be a
+/// deadline in 1970, and every reader would have to spell out that zero is not
+/// really a deadline. The null says it once, in the schema.
+macro_rules! media_session_drain_deadline_column {
+    () => {
+        // No trailing semicolon. The replicated backend submits this as one
+        // prepared statement and a trailing `;` makes it unpreparable — the
+        // failure the pointer-fence step above documents at length.
+        "ALTER TABLE media_sessions ADD COLUMN drain_deadline_ms INTEGER"
+    };
+}
+
+/// Refuse to move a draining session's ownership.
+///
+/// Application SQL already excludes a non-null deadline from both halves of
+/// takeover — the expired-route inventory and the CAS. That fences *this*
+/// binary and does nothing at all about an older one, because an older binary
+/// simply does not emit the predicate. Schema compatibility is checked when a
+/// database is opened and never again, so during a rolling upgrade every node
+/// still running the previous binary keeps issuing takeover SQL from before
+/// this column existed, against a store that already has it.
+///
+/// What that costs without the trigger is the exact failure the whole drain
+/// design was rewritten to avoid. A new-binary owner dies mid-drain, its lease
+/// lapses, and an old-binary node adopts the predecessor — a stream the
+/// pointer no longer names — starts an encoder for it, and then renews it
+/// every three seconds for as long as that node lives. Nothing on the old node
+/// ends it, because nothing on the old node knows it is draining. An immortal
+/// predecessor holding an encoder, an admission permit and a shared-cache
+/// generation, arriving through the upgrade door.
+///
+/// `RAISE(IGNORE)` rather than `RAISE(ABORT)`, which is the opposite of the
+/// pointer fence above and for a reason. Takeover's CAS already checks that it
+/// updated exactly one row and rolls the whole transaction back when it did
+/// not — that is how it handles losing a race to another survivor. Making the
+/// update affect no rows therefore lands the old binary in a path it already
+/// implements correctly, and it lands there quietly, once per attempt, instead
+/// of raising an error it would log and retry forever. The pointer fence
+/// chose `ABORT` because its old writer had no such check and would have
+/// believed it succeeded.
+///
+/// Guarded on the ownership columns only. The owner renews the lease on this
+/// row every three seconds for the whole drain, deliberately, and the sweep
+/// and the owner's own end both write `state` — none of those move ownership,
+/// and none of them may be fenced.
+macro_rules! media_session_drain_ownership_fence_trigger {
+    () => {
+        "CREATE TRIGGER IF NOT EXISTS media_sessions_drain_ownership_fence_au
+    BEFORE UPDATE OF owner_node_id, owner_epoch ON media_sessions
+    WHEN OLD.drain_deadline_ms IS NOT NULL
+     AND (NEW.owner_node_id IS NOT OLD.owner_node_id
+          OR NEW.owner_epoch IS NOT OLD.owner_epoch)
+    BEGIN
+      SELECT RAISE(IGNORE);
+    END;"
+    };
+}
+
+/// The drain deadline column, for the replicated migration's first statement.
+pub(crate) const MEDIA_SESSION_DRAIN_DEADLINE_COLUMN: &str = media_session_drain_deadline_column!();
+
+/// The ownership fence on its own, for the replicated migration and install.
+pub(crate) const MEDIA_SESSION_DRAIN_OWNERSHIP_FENCE_TRIGGER: &str =
+    media_session_drain_ownership_fence_trigger!();
+
+/// Column and fence as one SQLite migration, applied in one transaction.
+///
+/// One step, for the reason the pointer fence above spells out: a database
+/// holding the column without the trigger accepts exactly the writes the
+/// trigger exists to refuse, and that database is the middle of every rolling
+/// upgrade. The trigger cannot be created before the column exists, so they
+/// cannot be two steps.
+pub(crate) const MEDIA_SESSION_DRAIN_DEADLINE_SCHEMA: &str = concat!(
+    media_session_drain_deadline_column!(),
+    ";\n",
+    media_session_drain_ownership_fence_trigger!(),
+);
+
 const MEDIA_SESSION_PUBLICATION_CLAIM_TRIGGER_SCHEMA: &str =
     "CREATE TRIGGER IF NOT EXISTS media_session_publication_claim_au
     AFTER UPDATE OF publication_ready_at_ms ON media_sessions

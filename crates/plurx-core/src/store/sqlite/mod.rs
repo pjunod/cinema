@@ -990,6 +990,11 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     // nothing fenced a process that was already running when the schema moved,
     // because compatibility is checked at open and never again.
     crate::store::MEDIA_PLAYBACK_POINTER_DESIRED_FENCE_SCHEMA,
+    // v50: when a predecessor that is being drained on purpose stops being
+    // kept. Null on every row that exists, which is what makes this additive:
+    // a binary from before the column neither writes nor reads it, and its
+    // sessions behave exactly as they do today.
+    crate::store::MEDIA_SESSION_DRAIN_DEADLINE_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1293,6 +1298,17 @@ impl SqliteStore {
         Ok(count == 1)
     }
 
+    /// Whether v50's drain deadline column is already installed.
+    fn drain_deadline_column_exists(conn: &Connection) -> Result<bool, StoreError> {
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('media_sessions')
+              WHERE name = 'drain_deadline_ms'",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count == 1)
+    }
+
     /// Whether v45's negative fragment index is already installed.
     ///
     /// A replay guard is normally about a crash between a migration's commit
@@ -1354,6 +1370,7 @@ impl SqliteStore {
                 || (version == 45 && Self::fragment_index_outcomes_table_exists(conn)?)
                 || (version == 46 && Self::attempt_errors_column_exists(conn)?)
                 || (version == 47 && Self::video_identity_column_exists(conn)?)
+                || (version == 50 && Self::drain_deadline_column_exists(conn)?)
             {
                 Ok(())
             } else {
@@ -2382,7 +2399,7 @@ mod tests {
             .expect("version");
         assert_eq!(version, MIGRATIONS.len() as i64);
         assert_eq!(
-            version, 49,
+            version, 50,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );
@@ -3113,7 +3130,9 @@ mod tests {
             // 5 since v49 added `desired_revision`, the ask a pointer write
             // was decided against.
             ("media_playback_pointers", 5),
-            ("media_sessions", 19),
+            // 20 since v50 added `drain_deadline_ms`, when a predecessor kept
+            // alive on purpose stops being kept.
+            ("media_sessions", 20),
         ] {
             assert_eq!(
                 conn.query_row(
@@ -3673,6 +3692,169 @@ mod tests {
         );
         assert!(SqliteStore::analysis_component_schema_is_current(&conn)
             .expect("inspect current analysis schema"));
+    }
+
+    /// A live session written before the drain column survives gaining it, and
+    /// gains it as null rather than as a deadline in 1970.
+    ///
+    /// The second half of the test is the guard, not the column. A migration
+    /// commits its own transaction and only then bumps `user_version`, so a
+    /// crash in that window leaves the shape applied and the marker behind —
+    /// and `ADD COLUMN` replayed onto a column that is already there fails
+    /// permanently, which is a database nobody can open again. v41, v45, v46
+    /// and v47 each carry this guard for the same reason; a step that adds a
+    /// column and does not is one power cut away from that.
+    #[test]
+    fn v50_adds_a_drain_deadline_to_a_real_v49_shape_and_survives_a_stale_marker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("plurx.db");
+        {
+            let conn = Connection::open(&db).expect("raw open");
+            for (index, sql) in MIGRATIONS.iter().enumerate().take(49) {
+                conn.execute_batch(&format!("BEGIN;\n{sql}\nCOMMIT;"))
+                    .unwrap_or_else(|error| panic!("v{}: {error}", index + 1));
+            }
+            conn.pragma_update(None, "user_version", 49)
+                .expect("v49 marker");
+            conn.execute(
+                "INSERT INTO media_sessions (
+                     incarnation_id, session_id, user_id, playback_id,
+                     request_fingerprint, owner_node_id, owner_epoch,
+                     lease_expires_at_ms, state, recipe_json, response_json,
+                     updated_at_ms)
+                 VALUES ('inc-v49', 'sess-v49', 7, 'playback-v49', 'fingerprint',
+                         'node-a', 1, 5000, 'active', '{}', '{}', 4000)",
+                [],
+            )
+            .expect("seed a v49 session");
+        }
+
+        SqliteStore::open(&db).expect("migrate v49 to current");
+        {
+            let conn = Connection::open(&db).expect("raw reopen");
+            assert_eq!(
+                conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                    .expect("version"),
+                SQLITE_SCHEMA_VERSION
+            );
+            let (state, deadline) = conn
+                .query_row(
+                    "SELECT state, drain_deadline_ms FROM media_sessions
+                      WHERE incarnation_id = 'inc-v49'",
+                    [],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?)),
+                )
+                .expect("the v49 session survives");
+            assert_eq!(state, "active", "the migration is additive");
+            assert_eq!(
+                deadline, None,
+                "a session that existed before the column is not draining, and \
+                 null is how this schema says so"
+            );
+            conn.pragma_update(None, "user_version", 49)
+                .expect("simulate interruption after the v50 schema commit");
+        }
+
+        SqliteStore::open(&db).expect("settle the committed v50 migration");
+        let conn = Connection::open(&db).expect("raw reopen");
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .expect("version"),
+            SQLITE_SCHEMA_VERSION
+        );
+        assert!(SqliteStore::drain_deadline_column_exists(&conn)
+            .expect("inspect the drain deadline column"));
+    }
+
+    /// A binary that predates the drain cannot take a draining session over.
+    ///
+    /// The application SQL in both backends excludes a non-null deadline from
+    /// takeover, and that fences this binary only. Compatibility is checked
+    /// when a database is opened and never again, so every node still running
+    /// the previous binary during a rolling upgrade keeps issuing takeover
+    /// SQL from before the column existed. This runs exactly that statement —
+    /// the v49-era CAS, with no drain predicate in it — against a draining
+    /// row, and the trigger is the only thing in its path.
+    ///
+    /// `RAISE(IGNORE)`, so the statement reports zero rows changed rather
+    /// than raising. That is the answer the old binary already knows how to
+    /// read: its takeover checks for exactly one row and rolls back when it
+    /// does not get it, which is how it loses a race to another survivor.
+    #[test]
+    fn a_draining_session_refuses_the_ownership_move_an_older_binary_would_make() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("plurx.db");
+        SqliteStore::open(&db).expect("install current schema");
+        let conn = Connection::open(&db).expect("raw open");
+        conn.execute(
+            "INSERT INTO media_sessions (
+                 incarnation_id, session_id, user_id, playback_id,
+                 request_fingerprint, owner_node_id, owner_epoch,
+                 lease_expires_at_ms, state, recipe_json, response_json,
+                 updated_at_ms, drain_deadline_ms)
+             VALUES ('inc-drain', 'sess-drain', 3, 'playback-drain', 'fingerprint',
+                     'node-a', 4, 5000, 'active', '{}', '{}', 4000, 9000)",
+            [],
+        )
+        .expect("seed a draining session");
+
+        // The pre-v50 takeover CAS, verbatim in the shape that matters: it
+        // names the owner and epoch it expects and says nothing about a drain.
+        let moved = conn
+            .execute(
+                "UPDATE media_sessions
+                    SET owner_node_id = 'node-b', owner_epoch = 5,
+                        lease_expires_at_ms = 20000,
+                        discontinuity_sequence = discontinuity_sequence + 1,
+                        updated_at_ms = 10000
+                  WHERE incarnation_id = 'inc-drain' AND owner_node_id = 'node-a'
+                    AND owner_epoch = 4 AND state = 'active'",
+                [],
+            )
+            .expect("the old statement runs; it simply changes nothing");
+        assert_eq!(
+            moved, 0,
+            "an ownership move on a draining session must affect no rows"
+        );
+        let (owner, epoch, state): (String, i64, String) = conn
+            .query_row(
+                "SELECT owner_node_id, owner_epoch, state FROM media_sessions
+                  WHERE incarnation_id = 'inc-drain'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read the row back");
+        assert_eq!(
+            (owner.as_str(), epoch),
+            ("node-a", 4),
+            "ownership is intact"
+        );
+        assert_eq!(state, "active", "and nothing else about the row moved");
+
+        // The owner keeps renewing this row for the whole drain, and the
+        // sweep and the owner's own end both write `state`. Fencing any of
+        // those would break the drain rather than protect it.
+        assert_eq!(
+            conn.execute(
+                "UPDATE media_sessions SET lease_expires_at_ms = 30000, updated_at_ms = 11000
+                  WHERE incarnation_id = 'inc-drain'",
+                [],
+            )
+            .expect("renew a draining session"),
+            1,
+            "renewal is untouched"
+        );
+        assert_eq!(
+            conn.execute(
+                "UPDATE media_sessions SET state = 'ended', terminal_reason = 'superseded',
+                        updated_at_ms = 12000
+                  WHERE incarnation_id = 'inc-drain'",
+                [],
+            )
+            .expect("end a draining session"),
+            1,
+            "ending it is untouched"
+        );
     }
 
     #[test]
