@@ -9970,10 +9970,6 @@ impl TranscodeManager {
     /// conversion off has no converting sessions to serve, and indexing for
     /// them would spend a third full pass over every Profile 7 remux in the
     /// library on a stream nothing can ask for.
-    pub fn dv_convertible(&self) -> bool {
-        self.dv_convertible
-    }
-
     /// Whether this node converts Profile 7 to 8.1 right now.
     ///
     /// The builder value above is what this boot was configured with; the
@@ -9991,11 +9987,7 @@ impl TranscodeManager {
             .get_setting(plurx_core::store::keys::DV_CONVERT)
             .await
         {
-            Ok(Some(value)) => !matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "0" | "false" | "off" | "no"
-            ),
-            Ok(None) => true,
+            Ok(stored) => plurx_core::store::stored_switch(stored.as_deref(), true),
             Err(_) => self.dv_convertible,
         }
     }

@@ -711,23 +711,20 @@ impl AppState {
     ///
     /// Read at the request boundary rather than latched at boot, so an
     /// operator who turns it on in Settings sees the next request honour it.
-    /// A store that cannot be read answers `false`: the overlay API is the
-    /// thing that would then be advertised and not served, and a capability
-    /// the same process cannot honour is worse than one it does not offer.
-    pub(crate) async fn pgs_overlay_enabled(&self) -> bool {
-        self.store
-            .get_setting(keys::PGS_OVERLAY)
-            .await
-            .ok()
-            .flatten()
-            .as_deref()
-            .map(str::trim)
-            .is_some_and(|value| {
-                matches!(
-                    value.to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes" | "on"
-                )
-            })
+    ///
+    /// The store error is propagated rather than answered `false`, and that is
+    /// deliberate. Off is not the safe default here: it is the expensive one.
+    /// A selected PGS track with the overlay off becomes a burn-in, which
+    /// re-encodes the video and drops it to SDR, so one failed read during a
+    /// leader election would silently turn a direct-play HDR remux into a full
+    /// SDR transcode. The handlers that ask this already propagate store
+    /// errors a few lines later, so swallowing it here buys no availability —
+    /// it only substitutes a wrong answer for an honest failure.
+    pub(crate) async fn pgs_overlay_enabled(&self) -> Result<bool, plurx_core::error::StoreError> {
+        Ok(plurx_core::store::stored_switch(
+            self.store.get_setting(keys::PGS_OVERLAY).await?.as_deref(),
+            false,
+        ))
     }
 
     /// Resolve the operator's bounded forward subtitle span at the request
@@ -6110,7 +6107,14 @@ impl JobManager {
 
         let deadline = std::time::Instant::now() + INDEX_WINDOW;
         let have_dovi = transcode.dv_strippable();
-        let convert = transcode.dv_convertible();
+        // The live answer, not the one this process booted with. The indexer
+        // is what builds the converting identity a Dolby Vision client is
+        // later served, so an operator who turns the conversion on in
+        // Settings and gets a boot-latched `false` here has a switch that
+        // says convert, a decision path that agrees, and nothing that ever
+        // builds the index the player then waits on — forever, and only a
+        // restart heals it.
+        let convert = transcode.dv_convert_enabled().await;
         let runtime_cache = transcode.runtime_cache_dir().to_path_buf();
         let libraries = match self.store.list_libraries().await {
             Ok(libraries) => libraries,
@@ -6446,7 +6450,7 @@ impl JobManager {
                 self.store.as_ref(),
                 &file,
                 transcode.dv_strippable(),
-                transcode.dv_convertible(),
+                transcode.dv_convert_enabled().await,
             )
             .await
             {
@@ -6928,7 +6932,7 @@ impl JobManager {
             self.store.as_ref(),
             &file,
             have_dovi,
-            transcode.dv_convertible(),
+            transcode.dv_convert_enabled().await,
             &request.video_identity,
         )
         .await
@@ -7174,7 +7178,7 @@ impl JobManager {
             engine_sha256: crate::ffmpeg::fragment_index_engine_digest().await,
             cache_root: crate::fragment_index_cluster::cache_root(transcode.runtime_cache_dir()),
             have_dovi: transcode.dv_strippable(),
-            convert_dolby_vision: transcode.dv_convertible(),
+            convert_dolby_vision: transcode.dv_convert_enabled().await,
             retry_policy: self.analysis_retry_policy().await,
         };
         let mut built = 0_usize;

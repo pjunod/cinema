@@ -205,7 +205,7 @@ Runbook, with the owner-move procedure: [OPERATIONS.md](OPERATIONS.md).
 | `PLURX_CREDENTIAL_KEY_FILE` | `<data_dir>/credentials.key` | Key encrypting the stored Trakt credential — back it up with the database |
 | `PLURX_HLS_CLOSED_CAPTIONS_NONE` | off | Experiment: `CLOSED-CAPTIONS=NONE` on the HLS variant |
 | `PLURX_HLS_FORCED_AUTOSELECT` | off | Experiment: `AUTOSELECT=YES` on forced subtitle renditions |
-| `PLURX_PGS_OVERLAY` | off | Staged authenticated PGS manifest/PNG producer; not a production rollout switch until device acceptance |
+| `PLURX_PGS_OVERLAY` | off | **Seeds a setting; no longer a gate.** The switch is Settings → Developer (`subtitles.pgs_overlay`). Not a production rollout until device acceptance |
 
 The last two are HLS master experiments, not settings: enable **one per
 deploy**, restart, and watch a real Apple TV — the device is the only thing

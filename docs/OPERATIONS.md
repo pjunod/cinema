@@ -2853,7 +2853,7 @@ membership addresses and token-file paths are intentionally file-only:
 | `PLURX_CLUSTER_ACTIVATION_FAILPOINT` | — | — | Test-only activation exit: `after-quiescence` · `after-incoming` · `after-marker` · `after-rename`; each exits `86` |
 | `PLURX_HLS_CLOSED_CAPTIONS_NONE` | — | off | **Experiment.** Adds `CLOSED-CAPTIONS=NONE` to the HLS variant. Set `1` to enable |
 | `PLURX_HLS_FORCED_AUTOSELECT` | — | off | **Experiment.** Puts `AUTOSELECT=YES` on forced subtitle renditions. Set `1` to enable |
-| `PLURX_PGS_OVERLAY` | — | off | **Staged feature.** Advertises and serves the authenticated `pgs-v1` overlay producer. Keep off until native-client and physical HDR/DV acceptance is complete |
+| `PLURX_PGS_OVERLAY` | — | off | **Retired as a gate.** The switch is now Settings → Developer → *Serve PGS subtitles as an overlay* (`subtitles.pgs_overlay`). This variable seeds that setting once, on a node that has never been told either way, and does nothing afterwards. Still keep it off until native-client and physical HDR/DV acceptance is complete |
 
 ### The two HLS master experiments
 

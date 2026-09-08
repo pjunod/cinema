@@ -1897,17 +1897,13 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         vod_live_recovery: setting(keys::VOD_LIVE_RECOVERY).as_deref() != Some("0"),
         playback_control_protocol_v1: setting(keys::PLAYBACK_CONTROL_PROTOCOL_V1).as_deref()
             == Some("1"),
-        pgs_overlay: matches!(
-            setting(keys::PGS_OVERLAY).as_deref().map(str::trim),
-            Some("1" | "true" | "yes" | "on")
-        ),
-        // Absent is on, which is the default the environment variable this
-        // replaced also had.
-        dolby_vision_convert: !matches!(
-            setting(keys::DV_CONVERT)
-                .as_deref()
-                .map(|value| value.trim().to_ascii_lowercase()),
-            Some(ref value) if matches!(value.as_str(), "0" | "false" | "off" | "no")
+        // Both through the shared parser, so the card cannot say off while the
+        // server serves on. Absent is on for the conversion, which is the
+        // default the environment variable it replaced also had.
+        pgs_overlay: plurx_core::store::stored_switch(setting(keys::PGS_OVERLAY).as_deref(), false),
+        dolby_vision_convert: plurx_core::store::stored_switch(
+            setting(keys::DV_CONVERT).as_deref(),
+            true,
         ),
         vod_working_set_bytes: setting(keys::VOD_WORKING_SET_BYTES).unwrap_or_default(),
         vod_block_budget_secs: setting(keys::VOD_BLOCK_BUDGET_SECS).unwrap_or_default(),

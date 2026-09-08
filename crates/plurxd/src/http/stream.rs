@@ -1897,7 +1897,7 @@ pub async fn decision(
     // client and whether selecting one forces a burn-in are the same question
     // asked twice, and answering them from two reads would let a switch flip
     // between them inside one request.
-    let pgs_overlay = state.pgs_overlay_enabled().await;
+    let pgs_overlay = state.pgs_overlay_enabled().await?;
     let selected_subtitle_requires_burn =
         subtitle_requires_burn_in(&file, selected_subtitle, pgs_overlay);
     let container_default_audio = container_default_audio_index(&file.audio_streams);

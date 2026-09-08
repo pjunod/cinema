@@ -13813,8 +13813,8 @@ function developerPanel(settings,readiness){
       ${advisory}
       ${devReq(readiness,"live_hls_recovery","vod_coverage_replaces_it","Real VOD recipe coverage has replaced it","Turning the fallback off refuses any title whose VOD prerequisites are missing, rather than serving it the old way. The count below is what that would have refused.")}
       ${devReq(readiness,"live_hls_recovery","no_session_bypasses_the_switch","Nothing reaches the live engine past the switch","A request that already names the live presentation — the peer takeover path — never consults the setting. Sessions counted here keep running with the fallback off.")}`);
-  const overlay=setCard(`${cardHead("Image subtitles without burning them in","PGS and VOBSUB tracks served as timed images the player draws over the video, instead of being hidden or burned into the picture.",`<span class="pill">${settings.pgs_overlay?"on":"off"}</span>`)}
-      <div class="hint">With this off, a PGS track is not offered to the client at all, and choosing one forces a burn-in — which re-encodes the video and costs a transcode session. With it on, the same track is served through the authenticated <code>pgs-v1</code> overlay API and the video is left alone. This was an environment variable read once at startup; it is a setting now, so it can be answered here instead of in a compose file.</div>
+  const overlay=setCard(`${cardHead("Image subtitles without burning them in","PGS subtitle tracks served as timed images the player draws over the video, instead of being hidden or burned into the picture.",`<span class="pill">${settings.pgs_overlay?"on":"off"}</span>`)}
+      <div class="hint">Applies to PGS only; other bitmap subtitle formats still burn in. With this off, a PGS track is not offered to the client at all, and choosing one forces a burn-in — which re-encodes the video and costs a transcode session. With it on, the same track is served through the authenticated <code>pgs-v1</code> overlay API and the video is left alone. This was an environment variable read once at startup; it is a setting now, so it can be answered here instead of in a compose file.</div>
       ${togRow("pgso","Serve PGS subtitles as an overlay","Applies to the next request. Clients that do not implement pgs-v1 keep the burn-in path.",settings.pgs_overlay)}
       <h2 class="section">What must be true first</h2>
       ${advisory}
@@ -15408,9 +15408,9 @@ async function saveDolbyVisionConvert(btn){
   try{
     cacheSettings(await api("/settings",{method:"PUT",body:{
       dolby_vision_convert:document.getElementById("dvcv").checked}}));
-    render();
-  }catch(e){ err.textContent=e.message||String(e); }
-  finally{ if(btn) btn.disabled=false; }
+    toast("Dolby Vision conversion saved");
+    if(btn) setCardSaved(btn);
+  }catch(e){ err.textContent=e.message||String(e); if(btn) btn.disabled=false; }
 }
 async function saveSubtitleOverlay(btn){
   const err=document.getElementById("dserr"); err.textContent="";
@@ -15418,9 +15418,9 @@ async function saveSubtitleOverlay(btn){
   try{
     cacheSettings(await api("/settings",{method:"PUT",body:{
       pgs_overlay:document.getElementById("pgso").checked}}));
-    render();
-  }catch(e){ err.textContent=e.message||String(e); }
-  finally{ if(btn) btn.disabled=false; }
+    toast("Subtitle overlay saved");
+    if(btn) setCardSaved(btn);
+  }catch(e){ err.textContent=e.message||String(e); if(btn) btn.disabled=false; }
 }
 async function saveDeveloper(btn){
   const err=document.getElementById("dverr"); err.textContent="";
