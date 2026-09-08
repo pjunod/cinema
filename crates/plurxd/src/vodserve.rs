@@ -247,6 +247,7 @@ pub struct VodHlsFacts {
     /// copy produces — `hvc1` plus `SUPPLEMENTAL-CODECS: dvh1.08.LL` — and
     /// the source's own Dolby Vision record says profile 7.
     pub convert_dolby_vision: bool,
+    pub(crate) encoding: Option<Arc<crate::vodencode::Encoding>>,
     pub(crate) response_owner: ResponseOwner,
 }
 
@@ -381,6 +382,7 @@ pub struct VodSessionInfo {
 #[derive(Debug, Clone)]
 pub struct VodDeliveryInfo {
     pub id: String,
+    pub method: crate::delivery::Method,
     pub file_id: i64,
     pub item_id: i64,
     pub item_title: String,
@@ -406,6 +408,22 @@ pub struct VodDeliveryInfo {
 pub struct VodStart {
     pub session_id: String,
     pub duration_ms: i64,
+}
+
+/// The durable request plus an already resolved encoder recipe. Plain copy
+/// callers need no encoder preparation and convert from their request alone.
+pub(crate) struct VodRecipeRequest<'a> {
+    pub request: &'a SessionRequest,
+    pub encoding: Option<Arc<crate::vodencode::Encoding>>,
+}
+
+impl<'a> From<&'a SessionRequest> for VodRecipeRequest<'a> {
+    fn from(request: &'a SessionRequest) -> Self {
+        Self {
+            request,
+            encoding: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -540,6 +558,8 @@ struct Recipe {
     /// of the rendition directory key so weak legacy metadata cannot alias
     /// segments across an in-place source rewrite.
     cluster_cache_key: Option<String>,
+    /// A frozen encoded strategy; None is the indexed compressed-copy path.
+    encoding: Option<Arc<crate::vodencode::Encoding>>,
 }
 
 /// One attached reader, in plan indexes.
@@ -1218,7 +1238,7 @@ struct Rendition {
     playlist: Vec<u8>,
     timescale: u32,
     seconds_per_segment: f64,
-    index: FragmentIndex,
+    index: Option<FragmentIndex>,
     policy: CutPolicy,
     working_set_budget: u64,
     completed_cache_budget: u64,
@@ -1443,6 +1463,7 @@ impl Drop for TerminalCleanupGuard {
 /// dropping a resurrection/build cannot drop the only process owner.
 struct HeadChildOwner {
     child: Option<tokio::process::Child>,
+    permit: Option<crate::vodencode::EncodePermit>,
     #[cfg(test)]
     reap_pause: Option<Arc<tokio::sync::Barrier>>,
 }
@@ -1451,6 +1472,7 @@ impl HeadChildOwner {
     fn new(child: tokio::process::Child) -> Self {
         Self {
             child: Some(child),
+            permit: None,
             #[cfg(test)]
             reap_pause: None,
         }
@@ -1463,12 +1485,14 @@ impl HeadChildOwner {
     ) -> Self {
         Self {
             child: Some(child),
+            permit: None,
             reap_pause: Some(reap_pause),
         }
     }
 
     fn begin_reap(&mut self) -> Option<tokio::task::JoinHandle<()>> {
         let mut child = self.child.take()?;
+        let permit = self.permit.take();
         let _ = child.start_kill();
         #[cfg(test)]
         let reap_pause = self.reap_pause.take();
@@ -1479,6 +1503,7 @@ impl HeadChildOwner {
                 pause.wait().await;
             }
             let _ = child.wait().await;
+            drop(permit);
         }))
     }
 
@@ -1487,6 +1512,12 @@ impl HeadChildOwner {
             // Cancelling this await only detaches the already-owned reaper.
             let _ = reaper.await;
         }
+    }
+}
+
+impl From<tokio::process::Child> for HeadChildOwner {
+    fn from(child: tokio::process::Child) -> Self {
+        Self::new(child)
     }
 }
 
@@ -2096,6 +2127,7 @@ impl VodServe {
                 video: CopyVideoOptions::new(false, false),
                 source_object_version: None,
                 cluster_cache_key: None,
+                encoding: None,
             },
             source: None,
             playlist: plan.playlist().into_bytes(),
@@ -2103,7 +2135,7 @@ impl VodServe {
             seconds_per_segment: plan.duration_ticks() as f64
                 / f64::from(plan.timescale)
                 / plan.len() as f64,
-            index,
+            index: Some(index),
             policy,
             working_set_budget: 8 << 30,
             completed_cache_budget: 50 << 30,
@@ -2457,16 +2489,16 @@ impl VodServe {
     /// VOD-presented returns a stable refusal; it never changes presentation.
     /// `start_seconds` positions the first demand (the entry containing it),
     /// not the plan.
-    pub async fn try_create(
+    pub(crate) async fn try_create<'a>(
         &self,
-        req: &SessionRequest,
+        req: impl Into<VodRecipeRequest<'a>>,
         file: &MediaFile,
         settings: &VodSettings,
         attribution: VodAttribution<'_>,
         session_id: String,
     ) -> Result<VodStart, String> {
         self.try_create_with_release_fence(
-            req,
+            req.into(),
             file,
             settings,
             attribution,
@@ -2482,9 +2514,9 @@ impl VodServe {
     /// Cluster-only VOD creation. Unlike the legacy local entrypoint, this
     /// carries a serving admission captured before preparation and fences the
     /// final attachment against the corresponding quorum-loss transition.
-    pub(crate) async fn try_create_cluster(
+    pub(crate) async fn try_create_cluster<'a>(
         &self,
-        req: &SessionRequest,
+        req: impl Into<VodRecipeRequest<'a>>,
         file: &MediaFile,
         settings: &VodSettings,
         attribution: VodAttribution<'_>,
@@ -2492,7 +2524,7 @@ impl VodServe {
         serving_admission: VodServingAdmission,
     ) -> Result<VodStart, String> {
         self.try_create_with_release_fence(
-            req,
+            req.into(),
             file,
             settings,
             attribution,
@@ -2509,9 +2541,9 @@ impl VodServe {
     /// lifecycle/reader/registry attachment against public release. The
     /// release bit is checked while that exact transition is held, so slow
     /// Store/index/rendition work never delays a DELETE tombstone.
-    pub(crate) async fn try_create_before_release(
+    pub(crate) async fn try_create_before_release<'a>(
         &self,
-        req: &SessionRequest,
+        req: impl Into<VodRecipeRequest<'a>>,
         file: &MediaFile,
         settings: &VodSettings,
         attribution: VodAttribution<'_>,
@@ -2520,7 +2552,7 @@ impl VodServe {
     ) -> Result<VodStart, String> {
         let _preparing = self.begin_preparing_session(&session_id);
         self.try_create_with_release_fence(
-            req,
+            req.into(),
             file,
             settings,
             attribution,
@@ -2585,7 +2617,7 @@ impl VodServe {
 
     async fn try_create_with_release_fence(
         &self,
-        req: &SessionRequest,
+        prepared: VodRecipeRequest<'_>,
         file: &MediaFile,
         settings: &VodSettings,
         attribution: VodAttribution<'_>,
@@ -2600,21 +2632,25 @@ impl VodServe {
         // would be frozen at whatever the node booted with — and applying it
         // at `try_create` alone reached no production path at all.
         self.shared.pool.set_global_cap(settings.blocked_get_cap);
-        let SessionKind::Copy {
-            aac,
-            preserve_dolby_vision,
-            convert_dolby_vision,
-        } = req.kind
-        else {
-            return Err(crate::transcode::vod_refusal_error(
-                "vod_transcode_unavailable",
-                "transcode serving is gated on the D6 device measurement",
-            ));
+        let req = prepared.request;
+        let (aac, preserve_dolby_vision, convert_dolby_vision) = match req.kind {
+            SessionKind::Copy {
+                aac,
+                preserve_dolby_vision,
+                convert_dolby_vision,
+            } if prepared.encoding.is_none() => (aac, preserve_dolby_vision, convert_dolby_vision),
+            _ if prepared.encoding.is_some() => (true, false, false),
+            _ => {
+                return Err(crate::transcode::vod_refusal_error(
+                    "vod_recipe_unresolved",
+                    "the encoded VOD request has no resolved encoder recipe",
+                ))
+            }
         };
-        if req.subtitle_burn.is_some() {
+        if req.subtitle_burn.is_some() && prepared.encoding.is_none() {
             return Err(crate::transcode::vod_refusal_error(
-                "vod_subtitle_burn_unavailable",
-                "a subtitle burn changes the video pipeline",
+                "vod_recipe_unresolved",
+                "a subtitle burn requires a resolved encoded VOD recipe",
             ));
         }
         // A NULL/unprobed duration cannot be described by a closed film-time
@@ -2640,20 +2676,26 @@ impl VodServe {
             preserve_dolby_vision,
             convert_dolby_vision,
         );
-        let identity = crate::fragindex::identity_for(file, video);
-        let cluster_cache_enabled = self
-            .shared
-            .store
-            .get_setting(plurx_core::store::keys::VOD_INDEX_CLUSTER_CACHE)
-            .await
-            .map_err(|error| format!("reading the cluster index gate: {error}"))?
-            .is_some_and(|value| {
-                matches!(
-                    value.trim().to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes" | "on"
-                )
-            });
-        let cluster_index = if cluster_cache_enabled {
+        let identity = match prepared.encoding.as_ref() {
+            Some(encoding) => encoding.identity(file, duration_ms as f64 / 1_000.0),
+            None => crate::fragindex::identity_for(file, video),
+        };
+        let cluster_cache_enabled = prepared.encoding.is_none()
+            && self
+                .shared
+                .store
+                .get_setting(plurx_core::store::keys::VOD_INDEX_CLUSTER_CACHE)
+                .await
+                .map_err(|error| format!("reading the cluster index gate: {error}"))?
+                .is_some_and(|value| {
+                    matches!(
+                        value.trim().to_ascii_lowercase().as_str(),
+                        "1" | "true" | "yes" | "on"
+                    )
+                });
+        let cluster_index = if prepared.encoding.is_some() {
+            Ok(None)
+        } else if cluster_cache_enabled {
             self.try_cluster_fragment_index(file, video).await.map(Some)
         } else {
             Ok(None)
@@ -2662,6 +2704,14 @@ impl VodServe {
             Ok(Some((index, object_version, cache_key))) => {
                 (Some(index), Some(object_version), Some(cache_key))
             }
+            Ok(None) if prepared.encoding.is_some() => (
+                None,
+                prepared
+                    .encoding
+                    .as_ref()
+                    .map(|encoding| encoding.source_object_version.clone()),
+                None,
+            ),
             Ok(None) => (
                 self.shared
                     .store
@@ -2687,16 +2737,19 @@ impl VodServe {
                 )
             }
         };
-        let Some(index) = index else {
+        if index.is_none() && prepared.encoding.is_none() {
             return Err(crate::transcode::vod_refusal_error(
                 "vod_index_pending",
                 "no fragment index stored for the file's current identity",
             ));
-        };
+        }
         // The §2 ruling: a single immutable init cannot describe a film whose
         // clean fragments carry varying parameter sets, so the verdict is a
         // scan-time fallback here, never a producer_failed mid-playback.
-        if !index.parameter_sets_constant {
+        if index
+            .as_ref()
+            .is_some_and(|index| !index.parameter_sets_constant)
+        {
             return Err(crate::transcode::vod_refusal_error(
                 "vod_source_unsupported",
                 "its parameter sets vary mid-film (the §2 ruling)",
@@ -2709,6 +2762,7 @@ impl VodServe {
             video,
             source_object_version,
             cluster_cache_key,
+            encoding: prepared.encoding,
         };
         let key = rendition_key(&recipe, &identity);
         let attachment = self
@@ -2757,8 +2811,20 @@ impl VodServe {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|duration| duration.as_secs().min(i64::MAX as u64) as i64)
                 .unwrap_or(0),
-            target_height: file.height.unwrap_or(0),
-            kind: req.kind,
+            target_height: rendition
+                .recipe
+                .encoding
+                .as_ref()
+                .map_or(file.height.unwrap_or(0), |encoding| {
+                    encoding.options.target_height
+                }),
+            kind: rendition
+                .recipe
+                .encoding
+                .as_ref()
+                .map_or(req.kind, |encoding| SessionKind::Transcode {
+                    height: encoding.options.target_height,
+                }),
             supersession_user: attribution.supersession_user.to_owned(),
             block_budget: settings.block_budget,
             lifecycle: Arc::clone(&lifecycle),
@@ -2923,6 +2989,10 @@ impl VodServe {
                 session.live_rendition()?;
                 Some(VodDeliveryInfo {
                     id: id.clone(),
+                    method: match &session.kind {
+                        SessionKind::Copy { .. } => crate::delivery::Method::HlsCopy,
+                        SessionKind::Transcode { .. } => crate::delivery::Method::Transcode,
+                    },
                     file_id: session.file.id,
                     item_id: session.file.item_id,
                     item_title: session.item_title.clone(),
@@ -4303,6 +4373,7 @@ impl VodServe {
             aac: rendition.recipe.aac,
             preserve_dolby_vision: rendition.recipe.video.preserves_dolby_vision(),
             convert_dolby_vision: rendition.recipe.video.converts_dolby_vision(),
+            encoding: rendition.recipe.encoding.clone(),
             response_owner: publication.owner,
         })
     }
@@ -5073,7 +5144,7 @@ impl Shared {
         self: &Arc<Shared>,
         key: &str,
         identity: &SourceIdentity,
-        index: FragmentIndex,
+        index: Option<FragmentIndex>,
         recipe: Recipe,
         duration_ms: i64,
         settings: &VodSettings,
@@ -5112,7 +5183,7 @@ impl Shared {
         self: &Arc<Shared>,
         key: String,
         identity: SourceIdentity,
-        index: FragmentIndex,
+        index: Option<FragmentIndex>,
         recipe: Recipe,
         duration_ms: i64,
         settings: VodSettings,
@@ -5237,7 +5308,7 @@ impl Shared {
         &self,
         key: &str,
         identity: &SourceIdentity,
-        index: &FragmentIndex,
+        index: &Option<FragmentIndex>,
         recipe: &Recipe,
         duration_ms: i64,
     ) -> Result<SegmentPlan, String> {
@@ -5249,9 +5320,19 @@ impl Shared {
         {
             return Ok(plan);
         }
-        let policy = shipped_policy(index.timescale);
-        let tracks = track_durations(index, recipe, duration_ms);
-        let plan = plurx_core::segplan::plan_copy(index, &policy, &tracks);
+        let plan = if let Some(encoding) = &recipe.encoding {
+            encoding.grid.plan(
+                duration_ms,
+                (encoding.options.video_bitrate_kbps + encoding.options.audio_bitrate_kbps)
+                    .saturating_mul(1000)
+                    .into(),
+            )
+        } else {
+            let index = index.as_ref().expect("copy recipe has a fragment index");
+            let policy = shipped_policy(index.timescale);
+            let tracks = track_durations(index, recipe, duration_ms);
+            plurx_core::segplan::plan_copy(index, &policy, &tracks)
+        };
         if plan.is_empty() {
             // Never stored: an empty plan under the key would poison it.
             return Ok(plan);
@@ -5285,7 +5366,7 @@ impl Shared {
     async fn build_rendition(
         self: &Arc<Shared>,
         key: &str,
-        index: FragmentIndex,
+        index: Option<FragmentIndex>,
         recipe: Recipe,
         plan: SegmentPlan,
         settings: &VodSettings,
@@ -5666,8 +5747,36 @@ impl Shared {
 fn spawn_driver(shared: Arc<Shared>, rendition: Arc<Rendition>) {
     tokio::spawn(async move {
         loop {
-            rendition.wake.notified().await;
+            if rendition
+                .recipe
+                .encoding
+                .as_ref()
+                .is_some_and(|encoding| encoding.is_waiting())
+            {
+                // One owned driver, not one retry task per GET. Pool releases
+                // outside VOD cannot notify this registry, so queued foreground
+                // work also rechecks within a bounded admission interval.
+                tokio::select! {
+                    _ = rendition.wake.notified() => {},
+                    _ = tokio::time::sleep(Duration::from_millis(250)) => {},
+                }
+            } else {
+                rendition.wake.notified().await;
+            }
             if rendition.closed.load(Relaxed) {
+                if let Some(encoding) = &rendition.recipe.encoding {
+                    encoding.cancel_wait();
+                }
+                rendition.gen_epoch.fetch_add(1, Relaxed);
+                let _ = rendition
+                    .slot
+                    .perform(
+                        Step::Terminate {
+                            why: Termination::Idle,
+                        },
+                        || {},
+                    )
+                    .await;
                 break;
             }
             driver_pass(&shared, &rendition).await;
@@ -5726,147 +5835,201 @@ async fn retire_failed_rendition(rendition: &Arc<Rendition>) {
 
 /// One pass: demand → decide → step → carry it out.
 async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
-    if rendition.failure().is_some() {
-        retire_failed_rendition(rendition).await;
-        return;
-    }
-    let belief = rendition.slot.belief().await;
-    let mut manifest = rendition.manifest.lock().await;
-    let (demands, prewarm_ledgers) = {
-        let readers = rendition.readers.lock().await;
-        let demands = playback_demands(&shared.pool, rendition, &readers, &manifest);
-        let ledgers = readers
-            .values()
-            .map(|reader| Arc::clone(&reader.marker_prewarm))
-            .collect::<Vec<_>>();
-        (demands, ledgers)
-    };
-    let position = Position {
-        produced_through: belief.produced_through(),
-        positioned_at: belief.positioned_at(),
-        seconds_per_segment: rendition.seconds_per_segment,
-        working_set: WorkingSet {
-            used_bytes: shared.working_set.load(Relaxed),
-            budget_bytes: rendition.working_set_budget,
-            held: matches!(belief, Producer::Stopped { .. }),
-        },
-    };
-    // The eviction windows are read before the decision, not inside the sweep
-    // it may ask for: whether anything can be given up is not answerable
-    // without knowing what is protected, and answering it wrongly turns a
-    // capacity stall into a producer that looks like it stopped making
-    // progress.
-    let windows = eviction_windows(shared, rendition).await;
-    let decision =
-        decide_with_marker_prewarm(&manifest, &demands, position, &windows, &prewarm_ledgers);
-    // Recorded from this pass's own decision, before the step that acts on it.
-    // A hold with no scheduled end terminates its producer, so the belief that
-    // would otherwise carry the reason is gone by the time anyone reads the
-    // status; a hold that clears on its own is still carried by the stopped
-    // producer and needs nothing here. Any other decision clears it, so the
-    // record cannot outlive the condition that produced it.
-    *rendition.capacity_hold.lock().expect("capacity hold") = match decision.action {
-        Action::Suspend { reason, .. } if !crate::prodexec::clears_on_its_own(reason) => {
-            Some(reason)
+    let mut prepared_permit = None;
+    loop {
+        if rendition.closed.load(Relaxed) {
+            if let Some(encoding) = &rendition.recipe.encoding {
+                encoding.cancel_wait();
+            }
+            return;
         }
-        _ => None,
-    };
-    let step = retire_completed_marker_prewarm(
-        rendition,
-        belief,
-        &decision,
-        next_step(belief, decision.action),
-    );
-    if fence_marker_prewarm_before_room(rendition, belief, step) {
-        // Capacity belongs to blocked foreground demand. Fence and retire a
-        // speculative generation before freeing bytes, so queued prewarm
-        // output cannot consume the room between this pass and the next.
-        let terminate = Step::Terminate {
-            why: Termination::IndefiniteHold,
+        if rendition.failure().is_some() {
+            if let Some(encoding) = &rendition.recipe.encoding {
+                encoding.cancel_wait();
+            }
+            rendition.gen_epoch.fetch_add(1, Relaxed);
+            clear_marker_prewarm_dispatch(rendition);
+            retire_failed_rendition(rendition).await;
+            return;
+        }
+        let belief = rendition.slot.belief().await;
+        // Reader windows may require asynchronous state reads. Take that
+        // snapshot before the manifest lock so cached GET publication never
+        // waits behind policy or admission I/O.
+        let windows = eviction_windows(shared, rendition).await;
+        let mut manifest = rendition.manifest.lock().await;
+        let (demands, prewarm_ledgers) = {
+            let readers = rendition.readers.lock().await;
+            let demands = playback_demands(&shared.pool, rendition, &readers, &manifest);
+            let ledgers = readers
+                .values()
+                .map(|reader| Arc::clone(&reader.marker_prewarm))
+                .collect::<Vec<_>>();
+            (demands, ledgers)
         };
-        if let Err(error) = rendition.slot.perform(terminate, || {}).await {
-            tracing::debug!(rendition = %rendition.key, "retiring prewarm producer: {error}");
-        }
-        rendition.kick();
-        return;
-    }
-    update_marker_prewarm_dispatch(rendition, belief, step, &decision);
-    match step {
-        Step::Nothing => {}
-        Step::Stop | Step::Resume => {
-            // TODO(m3-wire): session progress clock — the manager's motion
-            // clock replaces this no-op touch when it attaches.
-            if let Err(error) = rendition.slot.perform(step, || {}).await {
-                clear_marker_prewarm_dispatch(rendition);
-                tracing::warn!(rendition = %rendition.key, "performing {step:?}: {error}");
+        let position = Position {
+            produced_through: belief.produced_through(),
+            positioned_at: belief.positioned_at(),
+            seconds_per_segment: rendition.seconds_per_segment,
+            working_set: WorkingSet {
+                used_bytes: shared.working_set.load(Relaxed),
+                budget_bytes: rendition.working_set_budget,
+                held: matches!(belief, Producer::Stopped { .. }),
+            },
+        };
+        let decision =
+            decide_with_marker_prewarm(&manifest, &demands, position, &windows, &prewarm_ledgers);
+        // Record only this pass's decision. A later non-capacity decision
+        // clears the reason, so the status cannot outlive the condition that
+        // produced it.
+        *rendition.capacity_hold.lock().expect("capacity hold") = match decision.action {
+            Action::Suspend { reason, .. } if !crate::prodexec::clears_on_its_own(reason) => {
+                Some(reason)
+            }
+            _ => None,
+        };
+        let step = retire_completed_marker_prewarm(
+            rendition,
+            belief,
+            &decision,
+            next_step(belief, decision.action),
+        );
+        let step = if rendition.recipe.encoding.is_some() && matches!(step, Step::Stop) {
+            // A full ahead window is no reason to reserve scarce encoder
+            // capacity while another viewer waits. Encoded restarts reproduce
+            // the same video grid and audio phase, so release instead of SIGSTOP.
+            Step::Terminate {
+                why: Termination::IndefiniteHold,
+            }
+        } else {
+            step
+        };
+        if matches!(step, Step::Start { .. } | Step::Restart { .. }) && prepared_permit.is_none() {
+            if let Some(encoding) = &rendition.recipe.encoding {
+                // The old child may own this pool's only permit. Retire it before
+                // admission, but never hold the manifest over process or Store I/O:
+                // already-materialized GETs and in-flight publication must drain.
+                if matches!(step, Step::Restart { .. }) {
+                    rendition.gen_epoch.fetch_add(1, Relaxed);
+                    clear_marker_prewarm_dispatch(rendition);
+                }
+                drop(manifest);
+                if matches!(step, Step::Restart { .. }) {
+                    if let Err(error) = rendition.slot.perform(step, || {}).await {
+                        tracing::warn!(rendition = %rendition.key, "retiring encoder before admission: {error}");
+                        return;
+                    }
+                }
+                prepared_permit = encoding.try_permit().await;
+                if prepared_permit.is_none() {
+                    return;
+                }
+                // Admission is not permission to execute the old decision. A
+                // seek/cancellation/publication may have changed it while waiting.
+                // Re-read producer belief and current admitted/accepted demand.
+                continue;
             }
         }
-        Step::Terminate { .. } => {
-            rendition.gen_epoch.fetch_add(1, Relaxed);
-            if let Err(error) = rendition.slot.perform(step, || {}).await {
-                tracing::debug!(rendition = %rendition.key, "performing {step:?}: {error}");
+        if fence_marker_prewarm_before_room(rendition, belief, step) {
+            // Capacity belongs to blocked foreground demand. Fence and retire a
+            // speculative generation before freeing bytes, so queued prewarm
+            // output cannot consume the room between this pass and the next.
+            let terminate = Step::Terminate {
+                why: Termination::IndefiniteHold,
+            };
+            if let Err(error) = rendition.slot.perform(terminate, || {}).await {
+                tracing::debug!(rendition = %rendition.key, "retiring prewarm producer: {error}");
+            }
+            rendition.kick();
+            return;
+        }
+        update_marker_prewarm_dispatch(rendition, belief, step, &decision);
+        if !matches!(step, Step::Start { .. } | Step::Restart { .. }) {
+            if let Some(encoding) = &rendition.recipe.encoding {
+                encoding.cancel_wait();
             }
         }
-        Step::Start { .. } | Step::Restart { .. } => {
-            rendition.gen_epoch.fetch_add(1, Relaxed);
-            match rendition.slot.perform(step, || {}).await {
-                Ok(Performed::NeedsSpawn { at }) => spawn_generation(shared, rendition, at).await,
-                Ok(Performed::Done) => {}
-                Err(error) => {
+        match step {
+            Step::Nothing => {}
+            Step::Stop | Step::Resume => {
+                // TODO(m3-wire): session progress clock — the manager's motion
+                // clock replaces this no-op touch when it attaches.
+                if let Err(error) = rendition.slot.perform(step, || {}).await {
                     clear_marker_prewarm_dispatch(rendition);
                     tracing::warn!(rendition = %rendition.key, "performing {step:?}: {error}");
                 }
             }
-        }
-        Step::MakeRoom { wanted } => {
-            match rendition
-                .dir
-                .make_room(&mut manifest, &windows, wanted)
-                .await
-            {
-                Ok(freed) => {
-                    sub_saturating(&shared.working_set, freed.bytes);
-                    if let Some(error) = freed.error {
-                        tracing::warn!(
-                            rendition = %rendition.key,
-                            freed = freed.bytes,
-                            "eviction sweep stopped early: {error}"
-                        );
-                    }
-                    // Room may now exist; decide again promptly — and the
-                    // freed bytes are node-wide news, so every other
-                    // rendition's driver re-examines its hold too.
-                    if freed.bytes > 0 {
-                        rendition.kick();
-                        shared.kick_all();
-                    } else if !matches!(belief, Producer::Absent { .. }) {
-                        // Protected bytes make this an indefinite capacity
-                        // hold. Fence queued writes and release the producer;
-                        // leaving it running would immediately exceed the
-                        // same bound that the zero-progress sweep proved.
-                        rendition.gen_epoch.fetch_add(1, Relaxed);
-                        if let Err(error) = rendition
-                            .slot
-                            .perform(
-                                Step::Terminate {
-                                    why: Termination::IndefiniteHold,
-                                },
-                                || {},
-                            )
-                            .await
-                        {
-                            tracing::warn!(rendition = %rendition.key, "terminating producer after a zero-progress capacity sweep: {error}");
-                        }
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(rendition = %rendition.key, "make_room: {error}");
+            Step::Terminate { .. } => {
+                rendition.gen_epoch.fetch_add(1, Relaxed);
+                if let Err(error) = rendition.slot.perform(step, || {}).await {
+                    tracing::debug!(rendition = %rendition.key, "performing {step:?}: {error}");
                 }
             }
+            Step::Start { .. } | Step::Restart { .. } => {
+                rendition.gen_epoch.fetch_add(1, Relaxed);
+                drop(manifest);
+                match rendition.slot.perform(step, || {}).await {
+                    Ok(Performed::NeedsSpawn { at }) => {
+                        spawn_generation(shared, rendition, at, prepared_permit.take()).await;
+                    }
+                    Ok(Performed::Done) => {}
+                    Err(error) => {
+                        clear_marker_prewarm_dispatch(rendition);
+                        tracing::warn!(rendition = %rendition.key, "performing {step:?}: {error}");
+                    }
+                }
+            }
+            Step::MakeRoom { wanted } => {
+                match rendition
+                    .dir
+                    .make_room(&mut manifest, &windows, wanted)
+                    .await
+                {
+                    Ok(freed) => {
+                        sub_saturating(&shared.working_set, freed.bytes);
+                        if let Some(error) = freed.error {
+                            tracing::warn!(
+                                rendition = %rendition.key,
+                                freed = freed.bytes,
+                                "eviction sweep stopped early: {error}"
+                            );
+                        }
+                        // Room may now exist; decide again promptly — and the
+                        // freed bytes are node-wide news, so every other
+                        // rendition's driver re-examines its hold too.
+                        if freed.bytes > 0 {
+                            rendition.kick();
+                            shared.kick_all();
+                        } else if !matches!(belief, Producer::Absent { .. }) {
+                            // Protected bytes make this an indefinite capacity
+                            // hold. Fence queued writes and release the producer;
+                            // leaving it running would immediately exceed the
+                            // same bound that the zero-progress sweep proved.
+                            rendition.gen_epoch.fetch_add(1, Relaxed);
+                            if let Err(error) = rendition
+                                .slot
+                                .perform(
+                                    Step::Terminate {
+                                        why: Termination::IndefiniteHold,
+                                    },
+                                    || {},
+                                )
+                                .await
+                            {
+                                tracing::warn!(rendition = %rendition.key, "terminating producer after a zero-progress capacity sweep: {error}");
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(rendition = %rendition.key, "make_room: {error}");
+                    }
+                }
+            }
+            Step::Report { hold } => {
+                tracing::warn!(rendition = %rendition.key, "producer stalled: {hold:?}");
+            }
         }
-        Step::Report { hold } => {
-            tracing::warn!(rendition = %rendition.key, "producer stalled: {hold:?}");
-        }
+        break;
     }
 }
 
@@ -6150,15 +6313,18 @@ fn update_marker_prewarm_dispatch(
 
 /// Spawn a real generation positioned at plan entry `at` and hand its stdout
 /// to [`run_generation`].
-async fn spawn_generation(shared: &Arc<Shared>, rendition: &Arc<Rendition>, at: u32) {
-    if rendition.recipe.cluster_cache_key.is_some()
-        && !crate::ffmpeg::fragment_index_engine_is_current().await
-    {
+async fn spawn_generation(
+    shared: &Arc<Shared>,
+    rendition: &Arc<Rendition>,
+    at: u32,
+    permit: Option<crate::vodencode::EncodePermit>,
+) {
+    if !recipe_engine_is_current(&rendition.recipe).await {
         record_failure(
             shared,
             rendition,
             crate::playback_control::ProducerDecisionReason::EngineChanged,
-            "the v2 fragment-index engine changed; restart is required".to_owned(),
+            "the immutable media engine changed; restart is required".to_owned(),
         );
         return;
     }
@@ -6173,29 +6339,37 @@ async fn spawn_generation(shared: &Arc<Shared>, rendition: &Arc<Rendition>, at: 
     };
     let start_seconds = entry.start_ticks as f64 / f64::from(rendition.timescale);
     let recipe = &rendition.recipe;
+    debug_assert_eq!(recipe.encoding.is_some(), permit.is_some());
     let attested = attested_source_setup(rendition);
+    let audio_source = match reopen_encoded_audio(rendition.source.as_ref(), recipe).await {
+        Ok(source) => source,
+        Err(cause) => {
+            record_failure(
+                shared,
+                rendition,
+                crate::playback_control::ProducerDecisionReason::SourceChanged,
+                cause,
+            );
+            return;
+        }
+    };
     // One ffmpeg, converting or not. The conversion happens on the far side of
     // the muxer now — `dvpipe` rewrites the RPUs inside the fragments this
     // process writes — so the producer is the producer it always was.
-    let (mut child, stdout) = {
-        let mut args = copy_pipe_args_with_dolby_vision(
-            &recipe.file,
-            start_seconds,
-            recipe.audio_index,
-            recipe.aac,
-            Pacing::unpaced(),
-            recipe.video,
+    let (mut child, stdout, stderr) = {
+        let args = recipe_pipe_args(recipe, start_seconds, attested);
+        let mut command = tokio::process::Command::new(recipe_program(recipe));
+        attach_recipe_descriptors(
+            &mut command,
+            rendition.source.as_ref(),
+            audio_source.as_ref(),
+            recipe,
         );
-        if attested {
-            replace_inputs_with_attested_descriptor(&mut args);
-        }
-        let mut command = tokio::process::Command::new(ffmpeg_bin());
-        attach_attested_descriptor(&mut command, rendition.source.as_ref());
         let mut child = match command
             .args(&args)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
             .kill_on_drop(true)
             .spawn()
         {
@@ -6212,6 +6386,7 @@ async fn spawn_generation(shared: &Arc<Shared>, rendition: &Arc<Rendition>, at: 
             }
         };
         let Some(stdout) = child.stdout.take() else {
+            let _ = child.kill().await;
             record_failure(
                 shared,
                 rendition,
@@ -6220,7 +6395,8 @@ async fn spawn_generation(shared: &Arc<Shared>, rendition: &Arc<Rendition>, at: 
             );
             return;
         };
-        (child, stdout)
+        let stderr = child.stderr.take().expect("piped producer stderr");
+        (child, stdout, stderr)
     };
     // The rendition can be closed between the spawn above and the attach
     // below (a purge committing on the maintain task). Attaching would leave
@@ -6241,14 +6417,123 @@ async fn spawn_generation(shared: &Arc<Shared>, rendition: &Arc<Rendition>, at: 
     rendition
         .last_child_pid
         .store(child.id().unwrap_or(0), Relaxed);
-    rendition.slot.attach(child, at).await;
+    rendition
+        .slot
+        .attach_owned(
+            child,
+            at,
+            permit.map(|permit| Box::new(permit) as Box<dyn Send>),
+        )
+        .await;
     let epoch = rendition.gen_epoch.load(Relaxed);
     let shared = Arc::clone(shared);
     let rendition = Arc::clone(rendition);
     tokio::spawn(async move {
-        run_generation(shared, rendition, stdout, at, epoch).await;
+        let key = rendition.key.clone();
+        let (_, diagnostic) = tokio::join!(
+            run_generation(shared, rendition, stdout, at, epoch),
+            crate::ffmpeg::drain_diagnostics(stderr),
+        );
+        if !diagnostic.trim().is_empty() {
+            tracing::warn!(rendition = %key, generation = epoch, %diagnostic, "VOD producer diagnostic");
+        }
     });
     tracing::info!(rendition = %rendition_key_field(at), "spawned a producer generation");
+}
+
+async fn recipe_engine_is_current(recipe: &Recipe) -> bool {
+    if recipe
+        .encoding
+        .as_ref()
+        .is_some_and(|encoding| !encoding.executable.is_current() || !encoding.engine.is_current())
+    {
+        return false;
+    }
+    recipe.cluster_cache_key.is_none() || crate::ffmpeg::fragment_index_engine_is_current().await
+}
+
+fn recipe_program(recipe: &Recipe) -> std::path::PathBuf {
+    recipe.encoding.as_ref().map_or_else(
+        || ffmpeg_bin().into(),
+        |encoding| encoding.executable.path.clone(),
+    )
+}
+
+fn recipe_pipe_args(recipe: &Recipe, start_seconds: f64, attested: bool) -> Vec<String> {
+    if let Some(encoding) = &recipe.encoding {
+        let mut file = recipe.file.clone();
+        if attested {
+            file.path = "/dev/fd/3".into();
+        }
+        // Plan duration is rounded to a complete output frame, just like the
+        // terminal -t. Neither audio padding nor the source's final VFR gap
+        // may turn a short final entry into an unplanned audio-only tail.
+        let plan = encoding.grid.plan(file.duration_ms.unwrap_or(0), 0);
+        let end = plan
+            .entries
+            .last()
+            .map_or(0, |entry| entry.start_ticks + entry.duration_ticks);
+        let mut args = encoding.args(&file, start_seconds, end as f64 / f64::from(plan.timescale));
+        if attested && !file.audio_streams.is_empty() {
+            let mut inputs = 0;
+            for index in 0..args.len().saturating_sub(1) {
+                if args[index] == "-i" {
+                    inputs += 1;
+                    if inputs == 2 {
+                        args[index + 1] = "/dev/fd/4".into();
+                        break;
+                    }
+                }
+            }
+        }
+        args
+    } else {
+        let mut args = copy_pipe_args_with_dolby_vision(
+            &recipe.file,
+            start_seconds,
+            recipe.audio_index,
+            recipe.aac,
+            Pacing::unpaced(),
+            recipe.video,
+        );
+        if attested {
+            replace_inputs_with_attested_descriptor(&mut args);
+        }
+        args
+    }
+}
+
+async fn reopen_encoded_audio(
+    source: Option<&crate::fragment_index_cluster::SourceFence>,
+    recipe: &Recipe,
+) -> Result<Option<crate::fragment_index_cluster::SourceFence>, String> {
+    if recipe.encoding.is_some() && !recipe.file.audio_streams.is_empty() {
+        if let Some(source) = source {
+            return source.reopen(&recipe.file).await.map(Some);
+        }
+    }
+    Ok(None)
+}
+
+fn attach_recipe_descriptors(
+    command: &mut tokio::process::Command,
+    source: Option<&crate::fragment_index_cluster::SourceFence>,
+    audio: Option<&crate::fragment_index_cluster::SourceFence>,
+    recipe: &Recipe,
+) {
+    let subtitle = recipe
+        .encoding
+        .as_ref()
+        .and_then(|encoding| encoding.subtitle.as_deref());
+    let files = [
+        source.map(|source| (&source.handle, 3)),
+        audio.map(|audio| (&audio.handle, 4)),
+        subtitle.map(|subtitle| (subtitle, 5)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    crate::ffmpeg::inherit_file_descriptors(command, &files);
 }
 
 /// Whether this rendition's producers read the source through the attested
@@ -6294,43 +6579,6 @@ fn copy_video_pipeline(
 ) -> CopyVideoOptions {
     CopyVideoOptions::from_probe(file, probe_json, have_dovi, preserve_dolby_vision)
         .with_dolby_vision_conversion(convert_dolby_vision)
-}
-
-/// Hand a child the attested source as fd 3, if there is one.
-///
-/// Factored out because two spawn sites need it — the producer and head
-/// regeneration — and a child that opened the file by name rather than by the
-/// attested descriptor could read a file that had been replaced since the
-/// fence was taken, pairing a playlist with media from a different film.
-fn attach_attested_descriptor(
-    command: &mut tokio::process::Command,
-    source: Option<&crate::fragment_index_cluster::SourceFence>,
-) {
-    #[cfg(unix)]
-    if let Some(source) = source {
-        use std::os::fd::AsRawFd;
-        let source_fd = source.handle.as_raw_fd();
-        unsafe {
-            command.pre_exec(move || {
-                let duplicate = libc::fcntl(source_fd, libc::F_DUPFD_CLOEXEC, 10);
-                if duplicate == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                if libc::dup2(duplicate, 3) == -1 {
-                    libc::close(duplicate);
-                    return Err(std::io::Error::last_os_error());
-                }
-                libc::close(duplicate);
-                let flags = libc::fcntl(3, libc::F_GETFD);
-                if flags == -1 || libc::fcntl(3, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = (command, source);
 }
 
 fn rendition_key_field(at: u32) -> String {
@@ -6392,6 +6640,11 @@ async fn run_generation(
     let generation = Generation {
         plan: rendition.plan.clone(),
         index: rendition.index.clone(),
+        encoded_audio_anchor: rendition.recipe.encoding.as_ref().map(|_| {
+            let start = rendition.plan.entry(at).expect("spawn entry").start_ticks as f64
+                / f64::from(rendition.timescale);
+            plurx_core::transcode::vod_audio_anchor(start)
+        }),
         identity,
         start_entry: at,
         policy: rendition.policy,
@@ -6417,14 +6670,12 @@ async fn establish_or_verify(
     muxer: &Init,
     epoch: u64,
 ) -> bool {
-    if rendition.recipe.cluster_cache_key.is_some()
-        && !crate::ffmpeg::fragment_index_engine_is_current().await
-    {
+    if !recipe_engine_is_current(&rendition.recipe).await {
         on_generation_end(
             shared,
             rendition,
             Outcome::Failed(Failure::EngineChanged(
-                "the v2 fragment-index engine changed before init publication".to_owned(),
+                "the immutable media engine changed before init publication".to_owned(),
             )),
             epoch,
         )
@@ -6455,23 +6706,29 @@ async fn establish_or_verify(
                 }
             },
             None => {
-                let identity =
-                    match InitIdentity::establish(muxer, rendition.index.promotion.clone()) {
-                        Ok(identity) => identity,
-                        Err(error) => {
-                            drop(state);
-                            on_generation_end(
-                                shared,
-                                rendition,
-                                Outcome::Failed(Failure::Stream(format!(
-                                    "establishing the init identity: {error}"
-                                ))),
-                                epoch,
-                            )
-                            .await;
-                            return false;
-                        }
-                    };
+                let identity = match InitIdentity::establish(
+                    muxer,
+                    rendition
+                        .index
+                        .as_ref()
+                        .map(|index| index.promotion.clone())
+                        .unwrap_or_default(),
+                ) {
+                    Ok(identity) => identity,
+                    Err(error) => {
+                        drop(state);
+                        on_generation_end(
+                            shared,
+                            rendition,
+                            Outcome::Failed(Failure::Stream(format!(
+                                "establishing the init identity: {error}"
+                            ))),
+                            epoch,
+                        )
+                        .await;
+                        return false;
+                    }
+                };
                 let served = identity
                     .served_init_for(muxer)
                     .expect("an identity just established from this muxer init serves it");
@@ -6806,10 +7063,8 @@ impl vodgen::Sink for RenditionSink {
             );
             return Err(io::Error::new(io::ErrorKind::InvalidData, cause));
         }
-        if self.rendition.recipe.cluster_cache_key.is_some()
-            && !crate::ffmpeg::fragment_index_engine_is_current().await
-        {
-            let cause = "v2 fragment-index engine changed before fragment publication".to_owned();
+        if !recipe_engine_is_current(&self.rendition.recipe).await {
+            let cause = "immutable media engine changed before fragment publication".to_owned();
             record_failure(
                 &self.shared,
                 &self.rendition,
@@ -7180,11 +7435,9 @@ async fn regenerate_init_head(
     let _permit = Arc::clone(slots)
         .try_acquire_owned()
         .map_err(|_| HeadRegenerationError::Busy)?;
-    if recipe.cluster_cache_key.is_some()
-        && !crate::ffmpeg::fragment_index_engine_is_current().await
-    {
+    if !recipe_engine_is_current(recipe).await {
         return Err(HeadRegenerationError::Failed(
-            "the v2 fragment-index engine changed before head regeneration".to_owned(),
+            "the immutable media engine changed before head regeneration".to_owned(),
         ));
     }
     if !source.unchanged() {
@@ -7192,50 +7445,65 @@ async fn regenerate_init_head(
             "source changed before head regeneration".to_owned(),
         ));
     }
-    let mut args = copy_pipe_args_with_dolby_vision(
-        &recipe.file,
-        0.0,
-        recipe.audio_index,
-        recipe.aac,
-        Pacing::unpaced(),
-        recipe.video,
-    );
-    #[cfg(unix)]
-    replace_inputs_with_attested_descriptor(&mut args);
-    let mut command = tokio::process::Command::new(ffmpeg_bin());
-    attach_attested_descriptor(&mut command, Some(source));
+    let permit = if let Some(encoding) = &recipe.encoding {
+        let permit = encoding.try_permit().await;
+        encoding.cancel_wait();
+        Some(permit.ok_or(HeadRegenerationError::Busy)?)
+    } else {
+        None
+    };
+    let args = recipe_pipe_args(recipe, 0.0, cfg!(unix));
+    let audio_source = reopen_encoded_audio(Some(source), recipe)
+        .await
+        .map_err(HeadRegenerationError::Failed)?;
+    let mut command = tokio::process::Command::new(recipe_program(recipe));
+    attach_recipe_descriptors(&mut command, Some(source), audio_source.as_ref(), recipe);
     let mut child = command
         .args(&args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()
         .map_err(|error| {
             HeadRegenerationError::Failed(format!("spawning the head regeneration: {error}"))
         })?;
     let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill().await;
         return Err(HeadRegenerationError::Failed(
             "the head regeneration started without a stdout".to_owned(),
         ));
     };
-    let muxer = read_regenerated_head_before(
-        child,
-        stdout,
-        HEAD_REGENERATION_TIMEOUT,
-        HEAD_REGENERATION_MAX_BYTES,
-    )
-    .await?;
+    let mut owner = HeadChildOwner::new(child);
+    owner.permit = permit;
+    let stderr = owner
+        .child
+        .as_mut()
+        .expect("owned head producer")
+        .stderr
+        .take()
+        .expect("piped head stderr");
+    let (muxer, diagnostic) = tokio::join!(
+        read_regenerated_head_before(
+            owner,
+            stdout,
+            HEAD_REGENERATION_TIMEOUT,
+            HEAD_REGENERATION_MAX_BYTES,
+        ),
+        crate::ffmpeg::drain_diagnostics(stderr)
+    );
+    if !diagnostic.trim().is_empty() {
+        tracing::warn!(%diagnostic, "VOD head regeneration diagnostic");
+    }
+    let muxer = muxer?;
     if !source.unchanged() {
         return Err(HeadRegenerationError::Failed(
             "source changed during head regeneration".to_owned(),
         ));
     }
-    if recipe.cluster_cache_key.is_some()
-        && !crate::ffmpeg::fragment_index_engine_is_current().await
-    {
+    if !recipe_engine_is_current(recipe).await {
         return Err(HeadRegenerationError::Failed(
-            "the v2 fragment-index engine changed during head regeneration".to_owned(),
+            "the immutable media engine changed during head regeneration".to_owned(),
         ));
     }
     identity
@@ -7247,14 +7515,14 @@ async fn regenerate_init_head(
 /// budget, then always kill and confirm-reap the child before returning. The
 /// owner also transfers reap to a detached task if this future is cancelled.
 async fn read_regenerated_head_before(
-    child: tokio::process::Child,
+    child: impl Into<HeadChildOwner>,
     stdout: tokio::process::ChildStdout,
     budget: Duration,
     max_bytes: usize,
 ) -> Result<Init, HeadRegenerationError> {
     // The stdout arrives separately from the child because the owner below
     // takes the child by value, and the read needs the pipe after that move.
-    let mut child = HeadChildOwner::new(child);
+    let mut child = child.into();
     let mut stdout = stdout;
     let head = tokio::time::timeout(budget, read_muxer_init_bounded(&mut stdout, max_bytes)).await;
     // Only the head is wanted; the rest of the pipe is not read.
@@ -7512,6 +7780,8 @@ mod tests {
     fn fixture_file() -> MediaFile {
         media_file_at(testfixtures::source("clean-cra"), 12_000)
     }
+
+    include!("vodencode_tests.rs");
 
     fn media_file_at(path: PathBuf, duration_ms: i64) -> MediaFile {
         MediaFile {
@@ -7861,6 +8131,7 @@ mod tests {
                 video: CopyVideoOptions::new(false, false),
                 source_object_version: None,
                 cluster_cache_key: None,
+                encoding: None,
             },
             source: None,
             playlist: plan.playlist().into_bytes(),
@@ -7868,7 +8139,7 @@ mod tests {
             seconds_per_segment: plan.duration_ticks() as f64
                 / f64::from(plan.timescale)
                 / plan.len() as f64,
-            index,
+            index: Some(index),
             policy,
             working_set_budget: 8 << 30,
             completed_cache_budget: 50 << 30,
@@ -9624,6 +9895,7 @@ mod tests {
             video: CopyVideoOptions::new(false, false),
             source_object_version: None,
             cluster_cache_key: None,
+            encoding: None,
         };
         let key = rendition_key(&recipe, &identity);
         let plan = plurx_core::segplan::plan_copy(
@@ -9670,7 +9942,7 @@ mod tests {
             let settings = settings();
             tokio::spawn(async move {
                 shared
-                    .attach_rendition(&key, &identity, index, recipe, duration_ms, &settings)
+                    .attach_rendition(&key, &identity, Some(index), recipe, duration_ms, &settings)
                     .await
             })
         };
@@ -9708,7 +9980,14 @@ mod tests {
 
         let reused = serve
             .shared
-            .attach_rendition(&key, &identity, index, recipe, duration_ms, &settings())
+            .attach_rendition(
+                &key,
+                &identity,
+                Some(index),
+                recipe,
+                duration_ms,
+                &settings(),
+            )
             .await
             .expect("same-key retry")
             .expect("non-empty rendition");
@@ -11373,7 +11652,7 @@ mod tests {
         let base = crate::test_tempdir().expect("base");
         let (serve, file) = serve_on(base.path()).await;
 
-        // A transcode recipe: gated on the D6 device measurement.
+        // A caller cannot bypass the manager's frozen encoder resolution.
         let mut transcode = request("play-a", 0.0);
         transcode.kind = SessionKind::Transcode { height: 720 };
         let transcode_error = serve
@@ -11389,8 +11668,8 @@ mod tests {
                 "sess-t".into(),
             )
             .await
-            .expect_err("transcode VOD is not implemented");
-        assert!(transcode_error.contains("vod_transcode_unavailable"));
+            .expect_err("transcode VOD requires a resolved recipe");
+        assert!(transcode_error.contains("vod_recipe_unresolved"));
 
         // A subtitle burn changes the video pipeline.
         let mut burn = request("play-a", 0.0);
@@ -11408,8 +11687,8 @@ mod tests {
                 "sess-s".into(),
             )
             .await
-            .expect_err("burn VOD is not implemented");
-        assert!(burn_error.contains("vod_subtitle_burn_unavailable"));
+            .expect_err("burn VOD requires a resolved pixel recipe");
+        assert!(burn_error.contains("vod_recipe_unresolved"));
 
         // No index stored for the current identity.
         let empty_store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
@@ -13259,6 +13538,7 @@ mod tests {
             video: CopyVideoOptions::new(false, false),
             source_object_version: None,
             cluster_cache_key: None,
+            encoding: None,
         };
         let video_ms = index_video_ms(&index);
         assert!(video_ms > 0);
