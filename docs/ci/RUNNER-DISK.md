@@ -200,8 +200,11 @@ was supposed to guard it asserted the URL *string* was present in the file,
 which it was, correctly, the whole time. `test_the_bootstrap_can_actually_fetch`
 now runs the fetch loop against a fake forge that refuses unauthenticated
 requests, and against a missing file, because without `--fail` curl writes the
-404 body to the destination and the installer runs an HTML error page as a
-shell script.
+404 body to the destination and exits 0, so the installer is chmod +x'd and
+exec'd as root over whatever the forge said. This forge answers `Not found.`,
+eleven bytes with no shebang, so that exec fails — but "the install silently
+did nothing" is the outcome either way, and nothing about the next endpoint is
+promised.
 
 **The Apple runner has its own**, in
 [`deploy/runner-janitor/macos/`](../../deploy/runner-janitor/macos/): same

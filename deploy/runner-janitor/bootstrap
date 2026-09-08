@@ -17,7 +17,10 @@
 # expansion inside the shell sudo runs and make a failed fetch loud.
 #
 # One command, because a fleet fix that takes four is a fleet fix that gets
-# applied to two hosts. It fetches the janitor, its unit and its timer from the
+# applied to two hosts. That is also why the token rides on the command line
+# rather than in a `--config` file: it is visible in `ps` for the seconds a
+# root install runs, on a host that already has root, and buying that back
+# costs two more steps. Chosen, not overlooked. It fetches the janitor, its unit and its timer from the
 # forge into a temporary directory and runs the ordinary installer, which is
 # the same one a checkout would run.
 #

@@ -783,7 +783,9 @@ class JanitorContractCase(unittest.TestCase):
             "fi\n"
             # A missing file models the other half of the real failure: without
             # `--fail`, curl writes the 404 body to the destination and exits
-            # 0, so `install` would run an HTML error page as a shell script.
+            # 0, so `install` would be chmod +x'd and exec'd as root over
+            # whatever the forge said. This one answers `Not found.`, so the
+            # exec fails — but the install silently did nothing either way.
             'printf \'%s\\n\' "$url" >> "$FIXTURE_CURL_LOG"\n'
             'src=${url#file://}\n'
             'if [ ! -f "$src" ]; then\n'
@@ -846,18 +848,29 @@ class JanitorContractCase(unittest.TestCase):
         self.assertIsNotNone(command, "RUNNER-DISK.md must document the bootstrap")
 
         fixture = Path(self._directory.name) / "documented"
-        forge, environment, installed, _ = self.fake_forge(fixture)
+        forge, environment, installed, curl_log = self.fake_forge(fixture)
         # `sudo` is what carries the assignment into the child shell, and this
         # test is not root: `env` has the same semantics for the one property
         # under test, so the placeholder becomes a real assignment on it.
-        command = command.replace(
-            "sudo PLURX_TOKEN=<forgejo token>", "env PLURX_TOKEN=fixture-token"
+        # Both substitutions are asserted, because a byte-exact `str.replace`
+        # that silently no-ops is how a unit test becomes something else. If
+        # the placeholder changed, this would run REAL `sudo` — on a
+        # passwordless runner, installing the janitor on the CI host from a
+        # test. If the URL changed, it would fetch the REAL forge over the
+        # network with a fixture token. Neither is a thing to discover later.
+        command, substituted = re.subn(
+            "sudo PLURX_TOKEN=<forgejo token>", "env PLURX_TOKEN=fixture-token", command
         )
-        command = command.replace(
-            "http://192.168.4.7:3000/noirr/plurx/raw/branch/main"
-            "/deploy/runner-janitor/bootstrap",
+        self.assertEqual(substituted, 1, "the documented command no longer uses sudo")
+        command, substituted = re.subn(
+            re.escape(
+                "http://192.168.4.7:3000/noirr/plurx/raw/branch/main"
+                "/deploy/runner-janitor/bootstrap"
+            ),
             f"file://{forge}/bootstrap",
+            command,
         )
+        self.assertEqual(substituted, 1, "the documented forge URL changed")
         (forge / "bootstrap").write_bytes(
             (ROOT / "deploy/runner-janitor/bootstrap").read_bytes()
         )
@@ -873,6 +886,15 @@ class JanitorContractCase(unittest.TestCase):
             + result.stdout
             + result.stderr,
         )
+        # The fake `curl` is the whole guarantee here too, and this test needs
+        # it more than its sibling does. Real curl ignores `-H` on a `file://`
+        # URL, so with the shim missed, even the broken `$( )` form passes:
+        # curl succeeds anonymously, prints the bootstrap, `$( )` captures it,
+        # and the child shell runs it with the token already in its
+        # environment. Five fetches: this command's own, then the four the
+        # bootstrap makes.
+        self.assertTrue(curl_log.exists(), "the fake curl never ran")
+        self.assertEqual(len(curl_log.read_text(encoding="utf-8").split()), 5)
 
     def test_the_bootstrap_can_actually_fetch(self):
         """A string in a file is not a fetch, and that distinction cost a day.
@@ -929,8 +951,8 @@ class JanitorContractCase(unittest.TestCase):
 
         # And the other half of the same failure: a file that is not there.
         # Without `--fail`, curl writes the 404 body to the destination and
-        # exits 0, so the bootstrap would hand `install` an HTML error page and
-        # run it as a shell script. It must abort instead.
+        # exits 0, so the bootstrap would hand `install` the forge's error
+        # body and exec it as root. It must abort instead.
         installed.unlink()
         (forge / "plurx-ci-janitor.timer").unlink()
         missing = subprocess.run(
