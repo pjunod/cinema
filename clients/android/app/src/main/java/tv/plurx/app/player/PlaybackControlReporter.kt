@@ -10,9 +10,25 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.KSerializer
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.SerializationException
+import kotlinx.serialization.descriptors.SerialDescriptor
+import kotlinx.serialization.descriptors.buildClassSerialDescriptor
+import kotlinx.serialization.descriptors.element
+import kotlinx.serialization.encoding.Decoder
+import kotlinx.serialization.encoding.Encoder
+import kotlinx.serialization.json.JsonDecoder
+import kotlinx.serialization.json.JsonEncoder
 import kotlinx.serialization.json.JsonClassDiscriminator
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 
 /**
  * Android's passive playback-control reporter.
@@ -270,7 +286,7 @@ data class DynamicCapabilities(
 }
 
 /** The complete recipe the server says a prepared successor will deliver. */
-@Serializable
+@Serializable(with = EffectiveSelectionSerializer::class)
 data class EffectiveSelection(
     @SerialName("quality_auto") val qualityAuto: Boolean,
     val height: Long,
@@ -288,6 +304,103 @@ data class EffectiveSelection(
             audioOffsetMs in -PlaybackControl.MAX_AUDIO_OFFSET_MS..PlaybackControl.MAX_AUDIO_OFFSET_MS &&
             PlaybackControl.isDeliveryMethod(codec) &&
             PlaybackControl.isDeliveredDynamicRange(dynamicRange)
+}
+
+/**
+ * Kotlin serialization otherwise treats a missing nullable value as JSON
+ * null when `explicitNulls` is disabled. The server requires all seven keys,
+ * including the three whose value may explicitly be null, so presence is
+ * validated before producing the typed recipe.
+ */
+object EffectiveSelectionSerializer : KSerializer<EffectiveSelection> {
+    override val descriptor: SerialDescriptor = buildClassSerialDescriptor(
+        "tv.plurx.app.player.EffectiveSelection",
+    ) {
+        element<Boolean>("quality_auto")
+        element<Long>("height")
+        element<Long?>("audio_track")
+        element<Long?>("subtitle_burn")
+        element<Long>("audio_offset_ms")
+        element<String>("codec")
+        element<String?>("dynamic_range")
+    }
+
+    override fun deserialize(decoder: Decoder): EffectiveSelection {
+        val input = decoder as? JsonDecoder
+            ?: throw SerializationException("EffectiveSelection is JSON-only")
+        val fields = input.decodeJsonElement().jsonObject
+        REQUIRED_FIELDS.forEach { field ->
+            if (field !in fields) throw SerializationException("missing effective_selection.$field")
+        }
+        return EffectiveSelection(
+            qualityAuto = fields.requiredBoolean("quality_auto"),
+            height = fields.requiredLong("height"),
+            audioTrack = fields.requiredNullableLong("audio_track"),
+            subtitleBurn = fields.requiredNullableLong("subtitle_burn"),
+            audioOffsetMs = fields.requiredLong("audio_offset_ms"),
+            codec = fields.requiredString("codec"),
+            dynamicRange = fields.requiredNullableString("dynamic_range"),
+        )
+    }
+
+    override fun serialize(encoder: Encoder, value: EffectiveSelection) {
+        val output = encoder as? JsonEncoder
+            ?: throw SerializationException("EffectiveSelection is JSON-only")
+        output.encodeJsonElement(
+            buildJsonObject {
+                put("quality_auto", JsonPrimitive(value.qualityAuto))
+                put("height", JsonPrimitive(value.height))
+                put("audio_track", value.audioTrack?.let(::JsonPrimitive) ?: JsonNull)
+                put("subtitle_burn", value.subtitleBurn?.let(::JsonPrimitive) ?: JsonNull)
+                put("audio_offset_ms", JsonPrimitive(value.audioOffsetMs))
+                put("codec", JsonPrimitive(value.codec))
+                put("dynamic_range", value.dynamicRange?.let(::JsonPrimitive) ?: JsonNull)
+            },
+        )
+    }
+
+    private val REQUIRED_FIELDS = setOf(
+        "quality_auto",
+        "height",
+        "audio_track",
+        "subtitle_burn",
+        "audio_offset_ms",
+        "codec",
+        "dynamic_range",
+    )
+
+    private fun Map<String, kotlinx.serialization.json.JsonElement>.requiredBoolean(
+        name: String,
+    ): Boolean = getValue(name).jsonPrimitive.booleanOrNull
+        ?: throw SerializationException("invalid effective_selection.$name")
+
+    private fun Map<String, kotlinx.serialization.json.JsonElement>.requiredLong(
+        name: String,
+    ): Long = getValue(name).jsonPrimitive.longOrNull
+        ?: throw SerializationException("invalid effective_selection.$name")
+
+    private fun Map<String, kotlinx.serialization.json.JsonElement>.requiredNullableLong(
+        name: String,
+    ): Long? = getValue(name).let { value ->
+        if (value is JsonNull) null else value.jsonPrimitive.longOrNull
+            ?: throw SerializationException("invalid effective_selection.$name")
+    }
+
+    private fun Map<String, kotlinx.serialization.json.JsonElement>.requiredString(
+        name: String,
+    ): String = getValue(name).jsonPrimitive.let { value ->
+        if (value.isString) value.content
+        else throw SerializationException("invalid effective_selection.$name")
+    }
+
+    private fun Map<String, kotlinx.serialization.json.JsonElement>.requiredNullableString(
+        name: String,
+    ): String? = getValue(name).let { element ->
+        if (element is JsonNull) null else element.jsonPrimitive.let { value ->
+            if (value.isString) value.content
+            else throw SerializationException("invalid effective_selection.$name")
+        }
+    }
 }
 
 /**

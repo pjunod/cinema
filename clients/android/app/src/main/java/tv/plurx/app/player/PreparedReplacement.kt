@@ -45,7 +45,8 @@ enum class PreparedReplacementReleaseReason {
  * The marked seam for the later presentation PR.
  *
  * This release never builds a second player. A future presentation owner may
- * build on [Offered] and must release everything it built on [Released].
+ * build on [Offered] and must settle its preparation exactly once on
+ * [Released].
  */
 sealed interface PreparedReplacementEvent {
     data class Offered(val offer: PreparedReplacementOffer) : PreparedReplacementEvent
@@ -61,21 +62,26 @@ private enum class PreparedPhase {
     METADATA_READY,
     BUFFER_READY,
     COMMITTING,
-    FAILING,
-    ABORTING,
 }
+
+internal data class PreparedCommitResult(
+    val queued: Boolean,
+    val released: PreparedReplacementEvent.Released? = null,
+)
 
 /**
  * One offer and one ordered acknowledgement ladder.
  *
  * There is intentionally no ExoPlayer here. The coordinator owns only protocol
- * state: repeated-offer identity, exact origin echoing, monotonic progress,
- * silent-discard detection, expiry, and teardown notifications.
+ * state: repeated-offer identity, exact origin echoing, selection fencing,
+ * silent-discard detection, expiry, and exactly-once teardown notifications.
  */
 internal class PreparedReplacementCoordinator {
     private var offer: PreparedReplacementOffer? = null
     private var phase: PreparedPhase? = null
     private var offeredAtMs = 0L
+    private var stagedSelection: ClientSelection? = null
+    private var releasedActionId: String? = null
     private val pending = ArrayDeque<ActionAcknowledgement>()
 
     @get:Synchronized
@@ -90,59 +96,67 @@ internal class PreparedReplacementCoordinator {
     fun receive(
         action: ControlAction,
         sent: ActionAcknowledgement?,
+        requestSelection: ClientSelection,
         nowMs: Long,
     ): List<PreparedReplacementEvent> {
         val events = expireLocked(nowMs).toMutableList()
-        if (action.type != PlaybackControl.PREPARE_ACTION_TYPE) {
-            settleWithoutOffer(sent, events)
-            return events
+        val inbound = if (action.type == PlaybackControl.PREPARE_ACTION_TYPE) {
+            PreparedReplacementOffer.from(action)
+        } else {
+            null
         }
-
-        val inbound = PreparedReplacementOffer.from(action) ?: return events
-        val current = offer
-        if (current == null) {
-            start(inbound, nowMs)
-            events += PreparedReplacementEvent.Offered(inbound)
-            return events
-        }
-        if (current.actionId != inbound.actionId) {
-            events += releaseLocked(PreparedReplacementReleaseReason.SUPERSEDED)
-            start(inbound, nowMs)
-            events += PreparedReplacementEvent.Offered(inbound)
-            return events
-        }
-
         val queued = pending.firstOrNull()
-        if (sent != null &&
+        val sentMatches = sent != null &&
             queued?.actionId == sent.actionId &&
             queued.state == sent.state
-        ) {
-            when (sent.state) {
-                AcknowledgementState.METADATA_READY,
-                AcknowledgementState.BUFFER_READY,
-                -> pending.removeFirst()
+        val current = offer
 
-                AcknowledgementState.COMMITTED -> {
-                    // A commit is the only acknowledgement whose successful
-                    // response cannot still carry the offer. Persistence is a
-                    // silent discard (most importantly, an origin mismatch),
-                    // so release locally and explicitly abort the staging.
-                    pending.clear()
-                    phase = PreparedPhase.ABORTING
-                    pending += ActionAcknowledgement(
-                        actionId = current.actionId,
-                        state = AcknowledgementState.ABORTED,
-                    )
-                    events += PreparedReplacementEvent.Released(
-                        current,
-                        PreparedReplacementReleaseReason.COMMIT_DISCARDED,
-                    )
-                }
-
-                AcknowledgementState.FAILED,
-                AcknowledgementState.ABORTED,
-                -> pending.removeFirst()
+        if (current != null && sentMatches && sent.state == AcknowledgementState.COMMITTED) {
+            if (inbound?.actionId == current.actionId) {
+                // A successful commit response cannot retain the offer. Its
+                // persistence is the server's silent discard signal, most
+                // importantly for an origin mismatch. Release once and ask
+                // the server to abort whatever it still has staged.
+                pending.clear()
+                pending += ActionAcknowledgement(
+                    actionId = current.actionId,
+                    state = AcknowledgementState.ABORTED,
+                )
+                events += releaseActive(
+                    PreparedReplacementReleaseReason.COMMIT_DISCARDED,
+                    keepPending = true,
+                )
+                return events
             }
+            pending.removeFirst()
+            events += releaseActive(PreparedReplacementReleaseReason.COMMITTED)
+        } else if (sentMatches) {
+            pending.removeFirst()
+        }
+
+        if (action.type != PlaybackControl.PREPARE_ACTION_TYPE) {
+            offer?.let {
+                events += releaseActive(PreparedReplacementReleaseReason.WITHDRAWN)
+            }
+            if (pending.isEmpty()) releasedActionId = null
+            return events
+        }
+
+        val prepared = inbound ?: return events
+        val active = offer
+        if (active == null) {
+            // A terminal acknowledgement is delivered after its local
+            // preparation has already been released. If an old owner repeats
+            // that same action in the response, it is not a new offer.
+            if (prepared.actionId == releasedActionId) return events
+            start(prepared, requestSelection, nowMs)
+            events += PreparedReplacementEvent.Offered(prepared)
+            return events
+        }
+        if (active.actionId != prepared.actionId) {
+            events += releaseActive(PreparedReplacementReleaseReason.SUPERSEDED)
+            start(prepared, requestSelection, nowMs)
+            events += PreparedReplacementEvent.Offered(prepared)
         }
         return events
     }
@@ -154,7 +168,7 @@ internal class PreparedReplacementCoordinator {
         requestGeneration: String,
     ): List<PreparedReplacementEvent> {
         val transport = failure as? ControlTransportException ?: run {
-            return releaseIfPresent(PreparedReplacementReleaseReason.PROTOCOL_REFUSED)
+            return releaseForTerminalFailure(PreparedReplacementReleaseReason.PROTOCOL_REFUSED)
         }
         val retryable = (transport.status == 425 && transport.code == "owner_transition") ||
             (transport.status == 429 && transport.code == "control_rate_limited") ||
@@ -181,7 +195,7 @@ internal class PreparedReplacementCoordinator {
                 PreparedReplacementReleaseReason.OWNER_LOST
             else -> PreparedReplacementReleaseReason.PROTOCOL_REFUSED
         }
-        return releaseIfPresent(reason)
+        return releaseForTerminalFailure(reason)
     }
 
     @Synchronized
@@ -207,19 +221,55 @@ internal class PreparedReplacementCoordinator {
     }
 
     @Synchronized
-    fun committed(actionId: String, firstFrameUnixMs: Long): Boolean {
-        val current = offer ?: return false
-        if (current.actionId != actionId || phase != PreparedPhase.BUFFER_READY) return false
+    fun committed(
+        actionId: String,
+        firstFrameUnixMs: Long,
+        currentSelection: ClientSelection?,
+        demand: PlaybackDemand?,
+    ): PreparedCommitResult {
+        val current = offer ?: return PreparedCommitResult(false)
+        if (current.actionId != actionId || phase != PreparedPhase.BUFFER_READY) {
+            return PreparedCommitResult(false)
+        }
+        if (currentSelection == null ||
+            currentSelection != stagedSelection ||
+            demand == PlaybackDemand.END
+        ) {
+            return PreparedCommitResult(
+                queued = false,
+                released = releaseWithTerminalAcknowledgement(
+                    if (demand == PlaybackDemand.END) {
+                        PreparedReplacementReleaseReason.SESSION_ENDED
+                    } else {
+                        PreparedReplacementReleaseReason.ABORTED
+                    },
+                ),
+            )
+        }
         val acknowledgement = ActionAcknowledgement(
             actionId,
             AcknowledgementState.COMMITTED,
             committedMediaOriginMs = current.mediaOriginMs,
             firstFrameUnixMs = firstFrameUnixMs,
         )
-        if (!acknowledgement.isValid) return false
+        if (!acknowledgement.isValid) return PreparedCommitResult(false)
         phase = PreparedPhase.COMMITTING
         pending += acknowledgement
-        return true
+        return PreparedCommitResult(true)
+    }
+
+    @Synchronized
+    fun reconcile(
+        currentSelection: ClientSelection,
+        demand: PlaybackDemand,
+    ): PreparedReplacementEvent.Released? {
+        if (offer == null) return null
+        val reason = when {
+            demand == PlaybackDemand.END -> PreparedReplacementReleaseReason.SESSION_ENDED
+            currentSelection != stagedSelection -> PreparedReplacementReleaseReason.ABORTED
+            else -> return null
+        }
+        return releaseWithTerminalAcknowledgement(reason)
     }
 
     @Synchronized
@@ -234,22 +284,10 @@ internal class PreparedReplacementCoordinator {
     fun expire(nowMs: Long): List<PreparedReplacementEvent> = expireLocked(nowMs)
 
     @Synchronized
-    fun reset(reason: PreparedReplacementReleaseReason): List<PreparedReplacementEvent> =
-        releaseIfPresent(reason)
-
-    private fun settleWithoutOffer(
-        sent: ActionAcknowledgement?,
-        events: MutableList<PreparedReplacementEvent>,
-    ) {
-        val current = offer ?: return
-        if (sent != null && pending.firstOrNull() == sent) pending.removeFirst()
-        val reason = if (sent?.state == AcknowledgementState.COMMITTED) {
-            PreparedReplacementReleaseReason.COMMITTED
-        } else {
-            PreparedReplacementReleaseReason.WITHDRAWN
-        }
-        events += PreparedReplacementEvent.Released(current, reason)
-        clear()
+    fun reset(reason: PreparedReplacementReleaseReason): List<PreparedReplacementEvent> {
+        val event = offer?.let { releaseActive(reason) }
+        clearAll()
+        return listOfNotNull(event)
     }
 
     private fun terminal(
@@ -259,55 +297,66 @@ internal class PreparedReplacementCoordinator {
     ): PreparedReplacementEvent.Released? {
         val current = offer ?: return null
         if (current.actionId != actionId || phase == PreparedPhase.COMMITTING) return null
+        return releaseWithTerminalAcknowledgement(reason, state)
+    }
+
+    private fun releaseWithTerminalAcknowledgement(
+        reason: PreparedReplacementReleaseReason,
+        state: AcknowledgementState = AcknowledgementState.ABORTED,
+    ): PreparedReplacementEvent.Released {
+        val current = checkNotNull(offer)
         pending.clear()
-        phase = if (state == AcknowledgementState.FAILED) {
-            PreparedPhase.FAILING
-        } else {
-            PreparedPhase.ABORTING
-        }
-        pending += ActionAcknowledgement(actionId, state)
-        return PreparedReplacementEvent.Released(current, reason)
+        pending += ActionAcknowledgement(current.actionId, state)
+        return releaseActive(reason, keepPending = true)
     }
 
     private fun expireLocked(nowMs: Long): List<PreparedReplacementEvent> {
         val current = offer ?: return emptyList()
         if (nowMs - offeredAtMs < PREPARED_OFFER_TTL_MS) return emptyList()
-        clear()
-        return listOf(
-            PreparedReplacementEvent.Released(
-                current,
-                PreparedReplacementReleaseReason.EXPIRED,
-            ),
-        )
+        return listOf(releaseActive(PreparedReplacementReleaseReason.EXPIRED))
     }
 
-    private fun releaseIfPresent(
+    private fun releaseForTerminalFailure(
         reason: PreparedReplacementReleaseReason,
     ): List<PreparedReplacementEvent> {
-        if (offer == null) return emptyList()
-        val event = releaseLocked(reason)
-        return listOf(event)
+        val event = offer?.let { releaseActive(reason) }
+        clearAll()
+        return listOfNotNull(event)
     }
 
-    private fun releaseLocked(
+    private fun releaseActive(
         reason: PreparedReplacementReleaseReason,
+        keepPending: Boolean = false,
     ): PreparedReplacementEvent.Released {
         val current = checkNotNull(offer)
-        clear()
-        return PreparedReplacementEvent.Released(current, reason)
-    }
-
-    private fun start(inbound: PreparedReplacementOffer, nowMs: Long) {
-        offer = inbound
-        phase = PreparedPhase.STAGED
-        offeredAtMs = nowMs
-        pending.clear()
-    }
-
-    private fun clear() {
         offer = null
         phase = null
         offeredAtMs = 0
+        stagedSelection = null
+        releasedActionId = current.actionId
+        if (!keepPending) pending.clear()
+        return PreparedReplacementEvent.Released(current, reason)
+    }
+
+    private fun start(
+        inbound: PreparedReplacementOffer,
+        requestSelection: ClientSelection,
+        nowMs: Long,
+    ) {
+        offer = inbound
+        phase = PreparedPhase.STAGED
+        offeredAtMs = nowMs
+        stagedSelection = requestSelection
+        releasedActionId = null
+        pending.clear()
+    }
+
+    private fun clearAll() {
+        offer = null
+        phase = null
+        offeredAtMs = 0
+        stagedSelection = null
+        releasedActionId = null
         pending.clear()
     }
 }

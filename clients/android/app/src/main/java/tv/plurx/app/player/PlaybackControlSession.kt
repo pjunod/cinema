@@ -337,12 +337,18 @@ class PlaybackControlSession(
             // already honours them; a player acting on them here would be
             // deciding, which is the next slice.
             onExchange = { exchange ->
-                if (exchange.capture.owner != PlaybackControlCaptureOwner(clientInstanceId, generation) ||
-                    latest.get()?.owner != exchange.capture.owner
+                if (exchange.capture.owner != owner ||
+                    synchronized(verdictLock) { generation != verdictGeneration }
                 ) {
                     return@create
                 }
+                // Preparation settlement belongs to the session generation,
+                // not to the transient capture slot. A routine mutation clears
+                // that slot while its new source is being attached, but an
+                // in-flight acknowledgement still has to be retired exactly
+                // once during that gap.
                 handlePreparedExchange(exchange)
+                if (latest.get()?.owner != exchange.capture.owner) return@create
                 // Every exchange advances the counter, including a failed one:
                 // an owner that asked must not wait out its whole bound for an
                 // exchange that has already come back with nothing.
@@ -437,8 +443,21 @@ class PlaybackControlSession(
      * it is echoed byte-for-byte from the retained offer and cannot be
      * recomputed from a playhead by the presentation path.
      */
-    fun preparedCommitted(actionId: String, firstFrameUnixMs: Long): Boolean =
-        queuePreparedAcknowledgement { prepared.committed(actionId, firstFrameUnixMs) }
+    fun preparedCommitted(actionId: String, firstFrameUnixMs: Long): Boolean {
+        if (reporter == null) return false
+        val snapshot = latest.get()?.snapshot
+        val result = prepared.committed(
+            actionId,
+            firstFrameUnixMs,
+            snapshot?.selection,
+            snapshot?.demand,
+        )
+        if (!result.queued && result.released == null) return false
+        refreshPreparedCapture()
+        result.released?.let { applyPreparedEvents(listOf(it)) }
+        sendPreparedAcknowledgementUrgently()
+        return result.queued
+    }
 
     fun preparedFailed(actionId: String): Boolean = queuePreparedTerminal {
         prepared.failed(actionId)
@@ -467,20 +486,23 @@ class PlaybackControlSession(
     }
 
     /** Called synchronously by the player dispatcher; never by the reporter. */
-    private fun publish(): PlaybackControlCapture? = synchronized(verdictLock) {
-        val snapshot = observe?.invoke()?.let(PlaybackControlMapping::snapshot)?.copy(
-            acknowledgement = prepared.nextAcknowledgement,
-        )
-        val capture = snapshot?.let {
-            PlaybackControlCapture(
-                it,
-                verdictIntentGeneration,
-                PlaybackControlCaptureOwner(clientInstanceId, verdictGeneration),
-                ++captureRevision,
-            )
+    private fun publish(): PlaybackControlCapture? {
+        val observed = observe?.invoke()?.let(PlaybackControlMapping::snapshot)
+        val release = observed?.let { prepared.reconcile(it.selection, it.demand) }
+        release?.let { applyPreparedEvents(listOf(it)) }
+        return synchronized(verdictLock) {
+            val snapshot = observed?.copy(acknowledgement = prepared.nextAcknowledgement)
+            val capture = snapshot?.let {
+                PlaybackControlCapture(
+                    it,
+                    verdictIntentGeneration,
+                    PlaybackControlCaptureOwner(clientInstanceId, verdictGeneration),
+                    ++captureRevision,
+                )
+            }
+            latest.set(capture)
+            capture
         }
-        latest.set(capture)
-        capture
     }
 
     fun end() {
@@ -506,6 +528,7 @@ class PlaybackControlSession(
             prepared.receive(
                 response.action,
                 exchange.request.acknowledgement,
+                exchange.request.selection,
                 monotonicNowMs(),
             )
         } ?: prepared.failure(
