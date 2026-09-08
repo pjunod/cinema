@@ -14,10 +14,12 @@ produces: 2160p source/direct play to 1080p server-selected transcode.
 > 30 Mbit/s shaping proxy (§3) against an 18.183 Mbit/s predecessor: 1.65x
 > headroom, *below* the floor `headroom_refusal` itself enforces. So it was
 > measuring a transition the server would have declined anyway. **That is why
-> this run does not bear on admission — it is not a root cause for the eight
-> failures.** §8 below declines to name one, and §4's receipts point elsewhere:
-> failure tracks the commit boundary rather than the link (30.0 s and 30.5 s
-> pass 3/3, 31.0 s fails 0/3), and every failed row records `Pred stalls 0`.
+> this run does not bear on admission — and it does not establish a root cause
+> for the eight failures.** §8 below declines to name one, and §4's receipts
+> point elsewhere: failure is boundary-determined and non-monotone in runway —
+> 13,500 ms passes 6/6, 13,000 ms fails 5/5, 12,000 ms passes 5/5 — which a
+> contended link would not produce, and every failed row records
+> `Pred stalls 0`.
 > `0cb370ac`'s message reads as causal on this point; §8 is the authority here
 > and it is unamended.
 >

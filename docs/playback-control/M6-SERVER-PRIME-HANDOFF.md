@@ -268,6 +268,19 @@ out of, and a burn removal moves the delivery method too, making it a pair
 rather than an axis. Substituting an example for the one in the list is how a
 false premise reads as true.
 
+**What the copy-to-copy case proves, and what it does not.** For a `Copy`,
+`candidate_request` copies every field and changes only `automatic`: the height
+is the source height on both sides, and `automatic` is consulted for a `Copy`
+in exactly one place, the session fingerprint. So predecessor and successor are
+two distinct sessions serving **byte-identical media**. That is the ideal
+control for a transaction test — nothing about the handoff can be explained by
+the media changing — but it means this case proves *the transaction*, not a
+changed pipeline. Say so when it lands rather than letting a reader infer a
+media handoff was proven. The first thing to confirm in the build is that two
+VOD sessions on the same file and playback id can coexist; the differing
+`automatic` gives them distinct fingerprints, so the expectation is yes, and
+this document asserts it implicitly.
+
 **What is still blocked on D6**, unchanged: priming for the transition the
 fleet actually produces — a copy dropping to a transcoded rung. That is the
 common case, and it stays refused by the engine until the measurement lands.
@@ -275,10 +288,11 @@ Building phase 3 on the copy-to-copy case does not front-run it; it proves the
 eight-phase transaction end to end so that D6 lands into working machinery
 rather than into an unbuilt phase.
 
-Everything below §4 remains unbuilt, and now deliberately so rather than
-pending an answer.
+Everything below §4 remains unbuilt, and §6 is now the order to build it in
+rather than a conditional. The copy-to-copy case is the one to build against
+first.
 
-## 6. If the answer is "build it", the order
+## 6. The order to build it in
 
 1. Free the worker on every exit first — `begin_end_detached` in
    `PreparationExecutor::abort`, in the deadline task, and in both refusal

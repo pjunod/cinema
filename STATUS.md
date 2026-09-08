@@ -109,12 +109,14 @@ retries against the Store has to fit inside the client's four-second exchange
 budget.
 
 `docs/playback-control/M6-SERVER-PRIME-HANDOFF.md` carries the phase this was
-found under, and **the decision it waits on**: the only transition M6 admits
+found under, and **the decision it waits on**: ~~the only transition M6 admits
 produces a `Transcode` recipe, and the VOD engine refuses every non-`Copy` kind
 until the D6 device measurement lands. Priming cannot be built against the
 transition the fleet actually produces. Hold it for D6, or narrow the axis set
-to copy-only and prove the transaction on those. **Answered 2026-09-08 and
-neither of those:** there is already an admitted, receipted, copy-only
+to copy-only and prove the transaction on those.~~ **That premise is false and
+the strike-through is deliberate — it is what this entry said, and what
+`M6-SERVER-PRIME-HANDOFF.md` §5 said, until a review checked it against the
+code. Answered 2026-09-08 and neither of those:** there is already an admitted, receipted, copy-only
 transition the engine serves, so phase 3 can be built now without narrowing
 anything. See the entry at the top of this page.
 
