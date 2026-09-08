@@ -9974,6 +9974,32 @@ impl TranscodeManager {
         self.dv_convertible
     }
 
+    /// Whether this node converts Profile 7 to 8.1 right now.
+    ///
+    /// The builder value above is what this boot was configured with; the
+    /// setting is what an operator has since answered, and it wins. Absent
+    /// means on, which is the default the environment variable this replaced
+    /// also had: a Profile 7 title reaching a Dolby Vision client as HDR10 is
+    /// what the conversion exists to stop, so it should not need enabling.
+    ///
+    /// A store that cannot be read falls back to the boot value rather than to
+    /// a constant. Losing the setting is not a reason to start or stop doing
+    /// work on somebody's GPU.
+    pub(crate) async fn dv_convert_enabled(&self) -> bool {
+        match self
+            .store
+            .get_setting(plurx_core::store::keys::DV_CONVERT)
+            .await
+        {
+            Ok(Some(value)) => !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "off" | "no"
+            ),
+            Ok(None) => true,
+            Err(_) => self.dv_convertible,
+        }
+    }
+
     #[cfg(test)]
     pub fn with_cache(self, cache_dir: PathBuf, ffmpeg_build: String, node_id: String) -> Self {
         let cache_parent = cache_dir.parent().unwrap_or(cache_dir.as_path()).to_owned();

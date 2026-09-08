@@ -13822,11 +13822,17 @@ function developerPanel(settings,readiness){
       ${devReq(readiness,"pgs_overlay","overlay_acceptance","Physical-client acceptance is complete","Timing, positioning and scaling of image subtitles are judged on a screen, not by a passing test. The daemon never holds that receipt.")}
       <div class="err" id="dserr"></div>
       ${setCardFoot("saveSubtitleOverlay")}`);
+  const dvconvert=setCard(`${cardHead("Dolby Vision Profile 7 conversion","Profile 7 titles converted to Profile 8.1 so a Dolby Vision client sees Dolby Vision instead of HDR10.",`<span class="pill">${settings.dolby_vision_convert===false?"off":"on"}</span>`)}
+      <div class="hint">On unless you turn it off, which is the opposite of everything else in this section: a Profile 7 title reaching a Dolby Vision client as HDR10 is the thing this stops. It costs encode time only when such a title is actually played. This was an environment variable, so a server that had it turned off said so nowhere.</div>
+      ${togRow("dvcv","Convert Profile 7 to 8.1","Applies to new sessions. Turning it off delivers those titles as HDR10.",settings.dolby_vision_convert!==false)}
+      <div class="hint">Nothing has to be true first. There is no reading for this switch because there is nothing to read: the conversion is plurx's own code, it runs wherever this build runs, and the only question is whether you have turned it off.</div>
+      <div class="err" id="dcerr"></div>
+      ${setCardFoot("saveDolbyVisionConvert")}`);
   const experimental=setCard(`${cardHead("Experimental delivery","Changes the shape of the stream itself. Applies to new sessions only.")}
       ${togRow("phs",`Typeless sliding HLS <span class="pill warn">experimental</span>`,"Only for the iPad control comparison.",settings.hls_typeless_sliding)}
       <div class="err" id="dxerr"></div>
       ${setCardFoot("saveExperimental")}`);
-  return `${setHead("Developer","Switches that are off on purpose — previews, unfinished halves, and anything that costs more than it looks. Nothing here is needed for ordinary playback.")}${transportRecovery}${liveTvSettingsCard(settings)}${preview}${prepared}${retained}${overlay}${experimental}`;
+  return `${setHead("Developer","Switches that are off on purpose — previews, unfinished halves, and anything that costs more than it looks. Nothing here is needed for ordinary playback.")}${transportRecovery}${liveTvSettingsCard(settings)}${preview}${prepared}${retained}${overlay}${dvconvert}${experimental}`;
 }
 function liveTvSettingsCard(s){
   const enabled=!!s.live_tv_enabled, disabled=enabled?' disabled':'';
@@ -15395,6 +15401,16 @@ async function saveStreaming(btn){
     if(SERVER) SERVER.playback_auto_abr=SETTINGS.playback_auto_abr;
     toast("Streaming settings saved"); if(btn) setCardSaved(btn);
   }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
+}
+async function saveDolbyVisionConvert(btn){
+  const err=document.getElementById("dcerr"); err.textContent="";
+  if(btn) btn.disabled=true;
+  try{
+    cacheSettings(await api("/settings",{method:"PUT",body:{
+      dolby_vision_convert:document.getElementById("dvcv").checked}}));
+    render();
+  }catch(e){ err.textContent=e.message||String(e); }
+  finally{ if(btn) btn.disabled=false; }
 }
 async function saveSubtitleOverlay(btn){
   const err=document.getElementById("dserr"); err.textContent="";

@@ -1259,6 +1259,16 @@ pub mod keys {
     /// seed it, so a deployment that had turned it on keeps it on and can
     /// then find it in Settings.
     pub const PGS_OVERLAY: &str = "subtitles.pgs_overlay";
+    /// Convert a Dolby Vision Profile 7 title to Profile 8.1 so a Dolby Vision
+    /// client sees Dolby Vision rather than HDR10.
+    ///
+    /// This was `PLURX_DV_CONVERT`, and unlike most switches it defaults *on*:
+    /// the conversion is plurx's own code, and a Profile 7 title reaching a
+    /// Dolby Vision client as HDR10 is the thing it exists to stop. Absent
+    /// therefore means on. It is a setting rather than an environment variable
+    /// for the same reason as the overlay above: an operator turning off work
+    /// their GPU is doing should be able to find the switch, and see it is off.
+    pub const DV_CONVERT: &str = "playback.dolby_vision_convert";
     /// Node-wide byte budget for un-admitted VOD rendition working sets.
     /// Absent takes the built-in default. A parsed zero is refused at the
     /// settings surface: "no working set" and "not configured" are opposite

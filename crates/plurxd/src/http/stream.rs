@@ -673,7 +673,11 @@ pub(super) async fn render_caps(state: &AppState) -> playback::RenderCaps {
         // depends on which encoder this node will actually choose, which is a
         // runtime answer the system snapshot does not carry.
         hdr10_max_height: state.transcode.hdr10_ceiling().await,
-        dolby_vision_convert: state.system.dolby_vision_convert,
+        // Asked of the transcoder for the same reason as the ceiling above:
+        // the operator can turn the conversion off in Settings, and a value
+        // latched at boot would keep telling clients this node converts long
+        // after it stopped.
+        dolby_vision_convert: state.transcode.dv_convert_enabled().await,
     }
 }
 

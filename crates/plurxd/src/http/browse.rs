@@ -395,7 +395,7 @@ pub async fn item_detail(
                 &f,
                 raw_probe.as_deref(),
                 crate::ffmpeg::has_dovi_rpu().await,
-                state.system.dolby_vision_convert,
+                state.transcode.dv_convert_enabled().await,
             );
             let mut present = 0_usize;
             // Why the rest are missing, when the indexer has already found

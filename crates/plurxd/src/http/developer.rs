@@ -124,6 +124,16 @@ pub(crate) async fn readiness(
         Some(ref value) if matches!(value.as_str(), "1" | "true" | "yes" | "on")
     );
 
+    // Absent is on, unlike every other switch here, because a Profile 7 title
+    // reaching a Dolby Vision client as HDR10 is what the conversion exists to
+    // stop.
+    let convert_on = !matches!(
+        settings
+            .get(plurx_core::store::keys::DV_CONVERT)
+            .map(|value| value.trim().to_ascii_lowercase()),
+        Some(ref value) if matches!(value.as_str(), "0" | "false" | "off" | "no")
+    );
+
     Ok(Json(DeveloperReadiness {
         items: vec![
             cluster_transport_recovery(&state).await,
@@ -131,8 +141,32 @@ pub(crate) async fn readiness(
             prepared_quality_handoff(),
             live_hls_recovery(live_recovery_on),
             pgs_overlay(overlay_on),
+            dolby_vision_convert(convert_on),
         ],
     }))
+}
+
+/// Profile 7 titles converted to 8.1 rather than delivered as HDR10.
+///
+/// The odd one in this section: it is on by default and costs work only when a
+/// Profile 7 title is actually played. It is here because it was
+/// `PLURX_DV_CONVERT`, an environment variable that could turn off encode work
+/// this node does on somebody's GPU, with nothing in the product to say it had
+/// been turned off or why a Dolby Vision client had started seeing HDR10.
+fn dolby_vision_convert(enabled: bool) -> DeveloperEnableItem {
+    DeveloperEnableItem {
+        id: "dolby_vision_convert",
+        title: "Convert Dolby Vision Profile 7 to 8.1",
+        enabled: Some(enabled),
+        setting: Some(plurx_core::store::keys::DV_CONVERT),
+        // No prerequisites, and that is the honest answer rather than a gap.
+        // The conversion is plurx's own code and runs wherever this binary
+        // runs; there is nothing to measure and nothing that has to be true
+        // first. Inventing a row to say so would have put this section's only
+        // green tick on the one switch that never earned a reading, which is
+        // exactly the "checked" tick this route exists to remove.
+        requirements: Vec::new(),
+    }
 }
 
 /// Image subtitles served as an overlay rather than hidden or burned in.

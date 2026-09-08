@@ -1799,6 +1799,7 @@ async fn probe_system(
 
     let hwaccel_pref = resolve_hwaccel_pref(store).await?;
     seed_pgs_overlay_setting(store).await?;
+    seed_dv_convert_setting(store).await?;
     let probe_pref = probe_preference(&hwaccel_pref);
     let encoder_selected = encoder_caps.choose(&probe_pref).label().to_owned();
     // Which tone-map graph this node may use. After encoder detection, because
@@ -1933,6 +1934,26 @@ async fn seed_pgs_overlay_setting(store: &Arc<dyn plurx_core::store::Store>) -> 
     store
         .put_setting(keys::PGS_OVERLAY, if on { "1" } else { "0" })
         .await?;
+    Ok(())
+}
+
+/// The same one-time carry for `PLURX_DV_CONVERT`.
+///
+/// Only an explicit off is worth recording: this switch defaults on, so a node
+/// whose variable was unset or said on is already answering the way the absent
+/// setting answers, and writing that down would only make a stored value where
+/// the operator never expressed one.
+async fn seed_dv_convert_setting(store: &Arc<dyn plurx_core::store::Store>) -> anyhow::Result<()> {
+    if store.get_setting(keys::DV_CONVERT).await?.is_some() {
+        return Ok(());
+    }
+    let Ok(value) = std::env::var("PLURX_DV_CONVERT") else {
+        return Ok(());
+    };
+    if dv_convert_enabled(Some(value.as_str())) {
+        return Ok(());
+    }
+    store.put_setting(keys::DV_CONVERT, "0").await?;
     Ok(())
 }
 

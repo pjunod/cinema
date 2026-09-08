@@ -1617,6 +1617,9 @@ pub struct SettingsDto {
     /// Off by default. Was `PLURX_PGS_OVERLAY`, which decided which subtitle
     /// tracks a client is offered from a compose file.
     pub pgs_overlay: bool,
+    /// Convert Dolby Vision Profile 7 to 8.1 rather than delivering HDR10.
+    /// On by default; this was `PLURX_DV_CONVERT`.
+    pub dolby_vision_convert: bool,
     /// Node-wide byte budget for un-admitted VOD working sets. Empty = the
     /// built-in default. Never zero — "no working set" is not a configuration
     /// this accepts (M3 handoff §6).
@@ -1898,6 +1901,14 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             setting(keys::PGS_OVERLAY).as_deref().map(str::trim),
             Some("1" | "true" | "yes" | "on")
         ),
+        // Absent is on, which is the default the environment variable this
+        // replaced also had.
+        dolby_vision_convert: !matches!(
+            setting(keys::DV_CONVERT)
+                .as_deref()
+                .map(|value| value.trim().to_ascii_lowercase()),
+            Some(ref value) if matches!(value.as_str(), "0" | "false" | "off" | "no")
+        ),
         vod_working_set_bytes: setting(keys::VOD_WORKING_SET_BYTES).unwrap_or_default(),
         vod_block_budget_secs: setting(keys::VOD_BLOCK_BUDGET_SECS).unwrap_or_default(),
         vod_materialize_budget_secs: setting(keys::VOD_MATERIALIZE_BUDGET_SECS).unwrap_or_default(),
@@ -1975,6 +1986,7 @@ pub struct UpdateSettings {
     pub vod_live_recovery: Option<bool>,
     pub playback_control_protocol_v1: Option<bool>,
     pub pgs_overlay: Option<bool>,
+    pub dolby_vision_convert: Option<bool>,
     pub vod_working_set_bytes: Option<String>,
     pub vod_block_budget_secs: Option<String>,
     pub vod_materialize_budget_secs: Option<String>,
@@ -2101,6 +2113,7 @@ impl UpdateSettings {
             || self.vod_live_recovery.is_some()
             || self.playback_control_protocol_v1.is_some()
             || self.pgs_overlay.is_some()
+            || self.dolby_vision_convert.is_some()
             || self.vod_working_set_bytes.is_some()
             || self.vod_block_budget_secs.is_some()
             || self.vod_materialize_budget_secs.is_some()
@@ -2839,6 +2852,12 @@ pub async fn update_settings(
         state
             .store
             .put_setting(keys::PGS_OVERLAY, if on { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(on) = req.dolby_vision_convert {
+        state
+            .store
+            .put_setting(keys::DV_CONVERT, if on { "1" } else { "0" })
             .await?;
     }
     if let Some(on) = req.vod_index_cluster_cache {

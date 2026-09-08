@@ -4247,7 +4247,8 @@ mod tests {
                 "playback_control_protocol_v1",
                 "prepared_quality_handoff",
                 "live_hls_recovery",
-                "pgs_overlay"
+                "pgs_overlay",
+                "dolby_vision_convert"
             ],
             "every Developer card with prerequisites needs a row here: {body}"
         );

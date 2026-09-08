@@ -307,7 +307,7 @@ test("nothing outside the Developer readings can reach a reading", () => {
   // A save function that early-returns on an unmet reading is invisible to
   // any comparison of rendered markup: the stub records the function name,
   // so the skeleton is byte-identical whatever the function does.
-  for (const name of ["saveDeveloper", "saveExperimental", "saveStreaming", "saveSubtitleOverlay"]) {
+  for (const name of ["saveDeveloper", "saveExperimental", "saveStreaming", "saveSubtitleOverlay", "saveDolbyVisionConvert"]) {
     assert.doesNotMatch(
       shippedSource(name),
       /readiness|devReq|DEV_READINESS/i,
