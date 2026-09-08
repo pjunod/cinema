@@ -188,6 +188,14 @@ commit `c7b87df5` closes all four:
 - this checkpoint records the reviewed and corrected heads rather than
   implying review was still pending.
 
+The first corrected draft gate then refused stale process/task ownership
+counts. Auditing that failure found one more lifecycle problem: destination
+I/O errors could return while a separately spawned diagnostic reader remained
+detached. Commit `d8806467` joins stdout and stderr in one cancellation scope,
+stops and reaps the exact child before returning any create/write/flush error,
+adds the pre-existing-destination regression, and records every changed owner
+in the enforced inventory.
+
 The correction fast lane passes pinned Rust 1.97.1 all-target compilation,
 workspace all-target Clippy with warnings denied, 93 VOD-serving tests with the
 explicit two-hour benchmark ignored, 18 subtitle-cache tests, and focused
