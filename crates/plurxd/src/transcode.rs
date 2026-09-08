@@ -13663,7 +13663,17 @@ impl TranscodeManager {
     /// be green on a fallback path the fleet takes and the tests never enter.
     /// Tests that want the refusal now say so, which is one line each and
     /// leaves the default meaning the same thing everywhere.
-    async fn live_hls_recovery_enabled(&self) -> Result<bool, String> {
+    /// Whether a VOD prerequisite failure may fall back to the retained
+    /// growing-HLS engine.
+    ///
+    /// `pub(crate)` because takeover consults it too. That was the fourth
+    /// reader of this setting, and adding a reader is what settled the parse:
+    /// three sites compared the raw string against `Some("0")` and the
+    /// Developer card's comment pinned itself to that on purpose, so that the
+    /// row could not report a switch the engine was not honouring. They all
+    /// share `stored_switch` now, which keeps that pin while giving a
+    /// hand-written ` OFF ` the answer an operator would expect.
+    pub(crate) async fn live_hls_recovery_enabled(&self) -> Result<bool, String> {
         let configured = self
             .store
             .get_setting(plurx_core::store::keys::VOD_LIVE_RECOVERY)
@@ -13671,7 +13681,10 @@ impl TranscodeManager {
             .map_err(|error| {
                 start_infrastructure_error(format!("reading live-HLS recovery setting: {error}"))
             })?;
-        Ok(configured.as_deref() != Some("0"))
+        Ok(plurx_core::store::stored_switch(
+            configured.as_deref(),
+            true,
+        ))
     }
 
     async fn start_live_recovery_session(

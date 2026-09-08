@@ -761,13 +761,40 @@ silently. Three things came with it:
   what it served and why, and a Developer card reports the same numbers and
   names the switch that stops the fallback. The switch itself stays in
   Playback → Streaming; two copies of one control drift.
-- **One path does not consult the switch, and now says so.** A request that
-  arrives already naming `Presentation::Live` goes straight to the retained
-  engine — today that is the peer takeover path, whose recipe validation
-  requires it. It is counted under `requested_live` and reported by
-  `no_session_bypasses_the_switch`, because a node serving live-HLS sessions
-  with the fallback off is otherwise invisible. **Whether that path should
-  consult the setting is a decision, not an oversight, and it is still open.**
+- **One path does not consult the switch, and that is now settled rather than
+  open.** A request arriving already stamped `Presentation::Live` goes straight
+  to the retained engine — today the only producer of one is peer takeover,
+  whose `takeover_recipe_is_valid` *requires* that stamp, while public and
+  worker ingress both require `Presentation::Vod`. It is counted under
+  `requested_live` and reported by `no_session_bypasses_the_switch`, because a
+  node serving live-HLS sessions with the fallback off is otherwise invisible.
+
+  **Decision (Paul, 2026-09-08): takeover consults the setting and refuses,
+  and the refusal names the switch.** `attempt_takeover` now answers *"live HLS
+  fallback is disabled cluster-wide, so this session cannot be adopted"*, right
+  after the EVENT gate.
+
+  Two earlier framings of this were wrong and are worth keeping so nobody
+  re-derives them. The note first left the question open on the premise that a
+  node might be configured differently from its cluster; it cannot be, because
+  settings are replicated. What it was actually describing is a *time* gap — a
+  session that started while the fallback was on, kept running when it was
+  turned off, and then outlived its owner. The second framing used that
+  narrowness to argue for adopting anyway: the session exists, someone is
+  watching, and refusing ends a film rather than preventing a stream. **The
+  rule beat the trade.** The cluster does not do what a setting says it may
+  not do — a system that quietly makes exceptions to its own configuration is
+  one an operator cannot reason about, and the rarity of the case is an
+  argument that the rule is cheap, not that it can be skipped.
+
+  A store read that fails is a skip rather than an adoption, so the next sweep
+  asks again instead of proceeding on a value nobody read.
+
+  This was the fourth reader of `playback.vod_live_recovery`, and adding it is
+  what settled the parse: the engine, the settings DTO and the Developer card
+  each compared the raw string against `Some("0")`, with the card's comment
+  pinned to that on purpose so the row could not report a switch the engine was
+  not honouring. All four share `stored_switch` now, which keeps that pin.
 
 Not done here: removing the engine. §5 conditions that on real VOD recipe
 coverage replacing it, and the coverage row exists precisely so someone can

@@ -1930,7 +1930,10 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         hls_typeless_sliding: setting(keys::HLS_TYPELESS_SLIDING)
             .is_some_and(|value| value.trim() == "1"),
         vod_presentation: setting(keys::VOD_PRESENTATION).as_deref() != Some("0"),
-        vod_live_recovery: setting(keys::VOD_LIVE_RECOVERY).as_deref() != Some("0"),
+        vod_live_recovery: plurx_core::store::stored_switch(
+            setting(keys::VOD_LIVE_RECOVERY).as_deref(),
+            true,
+        ),
         playback_control_protocol_v1: setting(keys::PLAYBACK_CONTROL_PROTOCOL_V1).as_deref()
             == Some("1"),
         // Both through the shared parser, so the card cannot say off while the
