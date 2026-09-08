@@ -295,12 +295,52 @@ first.
 ## 6. The order to build it in
 
 1. Free the worker on every exit first — `begin_end_detached` in
-   `PreparationExecutor::abort`, in the deadline task, and in both refusal
-   branches — and move the 330-second deadline into the actor's
+   `PreparationExecutor::abort`, in the deadline task, and on every exit that
+   discards a successor — and move the deadline into the actor's
    `next_deadline()` per `M5.5-STAGED-GENERATIONS-HANDOFF.md` §6.1. A detached
    `tokio::spawn(sleep)` loses its timer on restart, which with a worker
    attached leaks an ffmpeg until the idle sweep. **Build the teardown before
    the thing that needs tearing down.**
+
+   > **Scoped 2026-09-08, and two things this step said are not true today.**
+   >
+   > **It is pre-work, not a live leak fix.** `stage_prepared_successor` writes
+   > a durable row and takes the slot; it creates no rendition, no driver and
+   > no ffmpeg. There is nothing to leak until step 3 exists. That is what
+   > "build the teardown first" means, and it is worth saying plainly because
+   > the sentence reads as a present-tense bug.
+   >
+   > **"Both refusal branches" undercounts.** Four exits discard a successor:
+   > stage refused by the slot (the durable row is rolled back), commit refused
+   > by the gate (an early return that touches neither store nor slot), commit
+   > refused by the store's CAS, and `reject_commit`. The gate-refusal one is
+   > the easiest to miss precisely because it does nothing else.
+   >
+   > **The constant is `PREPARATION_DEADLINE_MS` in `http/hls.rs`**, derived as
+   > `VOD_LEASE_TIMEOUT_MS + 30_000` — there is no literal `330` to grep for,
+   > and the derivation is load-bearing.
+   >
+   > **The obstacle to name before starting.** `next_deadline()` returns a
+   > monotonic `Instant`; `PreparationSlot::Staged.deadline_ms` is absolute
+   > unix ms, so the slot needs a companion `Instant` recorded at stage time
+   > before it can be folded in with a `.min(...)`. And the firing arm gives
+   > you a synchronous `&mut self` in the actor, while
+   > `PreparationExecutor::abort` is `async` and makes a store round trip —
+   > the detached spawn gets that for free and the actor does not. It needs the
+   > directive shape `PreparationDirective` already uses, or the actor blocks.
+   > That routing is the part that can blow a 120-180 line estimate, and it is
+   > a design decision rather than a transcription.
+   >
+   > **Add the settle to both entry points.** `settle_due_deadlines_at` is
+   > `#[cfg(test)]`; production fires through `handle_producer_blocks_at`. A
+   > settle added only to the first passes every test and does nothing in
+   > production.
+   >
+   > **Follow these tests:** `the_next_wake_accounts_for_an_outstanding_action`
+   > for the fold, `lease_terminal_wins_an_exact_tie_with_the_producer_deadline`
+   > for §6.1's priority rule, and
+   > `actor_timer_publishes_the_fence_at_each_modes_exact_deadline` for proving
+   > the wake actually fires under `tokio::time` pause/advance.
 2. The `classify_durable_route` staged-route branch (§3), with the control
    refusal explicitly unchanged, and a test per consumer of that
    classification.
