@@ -635,7 +635,13 @@ expected_occurrences = 5
 [[module_symbols]]
 id = "m4-exact-media-session-end"
 pattern = "MediaSessionEnd"
-expected_occurrences = 2
+# 2 -> 3 with the §4 drain. The owner's lease tick builds a `MediaSessionEnd`
+# for a route whose drain deadline has passed and ends it through the same
+# CAS every other owner-scoped end uses. It is not a new authority: the end is
+# bound to the incarnation, owner epoch and exact lease boundary this tick's
+# own inventory read, and the route is left out of the renewal batch first so
+# nothing this node did between the two can move the boundary underneath it.
+expected_occurrences = 3
 
 [[module_symbols]]
 id = "m4-exact-playback-route-read"
@@ -680,7 +686,11 @@ expected_occurrences = 21
 [[module_symbols]]
 id = "m4-exact-owner-epoch-end"
 pattern = "end_media_session_if_owner"
-expected_occurrences = 1
+# 1 -> 2 with the §4 drain. The second caller is the owner's lease tick
+# ending a lapsed drain. Same function, same CAS, same reason it exists: the
+# owner is the only thing that may end its own route, and it must lose to a
+# takeover or a delete that got there first.
+expected_occurrences = 2
 
 [[module_symbols]]
 id = "m4-exact-activation-handoff-store"
@@ -894,7 +904,14 @@ pattern = "terminal_reason"
 # own transaction, which §4 has to stop it doing; the durable receipt is the
 # fence now, and a stricter one. A read is removed, no writer is. The count
 # goes back up if anything reintroduces a state gate on that cause.
-expected_occurrences = 20
+# 20 -> 22 with the §4 drain, and neither addition is a new writer. One is the
+# cause the owner's lease tick passes to `end_media_session_if_owner` when a
+# drain deadline lapses -- `superseded`, the same cause the commit used to
+# write in its own transaction, moved to the moment the predecessor actually
+# stops serving. The other is a test reading that the commit no longer decides
+# a cause at all: a predecessor mid-drain has `terminal_reason` null, which is
+# the property the whole step turns on.
+expected_occurrences = 22
 
 [[module_symbols]]
 id = "m4-release-terminal-cause"
@@ -959,7 +976,10 @@ expected_occurrences = 6
 [[module_symbols]]
 id = "m4-stale-end-lease-boundary"
 pattern = "expected_lease_expires_at_ms"
-expected_occurrences = 1
+# 1 -> 2 with the §4 drain. The lease boundary the owner tick passes comes
+# from the inventory read that selected the route, which is what makes a
+# renewal racing this end defeat it rather than be overwritten by it.
+expected_occurrences = 2
 
 [[module_symbols]]
 id = "m4-takeover-settlement-capacity"
@@ -1456,7 +1476,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # in `mod tests`, each bounding a wait on a control seam so a test that never
 # reaches it fails instead of hanging the suite. Neither is a production
 # timer and neither owns anything.
-expected_occurrences = 644
+# 644 -> 645 with the §4 drain. One `tokio::time::timeout` bounds the owner's
+# end of a lapsed drain against the same `LEASE_RENEWAL_DEADLINE` every other
+# store call in that tick already uses, so a slow store cannot stretch the
+# three-second tick. It is not a new timer or a new authority: no task is
+# spawned, nothing is retried, and the deadline the drain is actually bounded
+# by lives on the row, not here. A timeout here means this tick did not manage
+# to end the row, and the next tick tries again -- or the cross-node sweep does.
+expected_occurrences = 645
 
 [[module_structures]]
 id = "bare-time-constructor"
