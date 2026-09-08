@@ -189,7 +189,20 @@ pub(crate) async fn start(
             .transcode
             .create_cluster_session(
                 &request.request,
-                request.user_id,
+                // A relayed worker start carries no epoch: `RemoteStartRequest`
+                // is the recipe the owning node sends, and the epoch is not on
+                // it. Adding one is a change to a relayed type and therefore a
+                // fleet rollout, so it is deliberately not taken here — an
+                // empty epoch is refused by the ledger, which makes this "no
+                // budget" rather than a second one. Recorded as owed: until the
+                // epoch reaches this path, a session started on a relayed
+                // worker cannot reserve, and the bound is the in-process
+                // one-shot it has always been.
+                &crate::transcode::SessionRecoveryIdentity {
+                    user_id: request.user_id,
+                    incarnation_id: request.incarnation_id.clone(),
+                    recovery_epoch: String::new(),
+                },
                 &user.username,
                 start_deadline,
                 admitted_serving_generation,

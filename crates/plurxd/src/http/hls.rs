@@ -2034,12 +2034,25 @@ pub async fn create(
             let guard_incarnation = incarnation_id.clone();
             let guard_request = request_claim_id.clone();
             let guard_user = user.id;
+            // The epoch is decided here rather than at the activation literal
+            // below, because the session that will hold it is built by the
+            // task this block spawns — about two hundred lines before that
+            // literal is reached. Its only input is the predecessor route,
+            // which is already read above, so moving the decision up costs a
+            // moved expression and no store read. The activation still calls
+            // `recovery_epoch_for` itself: the store row is the authority, and
+            // this value is the same function of the same input.
+            let worker_recovery = crate::transcode::SessionRecoveryIdentity {
+                user_id: user.id,
+                incarnation_id: incarnation_id.clone(),
+                recovery_epoch: recovery_epoch_for(activation_predecessor.as_ref()),
+            };
             let worker_serving_authority = ingress_serving_authority.clone();
             let mut start_task = tokio::spawn(async move {
                 let started = transcode
                     .create_cluster_session(
                         &worker_request,
-                        guard_user,
+                        &worker_recovery,
                         &user_name,
                         placement_deadline,
                         admitted_serving_generation,
