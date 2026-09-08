@@ -95,6 +95,9 @@ struct PlaybackControlTransport {
         if let generation = fields["generation"] as? String { failure.generation = generation }
         if let epoch = fields["control_epoch"] as? Int { failure.controlEpoch = epoch }
         if let retryAfter = fields["retry_after_ms"] as? Int { failure.retryAfterMs = retryAfter }
+        if let invalidField = fields["invalid_field"] as? String {
+            failure.invalidField = invalidField
+        }
         return failure
     }
 }
@@ -178,7 +181,8 @@ final class PlaybackControlSession {
         bootstrap: ControlBootstrap,
         transport: PlaybackControlTransport,
         observe: @escaping () -> PlayerControlObservation?,
-        onSubtitleReady: @escaping @MainActor @Sendable () -> Void = {}
+        onSubtitleReady: @escaping @MainActor @Sendable () -> Void = {},
+        onPreparedSwitch: @escaping @MainActor @Sendable (PreparedSwitchEvent) -> Void = { _ in }
     ) {
         end()
         // A generation, not a reset. A verdict outlives the session it was
@@ -254,6 +258,11 @@ final class PlaybackControlSession {
                     intentGeneration: exchange.intentGeneration,
                     lease: lease
                 )
+            },
+            // Message plumbing only. The callback is deliberately not wired to
+            // AVPlayer until the staged successor has a producer to open.
+            onPreparation: { event in
+                Task { @MainActor in onPreparedSwitch(event) }
             }
         )
         guard let reporter else {
@@ -294,6 +303,41 @@ final class PlaybackControlSession {
               let floor = await reporter.notifyUrgently(capture)
         else { return nil }
         return UInt64(floor)
+    }
+
+    /// Prepared-switch producer seam. These are inert until a caller receives
+    /// `onPreparedSwitch(.offered)` and has real successor progress to report.
+    func preparedMetadataReady(actionId: String) {
+        guard let reporter else { return }
+        Task { await reporter.preparationMetadataReady(actionId: actionId) }
+    }
+
+    func preparedBufferReady(actionId: String, bufferedThroughMs: Int) {
+        guard let reporter else { return }
+        Task {
+            await reporter.preparationBufferReady(
+                actionId: actionId, bufferedThroughMs: bufferedThroughMs
+            )
+        }
+    }
+
+    func commitPrepared(actionId: String, firstFrameUnixMs: Int) {
+        guard let reporter else { return }
+        Task {
+            await reporter.preparationCommitted(
+                actionId: actionId, firstFrameUnixMs: firstFrameUnixMs
+            )
+        }
+    }
+
+    func failPrepared(actionId: String) {
+        guard let reporter else { return }
+        Task { await reporter.preparationFailed(actionId: actionId) }
+    }
+
+    func abortPrepared(actionId: String) {
+        guard let reporter else { return }
+        Task { await reporter.preparationAborted(actionId: actionId) }
     }
 
     /// Publish what a recovery owner is about to act on, then wait — briefly —
