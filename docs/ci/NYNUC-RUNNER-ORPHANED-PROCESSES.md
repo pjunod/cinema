@@ -66,15 +66,26 @@ The regression now writes the child PID before sleeping and requires that PID
 to be gone or a non-executable zombie after cleanup. The old marker assertion
 remains, but no longer stands in for process-lifecycle evidence.
 
-Focused proof on the task branch:
+Focused Linux proof on the task branch. On macOS this exact lifecycle test is
+skipped because it requires `/proc` start identities and pidfds:
 
 ```text
 python3 -m unittest \
   tests.validation.test_runner.CatalogCase.\
 test_timeout_cleanup_failure_kills_root_group_and_aborts
 
-Ran 1 test in 3.648s
+Ran 1 test in 2.048s
 OK
+```
+
+The same `nynuc` snapshot was then mutated back to the old shell-only fallback.
+Both injected census-failure subcases found the bound child still in state `T`,
+the regression failed, and its `finally` cleanup force-killed any surviving
+exact fixture identities. Neither remained executable:
+
+```text
+FAILED (failures=2)
+MUTATION_REJECTED_AND_FIXTURE_NONEXECUTABLE
 ```
 
 ## Monitoring and cleanup boundary

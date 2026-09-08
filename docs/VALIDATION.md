@@ -498,8 +498,9 @@ the shell PID. This matters when the census itself fails after the initial
 `SIGSTOP`: killing only the shell abandons any stopped same-group child under
 PID 1. The root group is safe to address here because `_run_shell` created it
 as a new session and its unreaped live leader still owns that numeric identity.
-The regression injects this exact census failure and requires the child PID to
-be gone or non-executable before the test returns. The nynuc incident and its
+The Linux-only regression injects this exact census failure, binds fixture
+identities through `/proc` start ticks and pidfds, and requires the child PID
+to be gone or non-executable before the test returns. The nynuc incident and its
 process-to-run correlation are recorded in
 [NYNUC-RUNNER-ORPHANED-PROCESSES.md](ci/NYNUC-RUNNER-ORPHANED-PROCESSES.md).
 
