@@ -138,9 +138,12 @@ physical playback qualification on each supported hardware family and
 client. The task PR records the exact compiler, FFmpeg build, commands, and
 results for its frozen tree.
 
-Producer and head regeneration drain stderr alongside stdout with a bounded
-8 KiB diagnostic tail, so a filter/codec failure is visible operationally
-without letting an unlimited diagnostic line block media production.
+Producer and head regeneration drain stderr alongside stdout in one
+cancellation scope with a bounded 8 KiB diagnostic tail, so a filter/codec
+failure is visible operationally without letting an unlimited diagnostic line
+block media production. A sidecar destination create, write, or flush error
+stops and reaps the exact child before returning; cancellation drops both pipe
+readers together and transfers that child to the runtime-owned reaper.
 
 ## Current task checkpoint — 2026-09-08
 

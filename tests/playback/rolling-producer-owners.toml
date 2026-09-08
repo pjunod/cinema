@@ -1291,7 +1291,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # task spawns. One actual production task owns a cancelled extractor through
 # kill/reap; two test tasks own the cancelled output and held-admission driver.
 # No detached stderr reader exists. Tests abort/join or await their actors.
-expected_occurrences = 446
+# -1 after the immutable-input review: the bounded file writer drains stderr in
+# the same joined future as stdout instead of spawning a diagnostic task. A
+# cancelled copy therefore drops both readers while the exact child transfers
+# to BoundedDiagnosticChild's runtime-owned kill/reap path.
+expected_occurrences = 445
 
 [[module_structures]]
 id = "method-spawn"
@@ -1325,7 +1329,10 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # +2 final encoded review: the bounded extractor helper's actual child spawn
 # replaces the implicit spawn in Command::output; one test sleep child models
 # a live encoder owning the pool's only permit and is explicitly reaped.
-expected_occurrences = 48
+# +1 after the immutable-input review: spawn_piped_output is the daemon-owned
+# stdout variant of the existing extractor owner. Its child stays kill-on-drop,
+# its copy and diagnostics are joined, and every terminal path awaits reap.
+expected_occurrences = 49
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -1519,7 +1526,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # +5 final encoded review: test-only deadlines bound noisy-child completion,
 # cancellation reap, admission rendezvous, cached GET, and driver completion.
 # Production policy still has its single existing one-second deadline.
-expected_occurrences = 655
+# +2 after the immutable-input review: one five-second fixture deadline proves
+# the physical sidecar cap, and one proves a destination-create failure kills
+# and reaps its writer. Both timers are awaited by their test owner.
+expected_occurrences = 657
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -1580,7 +1590,13 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # +3 final encoded review: two shell fixtures emit bounded/noisy diagnostics
 # through the real extractor owner; one sleep fixture retains a sole encoder
 # permit until the production restart path confirms its reap.
-expected_occurrences = 93
+# +7 after the immutable-input review: shipped held-source ffprobe, fc-list and
+# fc-conflist attest immutable inputs; two shell fixtures exercise the physical
+# cap and destination-error reap; one finite FFmpeg call site creates both stale
+# source fixtures; and one finite FFmpeg call creates an oversized attachment.
+# Shipped probes use bounded_command_output or BoundedDiagnosticChild; every
+# fixture awaits kill-on-drop output or the exact bounded child owner.
+expected_occurrences = 100
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -1735,7 +1751,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # +4 final encoded review: the helper's actual spawn, two test calls to its
 # bounded output method, and the sleep fixture's spawn. The production
 # .output call now invokes the owned helper instead of unbounded Command output.
-expected_occurrences = 303
+# +2 net after the immutable-input review: the daemon-owned piped child adds an
+# explicit spawn and two finite media fixtures add awaited output calls, while
+# burn extraction removes its old direct output call in favor of that owner.
+expected_occurrences = 305
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -1792,7 +1811,10 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # +7 final encoded review: extractor ordinary wait and cancellation start_kill
 # plus wait (three OS actions); two test-only admission-hook barriers and two
 # fixture rendezvous waits (four in-process synchronization calls).
-expected_occurrences = 341
+# +2 after the immutable-input review: bounded sidecar output explicitly
+# start-kills on a cap or daemon I/O error and awaits the exact child before
+# returning. Ordinary completion uses the same wait.
+expected_occurrences = 343
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
@@ -1839,7 +1861,10 @@ pattern = "kill_on_drop\\s*\\("
 # admission through explicit reap rather than relying on drop alone.
 # +1 final encoded review: the live sleep fixture; the extractor's existing
 # kill_on_drop moves to its shared bounded owner, with no net added site.
-expected_occurrences = 61
+# +3 after the immutable-input review: the piped-output owner and both finite
+# media fixture commands use kill-on-drop as cancellation protection. Their
+# normal paths still await output or confirmed child reap.
+expected_occurrences = 64
 
 [[module_structures]]
 id = "rolling-supervisor-construction"

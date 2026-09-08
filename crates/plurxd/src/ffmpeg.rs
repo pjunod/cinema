@@ -175,35 +175,45 @@ impl BoundedDiagnosticChild {
             .stderr
             .take()
             .ok_or_else(|| std::io::Error::other("extractor stderr was not piped"))?;
-        let diagnostics = tokio::spawn(drain_diagnostics(stderr));
-        let mut output = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)
-            .await?;
-        let mut total = 0_u64;
-        let mut buffer = [0_u8; 64 * 1024];
-        let exceeded = loop {
-            let read = stdout.read(&mut buffer).await?;
-            if read == 0 {
-                break false;
+        let child = self.child.as_mut().expect("owned extraction child");
+        let copy = async {
+            let result = async {
+                let mut output = tokio::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(path)
+                    .await?;
+                let mut total = 0_u64;
+                let mut buffer = [0_u8; 64 * 1024];
+                let exceeded = loop {
+                    let read = stdout.read(&mut buffer).await?;
+                    if read == 0 {
+                        break false;
+                    }
+                    let remaining = max_bytes.saturating_sub(total);
+                    let accepted = usize::try_from(remaining.min(read as u64)).unwrap_or(read);
+                    if accepted > 0 {
+                        output.write_all(&buffer[..accepted]).await?;
+                        total += accepted as u64;
+                    }
+                    if accepted < read {
+                        break true;
+                    }
+                };
+                output.flush().await?;
+                Ok::<_, std::io::Error>(exceeded)
             }
-            let remaining = max_bytes.saturating_sub(total);
-            let accepted = usize::try_from(remaining.min(read as u64)).unwrap_or(read);
-            if accepted > 0 {
-                output.write_all(&buffer[..accepted]).await?;
-                total += accepted as u64;
-            }
-            if accepted < read {
-                break true;
-            }
-        };
-        output.flush().await?;
-        if exceeded {
-            if let Some(child) = self.child.as_mut() {
+            .await;
+
+            // A failed daemon write is just as terminal as an exceeded cap.
+            // Stop the exact writer before joining its diagnostic pipe, or an
+            // encoder blocked on stdout could keep this error path alive.
+            if !matches!(&result, Ok(false)) {
                 let _ = child.start_kill();
             }
-        }
+            result
+        };
+        let (copy_result, diagnostics) = tokio::join!(copy, drain_diagnostics(stderr));
         let status = self
             .child
             .as_mut()
@@ -211,13 +221,11 @@ impl BoundedDiagnosticChild {
             .wait()
             .await?;
         self.child.take();
-        let diagnostics = diagnostics
-            .await
-            .map_err(|error| std::io::Error::other(format!("diagnostic reader failed: {error}")))?;
         #[cfg(test)]
         if let Some(reaped) = self.reaped.take() {
             let _ = reaped.send(());
         }
+        let exceeded = copy_result?;
         if exceeded {
             return Err(std::io::Error::other(format!(
                 "extractor output exceeded its disk bound of {max_bytes} bytes"
@@ -1708,6 +1716,34 @@ mod tests {
             4_096
         );
         reaped_rx.await.expect("oversized child reaped");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bounded_output_reaps_the_child_when_the_destination_cannot_be_created() {
+        let base = crate::test_tempdir().expect("bounded output");
+        let output = base.path().join("existing-sidecar");
+        tokio::fs::write(&output, b"owned by another extractor")
+            .await
+            .expect("pre-existing sidecar");
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "while :; do printf 'blocked stdout'; printf 'extracting' >&2; done",
+        ]);
+        let mut owner =
+            BoundedDiagnosticChild::spawn_piped_output(&mut command).expect("piped child");
+        let (reaped_tx, reaped_rx) = tokio::sync::oneshot::channel();
+        owner.reaped = Some(reaped_tx);
+        let error = tokio::time::timeout(
+            Duration::from_secs(5),
+            owner.output_to_bounded_file(&output, 4_096),
+        )
+        .await
+        .expect("destination error must stop the child")
+        .expect_err("create_new refuses a pre-existing sidecar");
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        reaped_rx.await.expect("failed output child reaped");
     }
 
     #[cfg(unix)]
