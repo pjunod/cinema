@@ -345,7 +345,7 @@ test("Developer is where the switches that cost something live", () => {
   // assertion is what says so.
   assert.match(html, /Not true on any node today/);
   assert.match(html, /One recovery per playback, and it is never given back/);
-  assert.match(html, /qualify a diagnostic contract against this node's hardware decoders/);
+  assert.match(html, /qualify diagnostic contracts against this node's measured hardware decoders/);
   assert.match(html, /HDHomeRun Live TV/);
   assert.match(html, /Save the configuration, check readiness, then enable/);
 });
@@ -383,21 +383,21 @@ test("Verified decode states its cost, its prerequisites, and what this node mea
   // Requested, and refused with the reason the fleet will actually hit.
   const refused = card({ decoder_health_qualified_artifacts: true, decoder_health_qualification: {
     namespace: "decoder-plan-v1-unqualified", enforcing: false, eligible: false,
-    measured_build: "ffmpeg version 5.1.9", measured_decoders: ["h264/h264", "hevc/hevc"],
+    measured_build: "ffmpeg version 5.1.9", measured_decoders: ["h264/software/h264", "hevc/software/hevc"],
     covered_decoders: [], refusal: "no_contract_covers_this_build",
     explanation: "No retained diagnostic contract covers this node's FFmpeg build under the qualified log flags. Capture one from this build before enabling.",
   } });
   assert.match(refused, /Requested · not in force/, "the state is not the request");
   assert.match(refused, /No retained diagnostic contract covers/);
-  assert.match(refused, /<code>h264\/h264<\/code>/, "what it did measure is still shown");
+  assert.match(refused, /<code>h264\/software\/h264<\/code>/, "what it did measure is still shown");
   assert.equal((refused.match(/✓/g) || []).length, 2);
   assert.equal((refused.match(/✗/g) || []).length, 1);
 
   // In force.
   const on = card({ decoder_health_qualified_artifacts: true, decoder_health_qualification: {
     namespace: "decoder-plan-v1-health-qualified-r1", enforcing: true, eligible: true,
-    measured_build: "ffmpeg version 9.0.1", measured_decoders: ["h264/h264"],
-    covered_decoders: ["h264/h264"], refusal: null, explanation: null,
+    measured_build: "ffmpeg version 9.0.1", measured_decoders: ["h264/software/h264"],
+    covered_decoders: ["h264/software/h264"], refusal: null, explanation: null,
   } });
   assert.match(on, /Enforcing/);
   assert.equal((on.match(/✗/g) || []).length, 0);
@@ -413,8 +413,8 @@ test("Verified decode states its cost, its prerequisites, and what this node mea
   // an operator just made.
   const pending = card({ decoder_health_qualified_artifacts: true, decoder_health_qualification: {
     namespace: "decoder-plan-v1-unqualified", enforcing: false, eligible: true,
-    measured_build: "ffmpeg version 9.0.1", measured_decoders: ["h264/h264"],
-    covered_decoders: ["h264/h264"], refusal: "not_requested",
+    measured_build: "ffmpeg version 9.0.1", measured_decoders: ["h264/software/h264"],
+    covered_decoders: ["h264/software/h264"], refusal: "not_requested",
     explanation: "Not requested on this node.", pending_restart: true,
   } });
   assert.match(pending, /Saved · restart to apply/);

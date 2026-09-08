@@ -1,10 +1,10 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M0–M3f, M4, M5a, M5b, the M5a census repair, M5c1, M5c2, M5c3 and
-M7a merged into the effort, and current `main` merged in ahead of promotion;
-M5 complete, M7b specified and next · **Updated:** 2026-09-08 · **Integration branch:**
-`effort/decoder-selection-recovery` · **Next task base:** effort head
-`08086371180ae9ae89063ec0946e42bb355a8d60`
+**Status:** M0–M5 complete · M6 server/client implementation landed, fleet
+acceptance open · M7b backend-aware inventory in progress · M8 and promotion
+remain · **Updated:** 2026-09-08 · **Integration branch:**
+`effort/decoder-selection-recovery` at `48ad8716` · **Active task:**
+`codex/decoder-m7b-inventory`
 
 The effort was created from Forgejo `main` at
 `4a6a0268bd314ad5587cb3037f12ebd992c0074e`. The original M0 research baseline was `main` at
@@ -17,21 +17,38 @@ This is the live execution ledger for
 It records what is merged, what was actually tested, and what remains unsafe.
 An unchecked item is not implied by a nearby passing check.
 
-## Current checkpoint
+## At a glance — what is done and how much is left
+
+| Stage | State | What remains |
+|---|---|---|
+| M0–M5 · selection, observation, receipts, admission and bounded prepublication recovery | Done on the effort branch | No planned build work |
+| M6 · prepared replacement contract and clients | Code landed | Apple is the only client currently reaching a viewer; the cross-client fleet receipt remains M8 evidence |
+| M7a · advisory Developer settings | Done | Keep the prerequisites accurate as hardware contracts land; the controls advise and never gate enablement |
+| M7b · hardware diagnostic path | In progress | Backend-aware inventory is implemented locally; focused checks, adversarial review, one final full suite, draft PR and merge remain. A real hardware contract is separate fleet evidence |
+| M7 remainder · offline durability and handoff enforcement | Not yet audited | Job-scoped recovery budget · alternate-result and part/assembly receipt verification · versioned worker capabilities · owner-handoff coverage · shipping-path exercise without the legacy recovery feature flag |
+| M8 · fleet qualification | Not started | Hardware diagnostic capture · workload matrix · false-positive classification · startup/concurrency/recovered-latency evidence · three-client replacement runs |
+| Promotion to `main` | Not started | Freeze effort merges · merge fresh `main` · requalify the exact tree · pass Main promotion gate · merge |
+
+**Shortest reading:** one active coding slice, one M7 audit/build tranche, the
+hardware/fleet qualification, then exact-tree promotion. The first hardware
+contract is the critical path: until a real node supplies it, automatic decode
+recovery remains deliberately unreachable rather than falsely certified.
+
+## Current checkpoint — `codex/decoder-m7b-inventory`
 
 | Field | Current value |
 |---|---|
-| Milestone | M5c — prepublication recovery. M5c1 and M5c2a–d merged: the decision seam, the durable-restriction reader, the alternate, its reason, and the installer. M5c3 next — the durable budget, which is still the only thing bounding a recovery to one per playback |
-| Task branch | Next task branches from effort head `67216de9` |
-| Task PR | Open against the effort branch. One whole-PR adversarial review is owed on this candidate before it merges |
-| M1 dependency | [Forgejo #63](http://192.168.4.7:3000/noirr/plurx/pulls/63) is merged. Exact head `f7f98b01` completed `make validate-full` with 23 passed, 0 failed, and 2 declared skips (`android-device`, no `adb` on the qualifying host; `live-tv-two-node`, which does not run on Darwin); `target/validation/report.json` records `git_ref f7f98b01`, generated `2026-09-07T01:01:02Z`. It fast-forwarded into the effort. M2 ([Forgejo #73](http://192.168.4.7:3000/noirr/plurx/pulls/73)) then fast-forwarded onto it after its own whole-PR review, its findings repair, and the Forgejo effort gate on exact head `773ad488` — which is the commit this M3a branch is based on |
-| Effort PR | Not opened yet |
+| Milestone | M7b slice 2 — measure and report decoders per `(codec, backend)`, then use that exact path for diagnostic-contract lookup |
+| Task base | Effort head `48ad8716`; Forgejo PRs #168 and #169 were already merged when this continuation began |
+| Task branch | `codex/decoder-m7b-inventory` in an agent-owned clone at `/private/tmp/codex-plurx-decoder.RRcx8j/repo` |
+| Task PR | Not opened yet. It will stay `WIP:` until focused checks and adversarial findings are clean; the full suite runs once on that corrected candidate |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
-| Full validation | On this exact head, pinned 1.97.1: `plurxd` 1877 passed 0 failed 3 ignored, `plurx-core` lib 991 passed with the one documented `cluster::migration` flake under load (a different test each run; 72/72 in isolation, including on Forgejo `main`), `store_contract` 97/97 including one new run through both backends, `plurx-cluster-check` 79/79. Web suite 15/15. Python validators 46/46. `make lint`, `make validation-lint`, `make history-check`, `cargo fmt --all --check` and `git diff --check` clean |
-| Repairs | The five inherited failures described in *M5a census repair* below are green on this head: the two sqlite transaction censuses, the migration count, the hiqlite additive-chain assertion, and the downgrade-fixture guard |
-| Exact receipt | The head this PR carries; the whole-PR adversarial review and the effort gate are what make it a receipt |
-| Full PR validation | Deferred to the `Main promotion gate`, per `AGENTS.md`. See *Decisions and deviations* — the plan's per-task full-suite instruction and the repository's own pipeline disagree, and the repository's pipeline wins |
-| Blocker | The Forgejo `Effort development gate` on this head. Per `AGENTS.md` a task PR into an effort branch defers the full suite to the `Main promotion gate`; the effort's one `make validate-full` is owed at promotion, not here |
+| Implemented locally | Nested backend-aware inventory · advertised-hwaccel probe fan-out · positive hardware-selection parser · backend-aware readiness/API display · plan observation reads its measured `(codec, backend)` name · Settings → Developer explains the measured prerequisites without disabling any control |
+| Focused evidence | Pinned compile passed · decoder inventory 13/13 · backend contract separation 1/1 · backend readiness 1/1 · composed hardware observation 1/1 · Developer UI 15/15 · status contract 21/21 · validation 196/196 |
+| Fast lane | History 1,600 · catalog 24 points / 33 checks / 1,569 audited files · formatting, locked all-target workspace compile, and changed library/binary Clippy with warnings denied pass. Operations has the same 10 failures on this branch and untouched `48ad8716`: the macOS system Bash lacks `mapfile`; 280/290 pass. All-target Clippy reaches the same four unused store-fixture constants on both trees |
+| Full validation | Per Paul's 2026-09-08 instruction, run one `make validate-full` only after adversarial findings are repaired and immediately before taking `WIP:` off the PR; exact-tree promotion still reruns the Main gate after fresh `main` is merged |
+| Next | Commit and push · open `WIP:` PR · adversarial review and repairs · one final full suite · mark ready and merge after the effort gate |
+| External blocker | No retained contract is yet qualified against a real hardware decoder. The code can make that contract expressible and enforceable; a qualifying host must supply the evidence |
 
 ## Milestones
 
@@ -42,9 +59,9 @@ An unchecked item is not implied by a nearby passing check.
 | M2 · arguments and identity use one plan | Merged | Movie HLS command construction and recipe v3 consume one `ResolvedTranscode`; the recipe remains in `decoder-plan-v1-unqualified`, so M2 cannot claim health-qualified cache artifacts. Retry, resumable/speculative, live, offline, cache lookup, and direct Live TV builder migrations are present but not yet reviewed or qualified |
 | M3 · owned observation and health receipts | Complete — M3a–M3f and M3c5 merged | M3a's grammar ([#79](http://192.168.4.7:3000/noirr/plurx/pulls/79)), M3b1's owned readers ([#83](http://192.168.4.7:3000/noirr/plurx/pulls/83)) and M3b2's health barrier ([#84](http://192.168.4.7:3000/noirr/plurx/pulls/84)) are in. M3c1 ([#85](http://192.168.4.7:3000/noirr/plurx/pulls/85), head `bf75c62c`) makes the generation manifest carry and authenticate the joined producer receipt. M3c2 ([#86](http://192.168.4.7:3000/noirr/plurx/pulls/86), head `ff10c2db`) makes a part carry its own receipt across a resume, without which no long film could ever be certified. M3c3 ([#87](http://192.168.4.7:3000/noirr/plurx/pulls/87), head `b602b9f2`) gives qualified production its own artifact identity. M3c4 ([#88](http://192.168.4.7:3000/noirr/plurx/pulls/88), head `86647b37`) enforces the receipt contract under that identity. M3d ([#89](http://192.168.4.7:3000/noirr/plurx/pulls/89), head `a8403e10`) measures which decoder the running build actually selects, without which no attempt could ever be classified. M3e ([#90](http://192.168.4.7:3000/noirr/plurx/pulls/90), head `c54fb052`) makes the diagnostic wording a contract field, because FFmpeg 9 does not print FFmpeg 8's. M3c5 ([#92](http://192.168.4.7:3000/noirr/plurx/pulls/92), head `5e0f7f1f`) gives the two non-queue publication paths a manifest, so a qualified generation they produce can actually be kept. M3f ([#99](http://192.168.4.7:3000/noirr/plurx/pulls/99), head `02831892`) adds the operator request, the node effective-mode intersection that decides whether it may be honoured, and the `Settings > Developer` enable section that states the cost and shows what this node measured |
 | M4 · mixed resource admission | Merged | [Forgejo #81](http://192.168.4.7:3000/noirr/plurx/pulls/81) fast-forwarded `f0f7aec8` into the effort after one whole-PR adversarial review, its three blockers repaired, and the Forgejo effort gate |
-| M5 · durable budget and prepublication recovery | M5a, its census repair and M5b merged; M5c specified, not started | `media_session_producer_recovery` exists on both backends with the reservation contract running against each. M5a left five inherited test failures invisible to the effort gate; its census repair ([#96](http://192.168.4.7:3000/noirr/plurx/pulls/96), head `b2dcf458`) closes them. M5b gives the ledger the key it was missing: a server-owned `recovery_epoch` on the session row, minted by a deliberate new play and inherited by every continuation. Still no recovery behaviour — nothing reads the epoch until M5c |
-| M6 · postpublication replacement and client intent | Not started | — |
-| M7 · offline, shared cache, and handoff enforcement | Not started | — |
+| M5 · durable budget and prepublication recovery | Complete | The M5a census landed at `b2dcf458`; `media_session_producer_recovery` exists on both backends, a server-owned `recovery_epoch` follows one playback across continuations, and the producer reserves, settles and refuses a second recovery. M5c1–M5c3 are merged through [#156](http://192.168.4.7:3000/noirr/plurx/pulls/156) |
+| M6 · postpublication replacement and client intent | Server and three client implementations landed; fleet acceptance open | The server half predated this effort. Apple, Android and web client halves are on `main`; only Apple currently reaches a viewer because Android's `dual_player_preparation` remains deliberately false. The three-client measured receipt belongs to M8 |
+| M7 · offline, shared cache, and handoff enforcement | In progress | M7a and M7b slice 1 are merged. M7b slice 2 is the active task; job-scoped budget persistence, result/receipt verification, versioned worker capabilities, owner handoff and no-legacy-flag shipping-path exercise remain to audit and build |
 | M8 · fleet qualification and promotion | Not started | — |
 
 ## M2 working tree — one plan names and builds the attempt
@@ -2790,12 +2807,12 @@ running.
 
 ## M7b specification — the hardware decoder contract, measured before it is written
 
-M7a established that the recovery this effort built cannot fire on any node:
-only a software-decode plan names its decoder, so only a software-decode plan
-can latch a qualified fault, and only a *hardware*-decode plan has an alternate
-to be given. This is the milestone that closes it. It is specified before it is
-built because the obvious implementation is wrong, and the measurement that
-proves it wrong takes two minutes and was worth taking first.
+M7a established that the recovery this effort built could not fire on any node:
+only a software-decode plan named its decoder, so only a software-decode plan
+could latch a qualified fault, and only a *hardware*-decode plan had an
+alternate to be given. M7b slice 2 now measures a name per `(codec, backend)`
+and makes the exact hardware path available to diagnostic matching. A real
+hardware contract is still required before recovery becomes reachable.
 
 ### What was measured
 
@@ -3839,10 +3856,10 @@ lane and focused tests provide earlier feedback.
   decode while retaining the hardware encoder.
 - Qualified FFmpeg diagnostic output from each supported build/backend class.
 - A diagnostic contract qualified against this fleet's *hardware* decoder
-  names, and an inventory that measures them. Until it exists the automatic
-  decode recovery cannot fire on any node, because only a software-decode plan
-  names its decoder and only a hardware-decode plan has an alternate to be
-  given. Recorded in full under "M7a".
+  names. The backend-aware inventory now measures those names only when FFmpeg
+  emits positive selection evidence, but no retained fleet contract covers a
+  real hardware path yet, so automatic decode recovery remains unreachable.
+  Recorded in full under "M7a" and "M7b".
 - Pixel, metadata, startup, concurrency, and recovery-latency evidence for the
   fleet workload matrix.
 - Web, Apple, and Android prepare/readiness/commit/retirement runs with one

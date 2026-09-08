@@ -1963,7 +1963,7 @@ pub struct DecoderHealthQualification {
     pub eligible: bool,
     /// The FFmpeg version this node measured for itself, if any.
     pub measured_build: Option<String>,
-    /// `codec/decoder` pairs the startup probe measured.
+    /// `codec/backend/decoder` paths the startup probe measured.
     pub measured_decoders: Vec<String>,
     /// The subset a retained contract covers on this build.
     pub covered_decoders: Vec<String>,
@@ -1986,14 +1986,17 @@ impl DecoderHealthQualification {
     /// because that is what planning uses — a surface reporting a fresh
     /// recomputation would say "enforcing" on a node that is not.
     fn of(readiness: &crate::transcode::ArtifactQualificationReadiness, requested: bool) -> Self {
-        let pair = |(codec, decoder): &(String, String)| format!("{codec}/{decoder}");
+        let path =
+            |(codec, backend, decoder): &(String, plurx_core::transcode::DecodeBackend, String)| {
+                format!("{codec}/{}/{decoder}", backend.name())
+            };
         Self {
             namespace: readiness.effective.namespace().to_owned(),
             enforcing: readiness.effective.enforces_receipt(),
             eligible: readiness.eligible(),
             measured_build: readiness.measured_build.clone(),
-            measured_decoders: readiness.measured_decoders.iter().map(pair).collect(),
-            covered_decoders: readiness.covered_decoders.iter().map(pair).collect(),
+            measured_decoders: readiness.measured_decoders.iter().map(path).collect(),
+            covered_decoders: readiness.covered_decoders.iter().map(path).collect(),
             refusal: readiness.refusal.map(|refusal| refusal.name().to_owned()),
             explanation: readiness
                 .refusal

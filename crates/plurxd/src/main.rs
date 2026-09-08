@@ -1830,8 +1830,8 @@ async fn probe_system(
         transcode_dir,
     )
     .await;
-    for (codec, decoder) in measured_decoders.measured_codecs() {
-        tracing::info!(%codec, %decoder, "measured the decoder this ffmpeg selects");
+    for (codec, backend, decoder) in measured_decoders.measured_paths() {
+        tracing::info!(%codec, backend = backend.name(), %decoder, "measured the decoder this ffmpeg selects");
     }
 
     let hwaccel_pref = resolve_hwaccel_pref(store).await?;

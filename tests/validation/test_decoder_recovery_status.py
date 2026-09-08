@@ -55,6 +55,7 @@ M5C1_MERGED_HEAD = "67216de972c1e39f1ef6aefb2541cf542619cb0c"
 # a reader acts on, and a stale one sends a task branch at a tree that no
 # longer exists.
 MAIN_MERGED_HEAD = "08086371180ae9ae89063ec0946e42bb355a8d60"
+M7B_TASK_BASE = "48ad8716"
 CORE_INVENTORY = ROOT / "crates/plurx-core/src/transcode/decoder_inventory.rs"
 CORE_STORE = ROOT / "crates/plurx-core/src/store/mod.rs"
 SQLITE_CACHE = ROOT / "crates/plurx-core/src/store/sqlite/cache.rs"
@@ -230,9 +231,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
 
     def test_current_base_and_receipt_state_cannot_be_confused_with_history(self) -> None:
         self.assertIn(FORGEJO_MAIN_LINEAGE, self.status)
-        self.assertIn(
-            f"Next task base:** effort head `{MAIN_MERGED_HEAD}`", self.flat_status
-        )
+        self.assertIn(f"Task base | Effort head `{M7B_TASK_BASE}`", self.flat_status)
         # Each merged head is named, not only the pull request that carried it.
         self.assertIn(M3C1_MERGED_HEAD[:8], self.status)
         self.assertIn(M3C2_MERGED_HEAD[:8], self.status)
@@ -368,9 +367,9 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
                 self.assertEqual(source.count(surface.get("m2_anchor", "")), 1)
 
         self.assertIn(
-            "M0–M3f, M4, M5a, M5b, the M5a census repair, M5c1, M5c2, M5c3 and "
-            "M7a merged into the effort, and current `main` merged in ahead of "
-            "promotion; M5 complete, M7b specified and next",
+            "M0–M5 complete · M6 server/client implementation landed, fleet "
+            "acceptance open · M7b backend-aware inventory in progress · M8 and "
+            "promotion remain",
             self.flat_status,
         )
         self.assertIn("decoder-plan-v1-unqualified", self.status)
@@ -379,16 +378,16 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             "introduced by M2.",
             self.flat_status,
         )
-        # The effort still owes exactly one full qualification; what changed
-        # is where it is owed. `AGENTS.md` puts it on the promotion head, not
-        # on every task candidate, and the deviation is recorded rather than
-        # taken silently.
+        # The operator explicitly requires one final full suite on each task
+        # candidate after review repairs. Keep that override visible, while
+        # retaining the separate exact-tree promotion obligation.
         self.assertIn(
-            "Deferred to the `Main promotion gate`, per `AGENTS.md`", self.status
+            "Per Paul's 2026-09-08 instruction, run one `make validate-full` only "
+            "after adversarial findings are repaired",
+            self.flat_status,
         )
         self.assertIn(
-            "the effort still owes exactly one `make validate-full` on the exact "
-            "promotion head",
+            "exact-tree promotion still reruns the Main gate after fresh `main` is merged",
             self.flat_status,
         )
 
@@ -773,7 +772,11 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         # And the measurement reaches a plan only under the enforced identity.
         naming = daemon.split(".map(|codec| SoftwareDecoder {", 1)[1].split("})", 1)[0]
         self.assertIn("qualifying", naming)
-        self.assertIn("self.measured_decoders.implementation(&codec)", naming)
+        self.assertIn(
+            "self.measured_decoders.implementation( &codec, "
+            "plurx_core::transcode::DecodeBackend::Software, )",
+            normalized(naming),
+        )
         self.assertIn(
             "let qualifying = qualification.enforces_receipt();", daemon
         )
@@ -1307,6 +1310,30 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             self.status,
         )
         self.assertIn("This is toolchain evidence, not\nfleet evidence", self.status)
+        inventory = CORE_INVENTORY.read_text(encoding="utf-8")
+        self.assertIn("pub fn selected_hardware_decoder(", inventory)
+        self.assertIn(
+            "Selecting decoder '<name>' because of requested hwaccel method <backend>",
+            inventory,
+        )
+        self.assertIn('command.args(["-hwaccel", backend.name()]);', inventory)
+        self.assertIn(
+            "selected_hardware_decoder(&stderr, codec, backend)", inventory
+        )
+        observation = daemon.split("fn for_plan_against(", 1)[1].split(
+            "fn resolve(", 1
+        )[0]
+        self.assertIn(
+            "measured.implementation(codec, plan.decode().backend())", observation
+        )
+        readiness = daemon.split("pub fn artifact_qualification_readiness(", 1)[
+            1
+        ].split("impl TranscodeManager", 1)[0]
+        self.assertIn("backend.name()", readiness)
+        self.assertNotIn("DecodeBackend::Software.name()", readiness)
+        self.assertIn(
+            'format!("{codec}/{}/{decoder}", backend.name())', system
+        )
         self.assertIn("async function saveVerifiedDecode(", web)
         self.assertIn(
             "decoder_health_qualified_artifacts:document.getElementById"
