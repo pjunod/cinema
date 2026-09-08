@@ -722,23 +722,16 @@ class JanitorContractCase(unittest.TestCase):
         self.assertIn("raw/branch/$REF/deploy/runner-janitor", bootstrap)
         self.assertIn('exec "$work/install"', bootstrap)
 
-    def test_the_bootstrap_can_actually_fetch(self):
-        """A string in a file is not a fetch, and that distinction cost a day.
+    def fake_forge(self, fixture):
+        """A forge that answers 404 unless an `Authorization: token` header is
 
-        `noirr/plurx` is private: every raw URL answers 404 to an anonymous
-        request and 200 with an `Authorization: token` header. The bootstrap
-        used a bare `curl`, so the one-command install documented at the top of
-        that file could never have worked on any host. It was published, handed
-        to an operator, and failed on first use with `curl: (22) ... 404` and
-        `bash: /dev/fd/63: Bad file descriptor`, which names neither the private
-        repository nor the missing credential.
+        present, plus the environment the bootstrap needs to reach it. Shared
+        by the two bootstrap tests so neither can drift from the other's idea
+        of what the forge does.
 
-        The check that was supposed to catch this asserted the URL *string*
-        appeared in the file — which it did, correctly, the whole time. This one
-        runs the bootstrap against a fake forge that refuses unauthenticated
-        requests, so it fails if the header is ever dropped again.
+        Returns (forge dir, environment, installed-marker path, curl log).
         """
-        fixture = Path(self._directory.name) / "bootstrap"
+        fixture.mkdir(parents=True, exist_ok=True)
         forge = fixture / "forge/noirr/plurx/raw/branch/main/deploy/runner-janitor"
         forge.mkdir(parents=True)
         for name in (
@@ -763,20 +756,35 @@ class JanitorContractCase(unittest.TestCase):
             "auth=no; url=; out=; fail=no\n"
             "while [ $# -gt 0 ]; do\n"
             '  case "$1" in\n'
-            '    -H) case "$2" in "Authorization: token "?*) auth=yes ;; esac; shift 2 ;;\n'
-            '    -o) out=$2; shift 2 ;;\n'
-            '    -*f*) fail=yes; shift ;;\n'
+            # Both spellings of every flag. An earlier version matched only
+            # `-H`/`-o`, so renaming them to `--header`/`--output` -- a change
+            # real curl cannot tell apart -- failed this test against a
+            # perfectly correct bootstrap. A guard that fails on correct code
+            # teaches people to edit the guard.
+            '    -H|--header) case "$2" in "Authorization: token "?*) auth=yes ;; esac; shift 2 ;;\n'
+            '    -o|--output) out=$2; shift 2 ;;\n'
+            '    --fail|-*f*) fail=yes; shift ;;\n'
             '    -*) shift ;;\n'
             '    *) url=$1; shift ;;\n'
             "  esac\n"
             "done\n"
+            # An unauthenticated request is a 404 like any other, so it
+            # obeys `--fail` like any other. Modelling it as an unconditional
+            # exit 22 hid the combined regression -- header dropped AND
+            # `--fail` dropped -- which is the case where `install` is
+            # chmod +x'd and exec'd as root over the forge's error body.
             'if [ "$auth" != yes ]; then\n'
-            '  echo "curl: (22) The requested URL returned error: 404" >&2\n'
-            "  exit 22\n"
+            '  if [ "$fail" = yes ]; then\n'
+            '    echo "curl: (22) The requested URL returned error: 404" >&2\n'
+            "    exit 22\n"
+            "  fi\n"
+            '  printf \'Not found.\\n\' > "$out"\n'
+            "  exit 0\n"
             "fi\n"
             # A missing file models the other half of the real failure: without
             # `--fail`, curl writes the 404 body to the destination and exits
             # 0, so `install` would run an HTML error page as a shell script.
+            'printf \'%s\\n\' "$url" >> "$FIXTURE_CURL_LOG"\n'
             'src=${url#file://}\n'
             'if [ ! -f "$src" ]; then\n'
             '  if [ "$fail" = yes ]; then\n'
@@ -801,11 +809,89 @@ class JanitorContractCase(unittest.TestCase):
                 "PATH": f"{bin_dir}{os.pathsep}{environment['PATH']}",
                 "PLURX_FORGE": f"file://{fixture / 'forge'}",
                 "FIXTURE_INSTALLED": str(installed),
+                "FIXTURE_CURL_LOG": str(fixture / "curl.log"),
                 # The bootstrap's own `mktemp -d` lands here rather than in
                 # whatever the ambient TMPDIR is, so the test is hermetic and
                 # does not fail on a host whose /tmp is full.
                 "TMPDIR": str(fixture),
             }
+        )
+        bootstrap_path = str(ROOT / "deploy/runner-janitor/bootstrap")
+
+        return forge, environment, installed, Path(environment["FIXTURE_CURL_LOG"])
+
+    def test_the_documented_bootstrap_command_works(self):
+        """The command in the doc is the one an operator copies, so run THAT.
+
+        The previous version of this file published
+        `sudo PLURX_TOKEN=… bash -c "$(curl …)"`. It is not a syntax error and
+        `bash -n` passes it, but `$( )` is expanded by the CALLING shell, where
+        `PLURX_TOKEN` is not set — a `sudo VAR=x` assignment applies only to
+        the command sudo runs. The header goes out empty, the forge answers
+        404, `--fail` makes curl exit 22, the substitution yields nothing, and
+        `bash -c ""` exits 0. A silent no-op reporting success, holding a valid
+        token, which is worse than the failure it replaced. It was written,
+        reviewed and published, in the file whose entire subject is a published
+        command that could not work.
+
+        Reading the block out of the document rather than restating it is the
+        point: a copy here would drift from the thing operators paste, which is
+        the same defect one level up.
+        """
+        document = (ROOT / "docs/ci/RUNNER-DISK.md").read_text(encoding="utf-8")
+        blocks = re.findall(r"```bash\n(.*?)```", document, re.S)
+        command = next(
+            (block for block in blocks if "PLURX_TOKEN" in block), None
+        )
+        self.assertIsNotNone(command, "RUNNER-DISK.md must document the bootstrap")
+
+        fixture = Path(self._directory.name) / "documented"
+        forge, environment, installed, _ = self.fake_forge(fixture)
+        # `sudo` is what carries the assignment into the child shell, and this
+        # test is not root: `env` has the same semantics for the one property
+        # under test, so the placeholder becomes a real assignment on it.
+        command = command.replace(
+            "sudo PLURX_TOKEN=<forgejo token>", "env PLURX_TOKEN=fixture-token"
+        )
+        command = command.replace(
+            "http://192.168.4.7:3000/noirr/plurx/raw/branch/main"
+            "/deploy/runner-janitor/bootstrap",
+            f"file://{forge}/bootstrap",
+        )
+        (forge / "bootstrap").write_bytes(
+            (ROOT / "deploy/runner-janitor/bootstrap").read_bytes()
+        )
+
+        result = subprocess.run(
+            ["bash", "-c", command], env=environment, capture_output=True, text=True
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(
+            installed.exists(),
+            "the documented command exited without running the installer: "
+            + result.stdout
+            + result.stderr,
+        )
+
+    def test_the_bootstrap_can_actually_fetch(self):
+        """A string in a file is not a fetch, and that distinction cost a day.
+
+        `noirr/plurx` is private: every raw URL answers 404 to an anonymous
+        request and 200 with an `Authorization: token` header. The bootstrap
+        used a bare `curl`, so the one-command install documented at the top of
+        that file could never have worked on any host. It was published, handed
+        to an operator, and failed on first use with `curl: (22) ... 404` and
+        `bash: /dev/fd/63: Bad file descriptor`, which names neither the private
+        repository nor the missing credential.
+
+        The check that was supposed to catch this asserted the URL *string*
+        appeared in the file — which it did, correctly, the whole time. This one
+        runs the bootstrap against a fake forge that refuses unauthenticated
+        requests, so it fails if the header is ever dropped again.
+        """
+        forge, environment, installed, curl_log = self.fake_forge(
+            Path(self._directory.name) / "bootstrap"
         )
         bootstrap_path = str(ROOT / "deploy/runner-janitor/bootstrap")
 
@@ -824,6 +910,13 @@ class JanitorContractCase(unittest.TestCase):
             ["bash", bootstrap_path], env=environment, capture_output=True, text=True
         )
         self.assertEqual(with_token.returncode, 0, with_token.stderr)
+        # The fake `curl` is the entire guarantee of this test, so prove it is
+        # the curl that ran. `PLURX_FORGE` is a `file://` URL and REAL curl
+        # ignores `-H` for that scheme — so if the PATH shim ever misses, this
+        # test passes with the header dropped, which is the vacuous-guard
+        # failure it exists to prevent.
+        self.assertTrue(curl_log.exists(), "the fake curl never ran")
+        self.assertEqual(len(curl_log.read_text(encoding="utf-8").split()), 4)
         self.assertEqual(
             installed.read_text(encoding="utf-8").split(),
             [

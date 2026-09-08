@@ -1,9 +1,20 @@
 #!/usr/bin/env bash
 # Install the runner janitor on a host with no checkout of this repository.
 #
-#   sudo PLURX_TOKEN=<forgejo token> bash -c "$(curl -fsSL \
+#   sudo PLURX_TOKEN=<forgejo token> bash -euc 'f=$(mktemp); curl -fsSL \
 #     -H "Authorization: token $PLURX_TOKEN" \
-#     http://192.168.4.7:3000/noirr/plurx/raw/branch/main/deploy/runner-janitor/bootstrap)"
+#     http://192.168.4.7:3000/noirr/plurx/raw/branch/main/deploy/runner-janitor/bootstrap \
+#     -o "$f"; bash "$f"; rm -f "$f"'
+#
+# The shape of that command is not decoration either, and getting it wrong is
+# how this file was published broken a second time. `bash -c "$(curl ...)"`
+# expands the substitution in the CALLING shell, where `PLURX_TOKEN` is not
+# set -- a `sudo VAR=x` assignment applies only to the command sudo runs. So
+# the header goes out empty, the forge answers 404, `--fail` makes curl exit
+# 22, the substitution yields nothing, and `bash -c ""` exits 0. A silent
+# no-op that reports success, with a perfectly valid token in hand, which is
+# worse than the failure it replaced. Single quotes and `-euc` keep the
+# expansion inside the shell sudo runs and make a failed fetch loud.
 #
 # One command, because a fleet fix that takes four is a fleet fix that gets
 # applied to two hosts. It fetches the janitor, its unit and its timer from the
@@ -40,8 +51,11 @@ base="$FORGE/noirr/plurx/raw/branch/$REF/deploy/runner-janitor"
 work=$(mktemp -d)
 trap 'rm -rf -- "$work"' EXIT
 for name in plurx-ci-janitor plurx-ci-janitor.service plurx-ci-janitor.timer install; do
-  # `--fail` matters as much as the header: without it a 404 body is written to
-  # the destination and `install` runs an HTML error page as a shell script.
+  # `--fail` matters as much as the header: without it curl writes the 404 body
+  # to the destination and exits 0, so `install` is chmod +x'd and exec'd as
+  # root over whatever the forge said. This one answers `Not found.` with no
+  # shebang, so the exec fails -- but "the install silently did nothing" is the
+  # outcome either way, and nothing about the next endpoint is promised.
   curl -fsSL -H "Authorization: token $TOKEN" "$base/$name" -o "$work/$name" || {
     echo "bootstrap: could not fetch $name from $base" >&2
     echo "           a 404 here usually means the token is wrong or expired." >&2

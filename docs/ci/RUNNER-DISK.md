@@ -174,10 +174,21 @@ four files from the forge and runs the same installer — **and it needs a token
 which is not optional**:
 
 ```bash
-sudo PLURX_TOKEN=<forgejo token> bash -c "$(curl -fsSL \
+sudo PLURX_TOKEN=<forgejo token> bash -euc 'f=$(mktemp); curl -fsSL \
   -H "Authorization: token $PLURX_TOKEN" \
-  http://192.168.4.7:3000/noirr/plurx/raw/branch/main/deploy/runner-janitor/bootstrap)"
+  http://192.168.4.7:3000/noirr/plurx/raw/branch/main/deploy/runner-janitor/bootstrap \
+  -o "$f"; bash "$f"; rm -f "$f"'
 ```
+
+**The shape of that command matters as much as the header.**
+`bash -c "$(curl …)"` expands the substitution in the *calling* shell, where
+`PLURX_TOKEN` is not set — a `sudo VAR=x` assignment applies only to the
+command sudo runs. The header goes out empty, the forge answers 404, `--fail`
+makes curl exit 22, the substitution yields nothing, and `bash -c ""` exits 0:
+a silent no-op that reports success, holding a perfectly valid token. That
+version was written, reviewed and published here before this one, which is why
+`test_the_documented_bootstrap_command_works` now extracts this very code block
+from this file and runs it.
 
 `noirr/plurx` is private: every raw URL answers 404 to an anonymous request and
 200 with that header. The bootstrap shipped without it, so the one-command
