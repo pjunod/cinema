@@ -32,6 +32,11 @@ pub(crate) const GUIDE_REFRESH_INTERVAL: Duration = Duration::from_secs(20 * 60)
 /// After this the cache is dropped and `unavailable` is the honest answer.
 /// A day-old grid is worse than no grid: it is confidently wrong.
 pub(crate) const GUIDE_STALE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
+/// A refresh needs a lineup it did not fetch, and on a freshly started owner
+/// the lineup cache is cold until a client reads channels. Waiting a full
+/// refresh interval for that would leave the first visitor a guideless grid
+/// for twenty minutes, so a refresh that found no lineup comes back soon.
+pub(crate) const GUIDE_COLD_LINEUP_RETRY: Duration = Duration::from_secs(60);
 pub(crate) const GUIDE_FETCH_TIMEOUT: Duration = Duration::from_secs(15);
 /// XMLTV for a large lineup is a few MiB. Anything larger is refused rather
 /// than streamed: this is a cache fill, not a download service.
@@ -43,6 +48,11 @@ pub(crate) const MAX_GUIDE_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_TITLE_BYTES: usize = 256;
 const MAX_EPISODE_TITLE_BYTES: usize = 256;
 const MAX_SYNOPSIS_BYTES: usize = 1024;
+/// A ceiling on the character data accumulated for one XMLTV element before
+/// its own field bound is applied. Without it, a hostile document could make
+/// a single `<desc>` out of unlimited entity fragments and grow the buffer
+/// without bound while every individual fragment stayed small.
+const MAX_XMLTV_FIELD_BYTES: usize = 16 * 1024;
 const MAX_AFFILIATE_BYTES: usize = 32;
 const MAX_IMAGE_URL_BYTES: usize = 512;
 const MAX_FILTERS: usize = 8;
@@ -181,10 +191,12 @@ impl LiveTvGuide {
             if encoded <= MAX_GUIDE_RESPONSE_BYTES {
                 break;
             }
-            let mut excess = encoded - MAX_GUIDE_RESPONSE_BYTES;
-            // A little headroom, so a pass that lands exactly on the cap does
-            // not need a ninth one for the enclosing punctuation.
-            excess += excess / 8 + 64;
+            // Headroom is a fixed slack for the enclosing punctuation, NOT a
+            // fraction of the excess: scaling it with the overshoot meant a
+            // document nine times the cap asked to drop nine times the cap's
+            // worth of rows and emptied the guide entirely — the one outcome
+            // this whole function exists to avoid.
+            let mut excess = encoded - MAX_GUIDE_RESPONSE_BYTES + 1024;
             while excess > 0 {
                 let Some((_, index)) = out
                     .channels
@@ -240,11 +252,18 @@ pub(crate) fn normalise_programmes(mut rows: Vec<LiveTvProgramme>) -> Vec<LiveTv
 
 pub(crate) fn bounded_text(value: Option<String>, limit: usize) -> Option<String> {
     let value = value?;
-    let cleaned = value
-        .chars()
-        .filter(|c| !c.is_control())
-        .take(limit)
-        .collect::<String>();
+    // The contract's limits are BYTES, and the guide host is untrusted: taking
+    // `limit` *characters* let a title of 256 CJK or emoji characters through
+    // at up to four times the bound it was supposed to enforce, which is a
+    // response-size bound as much as a display one. Take whole characters
+    // while they fit, so the result is bounded and never split mid-character.
+    let mut cleaned = String::new();
+    for c in value.chars().filter(|c| !c.is_control()) {
+        if cleaned.len() + c.len_utf8() > limit {
+            break;
+        }
+        cleaned.push(c);
+    }
     let trimmed = cleaned.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_owned())
 }
@@ -268,23 +287,32 @@ pub(crate) fn normalise_episode(value: Option<String>) -> Option<String> {
     if bytes.first() == Some(&b'S') {
         let rest = &upper[1..];
         let split = rest.find('E')?;
-        let season = rest[..split].trim_start_matches('0');
-        let episode = rest[split + 1..].trim_start_matches('0');
-        if season.is_empty() || episode.is_empty() {
-            return None;
-        }
-        if !season.chars().all(|c| c.is_ascii_digit())
-            || !episode.chars().all(|c| c.is_ascii_digit())
+        let raw_season = &rest[..split];
+        let raw_episode = &rest[split + 1..];
+        if raw_season.is_empty()
+            || raw_episode.is_empty()
+            || !raw_season.chars().all(|c| c.is_ascii_digit())
+            || !raw_episode.chars().all(|c| c.is_ascii_digit())
         {
             return None;
         }
+        // `S00E05` is how every guide source spells a special, and trimming
+        // zeros first turned its season into the empty string and dropped the
+        // episode number with it. Trim for display, but decide validity on the
+        // digits that were actually sent.
+        let season = raw_season.trim_start_matches('0');
+        let episode = raw_episode.trim_start_matches('0');
+        let season = if season.is_empty() { "0" } else { season };
+        let episode = if episode.is_empty() { "0" } else { episode };
         return Some(format!("S{season}E{episode}"));
     }
     if bytes.first() == Some(&b'E') {
-        let episode = upper[1..].trim_start_matches('0');
-        if episode.is_empty() || !episode.chars().all(|c| c.is_ascii_digit()) {
+        let raw = &upper[1..];
+        if raw.is_empty() || !raw.chars().all(|c| c.is_ascii_digit()) {
             return None;
         }
+        let episode = raw.trim_start_matches('0');
+        let episode = if episode.is_empty() { "0" } else { episode };
         return Some(format!("E{episode}"));
     }
     None
@@ -362,7 +390,28 @@ pub(crate) fn unix_to_air_date(value: i64) -> Option<String> {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
+    // The civil conversion is only correct for instants inside the range
+    // checked above; anything that lands outside a real calendar day is a
+    // guide row we drop rather than print. An air date is a fact shown to a
+    // person, and "2026-02-31" is worse than no date at all.
+    if !(1..=12).contains(&m) || !(1..=i64::from(days_in_month(y, m))).contains(&d) {
+        return None;
+    }
     Some(format!("{y:04}-{m:02}-{d:02}"))
+}
+
+fn days_in_month(year: i64, month: i64) -> u8 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if year.rem_euclid(4) == 0
+            && (year.rem_euclid(100) != 0 || year.rem_euclid(400) == 0) =>
+        {
+            29
+        }
+        2 => 28,
+        _ => 0,
+    }
 }
 
 /// Read `DeviceAuth` fresh from the device at the moment of each refresh, use
@@ -577,8 +626,15 @@ pub(crate) fn parse_xmltv(
     use quick_xml::events::Event;
 
     let mut reader = quick_xml::Reader::from_reader(body);
-    reader.config_mut().trim_text(true);
+    // Text must NOT be trimmed per event. quick-xml splits an element's
+    // character data at every entity and CDATA boundary, so "Tom &amp; Jerry"
+    // arrives as three events; trimming each one would glue the fragments
+    // together as "Tom&Jerry". The assembled value is trimmed once, below.
+    reader.config_mut().trim_text(false);
     let mut buffer = Vec::new();
+    // Character data for the element currently open, accumulated across every
+    // Text / CData / GeneralRef fragment and committed on its End event.
+    let mut pending = String::new();
 
     let mut channels: HashMap<String, XmltvChannel> = HashMap::new();
     let mut programmes: HashMap<String, Vec<LiveTvProgramme>> = HashMap::new();
@@ -642,6 +698,9 @@ pub(crate) fn parse_xmltv(
                     }
                     other => field = Some(other.to_owned()),
                 }
+                // Whitespace between the parent's tags is not this element's
+                // text.
+                pending.clear();
             }
             Ok(Event::Empty(event)) => {
                 let name = String::from_utf8_lossy(event.name().as_ref()).into_owned();
@@ -652,59 +711,55 @@ pub(crate) fn parse_xmltv(
                 }
             }
             Ok(Event::Text(text)) => {
-                let Ok(decoded) = text.decode() else { continue };
-                let value = quick_xml::escape::unescape(&decoded)
-                    .map(|value| value.into_owned())
-                    .unwrap_or_else(|_| decoded.into_owned());
-                if value.is_empty() {
-                    continue;
+                if let Ok(decoded) = text.decode() {
+                    let unescaped = quick_xml::escape::unescape(&decoded)
+                        .map(|value| value.into_owned())
+                        .unwrap_or_else(|_| decoded.into_owned());
+                    push_fragment(&mut pending, &unescaped);
                 }
-                match (field.as_deref(), programme.as_mut(), channel_id.as_deref()) {
-                    (Some("display-name"), None, Some(id)) => {
-                        if let Some(entry) = channels.get_mut(id) {
-                            entry.display_names.push(value);
-                        }
-                    }
-                    (Some("lcn"), None, Some(id)) => {
-                        if let Some(entry) = channels.get_mut(id) {
-                            entry.lcn = Some(value);
-                        }
-                    }
-                    (Some("title"), Some((_, row)), _) if row.title.is_empty() => {
-                        row.title = bounded_text(Some(value), MAX_TITLE_BYTES).unwrap_or_default();
-                    }
-                    (Some("sub-title"), Some((_, row)), _) => {
-                        row.episode_title = bounded_text(Some(value), MAX_EPISODE_TITLE_BYTES);
-                    }
-                    (Some("desc"), Some((_, row)), _) => {
-                        row.synopsis = bounded_text(Some(value), MAX_SYNOPSIS_BYTES);
-                    }
-                    (Some("date"), Some((_, row)), _) => {
-                        row.original_air_date = xmltv_date(&value);
-                    }
-                    (Some("category"), Some((_, row)), _) => {
-                        if row.filters.len() < MAX_FILTERS {
-                            if let Some(filter) = bounded_text(Some(value), MAX_FILTER_BYTES) {
-                                row.filters.push(filter);
-                            }
-                        }
-                    }
-                    (Some("episode-num"), Some((_, row)), _) => {
-                        let system = episode_system.as_deref().unwrap_or("");
-                        let candidate = if system == "xmltv_ns" {
-                            xmltv_ns_episode(&value)
-                        } else {
-                            normalise_episode(Some(value))
-                        };
-                        if row.episode.is_none() {
-                            row.episode = candidate;
-                        }
-                    }
-                    _ => {}
+            }
+            // CDATA is character data too. Reading only Text events meant a
+            // title wrapped in CDATA — which grabbers use precisely for titles
+            // full of punctuation — produced an empty title and the programme
+            // was dropped.
+            Ok(Event::CData(data)) => {
+                if let Ok(decoded) = data.decode() {
+                    push_fragment(&mut pending, &decoded);
+                }
+            }
+            // An entity is its own event, not part of the surrounding text.
+            // Dropping these is what turned "Tom &amp; Jerry" into the title
+            // "Tom" and, for the fields that take the last fragment, the
+            // synopsis " Jerry". Entities are ubiquitous in real grabber
+            // output, so this was the common case rather than an edge one.
+            Ok(Event::GeneralRef(entity)) => {
+                let resolved = match entity.resolve_char_ref() {
+                    Ok(Some(c)) => Some(c.to_string()),
+                    Ok(None) => entity
+                        .decode()
+                        .ok()
+                        .and_then(|name| named_entity(name.as_ref()).map(str::to_owned)),
+                    Err(_) => None,
+                };
+                if let Some(resolved) = resolved {
+                    push_fragment(&mut pending, &resolved);
                 }
             }
             Ok(Event::End(event)) => {
                 let name = String::from_utf8_lossy(event.name().as_ref()).into_owned();
+                // The whole element's character data is now in hand, entities
+                // and CDATA included, so this is the only place it is read.
+                let value = std::mem::take(&mut pending).trim().to_owned();
+                if !value.is_empty() {
+                    commit_xmltv_field(
+                        field.as_deref(),
+                        value,
+                        &mut channels,
+                        channel_id.as_deref(),
+                        programme.as_mut(),
+                        episode_system.as_deref(),
+                    );
+                }
                 match name.as_str() {
                     "channel" => channel_id = None,
                     "programme" => {
@@ -715,6 +770,7 @@ pub(crate) fn parse_xmltv(
                     _ => {}
                 }
                 field = None;
+                episode_system = None;
             }
             _ => {}
         }
@@ -738,6 +794,80 @@ pub(crate) fn parse_xmltv(
         });
     }
     Ok(out)
+}
+
+fn push_fragment(pending: &mut String, fragment: &str) {
+    if pending.len() + fragment.len() <= MAX_XMLTV_FIELD_BYTES {
+        pending.push_str(fragment);
+    }
+}
+
+/// The five entities XML predefines. A document that uses any other named
+/// entity has to declare it in a DTD, and plurx does not process DTDs from an
+/// untrusted document — an undeclared name resolves to nothing rather than to
+/// a guess.
+fn named_entity(name: &str) -> Option<&'static str> {
+    match name {
+        "amp" => Some("&"),
+        "lt" => Some("<"),
+        "gt" => Some(">"),
+        "quot" => Some("\""),
+        "apos" => Some("'"),
+        _ => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn commit_xmltv_field(
+    field: Option<&str>,
+    value: String,
+    channels: &mut HashMap<String, XmltvChannel>,
+    channel_id: Option<&str>,
+    programme: Option<&mut (String, LiveTvProgramme)>,
+    episode_system: Option<&str>,
+) {
+    match (field, programme, channel_id) {
+        (Some("display-name"), None, Some(id)) => {
+            if let Some(entry) = channels.get_mut(id) {
+                entry.display_names.push(value);
+            }
+        }
+        (Some("lcn"), None, Some(id)) => {
+            if let Some(entry) = channels.get_mut(id) {
+                entry.lcn = Some(value);
+            }
+        }
+        (Some("title"), Some((_, row)), _) if row.title.is_empty() => {
+            row.title = bounded_text(Some(value), MAX_TITLE_BYTES).unwrap_or_default();
+        }
+        (Some("sub-title"), Some((_, row)), _) => {
+            row.episode_title = bounded_text(Some(value), MAX_EPISODE_TITLE_BYTES);
+        }
+        (Some("desc"), Some((_, row)), _) => {
+            row.synopsis = bounded_text(Some(value), MAX_SYNOPSIS_BYTES);
+        }
+        (Some("date"), Some((_, row)), _) => {
+            row.original_air_date = xmltv_date(&value);
+        }
+        (Some("category"), Some((_, row)), _) => {
+            if row.filters.len() < MAX_FILTERS {
+                if let Some(filter) = bounded_text(Some(value), MAX_FILTER_BYTES) {
+                    row.filters.push(filter);
+                }
+            }
+        }
+        (Some("episode-num"), Some((_, row)), _) => {
+            let candidate = if episode_system == Some("xmltv_ns") {
+                xmltv_ns_episode(&value)
+            } else {
+                normalise_episode(Some(value))
+            };
+            if row.episode.is_none() {
+                row.episode = candidate;
+            }
+        }
+        _ => {}
+    }
 }
 
 fn attribute(event: &quick_xml::events::BytesStart<'_>, name: &str) -> Option<String> {

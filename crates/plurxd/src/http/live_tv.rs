@@ -27,11 +27,6 @@ const DRAIN_EXCHANGE_DEADLINE: Duration = Duration::from_secs(20);
 const RESOURCE_EXCHANGE_DEADLINE: Duration = Duration::from_secs(12);
 const MAX_START_RESPONSE_BYTES: usize = 32 * 1024;
 const GUIDE_EXCHANGE_DEADLINE: Duration = Duration::from_secs(25);
-/// An ingress remembers the owner's answer for this long, so a click-storm on
-/// a busy page is not a relay-storm on the owner. It is deliberately shorter
-/// than the refresh interval: this bounds fan-out, it does not add staleness
-/// the owner has not already accounted for.
-const GUIDE_RELAY_MEMORY: Duration = Duration::from_secs(60);
 const MAX_GUIDE_REQUEST_HOURS: u8 = 72;
 
 #[derive(Clone, Debug, Serialize)]
@@ -129,7 +124,7 @@ pub(crate) async fn owner_guide(
         Ok(guide) => {
             state
                 .live_tv
-                .remember_relayed_guide(config.generation, guide.clone(), GUIDE_RELAY_MEMORY)
+                .remember_relayed_guide(config.generation, guide.clone())
                 .await;
             guide.clipped(&window)
         }
@@ -271,12 +266,17 @@ pub(crate) async fn guide_readiness(
             )
         },
     });
+    // The same horizon a client asks for, so `programmes` is the depth the
+    // guide actually has. A zero-width window here counted only what is on air
+    // this second, which reads as roughly one row per channel however deep the
+    // guide is — the opposite of what an operator opens this panel to learn.
+    let now = crate::live_tv::unix_seconds();
     let guide = owner_guide(
         &state,
         &config,
         GuideWindow {
-            start: crate::live_tv::unix_seconds(),
-            end: crate::live_tv::unix_seconds(),
+            start: now - 3600,
+            end: now.saturating_add(i64::from(config.guide_hours) * 3600),
         },
     )
     .await;
