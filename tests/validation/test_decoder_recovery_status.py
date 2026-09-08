@@ -55,6 +55,7 @@ M5C1_MERGED_HEAD = "67216de972c1e39f1ef6aefb2541cf542619cb0c"
 # a reader acts on, and a stale one sends a task branch at a tree that no
 # longer exists.
 MAIN_MERGED_HEAD = "08086371180ae9ae89063ec0946e42bb355a8d60"
+M7B_TASK_BASE = "48ad8716"
 CORE_INVENTORY = ROOT / "crates/plurx-core/src/transcode/decoder_inventory.rs"
 CORE_STORE = ROOT / "crates/plurx-core/src/store/mod.rs"
 SQLITE_CACHE = ROOT / "crates/plurx-core/src/store/sqlite/cache.rs"
@@ -230,9 +231,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
 
     def test_current_base_and_receipt_state_cannot_be_confused_with_history(self) -> None:
         self.assertIn(FORGEJO_MAIN_LINEAGE, self.status)
-        self.assertIn(
-            f"Next task base:** effort head `{MAIN_MERGED_HEAD}`", self.flat_status
-        )
+        self.assertIn(f"Task base | Effort head `{M7B_TASK_BASE}`", self.flat_status)
         # Each merged head is named, not only the pull request that carried it.
         self.assertIn(M3C1_MERGED_HEAD[:8], self.status)
         self.assertIn(M3C2_MERGED_HEAD[:8], self.status)
@@ -368,9 +367,9 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
                 self.assertEqual(source.count(surface.get("m2_anchor", "")), 1)
 
         self.assertIn(
-            "M0–M3f, M4, M5a, M5b, the M5a census repair, M5c1, M5c2, M5c3 and "
-            "M7a merged into the effort, and current `main` merged in ahead of "
-            "promotion; M5 complete, M7b specified and next",
+            "M0–M5 complete · M6 server/client implementation landed, fleet "
+            "acceptance open · M7b approved, final effort gate pending · "
+            "M8 and promotion remain",
             self.flat_status,
         )
         self.assertIn("decoder-plan-v1-unqualified", self.status)
@@ -379,16 +378,15 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             "introduced by M2.",
             self.flat_status,
         )
-        # The effort still owes exactly one full qualification; what changed
-        # is where it is owed. `AGENTS.md` puts it on the promotion head, not
-        # on every task candidate, and the deviation is recorded rather than
-        # taken silently.
+        # Task PRs use the effort lane; the expensive complete suite runs once
+        # after all reviewed tasks are merged into the frozen effort candidate.
         self.assertIn(
-            "Deferred to the `Main promotion gate`, per `AGENTS.md`", self.status
+            "Per Paul's 2026-09-08 clarification, task PRs into the effort do not "
+            "run the full unit suite",
+            self.flat_status,
         )
         self.assertIn(
-            "the effort still owes exactly one `make validate-full` on the exact "
-            "promotion head",
+            "Run it once on the frozen, fully reviewed effort branch after all fixes",
             self.flat_status,
         )
 
@@ -531,10 +529,10 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
 
         # Until M3f nothing selected the qualified identity at all, and this
         # asserted the document said so. M3f adds the selector, so the claim
-        # worth pinning is the one that replaced it: the identity is never
-        # chosen by a request alone, only by a request the node's own
-        # measurements allow.
-        self.assertIn("the node effective-mode intersection", self.status)
+        # worth pinning is the rule that replaced it: the request is honoured,
+        # while only an exactly measured and uniquely covered path changes
+        # identity. Missing prerequisites remain visible advice.
+        self.assertIn("path-scoped policy", self.status)
         self.assertNotIn("Nothing selects it in production yet", self.status)
         # And the document does not name two different milestones for it.
         self.assertNotIn("That is M3c3, and it now has something", self.status)
@@ -773,7 +771,11 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         # And the measurement reaches a plan only under the enforced identity.
         naming = daemon.split(".map(|codec| SoftwareDecoder {", 1)[1].split("})", 1)[0]
         self.assertIn("qualifying", naming)
-        self.assertIn("self.measured_decoders.implementation(&codec)", naming)
+        self.assertIn(
+            "self.measured_decoders.implementation( &codec, "
+            "plurx_core::transcode::DecodeBackend::Software, )",
+            normalized(naming),
+        )
         self.assertIn(
             "let qualifying = qualification.enforces_receipt();", daemon
         )
@@ -1144,7 +1146,8 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         # What the repair does not claim.
         self.assertIn("That is a practice, not a gate", self.status)
         self.assertIn(
-            "Wire the full `cargo test --workspace` run into a gate", self.status
+            "Run the full `cargo test --workspace` coverage in the effort's promotion",
+            self.status,
         )
         self.assertIn(
             "Give `populated_v14_import_fixture` in `tests/store_contract.rs` "
@@ -1154,16 +1157,14 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         self.assertIn("five gates M5a tripped and nobody read", self.status)
         self.assertNotIn("four gates M5a tripped", self.status)
 
-    def test_m3f_the_control_is_a_request_the_node_may_refuse(self) -> None:
-        """A switch here would rename every transcode on a node that cannot use it.
+    def test_m3f_the_control_is_path_scoped_and_prerequisites_are_advisory(self) -> None:
+        """A covered path rotates identity without gating the operator request.
 
-        The identity this control selects is a content-addressed key space. A
-        node that honoured a request it could not serve would rotate its whole
-        cache to keys whose every generation is then refused — re-encoding each
-        title once per request forever, with every counter reading healthy.
-        That is worse than the failure the effort exists to fix, because it is
-        silent and it is caused by the fix. So the request is intersected with
-        what the node measured, and the surface reports both facts.
+        The identity this control selects is a content-addressed key space.
+        Enabling the policy rotates only exact paths with one covering
+        contract; uncovered or ambiguous paths retain their current identity.
+        The surface therefore reports the enabled policy, the conservative
+        legacy whole-node fact, and the path coverage separately.
         """
         daemon = DAEMON_TRANSCODE.read_text(encoding="utf-8")
         system = HTTP_SYSTEM.read_text(encoding="utf-8")
@@ -1174,8 +1175,8 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         self.assertIn(
             '"playback.decoder_health_qualified_artifacts"', store
         )
-        # The rule takes measured facts and nothing else, so it is testable
-        # without a manager, a store, a cache or an FFmpeg.
+        # The rule takes immutable boot facts and selectable paths, so it is
+        # testable without a manager, a store, a cache or an FFmpeg.
         self.assertIn(
             "pub fn artifact_qualification_readiness(\n    requested: bool,", daemon
         )
@@ -1186,6 +1187,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             "BuildUnmeasured",
             "NoDecoderMeasured",
             "NoContractCoversThisBuild",
+            "IncompleteCoverage",
             # Two covering contracts read downstream exactly like none, and the
             # fix for one is the opposite of the fix for the other.
             "AmbiguousContract",
@@ -1205,9 +1207,9 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             "crate::decoder_health::QUALIFIED_STDERR_MODE", daemon
         )
 
-        # Published once, at start, and nowhere else. The value is part of
-        # every cache key the node computes, so applying it to a live node
-        # would move that key space under work already running — a session
+        # Published once, at start, and nowhere else. The value can change the
+        # key of each covered path, so applying it to a live node would move
+        # affected key spaces under work already running — a session
         # publishing where the next lookup will not look, a resumable
         # production restarting from parts that carry no receipt.
         self.assertIn("state.transcode.publish_artifact_qualification().await;", main)
@@ -1236,9 +1238,9 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             "#[cfg(test)]\n    pub(crate) fn test_publish_artifact_qualification(", daemon
         )
 
-        # Two facts, two fields. A surface that echoed the request back as the
-        # state would let an operator believe every transcode on the node is
-        # verified when nothing about it changed.
+        # The stored request, conservative legacy state and exact coverage are
+        # separate facts. Collapsing them would either hide an enabled policy
+        # or claim every transcode on the node is verified.
         self.assertIn("pub decoder_health_qualified_artifacts: bool,", system)
         self.assertIn(
             "pub decoder_health_qualification: DecoderHealthQualification,", system
@@ -1247,7 +1249,14 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         for field in (
             "namespace",
             "enforcing",
+            "policy_enabled",
+            "requested_namespace",
+            "path_scoped",
             "eligible",
+            "measured_decoders",
+            "covered_decoders",
+            "measured_paths_v2",
+            "covered_paths_v2",
             "refusal",
             "explanation",
             # The third fact. Without it the surface either hides a saved
@@ -1261,12 +1270,13 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         # node measured, and saves its own single field.
         self.assertIn("function verifiedDecodeCard(", web)
         self.assertIn("verifiedDecodeCard(settings)", web)
-        # Conditional, because on a node that cannot honour the request there
-        # is no cost — and an unconditional warning above three crosses that
-        # contradict it teaches an operator to stop reading warnings.
-        self.assertIn("cannot honour the request today", web)
-        self.assertIn("renames every transcode it caches", web)
-        self.assertIn("pays the same rename a second time", web)
+        # Conditional, because an uncovered path pays no cache rename yet.
+        # The prerequisites advise; they never disable the operator control.
+        self.assertIn("You may still enable the policy", web)
+        self.assertIn("advisory and never disable this control", web)
+        self.assertIn("renames cached transcodes that use those paths", web)
+        self.assertIn("paths pay the same rename a second time", web)
+        self.assertNotIn("every cache key the node computes", web)
         # FFmpeg's banner and decoder names are somebody else's strings.
         self.assertIn("esc(q.measured_build)", web)
         # Saving replaces this card, never the panel: the Live TV card beside
@@ -1307,6 +1317,61 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             self.status,
         )
         self.assertIn("This is toolchain evidence, not\nfleet evidence", self.status)
+        inventory = CORE_INVENTORY.read_text(encoding="utf-8")
+        self.assertIn("pub fn selected_hardware_decoder(", inventory)
+        self.assertIn(
+            "Selecting decoder '<name>' because of requested hwaccel method <backend>",
+            inventory,
+        )
+        self.assertIn('"-hwaccel_output_format",', inventory)
+        self.assertIn("hardware_runtime_evidence(stderr, backend)", inventory)
+        self.assertIn("const INVENTORY_TIMEOUT: std::time::Duration", inventory)
+        self.assertIn("by_codec_and_backend_v2", inventory)
+        self.assertIn(
+            "selected_hardware_decoder(&stderr, codec, backend, output.status.success())",
+            inventory,
+        )
+        observation = daemon.split("fn for_plan_against(", 1)[1].split(
+            "fn resolve(", 1
+        )[0]
+        self.assertIn(
+            "measured.implementation(codec, plan.decode().backend())", observation
+        )
+        readiness = daemon.split("pub fn artifact_qualification_readiness(", 1)[
+            1
+        ].split("impl TranscodeManager", 1)[0]
+        self.assertIn("backend.name()", readiness)
+        self.assertNotIn("DecodeBackend::Software.name()", readiness)
+        self.assertIn(
+            'format!("{codec}/{}/{decoder}", backend.name())', system
+        )
+        self.assertIn("measured_paths_v2", system)
+        self.assertIn("covered_paths_v2", system)
+        self.assertIn("q.measured_paths_v2||q.measured_decoders", web)
+        self.assertIn("q.covered_paths_v2||q.covered_decoders", web)
+        self.assertIn(
+            "const covered=q.covered_paths_v2||q.covered_decoders||[];", web
+        )
+        self.assertIn(
+            "const policyEnabled=q.policy_enabled===undefined?!!q.enforcing:!!q.policy_enabled;",
+            web,
+        )
+        self.assertIn(
+            "const ready=policyReady&&!!q.measured_build&&recoverable.length>0;",
+            web,
+        )
+        self.assertIn("const requested=!!s.decoder_health_qualified_artifacts;", web)
+        self.assertIn("const policyReady=policyEnabled;", web)
+        self.assertIn("checks advise and never gate that setting", web)
+        self.assertIn("must restart before the published policy enables", web)
+        self.assertIn("will turn off at that restart", web)
+        self.assertIn("ready for eligible sessions", web)
+        self.assertIn("Only some selectable decode paths", daemon)
+        self.assertIn("missing measurements or contracts", daemon)
+        self.assertIn(
+            "!delivered.enforces_receipt() || !alternate.enforces_receipt()",
+            daemon,
+        )
         self.assertIn("async function saveVerifiedDecode(", web)
         self.assertIn(
             "decoder_health_qualified_artifacts:document.getElementById"

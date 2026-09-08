@@ -238,9 +238,9 @@ test("Playback saves per card, and each card writes only its own fields", () => 
       "vod_working_set_bytes",
     ]);
     assert.deepEqual(Object.keys(writes.saveDeveloper.body).sort(), ["playback_control_protocol_v1"]);
-    // Its own card, its own field. The verified-decode request renames every
-    // cached transcode on the node, so it must never ride along with a save
-    // an operator made for something else.
+    // Its own card, its own field. The verified-decode request renames cached
+    // transcodes on covered paths, so it must never ride along with a save an
+    // operator made for something else.
     assert.deepEqual(Object.keys(writes.saveVerifiedDecode.body).sort(), ["decoder_health_qualified_artifacts"]);
     assert.equal(writes.saveVerifiedDecode.path, "/settings");
     assert.deepEqual(Object.keys(writes.saveExperimental.body).sort(), ["hls_typeless_sliding"]);
@@ -345,7 +345,7 @@ test("Developer is where the switches that cost something live", () => {
   // assertion is what says so.
   assert.match(html, /Not true on any node today/);
   assert.match(html, /One recovery per playback, and it is never given back/);
-  assert.match(html, /qualify a diagnostic contract against this node's hardware decoders/);
+  assert.match(html, /qualify diagnostic contracts against this node's measured hardware decoders/);
   assert.match(html, /HDHomeRun Live TV/);
   assert.match(html, /Save the configuration, check readiness, then enable/);
 });
@@ -371,55 +371,72 @@ test("Verified decode states its cost, its prerequisites, and what this node mea
   } });
   assert.match(bare, /TOG:dhqa\|/);
   assert.match(bare, /FOOT:saveVerifiedDecode/);
-  // On a node that cannot honour the request there is no cost, and saying
-  // there is teaches an operator to stop reading the warnings.
-  assert.match(bare, /cannot honour the request today/);
+  // No covered path pays a rename yet, but the control remains enabled: the
+  // prerequisites are advice, not a disabled switch.
+  assert.match(bare, /No measured path can produce a verified artifact today/);
+  assert.match(bare, /checks above are advisory and never disable this control/);
   assert.doesNotMatch(bare, /This node can honour the request/);
   // Why the feature exists at all, in the words the failure actually takes.
   assert.match(bare, /drop every frame of a file and still exit successfully/);
   assert.equal((bare.match(/✗/g) || []).length, 3, "three unmet checks, each shown");
   assert.match(bare, /Not requested on this node\./);
 
-  // Requested, and refused with the reason the fleet will actually hit.
+  // Requested and enabled, with the uncovered state still shown as advice.
   const refused = card({ decoder_health_qualified_artifacts: true, decoder_health_qualification: {
-    namespace: "decoder-plan-v1-unqualified", enforcing: false, eligible: false,
+    namespace: "decoder-plan-v1-unqualified", enforcing: false, policy_enabled: true, eligible: false,
     measured_build: "ffmpeg version 5.1.9", measured_decoders: ["h264/h264", "hevc/hevc"],
-    covered_decoders: [], refusal: "no_contract_covers_this_build",
-    explanation: "No retained diagnostic contract covers this node's FFmpeg build under the qualified log flags. Capture one from this build before enabling.",
+    covered_decoders: [], measured_paths_v2: ["h264/software/h264", "hevc/software/hevc"],
+    covered_paths_v2: [], refusal: "no_contract_covers_this_build",
+    explanation: "No retained diagnostic contract covers this node's FFmpeg build under the qualified log flags.",
   } });
-  assert.match(refused, /Requested · not in force/, "the state is not the request");
+  assert.match(refused, /Enabled · covered paths/);
+  assert.match(refused, /Coverage advisory/);
   assert.match(refused, /No retained diagnostic contract covers/);
-  assert.match(refused, /<code>h264\/h264<\/code>/, "what it did measure is still shown");
+  assert.match(refused, /<code>h264\/software\/h264<\/code>/, "what it did measure is still shown");
   assert.equal((refused.match(/✓/g) || []).length, 2);
   assert.equal((refused.match(/✗/g) || []).length, 1);
 
   // In force.
   const on = card({ decoder_health_qualified_artifacts: true, decoder_health_qualification: {
-    namespace: "decoder-plan-v1-health-qualified-r1", enforcing: true, eligible: true,
+    namespace: "decoder-plan-v1-health-qualified-r1", enforcing: true, policy_enabled: true, eligible: true,
     measured_build: "ffmpeg version 9.0.1", measured_decoders: ["h264/h264"],
-    covered_decoders: ["h264/h264"], refusal: null, explanation: null,
+    covered_decoders: ["h264/h264"], measured_paths_v2: ["h264/software/h264"],
+    covered_paths_v2: ["h264/software/h264"], refusal: null, explanation: null,
   } });
-  assert.match(on, /Enforcing/);
+  assert.match(on, /Enabled · covered paths/);
   assert.equal((on.match(/✗/g) || []).length, 0);
   assert.doesNotMatch(on, /Not in force/);
   // An eligible node is the one that actually pays, so it is the one told.
-  assert.match(on, /This node can honour the request/);
-  assert.match(on, /renames every transcode it caches/);
-  assert.match(on, /pays the same rename a second time/);
+  assert.match(on, /This node has covered decode paths/);
+  assert.match(on, /renames cached transcodes that use those paths/);
+  assert.match(on, /paths pay the same rename a second time/);
+  assert.doesNotMatch(on, /every transcode/);
 
   // Saved and not yet applied is a third state, and it is neither of the
   // other two: reporting the request as the state would claim a change that
   // has not happened, and reporting only the published answer would hide one
   // an operator just made.
   const pending = card({ decoder_health_qualified_artifacts: true, decoder_health_qualification: {
-    namespace: "decoder-plan-v1-unqualified", enforcing: false, eligible: true,
+    namespace: "decoder-plan-v1-unqualified", enforcing: false, policy_enabled: false, eligible: true,
     measured_build: "ffmpeg version 9.0.1", measured_decoders: ["h264/h264"],
-    covered_decoders: ["h264/h264"], refusal: "not_requested",
+    covered_decoders: ["h264/h264"], measured_paths_v2: ["h264/software/h264"],
+    covered_paths_v2: ["h264/software/h264"], refusal: "not_requested",
     explanation: "Not requested on this node.", pending_restart: true,
   } });
   assert.match(pending, /Saved · restart to apply/);
   assert.match(pending, /applies the request when it next starts/);
-  assert.match(pending, /move that key space under work already in flight/);
+  assert.match(pending, /move an affected key space under work already in flight/);
+  assert.doesNotMatch(pending, /every cache key/);
+
+  // A current response prefers the backend-aware sibling, while an older
+  // node with only the pair list remains readable.
+  const legacy = card({ decoder_health_qualified_artifacts: false, decoder_health_qualification: {
+    namespace: "decoder-plan-v1-unqualified", enforcing: false, eligible: true,
+    measured_build: "ffmpeg version 8.0", measured_decoders: ["h264/h264"],
+    covered_decoders: ["h264/h264"], refusal: "not_requested", explanation: null,
+  } });
+  assert.match(legacy, /<code>h264\/h264<\/code>/);
+  assert.match(legacy, /older nodes report software-only/);
 
   // FFmpeg's version banner and decoder names are somebody else's strings.
   const hostile = card({ decoder_health_qualified_artifacts: false, decoder_health_qualification: {
@@ -435,6 +452,76 @@ test("Verified decode states its cost, its prerequisites, and what this node mea
   // only source for this card, and a page that throws on a missing field is a
   // Settings section that cannot be opened at all.
   assert.doesNotThrow(() => card({}));
+});
+
+test("Automatic recovery requires a covered hardware and software pair for one codec", () => {
+  const card = new Function(
+    "setCard", "cardHead", "esc",
+    `${shippedSource("decodeRecoveryCard")}\nreturn decodeRecoveryCard;`,
+  )(
+    (body) => `CARD[${body}]`,
+    (title, sub, tools) => `CARDHEAD:${title}|${sub || ""}|${tools || ""}`,
+    esc,
+  );
+
+  const crossed = card({ decoder_health_qualification: {
+    measured_build: "ffmpeg version 9.0.1",
+    covered_decoders: ["h264/h264"],
+    covered_paths_v2: ["h264/software/h264", "hevc/videotoolbox/hevc"],
+  } });
+  assert.match(crossed, /✗ The same codec has covered hardware and software paths/);
+  assert.match(crossed, /different codecs do not form a recovery/);
+
+  const paired = card({ decoder_health_qualified_artifacts: true, decoder_health_qualification: {
+    policy_enabled: true,
+    measured_build: "ffmpeg version 9.0.1",
+    covered_decoders: ["h264/h264"],
+    covered_paths_v2: ["h264/software/h264", "h264/videotoolbox/h264"],
+  } });
+  assert.match(paired, /✓ The same codec has covered hardware and software paths/);
+  assert.match(paired, /h264\/videotoolbox\/h264/);
+  assert.match(paired, /✓ The receipt-qualified decode policy is applied/);
+  assert.match(paired, /ready for eligible sessions/);
+  assert.doesNotMatch(paired, /prerequisites unmet/);
+
+  const off = card({ decoder_health_qualified_artifacts: false, decoder_health_qualification: {
+    policy_enabled: false,
+    measured_build: "ffmpeg version 9.0.1",
+    covered_paths_v2: ["h264/software/h264", "h264/videotoolbox/h264"],
+  } });
+  assert.match(off, /prerequisites unmet/);
+  assert.match(off, /✗ The receipt-qualified decode policy is applied/);
+  assert.match(off, /policy is off on this node/);
+  assert.match(off, /checks advise and never gate that setting/);
+
+  const pendingEnable = card({ decoder_health_qualified_artifacts: true, decoder_health_qualification: {
+    policy_enabled: false, pending_restart: true,
+    measured_build: "ffmpeg version 9.0.1",
+    covered_paths_v2: ["h264/software/h264", "h264/videotoolbox/h264"],
+  } });
+  assert.match(pendingEnable, /prerequisites unmet/);
+  assert.match(pendingEnable, /✗ The receipt-qualified decode policy is applied/);
+  assert.match(pendingEnable, /must restart before the published policy enables/);
+  assert.match(pendingEnable, /Recovery stays unavailable until that restart/);
+
+  const pendingDisable = card({ decoder_health_qualified_artifacts: false, decoder_health_qualification: {
+    policy_enabled: true, pending_restart: true,
+    measured_build: "ffmpeg version 9.0.1",
+    covered_paths_v2: ["h264/software/h264", "h264/videotoolbox/h264"],
+  } });
+  assert.match(pendingDisable, /✓ The receipt-qualified decode policy is applied/);
+  assert.match(pendingDisable, /ready for eligible sessions/);
+  assert.match(pendingDisable, /will turn off at that restart/);
+  assert.doesNotMatch(pendingDisable, /prerequisites unmet/);
+
+  const legacy = card({ decoder_health_qualification: {
+    enforcing: true,
+    measured_build: "ffmpeg version 8.0",
+    covered_decoders: ["h264/h264"],
+  } });
+  assert.match(legacy, /✗ The same codec has covered hardware and software paths/);
+  assert.doesNotMatch(legacy, /✓ The same codec has covered hardware and software paths/);
+  assert.match(legacy, /prerequisites unmet/);
 });
 
 test("Maintenance owns the timers, and each of its cards saves its own fields", () => {

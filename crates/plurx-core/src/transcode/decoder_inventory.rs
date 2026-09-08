@@ -17,8 +17,16 @@
 //! diagnostics — `[vist#0:0/av1 @ …] [dec:libdav1d @ …]` — which is the same
 //! context grammar the health reader already parses, at a log level that
 //! prints it for a decode that goes perfectly. The measurement is one probe
-//! per codec: encode a fraction of a second of `testsrc`, decode it to null,
-//! and read back the name FFmpeg used.
+//! per `(codec, backend)`: encode a fraction of a second of `testsrc`, decode
+//! it to null once in software and once for each advertised hardware
+//! accelerator, and read back the name FFmpeg used.
+//!
+//! A hardware request is a measurement only when FFmpeg says
+//! `Selecting decoder '<name>' because of requested hwaccel method <backend>`,
+//! the decode succeeds, and its runtime context reports the corresponding
+//! hardware frame format. The selection line happens before device
+//! initialization; the decoder context alone also cannot distinguish software
+//! h264 from VideoToolbox h264. All three facts are therefore necessary.
 //!
 //! A codec this build can decode but cannot encode has no probe clip and is
 //! reported as unmeasured. That is honest and it is the whole point: an
@@ -26,6 +34,8 @@
 //! qualified artifact namespace rather than putting a guess into a cache key.
 
 use std::collections::BTreeMap;
+
+use super::DecodeBackend;
 
 /// How long each ffmpeg invocation may take before it is killed and the codec
 /// reported unmeasured.
@@ -36,6 +46,10 @@ use std::collections::BTreeMap;
 /// keeps a wedged-ffmpeg fixture for the encoder probe because this failure is
 /// not hypothetical.
 const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// One budget for the complete inventory, not one budget multiplied by every
+/// codec/backend pair. Startup must still open its listener when an FFmpeg
+/// build advertises several accelerators whose drivers all wedge.
+const INVENTORY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// How long a probe clip runs. Long enough that a decoder actually opens and
 /// emits its context lines, short enough that measuring every codec at boot
 /// costs less than one segment of real work.
@@ -66,35 +80,48 @@ const PROBE_ENCODERS: &[(&str, &[&str])] = &[
 /// production sources look like.
 const PROBE_CONTAINER: &str = "matroska";
 
-/// What this build was measured to use, per codec.
+/// What this build was measured to use, per `(codec, backend)`.
 ///
 /// `Serialize` because an operator deciding whether to enable qualification
 /// needs to see what their own node measured, and "which decoder will actually
 /// run" is not something they can read anywhere else.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct MeasuredDecoders {
+    /// The original `/api/v1/system` shape. Keep software measurements here so
+    /// existing consumers still read `by_codec.h264` as a string.
     by_codec: BTreeMap<String, String>,
+    /// Versioned backend-aware sibling. Changing `by_codec` in place broke the
+    /// public v1 response for consumers that deserialize its values as strings.
+    by_codec_and_backend_v2: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 impl MeasuredDecoders {
-    /// The decoder FFmpeg selected for `codec`, when it was measured.
+    /// The decoder FFmpeg selected for `(codec, backend)`, when measured.
     ///
     /// `None` means unmeasured, never "the family name" — the caller must keep
     /// its plan unnamed rather than substitute the codec, because a contract
     /// looked up under a substituted name yields a grammar that matches
     /// nothing and certifies everything.
-    pub fn implementation(&self, codec: &str) -> Option<&str> {
-        self.by_codec.get(codec).map(String::as_str)
+    pub fn implementation(&self, codec: &str, backend: DecodeBackend) -> Option<&str> {
+        self.by_codec_and_backend_v2
+            .get(codec)?
+            .get(backend.name())
+            .map(String::as_str)
     }
 
     pub fn is_empty(&self) -> bool {
-        self.by_codec.is_empty()
+        self.by_codec_and_backend_v2.is_empty()
     }
 
-    pub fn measured_codecs(&self) -> impl Iterator<Item = (&str, &str)> {
-        self.by_codec
+    pub fn measured_paths(&self) -> impl Iterator<Item = (&str, DecodeBackend, &str)> {
+        self.by_codec_and_backend_v2
             .iter()
-            .map(|(codec, decoder)| (codec.as_str(), decoder.as_str()))
+            .flat_map(|(codec, by_backend)| {
+                by_backend.iter().filter_map(|(backend, decoder)| {
+                    DecodeBackend::parse(backend)
+                        .map(|backend| (codec.as_str(), backend, decoder.as_str()))
+                })
+            })
     }
 
     /// Record a measurement that was made elsewhere.
@@ -104,14 +131,24 @@ impl MeasuredDecoders {
     /// measurement cannot be put in by hand either — the value ends up in an
     /// artifact's identity, and there is no reading of "unmeasured" that
     /// should be spelled by an unusable name rather than by absence.
-    pub fn from_measured(pairs: &[(&str, &str)]) -> Self {
-        Self {
-            by_codec: pairs
-                .iter()
-                .filter(|(_, decoder)| safe_decoder_name(decoder))
-                .map(|(codec, decoder)| ((*codec).to_owned(), (*decoder).to_owned()))
-                .collect(),
+    pub fn from_measured(pairs: &[(&str, DecodeBackend, &str)]) -> Self {
+        let mut measured = Self::default();
+        for (codec, backend, decoder) in pairs {
+            if safe_decoder_name(decoder) {
+                measured.record(codec, *backend, decoder);
+            }
         }
+        measured
+    }
+
+    fn record(&mut self, codec: &str, backend: DecodeBackend, decoder: &str) {
+        if backend == DecodeBackend::Software {
+            self.by_codec.insert(codec.to_owned(), decoder.to_owned());
+        }
+        self.by_codec_and_backend_v2
+            .entry(codec.to_owned())
+            .or_default()
+            .insert(backend.name().to_owned(), decoder.to_owned());
     }
 }
 
@@ -153,6 +190,74 @@ pub fn selected_decoder(stderr: &str, codec: &str) -> Option<String> {
     found
         .filter(|decoder| safe_decoder_name(decoder))
         .map(str::to_owned)
+}
+
+/// Read the positive statement that a requested hardware backend was used.
+///
+/// The selected-decoder context is still required and must name the same
+/// decoder. The selection statement on its own has no stream or codec, while
+/// the context on its own cannot distinguish software from an attached
+/// accelerator. Only their agreement is a `(codec, backend)` measurement.
+pub fn selected_hardware_decoder(
+    stderr: &str,
+    codec: &str,
+    backend: DecodeBackend,
+    decode_succeeded: bool,
+) -> Option<String> {
+    if backend == DecodeBackend::Software
+        || !decode_succeeded
+        || !hardware_runtime_evidence(stderr, backend)
+    {
+        return None;
+    }
+    let decoder = selected_decoder(stderr, codec)?;
+    let mut found = false;
+    for line in stderr.lines() {
+        let Some((selected, selected_backend)) = hardware_selection(line) else {
+            continue;
+        };
+        if selected_backend != backend.name() {
+            continue;
+        }
+        if selected != decoder {
+            return None;
+        }
+        found = true;
+    }
+    found.then_some(decoder)
+}
+
+/// Runtime evidence emitted after device initialization for the controlled
+/// probe graph. The graph has no filters that could manufacture a hardware
+/// frame, and `probe_decode` also forces this output format, so seeing it on a
+/// successful decode means the requested backend produced the probe frame.
+fn hardware_runtime_evidence(stderr: &str, backend: DecodeBackend) -> bool {
+    let Some(format) = hardware_output_format(backend) else {
+        return false;
+    };
+    let marker = format!("pix_fmt: {format}");
+    stderr
+        .lines()
+        .any(|line| line.contains("Reinit context to ") && line.contains(&marker))
+}
+
+fn hardware_output_format(backend: DecodeBackend) -> Option<&'static str> {
+    match backend {
+        DecodeBackend::Software => None,
+        DecodeBackend::VideoToolbox => Some("videotoolbox_vld"),
+        DecodeBackend::Cuda => Some("cuda"),
+        DecodeBackend::Qsv => Some("qsv"),
+        DecodeBackend::Vaapi => Some("vaapi"),
+    }
+}
+
+/// `… Selecting decoder '<name>' because of requested hwaccel method <name>`
+fn hardware_selection(line: &str) -> Option<(&str, &str)> {
+    let (_, selected) = line.split_once("Selecting decoder '")?;
+    let (decoder, backend) = selected.split_once("' because of requested hwaccel method ")?;
+    let backend = backend.trim();
+    (!decoder.is_empty() && safe_decoder_name(decoder) && DecodeBackend::parse(backend).is_some())
+        .then_some((decoder, backend))
 }
 
 /// `[vist#<input>:<stream>/<codec>[ @ addr]] [dec:<name>[ @ addr]] …`
@@ -207,7 +312,39 @@ pub async fn measure_selected_decoders(
     codecs: &[String],
     scratch: &std::path::Path,
 ) -> MeasuredDecoders {
-    let mut by_codec = BTreeMap::new();
+    measure_selected_decoders_with_budget(ffmpeg_bin, codecs, scratch, INVENTORY_TIMEOUT).await
+}
+
+async fn measure_selected_decoders_with_budget(
+    ffmpeg_bin: &str,
+    codecs: &[String],
+    scratch: &std::path::Path,
+    budget: std::time::Duration,
+) -> MeasuredDecoders {
+    match tokio::time::timeout(
+        budget,
+        measure_selected_decoders_inner(ffmpeg_bin, codecs, scratch),
+    )
+    .await
+    {
+        Ok(measured) => measured,
+        Err(_) => {
+            tracing::warn!(
+                timeout_ms = budget.as_millis(),
+                "the complete decoder inventory exceeded its startup budget"
+            );
+            MeasuredDecoders::default()
+        }
+    }
+}
+
+async fn measure_selected_decoders_inner(
+    ffmpeg_bin: &str,
+    codecs: &[String],
+    scratch: &std::path::Path,
+) -> MeasuredDecoders {
+    let backends = advertised_backends(ffmpeg_bin).await;
+    let mut measured = MeasuredDecoders::default();
     for codec in codecs {
         let Some(encoders) = PROBE_ENCODERS
             .iter()
@@ -215,46 +352,96 @@ pub async fn measure_selected_decoders(
         else {
             continue;
         };
-        if let Some(decoder) = measure_one(ffmpeg_bin, codec, encoders, scratch).await {
-            tracing::debug!(%codec, %decoder, "measured the decoder this build selects");
-            by_codec.insert(codec.clone(), decoder);
+        for (backend, decoder) in measure_one(ffmpeg_bin, codec, encoders, &backends, scratch).await
+        {
+            tracing::debug!(%codec, backend = backend.name(), %decoder, "measured the decoder this build selects");
+            measured.record(codec, backend, &decoder);
         }
     }
-    if by_codec.is_empty() {
+    if measured.is_empty() {
         tracing::info!(
             "no decoder implementation could be measured on this build; plans stay unnamed"
         );
     }
-    MeasuredDecoders { by_codec }
+    measured
+}
+
+/// The backends this build advertises, with software always first.
+///
+/// Advertising is an invitation to probe, not a measurement. A compiled
+/// method with no usable device is harmless here because the per-pair probe
+/// records nothing unless FFmpeg positively states that it selected it.
+async fn advertised_backends(ffmpeg_bin: &str) -> Vec<DecodeBackend> {
+    let output = bounded(
+        tokio::process::Command::new(ffmpeg_bin)
+            .kill_on_drop(true)
+            .args(["-hide_banner", "-hwaccels"])
+            .output(),
+    )
+    .await;
+    match output {
+        Some(Ok(output)) if output.status.success() => {
+            parse_hwaccel_list(&String::from_utf8_lossy(&output.stdout))
+        }
+        _ => vec![DecodeBackend::Software],
+    }
+}
+
+fn parse_hwaccel_list(stdout: &str) -> Vec<DecodeBackend> {
+    DecodeBackend::ALL
+        .into_iter()
+        .filter(|backend| {
+            *backend == DecodeBackend::Software
+                || stdout.lines().any(|line| line.trim() == backend.name())
+        })
+        .collect()
 }
 
 async fn measure_one(
     ffmpeg_bin: &str,
     codec: &str,
     encoders: &[&str],
+    backends: &[DecodeBackend],
     scratch: &std::path::Path,
-) -> Option<String> {
+) -> Vec<(DecodeBackend, String)> {
     // A name nothing else writes, so two nodes sharing a scratch directory —
     // or one node probing while an earlier probe's process is still exiting —
     // cannot read each other's clip.
-    let clip = scratch.join(format!(
+    let clip = ProbeClip(scratch.join(format!(
         "decoder-probe-{codec}-{}.mkv",
         uuid::Uuid::new_v4().simple()
-    ));
+    )));
     let mut made = false;
     for encoder in encoders {
-        if probe_clip(ffmpeg_bin, encoder, &clip).await {
+        if probe_clip(ffmpeg_bin, encoder, clip.path()).await {
             made = true;
             break;
         }
     }
-    let measured = if made {
-        probe_decode(ffmpeg_bin, codec, &clip).await
-    } else {
-        None
-    };
-    let _ = tokio::fs::remove_file(&clip).await;
+    let mut measured = Vec::new();
+    if made {
+        for backend in backends {
+            if let Some(decoder) = probe_decode(ffmpeg_bin, codec, *backend, clip.path()).await {
+                measured.push((*backend, decoder));
+            }
+        }
+    }
+    let _ = tokio::fs::remove_file(clip.path()).await;
     measured
+}
+
+struct ProbeClip(std::path::PathBuf);
+
+impl ProbeClip {
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for ProbeClip {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 async fn probe_clip(ffmpeg_bin: &str, encoder: &str, clip: &std::path::Path) -> bool {
@@ -309,25 +496,47 @@ where
     }
 }
 
-async fn probe_decode(ffmpeg_bin: &str, codec: &str, clip: &std::path::Path) -> Option<String> {
+async fn probe_decode(
+    ffmpeg_bin: &str,
+    codec: &str,
+    backend: DecodeBackend,
+    clip: &std::path::Path,
+) -> Option<String> {
     // `verbose`, because the context that names the decoder is printed by a
     // decode that goes perfectly and `error` prints nothing at all for one.
     // This is a probe of this node's own synthetic clip, so the log level is
     // not the production log level and does not have to be.
+    let mut command = tokio::process::Command::new(ffmpeg_bin);
+    command
+        .kill_on_drop(true)
+        .args(["-hide_banner", "-loglevel", "verbose"]);
+    if backend != DecodeBackend::Software {
+        command.args([
+            "-hwaccel",
+            backend.name(),
+            "-hwaccel_output_format",
+            hardware_output_format(backend).expect("hardware backend has an output format"),
+        ]);
+    }
     let output = bounded(
-        tokio::process::Command::new(ffmpeg_bin)
-            .kill_on_drop(true)
-            .args(["-hide_banner", "-loglevel", "verbose", "-i"])
+        command
+            .arg("-i")
             .arg(clip)
-            .args(["-f", "null", "-"])
+            .args(["-frames:v", "1", "-f", "null", "-"])
             .output(),
     )
     .await?
     .ok()?;
-    if !output.status.success() {
-        return None;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if backend == DecodeBackend::Software {
+        output
+            .status
+            .success()
+            .then(|| selected_decoder(&stderr, codec))
+            .flatten()
+    } else {
+        selected_hardware_decoder(&stderr, codec, backend, output.status.success())
     }
-    selected_decoder(&String::from_utf8_lossy(&output.stderr), codec)
 }
 
 #[cfg(test)]
@@ -342,11 +551,94 @@ mod tests {
 [vist#0:0/h264 @ 0xbb3014600] [dec:h264 @ 0xbb2c10280] Terminating thread with return code 0 (success)
 ";
 
+    const FFMPEG_9_H264_VIDEOTOOLBOX: &str = "\
+Selecting decoder 'h264' because of requested hwaccel method videotoolbox
+[vist#0:0/h264 @ 0xbb3014600] [dec:h264 @ 0xbb2c10280] Starting thread...
+[vist#0:0/h264 @ 0xbb3014600] Reinit context to 160x120, pix_fmt: videotoolbox_vld
+";
+
     #[test]
     fn the_decoder_is_read_from_the_context_ffmpeg_prints() {
         assert_eq!(
             selected_decoder(FFMPEG_9_H264, "h264").as_deref(),
             Some("h264")
+        );
+    }
+
+    #[test]
+    fn hardware_measurement_requires_the_backend_statement_and_context_to_agree() {
+        assert_eq!(
+            selected_hardware_decoder(
+                FFMPEG_9_H264_VIDEOTOOLBOX,
+                "h264",
+                DecodeBackend::VideoToolbox,
+                true,
+            )
+            .as_deref(),
+            Some("h264")
+        );
+
+        for (label, stderr, backend, succeeded) in [
+            (
+                "a silent software fallback",
+                FFMPEG_9_H264,
+                DecodeBackend::VideoToolbox,
+                true,
+            ),
+            (
+                "the statement for a different backend",
+                FFMPEG_9_H264_VIDEOTOOLBOX,
+                DecodeBackend::Qsv,
+                true,
+            ),
+            (
+                "a statement that disagrees with the context",
+                "Selecting decoder 'h264_qsv' because of requested hwaccel method qsv\n\
+[vist#0:0/h264 @ 0x1] [dec:h264 @ 0x2] Starting thread...\n",
+                DecodeBackend::Qsv,
+                true,
+            ),
+            (
+                "selection before hardware initialization fails",
+                "Selecting decoder 'h264' because of requested hwaccel method videotoolbox\n\
+[vist#0:0/h264 @ 0x1] [dec:h264 @ 0x2] Starting thread...\n\
+Device creation failed: -12.\n",
+                DecodeBackend::VideoToolbox,
+                false,
+            ),
+        ] {
+            assert_eq!(
+                selected_hardware_decoder(stderr, "h264", backend, succeeded),
+                None,
+                "{label} is not a hardware measurement"
+            );
+        }
+        assert_eq!(
+            selected_hardware_decoder(
+                FFMPEG_9_H264_VIDEOTOOLBOX,
+                "h264",
+                DecodeBackend::Software,
+                true,
+            ),
+            None,
+            "software is measured by its attributed context, never a hardware statement"
+        );
+    }
+
+    #[test]
+    fn only_supported_advertised_hwaccels_are_probed() {
+        let stdout = "Hardware acceleration methods:\n\
+videotoolbox\n\
+vulkan\n\
+qsv\n";
+        assert_eq!(
+            parse_hwaccel_list(stdout),
+            vec![
+                DecodeBackend::Software,
+                DecodeBackend::VideoToolbox,
+                DecodeBackend::Qsv,
+            ],
+            "software is always measured, unsupported FFmpeg methods are not plans this daemon can run"
         );
     }
 
@@ -447,15 +739,53 @@ mod tests {
 
     #[test]
     fn an_unmeasured_codec_reports_nothing_rather_than_its_family() {
-        let measured = MeasuredDecoders::from_measured(&[("av1", "libdav1d")]);
-        assert_eq!(measured.implementation("av1"), Some("libdav1d"));
+        let measured = MeasuredDecoders::from_measured(&[
+            ("av1", DecodeBackend::Software, "libdav1d"),
+            ("av1", DecodeBackend::Cuda, "av1"),
+        ]);
         assert_eq!(
-            measured.implementation("h264"),
+            measured.implementation("av1", DecodeBackend::Software),
+            Some("libdav1d")
+        );
+        assert_eq!(
+            measured.implementation("av1", DecodeBackend::Cuda),
+            Some("av1")
+        );
+        assert_eq!(
+            measured.implementation("h264", DecodeBackend::Software),
             None,
             "an unmeasured codec must not fall back to its own name"
         );
+        assert_eq!(
+            measured.implementation("av1", DecodeBackend::Qsv),
+            None,
+            "a measurement on one backend says nothing about another"
+        );
         assert!(!measured.is_empty());
         assert!(MeasuredDecoders::default().is_empty());
+    }
+
+    #[test]
+    fn serialized_inventory_uses_the_same_backend_names_as_contract_coverage() {
+        let measured = MeasuredDecoders::from_measured(&[
+            ("h264", DecodeBackend::Software, "h264"),
+            ("h264", DecodeBackend::VideoToolbox, "h264"),
+        ]);
+
+        assert_eq!(
+            serde_json::to_value(measured).expect("serialize measured decoder inventory"),
+            serde_json::json!({
+                "by_codec": {
+                    "h264": "h264"
+                },
+                "by_codec_and_backend_v2": {
+                    "h264": {
+                        "software": "h264",
+                        "videotoolbox": "h264"
+                    }
+                }
+            })
+        );
     }
 
     #[test]
@@ -479,6 +809,81 @@ mod tests {
             );
             assert!(!encoders.is_empty(), "{codec} names no encoder");
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_complete_inventory_has_one_startup_budget() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let scratch = tempfile::tempdir().expect("scratch");
+        let fake = scratch.path().join("wedged-ffmpeg");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\n\
+case \" $* \" in\n\
+  *\" -hwaccels \"*) printf 'Hardware acceleration methods:\\nqsv\\nvaapi\\n' ;;\n\
+  *)\n\
+    for argument do output=\"$argument\"; done\n\
+    printf partial >\"$output\"\n\
+    printf '%s\\n' \"$$\" >\"$0.pid\"\n\
+    exec /bin/sleep 30\n\
+    ;;\n\
+esac\n",
+        )
+        .expect("write fake ffmpeg");
+        let mut permissions = std::fs::metadata(&fake)
+            .expect("fake metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&fake, permissions).expect("make fake executable");
+
+        let started = std::time::Instant::now();
+        let measured = measure_selected_decoders_with_budget(
+            fake.to_str().expect("utf8 fake path"),
+            &["mpeg2video".to_owned()],
+            scratch.path(),
+            std::time::Duration::from_secs(2),
+        )
+        .await;
+
+        assert!(measured.is_empty());
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(4),
+            "one wedged pair must not multiply the whole inventory's budget"
+        );
+
+        let pid_file = fake.with_extension("pid");
+        let pid = std::fs::read_to_string(&pid_file)
+            .expect("the wedged child recorded its pid after creating the partial clip")
+            .trim()
+            .parse::<libc::pid_t>()
+            .expect("numeric child pid");
+        let process_is_alive = |pid| {
+            // Safety: signal zero changes no process state; it only asks the
+            // kernel whether this exact pid still exists and is signalable.
+            let result = unsafe { libc::kill(pid, 0) };
+            result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+        };
+        let child_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while process_is_alive(pid) && std::time::Instant::now() < child_deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            !process_is_alive(pid),
+            "cancelling the aggregate probe must terminate its exact child pid"
+        );
+        assert_eq!(
+            std::fs::read_dir(scratch.path())
+                .expect("scratch listing")
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry.file_name() != "wedged-ffmpeg" && entry.file_name() != "wedged-ffmpeg.pid"
+                })
+                .count(),
+            0,
+            "cancelling the aggregate probe must remove its partial clip"
+        );
     }
 
     #[tokio::test]
@@ -535,7 +940,7 @@ mod tests {
                 .output()
                 .await;
             assert_eq!(
-                measured.implementation("mpeg2video"),
+                measured.implementation("mpeg2video", DecodeBackend::Software),
                 Some("mpeg2video"),
                 "a build that prints the context must measure the codec it decoded; \
                  summary probe status {:?}",

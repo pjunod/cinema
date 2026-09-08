@@ -1944,32 +1944,50 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
 }
 
 /// GET /api/v1/settings (admin)
-/// What this node measured about its own decode, and the artifact identity it
-/// therefore plans into.
+/// What this node measured about its own decode and artifact identities.
 ///
 /// Read-only, and reported next to the request rather than instead of it. The
-/// request is what an operator asked for; this is what the node can honour.
-/// A surface that showed only the first would let someone believe every
-/// transcode on the node is now verified when nothing about it changed.
+/// legacy `namespace` and `enforcing` fields remain conservative whole-node
+/// facts. The additive policy fields report an advisory-only request even when
+/// only a subset of paths can produce verified artifacts.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct DecoderHealthQualification {
-    /// The content-addressed namespace this node plans into right now.
+    /// Legacy whole-node namespace. Qualified only when every selectable path
+    /// is measured and uniquely covered; path-scoped mixed state is described
+    /// below.
     pub namespace: String,
-    /// Whether it is enforcing producer health receipts.
+    /// Legacy whole-node enforcement fact.
     pub enforcing: bool,
+    /// Whether the published path-scoped operator policy is enabled. Missing
+    /// prerequisites never turn this back off.
+    #[serde(default)]
+    pub policy_enabled: bool,
+    /// Namespace the enabled policy requests for each uniquely covered path.
+    #[serde(default = "unqualified_artifact_namespace")]
+    pub requested_namespace: String,
+    /// Explicitly states that `covered_paths_v2` are the enforcement unit and
+    /// the node can therefore use mixed namespaces.
+    #[serde(default)]
+    pub path_scoped: bool,
     /// Whether this node *could* enforce them if asked — that is, whether a
     /// retained diagnostic contract covers its own FFmpeg build for at least
     /// one decoder it measured.
     pub eligible: bool,
     /// The FFmpeg version this node measured for itself, if any.
     pub measured_build: Option<String>,
-    /// `codec/decoder` pairs the startup probe measured.
+    /// Legacy software-only `codec/decoder` pairs the startup probe measured.
     pub measured_decoders: Vec<String>,
-    /// The subset a retained contract covers on this build.
+    /// Legacy software-only subset a retained contract covers on this build.
     pub covered_decoders: Vec<String>,
-    /// Machine-readable reason the request is not in force, if it is not.
+    /// Versioned backend-aware `codec/backend/decoder` paths.
+    #[serde(default)]
+    pub measured_paths_v2: Vec<String>,
+    /// Versioned backend-aware subset uniquely covered on this build.
+    #[serde(default)]
+    pub covered_paths_v2: Vec<String>,
+    /// Legacy field name for a machine-readable readiness advisory.
     pub refusal: Option<String>,
-    /// One sentence an operator can act on.
+    /// One advisory sentence an operator can act on.
     pub explanation: Option<String>,
     /// The stored request differs from the one this node published, so a
     /// restart is owed before the request means anything.
@@ -1980,20 +1998,51 @@ pub struct DecoderHealthQualification {
     pub pending_restart: bool,
 }
 
+fn unqualified_artifact_namespace() -> String {
+    plurx_core::transcode::UNQUALIFIED_ARTIFACT_NAMESPACE.to_owned()
+}
+
 impl DecoderHealthQualification {
     /// `published` is what this node decided at start; `requested` is what the
     /// store says now. Everything else here describes the published answer,
     /// because that is what planning uses — a surface reporting a fresh
     /// recomputation would say "enforcing" on a node that is not.
     fn of(readiness: &crate::transcode::ArtifactQualificationReadiness, requested: bool) -> Self {
-        let pair = |(codec, decoder): &(String, String)| format!("{codec}/{decoder}");
+        let path =
+            |(codec, backend, decoder): &(String, plurx_core::transcode::DecodeBackend, String)| {
+                format!("{codec}/{}/{decoder}", backend.name())
+            };
+        let legacy_pair =
+            |(codec, backend, decoder): &(String, plurx_core::transcode::DecodeBackend, String)| {
+                (*backend == plurx_core::transcode::DecodeBackend::Software)
+                    .then(|| format!("{codec}/{decoder}"))
+            };
         Self {
             namespace: readiness.effective.namespace().to_owned(),
             enforcing: readiness.effective.enforces_receipt(),
+            policy_enabled: readiness.requested,
+            requested_namespace: (if readiness.requested {
+                plurx_core::transcode::ArtifactQualification::HealthQualified
+            } else {
+                plurx_core::transcode::ArtifactQualification::Unqualified
+            })
+            .namespace()
+            .to_owned(),
+            path_scoped: true,
             eligible: readiness.eligible(),
             measured_build: readiness.measured_build.clone(),
-            measured_decoders: readiness.measured_decoders.iter().map(pair).collect(),
-            covered_decoders: readiness.covered_decoders.iter().map(pair).collect(),
+            measured_decoders: readiness
+                .measured_decoders
+                .iter()
+                .filter_map(legacy_pair)
+                .collect(),
+            covered_decoders: readiness
+                .covered_decoders
+                .iter()
+                .filter_map(legacy_pair)
+                .collect(),
+            measured_paths_v2: readiness.measured_decoders.iter().map(path).collect(),
+            covered_paths_v2: readiness.covered_decoders.iter().map(path).collect(),
             refusal: readiness.refusal.map(|refusal| refusal.name().to_owned()),
             explanation: readiness
                 .refusal
@@ -2912,8 +2961,8 @@ pub async fn update_settings(
             )
             .await?;
         // Stored, and deliberately not applied here. This value is part of
-        // every cache key the node computes, so applying it to a live node
-        // would move the key space under work already running. The response
+        // covered paths' cache keys, so applying it to a live node could move
+        // an affected key space under work already running. The response
         // reports the stored request and the published answer separately, so
         // the operator sees that a restart is owed rather than being told the
         // change is in force.
@@ -4518,6 +4567,86 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+
+    #[test]
+    fn partial_coverage_preserves_legacy_settings_facts_and_reports_the_enabled_policy() {
+        use plurx_core::transcode::{ArtifactQualification, DecodeBackend};
+
+        let readiness = crate::transcode::ArtifactQualificationReadiness {
+            requested: true,
+            measured_build: Some("ffmpeg version 9.0.1".to_owned()),
+            measured_decoders: vec![
+                (
+                    "h264".to_owned(),
+                    DecodeBackend::Software,
+                    "h264".to_owned(),
+                ),
+                (
+                    "h264".to_owned(),
+                    DecodeBackend::VideoToolbox,
+                    "h264".to_owned(),
+                ),
+            ],
+            covered_decoders: vec![(
+                "h264".to_owned(),
+                DecodeBackend::VideoToolbox,
+                "h264".to_owned(),
+            )],
+            effective: ArtifactQualification::Unqualified,
+            refusal: Some(crate::transcode::QualificationRefusal::IncompleteCoverage),
+        };
+
+        let wire = serde_json::to_value(DecoderHealthQualification::of(&readiness, true))
+            .expect("serialize settings qualification");
+        assert_eq!(
+            wire["namespace"],
+            plurx_core::transcode::UNQUALIFIED_ARTIFACT_NAMESPACE,
+            "the legacy field must not claim one namespace for a mixed-path node"
+        );
+        assert_eq!(wire["enforcing"], false);
+        assert_eq!(wire["policy_enabled"], true);
+        assert_eq!(
+            wire["requested_namespace"],
+            plurx_core::transcode::HEALTH_QUALIFIED_ARTIFACT_NAMESPACE
+        );
+        assert_eq!(wire["path_scoped"], true);
+        assert_eq!(wire["covered_decoders"], serde_json::json!([]));
+        assert_eq!(
+            wire["measured_decoders"],
+            serde_json::json!(["h264/h264"]),
+            "the v1 list remains the original software-only codec/decoder pair"
+        );
+        assert_eq!(
+            wire["measured_paths_v2"],
+            serde_json::json!(["h264/software/h264", "h264/videotoolbox/h264"])
+        );
+        assert_eq!(
+            wire["covered_paths_v2"],
+            serde_json::json!(["h264/videotoolbox/h264"])
+        );
+
+        let legacy_wire = serde_json::json!({
+            "namespace": plurx_core::transcode::UNQUALIFIED_ARTIFACT_NAMESPACE,
+            "enforcing": false,
+            "eligible": true,
+            "measured_build": "ffmpeg version 9.0.1",
+            "measured_decoders": ["h264/h264"],
+            "covered_decoders": ["h264/h264"],
+            "refusal": "not_requested",
+            "explanation": "Not requested on this node.",
+            "pending_restart": false
+        });
+        let legacy: DecoderHealthQualification =
+            serde_json::from_value(legacy_wire).expect("deserialize legacy settings response");
+        assert!(!legacy.policy_enabled);
+        assert_eq!(
+            legacy.requested_namespace,
+            plurx_core::transcode::UNQUALIFIED_ARTIFACT_NAMESPACE
+        );
+        assert!(!legacy.path_scoped);
+        assert!(legacy.measured_paths_v2.is_empty());
+        assert!(legacy.covered_paths_v2.is_empty());
+    }
 
     fn test_delivery(method: &'static str, started_unix: i64) -> Delivery {
         Delivery {
