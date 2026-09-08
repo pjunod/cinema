@@ -50,7 +50,53 @@ struct PlayerRemoteAdapter: ViewModifier {
     }
 }
 
+/// The same adapter for the live surface. It is here rather than in
+/// `LiveTvView.swift` because this file is the platform's one allowed home for
+/// remote decoding — `scripts/player-input-fence` enforces that, and a second
+/// place that turns a `MoveCommandDirection` into an action is a second answer
+/// to what the remote does. Live TV routes through its own table because a
+/// live stream has no timeline to scrub.
+struct LiveTvRemoteAdapter: ViewModifier {
+    let state: () -> LiveTvInputState
+    let apply: (LiveTvInputOutcome, LiveTvContractInput) -> Bool
+
+    func body(content: Content) -> some View {
+        content
+            .onExitCommand { dispatch(.back) }
+            .onPlayPauseCommand { dispatch(.playPause) }
+            .onTapGesture { dispatch(.select) }
+            .onMoveCommand { direction in
+                guard let input = Self.input(for: direction) else { return }
+                dispatch(input)
+            }
+    }
+
+    static func input(for direction: MoveCommandDirection) -> LiveTvContractInput? {
+        switch direction {
+        case .left: .left
+        case .right: .right
+        case .up: .up
+        case .down: .down
+        @unknown default: nil
+        }
+    }
+
+    private func dispatch(_ input: LiveTvContractInput) {
+        _ = apply(
+            LiveTvInputRouting.route(surface: .tenFoot, state: state(), input: input),
+            input
+        )
+    }
+}
+
 extension View {
+    func liveTvRemoteAdapter(
+        state: @escaping () -> LiveTvInputState,
+        apply: @escaping (LiveTvInputOutcome, LiveTvContractInput) -> Bool
+    ) -> some View {
+        modifier(LiveTvRemoteAdapter(state: state, apply: apply))
+    }
+
     func playerRemoteAdapter(
         _ scope: PlayerRemoteAdapter.Scope,
         state: @escaping () -> PlayerInputState,
