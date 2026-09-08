@@ -52,6 +52,13 @@ class SettingsStore(private val context: Context) {
         val PLAYBACK_INFO_MODE = stringPreferencesKey("playback_info_mode")
         val OFFLINE_QUALITY = stringPreferencesKey("offline_quality")
         val OFFLINE_NETWORK = stringPreferencesKey("offline_network")
+        /**
+         * Live TV's browse view. Deliberately not part of ViewerPreferences:
+         * that record is written as one transaction by the settings screen,
+         * and a switch tapped on the Live TV screen has no business rewriting
+         * eleven unrelated preferences to record itself.
+         */
+        val LIVE_TV_VIEW = stringPreferencesKey("live_tv_view")
         val PREPARED_REPLACEMENT = booleanPreferencesKey("prepared_replacement")
     }
 
@@ -146,6 +153,13 @@ class SettingsStore(private val context: Context) {
             p[Keys.AUDIO_LANG] = audio
             p[Keys.SUB_LANG] = sub
         }
+    }
+
+    /** The persisted Live TV browse view, or null when the viewer has none. */
+    val liveTvView: Flow<String?> = context.dataStore.data.map { it[Keys.LIVE_TV_VIEW] }
+
+    suspend fun saveLiveTvView(storage: String) {
+        context.dataStore.edit { it[Keys.LIVE_TV_VIEW] = storage }
     }
 
     suspend fun saveViewerPreferences(value: ViewerPreferences) {

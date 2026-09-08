@@ -32,6 +32,7 @@
       stream_failed: ["Live stream stopped", "The tuner or transcoder stopped producing live television."],
       capability_expired: ["Live session expired", "The player was idle or disconnected. Start the channel again."],
       settings_conflict: ["Live TV settings changed", "Reload the channel list before starting another channel."],
+      guide_unavailable: ["No programme guide yet", "The tuner owner has not fetched a guide. Channels still play; rows show number and callsign only."],
     };
     const selected = views[code] || views.owner_unavailable;
     return { code, title: selected[0], detail: selected[1], retryable: RETRYABLE_CODES.has(code) };
@@ -209,5 +210,147 @@
     }
   }
 
-  return Object.freeze({ Lease, StartBarrier, channelView, errorView });
+
+  // ---- programme guide: the pure half -------------------------------------
+  // Every one of these is a total function over a guide document and answers
+  // the same way on the web, on Apple and on Android — the cases they must
+  // reproduce are tests/playback/live-tv-guide-cases.json. Keeping them here
+  // rather than in index.html is what lets a test call them directly.
+
+  function guideChannel(guide, channelId) {
+    if (!guide || !Array.isArray(guide.channels)) return null;
+    return guide.channels.find(channel => channel && channel.id === channelId) || null;
+  }
+
+  // (guide, channel id, now) → { now, next, progress }.
+  // The start instant belongs to the programme that starts; the end instant
+  // does not. Without that rule a viewer at exactly 8:30 sees two programmes
+  // on air, and "what is on now" stops being a question with one answer.
+  function programmeAt(guide, channelId, now) {
+    const channel = guideChannel(guide, channelId);
+    const rows = channel && Array.isArray(channel.programmes) ? channel.programmes : [];
+    let current = null, next = null;
+    for (const row of rows) {
+      if (!row || typeof row.start !== "number" || typeof row.end !== "number") continue;
+      if (row.start <= now && now < row.end) { current = row; continue; }
+      if (row.start > now && (next === null || row.start < next.start)) next = row;
+    }
+    // A real hole in the guide is a state to render, not one to paper over
+    // with the programme that just ended.
+    const span = current ? current.end - current.start : 0;
+    const progress = current && span > 0 ? (now - current.start) / span : null;
+    return { now: current, next, progress };
+  }
+
+  // Positioned cells for the half-hour grid. Clips to the window, never
+  // overlaps, and reports where the red now line goes. Geometry only: the
+  // caller decides what a cell looks like.
+  function gridLayout(guide, channels, window, now, slotSeconds, pxPerSlot) {
+    const slot = slotSeconds > 0 ? slotSeconds : 1800;
+    const px = pxPerSlot > 0 ? pxPerSlot : 240;
+    const scale = seconds => ((seconds - window.start) / slot) * px;
+    const rows = (channels || []).map(channel => {
+      const source = guideChannel(guide, channel.id);
+      const programmes = source && Array.isArray(source.programmes) ? source.programmes : [];
+      const cells = [];
+      for (const row of programmes) {
+        // Total over a malformed guide, exactly as programmeAt is. The guide
+        // host is untrusted, and one bad row used to take the whole grid
+        // render down with a TypeError.
+        if (!row || typeof row.start !== "number" || typeof row.end !== "number") continue;
+        const start = Math.max(row.start, window.start);
+        const end = Math.min(row.end, window.end);
+        if (!(end > start)) continue;
+        cells.push({
+          programme: row,
+          left: scale(start),
+          width: scale(end) - scale(start),
+          airing: row.start <= now && now < row.end,
+          clipped: row.start < window.start || row.end > window.end,
+        });
+      }
+      return { channel, cells };
+    });
+    return {
+      rows,
+      totalWidth: scale(window.end),
+      nowX: now >= window.start && now <= window.end ? scale(now) : null,
+      slots: Math.max(1, Math.round((window.end - window.start) / slot)),
+    };
+  }
+
+  // Search matches the number, the callsign, and what is on now — typing what
+  // you can see on screen should find the channel showing it.
+  function filterChannels(channels, guide, opts, now) {
+    const options = opts || {};
+    const query = String(options.query || "").trim().toLocaleLowerCase();
+    const favorites = options.filter === "favorites";
+    const hideProtected = options.hideProtected === true;
+    return (channels || []).filter(channel => {
+      if (!channel) return false;
+      if (favorites && !channel.favorite) return false;
+      if (hideProtected && channelView(channel).disabled) return false;
+      if (!query) return true;
+      const airing = programmeAt(guide, channel.id, now || 0).now;
+      const haystack = `${channel.guide_number} ${channel.guide_name} ${airing ? airing.title : ""}`;
+      return haystack.toLocaleLowerCase().includes(query);
+    });
+  }
+
+  // Which channel is ±1 from `current` in the visible order, wrapping. An
+  // unknown current lands on the first, so channel-up from a channel that was
+  // just filtered away still goes somewhere.
+  function adjacentChannel(visible, currentId, delta) {
+    const list = visible || [];
+    if (list.length === 0) return null;
+    const ids = list.map(entry => (typeof entry === "string" ? entry : entry.id));
+    const at = ids.indexOf(currentId);
+    if (at === -1) return ids[0];
+    const step = Number(delta) || 0;
+    const next = ((at + step) % ids.length + ids.length) % ids.length;
+    return ids[next];
+  }
+
+  // Half-hour column headings across the window, for the grid's sticky header.
+  function gridSlots(window, slotSeconds) {
+    const slot = slotSeconds > 0 ? slotSeconds : 1800;
+    const out = [];
+    for (let at = window.start; at < window.end; at += slot) out.push(at);
+    return out;
+  }
+
+  // Where the guide's data stops on a channel — the hatched "guide data ends"
+  // cell. Null when it runs past the window, which is the ordinary case.
+  function guideEnds(guide, channelId, window) {
+    const channel = guideChannel(guide, channelId);
+    const rows = channel && channel.programmes ? channel.programmes : [];
+    // No rows is not "the guide ends here" — it is a channel the guide says
+    // nothing about, which happens for every channel when the source is off.
+    // Answering window.start drew "Guide data ends 3:00 PM" on every row of an
+    // empty grid, which is a statement the page had no basis for.
+    if (rows.length === 0) return null;
+    // Take the furthest end rather than the last row's: the contract sorts
+    // programmes by start, which does not make the final end the maximum, and
+    // a feed that is out of order should not shorten the guide.
+    let end = null;
+    for (const row of rows) {
+      if (!row || typeof row.end !== "number") continue;
+      if (end === null || row.end > end) end = row.end;
+    }
+    if (end === null) return null;
+    return window && end >= window.end ? null : end;
+  }
+
+  return Object.freeze({
+    Lease,
+    StartBarrier,
+    channelView,
+    errorView,
+    programmeAt,
+    gridLayout,
+    gridSlots,
+    guideEnds,
+    filterChannels,
+    adjacentChannel,
+  });
 });

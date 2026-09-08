@@ -204,6 +204,18 @@ final class LiveTvAPI: LiveTvRequests, @unchecked Sendable {
         try decode(LiveTvStatus.self, data: await request("live-tv/sessions/\(Self.pathComponent(capability))/status"))
     }
 
+    /// The programme guide. A read of the owner's cache: it never triggers a
+    /// fetch, so it is always fast and always answers — including with
+    /// `freshness: "unavailable"`, which the client draws rather than retries.
+    func guide(from: Int? = nil, hours: Int? = nil) async throws -> LiveTvGuide {
+        var query: [String] = []
+        if let from { query.append("from=\(from)") }
+        if let hours { query.append("hours=\(max(1, min(72, hours)))") }
+        let suffix = query.isEmpty ? "" : "?" + query.joined(separator: "&")
+        return try decode(LiveTvGuide.self,
+                          data: await request("live-tv/guide" + suffix, authenticated: true, session: transport))
+    }
+
     func settings() async throws -> LiveTvSettings {
         try decode(LiveTvSettings.self, data: await request("settings", authenticated: true, session: transport))
     }

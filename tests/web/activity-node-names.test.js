@@ -57,6 +57,9 @@ const BORROWED = [
   "activityStreamMeters",
   "activityStreamDetails",
   "activityStreamCell",
+  // Live TV rows are drawn by the same painter and name their owner node
+  // through the same roster map, so they are borrowed rather than stubbed.
+  "liveTvActivityRows",
   "paintActivityBody",
 ];
 

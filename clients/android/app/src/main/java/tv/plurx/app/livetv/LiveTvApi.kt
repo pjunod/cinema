@@ -110,6 +110,19 @@ interface LiveTvRequests {
 
 /** Immutable profile-bound API. Narrow capabilities never inherit Session.token. */
 class LiveTvApi(origin: String, private val token: String) : LiveTvRequests {
+    private companion object {
+        /** Every lineup-shaped read. A device document is far smaller. */
+        const val MAX_BODY_BYTES: Long = 1_048_576
+
+        /**
+         * The guide's ceiling is the server's own `MAX_GUIDE_RESPONSE_BYTES`,
+         * plus room for the envelope. Reusing the lineup's 1 MiB would refuse
+         * a large lineup's guide as a transport failure, on a limit that has
+         * nothing to do with what went wrong.
+         */
+        const val MAX_GUIDE_BYTES: Long = 2 * 1_048_576 + 8_192
+    }
+
     private val base = (Session.canonicalOrigin(origin) ?: throw LiveTvFailure("invalid_settings")).toHttpUrl()
     private val client: OkHttpClient = Net.capabilityClient.newBuilder()
         .connectTimeout(8, TimeUnit.SECONDS).readTimeout(45, TimeUnit.SECONDS)
@@ -129,6 +142,7 @@ class LiveTvApi(origin: String, private val token: String) : LiveTvRequests {
     private suspend fun request(
         target: HttpUrl, method: String = "GET", authenticated: Boolean = false,
         body: JsonObject? = null, timeout: Long = 45, starting: Boolean = false,
+        maxBytes: Long = MAX_BODY_BYTES,
     ): String = withContext(Dispatchers.IO) {
         try {
             val payload = if (method in setOf("POST", "PUT")) {
@@ -141,7 +155,7 @@ class LiveTvApi(origin: String, private val token: String) : LiveTvRequests {
             call.execute().use { response ->
                 if (method == "DELETE" && response.code in setOf(404, 410)) return@withContext ""
                 val source = response.body?.source()
-                if (source?.request(1_048_577) == true) throw LiveTvFailure(if (starting) "start_outcome_unknown" else "stream_failed")
+                if (source?.request(maxBytes + 1) == true) throw LiveTvFailure(if (starting) "start_outcome_unknown" else "stream_failed")
                 val text = source?.readUtf8().orEmpty()
                 if (!response.isSuccessful) {
                     val code = runCatching { Net.json.decodeFromString<JsonObject>(text)["code"]?.jsonPrimitive?.content }.getOrNull()
@@ -185,6 +199,16 @@ class LiveTvApi(origin: String, private val token: String) : LiveTvRequests {
     }
     suspend fun keepalive(capability: String) { request(url("live-tv", "sessions", capability, "keepalive"), "PUT", timeout = 15) }
     suspend fun status(capability: String): LiveTvStatus = Net.json.decodeFromString(request(url("live-tv", "sessions", capability, "status"), timeout = 15))
+    /**
+     * The programme guide. A read of the owner's cache: it never triggers a
+     * fetch, so it is always fast and always answers — including with
+     * `freshness: "unavailable"`, which the client draws rather than retries.
+     * Its ceiling is the server's own response cap, not the lineup's.
+     */
+    suspend fun guide(): LiveTvGuide = Net.json.decodeFromString(
+        request(url("live-tv", "guide"), authenticated = true, timeout = 20, maxBytes = MAX_GUIDE_BYTES),
+    )
+
     suspend fun settings(): LiveTvSettings = Net.json.decodeFromString(request(url("settings"), authenticated = true))
     suspend fun save(settings: LiveTvSettings, change: LiveTvSettingsChange): LiveTvSettings = Net.json.decodeFromString(
         request(url("settings"), "PUT", authenticated = true, body = change.body(settings.live_tv_config_generation)),
