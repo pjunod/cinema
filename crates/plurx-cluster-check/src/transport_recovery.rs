@@ -1610,20 +1610,20 @@ struct ResourceEnvelopeAllowances {
 }
 
 impl ResourceBand {
-    /// The band of `samples`: the floor is the elementwise minimum, over
-    /// `floor_only` as well, and the ceiling is the `sustained`-th highest
-    /// value of each resource over `samples` alone — the highest when
-    /// `sustained` is one, the fourth-highest for the closing window, clamped
-    /// to what a shorter window holds. `floor_only` is the warmup baseline:
-    /// a resting sample that belongs in the floor and, as the one number in
-    /// the artifact nothing recomputes, bounds nothing at the ceiling.
-    fn over(
-        samples: &[ProcessResourceCount],
-        floor_only: Option<&ProcessResourceCount>,
-        sustained: usize,
-    ) -> Option<Self> {
+    /// The band of `samples`: the floor is the elementwise minimum and the
+    /// ceiling is the `sustained`-th highest value of each resource — the
+    /// highest when `sustained` is one, the fourth-highest for the closing
+    /// window, clamped to what a shorter window holds.
+    ///
+    /// Both edges are taken over recovery cycles alone. The warmup baseline is
+    /// deliberately not a member of either window: it is sampled before the
+    /// first recovery, while a node's pools are still cold, so it records a
+    /// level the process leaves during warmup and never returns to. Admitting
+    /// it to the opening floor would compare steady state against cold start
+    /// and read one-time warmup growth as a leak.
+    fn over(samples: &[ProcessResourceCount], sustained: usize) -> Option<Self> {
         let first = samples.first()?;
-        let mut floor = floor_only.unwrap_or(first).clone();
+        let mut floor = first.clone();
         for sample in samples {
             floor.threads = floor.threads.min(sample.threads);
             floor.sockets = floor.sockets.min(sample.sockets);
@@ -1649,9 +1649,12 @@ impl ResourceBand {
 ///
 /// The series is the warmup baseline followed by every recorded cycle, so the
 /// count is one more than the cycle count. The opening window is the first
-/// half rounded up: for the twenty-cycle campaign it is the baseline and
-/// cycles 1 through 10, and the closing window is cycles 11 through 20. For a
-/// three-cycle smoke it is the baseline and cycle 1 against cycles 2 and 3.
+/// half rounded up: for the twenty-cycle campaign it ends at cycle 10, so ten
+/// cycles face ten. For a three-cycle smoke it is cycle 1 against cycles 2
+/// and 3.
+///
+/// The baseline is counted here only so that the split falls evenly; it is
+/// not itself a member of either band. See [`ResourceBand::over`].
 fn opening_window_last_cycle(samples: usize) -> u32 {
     let opening_len = samples.div_ceil(2);
     u32::try_from(opening_len.saturating_sub(1)).unwrap_or(u32::MAX)
@@ -1736,18 +1739,20 @@ fn resource_envelopes(cycles: &[RecoveryCycleEvidence]) -> Result<RecoveryResour
             };
             let opening_samples = samples(opening_samples);
             let closing_samples = samples(closing_samples);
-            // An opening window is the baseline alone only for a one-cycle
-            // campaign, whose single cycle is then the whole closing window.
-            let opening = ResourceBand::over(&opening_samples, Some(&sample.baseline), 1)
-                .unwrap_or_else(|| ResourceBand {
-                    floor: sample.baseline.clone(),
-                    ceiling: sample.baseline.clone(),
-                });
+            // The opening window is empty only for a one-cycle campaign, whose
+            // single cycle is the whole closing window; the baseline stands in
+            // as that campaign's opening band because there is no cycle left to
+            // form one. Such a campaign is far short of
+            // RESOURCE_ENVELOPE_WINDOW_SAMPLES, so the envelope is a print
+            // rather than a verdict and the stand-in decides nothing.
+            let opening = ResourceBand::over(&opening_samples, 1).unwrap_or_else(|| ResourceBand {
+                floor: sample.baseline.clone(),
+                ceiling: sample.baseline.clone(),
+            });
             // The last cycle is always past the opening window, so a
             // non-empty campaign always has a closing sample.
-            let closing =
-                ResourceBand::over(&closing_samples, None, RESOURCE_CEILING_SUSTAINED_SAMPLES)
-                    .context("closing window has no sample")?;
+            let closing = ResourceBand::over(&closing_samples, RESOURCE_CEILING_SUSTAINED_SAMPLES)
+                .context("closing window has no sample")?;
             Ok(NodeResourceEnvelope {
                 node_id: sample.node_id,
                 kind: sample.kind,
@@ -3399,7 +3404,7 @@ mod tests {
         let error = validate_transport_recovery_artifact(&value).expect_err("a socket leak");
         let rendered = format!("{error:#}");
         assert!(
-            rendered.contains("node 1 sockets floor rose 8 -> 19"),
+            rendered.contains("node 1 sockets floor rose 9 -> 19"),
             "{rendered}"
         );
         assert!(
@@ -3416,7 +3421,7 @@ mod tests {
         });
         let error = validate_transport_recovery_artifact(&value).expect_err("a thread leak");
         assert!(
-            format!("{error:#}").contains("node 4 threads floor rose 12 -> 23"),
+            format!("{error:#}").contains("node 4 threads floor rose 13 -> 23"),
             "{error:#}"
         );
     }
@@ -3512,6 +3517,62 @@ mod tests {
             }
         });
         validate_transport_recovery_artifact(&value).expect("a high warmup is not a leak");
+    }
+
+    /// Node 1 of the voter campaign on run 1034, sample for sample: a cold
+    /// baseline of fourteen threads, sixteen once recoveries start, seventeen
+    /// from cycle ten onward, and then eleven consecutive cycles that do not
+    /// move. Sockets and owned tasks drain a peer's worth every third cycle
+    /// or so throughout.
+    ///
+    /// A pool that grows twice during warmup and then stops is not a leak: a
+    /// leak has no last cycle. Admitting the baseline to the opening floor
+    /// made this campaign fail with `threads floor rose 14 -> 17`, comparing
+    /// steady state against a cold start rather than the campaign against
+    /// itself.
+    #[test]
+    fn a_warmup_step_that_plateaus_is_not_growth() {
+        const THREADS: [u64; 20] = [
+            16, 16, 16, 16, 16, 16, 16, 16, 16, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17,
+        ];
+        let high = [1_u64, 12, 13, 16, 20];
+        let mut value = artifact();
+        value.voter.cycles.iter_mut().for_each(|cycle| {
+            cycle.node_resources[0].baseline = counts(14, 16, 31);
+        });
+        with_node_series(&mut value.voter, 0, |cycle| {
+            let threads = THREADS[cycle as usize - 1];
+            if high.contains(&u64::from(cycle)) {
+                counts(threads, 19, 34)
+            } else {
+                counts(threads, 16, 31)
+            }
+        });
+        validate_transport_recovery_artifact(&value)
+            .expect("a warmup step that plateaus is not a leak");
+
+        let node = &value.voter.resource_envelopes.nodes[0];
+        assert_eq!(
+            node.opening.floor.threads, 16,
+            "the cold baseline is not the floor"
+        );
+        assert_eq!(node.closing.floor.threads, 17);
+
+        // The same series with the plateau replaced by continued growth is a
+        // leak, and is still caught.
+        let mut value = artifact();
+        value.voter.cycles.iter_mut().for_each(|cycle| {
+            cycle.node_resources[0].baseline = counts(14, 16, 31);
+        });
+        with_node_series(&mut value.voter, 0, |cycle| {
+            counts(16 + u64::from(cycle) / 3, 16, 31)
+        });
+        let error = validate_transport_recovery_artifact(&value)
+            .expect_err("growth that never stops is a leak");
+        assert!(
+            format!("{error:#}").contains("node 1 threads floor rose"),
+            "{error:#}"
+        );
     }
 
     /// The other measured shape: thread counts wander a couple either side
@@ -3718,7 +3779,9 @@ mod tests {
         assert_eq!(envelopes.opening_window_last_cycle, 1);
         assert_eq!(envelopes.closing_window_samples, 2);
         assert!(!envelope_is_asserted(envelopes));
-        assert_eq!(envelopes.nodes[0].opening.floor, counts(12, 8, 10));
+        // Cycle 1 is the whole opening window, and the baseline of eight
+        // sockets is not a member of it: the band is that cycle alone.
+        assert_eq!(envelopes.nodes[0].opening.floor, counts(12, 9, 10));
         assert_eq!(envelopes.nodes[0].opening.ceiling, counts(12, 9, 10));
         assert_eq!(envelopes.nodes[0].closing.floor, counts(12, 10, 10));
         // Two closing samples: the sustained ceiling clamps to the lower.
@@ -3938,7 +4001,7 @@ mod tests {
         });
         let error = validate_transport_recovery_artifact(&value).expect_err("an owned task leak");
         assert!(
-            format!("{error:#}").contains("node 1 owned async tasks floor rose 10 -> 21"),
+            format!("{error:#}").contains("node 1 owned async tasks floor rose 11 -> 21"),
             "{error:#}"
         );
 
