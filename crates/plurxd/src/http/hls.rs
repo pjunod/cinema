@@ -4254,7 +4254,6 @@ fn local_control_response(
             start.delivered_dynamic_range.clone(),
         ),
         action: crate::playback_control::ControlAction::None,
-        accepted_acknowledgements: crate::playback_control::accepted_acknowledgements(),
     };
     // The advisory hold is derived from the delivery this response is already
     // carrying, so the two can never disagree. Building the response first and
@@ -5431,35 +5430,6 @@ async fn control_inner(
             }
         };
     }
-    // `switched` on a draining predecessor releases it now rather than at its
-    // deadline. That is the whole of §4 step 2: the drain exists so a client
-    // that has committed but not yet displayed keeps a stream to fall back on,
-    // and the moment it says a frame reached the screen there is nothing left
-    // to fall back to.
-    //
-    // Before `control_local`, because the exchange is still answered normally
-    // — this is a report, not a request to end anything the client is
-    // watching. What ends is the route it has just told us it left. The next
-    // request on that route gets the ordinary `410 session_ended`.
-    //
-    // Not gated on a receipt, for the same reason the `demand: end` path is
-    // not: this session's one receipt slot holds the commit's, and a client
-    // that misses this reply learns the same thing from the 410.
-    if route.drain_deadline_ms.is_some()
-        && request.acknowledgement.as_ref().map(|ack| ack.state)
-            == Some(crate::playback_control::AcknowledgementState::Switched)
-    {
-        if let Err(error) = state
-            .store
-            .end_media_session(&route.session_id, "superseded", unix_ms())
-            .await
-        {
-            // Not fatal to the exchange. The deadline and the cross-node sweep
-            // are both still behind this, so a failed early release costs the
-            // rest of the window, not correctness.
-            tracing::debug!(%error, "a switched acknowledgement could not release the drain");
-        }
-    }
     control_local(&state, &route, request, deadline_unix_ms).await
 }
 
@@ -5708,7 +5678,48 @@ pub(crate) async fn control_local(
     // deadline. Keep admission and every nonterminal mutation in that caller
     // future; only an already-accepted End receives a detached continuation
     // below for its durable acknowledgement.
-    control_local_inner(state, route, request, deadline_unix_ms).await
+    //
+    // `switched` on a draining predecessor releases it, and it is released
+    // *here* — after the exchange, on the owner — for three reasons, each of
+    // which was a defect in the first placement:
+    //
+    // Only the owner reaches this function, and it reaches it on both paths:
+    // public ingress that owns the route falls through to it, and a relayed
+    // request arrives at `internal_media_sessions::control_authorized`, which
+    // calls it directly. `control_inner` is on neither of those for a remote
+    // route, so a release placed there ran only when the client happened to
+    // hit the owning node.
+    //
+    // After the exchange, so the exchange is answered. Ending the row first
+    // meant the very packet reporting the switch was answered `410
+    // session_ended` — every successful early release counted as `Gone`, and
+    // anything else riding that request was dropped.
+    //
+    // After the actor's fences. `control_inner` checks the generation, the
+    // owner epoch and the route state; the client-instance and monotonic
+    // sequence fences live in `ControlState::accept`, inside this call. The
+    // drain exists to protect the instance that committed, so a packet from a
+    // second instance — or a replayed one with a stale sequence — must not be
+    // able to pull it out from under that instance.
+    let releases_drain = route.drain_deadline_ms.is_some()
+        && request.acknowledgement.as_ref().map(|ack| ack.state)
+            == Some(crate::playback_control::AcknowledgementState::Switched);
+    let response = control_local_inner(state, route, request, deadline_unix_ms).await;
+    // Only on an accepted exchange. A refused one proves nothing about what
+    // reached a screen.
+    if releases_drain && response.status().is_success() {
+        if let Err(error) = state
+            .store
+            .end_media_session(&route.session_id, "superseded", unix_ms())
+            .await
+        {
+            // Not fatal. The deadline and the cross-node sweep are both still
+            // behind this, so a failed early release costs the rest of the
+            // window, not correctness.
+            tracing::debug!(%error, "a switched acknowledgement could not release the drain");
+        }
+    }
+    response
 }
 
 async fn control_local_inner(
@@ -12505,6 +12516,282 @@ mod tests {
         drop(held);
     }
 
+    /// One client instance across a drain-release exchange, so the ascending
+    /// sequences are judged against each other rather than being waved through
+    /// as a new instance.
+    fn drain_control_request(
+        generation: String,
+        sequence: u64,
+    ) -> crate::playback_control::ControlRequestV1 {
+        crate::playback_control::ControlRequestV1 {
+            intent: None,
+            protocol: crate::playback_control::PROTOCOL_V1.to_owned(),
+            generation,
+            control_epoch: 1,
+            client_instance_id: "6f1c2f8e-4a3b-4d5e-9f60-71a2b3c4d5e6".to_owned(),
+            sequence,
+            demand: crate::playback_control::PlaybackDemand::Active,
+            position_ms: 1_000,
+            buffered_from_ms: Some(0),
+            buffered_through_ms: 10_000,
+            playback_rate: 1.0,
+            render_state: crate::playback_control::RenderState::Rendering,
+            seek_target_ms: None,
+            observed_download_bps: None,
+            selection: crate::playback_control::ClientSelection {
+                quality: crate::playback_control::QualitySelection::Auto,
+                audio_track: None,
+                subtitle: crate::playback_control::SubtitleSelection {
+                    mode: crate::playback_control::SubtitleMode::Off,
+                    track: None,
+                },
+                audio_offset_ms: 0,
+                codec: crate::playback_control::CodecPolicy::Auto,
+                dynamic_range: crate::playback_control::DynamicRangePolicy::Auto,
+            },
+            capabilities: Some(crate::playback_control::DynamicCapabilities {
+                platform: crate::playback_control::ClientPlatform::Web,
+                max_height: 1080,
+                codecs: vec![crate::playback_control::CodecPolicy::H264],
+                dynamic_ranges: vec![crate::playback_control::DynamicRangePolicy::Sdr],
+                dual_player_preparation: false,
+            }),
+            observation: None,
+            acknowledgement: None,
+            supported_actions: None,
+        }
+    }
+
+    /// A `switched` on a draining predecessor releases it, and only on an
+    /// exchange that was actually accepted.
+    ///
+    /// Every assertion here corresponds to a way the first placement of this
+    /// hook was wrong. It ran before the exchange, so the packet reporting the
+    /// switch was answered `410 session_ended` — hence the status assertion,
+    /// which is not incidental. It ran on every packet that named the state,
+    /// accepted or not — hence the refused case, because a refused exchange
+    /// proves nothing about what reached a screen. And it lived in
+    /// `control_inner`, which a relayed request never reaches — hence this
+    /// test entering through `control_authorized`, the relay's own door, so
+    /// that moving the hook back out of `control_local` fails here.
+    #[tokio::test]
+    async fn a_switch_releases_the_drain_through_the_relay_and_only_when_accepted() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let generation = uuid::Uuid::new_v4().to_string();
+        let fixture = HlsDeliveryFixture::publish(dir.path(), &session_id).await;
+        let user = fixture
+            .store
+            .create_user("drain-release", "hash", false)
+            .await
+            .expect("drain release user");
+        let recipe_json = crate::media_sessions::takeover_eligible_route(&session_id, &generation)
+            .recipe_json
+            .replace("\"user_id\":7", &format!("\"user_id\":{}", user.id));
+        let start = StartResponse {
+            session_id: session_id.clone(),
+            playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
+            duration_ms: Some(60_000),
+            start_seconds: 0.0,
+            media_origin_ms: Some(0),
+            height: 720,
+            encoder: "software".to_owned(),
+            vod: false,
+            ladder: vec![],
+            prior_kbps: None,
+            delivered_dynamic_range: Some("sdr".to_owned()),
+            delivered_dolby_vision_profile: None,
+            control: crate::playback_control::ControlBootstrap::new(
+                &session_id,
+                &generation,
+                1,
+                crate::playback_control::ROLLING_LEASE_TIMEOUT_MS,
+            ),
+            plan_notes: Vec::new(),
+        };
+        let now_ms = unix_ms();
+        activate_ready(
+            &fixture.store,
+            MediaSessionActivation {
+                expected_desired_revision: None,
+                incarnation_id: generation.clone(),
+                session_id: session_id.clone(),
+                user_id: user.id,
+                playback_id: "drain-release".to_owned(),
+                expected_predecessor_incarnation_id: None,
+                fence_predecessor: false,
+                request_id: None,
+                request_fingerprint: "a".repeat(64),
+                owner_node_id: fixture.state.node_id.clone(),
+                lease_expires_at_ms: now_ms.saturating_add(60_000),
+                recipe_json: recipe_json.clone(),
+                response_json: serde_json::to_string(&start).expect("start response"),
+                publication_ready_at_ms: 0,
+                media_origin_ms: 0,
+                now_ms,
+            },
+        )
+        .await;
+
+        // The drain is put on the row the way production puts it there: by
+        // committing a successor. Setting the column by hand would test the
+        // hook against a state the store never produces.
+        let successor_incarnation = uuid::Uuid::new_v4().to_string();
+        let successor_session = uuid::Uuid::new_v4().to_string();
+        fixture
+            .store
+            .prepare_media_session(&plurx_core::domain::MediaSessionPreparation {
+                expected_desired_revision: None,
+                incarnation_id: successor_incarnation.clone(),
+                session_id: successor_session.clone(),
+                user_id: user.id,
+                playback_id: "drain-release".to_owned(),
+                expected_predecessor_incarnation_id: generation.clone(),
+                expected_predecessor_owner_node_id: fixture.state.node_id.clone(),
+                expected_predecessor_owner_epoch: 1,
+                request_fingerprint: "b".repeat(64),
+                owner_node_id: fixture.state.node_id.clone(),
+                recipe_json,
+                response_json: serde_json::to_string(&start).expect("successor response"),
+                media_origin_ms: 0,
+                now_ms,
+                deadline_ms: now_ms.saturating_add(60_000),
+            })
+            .await
+            .expect("stage successor")
+            .expect("staging wins");
+        fixture
+            .store
+            .commit_media_session_preparation(
+                user.id,
+                "drain-release",
+                &plurx_core::domain::MediaSessionPreparationCommitRequest {
+                    expected_desired_revision: None,
+                    staged_incarnation_id: successor_incarnation.clone(),
+                    expected_predecessor_owner_node_id: fixture.state.node_id.clone(),
+                    expected_predecessor_owner_epoch: 1,
+                    now_ms,
+                    lease_expires_at_ms: now_ms.saturating_add(60_000),
+                    control_receipt: None,
+                },
+            )
+            .await
+            .expect("commit successor")
+            .expect("commit wins");
+
+        let draining = fixture
+            .store
+            .media_session_route(&session_id)
+            .await
+            .expect("predecessor route")
+            .expect("the predecessor keeps serving while it drains");
+        assert_eq!(draining.state, "active");
+        assert!(
+            draining.drain_deadline_ms.is_some(),
+            "the commit is what puts the predecessor into its drain",
+        );
+
+        let switched = || crate::playback_control::ActionAcknowledgement {
+            action_id: uuid::Uuid::new_v4().to_string(),
+            state: crate::playback_control::AcknowledgementState::Switched,
+            buffered_through_ms: None,
+            committed_media_origin_ms: None,
+            first_frame_unix_ms: Some(unix_ms()),
+        };
+
+        // A refused exchange: the generation names an incarnation this route
+        // is not on, so the relay's own fence answers before any acceptance.
+        let mut refused = drain_control_request(generation.clone(), 1);
+        refused.acknowledgement = Some(switched());
+        let response = crate::http::internal_media_sessions::control_authorized(
+            fixture.state.clone(),
+            crate::playback_control::ControlRelayRequest {
+                session_id: session_id.clone(),
+                generation: uuid::Uuid::new_v4().to_string(),
+                expected_owner_node_id: fixture.state.node_id.clone(),
+                expected_owner_epoch: 1,
+                deadline_unix_ms: unix_ms().saturating_add(4_000),
+                control: refused,
+            },
+        )
+        .await;
+        assert!(
+            !response.status().is_success(),
+            "a control naming another generation is refused",
+        );
+        assert_eq!(
+            fixture
+                .store
+                .media_session_route(&session_id)
+                .await
+                .expect("route after refusal")
+                .map(|route| route.state),
+            Some("active".to_owned()),
+            "a refused exchange proves nothing about what reached a screen, \
+             and must not end the stream the client is still watching",
+        );
+
+        // An accepted exchange carrying no acknowledgement is ordinary
+        // traffic on a draining route, and leaves the drain alone.
+        let response = crate::http::internal_media_sessions::control_authorized(
+            fixture.state.clone(),
+            crate::playback_control::ControlRelayRequest {
+                session_id: session_id.clone(),
+                generation: generation.clone(),
+                expected_owner_node_id: fixture.state.node_id.clone(),
+                expected_owner_epoch: 1,
+                deadline_unix_ms: unix_ms().saturating_add(4_000),
+                control: drain_control_request(generation.clone(), 1),
+            },
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            fixture
+                .store
+                .media_session_route(&session_id)
+                .await
+                .expect("route after silent exchange")
+                .map(|route| route.state),
+            Some("active".to_owned()),
+            "the drain runs its window unless a client says it is done with it",
+        );
+
+        // And the exchange that does say so: answered, then released. Spaced
+        // past `MIN_CONTROL_INTERVAL`, which the previous exchange has just
+        // started; a rate-limited packet is refused, and a refusal is what the
+        // case above is already about.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let mut releasing = drain_control_request(generation.clone(), 2);
+        releasing.acknowledgement = Some(switched());
+        let response = crate::http::internal_media_sessions::control_authorized(
+            fixture.state.clone(),
+            crate::playback_control::ControlRelayRequest {
+                session_id: session_id.clone(),
+                generation: generation.clone(),
+                expected_owner_node_id: fixture.state.node_id.clone(),
+                expected_owner_epoch: 1,
+                deadline_unix_ms: unix_ms().saturating_add(4_000),
+                control: releasing,
+            },
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "the packet that reports the switch is answered; ending the row \
+             ahead of it is what answered it 410",
+        );
+        let released = fixture
+            .store
+            .media_session_route(&session_id)
+            .await
+            .expect("route after the switch")
+            .expect("the row is still readable once it has ended");
+        assert_eq!(released.state, "ended");
+        assert_eq!(released.terminal_reason.as_deref(), Some("superseded"));
+    }
+
     #[tokio::test]
     async fn terminal_control_cancellation_and_reaper_preserve_one_durable_reply() {
         let dir = crate::test_tempdir().expect("state dir");
@@ -12893,7 +13180,6 @@ mod tests {
                     dynamic_range: Some("sdr".to_owned()),
                 },
                 action: crate::playback_control::ControlAction::None,
-                accepted_acknowledgements: crate::playback_control::accepted_acknowledgements(),
             };
             let acknowledgement = MediaSessionTerminalAck {
                 incarnation_id: generation.clone(),

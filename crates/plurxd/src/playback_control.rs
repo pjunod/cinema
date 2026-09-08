@@ -693,9 +693,12 @@ pub(crate) enum AcknowledgementState {
     /// that committed and then failed to present was indistinguishable from
     /// one that succeeded.
     ///
-    /// `first_frame_unix_ms` is required here rather than on `Committed`,
-    /// where nothing has reached the screen yet and requiring it made a client
-    /// invent a timestamp for a frame it had not drawn.
+    /// `first_frame_unix_ms` is required here as it is on `Committed`, and
+    /// for a different reason. On `Committed` it is a measurement taken
+    /// alongside the evidence (`committed_media_origin_ms`); here it is the
+    /// entire content of the state, because without a frame timestamp
+    /// `switched` says only that the client sent a different word than last
+    /// time.
     ///
     /// **No shipped client sends this yet, and none may until every node in a
     /// fleet runs a binary that accepts it.** `AcknowledgementState` has no
@@ -703,8 +706,11 @@ pub(crate) enum AcknowledgementState {
     /// deserialize failure, an empty 400, and a 503 with `retry_after_ms` that
     /// the client retries forever. That is why this lands server-first: this
     /// release teaches every node the word, and only a later one teaches a
-    /// client to say it. `accepted_acknowledgements` on the response is how a
-    /// client will know which it is talking to.
+    /// client to say it. How a client will learn which build it is talking to
+    /// is that later release's problem — see the note under §4 step 2 in
+    /// `docs/STREAMING-RELIABILITY-HANDOFF.md`, which cannot be solved by
+    /// adding a response field while `ControlResponseV1` still carries
+    /// `deny_unknown_fields`.
     Switched,
     Failed,
     Aborted,
@@ -722,22 +728,6 @@ pub(crate) struct ControlResponseV1 {
     pub delivery: DeliveryView,
     pub effective_selection: EffectiveSelection,
     pub action: ControlAction,
-    /// Acknowledgement states this server will accept, for a client deciding
-    /// what it may send.
-    ///
-    /// The reverse of `supported_actions`, and it exists for the same reason
-    /// in the other direction. `AcknowledgementState` has no unknown-value
-    /// fallback, so a state an owner does not know is a deserialize failure,
-    /// an empty 400, and a 503 the client retries forever — the failure that
-    /// withdrew the first attempt at `switched`. A client must therefore be
-    /// able to ask before it speaks, and the only moment it can ask is a
-    /// response it has already been given.
-    ///
-    /// Optional so an older owner, which omits it, reads as "the original five
-    /// states and nothing more" rather than as a fleet-wide unknown. A client
-    /// that has not seen this field must not send anything outside that set.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub accepted_acknowledgements: Option<Vec<String>>,
 }
 
 impl ControlResponseV1 {
@@ -2912,31 +2902,6 @@ impl PreparationGate for RollingControlHandle {
     }
 }
 
-/// Every acknowledgement state this build accepts, newest last.
-///
-/// Sent on every response so a client can tell what it is talking to before it
-/// speaks. Written out rather than derived from the enum on purpose: this list
-/// is a wire promise, and a variant added to the enum should not silently
-/// become one until somebody decides it is ready to be.
-pub(crate) const ACCEPTED_ACKNOWLEDGEMENTS: &[&str] = &[
-    "metadata_ready",
-    "buffer_ready",
-    "committed",
-    "switched",
-    "failed",
-    "aborted",
-];
-
-/// The advertisement as the response carries it.
-pub(crate) fn accepted_acknowledgements() -> Option<Vec<String>> {
-    Some(
-        ACCEPTED_ACKNOWLEDGEMENTS
-            .iter()
-            .map(|state| (*state).to_owned())
-            .collect(),
-    )
-}
-
 pub(crate) trait TerminalControlCommitter: Send + Sync {
     /// Start the continuation synchronously. The returned receipt may be
     /// awaited by HTTP, but dropping every waiter cannot cancel the commit.
@@ -2982,7 +2947,6 @@ pub(crate) fn terminal_response_for_test(result: &LocalControlResult) -> Control
             dynamic_range: Some("sdr".to_owned()),
         },
         action: result.action.clone(),
-        accepted_acknowledgements: accepted_acknowledgements(),
     }
 }
 
@@ -3887,14 +3851,41 @@ impl ControlState {
                     })
                 }
             }
-            // `Switched` arrives *after* a commit, not instead of one, so it
-            // has no preparation left to direct: the ledger row is gone and
-            // the successor is the pointer's current incarnation. It is not an
-            // abort — aborting here would tear down the stream the viewer is
-            // now watching — and it is not a second commit. What it releases
-            // is the predecessor's drain, and that is handled where the
-            // predecessor's route is, not on the successor's preparation.
-            AcknowledgementState::Switched => None,
+            // `Switched` arrives *after* a commit, not instead of one, so in
+            // the ordinary case it has no preparation left to direct: the slot
+            // is gone and the successor is the pointer's current incarnation.
+            // It is not an abort — aborting there would tear down the stream
+            // the viewer is now watching — and it is not a second commit. What
+            // it releases is the predecessor's drain, and that is handled
+            // where the predecessor's route is, not on the successor's
+            // preparation.
+            //
+            // A slot still `Staged` for this incarnation is the exception, and
+            // it must not be waved through. Nothing has committed it, so the
+            // client is claiming a frame from media this owner never
+            // published, and no later packet can direct the slot either:
+            // `Committed` after a `Switched` is out of order and
+            // `record_preparation_progress` has already recorded the terminal
+            // state. Left alone the slot holds its encoder reservation until
+            // its own deadline lapses — an encoder is one of two — so the
+            // claim is refused and the preparation torn down.
+            AcknowledgementState::Switched => {
+                if matches!(
+                    &self.preparation,
+                    PreparationSlot::Staged {
+                        staged_incarnation_id: staged,
+                        ..
+                    } if *staged == staged_incarnation_id
+                ) {
+                    self.abort_preparation(&staged_incarnation_id);
+                    Some(PreparationDirective::Abort {
+                        staged_incarnation_id,
+                        acknowledgement_rejected: true,
+                    })
+                } else {
+                    None
+                }
+            }
             AcknowledgementState::Failed | AcknowledgementState::Aborted => {
                 self.abort_preparation(&staged_incarnation_id);
                 Some(PreparationDirective::Abort {
@@ -13463,7 +13454,6 @@ mod tests {
                     dynamic_range: Some("sdr".to_owned()),
                 },
                 action: ControlAction::None,
-                accepted_acknowledgements: accepted_acknowledgements(),
             }
         }
 
@@ -13569,11 +13559,12 @@ mod tests {
     /// timestamp on it, and it may not ride an `end`.
     ///
     /// The two halves matter for different reasons. `committed` is the
-    /// server's transaction and `switched` is the client's display, so the
-    /// timestamp belongs on the second — requiring it on the first made a
-    /// client invent one for a frame it had not drawn. And a packet that both
-    /// ends the stream and reports a successor reaching the screen is asking
-    /// for one teardown down two paths.
+    /// server's transaction and carries `committed_media_origin_ms` as its
+    /// evidence, with the frame time alongside as a measurement; `switched` is
+    /// the client's display and the frame time is the whole of it, so one that
+    /// arrives without it reports nothing at all. And a packet that both ends
+    /// the stream and reports a successor reaching the screen is asking for
+    /// one teardown down two paths.
     #[test]
     fn a_switched_acknowledgement_needs_the_frame_it_claims() {
         let ack = |state: AcknowledgementState, first_frame: Option<i64>| ActionAcknowledgement {
@@ -13616,43 +13607,101 @@ mod tests {
         );
     }
 
-    /// Every state this build accepts is advertised, and the advertisement is
-    /// what a client reads before it dares send a new one.
+    /// A `switched` naming a successor that was never committed tears the
+    /// preparation down; one that follows a real commit leaves it alone.
     ///
-    /// `AcknowledgementState` has no unknown-value fallback, so a state an
-    /// owner does not know is a 400 and then a 503 the client retries forever.
-    /// The list is therefore a wire promise: it has to name exactly what
-    /// `validate` will accept, and it is written out by hand so that adding a
-    /// variant to the enum does not silently make one.
+    /// The second half is the ordinary case and the reason `switched` returns
+    /// no directive at all: by the time the client's frame is on screen the
+    /// slot has already been committed and cleared, and issuing an abort there
+    /// would tear down the stream the viewer is now watching.
+    ///
+    /// The first half is what makes the first half safe. A slot still staged
+    /// is a successor this owner never published, so the claim is false — but
+    /// the expensive part is not the lie, it is that nothing else will ever
+    /// direct the slot. `record_preparation_progress` has recorded a terminal
+    /// state, so a later `committed` is out of order, and the reservation
+    /// would sit on one of two encoders until its own deadline lapsed.
     #[test]
-    fn the_advertised_states_are_exactly_the_ones_this_build_accepts() {
-        for state in ACCEPTED_ACKNOWLEDGEMENTS {
-            let decoded: AcknowledgementState =
-                serde_json::from_value(serde_json::Value::String((*state).to_owned()))
-                    .unwrap_or_else(|error| {
-                        panic!("advertised {state:?} does not decode: {error}")
-                    });
-            assert_eq!(
-                serde_json::to_value(decoded).expect("re-encode"),
-                serde_json::Value::String((*state).to_owned()),
-                "advertised {state:?} does not round-trip"
-            );
-        }
-        for state in [
-            AcknowledgementState::MetadataReady,
-            AcknowledgementState::BufferReady,
-            AcknowledgementState::Committed,
-            AcknowledgementState::Switched,
-            AcknowledgementState::Failed,
-            AcknowledgementState::Aborted,
-        ] {
-            let wire = serde_json::to_value(state).expect("encode");
-            let wire = wire.as_str().expect("a state is a string on the wire");
-            assert!(
-                ACCEPTED_ACKNOWLEDGEMENTS.contains(&wire),
-                "{wire} is accepted but not advertised, so a client cannot learn it may send it"
-            );
-        }
+    fn a_switch_onto_media_that_never_published_aborts_the_preparation() {
+        let action_id = uuid::Uuid::new_v4().to_string();
+        let staged = uuid::Uuid::new_v4().to_string();
+        let selection = EffectiveSelection {
+            quality_auto: true,
+            height: 1080,
+            audio_track: None,
+            subtitle_burn: None,
+            audio_offset_ms: 0,
+            codec: "h264".to_owned(),
+            dynamic_range: None,
+        };
+        // Announced after staging, as acceptance does it: `stage_preparation`
+        // clears any prior binding, so a binding written first would not
+        // survive to be acknowledged.
+        let binding = || PreparedActionBinding {
+            successor: PreparedSuccessorAction {
+                staged_incarnation_id: staged.clone(),
+                deadline_ms: i64::MAX,
+                session_id: "session".to_owned(),
+                playlist_url: "/hls/session/index.m3u8".to_owned(),
+                media_origin_ms: 0,
+                effective_selection: selection.clone(),
+            },
+            action: ControlAction::Prepare {
+                action_id: action_id.clone(),
+                session_id: "session".to_owned(),
+                playlist_url: "/hls/session/index.m3u8".to_owned(),
+                media_origin_ms: 0,
+                effective_selection: selection.clone(),
+            },
+            acknowledgement: None,
+        };
+        let switched = ActionAcknowledgement {
+            action_id: action_id.clone(),
+            state: AcknowledgementState::Switched,
+            buffered_through_ms: None,
+            committed_media_origin_ms: None,
+            first_frame_unix_ms: Some(1_700_000_000_000),
+        };
+
+        let mut still_staged = ControlState::default();
+        assert!(still_staged.stage_preparation(
+            staged.clone(),
+            uuid::Uuid::new_v4().to_string(),
+            i64::MAX,
+            None,
+        ));
+        still_staged.prepared_action = Some(binding());
+        assert_eq!(
+            still_staged
+                .record_terminal_preparation_acknowledgement(Some(&switched), 1_700_000_000_000),
+            Some(PreparationDirective::Abort {
+                staged_incarnation_id: staged.clone(),
+                acknowledgement_rejected: true,
+            }),
+            "a successor on screen that this owner never published is refused, \
+             and the slot it would otherwise hold is released",
+        );
+        assert!(
+            matches!(
+                &still_staged.preparation,
+                PreparationSlot::Aborting { staged_incarnation_id } if *staged_incarnation_id == staged
+            ),
+            "the refusal has to move the slot, not merely report a directive",
+        );
+
+        // The ordinary case: the commit already cleared the slot.
+        let mut after_commit = ControlState {
+            prepared_action: Some(binding()),
+            ..ControlState::default()
+        };
+        assert_eq!(
+            after_commit
+                .record_terminal_preparation_acknowledgement(Some(&switched), 1_700_000_000_000),
+            None,
+            "a switch that follows a real commit has no preparation left to \
+             direct, and must not tear down what the viewer is watching",
+        );
+        assert!(matches!(after_commit.preparation, PreparationSlot::Empty));
     }
 
     fn request() -> ControlRequestV1 {
@@ -15550,7 +15599,6 @@ mod tests {
             delivery: delivery_view(),
             effective_selection: prepared_selection(),
             action: action.clone(),
-            accepted_acknowledgements: accepted_acknowledgements(),
         };
         let relay = ControlRelayRequest {
             session_id: uuid::Uuid::new_v4().to_string(),
@@ -17348,7 +17396,6 @@ mod tests {
                 dynamic_range: Some("sdr".to_owned()),
             },
             action: ControlAction::None,
-            accepted_acknowledgements: accepted_acknowledgements(),
         };
         (response, request)
     }
@@ -21424,7 +21471,6 @@ mod tests {
                 dynamic_range: Some("sdr".to_owned()),
             },
             action: ControlAction::None,
-            accepted_acknowledgements: accepted_acknowledgements(),
         };
         assert!(response.is_valid_for(&request));
 

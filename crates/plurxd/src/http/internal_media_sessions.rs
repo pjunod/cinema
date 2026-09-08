@@ -750,7 +750,7 @@ async fn control_inner(
 /// body was unreachable from `cargo test` and a mutation reverting any of its
 /// gates survived the suite. The one line this leaves untested is the
 /// `authorize` call itself, which is proved by the router's own auth tests.
-async fn control_authorized(
+pub(crate) async fn control_authorized(
     state: AppState,
     request: crate::playback_control::ControlRelayRequest,
 ) -> Response {
@@ -1247,7 +1247,6 @@ mod tests {
                 dynamic_range: Some("sdr".to_owned()),
             },
             action: crate::playback_control::ControlAction::None,
-            accepted_acknowledgements: crate::playback_control::accepted_acknowledgements(),
         };
         let receipt = plurx_core::domain::MediaSessionTerminalAck {
             incarnation_id: incarnation_id.clone(),
