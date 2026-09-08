@@ -248,14 +248,18 @@ runner merely busy at the top of every hour is the normal condition of a
 working CI host, and reporting it as short would send an operator to
 re-provision a machine that is fine.
 
-**`demand_dropped` counts filesystems running on the percentage rule rather
-than the reserve configured for them** — a demand larger than half the volume
-is dropped rather than met (below), and that is the original defect narrowed to
-one filesystem. It is a count and not a reserve figure on purpose: an earlier
-version reported the largest reserve seen in the pass, which on a host with one
-big volume and one small one read as healthy while hiding the small one
-entirely. The message naming the filesystem is printed once per pass; the
-counter counts every one.
+**`demand_dropped` non-zero means something on this host is running on the
+percentage rule rather than the reserve configured for it** — a demand larger
+than half the volume is dropped rather than met (below), which is the original
+defect narrowed to one filesystem. Read it as a flag, not as a census: it
+counts *checks*, one per runner instance plus one for Docker, so four runners
+sharing one short volume read `5` rather than `1`. Deduping by mount point
+would cost a `df` per instance to change a number nobody acts on differently.
+
+It is a count and not a reserve figure on purpose. An earlier version reported
+the largest reserve seen in the pass, which on a host with one big volume and
+one small one read as healthy while hiding the small one entirely. The message
+naming the filesystem is printed once per pass; the counter counts every check.
 
 ### The reserve has to clear the bar jobs are held to
 

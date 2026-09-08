@@ -155,6 +155,12 @@ available_kb_for() { df -Pk "$1" | awk 'NR == 2 { print $4 }'; }
 # while the script kept 10 G -- two copies of the same rule, disagreeing on
 # their first outing, on exactly the small hosts the message exists for.
 unreachable_reported=false
+# Counts CHECKS, not distinct filesystems: once per runner instance plus once
+# for Docker. Runners sharing one volume -- the ordinary shape -- are counted
+# once each, so a four-runner host on a single short volume reads 5. Deduping
+# by mount point would need a fifth `df` per instance to buy a number nobody
+# acts on differently: non-zero already means "something here is on the
+# percentage rule", which is the whole signal. Named for what it is instead.
 demand_dropped=0
 note_unreachable_demand() {
   local path floor_kb filesystem_kb half

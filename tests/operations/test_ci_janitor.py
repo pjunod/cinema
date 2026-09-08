@@ -471,9 +471,10 @@ class JanitorContractCase(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.last_run()["instances"], 2)
         self.assertEqual(result.stderr.count("no amount of pruning"), 1)
-        # Said once, counted every time: the message is for a human reading a
-        # journal, the counter is for whoever asks how many filesystems on this
-        # host are running on the percentage rule instead of the reserve.
+        # Said once, counted every check. Both runners share one `df` answer
+        # here, so 2 is two checks against one filesystem -- which is what the
+        # field measures and what the doc now says it measures. It is a flag
+        # ("something here is on the percentage rule"), not a census.
         self.assertEqual(self.last_run()["demand_dropped"], 2)
 
     def test_the_reported_reserve_is_the_one_the_script_actually_kept(self):
@@ -655,10 +656,18 @@ class JanitorContractCase(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("no amount of pruning reaches that", result.stderr)
+        self.assertIn(str(docker_root), result.stderr)
         self.assertEqual(self.last_run()["demand_dropped"], 1)
         # And it is still the runner cache's turn first: the runner volume is
         # healthy, so nothing there is touched.
         self.assertEqual(self.systemctl_calls(), [])
+        # Reporting the dropped demand must not change the decision. 12 G free
+        # clears the 10 G reserve the drop leaves behind, so nothing is pruned
+        # — saying so out loud is the entire change on this path.
+        self.assertFalse(self.last_run()["docker_pruned"])
+        self.assertIn("Docker within reserve", result.stdout)
+        docker_log = Path(self.environment["FIXTURE_DOCKER_LOG"])
+        self.assertFalse(docker_log.exists(), docker_log.read_text() if docker_log.exists() else "")
 
     def test_a_cache_dir_the_config_points_somewhere_else_is_refused(self):
         """The delete is a whole directory, so the path check is the safety."""
