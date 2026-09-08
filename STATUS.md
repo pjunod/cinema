@@ -1,8 +1,87 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-09-07 · Kept current by the working agent in the same
+**Updated:** 2026-09-08 · Kept current by the working agent in the same
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
+
+## Apple viewers were paying for encoders nobody told them about
+
+**Merged into `main` as `9c5e1f9b`, 2026-09-08, from
+[its pull request](http://192.168.4.7:3000/noirr/plurx/pulls/122). Not
+deployed, and not yet on any physical device.**
+Apple is the only platform whose `dual_player_preparation` is `true`,
+measured on an iPhone 17 Pro Max and an Apple TV 4K at 20/20 on both cases.
+So the server has been staging real successors for Apple viewers all along —
+minting an incarnation, taking the actor's one preparation slot, writing a
+durable row — and then refusing to mention them, because no shipped client
+ever named `prepare_replacement` in `supported_actions`. `prepared_successor`
+resolved to `NotRequested`, the client was told `{"type":"none"}`, the
+`suppressed` counter moved, and 330 seconds later the deadline reaped a
+successor nobody had heard of.
+
+Apple now declares the action and drives the whole transaction: a second
+`AVPlayer` that is muted, never on a layer and never asked to play, primed to
+the viewer's film position through the successor's own `media_origin_ms`;
+`metadata_ready` and `buffer_ready` as it gets there; the item handed to the
+authoritative player so the layer, Picture in Picture, the time observer and
+every KVO survive the switch; and `committed` carrying the wall clock of the
+successor's own first qualifying frame, taken from the item's video output
+against the film position the switch happened at rather than from a timer.
+Every exit frees the second pipeline and settles the staging — a seek, a
+second quality change, an audio change, backgrounding, the player ending —
+because a staging left to the deadline costs that session its only
+preparation for the rest of its life.
+
+**The finding that changed the shape of the work.** The contract this was
+built from says the server half is finished. It is finished as a transaction
+and not as a stream: `stage_prepared_successor`'s own comment says
+"**Stage only** … nothing produced yet", the third of its eight phases —
+*reserve and prime* — is not implemented, and the staged row carries the
+blocked publication sentinel, so `classify_durable_route` answers
+`OwnerTransition` and **a GET of the successor's playlist is answered `503
+media_owner_transition` on every request until the pointer moves.** Commit
+does not publish it either. A client built from the sequence diagram would
+therefore build a second pipeline that can never become playable and pay for
+finding that out on *every* quality change. So a successor that dies before
+it was ever playable is taken as evidence about this playback rather than
+this attempt, and the asking stops for the rest of it: the viewer pays once,
+nothing configures it, and the day the priming phase lands this client uses
+it with no change at all. The same rule is now written into the contract for
+web and Android, and the contract's §1 is corrected — the code wins.
+
+Also here: the contract and its three per-platform briefs, which lived only
+on an effort branch 381 commits behind `main`, move into
+`docs/playback-control/`; the caller handoff's claim that Apple and Android
+send `observed_download_bps` as null is corrected, because both fill it now;
+and Settings → Developer's prepared-handoff card says, per requirement,
+whether it is currently met — advisory, gating nothing.
+
+An adversarial review of the branch found nine defects and all nine are
+fixed. Three were the kind only a reviewer finds: a commit that reported
+`failed` for a successor already on screen — which would have told the
+server to abort the session the viewer was watching, and fired on every
+quality change made while paused; a commit that settled *whatever staging
+was current* rather than the one it was called for, which the server would
+have accepted and used to move the pointer to a session nothing displayed;
+and a `.alreadySettled` replay that silently swallowed the viewer's tap and
+changed nothing at all. The switch is now a critical section nothing may
+build on top of, every settlement is named, and the successor's alignment
+seek waits for an item that can honour it instead of being dropped on an
+item one statement old.
+
+The review also caught the branch excluding VOD on the strength of a
+contract paragraph that `main` had already contradicted: `f2fecc98`
+populates `delivered_bps` for VOD and says in as many words that its absence
+"is what made preparation unreachable on the primary presentation". The
+exclusion would have disabled this on the presentation the server had just
+enabled it for. Both documents and the Rust doc comment that caused it are
+corrected.
+
+**Not proven here:** a directed replacement on real hardware and the
+fallback interruption Apple has never measured. Both are operator steps; the
+prompt for them is in the pull request. `make apple-build` and
+`make apple-test` are green on Xcode 26.6 — 900 cases across the iOS and
+tvOS destinations.
 
 ## The CI fleet filled up because the bound was behind a flag nobody set
 

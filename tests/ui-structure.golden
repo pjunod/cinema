@@ -2168,9 +2168,9 @@ catalog|settings-developer@1280x860|dom|div.card.setcard > div#dxerr.err|1
 catalog|settings-developer@1280x860|dom|div.card.setcard > div.cardhead|4
 catalog|settings-developer@1280x860|dom|div.card.setcard > div.hint[text]|4
 catalog|settings-developer@1280x860|dom|div.card.setcard > div.setfoot|2
-catalog|settings-developer@1280x860|dom|div.card.setcard > div.tog|9
+catalog|settings-developer@1280x860|dom|div.card.setcard > div.tog|6
 catalog|settings-developer@1280x860|dom|div.card.setcard > h2.section[text]|2
-catalog|settings-developer@1280x860|dom|div.card.setcard > label.tog|3
+catalog|settings-developer@1280x860|dom|div.card.setcard > label.tog|2
 catalog|settings-developer@1280x860|dom|div.cardhead > div.cardtools|3
 catalog|settings-developer@1280x860|dom|div.cardhead > div|5
 catalog|settings-developer@1280x860|dom|div.cardtools > span.pill.warn[text]|1
@@ -2198,13 +2198,10 @@ catalog|settings-developer@1280x860|dom|div.setfoot > span.setstate[text]|3
 catalog|settings-developer@1280x860|dom|div.sethead > div|1
 catalog|settings-developer@1280x860|dom|div.setlayout > div#setbody.adminwrap|1
 catalog|settings-developer@1280x860|dom|div.setlayout > nav.settabs[aria-label=*]|1
-catalog|settings-developer@1280x860|dom|div.tog > span.pill.warn[text]|2
-catalog|settings-developer@1280x860|dom|div.tog > span.pill[text]|4
-catalog|settings-developer@1280x860|dom|div.tog > span[text]|9
+catalog|settings-developer@1280x860|dom|div.tog > span[text]|6
 catalog|settings-developer@1280x860|dom|label.tog > input#pcpv1[type=checkbox]|1
-catalog|settings-developer@1280x860|dom|label.tog > input#pdp[type=checkbox]|1
 catalog|settings-developer@1280x860|dom|label.tog > input#phs[type=checkbox]|1
-catalog|settings-developer@1280x860|dom|label.tog > span[text]|3
+catalog|settings-developer@1280x860|dom|label.tog > span[text]|2
 catalog|settings-developer@1280x860|dom|main#main > div.setlayout|1
 catalog|settings-developer@1280x860|dom|nav.px-nav[aria-label=*] > a.on[aria-current=page]|1
 catalog|settings-developer@1280x860|dom|nav.px-nav[aria-label=*] > a|3
@@ -2216,10 +2213,9 @@ catalog|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > button.setta
 catalog|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 catalog|settings-developer@1280x860|dom|select#ltheight > option[text]|2
 catalog|settings-developer@1280x860|dom|select#ltlimit > option[text]|4
-catalog|settings-developer@1280x860|dom|small[text] > b[text]|1
-catalog|settings-developer@1280x860|dom|small[text] > code[text]|11
-catalog|settings-developer@1280x860|dom|span[text] > small[text]|12
-catalog|settings-developer@1280x860|dom|span[text] > span.pill.warn[text]|2
+catalog|settings-developer@1280x860|dom|small[text] > code[text]|6
+catalog|settings-developer@1280x860|dom|span[text] > small[text]|8
+catalog|settings-developer@1280x860|dom|span[text] > span.pill.warn[text]|1
 catalog|settings-developer@1280x860|dom|span[text] > span.pill[text]|1
 catalog|settings-developer@1280x860|dom|svg.px-ico[aria-hidden=true] > circle|2
 catalog|settings-developer@1280x860|dom|svg.px-ico[aria-hidden=true] > path|7
@@ -2250,9 +2246,8 @@ catalog|settings-developer@1280x860|focus|022|button.ghost.sm "Check saved confi
 catalog|settings-developer@1280x860|focus|023|button#ltenable.primary.sm "Enable Live TV"
 catalog|settings-developer@1280x860|focus|024|a "Browse channels"
 catalog|settings-developer@1280x860|focus|025|input#pcpv1
-catalog|settings-developer@1280x860|focus|026|input#pdp
-catalog|settings-developer@1280x860|focus|027|input#phs
-catalog|settings-developer@1280x860|focus|028|<wrap>
+catalog|settings-developer@1280x860|focus|026|input#phs
+catalog|settings-developer@1280x860|focus|027|<wrap>
 catalog|settings-developer@1280x860|req|GET /api/v1/activity|2
 catalog|settings-developer@1280x860|req|GET /api/v1/me|1
 catalog|settings-developer@1280x860|req|GET /api/v1/server|1
@@ -2310,9 +2305,9 @@ catalog|settings-developer@390x780|dom|div.card.setcard > div#dxerr.err|1
 catalog|settings-developer@390x780|dom|div.card.setcard > div.cardhead|4
 catalog|settings-developer@390x780|dom|div.card.setcard > div.hint[text]|4
 catalog|settings-developer@390x780|dom|div.card.setcard > div.setfoot|2
-catalog|settings-developer@390x780|dom|div.card.setcard > div.tog|9
+catalog|settings-developer@390x780|dom|div.card.setcard > div.tog|6
 catalog|settings-developer@390x780|dom|div.card.setcard > h2.section[text]|2
-catalog|settings-developer@390x780|dom|div.card.setcard > label.tog|3
+catalog|settings-developer@390x780|dom|div.card.setcard > label.tog|2
 catalog|settings-developer@390x780|dom|div.cardhead > div.cardtools|3
 catalog|settings-developer@390x780|dom|div.cardhead > div|5
 catalog|settings-developer@390x780|dom|div.cardtools > span.pill.warn[text]|1
@@ -2340,13 +2335,10 @@ catalog|settings-developer@390x780|dom|div.setfoot > span.setstate[text]|3
 catalog|settings-developer@390x780|dom|div.sethead > div|1
 catalog|settings-developer@390x780|dom|div.setlayout > div#setbody.adminwrap|1
 catalog|settings-developer@390x780|dom|div.setlayout > nav.settabs[aria-label=*]|1
-catalog|settings-developer@390x780|dom|div.tog > span.pill.warn[text]|2
-catalog|settings-developer@390x780|dom|div.tog > span.pill[text]|4
-catalog|settings-developer@390x780|dom|div.tog > span[text]|9
+catalog|settings-developer@390x780|dom|div.tog > span[text]|6
 catalog|settings-developer@390x780|dom|label.tog > input#pcpv1[type=checkbox]|1
-catalog|settings-developer@390x780|dom|label.tog > input#pdp[type=checkbox]|1
 catalog|settings-developer@390x780|dom|label.tog > input#phs[type=checkbox]|1
-catalog|settings-developer@390x780|dom|label.tog > span[text]|3
+catalog|settings-developer@390x780|dom|label.tog > span[text]|2
 catalog|settings-developer@390x780|dom|main#main > div.setlayout|1
 catalog|settings-developer@390x780|dom|nav.px-nav[aria-label=*] > a.on[aria-current=page]|1
 catalog|settings-developer@390x780|dom|nav.px-nav[aria-label=*] > a|3
@@ -2358,10 +2350,9 @@ catalog|settings-developer@390x780|dom|nav.settabs[aria-label=*] > button.settab
 catalog|settings-developer@390x780|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 catalog|settings-developer@390x780|dom|select#ltheight > option[text]|2
 catalog|settings-developer@390x780|dom|select#ltlimit > option[text]|4
-catalog|settings-developer@390x780|dom|small[text] > b[text]|1
-catalog|settings-developer@390x780|dom|small[text] > code[text]|11
-catalog|settings-developer@390x780|dom|span[text] > small[text]|12
-catalog|settings-developer@390x780|dom|span[text] > span.pill.warn[text]|2
+catalog|settings-developer@390x780|dom|small[text] > code[text]|6
+catalog|settings-developer@390x780|dom|span[text] > small[text]|8
+catalog|settings-developer@390x780|dom|span[text] > span.pill.warn[text]|1
 catalog|settings-developer@390x780|dom|span[text] > span.pill[text]|1
 catalog|settings-developer@390x780|dom|svg.px-ico[aria-hidden=true] > circle|2
 catalog|settings-developer@390x780|dom|svg.px-ico[aria-hidden=true] > path|7
@@ -2388,13 +2379,12 @@ catalog|settings-developer@390x780|focus|018|button.ghost.sm "Check saved config
 catalog|settings-developer@390x780|focus|019|button#ltenable.primary.sm "Enable Live TV"
 catalog|settings-developer@390x780|focus|020|a "Browse channels"
 catalog|settings-developer@390x780|focus|021|input#pcpv1
-catalog|settings-developer@390x780|focus|022|input#pdp
-catalog|settings-developer@390x780|focus|023|input#phs
-catalog|settings-developer@390x780|focus|024|a.px-tab "Home"
-catalog|settings-developer@390x780|focus|025|button.px-tab "Libraries"
-catalog|settings-developer@390x780|focus|026|button.px-tab "Search"
-catalog|settings-developer@390x780|focus|027|a.px-tab "Activity"
-catalog|settings-developer@390x780|focus|028|<wrap>
+catalog|settings-developer@390x780|focus|022|input#phs
+catalog|settings-developer@390x780|focus|023|a.px-tab "Home"
+catalog|settings-developer@390x780|focus|024|button.px-tab "Libraries"
+catalog|settings-developer@390x780|focus|025|button.px-tab "Search"
+catalog|settings-developer@390x780|focus|026|a.px-tab "Activity"
+catalog|settings-developer@390x780|focus|027|<wrap>
 catalog|settings-developer@390x780|req|GET /api/v1/activity|2
 catalog|settings-developer@390x780|req|GET /api/v1/me|1
 catalog|settings-developer@390x780|req|GET /api/v1/server|1
@@ -4231,9 +4221,9 @@ classic|settings-developer@1280x860|dom|div.card.setcard > div#dxerr.err|1
 classic|settings-developer@1280x860|dom|div.card.setcard > div.cardhead|4
 classic|settings-developer@1280x860|dom|div.card.setcard > div.hint[text]|4
 classic|settings-developer@1280x860|dom|div.card.setcard > div.setfoot|2
-classic|settings-developer@1280x860|dom|div.card.setcard > div.tog|9
+classic|settings-developer@1280x860|dom|div.card.setcard > div.tog|6
 classic|settings-developer@1280x860|dom|div.card.setcard > h2.section[text]|2
-classic|settings-developer@1280x860|dom|div.card.setcard > label.tog|3
+classic|settings-developer@1280x860|dom|div.card.setcard > label.tog|2
 classic|settings-developer@1280x860|dom|div.cardhead > div.cardtools|3
 classic|settings-developer@1280x860|dom|div.cardhead > div|5
 classic|settings-developer@1280x860|dom|div.cardtools > span.pill.warn[text]|1
@@ -4249,9 +4239,7 @@ classic|settings-developer@1280x860|dom|div.setfoot > span.setstate[text]|3
 classic|settings-developer@1280x860|dom|div.sethead > div|1
 classic|settings-developer@1280x860|dom|div.setlayout > div#setbody.adminwrap|1
 classic|settings-developer@1280x860|dom|div.setlayout > nav.settabs[aria-label=*]|1
-classic|settings-developer@1280x860|dom|div.tog > span.pill.warn[text]|2
-classic|settings-developer@1280x860|dom|div.tog > span.pill[text]|4
-classic|settings-developer@1280x860|dom|div.tog > span[text]|9
+classic|settings-developer@1280x860|dom|div.tog > span[text]|6
 classic|settings-developer@1280x860|dom|div.topctl > div|2
 classic|settings-developer@1280x860|dom|header.top > a.logo[text]|1
 classic|settings-developer@1280x860|dom|header.top > div.topctl|1
@@ -4260,9 +4248,8 @@ classic|settings-developer@1280x860|dom|header.top > nav|1
 classic|settings-developer@1280x860|dom|header.top > span#activity.activity|1
 classic|settings-developer@1280x860|dom|header.top > span.spacer|1
 classic|settings-developer@1280x860|dom|label.tog > input#pcpv1[type=checkbox]|1
-classic|settings-developer@1280x860|dom|label.tog > input#pdp[type=checkbox]|1
 classic|settings-developer@1280x860|dom|label.tog > input#phs[type=checkbox]|1
-classic|settings-developer@1280x860|dom|label.tog > span[text]|3
+classic|settings-developer@1280x860|dom|label.tog > span[text]|2
 classic|settings-developer@1280x860|dom|main#main > div.setlayout|1
 classic|settings-developer@1280x860|dom|nav > a.active[text]|1
 classic|settings-developer@1280x860|dom|nav > a[text]|3
@@ -4271,10 +4258,9 @@ classic|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > button.setta
 classic|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 classic|settings-developer@1280x860|dom|select#ltheight > option[text]|2
 classic|settings-developer@1280x860|dom|select#ltlimit > option[text]|4
-classic|settings-developer@1280x860|dom|small[text] > b[text]|1
-classic|settings-developer@1280x860|dom|small[text] > code[text]|11
-classic|settings-developer@1280x860|dom|span[text] > small[text]|12
-classic|settings-developer@1280x860|dom|span[text] > span.pill.warn[text]|2
+classic|settings-developer@1280x860|dom|small[text] > code[text]|6
+classic|settings-developer@1280x860|dom|span[text] > small[text]|8
+classic|settings-developer@1280x860|dom|span[text] > span.pill.warn[text]|1
 classic|settings-developer@1280x860|dom|span[text] > span.pill[text]|1
 classic|settings-developer@1280x860|focus|000|a.logo "cinema"
 classic|settings-developer@1280x860|focus|001|a "home"
@@ -4302,9 +4288,8 @@ classic|settings-developer@1280x860|focus|022|button.ghost.sm "Check saved confi
 classic|settings-developer@1280x860|focus|023|button#ltenable.primary.sm "Enable Live TV"
 classic|settings-developer@1280x860|focus|024|a "Browse channels"
 classic|settings-developer@1280x860|focus|025|input#pcpv1
-classic|settings-developer@1280x860|focus|026|input#pdp
-classic|settings-developer@1280x860|focus|027|input#phs
-classic|settings-developer@1280x860|focus|028|<wrap>
+classic|settings-developer@1280x860|focus|026|input#phs
+classic|settings-developer@1280x860|focus|027|<wrap>
 classic|settings-developer@1280x860|req|GET /api/v1/activity|2
 classic|settings-developer@1280x860|req|GET /api/v1/me|1
 classic|settings-developer@1280x860|req|GET /api/v1/server|1
@@ -4347,9 +4332,9 @@ classic|settings-developer@390x780|dom|div.card.setcard > div#dxerr.err|1
 classic|settings-developer@390x780|dom|div.card.setcard > div.cardhead|4
 classic|settings-developer@390x780|dom|div.card.setcard > div.hint[text]|4
 classic|settings-developer@390x780|dom|div.card.setcard > div.setfoot|2
-classic|settings-developer@390x780|dom|div.card.setcard > div.tog|9
+classic|settings-developer@390x780|dom|div.card.setcard > div.tog|6
 classic|settings-developer@390x780|dom|div.card.setcard > h2.section[text]|2
-classic|settings-developer@390x780|dom|div.card.setcard > label.tog|3
+classic|settings-developer@390x780|dom|div.card.setcard > label.tog|2
 classic|settings-developer@390x780|dom|div.cardhead > div.cardtools|3
 classic|settings-developer@390x780|dom|div.cardhead > div|5
 classic|settings-developer@390x780|dom|div.cardtools > span.pill.warn[text]|1
@@ -4365,9 +4350,7 @@ classic|settings-developer@390x780|dom|div.setfoot > span.setstate[text]|3
 classic|settings-developer@390x780|dom|div.sethead > div|1
 classic|settings-developer@390x780|dom|div.setlayout > div#setbody.adminwrap|1
 classic|settings-developer@390x780|dom|div.setlayout > nav.settabs[aria-label=*]|1
-classic|settings-developer@390x780|dom|div.tog > span.pill.warn[text]|2
-classic|settings-developer@390x780|dom|div.tog > span.pill[text]|4
-classic|settings-developer@390x780|dom|div.tog > span[text]|9
+classic|settings-developer@390x780|dom|div.tog > span[text]|6
 classic|settings-developer@390x780|dom|div.topctl > div|2
 classic|settings-developer@390x780|dom|header.top > a.logo[text]|1
 classic|settings-developer@390x780|dom|header.top > div.topctl|1
@@ -4376,9 +4359,8 @@ classic|settings-developer@390x780|dom|header.top > nav|1
 classic|settings-developer@390x780|dom|header.top > span#activity.activity|1
 classic|settings-developer@390x780|dom|header.top > span.spacer|1
 classic|settings-developer@390x780|dom|label.tog > input#pcpv1[type=checkbox]|1
-classic|settings-developer@390x780|dom|label.tog > input#pdp[type=checkbox]|1
 classic|settings-developer@390x780|dom|label.tog > input#phs[type=checkbox]|1
-classic|settings-developer@390x780|dom|label.tog > span[text]|3
+classic|settings-developer@390x780|dom|label.tog > span[text]|2
 classic|settings-developer@390x780|dom|main#main > div.setlayout|1
 classic|settings-developer@390x780|dom|nav > a.active[text]|1
 classic|settings-developer@390x780|dom|nav > a[text]|3
@@ -4387,10 +4369,9 @@ classic|settings-developer@390x780|dom|nav.settabs[aria-label=*] > button.settab
 classic|settings-developer@390x780|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 classic|settings-developer@390x780|dom|select#ltheight > option[text]|2
 classic|settings-developer@390x780|dom|select#ltlimit > option[text]|4
-classic|settings-developer@390x780|dom|small[text] > b[text]|1
-classic|settings-developer@390x780|dom|small[text] > code[text]|11
-classic|settings-developer@390x780|dom|span[text] > small[text]|12
-classic|settings-developer@390x780|dom|span[text] > span.pill.warn[text]|2
+classic|settings-developer@390x780|dom|small[text] > code[text]|6
+classic|settings-developer@390x780|dom|span[text] > small[text]|8
+classic|settings-developer@390x780|dom|span[text] > span.pill.warn[text]|1
 classic|settings-developer@390x780|dom|span[text] > span.pill[text]|1
 classic|settings-developer@390x780|focus|000|a.logo "cinema"
 classic|settings-developer@390x780|focus|001|a "home"
@@ -4418,9 +4399,8 @@ classic|settings-developer@390x780|focus|022|button.ghost.sm "Check saved config
 classic|settings-developer@390x780|focus|023|button#ltenable.primary.sm "Enable Live TV"
 classic|settings-developer@390x780|focus|024|a "Browse channels"
 classic|settings-developer@390x780|focus|025|input#pcpv1
-classic|settings-developer@390x780|focus|026|input#pdp
-classic|settings-developer@390x780|focus|027|input#phs
-classic|settings-developer@390x780|focus|028|<wrap>
+classic|settings-developer@390x780|focus|026|input#phs
+classic|settings-developer@390x780|focus|027|<wrap>
 classic|settings-developer@390x780|req|GET /api/v1/activity|2
 classic|settings-developer@390x780|req|GET /api/v1/me|1
 classic|settings-developer@390x780|req|GET /api/v1/server|1
@@ -6276,9 +6256,9 @@ theater|settings-developer@1280x860|dom|div.card.setcard > div#dxerr.err|1
 theater|settings-developer@1280x860|dom|div.card.setcard > div.cardhead|4
 theater|settings-developer@1280x860|dom|div.card.setcard > div.hint[text]|4
 theater|settings-developer@1280x860|dom|div.card.setcard > div.setfoot|2
-theater|settings-developer@1280x860|dom|div.card.setcard > div.tog|9
+theater|settings-developer@1280x860|dom|div.card.setcard > div.tog|6
 theater|settings-developer@1280x860|dom|div.card.setcard > h2.section[text]|2
-theater|settings-developer@1280x860|dom|div.card.setcard > label.tog|3
+theater|settings-developer@1280x860|dom|div.card.setcard > label.tog|2
 theater|settings-developer@1280x860|dom|div.cardhead > div.cardtools|3
 theater|settings-developer@1280x860|dom|div.cardhead > div|5
 theater|settings-developer@1280x860|dom|div.cardtools > span.pill.warn[text]|1
@@ -6299,9 +6279,7 @@ theater|settings-developer@1280x860|dom|div.th-pop > button.ghost.lookbtn.sm[ari
 theater|settings-developer@1280x860|dom|div.th-pop > button.ghost.profile.sm|1
 theater|settings-developer@1280x860|dom|div.th-pop > div#lookmenu.amenu.lookmenu|1
 theater|settings-developer@1280x860|dom|div.th-pop > div#profilemenu.amenu|1
-theater|settings-developer@1280x860|dom|div.tog > span.pill.warn[text]|2
-theater|settings-developer@1280x860|dom|div.tog > span.pill[text]|4
-theater|settings-developer@1280x860|dom|div.tog > span[text]|9
+theater|settings-developer@1280x860|dom|div.tog > span[text]|6
 theater|settings-developer@1280x860|dom|header.th-top > a.logo[text]|1
 theater|settings-developer@1280x860|dom|header.th-top > div.th-ctl|1
 theater|settings-developer@1280x860|dom|header.th-top > input#q.search[aria-label=*]|1
@@ -6309,9 +6287,8 @@ theater|settings-developer@1280x860|dom|header.th-top > nav.th-nav[aria-label=*]
 theater|settings-developer@1280x860|dom|header.th-top > span#activity.activity|1
 theater|settings-developer@1280x860|dom|header.th-top > span.spacer|1
 theater|settings-developer@1280x860|dom|label.tog > input#pcpv1[type=checkbox]|1
-theater|settings-developer@1280x860|dom|label.tog > input#pdp[type=checkbox]|1
 theater|settings-developer@1280x860|dom|label.tog > input#phs[type=checkbox]|1
-theater|settings-developer@1280x860|dom|label.tog > span[text]|3
+theater|settings-developer@1280x860|dom|label.tog > span[text]|2
 theater|settings-developer@1280x860|dom|main#main > div.setlayout|1
 theater|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
 theater|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|9
@@ -6322,10 +6299,9 @@ theater|settings-developer@1280x860|dom|nav.th-pills[aria-label=*] > a.on[aria-c
 theater|settings-developer@1280x860|dom|nav.th-pills[aria-label=*] > a[text]|3
 theater|settings-developer@1280x860|dom|select#ltheight > option[text]|2
 theater|settings-developer@1280x860|dom|select#ltlimit > option[text]|4
-theater|settings-developer@1280x860|dom|small[text] > b[text]|1
-theater|settings-developer@1280x860|dom|small[text] > code[text]|11
-theater|settings-developer@1280x860|dom|span[text] > small[text]|12
-theater|settings-developer@1280x860|dom|span[text] > span.pill.warn[text]|2
+theater|settings-developer@1280x860|dom|small[text] > code[text]|6
+theater|settings-developer@1280x860|dom|span[text] > small[text]|8
+theater|settings-developer@1280x860|dom|span[text] > span.pill.warn[text]|1
 theater|settings-developer@1280x860|dom|span[text] > span.pill[text]|1
 theater|settings-developer@1280x860|focus|000|a.logo "cinema"
 theater|settings-developer@1280x860|focus|001|a "Home"
@@ -6353,9 +6329,8 @@ theater|settings-developer@1280x860|focus|022|button.ghost.sm "Check saved confi
 theater|settings-developer@1280x860|focus|023|button#ltenable.primary.sm "Enable Live TV"
 theater|settings-developer@1280x860|focus|024|a "Browse channels"
 theater|settings-developer@1280x860|focus|025|input#pcpv1
-theater|settings-developer@1280x860|focus|026|input#pdp
-theater|settings-developer@1280x860|focus|027|input#phs
-theater|settings-developer@1280x860|focus|028|<wrap>
+theater|settings-developer@1280x860|focus|026|input#phs
+theater|settings-developer@1280x860|focus|027|<wrap>
 theater|settings-developer@1280x860|req|GET /api/v1/activity|2
 theater|settings-developer@1280x860|req|GET /api/v1/me|1
 theater|settings-developer@1280x860|req|GET /api/v1/server|1
@@ -6395,9 +6370,9 @@ theater|settings-developer@390x780|dom|div.card.setcard > div#dxerr.err|1
 theater|settings-developer@390x780|dom|div.card.setcard > div.cardhead|4
 theater|settings-developer@390x780|dom|div.card.setcard > div.hint[text]|4
 theater|settings-developer@390x780|dom|div.card.setcard > div.setfoot|2
-theater|settings-developer@390x780|dom|div.card.setcard > div.tog|9
+theater|settings-developer@390x780|dom|div.card.setcard > div.tog|6
 theater|settings-developer@390x780|dom|div.card.setcard > h2.section[text]|2
-theater|settings-developer@390x780|dom|div.card.setcard > label.tog|3
+theater|settings-developer@390x780|dom|div.card.setcard > label.tog|2
 theater|settings-developer@390x780|dom|div.cardhead > div.cardtools|3
 theater|settings-developer@390x780|dom|div.cardhead > div|5
 theater|settings-developer@390x780|dom|div.cardtools > span.pill.warn[text]|1
@@ -6418,9 +6393,7 @@ theater|settings-developer@390x780|dom|div.th-pop > button.ghost.lookbtn.sm[aria
 theater|settings-developer@390x780|dom|div.th-pop > button.ghost.profile.sm|1
 theater|settings-developer@390x780|dom|div.th-pop > div#lookmenu.amenu.lookmenu|1
 theater|settings-developer@390x780|dom|div.th-pop > div#profilemenu.amenu|1
-theater|settings-developer@390x780|dom|div.tog > span.pill.warn[text]|2
-theater|settings-developer@390x780|dom|div.tog > span.pill[text]|4
-theater|settings-developer@390x780|dom|div.tog > span[text]|9
+theater|settings-developer@390x780|dom|div.tog > span[text]|6
 theater|settings-developer@390x780|dom|header.th-top > a.logo[text]|1
 theater|settings-developer@390x780|dom|header.th-top > div.th-ctl|1
 theater|settings-developer@390x780|dom|header.th-top > input#q.search[aria-label=*]|1
@@ -6428,9 +6401,8 @@ theater|settings-developer@390x780|dom|header.th-top > nav.th-nav[aria-label=*]|
 theater|settings-developer@390x780|dom|header.th-top > span#activity.activity|1
 theater|settings-developer@390x780|dom|header.th-top > span.spacer|1
 theater|settings-developer@390x780|dom|label.tog > input#pcpv1[type=checkbox]|1
-theater|settings-developer@390x780|dom|label.tog > input#pdp[type=checkbox]|1
 theater|settings-developer@390x780|dom|label.tog > input#phs[type=checkbox]|1
-theater|settings-developer@390x780|dom|label.tog > span[text]|3
+theater|settings-developer@390x780|dom|label.tog > span[text]|2
 theater|settings-developer@390x780|dom|main#main > div.setlayout|1
 theater|settings-developer@390x780|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
 theater|settings-developer@390x780|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|9
@@ -6441,10 +6413,9 @@ theater|settings-developer@390x780|dom|nav.th-pills[aria-label=*] > a.on[aria-cu
 theater|settings-developer@390x780|dom|nav.th-pills[aria-label=*] > a[text]|3
 theater|settings-developer@390x780|dom|select#ltheight > option[text]|2
 theater|settings-developer@390x780|dom|select#ltlimit > option[text]|4
-theater|settings-developer@390x780|dom|small[text] > b[text]|1
-theater|settings-developer@390x780|dom|small[text] > code[text]|11
-theater|settings-developer@390x780|dom|span[text] > small[text]|12
-theater|settings-developer@390x780|dom|span[text] > span.pill.warn[text]|2
+theater|settings-developer@390x780|dom|small[text] > code[text]|6
+theater|settings-developer@390x780|dom|span[text] > small[text]|8
+theater|settings-developer@390x780|dom|span[text] > span.pill.warn[text]|1
 theater|settings-developer@390x780|dom|span[text] > span.pill[text]|1
 theater|settings-developer@390x780|focus|000|a.logo "cinema"
 theater|settings-developer@390x780|focus|001|input#q.search "Search cinema"
@@ -6468,13 +6439,12 @@ theater|settings-developer@390x780|focus|018|button.ghost.sm "Check saved config
 theater|settings-developer@390x780|focus|019|button#ltenable.primary.sm "Enable Live TV"
 theater|settings-developer@390x780|focus|020|a "Browse channels"
 theater|settings-developer@390x780|focus|021|input#pcpv1
-theater|settings-developer@390x780|focus|022|input#pdp
-theater|settings-developer@390x780|focus|023|input#phs
-theater|settings-developer@390x780|focus|024|a "Home"
-theater|settings-developer@390x780|focus|025|a "Live TV"
-theater|settings-developer@390x780|focus|026|a "Activity"
-theater|settings-developer@390x780|focus|027|a.on "Settings"
-theater|settings-developer@390x780|focus|028|<wrap>
+theater|settings-developer@390x780|focus|022|input#phs
+theater|settings-developer@390x780|focus|023|a "Home"
+theater|settings-developer@390x780|focus|024|a "Live TV"
+theater|settings-developer@390x780|focus|025|a "Activity"
+theater|settings-developer@390x780|focus|026|a.on "Settings"
+theater|settings-developer@390x780|focus|027|<wrap>
 theater|settings-developer@390x780|req|GET /api/v1/activity|2
 theater|settings-developer@390x780|req|GET /api/v1/me|1
 theater|settings-developer@390x780|req|GET /api/v1/server|1

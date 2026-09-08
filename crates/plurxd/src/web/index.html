@@ -14430,74 +14430,6 @@ document.addEventListener("visibilitychange",()=>{
   }
 });
 
-// Everything that is off on purpose, in one place.
-//
-// These are switches with a cost or an unfinished half, not preferences: each
-// one names what it spends and what is still missing, because "experimental"
-// on its own tells an operator nothing about whether turning it on will cost
-// them a stream.
-// What "safe to enable" means for a prepared handoff, and whether each part is
-// true right now.
-//
-// Advisory, deliberately: nothing here blocks the switch below it. A readiness
-// list that refuses to let an operator turn something on tells them less than
-// one that says exactly what it will cost — and an operator who wants the path
-// on for an integration run should not have to patch the page to get it.
-//
-// `met:null` is "this page cannot answer that", which is a different statement
-// from "no", and is never rendered as one.
-function preparedHandoffReadiness(settings){
-  const s=settings||{};
-  const mse=typeof window!=="undefined"
-    &&!!(window.MediaSource||window.ManagedMediaSource||window.WebKitMediaSource);
-  return [
-    {met:false,label:"Server preparation is real",
-      note:`Staging writes a durable row and takes the actor slot; it starts no worker. `+
-        `The staged playlist answers <code>503 media_owner_transition</code> for the whole `+
-        `330-second preparation lease, so a second pipeline built against it reports `+
-        `<code>failed</code> rather than reaching readiness. A later build must reserve `+
-        `capacity, start the unpublished successor, bound every Store write and teardown, `+
-        `and prove abort releases both the worker and the actor slot.`},
-    {met:!!s.playback_control_protocol_v1,label:"The control protocol is advertised",
-      note:`New sessions only carry a control block when <b>Advertise playback control `+
-        `protocol v1</b> is on above. Without one there is no exchange to stage a successor `+
-        `on, and a control request against such a session answers <code>404 session_gone</code>.`},
-    {met:true,label:"This build owns the two-player handoff",
-      note:`It advertises <code>prepare_replacement</code>, aligns the second timeline with `+
-        `<code>media_origin_ms</code>, reports metadata and buffer readiness, switches `+
-        `visibly, then sends <code>committed</code> with the first qualifying frame `+
-        `timestamp. Failed setup sends <code>failed</code> or <code>aborted</code>.`},
-    {met:mse,label:"This browser can build a second pipeline",
-      note:`Two live decode pipelines need Media Source Extensions, or a native HLS engine `+
-        `that will take a second element. A browser without either can still play; it just `+
-        `cannot prepare.`},
-    {met:true,label:"The stream reports throughput",
-      note:`The server refuses a preparation unless this client's measured download rate is `+
-        `at least twice what the session is delivering. This browser reports its rate from `+
-        `hls.js's own estimate, and the server has measured the delivered rate on VOD `+
-        `sessions since <code>f2fecc98</code> — before that it did not, and preparation was `+
-        `unreachable on the presentation nearly every session uses. Neither native client `+
-        `reports a rate yet.`},
-    {met:null,label:"The fleet receipt is complete",
-      note:`Require twenty consecutive commits on the corrected realistic-runway instrument `+
-        `with stable memory. Apple is the measured candidate; Android and web remain `+
-        `unqualified. Safari reached twenty consecutive same-codec commits and thirteen of `+
-        `twenty on codec/HDR — and same-codec is the only kind of change the server ever `+
-        `prepares, so the failure that disqualified web is one it would never be offered.`},
-  ];
-}
-// `met:null` reads as "not measured here" rather than as a refusal: a page
-// cannot answer a question about a fleet.
-function readinessRow(row){
-  const pill=row.met===true
-    ? `<span class="pill" style="color:var(--good);border-color:var(--good)">met</span>`
-    : row.met===false ? `<span class="pill warn">not met</span>`
-    : `<span class="pill">not measured here</span>`;
-  return `<div class="tog"><span>${row.label}<small>${row.note}</small></span>${pill}</div>`;
-}
-// A browser-local switch, applied on the next stream this page starts. It is
-// not a server setting: the capability it sets is a claim about THIS browser on
-// THIS machine, and a fleet-wide value would be a claim about all of them.
 function setPreparedHandoff(on){
   setPreparedHandoffEnabled(!!on);
   // Honest about when: the capability is read on every exchange and the server
@@ -14519,12 +14451,27 @@ function developerPanel(settings){
       ${togRow("pcpv1",`Advertise playback control protocol v1 <span class="pill">preview</span>`,"New sessions advertise the control endpoint. Passive on its own: the server measures what a quality change would cost, and takes no automatic action.",settings.playback_control_protocol_v1)}
       <div class="err" id="dverr"></div>
       ${setCardFoot("saveDeveloper")}`);
-  const prepared=setCard(`${cardHead("Enable prepared quality handoff","The server can announce, acknowledge, commit, and abort a staged successor. It does not yet start or prime that successor's encoder.",`<span class="pill warn">integration only</span>`)}
-      <div class="hint"><b>Do not enable this for viewers yet.</b> The staged route still reports <code>encoder: staged</code> and has no worker behind its playlist. Committing it is useful for protocol and Store integration tests, not playback.</div>
-      <h2 class="section">What must be true first</h2>
-      ${preparedHandoffReadiness(settings).map(readinessRow).join("")}
-      <div class="hint"><b>Enable path after those checks pass:</b> turn on <b>Advertise playback control protocol v1</b> above and deploy only a qualified client that declares the action. There is no separate hidden server flag.</div>
-      ${togRow("pdp",`Tell the server this browser can prepare a second player <span class="pill warn">unqualified</span>`,"Sets <code>dual_player_preparation</code> on this browser's control exchanges, which is the only thing that lets the server stage a successor for it. The list above is advisory and does not block this switch — it is what tells you the cost. Applies to the next stream you start.",preparedHandoffEnabled(),'onchange="setPreparedHandoff(this.checked)"')}`);
+  // Advisory, never a gate. Each requirement says what it is and whether it
+  // is true right now, because "experimental" on its own tells an operator
+  // nothing about whether turning something on will cost them a stream. The
+  // toggle above is not disabled by anything here: an operator who reads this
+  // and enables it anyway is making an informed choice, which is the point.
+  const req=(state,label,note)=>{
+    const pill=state==="met"?`<span class="pill" style="color:var(--good);border-color:var(--good)">met</span>`
+      :state==="partly"?`<span class="pill warn">partly met</span>`
+      :`<span class="pill warn">not met</span>`;
+    return `<div class="tog"><span>${label}<small>${note}</small></span>${pill}</div>`;
+  };
+  const prepared=setCard(`${cardHead("Enable prepared quality handoff","The server announces, acknowledges, commits and aborts a staged successor, and the Apple client now drives one. It does not yet start or prime that successor's encoder.",`<span class="pill warn">integration only</span>`)}
+      <div class="hint"><b>Do not enable this for viewers yet.</b> The staged route still reports <code>encoder: staged</code> and has no worker behind its playlist: a client that opens the successor's playlist before commit is answered <code>503 media_owner_transition</code> on every request. Committing it is useful for protocol and Store integration tests, not playback.</div>
+      <h2 class="section">What must be true first, and whether it is</h2>
+      ${req(settings.playback_control_protocol_v1?"met":"unmet","The control endpoint is advertised","New sessions carry the control block only while <b>Advertise playback control protocol v1</b> above is on. Nothing is staged for a session that never had one.")}
+      ${req("unmet","The server primes the successor it stages","<code>stage_prepared_successor</code> is stage-only: a durable row and the actor's one successor slot, nothing produced. The <i>reserve and prime</i> phase must reserve capacity, start the unpublished successor, bound every Store write and teardown, and prove abort releases both the worker and the slot.")}
+      ${req("partly","A client owns a measured two-player handoff","Apple build 119 advertises <code>prepare_replacement</code>, aligns the second timeline with <code>media_origin_ms</code>, reports metadata and buffer readiness, switches visibly, then sends <code>committed</code> with the first qualifying frame timestamp; failed setup sends <code>failed</code> or <code>aborted</code>. Android and web remain unqualified.")}
+      ${req("met","A prepared handoff can fire on the sessions you actually serve","The throughput floor needs both the client's observed rate and the server's delivered rate. Both are reported now, on VOD as well as live: the clients fill <code>observed_download_bps</code> and the VOD serving boundary measures <code>delivered_bps</code>. A window that has not closed yet still refuses, which is the honest reading rather than a missing input.")}
+      ${req("unmet","The fleet receipt is complete","Requires twenty consecutive commits on the corrected realistic-runway instrument with stable memory, and a measured fallback interruption on at least one Apple device. Apple is the measured candidate for two live pipelines; neither of these numbers exists yet.")}
+      ${togRow("pdp",`Tell the server this browser can prepare a second player <span class="pill warn">unqualified</span>`,"Sets <code>dual_player_preparation</code> on this browser's control exchanges, which is the only thing that lets the server stage a successor for it. Nothing above blocks this switch — the list is what tells you the cost. It reaches the server on the next control exchange, and a playback whose successor was never playable stops offering for the rest of that playback.",preparedHandoffEnabled(),'onchange="setPreparedHandoff(this.checked)"')}
+      <div class="hint"><b>Enable path after those checks pass:</b> turn on <b>Advertise playback control protocol v1</b> above and deploy only a qualified client that declares the action. There is no separate hidden server flag, and nothing on this card prevents you enabling it now — a client that is offered a successor it cannot prime settles it and falls back to the ordinary in-place change.</div>`);
   const experimental=setCard(`${cardHead("Experimental delivery","Changes the shape of the stream itself. Applies to new sessions only.")}
       ${togRow("phs",`Typeless sliding HLS <span class="pill warn">experimental</span>`,"Only for the iPad control comparison.",settings.hls_typeless_sliding)}
       <div class="err" id="dxerr"></div>

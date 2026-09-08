@@ -624,6 +624,57 @@ than the accepted sequence: a create can outrun the snapshot that justifies it,
 and a client reporting a *higher* sequence can only look less superseded, which
 is the safe direction. Apple 108, Android 64.
 
+## The Apple client half of M6 is merged, and the server half is not what the contract says
+
+**Merged into `main` as `9c5e1f9b`, 2026-09-08
+([#122](http://192.168.4.7:3000/noirr/plurx/pulls/122)). Not deployed, and not
+yet on any physical device.** Apple declares `prepare_replacement` and drives
+the whole transaction — a muted, layer-less second `AVPlayer` primed through
+the successor's own `media_origin_ms`, `metadata_ready` and `buffer_ready` as
+it gets there, the item handed to the authoritative player so the layer,
+Picture in Picture and every observer survive the switch, and `committed`
+carrying the wall clock of the successor's own first qualifying frame measured
+against the film position the switch happened at. Every exit settles the
+staging, because one left to the 330-second deadline costs that session its
+only preparation for the rest of its life.
+
+**The finding that matters more than the client.** The contract says the
+server half is finished. It is finished as a *transaction* and not as a
+*stream*: `stage_prepared_successor`'s own comment says "**Stage only** …
+nothing produced yet", the third of its eight phases — *reserve and prime* —
+is not implemented, and the staged row carries the blocked publication
+sentinel, so `classify_durable_route` answers `OwnerTransition` and **a GET of
+the successor's `playlist_url` returns `503 media_owner_transition` on every
+request until the pointer moves.** Commit does not publish it either. A client
+built from the contract's own sequence diagram therefore builds a second
+pipeline that can never become playable and pays for finding that out on every
+quality change. **So the rule all three clients need: a successor that dies
+before it was ever playable is evidence about this playback, not this attempt
+— stop asking for the rest of it.** Apple implements it as
+`PreparedReplacementCoordinator.canOfferPreparation`; it is learned, needs no
+flag, is forgotten when the player ends, and disappears on its own the day the
+priming phase lands.
+
+Two more corrections, both "the code wins": `ActionAcknowledgement` has a fifth
+field the contract omits — `committed_media_origin_ms`, **required on
+`Committed`** and compared against the staged successor's own origin, so
+without it every Apple commit is a `400` — and **VOD is no longer excluded**,
+because `f2fecc98` populates `delivered_bps` there and says its absence "is
+what made preparation unreachable on the primary presentation". A client that
+gates on `!isVOD` disables the capability on the presentation the server just
+enabled it for. `docs/playback-control/M6-CLIENT-REPLACEMENT-CONTRACT.md` now
+carries all three beside the claims they correct, and the cross-port
+conformance gate compares `ActionAcknowledgement` for every port that models it.
+
+**Still owed, and only hardware can pay:** one directed replacement on a real
+iPhone and a real Apple TV, and the fallback interruption Apple has never
+measured — web/Safari 271–2,246 ms (mean 1,121), Android/Google TV 353–766 ms
+(mean 471), Apple blank. `docs/playback-control/M6-APPLE-HARDWARE-ACCEPTANCE.md`
+is the paste-ready prompt for both, and it starts with the two Ansible
+playbooks, because an acceptance run against the previous build says nothing.
+Nobody has twenty consecutive commits on a realistic runway, and Apple decoder
+memory across repeated trials still cannot be measured at all.
+
 ## M6 is building, and what it does not yet reach
 
 Three PRs, in the order the design demands: the actor's slot
