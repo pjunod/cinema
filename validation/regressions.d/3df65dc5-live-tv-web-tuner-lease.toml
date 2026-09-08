@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["3df65dc5"]
+points = ["web.experience", "live-tv.integration"]
+checks = ["web-static", "web-layout"]
+reason = "Three of the fourteen findings lose a physical tuner, and each retains a test that fails if the fix is reverted. `the tuner watchdog, the keepalive and the status poll all survive docking` drives the shipped `watchLiveTv` poll across a real route change with a mutable `location`: it requires thirteen keepalives and thirteen status reads while docked, and requires the thirty-second no-progress release to still fire there — restoring the old single liveness predicate, which conflated 'is this my session' with 'is this render still on screen', drops all three to zero the instant the picture docks and the test fails on the first assertion. `navigating away during the start POST still docks and can still be stopped` holds the start promise open, navigates, and requires `liveTvLeaveRoute` to dock on `LIVE_TV.starting` rather than on a lease that does not exist yet, then requires the granted session to be wired to a poll that can reclaim it; removing the flag leaves the capability held with no dock, no poll and no Stop, and the test fails on the mode assertion and again on the release count. The keyboard scope is pinned by `page-read-budget.test.js`, whose docking case now asserts the three-way mode decision rather than matching source text — the form of assertion that let the first two defects through CI while broken."

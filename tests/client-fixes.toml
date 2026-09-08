@@ -821,6 +821,20 @@ test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvInputPolicyT
 test_anchor = "a refused picture-in-picture never latches the retention flag"
 
 [[fixes]]
+# Nothing in the tvOS live surface was focusable while the overlay was hidden.
+# tvOS delivers move/exit/playPause only to the focused view and its ancestors,
+# and PlayerSurfaceView refuses focus — so the overlay's own four-second
+# auto-hide removed the last focusable view from the presented cover and the
+# surface went permanently deaf. Every `hidden -> reveal` row of the contract
+# was unreachable, with no way back to any chrome.
+id = "apple.live-tv-ten-foot-surface-keeps-something-focusable"
+commits = ["9268f5f6"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = ".focused($focusedControl, equals: FocusTarget.reveal)"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testTheTenFootSurfaceKeepsSomethingFocusableWhileTheOverlayIsHidden"
+
+[[fixes]]
 # Entering picture-in-picture backgrounds the app, and the release rule read
 # only the scene phase — so the one case picture-in-picture exists for would
 # have released the tuner underneath its own window. Every release path now
