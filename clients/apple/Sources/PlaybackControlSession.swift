@@ -95,6 +95,9 @@ struct PlaybackControlTransport {
         if let generation = fields["generation"] as? String { failure.generation = generation }
         if let epoch = fields["control_epoch"] as? Int { failure.controlEpoch = epoch }
         if let retryAfter = fields["retry_after_ms"] as? Int { failure.retryAfterMs = retryAfter }
+        if let invalidField = fields["invalid_field"] as? String {
+            failure.invalidField = invalidField
+        }
         return failure
     }
 }
@@ -113,13 +116,20 @@ final class PlaybackControlSession {
     private let scheduleSubtitleReady: @Sendable (
         @escaping @MainActor @Sendable () -> Void
     ) -> Void
+    private let schedulePreparedSwitch: @Sendable (
+        @escaping @MainActor @Sendable () -> Void
+    ) -> Void
 
     init(
         scheduleSubtitleReady: @escaping @Sendable (
             @escaping @MainActor @Sendable () -> Void
+        ) -> Void = { callback in Task { @MainActor in callback() } },
+        schedulePreparedSwitch: @escaping @Sendable (
+            @escaping @MainActor @Sendable () -> Void
         ) -> Void = { callback in Task { @MainActor in callback() } }
     ) {
         self.scheduleSubtitleReady = scheduleSubtitleReady
+        self.schedulePreparedSwitch = schedulePreparedSwitch
     }
 
     /// What the reporter reads. See `PlaybackControlLatestCapture`: the
@@ -178,7 +188,8 @@ final class PlaybackControlSession {
         bootstrap: ControlBootstrap,
         transport: PlaybackControlTransport,
         observe: @escaping () -> PlayerControlObservation?,
-        onSubtitleReady: @escaping @MainActor @Sendable () -> Void = {}
+        onSubtitleReady: @escaping @MainActor @Sendable () -> Void = {},
+        onPreparedSwitch: @escaping @MainActor @Sendable (PreparedSwitchEvent) -> Void = { _ in }
     ) {
         end()
         // A generation, not a reset. A verdict outlives the session it was
@@ -192,6 +203,7 @@ final class PlaybackControlSession {
         answers.begin(generation: generation)
         let lease = TimeInterval(bootstrap.leaseTimeoutMs) / 1_000
         let subtitleReadiness = SubtitleReadinessRetryState()
+        let preparationEvents = PlaybackControlPreparationEvents()
         self.observe = observe
         // The reporter takes its first snapshot the moment it starts, so the
         // first one has to be there before it does.
@@ -254,6 +266,19 @@ final class PlaybackControlSession {
                     intentGeneration: exchange.intentGeneration,
                     lease: lease
                 )
+            },
+            // Message plumbing only. The callback is deliberately not wired to
+            // AVPlayer until the staged successor has a producer to open.
+            onPreparation: { [weak self, schedulePreparedSwitch] event in
+                guard preparationEvents.enqueue(event) else { return }
+                schedulePreparedSwitch { [weak self] in
+                    let events = preparationEvents.drain()
+                    guard let self, self.activeGeneration == generation else { return }
+                    for event in events {
+                        guard self.activeGeneration == generation else { return }
+                        onPreparedSwitch(event)
+                    }
+                }
             }
         )
         guard let reporter else {
@@ -294,6 +319,42 @@ final class PlaybackControlSession {
               let floor = await reporter.notifyUrgently(capture)
         else { return nil }
         return UInt64(floor)
+    }
+
+    /// Prepared-switch producer seam. These are inert until a caller receives
+    /// `onPreparedSwitch(.offered)` and has real successor progress to report.
+    @discardableResult
+    func preparedMetadataReady(actionId: String) async -> Bool {
+        guard let reporter else { return false }
+        return await reporter.preparationMetadataReady(actionId: actionId)
+    }
+
+    @discardableResult
+    func preparedBufferReady(actionId: String, bufferedThroughMs: Int) async -> Bool {
+        guard let reporter else { return false }
+        return await reporter.preparationBufferReady(
+            actionId: actionId, bufferedThroughMs: bufferedThroughMs
+        )
+    }
+
+    @discardableResult
+    func commitPrepared(actionId: String, firstFrameUnixMs: Int) async -> Bool {
+        guard let reporter else { return false }
+        return await reporter.preparationCommitted(
+            actionId: actionId, firstFrameUnixMs: firstFrameUnixMs
+        )
+    }
+
+    @discardableResult
+    func failPrepared(actionId: String) async -> Bool {
+        guard let reporter else { return false }
+        return await reporter.preparationFailed(actionId: actionId)
+    }
+
+    @discardableResult
+    func abortPrepared(actionId: String) async -> Bool {
+        guard let reporter else { return false }
+        return await reporter.preparationAborted(actionId: actionId)
     }
 
     /// Publish what a recovery owner is about to act on, then wait — briefly —
@@ -435,6 +496,34 @@ final class PlaybackControlSession {
         )
         latest.store(capture)
         return capture
+    }
+}
+
+/// Serializes reporter events before they cross to MainActor. One scheduled
+/// drain owns every event already queued, so offer/release order cannot invert;
+/// a generation check in the session discards the whole stale drain after End.
+private final class PlaybackControlPreparationEvents: @unchecked Sendable {
+    private let lock = NSLock()
+    private var events: [PreparedSwitchEvent] = []
+    private var scheduled = false
+
+    /// Returns true only for the event that must schedule the next drain.
+    func enqueue(_ event: PreparedSwitchEvent) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        events.append(event)
+        guard !scheduled else { return false }
+        scheduled = true
+        return true
+    }
+
+    func drain() -> [PreparedSwitchEvent] {
+        lock.lock()
+        defer { lock.unlock() }
+        let drained = events
+        events.removeAll()
+        scheduled = false
+        return drained
     }
 }
 

@@ -145,6 +145,25 @@ function response(request) {
   };
 }
 
+function prepareAction() {
+  return {
+    type: "prepare",
+    action_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    session_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    playlist_url: "/api/v1/hls/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb/index.m3u8",
+    media_origin_ms: 600_000,
+    effective_selection: {
+      quality_auto: true,
+      height: 1080,
+      audio_track: 1,
+      subtitle_burn: null,
+      audio_offset_ms: 0,
+      codec: "server_selected",
+      dynamic_range: "sdr",
+    },
+  };
+}
+
 function controlError(status, code, fields = {}) {
   const error = new Error(code);
   Object.assign(error, { status, code }, fields);
@@ -162,7 +181,86 @@ async function flush() {
   await Promise.resolve();
 }
 
+function preparedReporterHarness(answer) {
+  let now = 0;
+  let currentSelection = snapshot().selection;
+  const timers = new Map();
+  let nextTimer = 0;
+  const calls = [];
+  const releases = [];
+  const preparation = new control.Preparation({ now: () => now });
+  let reporter = null;
+  const captureCurrent = () => {
+    const value = snapshot();
+    value.selection = currentSelection;
+    value.acknowledgement = preparation.acknowledgement(value.demand);
+    return captureSnapshot(value);
+  };
+  reporter = new control.Reporter({
+    bootstrap: bootstrap(),
+    clientInstanceId: "12121212-1212-4212-8212-121212121212",
+    capture: captureCurrent,
+    send: async (_url, request) => {
+      const copy = JSON.parse(JSON.stringify(request));
+      calls.push(copy);
+      if (answer) return answer(copy, calls.length);
+      const terminal = copy.acknowledgement
+        && ["committed", "failed", "aborted"].includes(copy.acknowledgement.state);
+      return Object.assign(response(copy), { action: terminal ? { type: "none" } : prepareAction() });
+    },
+    setTimer: (run, ms) => {
+      const id = ++nextTimer;
+      timers.set(id, { run, at: now + ms });
+      return id;
+    },
+    clearTimer: (id) => { timers.delete(id); },
+    now: () => now,
+    onExchange: ({ request, response: reply, error }) => {
+      const outcome = preparation.settle(request, reply, error);
+      if (outcome === "acknowledged") reporter.notify();
+      if (outcome === "commit_discarded") reporter.notify();
+      if (outcome === "committed") reporter.stop();
+    },
+  }).start();
+  return {
+    preparation, reporter, calls, releases,
+    attachResource() {
+      return preparation.attachResource(
+        prepareAction().action_id,
+        { kind: "future-successor" },
+        (resource, reason) => releases.push({ resource, reason }),
+      );
+    },
+    async advance(state, fields = {}) {
+      now += 250;
+      const changed = preparation.advance(state, fields, currentSelection);
+      if (changed) reporter.notify();
+      await flush();
+      return changed;
+    },
+    async notify() {
+      now += 250;
+      reporter.notify();
+      await flush();
+    },
+    async tick(ms) {
+      now += ms;
+      for (const [id, timer] of Array.from(timers)) {
+        if (timer.at <= now) {
+          timers.delete(id);
+          timer.run();
+        }
+      }
+      await flush();
+    },
+    setSelection(value) { currentSelection = value; },
+    setNow(value) { now = value; },
+  };
+}
+
 async function main() {
+  const preparationRejectionMessage =
+    "the preparation acknowledgement lost its commit or deadline fence";
   assert.equal(control.validBootstrap(bootstrap()), true);
   assert.equal(control.validBootstrap(Object.assign(bootstrap(), { control_epoch: 0 })), false);
   assert.equal(control.validBootstrap(Object.assign(bootstrap(), { url: "https://attacker/control" })), false);
@@ -535,6 +633,141 @@ async function main() {
   assert.equal(ownerCalls[1].capabilities.platform,"web");
   ownerReporter.stop();
 
+  async function preparedRefusal(error, commit = false) {
+    let refusalNow = 0;
+    const refusalTimers = [];
+    const refusalCalls = [];
+    const refusalReleases = [];
+    const preparation = new control.Preparation({ now: () => refusalNow });
+    const offerRequest = Object.assign(snapshot(), {
+      generation: bootstrap().generation,
+      control_epoch: bootstrap().control_epoch,
+      sequence: 1,
+    });
+    preparation.adopt(prepareAction(), offerRequest);
+    preparation.attachResource(prepareAction().action_id, {}, (_resource, reason) => {
+      refusalReleases.push(reason);
+    });
+    if (commit) {
+      preparation.active.progress = "buffer_ready";
+      preparation.advance("committed", { firstFrameUnixMs: 1_700_000_000_000 },
+        offerRequest.selection);
+    }
+    let refusalReporter = null;
+    refusalReporter = new control.Reporter({
+      bootstrap: bootstrap(),
+      clientInstanceId: "34343434-3434-4434-8434-343434343434",
+      capture: () => {
+        const value = snapshot();
+        value.acknowledgement = preparation.acknowledgement(value.demand);
+        return captureSnapshot(value);
+      },
+      send: async (_url, request) => {
+        refusalCalls.push(request);
+        throw error;
+      },
+      setTimer: (run, ms) => {
+        refusalTimers.push({ run, ms });
+        return refusalTimers.length;
+      },
+      clearTimer: () => {},
+      now: () => refusalNow,
+      onExchange: ({ request, error: exchangeError }) => {
+        preparation.settle(request, null, exchangeError);
+      },
+    }).start();
+    await flush();
+    return { preparation, reporter: refusalReporter, refusalCalls, refusalReleases,
+      refusalTimers, setNow(value) { refusalNow = value; } };
+  }
+
+  for (const [status, code] of [
+    [400, "invalid_control"],
+    [404, "session_gone"],
+    [410, "session_ended"],
+    [410, "owner_lost"],
+  ]) {
+    const refused = await preparedRefusal(controlError(status, code));
+    assert.equal(refused.reporter.status().stopped, true, `${status} ${code} stops control`);
+    assert.equal(refused.preparation.status().active, false, `${status} ${code} drops the offer`);
+    assert.deepEqual(refused.refusalReleases, [code], `${status} ${code} releases preparation`);
+  }
+
+  const staleFence = await preparedRefusal(controlError(409, "stale_control", {
+    generation: bootstrap().generation, controlEpoch: bootstrap().control_epoch,
+  }));
+  assert.equal(staleFence.reporter.status().stopped, true,
+    "a client-instance or sequence fence is a client bug, so reporting stops");
+
+  const refreshedGeneration = "56565656-5656-4656-8656-565656565656";
+  const staleGeneration = await preparedRefusal(controlError(409, "stale_control", {
+    generation: refreshedGeneration, controlEpoch: bootstrap().control_epoch,
+  }));
+  assert.equal(staleGeneration.reporter.status().stopped, false);
+  assert.equal(staleGeneration.reporter.bootstrap.generation, refreshedGeneration,
+    "a stale generation re-resolves onto the server's current fence");
+  assert.equal(staleGeneration.reporter.status().sequence, 0,
+    "the new generation restarts at sequence one on its next exchange");
+  staleGeneration.reporter.stop();
+
+  const movedOwner = new control.Preparation({ now: () => 0 });
+  movedOwner.adopt(prepareAction(), Object.assign(snapshot(), {
+    generation: bootstrap().generation,
+    control_epoch: bootstrap().control_epoch,
+    sequence: 1,
+  }));
+  assert.equal(movedOwner.settle(null, null, controlError(409, "owner_changed", {
+    generation: bootstrap().generation, controlEpoch: bootstrap().control_epoch + 1,
+  })), "failed");
+  assert.equal(movedOwner.status().active, false,
+    "moving to another owner drops state bound to the old owner");
+
+  const rejectedPreparation = await preparedRefusal(controlError(409, "stale_control", {
+    generation: bootstrap().generation, controlEpoch: bootstrap().control_epoch,
+    serverMessage: preparationRejectionMessage,
+  }), true);
+  assert.equal(rejectedPreparation.refusalCalls[0].acknowledgement.state, "committed");
+  assert.equal(rejectedPreparation.preparation.status().last_outcome, "commit_rejected");
+  assert.equal(rejectedPreparation.preparation.status().active, false);
+  assert.equal(rejectedPreparation.reporter.status().stopped, false,
+    "a rejected preparation is dropped while the incumbent control loop continues");
+  rejectedPreparation.reporter.stop();
+
+  const committedFence = await preparedRefusal(controlError(409, "stale_control", {
+    generation: bootstrap().generation, controlEpoch: bootstrap().control_epoch,
+    serverMessage: "the generation, client instance, or sequence fence is stale",
+  }), true);
+  assert.equal(committedFence.reporter.status().stopped, true,
+    "a committed body does not turn a client-instance or sequence bug into a recoverable refusal");
+  assert.deepEqual(committedFence.refusalReleases, ["stale_control"]);
+
+  const malformedReleases = [];
+  const malformedPreparation = new control.Preparation({ now: () => 0 });
+  malformedPreparation.adopt(prepareAction(), Object.assign(snapshot(), {
+    generation: bootstrap().generation,
+    control_epoch: bootstrap().control_epoch,
+    sequence: 1,
+  }));
+  malformedPreparation.attachResource(prepareAction().action_id, {}, (_resource, reason) => {
+    malformedReleases.push(reason);
+  });
+  const malformedReporter = new control.Reporter({
+    bootstrap: bootstrap(),
+    clientInstanceId: "45454545-4545-4545-8545-454545454545",
+    capture: () => captureSnapshot(snapshot()),
+    send: async (_url, request) => Object.assign(response(request), {
+      action: { type: "prepare", action_id: prepareAction().action_id },
+    }),
+    onExchange: ({ request, response: reply, error }) => {
+      malformedPreparation.settle(request, reply, error);
+    },
+  }).start();
+  await flush();
+  assert.equal(malformedReporter.status().stopped, true);
+  assert.equal(malformedPreparation.status().active, false);
+  assert.deepEqual(malformedReleases, ["invalid_response"],
+    "a malformed response releases preparation state before reporting stops");
+
   const late=deferred();
   let lateCompletions=0;
   const predecessor=new control.Reporter({
@@ -666,7 +899,10 @@ async function main() {
   };
   const player={offset:5,bookOffset:0,durMs:60_000,knownDur:60_000,started:true,
     waitAt:null,_seekPreview:null,source:{height:1080},curSub:-1,burnedSub:null,aoffset:0,hls:null};
-  assert.equal(adapter.playbackControlSnapshot(video,player).position_ms,15_000);
+  const firstWebSnapshot=adapter.playbackControlSnapshot(video,player);
+  assert.equal(firstWebSnapshot.position_ms,15_000);
+  assert.equal(firstWebSnapshot.capabilities.dual_player_preparation,false,
+    "measured Safari evidence keeps web dual-player preparation disabled");
   video.paused=true;
   assert.equal(adapter.playbackControlSnapshot(video,player).demand,"hold");
   player.wantsPlayback=true;
@@ -1581,6 +1817,28 @@ async function main() {
   assert.match(playSource,/PLAY_OPEN_GATE\.acceptResource\(openAttempt/);
   assert.match(shippedSource("startCopyHls"),/PLAY_OPEN_GATE\.acceptResource/);
 
+  const transportError = await new Function(
+    "fetch", "TOKEN",
+    `${shippedSource("sendPlaybackControl")}; return sendPlaybackControl;`,
+  )(
+    async () => ({
+      ok: false,
+      status: 409,
+      json: async () => ({
+        code: "stale_control",
+        message: preparationRejectionMessage,
+        generation: bootstrap().generation,
+        control_epoch: bootstrap().control_epoch,
+      }),
+    }),
+    null,
+  )(bootstrap().url, {}, null).then(
+    () => null,
+    error => error,
+  );
+  assert.equal(transportError.serverMessage, preparationRejectionMessage,
+    "the shipped transport preserves the server discriminator for stale-control handling");
+
   // The action vocabulary. Declaring `hold` is what permits the server to send
   // it at all: an undeclared action is never sent, so a client that did not ask
   // cannot be silenced by one.
@@ -1594,10 +1852,264 @@ async function main() {
   await flush();
   assert.deepEqual(
     declared,
-    ["hold", "retry_resource", "terminal"],
+    ["hold", "retry_resource", "terminal", "prepare_replacement"],
     "the request declares the actions this client accepts",
   );
   declaring.stop();
+
+  // The response parser admits the complete prepared-switch payload and no
+  // partial imitation of it. The nullable values below survive adoption; a
+  // test that merely reads the fields it happens to know would miss both.
+  const offered = prepareAction();
+  const preparedRequest = Object.assign(snapshot(), {
+    generation: bootstrap().generation,
+    control_epoch: bootstrap().control_epoch,
+    sequence: 1,
+  });
+  const preparedResponse = Object.assign(response(preparedRequest), { action: offered });
+  assert.equal(control.validResponse(bootstrap(), preparedRequest, preparedResponse), true);
+  const nullableOffer = JSON.parse(JSON.stringify(offered));
+  nullableOffer.effective_selection.audio_track = null;
+  nullableOffer.effective_selection.dynamic_range = null;
+  assert.equal(control.validPrepareAction(nullableOffer), true);
+  const modeled = new control.Preparation({ now: () => 10 });
+  assert.equal(modeled.settle(preparedRequest,
+    Object.assign(response(preparedRequest), { action: nullableOffer }), null), "offered");
+  assert.deepEqual(modeled.status().offer, nullableOffer,
+    "every offer field, including nested nulls, is retained exactly");
+  modeled.stop();
+  for (const field of ["action_id", "session_id", "playlist_url", "media_origin_ms",
+    "effective_selection"]) {
+    const partial = JSON.parse(JSON.stringify(offered));
+    delete partial[field];
+    assert.equal(control.validPrepareAction(partial), false, `prepare requires ${field}`);
+  }
+  for (const field of ["quality_auto", "height", "audio_track", "subtitle_burn",
+    "audio_offset_ms", "codec", "dynamic_range"]) {
+    const partial = JSON.parse(JSON.stringify(offered));
+    delete partial.effective_selection[field];
+    assert.equal(control.validPrepareAction(partial), false,
+      `prepare requires effective_selection.${field}`);
+  }
+
+  // Drive the exact request/response ladder over the real reporter. No second
+  // video exists yet; the attached resource is the seam the later producer
+  // work will occupy, and its release proves the incumbent is never touched.
+  const ladder = preparedReporterHarness();
+  await flush();
+  assert.equal(ladder.calls.length, 1);
+  assert.deepEqual(ladder.preparation.status().offer, offered);
+  assert.equal(ladder.attachResource(), true);
+  assert.equal(ladder.attachResource(), false,
+    "a repeated offer cannot allocate a second successor resource");
+  assert.equal(await ladder.advance("metadata_ready"), true);
+  assert.deepEqual(ladder.calls[1].acknowledgement, {
+    action_id: offered.action_id,
+    state: "metadata_ready",
+    buffered_through_ms: null,
+    committed_media_origin_ms: null,
+    first_frame_unix_ms: null,
+  });
+  assert.equal(await ladder.advance("buffer_ready", { bufferedThroughMs: 612_000 }), true);
+  assert.deepEqual(ladder.calls[2].acknowledgement, {
+    action_id: offered.action_id,
+    state: "buffer_ready",
+    buffered_through_ms: 612_000,
+    committed_media_origin_ms: null,
+    first_frame_unix_ms: null,
+  });
+  assert.equal(await ladder.advance("committed", { firstFrameUnixMs: 1_700_000_000_123 }), true);
+  assert.deepEqual(ladder.calls[3].acknowledgement, {
+    action_id: offered.action_id,
+    state: "committed",
+    buffered_through_ms: null,
+    committed_media_origin_ms: offered.media_origin_ms,
+    first_frame_unix_ms: 1_700_000_000_123,
+  }, "commit echoes the offered source origin rather than deriving one from currentTime");
+  assert.deepEqual(ladder.calls[3].selection, ladder.calls[0].selection,
+    "the commit repeats the selection the offer was staged against");
+  assert.deepEqual(ladder.releases.map(item => item.reason), ["committed"]);
+  assert.equal(ladder.preparation.status().active, false);
+  assert.equal(ladder.reporter.status().stopped, true,
+    "the predecessor loop stops at the missing successor-bootstrap seam");
+
+  // Readiness callbacks need not wait for a control round trip. Queue every
+  // rung, and promote it only when the previous acknowledgement is accepted.
+  const heldMetadata = deferred();
+  const rapid = preparedReporterHarness((request, call) => {
+    if (call === 2) return heldMetadata.promise;
+    const terminal = request.acknowledgement
+      && ["committed", "failed", "aborted"].includes(request.acknowledgement.state);
+    return Object.assign(response(request), {
+      action: terminal ? { type: "none" } : prepareAction(),
+    });
+  });
+  await flush();
+  rapid.attachResource();
+  assert.equal(await rapid.advance("metadata_ready"), true);
+  assert.equal(await rapid.advance("buffer_ready", { bufferedThroughMs: 612_000 }), true);
+  assert.equal(await rapid.advance("committed", { firstFrameUnixMs: 1_700_000_000_124 }), true);
+  assert.deepEqual(rapid.calls.slice(1).map(request => request.acknowledgement.state),
+    ["metadata_ready"], "later readiness waits behind the in-flight metadata acknowledgement");
+  heldMetadata.resolve(Object.assign(response(rapid.calls[1]), { action: prepareAction() }));
+  await flush();
+  assert.deepEqual(rapid.calls.slice(1).map(request => request.acknowledgement.state),
+    ["metadata_ready", "buffer_ready"]);
+  await rapid.tick(250);
+  assert.deepEqual(rapid.calls.slice(1).map(request => request.acknowledgement.state),
+    ["metadata_ready", "buffer_ready", "committed"]);
+  assert.equal(rapid.reporter.status().stopped, true);
+  assert.deepEqual(rapid.releases.map(item => item.reason), ["committed"]);
+
+  // A terminal local decision outranks an older response. In particular, a
+  // metadata reply cannot clear an abort that was queued while it was away.
+  const heldBeforeAbort = deferred();
+  const aborting = preparedReporterHarness((request, call) => {
+    if (call === 2) return heldBeforeAbort.promise;
+    const terminal = request.acknowledgement
+      && ["failed", "aborted"].includes(request.acknowledgement.state);
+    return Object.assign(response(request), {
+      action: terminal ? { type: "none" } : prepareAction(),
+    });
+  });
+  await flush();
+  aborting.attachResource();
+  assert.equal(await aborting.advance("metadata_ready"), true);
+  assert.equal(await aborting.advance("aborted"), true);
+  assert.equal(aborting.preparation.status().acknowledgement.state, "aborted");
+  heldBeforeAbort.resolve(Object.assign(response(aborting.calls[1]), { action: prepareAction() }));
+  await flush();
+  assert.deepEqual(aborting.calls.slice(1).map(request => request.acknowledgement.state),
+    ["metadata_ready", "aborted"]);
+  assert.deepEqual(aborting.releases.map(item => item.reason), ["aborted"]);
+  assert.equal(aborting.preparation.status().active, false);
+  assert.equal(aborting.reporter.status().stopped, false,
+    "aborting a successor leaves the incumbent reporter alive");
+  aborting.reporter.stop();
+
+  // The shipped HTML owns the player binding around the module state machine.
+  // Exercise that seam too, so a module-only implementation cannot pass while
+  // the page keeps sending `acknowledgement: null`.
+  assert.match(shippedSource("playbackControlSnapshot"),
+    /controlPreparation[\s\S]*acknowledgement\(demand\)/);
+  const wiredCalls = [];
+  const wired = new Function(
+    "window", "PlurxPlaybackControl", "sendPlaybackControl", "offer", "makeSnapshot",
+    [
+      "const CONTROL_CLIENT_ID='78787878-7878-4878-8878-787878787878';",
+      "function playbackOwnsAttachedMedia(){return true;}",
+      "function playbackControlSelection(){return makeSnapshot().selection;}",
+      "function playbackControlSnapshot(_video,player){const value=makeSnapshot();"+
+        "value.acknowledgement=player.controlPreparation?"+
+        "player.controlPreparation.acknowledgement(value.demand):null;return value;}",
+      "function clearPlaybackControlWaiters(){}",
+      "function settlePlaybackControlWaiters(){}",
+      "function subtitleReadinessRetryTransition(){return false;}",
+      "function retryReadyNativeSubtitle(){}",
+      "function clientLog(){}",
+      shippedSource("stopPlaybackControl"),
+      shippedSource("advancePlaybackPreparation"),
+      shippedSource("playbackPreparationMetadataReady"),
+      shippedSource("playbackPreparationBufferReady"),
+      shippedSource("commitPlaybackPreparation"),
+      shippedSource("startPlaybackControl"),
+      "return {startPlaybackControl,playbackPreparationMetadataReady,"+
+        "playbackPreparationBufferReady,commitPlaybackPreparation};",
+    ].join("\n"),
+  )(
+    { PlurxPlaybackControl: control }, control,
+    async (_url, request) => {
+      wiredCalls.push(JSON.parse(JSON.stringify(request)));
+      const committed = request.acknowledgement
+        && request.acknowledgement.state === "committed";
+      return Object.assign(response(request), {
+        action: committed ? { type: "none" } : offered,
+      });
+    },
+    offered, snapshot,
+  );
+  const wiredPlayer = { mediaAttachment: {}, controlIntentGeneration: 0 };
+  wired.startPlaybackControl({}, wiredPlayer, bootstrap());
+  await flush();
+  assert.equal(wiredPlayer.controlPreparation.status().active, true);
+  wiredPlayer.controlReporter.lastStartedAt = null;
+  wired.playbackPreparationMetadataReady(wiredPlayer);
+  await flush();
+  wiredPlayer.controlReporter.lastStartedAt = null;
+  wired.playbackPreparationBufferReady(wiredPlayer, 612_000);
+  await flush();
+  wiredPlayer.controlReporter.lastStartedAt = null;
+  wired.commitPlaybackPreparation(wiredPlayer, 1_700_000_000_789);
+  await flush();
+  assert.deepEqual(wiredCalls.slice(1).map(request => request.acknowledgement.state),
+    ["metadata_ready", "buffer_ready", "committed"]);
+  assert.equal(wiredPlayer.controlReporter.status().stopped, true);
+
+  // A bad origin is silently discarded by the server. Returning the same
+  // action is the signal: the client releases its local work and sends an
+  // abort on a fresh sequence instead of waiting for an error that never comes.
+  const discarded = preparedReporterHarness((request) => Object.assign(response(request), {
+    action: request.acknowledgement && request.acknowledgement.state === "aborted"
+      ? { type: "none" } : prepareAction(),
+  }));
+  await flush();
+  discarded.attachResource();
+  await discarded.advance("metadata_ready");
+  await discarded.advance("buffer_ready", { bufferedThroughMs: 612_000 });
+  assert.equal(discarded.preparation.advance("committed",
+    { firstFrameUnixMs: 1_700_000_000_456 }, discarded.calls[0].selection), true);
+  discarded.preparation.active.acknowledgement = Object.freeze(Object.assign(
+    {}, discarded.preparation.active.acknowledgement,
+    { committed_media_origin_ms: offered.media_origin_ms + 1 },
+  ));
+  await discarded.notify();
+  assert.equal(discarded.calls[3].acknowledgement.committed_media_origin_ms,
+    offered.media_origin_ms + 1, "the fixture actually sends the bad origin");
+  assert.equal(discarded.preparation.status().last_outcome, "commit_discarded");
+  assert.deepEqual(discarded.releases.map(item => item.reason), ["commit_discarded"]);
+  await discarded.tick(250);
+  assert.equal(discarded.calls[4].acknowledgement.state, "aborted");
+  assert.equal(discarded.calls[4].sequence, discarded.calls[3].sequence + 1);
+  assert.equal(discarded.reporter.status().stopped, false,
+    "a discarded commit does not strand or stop the incumbent player");
+  discarded.reporter.stop();
+
+  const selectionChanged = new control.Preparation({ now: () => 0 });
+  selectionChanged.adopt(offered, preparedRequest);
+  selectionChanged.active.progress = "buffer_ready";
+  selectionChanged.attachResource(offered.action_id, {}, () => {});
+  const otherSelection = JSON.parse(JSON.stringify(preparedRequest.selection));
+  otherSelection.audio_track = 2;
+  assert.equal(selectionChanged.advance("committed", { firstFrameUnixMs: 1 }, otherSelection), true);
+  assert.equal(selectionChanged.status().acknowledgement.state, "aborted",
+    "a viewer selection change abandons instead of committing the stale offer");
+
+  const endingPreparation = new control.Preparation({ now: () => 0 });
+  endingPreparation.adopt(offered, preparedRequest);
+  endingPreparation.active.progress = "buffer_ready";
+  endingPreparation.advance("committed", { firstFrameUnixMs: 1 }, preparedRequest.selection);
+  assert.equal(endingPreparation.acknowledgement("end"), null,
+    "terminal demand never carries a commit acknowledgement");
+
+  const withdrawnReleases = [];
+  const withdrawn = new control.Preparation({ now: () => 0 });
+  withdrawn.adopt(offered, preparedRequest);
+  withdrawn.attachResource(offered.action_id, {}, (_resource, reason) => withdrawnReleases.push(reason));
+  assert.equal(withdrawn.settle(preparedRequest,
+    Object.assign(response(preparedRequest), { action: { type: "none" } }), null), "withdrawn");
+  assert.deepEqual(withdrawnReleases, ["withdrawn"]);
+  assert.equal(withdrawn.status().active, false);
+
+  let expiryNow = 0;
+  const expiryReleases = [];
+  const expiring = new control.Preparation({ now: () => expiryNow });
+  expiring.adopt(offered, preparedRequest);
+  expiring.attachResource(offered.action_id, {}, (_resource, reason) => expiryReleases.push(reason));
+  expiryNow = 330_001;
+  assert.equal(expiring.settle(preparedRequest, preparedResponse, null), "expired");
+  assert.deepEqual(expiryReleases, ["expired"]);
+  assert.equal(expiring.status().active, false,
+    "an expired offer retains neither state nor an attached resource");
 
   // A hold is not a failure and not a reason to stop. This is the whole point:
   // the server is saying production is deliberately not advancing, and a client
@@ -1855,6 +2367,22 @@ async function main() {
     };
   }
   const stalledVideo = { paused: false, seeking: false };
+  {
+    const h=stallHarness(),player=stalledPlayer(),held=deferred();
+    player.mediaAttachment={};player.controlIntentGeneration=0;
+    h.holdWith(()=>held.promise);
+    h.stub.attach(player,stalledVideo,bootstrap());h.attached.push(player);
+    await flush();
+    assert.equal(h.sent.length,1);
+    h.stub.supersede(player);
+    held.resolve(Object.assign(response(h.sent[0]),{action:prepareAction()}));
+    await flush();
+    assert.equal(player.controlPreparation.status().active,false,
+      "an offer answered for a superseded viewer intent is not adopted");
+    assert.equal(player.controlPreparation.status().ignored_action_id,prepareAction().action_id,
+      "the stale offer remains declined if the server repeats it");
+    player.controlReporter.stop();
+  }
   {
     const h=stallHarness(),player=stalledPlayer(),held=deferred();
     player.mediaAttachment={};player.controlIntentGeneration=0;

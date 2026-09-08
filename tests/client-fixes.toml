@@ -812,3 +812,11 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/PreparedReplacem
 source_anchor = "fun committed("
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedReplacementTest.kt"
 test_anchor = "commit rejection settles while the current capture is cleared"
+
+[[fixes]]
+id = "apple.prepared-switch-lifecycle-hardening"
+commits = ["638ac998"]
+source = "clients/apple/Sources/PlaybackControlReporter.swift"
+source_anchor = "private var pendingAcknowledgements: [ActionAcknowledgement] = []"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testRapidPreparedProgressQueuesInOrderAndCommitStopsThePredecessor"

@@ -175,17 +175,18 @@ class ControlRequestWireCase(unittest.TestCase):
         cls.android = ANDROID.read_text(encoding="utf-8")
 
     def assertSameWire(self, label: str, rust: set[str], swift: set[str], kotlin: set[str]) -> None:
+        self.assertPortWire(label, "Apple", rust, swift)
+        self.assertPortWire(label, "Android", rust, kotlin)
+
+    def assertPortWire(
+        self, label: str, port: str, rust: set[str], client: set[str]
+    ) -> None:
         self.assertEqual(
-            swift,
+            client,
             rust,
-            f"{label}: Apple and the server disagree "
-            f"(apple-only {sorted(swift - rust)}, server-only {sorted(rust - swift)})",
-        )
-        self.assertEqual(
-            kotlin,
-            rust,
-            f"{label}: Android and the server disagree "
-            f"(android-only {sorted(kotlin - rust)}, server-only {sorted(rust - kotlin)})",
+            f"{label}: {port} and the server disagree "
+            f"({port.lower()}-only {sorted(client - rust)}, "
+            f"server-only {sorted(rust - client)})",
         )
 
     def test_the_request_itself(self) -> None:
@@ -237,26 +238,38 @@ class ControlRequestWireCase(unittest.TestCase):
                 "prepare_replacement",
             )
 
-    def test_the_android_acknowledgement_matches_the_server(self) -> None:
-        """The first prepared-switch port speaks the server's exact wire subset."""
-        self.assertEqual(
+    def test_every_modelled_acknowledgement_matches_the_server(self) -> None:
+        """Each active adapter spells every acknowledgement field exactly."""
+        rust = rust_struct_fields(self.rust, "ActionAcknowledgement")
+        self.assertPortWire(
+            "ActionAcknowledgement",
+            "Apple",
+            rust,
+            swift_coding_keys(self.apple, "ActionAcknowledgement"),
+        )
+        self.assertPortWire(
+            "ActionAcknowledgement",
+            "Android",
+            rust,
             kotlin_fields(self.android, "ActionAcknowledgement"),
-            rust_struct_fields(self.rust, "ActionAcknowledgement"),
-            "Android and the server disagree on acknowledgement field names",
         )
+
         server = rust_enum_values(self.rust, "AcknowledgementState")
-        android = kotlin_enum_values(self.android, "AcknowledgementState")
         self.assertIn("switched", server, "the server vocabulary unexpectedly changed")
-        self.assertNotIn(
-            "switched",
-            android,
-            "Android must not send switched before that state is fleet-safe",
-        )
-        self.assertEqual(
-            android,
-            server - {"switched"},
-            "Android speaks a different acknowledgement vocabulary subset",
-        )
+        for label, states in (
+            ("Apple", swift_enum_values(self.apple, "AcknowledgementState")),
+            ("Android", kotlin_enum_values(self.android, "AcknowledgementState")),
+        ):
+            self.assertNotIn(
+                "switched",
+                states,
+                f"{label} must not send switched before that state is fleet-safe",
+            )
+            self.assertEqual(
+                states,
+                server - {"switched"},
+                f"{label} speaks a different acknowledgement vocabulary subset",
+            )
 
     def test_the_selection(self) -> None:
         self.assertSameWire(
