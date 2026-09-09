@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["15211a47"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "Fast Rust run #1300 exposed that the retained VFR restart assertion judged the containing segment's leading boundary frame rather than the requested film instant. The encoded_vod_vfr_input_is_sampled_on_the_declared_rational_grid regression now samples the request-relative offset and still rejects a restart that relabels opening content as destination media."

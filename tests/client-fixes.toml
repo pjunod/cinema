@@ -989,6 +989,17 @@ test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
 test_anchor = "testAnEndingCommitIsSettledBeforeTheEndExchange"
 
 [[fixes]]
+# An injected URLSession owns the transport lifetime. Test and short-lived
+# owners join every detached final reporter before invalidating that session,
+# while ordinary player teardown remains non-blocking.
+id = "apple.final-reporter-joins-before-transport-invalidation"
+commits = ["e46702c4"]
+source = "clients/apple/Sources/PlaybackControlSession.swift"
+source_anchor = "func endAndWait() async"
+test = "clients/apple/Tests/PlaybackControlSessionTests.swift"
+test_anchor = "private func tearDownTransport("
+
+[[fixes]]
 # Promotion compares counters to the current merge target. This anchor keeps
 # the Android 76 claim tied to the collision regression that rejects reusing
 # the build number already present on main.

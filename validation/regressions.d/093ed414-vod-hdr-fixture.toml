@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["093ed414"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "Fast Rust run #1291 exposed that the real HDR10 restart fixture replaced its generated 10-bit PQ source but rebuilt the immutable decode plan from hard-coded 8-bit SDR facts. The focused encoded_vod_hdr10_gets_keep_main10_and_pq_across_restarts regression reaches the same recipe resolver and rejects that false fixture metadata before FFmpeg can produce the restart fragments."

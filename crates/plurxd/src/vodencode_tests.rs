@@ -13,6 +13,11 @@ fn encoded_plan(
     };
 
     let codec = file.video_codec.as_deref().unwrap_or("h264");
+    let transfer = match plurx_core::transcode::routing_hdr(file) {
+        Some("hdr10" | "hdr10plus" | "dolby_vision") => Some("smpte2084"),
+        Some("hlg") => Some("arib-std-b67"),
+        _ => Some("bt709"),
+    };
     let facts = DecodeFacts::from_ffprobe_json(
         &serde_json::json!({
             "streams": [{
@@ -21,9 +26,10 @@ fn encoded_plan(
                 "codec_name": codec,
                 "width": file.width.unwrap_or(320),
                 "height": file.height.unwrap_or(180),
-                "pix_fmt": "yuv420p",
+                "pix_fmt": if file.bit_depth.unwrap_or(8) >= 10 { "yuv420p10le" } else { "yuv420p" },
                 "avg_frame_rate": "24000/1001",
                 "r_frame_rate": "24000/1001",
+                "color_transfer": transfer,
                 "disposition": {"attached_pic": 0}
             }]
         }),
@@ -1263,12 +1269,23 @@ async fn assert_encoded_restarts(
                 Unit::Trailer => {}
             }
         }
+        // A seek attaches at the containing segment boundary, which can
+        // precede the requested film time. With VFR input, the fps filter may
+        // legitimately choose a preceding source frame for that boundary.
+        // Inspect the frame at the actual seek target so this assertion tests
+        // destination content rather than the segment's leading preroll.
+        let entry_start_seconds = rendition.plan.entry(entry).expect("entry").start_ticks as f64
+            / f64::from(rendition.plan.timescale);
+        let marker_offset = (target - entry_start_seconds).max(0.0);
+        let marker_filter = format!(
+            "select='gte(t,{marker_offset:.9})',crop=2:2:8:8,format=rgb24"
+        );
         let pixel = tokio::process::Command::new(ffmpeg_bin())
             .args(["-hide_banner", "-loglevel", "error", "-i"])
             .arg(&output)
             .args([
                 "-vf",
-                "crop=2:2:8:8,format=rgb24",
+                &marker_filter,
                 "-frames:v",
                 "1",
                 "-an",
@@ -1281,6 +1298,7 @@ async fn assert_encoded_restarts(
             .await
             .expect("decode destination marker");
         assert!(pixel.status.success());
+        assert_eq!(pixel.stdout.len(), 12, "one 2x2 RGB marker frame");
         let channel = [0, 2, 1][ordinal];
         assert!(
             pixel.stdout[channel] > 70

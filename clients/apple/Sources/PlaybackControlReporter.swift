@@ -696,7 +696,6 @@ actor PlaybackControlReporter {
 
     /// Teardown is best-effort after this bound; the server owns durable reap.
     static let finalizationDeadlineMs = 3_000
-
     /// Why the reporter is waiting. Pacing waits are the exchange cadence and
     /// the retry backoff; the deadline wait races one in-flight exchange. They
     /// are named rather than merged so a test can hold one still while it
@@ -849,6 +848,20 @@ actor PlaybackControlReporter {
             pump?.cancel()
             pump = Task { [weak self] in await self?.run() }
         }
+    }
+
+    /// Finish reporting and do not return until the reporter can no longer
+    /// start a transport request.
+    ///
+    /// Production teardown is intentionally fire-and-forget so closing the
+    /// player never waits on the control plane. Tests and transport owners
+    /// that are about to invalidate an injected URLSession need the stronger
+    /// boundary: invalidating it while this actor can still begin the final
+    /// exchange is an Objective-C exception, not a catchable transport error.
+    func finishAndWait(_ final: PlaybackControlCapture?) async {
+        finish(final)
+        let activePump = pump
+        await activePump?.value
     }
 
     /// A terminal stops only the captured intent. MainActor may publish B
