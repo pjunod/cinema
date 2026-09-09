@@ -76,6 +76,13 @@ effort-rust-check: fmt-check spike-lock-check ## Compile every Rust target witho
 lint: ## Clippy across the workspace, warnings are errors
 	$(CARGO) clippy --workspace --all-targets -- -D warnings
 
+# Commits need quick parser and lint feedback, not the test and qualification
+# suites. Keep this target separate from `check` and `validate-staged` so adding
+# evidence to either gate cannot silently make the local hook slow again.
+.PHONY: precommit-check
+precommit-check: validation-lint fmt-check lint ## Run only pre-commit lint and syntax checks
+	@scripts/js-check
+
 .PHONY: rust-check
 rust-check: fmt-check lint test ## Rust format, lint, and workspace tests
 
@@ -1566,10 +1573,10 @@ release-check: ## Verify the tree is ready to tag the current version
 	@echo "Ready: git tag -a v$(VERSION) -m 'v$(VERSION)' && git push && git push --tags"
 
 .PHONY: hooks
-hooks: ## Install the functionality-point pre-commit validator
+hooks: ## Install the lint-and-syntax pre-commit hook
 	@mkdir -p .git/hooks
 	@install -m 0755 scripts/pre-commit .git/hooks/pre-commit
-	@echo "Installed .git/hooks/pre-commit — it runs make validate-staged."
+	@echo "Installed .git/hooks/pre-commit — it runs make precommit-check."
 	@echo "Bypass one run with 'git commit --no-verify'."
 
 ## ---- apple clients -----------------------------------------------------

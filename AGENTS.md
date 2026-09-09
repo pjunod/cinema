@@ -50,9 +50,10 @@ test failures, or denied lints.
 - Run the smallest focused regression for changed behavior locally and record
   that command in the task pull request. The effort workflow deliberately
   defers the full suites.
-- Commit effort tasks with `PLURX_EFFORT_COMMIT=1 git commit ...`. The tracked
-  hook then runs fast policy plus compile-only Rust evidence instead of the
-  full commit profile; never use that override for an ordinary `main` change.
+- Commit normally on every branch. The tracked hook runs only catalog lint,
+  Rust formatting and Clippy, and embedded JavaScript syntax; it does not run
+  tests or compile-only effort evidence. Run the smallest focused regression
+  and the affected compile checks before pushing.
 - When the effort is complete, freeze task merges, merge current `main` into
   the effort, and open `effort/<project>` into `main`.
 - Merge only after `Main promotion gate` passes on the current candidate and
