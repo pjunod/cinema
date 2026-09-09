@@ -267,7 +267,7 @@ profiles = ["full", "nightly"]
 platforms = ["linux"]
 requires = ["cargo", "make"]
 missing = "fail"
-timeout_seconds = 7200
+timeout_seconds = 28800
 
 [[checks]]
 id = "offline-contract"

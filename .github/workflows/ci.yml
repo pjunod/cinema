@@ -411,35 +411,249 @@ jobs:
         if: always() && steps.topology_contracts.outcome != 'success'
         run: exit 1
 
-  cluster_transport_recovery:
-    name: cluster transport recovery campaign
+  cluster_transport_recovery_contracts:
+    name: cluster transport recovery contracts
     needs: [scope, preflight]
     if: needs.scope.outputs.cluster_auth == 'true'
     runs-on: [self-hosted, Linux, X64, lab, ci-topology]
-    # A voter recovery is ~4.7 min on this two-core runner (main run 4284:
-    # cycles at 16:38, 16:43, 16:47, 16:52), so the twenty-one voter cycles
-    # alone are ~100 min and the learner half follows them. No Forgejo run
-    # of this lane has ever reached the learner campaign, so 120 would have
-    # timed out the first campaign that got past the resource check.
-    timeout-minutes: 240
+    timeout-minutes: 30
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v4
       - uses: https://github.com/dtolnay/rust-toolchain@1.97.1
       - id: cargo-cache
         uses: ./.github/actions/cargo-cache
         with:
-          lane: cluster-transport-recovery
-      - name: Run 20 learner and 20 voter snapshot recovery cycles
-        id: transport_recovery
+          lane: cluster-transport-recovery-contracts
+      - name: Run recovery schemas, validators, and focused regressions
+        id: recovery_contracts
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p target/validation
+          make cluster-transport-recovery-contracts \
+            2>&1 | tee target/validation/cluster-transport-recovery-contracts.log
+      - name: Retain recovery contract logs
+        if: always()
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+        with:
+          name: cluster-transport-recovery-contracts
+          path: target/validation/cluster-transport-recovery-contracts.log
+          if-no-files-found: error
+          retention-days: 14
+      - name: Enforce persistent Cargo bounds
+        if: always() && steps.cargo-cache.outputs.local == 'true'
+        uses: ./.github/actions/cargo-cache-finalize
+        with:
+          cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
+          budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
+          last-used: ${{ steps.cargo-cache.outputs.last-used }}
+      - name: Propagate the recovery contract result
+        if: always() && steps.recovery_contracts.outcome != 'success'
+        run: exit 1
+
+  cluster_transport_recovery_voter:
+    name: cluster transport recovery voter role
+    needs: [scope, preflight, cluster_transport_recovery_contracts]
+    if: >-
+      needs.scope.outputs.cluster_auth == 'true' &&
+      needs.cluster_transport_recovery_contracts.result == 'success'
+    runs-on: [self-hosted, Linux, X64, lab, ci-topology]
+    timeout-minutes: 240
+    steps:
+      - name: Record the role job budget start
+        run: echo "RECOVERY_JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
+      - uses: https://data.forgejo.org/actions/checkout@v4
+      - uses: https://github.com/dtolnay/rust-toolchain@1.97.1
+      - id: cargo-cache
+        uses: ./.github/actions/cargo-cache
+        with:
+          lane: cluster-transport-recovery-voter
+      - name: Build the exact voter role runner
+        env:
+          PLURX_BUILD_SHA: ${{ github.sha }}
+        run: cargo build --locked -p plurx-cluster-check
+      - name: Run 20 voter snapshot recovery cycles
+        id: voter_recovery
         continue-on-error: true
         shell: bash
         env:
           PLURX_BUILD_SHA: ${{ github.sha }}
+          PLURX_RUNNER_LABEL: ${{ runner.name }}
         run: |
           set -euo pipefail
           mkdir -p target/validation
-          make cluster-transport-recovery-check \
-            2>&1 | tee target/validation/cluster-transport-recovery.log
+          elapsed=$(( $(date +%s) - RECOVERY_JOB_STARTED ))
+          role_budget=$(( 13800 - elapsed ))
+          if [ "$role_budget" -le 0 ]; then
+            echo "No positive voter role budget remains before the ten-minute evidence reserve"
+            exit 1
+          fi
+          make cluster-transport-recovery-voter-check \
+            RECOVERY_EXECUTION_ID="ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            RECOVERY_OUTPUT_DIR=target/validation/transport-recovery-voter \
+            RECOVERY_MAX_RUN_SECONDS="$role_budget" \
+            RECOVERY_BINARY="${{ steps.cargo-cache.outputs.target-dir }}/debug/plurx-cluster-check" \
+            2>&1 | tee target/validation/cluster-transport-recovery-voter.log
+      - name: Retain voter report, diagnostics, and log
+        if: always()
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+        with:
+          name: cluster-transport-recovery-voter
+          path: |
+            target/validation/cluster-transport-recovery-voter.log
+            target/validation/transport-recovery-voter/voter-role.json
+            target/validation/transport-recovery-voter/voter-diagnostics
+          if-no-files-found: error
+          retention-days: 14
+      - name: Enforce persistent Cargo bounds
+        if: always() && steps.cargo-cache.outputs.local == 'true'
+        uses: ./.github/actions/cargo-cache-finalize
+        with:
+          cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
+          budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
+          last-used: ${{ steps.cargo-cache.outputs.last-used }}
+      - name: Propagate the voter role result
+        if: always() && steps.voter_recovery.outcome != 'success'
+        run: exit 1
+
+  cluster_transport_recovery_learner:
+    name: cluster transport recovery learner role
+    needs: [scope, preflight, cluster_transport_recovery_contracts]
+    if: >-
+      needs.scope.outputs.cluster_auth == 'true' &&
+      needs.cluster_transport_recovery_contracts.result == 'success'
+    runs-on: [self-hosted, Linux, X64, lab, ci-topology]
+    timeout-minutes: 240
+    steps:
+      - name: Record the role job budget start
+        run: echo "RECOVERY_JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
+      - uses: https://data.forgejo.org/actions/checkout@v4
+      - uses: https://github.com/dtolnay/rust-toolchain@1.97.1
+      - id: cargo-cache
+        uses: ./.github/actions/cargo-cache
+        with:
+          lane: cluster-transport-recovery-learner
+      - name: Build the exact learner role runner
+        env:
+          PLURX_BUILD_SHA: ${{ github.sha }}
+        run: cargo build --locked -p plurx-cluster-check
+      - name: Run 20 learner snapshot recovery cycles
+        id: learner_recovery
+        continue-on-error: true
+        shell: bash
+        env:
+          PLURX_BUILD_SHA: ${{ github.sha }}
+          PLURX_RUNNER_LABEL: ${{ runner.name }}
+        run: |
+          set -euo pipefail
+          mkdir -p target/validation
+          elapsed=$(( $(date +%s) - RECOVERY_JOB_STARTED ))
+          role_budget=$(( 13800 - elapsed ))
+          if [ "$role_budget" -le 0 ]; then
+            echo "No positive learner role budget remains before the ten-minute evidence reserve"
+            exit 1
+          fi
+          make cluster-transport-recovery-learner-check \
+            RECOVERY_EXECUTION_ID="ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            RECOVERY_OUTPUT_DIR=target/validation/transport-recovery-learner \
+            RECOVERY_MAX_RUN_SECONDS="$role_budget" \
+            RECOVERY_BINARY="${{ steps.cargo-cache.outputs.target-dir }}/debug/plurx-cluster-check" \
+            2>&1 | tee target/validation/cluster-transport-recovery-learner.log
+      - name: Retain learner report, diagnostics, and log
+        if: always()
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+        with:
+          name: cluster-transport-recovery-learner
+          path: |
+            target/validation/cluster-transport-recovery-learner.log
+            target/validation/transport-recovery-learner/learner-role.json
+            target/validation/transport-recovery-learner/learner-diagnostics
+          if-no-files-found: error
+          retention-days: 14
+      - name: Enforce persistent Cargo bounds
+        if: always() && steps.cargo-cache.outputs.local == 'true'
+        uses: ./.github/actions/cargo-cache-finalize
+        with:
+          cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
+          budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
+          last-used: ${{ steps.cargo-cache.outputs.last-used }}
+      - name: Propagate the learner role result
+        if: always() && steps.learner_recovery.outcome != 'success'
+        run: exit 1
+
+  cluster_transport_recovery:
+    name: cluster transport recovery campaign
+    needs:
+      - scope
+      - preflight
+      - cluster_transport_recovery_contracts
+      - cluster_transport_recovery_voter
+      - cluster_transport_recovery_learner
+    if: always() && needs.scope.outputs.cluster_auth == 'true'
+    runs-on: [self-hosted, Linux, X64, lab, ci-topology]
+    timeout-minutes: 30
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: https://github.com/dtolnay/rust-toolchain@1.97.1
+      - id: cargo-cache
+        uses: ./.github/actions/cargo-cache
+        with:
+          lane: cluster-transport-recovery-aggregate
+      - name: Build the exact evidence validator
+        id: build_recovery_validator
+        continue-on-error: true
+        env:
+          PLURX_BUILD_SHA: ${{ github.sha }}
+        run: cargo build --locked -p plurx-cluster-check
+      - name: Download this run's voter evidence
+        id: download_voter_recovery
+        continue-on-error: true
+        uses: https://data.forgejo.org/forgejo/download-artifact@v4
+        with:
+          name: cluster-transport-recovery-voter
+          path: target/validation/voter-artifact
+      - name: Download this run's learner evidence
+        id: download_learner_recovery
+        continue-on-error: true
+        uses: https://data.forgejo.org/forgejo/download-artifact@v4
+        with:
+          name: cluster-transport-recovery-learner
+          path: target/validation/learner-artifact
+      - name: Validate and assemble current-run role evidence
+        id: transport_recovery
+        if: always()
+        continue-on-error: true
+        shell: bash
+        env:
+          CONTRACTS_RESULT: ${{ needs.cluster_transport_recovery_contracts.result }}
+          VOTER_RESULT: ${{ needs.cluster_transport_recovery_voter.result }}
+          LEARNER_RESULT: ${{ needs.cluster_transport_recovery_learner.result }}
+          VALIDATOR_RESULT: ${{ steps.build_recovery_validator.outcome }}
+          VOTER_DOWNLOAD_RESULT: ${{ steps.download_voter_recovery.outcome }}
+          LEARNER_DOWNLOAD_RESULT: ${{ steps.download_learner_recovery.outcome }}
+          PLURX_BUILD_SHA: ${{ github.sha }}
+        run: |
+          set -eo pipefail
+          mkdir -p target/validation
+          validator="${{ steps.cargo-cache.outputs.target-dir }}/debug/plurx-cluster-check"
+          {
+            test "$CONTRACTS_RESULT" = success
+            test "$VOTER_RESULT" = success
+            test "$LEARNER_RESULT" = success
+            test "$VALIDATOR_RESULT" = success
+            test "$VOTER_DOWNLOAD_RESULT" = success
+            test "$LEARNER_DOWNLOAD_RESULT" = success
+            "$validator" transport-recovery-assemble \
+              --execution-id "ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+              --voter target/validation/voter-artifact/transport-recovery-voter/voter-role.json \
+              --learner target/validation/learner-artifact/transport-recovery-learner/learner-role.json \
+              --output target/validation/cluster-transport-recovery.json
+            "$validator" validate-transport-recovery-stdin \
+              < target/validation/cluster-transport-recovery.json
+          } 2>&1 | tee target/validation/cluster-transport-recovery.log
       - name: Record the transport recovery lane result
         if: always()
         env:
@@ -453,7 +667,10 @@ jobs:
           --evidence-validator "$EVIDENCE_VALIDATOR"
           --lane cluster-transport-recovery
           --result "$LANE_RESULT"
-          --command "make cluster-transport-recovery-check"
+          --command "make cluster-transport-recovery-contracts"
+          --command "make cluster-transport-recovery-voter-check"
+          --command "make cluster-transport-recovery-learner-check"
+          --command "transport-recovery-assemble"
       - name: Retain transport recovery log, receipt, and evidence
         if: always()
         uses: https://data.forgejo.org/forgejo/upload-artifact@v4
