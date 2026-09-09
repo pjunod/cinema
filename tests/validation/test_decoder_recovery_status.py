@@ -376,6 +376,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         )
         self.assertIn("decoder-plan-v1-unqualified", self.status)
         self.assertIn("one replicated cluster-wide kill-switch transaction", self.status)
+        self.assertIn("there is no additional task-review loop", self.status)
         self.assertIn(
             "No new compile-time feature gate or hidden runtime enable switch is "
             "introduced by M2.",
