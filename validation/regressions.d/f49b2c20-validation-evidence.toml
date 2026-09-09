@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["f49b2c20"]
+reason = "This commit only mapped the preceding cluster-wide offline disable repair and replaced working-tree wording with the exact reviewed code commit; it changed no runtime behavior."
+ignore = true
