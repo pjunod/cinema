@@ -97,6 +97,7 @@ mod named_runner;
 mod storage_evidence;
 mod topology;
 mod transport_recovery;
+mod transport_recovery_diagnostics;
 pub use failure_drills::{
     validate_failure_drill_artifact, ClusterFailureDrillArtifact,
     FAILURE_DRILL_ARTIFACT_SCHEMA_VERSION,
@@ -8413,6 +8414,12 @@ impl NodeProcess {
             input,
             output,
         })
+    }
+
+    pub(crate) fn pid(&self) -> Result<u32> {
+        self.child
+            .id()
+            .with_context(|| format!("voter {} has no process id", self.id))
     }
 
     pub async fn wait_ready(&mut self) -> Result<()> {

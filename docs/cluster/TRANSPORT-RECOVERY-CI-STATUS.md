@@ -1,6 +1,6 @@
 # Transport recovery CI — implementation status and evidence
 
-**Status:** building M2 · **Owner:** Codex · **Updated:** 2026-09-08
+**Status:** qualifying M2 · **Owner:** Codex · **Updated:** 2026-09-08
 
 Companion to
 [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md) (how this effort reaches
@@ -98,6 +98,25 @@ separate mandatory evidence. Focused package tests now contain 51 cases.
 The node's 31 GiB `/tmp` tmpfs filled during the initial cold link. The exact
 source-only rerun used `/var/tmp`, which had 108 GiB available. This is runner
 capacity evidence, not a product or campaign failure.
+
+## M2 implementation — local checks complete, Linux acceptance running
+
+The common role runner now writes create-new `events.jsonl` and
+`cycles.jsonl` journals plus an atomic terminal `summary.json` outside the
+temporary cluster root. Records include named phase and learner-admission
+subphase timings, every resource-sampling attempt, source and replacement
+process identities, synchronized completed-cycle evidence, classified failure
+context, and bounded cleanup results. A passing role report is still withheld
+until orderly teardown and diagnostic summary publication succeed.
+
+SIGINT, SIGTERM, and the optional role runtime limit now interrupt the active
+role, drop its in-flight protocol exchange, and enter a 30-second cleanup path
+that targets only registered PID/start-time identities. External cancellation
+suppresses the second role in the compatible paired wrapper; an ordinary role
+failure still does not. The pinned package check, formatting, Clippy with
+warnings denied, and 58 focused transport-recovery tests pass locally. M2
+remains open until both three-cycle Linux smokes and the deliberate bounded
+failure produce the retained evidence listed above.
 
 ## Guardrails — this effort changes observability, not production transport
 

@@ -5,7 +5,7 @@
 //! WebSocket path.  The only acceleration is a validation-only snapshot policy
 //! on [`NodeLaunch`]; production configuration keeps its normal threshold.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::future::Future;
 use std::io::{Read, Write};
@@ -27,6 +27,10 @@ use super::topology::{resolve_build_sha, unix_ms};
 use super::{
     allocate_nodes, harness_executable, wait_for_protocol_pending, with_port_retry,
     ClusterProcesses, NodeLaunch, NodeProcess, NodeSpec, Request, Response, API_SECRET,
+};
+use crate::transport_recovery_diagnostics::{
+    classify_failure, CleanupSummary, DiagnosticContracts, DiagnosticOutcome, FailureClass,
+    ProcessIdentity, RecoveryDiagnostics, CLEANUP_BUDGET,
 };
 
 /// Version 2 replaced the per-cycle resource ceiling and its three zero
@@ -448,6 +452,7 @@ struct RecoveryWriterProgress {
 struct RecoveryWriter {
     child: Child,
     stdout: Option<JoinHandle<std::io::Result<Vec<u8>>>>,
+    identity: Option<ProcessIdentity>,
 }
 
 impl Drop for RecoveryWriter {
@@ -778,8 +783,33 @@ where
     Fut: Future<Output = Result<TransportRecoveryRoleReport>>,
 {
     let voter = runner(voter).await;
+    if voter.as_ref().err().is_some_and(is_recovery_cancelled) {
+        return (
+            voter,
+            Err(anyhow::Error::new(RecoveryCancelled {
+                signal: "parent invocation already cancelled".to_owned(),
+            })),
+        );
+    }
     let learner = runner(learner).await;
     (voter, learner)
+}
+
+#[derive(Debug)]
+struct RecoveryCancelled {
+    signal: String,
+}
+
+impl std::fmt::Display for RecoveryCancelled {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "transport-recovery cancelled by {}", self.signal)
+    }
+}
+
+impl std::error::Error for RecoveryCancelled {}
+
+fn is_recovery_cancelled(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<RecoveryCancelled>().is_some()
 }
 
 fn require_independent_roles(
@@ -849,66 +879,292 @@ pub async fn run_transport_recovery_role(
     let build_sha = resolve_build_sha()
         .context("resolve transport-recovery candidate SHA before role start")?;
     let started_at_unix_ms = unix_ms()?;
+    let build_profile = build_profile_descriptor();
+    let diagnostics = RecoveryDiagnostics::create(
+        &plan,
+        &build_sha,
+        &build_profile,
+        diagnostic_contracts(plan.role),
+        started_at_unix_ms,
+    )
+    .context("initialize transport-recovery diagnostic evidence I/O")?;
     let role = plan.role;
     let cycles_required = plan.cycles_required;
     let output = plan.output.clone();
-    let run = async {
-        let executable = harness_executable()?;
-        let root = tempfile::tempdir().context("transport-recovery role cluster root")?;
-        println!(
-            "cluster-check: {cycles_required}-cycle {} snapshot recovery role",
-            role.label()
-        );
-        let campaign = run_role_campaign(
-            &executable,
-            root.path(),
-            role,
-            role.minimum_sqlite_bytes(),
-            cycles_required,
-        )
-        .await?;
-        let report = TransportRecoveryRoleReport {
-            schema_version: TRANSPORT_RECOVERY_ROLE_REPORT_SCHEMA_VERSION,
-            kind: ROLE_REPORT_KIND.to_owned(),
-            execution_id: plan.execution_id.clone(),
-            build_sha,
-            platform: "linux".to_owned(),
-            build_profile: build_profile_descriptor(),
-            started_at_unix_ms,
-            finished_at_unix_ms: unix_ms()?,
-            scope: role_report_scope(cycles_required),
-            resource_envelope_asserted: envelope_is_asserted(&campaign.resource_envelopes),
-            snapshot_policy: fixed_snapshot_policy(),
-            transport: fixed_transport_contract(),
-            resource_thread_envelope_allowance: THREAD_ENVELOPE_ALLOWANCE,
-            resource_socket_envelope_allowance: SOCKET_ENVELOPE_ALLOWANCE,
-            resource_owned_async_task_envelope_allowance: OWNED_ASYNC_TASK_ENVELOPE_ALLOWANCE,
-            resource_cleanup_horizon_millis: duration_millis(RESOURCE_CLEANUP_HORIZON),
-            resource_stable_samples: RESOURCE_STABLE_SAMPLES,
-            campaign,
+    let mut cancelled = false;
+    let result = {
+        let run = async {
+            let executable = harness_executable()?;
+            let root = tempfile::tempdir().context("transport-recovery role cluster root")?;
+            println!(
+                "cluster-check: {cycles_required}-cycle {} snapshot recovery role",
+                role.label()
+            );
+            let campaign = run_role_campaign(
+                &executable,
+                root.path(),
+                role,
+                role.minimum_sqlite_bytes(),
+                cycles_required,
+                &diagnostics,
+            )
+            .await?;
+            let report = TransportRecoveryRoleReport {
+                schema_version: TRANSPORT_RECOVERY_ROLE_REPORT_SCHEMA_VERSION,
+                kind: ROLE_REPORT_KIND.to_owned(),
+                execution_id: plan.execution_id.clone(),
+                build_sha,
+                platform: "linux".to_owned(),
+                build_profile,
+                started_at_unix_ms,
+                finished_at_unix_ms: unix_ms()?,
+                scope: role_report_scope(cycles_required),
+                resource_envelope_asserted: envelope_is_asserted(&campaign.resource_envelopes),
+                snapshot_policy: fixed_snapshot_policy(),
+                transport: fixed_transport_contract(),
+                resource_thread_envelope_allowance: THREAD_ENVELOPE_ALLOWANCE,
+                resource_socket_envelope_allowance: SOCKET_ENVELOPE_ALLOWANCE,
+                resource_owned_async_task_envelope_allowance: OWNED_ASYNC_TASK_ENVELOPE_ALLOWANCE,
+                resource_cleanup_horizon_millis: duration_millis(RESOURCE_CLEANUP_HORIZON),
+                resource_stable_samples: RESOURCE_STABLE_SAMPLES,
+                campaign,
+            };
+            validate_transport_recovery_role_report(&report)?;
+            Ok::<_, anyhow::Error>(report)
         };
-        validate_transport_recovery_role_report(&report)?;
-        let mut bytes = serde_json::to_vec_pretty(&report)?;
-        bytes.push(b'\n');
-        publish_artifact_atomically(&output, &bytes)?;
-        println!(
-            "cluster-check: {cycles_required}/{cycles_required} {} recoveries passed for {}",
-            role.label(),
-            report.build_sha
-        );
-        Ok::<_, anyhow::Error>(report)
+        tokio::pin!(run);
+        let cancellation = wait_for_recovery_cancellation();
+        tokio::pin!(cancellation);
+        match plan.max_runtime_seconds {
+            Some(seconds) => {
+                let timeout = tokio::time::sleep(Duration::from_secs(seconds));
+                tokio::pin!(timeout);
+                tokio::select! {
+                    result = &mut run => result,
+                    signal = &mut cancellation => {
+                        cancelled = true;
+                        let signal = signal.unwrap_or_else(|error| format!("signal handler failed: {error:#}"));
+                        Err(anyhow::Error::new(RecoveryCancelled { signal }))
+                    }
+                    _ = &mut timeout => {
+                        let (phase, cycle) = diagnostics.active_phase()?;
+                        bail!(
+                            "{} transport-recovery role exceeded its {seconds}-second orchestration limit in phase {} cycle {}",
+                            role.label(),
+                            phase.as_deref().unwrap_or("between_phases"),
+                            cycle.unwrap_or(0)
+                        )
+                    }
+                }
+            }
+            None => tokio::select! {
+                result = &mut run => result,
+                signal = &mut cancellation => {
+                    cancelled = true;
+                    let signal = signal.unwrap_or_else(|error| format!("signal handler failed: {error:#}"));
+                    Err(anyhow::Error::new(RecoveryCancelled { signal }))
+                }
+            },
+        }
     };
-    match plan.max_runtime_seconds {
-        Some(seconds) => tokio::time::timeout(Duration::from_secs(seconds), run)
-            .await
-            .with_context(|| {
-                format!(
-                    "{} transport-recovery role exceeded its {seconds}-second orchestration limit",
-                    role.label()
-                )
-            })?,
-        None => run.await,
+    let result = match result {
+        Ok(report) => Ok(report),
+        Err(primary) => {
+            let message = format!("{primary:#}");
+            let failure_class = if cancelled {
+                None
+            } else {
+                Some(classify_failure(&message))
+            };
+            match diagnostics.record_terminal_observation(
+                if cancelled {
+                    DiagnosticOutcome::Cancelled
+                } else {
+                    DiagnosticOutcome::Failed
+                },
+                failure_class,
+                Some(&message),
+            ) {
+                Ok(()) => Err(primary),
+                Err(diagnostic_error) => Err(primary.context(format!(
+                    "also failed to record primary diagnostic failure: {diagnostic_error:#}"
+                ))),
+            }
+        }
+    };
+    let cleanup_result = diagnostics.cleanup_registered(CLEANUP_BUDGET).await;
+    let (cleanup, cleanup_error) = match cleanup_result {
+        Ok(cleanup) => (cleanup, None),
+        Err(error) => {
+            let surviving_processes = diagnostics.registered_processes().unwrap_or_default();
+            (
+                CleanupSummary {
+                    attempted: true,
+                    budget_millis: duration_millis(CLEANUP_BUDGET),
+                    registered_processes: surviving_processes.len(),
+                    reaped_processes: 0,
+                    surviving_processes,
+                },
+                Some(error.context("bounded transport-recovery cleanup")),
+            )
+        }
+    };
+    let result = match (result, cleanup_error) {
+        (Ok(_), Some(cleanup_error)) => Err(cleanup_error),
+        (Err(primary), Some(cleanup_error)) => {
+            Err(primary.context(format!("cleanup also failed: {cleanup_error:#}")))
+        }
+        (result, None) => result,
+    };
+    let result = if cleanup.surviving_processes.is_empty() {
+        result
+    } else {
+        let cleanup_error = anyhow::anyhow!(
+            "transport-recovery cleanup left {} owned process(es)",
+            cleanup.surviving_processes.len()
+        );
+        match result {
+            Ok(_) => Err(cleanup_error),
+            Err(primary) => Err(primary.context(cleanup_error)),
+        }
+    };
+    match result {
+        Ok(report) => {
+            let publish = (|| -> Result<()> {
+                let mut bytes = serde_json::to_vec_pretty(&report)?;
+                bytes.push(b'\n');
+                publish_artifact_atomically(&output, &bytes)
+            })();
+            if let Err(error) = publish {
+                let message = format!("publish passing role report: {error:#}");
+                let _ = diagnostics.write_summary(
+                    DiagnosticOutcome::Failed,
+                    false,
+                    Some(FailureClass::EvidenceIo),
+                    Some(&message),
+                    cleanup,
+                );
+                return Err(error).context("publish passing transport-recovery role report");
+            }
+            let summary = match diagnostics.write_summary(
+                DiagnosticOutcome::Passed,
+                report.resource_envelope_asserted,
+                None,
+                None,
+                cleanup,
+            ) {
+                Ok(summary) => summary,
+                Err(error) => {
+                    let _ = std::fs::remove_file(&output);
+                    return Err(error)
+                        .context("publish passing transport-recovery diagnostic summary");
+                }
+            };
+            println!(
+                "cluster-check: {cycles_required}/{cycles_required} {} recoveries passed for {}; resource envelope asserted: {}",
+                role.label(),
+                report.build_sha,
+                report.resource_envelope_asserted
+            );
+            println!(
+                "cluster-check: {} end-of-role timing {} (wall={}ms)",
+                role.label(),
+                describe_timing_statistics(&summary.phase_timings),
+                summary.total_wall_millis
+            );
+            Ok(report)
+        }
+        Err(error) => {
+            let message = format!("{error:#}");
+            let summary_result = diagnostics.write_summary(
+                if cancelled {
+                    DiagnosticOutcome::Cancelled
+                } else {
+                    DiagnosticOutcome::Failed
+                },
+                false,
+                if cancelled {
+                    None
+                } else {
+                    Some(classify_failure(&message))
+                },
+                Some(&message),
+                cleanup,
+            );
+            match summary_result {
+                Ok(_) => Err(error),
+                Err(summary_error) => Err(error.context(format!(
+                    "also failed to publish diagnostic summary: {summary_error:#}"
+                ))),
+            }
+        }
     }
+}
+
+fn diagnostic_contracts(role: RecoveryRole) -> DiagnosticContracts {
+    DiagnosticContracts {
+        minimum_sqlite_bytes: role.minimum_sqlite_bytes(),
+        snapshot_logs_since_last: TRANSPORT_RECOVERY_SNAPSHOT_LOGS_SINCE_LAST,
+        recovery_deadline_millis: duration_millis(RECOVERY_DEADLINE),
+        resource_cleanup_horizon_millis: duration_millis(RESOURCE_CLEANUP_HORIZON),
+        resource_sample_interval_millis: duration_millis(RESOURCE_SAMPLE_INTERVAL),
+        resource_stable_samples: RESOURCE_STABLE_SAMPLES,
+        thread_envelope_allowance: THREAD_ENVELOPE_ALLOWANCE,
+        socket_envelope_allowance: SOCKET_ENVELOPE_ALLOWANCE,
+        owned_async_task_envelope_allowance: OWNED_ASYNC_TASK_ENVELOPE_ALLOWANCE,
+    }
+}
+
+pub(crate) async fn wait_for_recovery_cancellation() -> Result<String> {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .context("install SIGTERM handler")?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => {
+                result.context("wait for SIGINT")?;
+                Ok("SIGINT".to_owned())
+            }
+            _ = terminate.recv() => Ok("SIGTERM".to_owned()),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c()
+            .await
+            .context("wait for cancellation")?;
+        Ok("interrupt".to_owned())
+    }
+}
+
+async fn observed_phase<T, F>(
+    diagnostics: &RecoveryDiagnostics,
+    phase: &str,
+    cycle: u32,
+    parent_phase: Option<&str>,
+    future: F,
+) -> Result<T>
+where
+    F: Future<Output = Result<T>>,
+{
+    let token = diagnostics
+        .phase_start(phase, cycle, parent_phase)
+        .context("write transport-recovery diagnostic phase start")?;
+    let result = future.await;
+    let diagnostic_result = result
+        .as_ref()
+        .map(|_| ())
+        .map_err(|error| anyhow::anyhow!("{error:#}"));
+    if let Err(diagnostic_error) = diagnostics.phase_end(token, &diagnostic_result) {
+        return match result {
+            Ok(_) => Err(diagnostic_error).context("write transport-recovery diagnostic phase end"),
+            Err(primary) => Err(primary.context(format!(
+                "also failed to write transport-recovery diagnostic phase end: {diagnostic_error:#}"
+            ))),
+        };
+    }
+    result
 }
 
 fn role_report_scope(cycles_required: u32) -> RecoveryRoleReportScope {
@@ -940,23 +1196,41 @@ async fn run_role_campaign(
     role: RecoveryRole,
     minimum_sqlite_bytes: u64,
     cycles_required: u32,
+    diagnostics: &RecoveryDiagnostics,
 ) -> Result<RecoveryRoleCampaign> {
     let role_root = root.join(role.label());
-    let (mut cluster, specs, cluster_root) =
-        start_recovery_cluster(executable, &role_root, role).await?;
-    let result = exercise_role_campaign(
+    let (mut cluster, specs, cluster_root) = observed_phase(
+        diagnostics,
+        "cluster_start",
+        0,
+        None,
+        start_recovery_cluster(executable, &role_root, role, diagnostics),
+    )
+    .await?;
+    let runtime = RecoveryRoleRuntime {
         executable,
-        &mut cluster,
-        &specs,
-        &cluster_root,
+        specs: &specs,
+        cluster_root: &cluster_root,
         role,
         minimum_sqlite_bytes,
         cycles_required,
-    )
-    .await;
+        diagnostics,
+    };
+    let result = exercise_role_campaign(&mut cluster, runtime).await;
     match result {
         Ok(campaign) => {
-            cluster.shutdown_all().await?;
+            observed_phase(diagnostics, "shutdown", 0, None, async {
+                let identities = diagnostics.registered_processes()?;
+                let result = cluster.shutdown_all().await;
+                for identity in identities
+                    .iter()
+                    .filter(|identity| identity.process_kind == "node")
+                {
+                    diagnostics.process_action("reap", identity, &result)?;
+                }
+                result
+            })
+            .await?;
             Ok(campaign)
         }
         Err(error) => {
@@ -970,6 +1244,7 @@ async fn start_recovery_cluster(
     executable: &Path,
     root: &Path,
     role: RecoveryRole,
+    diagnostics: &RecoveryDiagnostics,
 ) -> Result<(ClusterProcesses, Vec<NodeSpec>, PathBuf)> {
     with_port_retry(|attempt| {
         let reservation = allocate_nodes(TARGET_NODE);
@@ -992,7 +1267,9 @@ async fn start_recovery_cluster(
                 };
                 let launch =
                     recovery_launch(node_id, &attempt_root, launch_specs, RecoveryRole::Voter);
-                nodes.push(Some(NodeProcess::spawn(executable, &launch)?));
+                let process = NodeProcess::spawn(executable, &launch)?;
+                diagnostics.register_process(process.pid()?, "node", Some(node_id))?;
+                nodes.push(Some(process));
             }
             nodes.resize_with(TARGET_NODE as usize, || None);
             let mut cluster = ClusterProcesses {
@@ -1017,7 +1294,14 @@ async fn start_recovery_cluster(
                 .wait_for_voters(&(1..=initial_processes).collect::<Vec<_>>())
                 .await?;
             if role == RecoveryRole::Learner {
-                admit_learner(executable, &mut cluster, &specs, &attempt_root).await?;
+                observed_phase(
+                    diagnostics,
+                    "learner_admission",
+                    0,
+                    Some("cluster_start"),
+                    admit_learner(executable, &mut cluster, &specs, &attempt_root, diagnostics),
+                )
+                .await?;
             }
             Ok((cluster, specs, attempt_root))
         }
@@ -1030,26 +1314,48 @@ async fn admit_learner(
     cluster: &mut ClusterProcesses,
     specs: &[NodeSpec],
     cluster_root: &Path,
+    diagnostics: &RecoveryDiagnostics,
 ) -> Result<()> {
     let leader = cluster.leader().await?;
-    wait_for_protocol_pending(cluster, leader, &[]).await?;
-    match cluster
-        .request(leader, Request::ActivateLearnerProtocol)
-        .await?
-    {
-        Response::ProtocolChange { change }
-            if change.protocol.learner_protocol_active
-                && change.protocol.active_min == AUTH_PROTOCOL_MAX
-                && change.protocol.active_max == AUTH_PROTOCOL_MAX => {}
-        response => bail!("learner protocol activation failed: {response:?}"),
-    }
-    let issued = match cluster
-        .request(leader, Request::IssueLearnerJoinToken { ttl_ms: 120_000 })
-        .await?
-    {
-        Response::IssuedJoinToken { token } => token,
-        response => bail!("unexpected learner token response: {response:?}"),
-    };
+    observed_phase(
+        diagnostics,
+        "admission_activation",
+        0,
+        Some("learner_admission"),
+        async {
+            wait_for_protocol_pending(cluster, leader, &[]).await?;
+            match cluster
+                .request(leader, Request::ActivateLearnerProtocol)
+                .await?
+            {
+                Response::ProtocolChange { change }
+                    if change.protocol.learner_protocol_active
+                        && change.protocol.active_min == AUTH_PROTOCOL_MAX
+                        && change.protocol.active_max == AUTH_PROTOCOL_MAX =>
+                {
+                    Ok(())
+                }
+                response => bail!("learner protocol activation failed: {response:?}"),
+            }
+        },
+    )
+    .await?;
+    let issued = observed_phase(
+        diagnostics,
+        "admission_token_issue",
+        0,
+        Some("learner_admission"),
+        async {
+            match cluster
+                .request(leader, Request::IssueLearnerJoinToken { ttl_ms: 120_000 })
+                .await?
+            {
+                Response::IssuedJoinToken { token } => Ok(token),
+                response => bail!("unexpected learner token response: {response:?}"),
+            }
+        },
+    )
+    .await?;
     if issued.raft_id != TARGET_NODE {
         bail!(
             "learner admission allocated raft id {}, expected {TARGET_NODE}",
@@ -1057,63 +1363,124 @@ async fn admit_learner(
         );
     }
     let target = &specs[(TARGET_NODE - 1) as usize];
-    cluster
-        .request(
-            leader,
-            Request::RedeemLearnerJoin {
-                request: RedeemJoinRequest {
-                    token_digest: join_token_digest(&issued.token),
-                    raft_id: TARGET_NODE,
-                    node_id: format!("node-{TARGET_NODE}"),
-                    hostname: format!("cluster-node-{TARGET_NODE}"),
-                    raft_address: target.raft.clone(),
-                    api_address: target.api.clone(),
-                    http_base: format!("http://127.0.0.1:{}", 33_000 + TARGET_NODE),
-                    schema_version: AUTH_SCHEMA_VERSION,
-                    protocol_version: AUTH_PROTOCOL_MIN,
-                    protocol_min: AUTH_PROTOCOL_MIN,
-                    protocol_max: AUTH_PROTOCOL_MAX,
-                    live_tv_v1: true,
-                },
-            },
-        )
-        .await?
-        .require_ok()?;
-    spawn_recovery_node(
-        executable,
-        cluster,
-        recovery_launch(TARGET_NODE, cluster_root, specs, RecoveryRole::Learner),
-        Instant::now() + RECOVERY_DEADLINE,
+    observed_phase(
+        diagnostics,
+        "admission_token_redeem",
+        0,
+        Some("learner_admission"),
+        async {
+            cluster
+                .request(
+                    leader,
+                    Request::RedeemLearnerJoin {
+                        request: RedeemJoinRequest {
+                            token_digest: join_token_digest(&issued.token),
+                            raft_id: TARGET_NODE,
+                            node_id: format!("node-{TARGET_NODE}"),
+                            hostname: format!("cluster-node-{TARGET_NODE}"),
+                            raft_address: target.raft.clone(),
+                            api_address: target.api.clone(),
+                            http_base: format!("http://127.0.0.1:{}", 33_000 + TARGET_NODE),
+                            schema_version: AUTH_SCHEMA_VERSION,
+                            protocol_version: AUTH_PROTOCOL_MIN,
+                            protocol_min: AUTH_PROTOCOL_MIN,
+                            protocol_max: AUTH_PROTOCOL_MAX,
+                            live_tv_v1: true,
+                        },
+                    },
+                )
+                .await?
+                .require_ok()
+        },
     )
     .await?;
-    cluster
-        .wait_for_members(1, &[1, 2, 3], &[1, 2, 3, TARGET_NODE])
-        .await?;
-    cluster
-        .request(TARGET_NODE, Request::Open)
-        .await?
-        .require_ok()?;
-    cluster
-        .request(TARGET_NODE, Request::ForceHeartbeat)
-        .await?
-        .require_ok()?;
-    cluster
-        .request(
-            leader,
-            Request::FinalizeLearnerJoin {
-                request: FinalizeJoinRequest {
-                    token_digest: join_token_digest(&issued.token),
-                    raft_id: TARGET_NODE,
-                    node_id: format!("node-{TARGET_NODE}"),
-                },
-            },
-        )
-        .await?
-        .require_ok()?;
-    cluster
-        .request(TARGET_NODE, Request::StartHeartbeatLoop)
-        .await?
-        .require_ok()?;
+    observed_phase(
+        diagnostics,
+        "admission_learner_ready",
+        0,
+        Some("learner_admission"),
+        spawn_recovery_node(
+            executable,
+            cluster,
+            recovery_launch(TARGET_NODE, cluster_root, specs, RecoveryRole::Learner),
+            Instant::now() + RECOVERY_DEADLINE,
+            diagnostics,
+        ),
+    )
+    .await?;
+    observed_phase(
+        diagnostics,
+        "admission_member_convergence",
+        0,
+        Some("learner_admission"),
+        async {
+            cluster
+                .wait_for_members(1, &[1, 2, 3], &[1, 2, 3, TARGET_NODE])
+                .await
+        },
+    )
+    .await?;
+    observed_phase(
+        diagnostics,
+        "admission_open",
+        0,
+        Some("learner_admission"),
+        async {
+            cluster
+                .request(TARGET_NODE, Request::Open)
+                .await?
+                .require_ok()
+        },
+    )
+    .await?;
+    observed_phase(
+        diagnostics,
+        "admission_forced_heartbeat",
+        0,
+        Some("learner_admission"),
+        async {
+            cluster
+                .request(TARGET_NODE, Request::ForceHeartbeat)
+                .await?
+                .require_ok()
+        },
+    )
+    .await?;
+    observed_phase(
+        diagnostics,
+        "admission_finalize",
+        0,
+        Some("learner_admission"),
+        async {
+            cluster
+                .request(
+                    leader,
+                    Request::FinalizeLearnerJoin {
+                        request: FinalizeJoinRequest {
+                            token_digest: join_token_digest(&issued.token),
+                            raft_id: TARGET_NODE,
+                            node_id: format!("node-{TARGET_NODE}"),
+                        },
+                    },
+                )
+                .await?
+                .require_ok()
+        },
+    )
+    .await?;
+    observed_phase(
+        diagnostics,
+        "admission_loop_start",
+        0,
+        Some("learner_admission"),
+        async {
+            cluster
+                .request(TARGET_NODE, Request::StartHeartbeatLoop)
+                .await?
+                .require_ok()
+        },
+    )
+    .await?;
     Ok(())
 }
 
@@ -1132,65 +1499,87 @@ fn recovery_launch(
     }
 }
 
-async fn exercise_role_campaign(
-    executable: &Path,
-    cluster: &mut ClusterProcesses,
-    specs: &[NodeSpec],
-    cluster_root: &Path,
+struct RecoveryRoleRuntime<'a> {
+    executable: &'a Path,
+    specs: &'a [NodeSpec],
+    cluster_root: &'a Path,
     role: RecoveryRole,
     minimum_sqlite_bytes: u64,
     cycles_required: u32,
+    diagnostics: &'a RecoveryDiagnostics,
+}
+
+async fn exercise_role_campaign(
+    cluster: &mut ClusterProcesses,
+    runtime: RecoveryRoleRuntime<'_>,
 ) -> Result<RecoveryRoleCampaign> {
+    let RecoveryRoleRuntime {
+        executable,
+        specs,
+        cluster_root,
+        role,
+        minimum_sqlite_bytes,
+        cycles_required,
+        diagnostics,
+    } = runtime;
     let leader = cluster.leader_among(&[1, 2, 3]).await?;
     let marker = format!("transport-recovery-{}-image-v1", role.label());
-    let expected_image = match cluster
-        .request(
-            leader,
-            Request::SeedRecoveryImage {
-                minimum_bytes: minimum_sqlite_bytes,
-                marker: marker.clone(),
-            },
-        )
-        .await?
-    {
-        Response::RecoveryImage { evidence } => evidence,
-        response => bail!("unexpected recovery image seed response: {response:?}"),
-    };
-    validate_image(&expected_image, minimum_sqlite_bytes, &marker)?;
+    let expected_image = observed_phase(diagnostics, "image_seed", 0, None, async {
+        let evidence = match cluster
+            .request(
+                leader,
+                Request::SeedRecoveryImage {
+                    minimum_bytes: minimum_sqlite_bytes,
+                    marker: marker.clone(),
+                },
+            )
+            .await?
+        {
+            Response::RecoveryImage { evidence } => evidence,
+            response => bail!("unexpected recovery image seed response: {response:?}"),
+        };
+        validate_image(&evidence, minimum_sqlite_bytes, &marker)?;
+        Ok(evidence)
+    })
+    .await?;
     let voters = if role == RecoveryRole::Learner {
         vec![1, 2, 3]
     } else {
         vec![1, 2, 3, TARGET_NODE]
     };
-    cluster
-        .wait_for_members(leader, &voters, &[1, 2, 3, TARGET_NODE])
-        .await?;
-    let seeded_index = request_status(cluster, leader)
-        .await?
-        .applied_index
-        .context("seeded recovery image has no applied index")?;
-    wait_for_applied_index(
-        cluster,
-        TARGET_NODE,
-        seeded_index,
-        Instant::now() + RECOVERY_DEADLINE,
-    )
-    .await?;
-    let target_image = match cluster
-        .request(
+    observed_phase(diagnostics, "baseline_convergence", 0, None, async {
+        cluster
+            .wait_for_members(leader, &voters, &[1, 2, 3, TARGET_NODE])
+            .await?;
+        let seeded_index = request_status(cluster, leader)
+            .await?
+            .applied_index
+            .context("seeded recovery image has no applied index")?;
+        wait_for_applied_index(
+            cluster,
             TARGET_NODE,
-            Request::RecoveryImageDigest {
-                minimum_bytes: minimum_sqlite_bytes,
-            },
+            seeded_index,
+            Instant::now() + RECOVERY_DEADLINE,
         )
-        .await?
-    {
-        Response::RecoveryImage { evidence } => evidence,
-        response => bail!("unexpected baseline recovery image response: {response:?}"),
-    };
-    if target_image != expected_image {
-        bail!("target recovery image did not converge before resource baseline");
-    }
+        .await?;
+        let target_image = match cluster
+            .request(
+                TARGET_NODE,
+                Request::RecoveryImageDigest {
+                    minimum_bytes: minimum_sqlite_bytes,
+                },
+            )
+            .await?
+        {
+            Response::RecoveryImage { evidence } => evidence,
+            response => bail!("unexpected baseline recovery image response: {response:?}"),
+        };
+        if target_image != expected_image {
+            bail!("target recovery image did not converge before resource baseline");
+        }
+        Ok(())
+    })
+    .await?;
     let mut baseline_resources: Option<Vec<(u64, ProcessResourceCount)>> = None;
     let mut cycles = Vec::with_capacity(cycles_required as usize);
 
@@ -1208,14 +1597,21 @@ async fn exercise_role_campaign(
             );
         }
         let prefix = format!("cluster.transport-recovery.{}.{cycle:02}.", role.label());
-        let (mut writer, writer_config) =
-            spawn_writer(executable, cluster_root, specs, &prefix).await?;
-        wait_for_writer_ready(&mut writer, &writer_config.ready_path, WRITER_READY_TIMEOUT).await?;
-        let ready_acknowledged_at_unix_ms = std::fs::read_to_string(&writer_config.ready_path)
-            .context("read recovery writer readiness timestamp")?
-            .trim()
-            .parse::<i64>()
-            .context("parse recovery writer readiness timestamp")?;
+        let (mut writer, writer_config, ready_acknowledged_at_unix_ms) =
+            observed_phase(diagnostics, "writer_ready", cycle, None, async {
+                let (mut writer, writer_config) =
+                    spawn_writer(executable, cluster_root, specs, &prefix, diagnostics).await?;
+                wait_for_writer_ready(&mut writer, &writer_config.ready_path, WRITER_READY_TIMEOUT)
+                    .await?;
+                let ready_acknowledged_at_unix_ms =
+                    std::fs::read_to_string(&writer_config.ready_path)
+                        .context("read recovery writer readiness timestamp")?
+                        .trim()
+                        .parse::<i64>()
+                        .context("parse recovery writer readiness timestamp")?;
+                Ok((writer, writer_config, ready_acknowledged_at_unix_ms))
+            })
+            .await?;
         let timestamp_deadline = Instant::now() + Duration::from_secs(1);
         let recovery_started_at_unix_ms = loop {
             let now = unix_ms()?;
@@ -1241,63 +1637,113 @@ async fn exercise_role_campaign(
             .checked_add(RECOVERY_DEADLINE)
             .context("recovery deadline overflow")?;
         let recovery = async {
-            cluster.kill(TARGET_NODE).await?;
-            delete_disposable_target(cluster_root, TARGET_NODE)?;
+            observed_phase(diagnostics, "target_reset", cycle, None, async {
+                let identity = diagnostics
+                    .registered_for_node(TARGET_NODE)?
+                    .context("target process identity was not registered")?;
+                let kill_result = cluster.kill(TARGET_NODE).await;
+                let lifecycle_result = kill_result
+                    .as_ref()
+                    .map(|_| ())
+                    .map_err(|error| anyhow::anyhow!("{error:#}"));
+                diagnostics.process_action("kill", &identity, &lifecycle_result)?;
+                if kill_result.is_ok() {
+                    diagnostics.process_action("reap", &identity, &Ok(()))?;
+                }
+                kill_result?;
+                delete_disposable_target(cluster_root, TARGET_NODE)?;
+                Ok(())
+            })
+            .await?;
             let leader = cluster.leader_among(&[1, 2, 3]).await?;
-            let purge_evidence =
-                trigger_and_wait_for_snapshot(cluster, leader, role, cycle, recovery_deadline)
-                    .await?;
+            let purge_evidence = trigger_and_wait_for_snapshot(
+                cluster,
+                leader,
+                role,
+                cycle,
+                recovery_deadline,
+                diagnostics,
+            )
+            .await?;
             let snapshot_index = purge_evidence.snapshot_index;
             let purged_index = purge_evidence.purged_index;
-            let source_snapshot = snapshot_file(cluster_root, leader)?;
-            if source_snapshot.bytes < minimum_sqlite_bytes {
-                bail!(
-                    "{} cycle {cycle} snapshot was {} bytes, below {minimum_sqlite_bytes}",
-                    role.label(),
-                    source_snapshot.bytes
-                );
-            }
-            let recovery_status = async {
-                spawn_recovery_node(
-                    executable,
-                    cluster,
-                    recovery_launch(TARGET_NODE, cluster_root, specs, role),
-                    recovery_deadline,
-                )
+            let source_snapshot =
+                observed_phase(diagnostics, "source_snapshot_hash", cycle, None, async {
+                    let source_snapshot = snapshot_file(cluster_root, leader)?;
+                    if source_snapshot.bytes < minimum_sqlite_bytes {
+                        bail!(
+                            "{} cycle {cycle} snapshot was {} bytes, below {minimum_sqlite_bytes}",
+                            role.label(),
+                            source_snapshot.bytes
+                        );
+                    }
+                    Ok(source_snapshot)
+                })
                 .await?;
-                cluster
-                    .request(TARGET_NODE, Request::Open)
-                    .await?
-                    .require_ok()?;
-                if role == RecoveryRole::Learner {
+            let recovery_status = async {
+                observed_phase(diagnostics, "target_start_open", cycle, None, async {
+                    spawn_recovery_node(
+                        executable,
+                        cluster,
+                        recovery_launch(TARGET_NODE, cluster_root, specs, role),
+                        recovery_deadline,
+                        diagnostics,
+                    )
+                    .await?;
                     cluster
-                        .request(TARGET_NODE, Request::StartHeartbeatLoop)
+                        .request(TARGET_NODE, Request::Open)
                         .await?
                         .require_ok()?;
-                }
-                let target_status = wait_for_installed_snapshot(
-                    cluster,
-                    TARGET_NODE,
-                    snapshot_index,
-                    &source_snapshot.snapshot_id,
-                    recovery_deadline,
+                    if role == RecoveryRole::Learner {
+                        cluster
+                            .request(TARGET_NODE, Request::StartHeartbeatLoop)
+                            .await?
+                            .require_ok()?;
+                    }
+                    Ok(())
+                })
+                .await?;
+                let target_status = observed_phase(
+                    diagnostics,
+                    "target_install_observed",
+                    cycle,
+                    None,
+                    wait_for_installed_snapshot(
+                        cluster,
+                        TARGET_NODE,
+                        snapshot_index,
+                        &source_snapshot.snapshot_id,
+                        recovery_deadline,
+                    ),
                 )
                 .await?;
-                let source_status = wait_for_completed_source_outbound(
-                    cluster,
-                    leader,
-                    TARGET_NODE,
-                    &source_snapshot.snapshot_id,
-                    recovery_deadline,
+                let source_status = observed_phase(
+                    diagnostics,
+                    "source_completion_observed",
+                    cycle,
+                    None,
+                    wait_for_completed_source_outbound(
+                        cluster,
+                        leader,
+                        TARGET_NODE,
+                        &source_snapshot.snapshot_id,
+                        recovery_deadline,
+                    ),
                 )
                 .await?;
                 Ok::<_, anyhow::Error>((target_status, source_status))
             };
-            let installed_snapshot = wait_for_installed_snapshot_file(
-                cluster_root,
-                TARGET_NODE,
-                &source_snapshot,
-                recovery_deadline,
+            let installed_snapshot = observed_phase(
+                diagnostics,
+                "installed_snapshot_verify",
+                cycle,
+                None,
+                wait_for_installed_snapshot_file(
+                    cluster_root,
+                    TARGET_NODE,
+                    &source_snapshot,
+                    recovery_deadline,
+                ),
             );
             let ((target_status, source_status), installed_snapshot) =
                 tokio::try_join!(recovery_status, installed_snapshot)?;
@@ -1341,36 +1787,49 @@ async fn exercise_role_campaign(
         )?;
         let recovery_finished_at_unix_ms = unix_ms()?;
         let recovery_millis = duration_millis(recovery_started.elapsed());
-        std::fs::write(&writer_config.stop_path, b"stop\n")
-            .context("signal recovery writer to stop")?;
-        let writer_report = wait_writer(&mut writer).await?;
+        let writer_report = observed_phase(diagnostics, "writer_stop", cycle, None, async {
+            std::fs::write(&writer_config.stop_path, b"stop\n")
+                .context("signal recovery writer to stop")?;
+            wait_writer(&mut writer, diagnostics).await
+        })
+        .await?;
 
-        let target_digest = wait_for_write_digest(
-            cluster,
-            TARGET_NODE,
-            &prefix,
-            writer_report.writes.len(),
-            &writer_report.digest,
+        let target_digest = observed_phase(
+            diagnostics,
+            "write_digest_verify",
+            cycle,
+            None,
+            wait_for_write_digest(
+                cluster,
+                TARGET_NODE,
+                &prefix,
+                writer_report.writes.len(),
+                &writer_report.digest,
+            ),
         )
         .await?;
-        let image = match cluster
-            .request(
-                TARGET_NODE,
-                Request::RecoveryImageDigest {
-                    minimum_bytes: minimum_sqlite_bytes,
-                },
-            )
-            .await?
-        {
-            Response::RecoveryImage { evidence } => evidence,
-            response => bail!("unexpected recovered image response: {response:?}"),
-        };
-        if image != expected_image {
-            bail!(
-                "{} cycle {cycle} recovered image digest drifted",
-                role.label()
-            );
-        }
+        let image = observed_phase(diagnostics, "image_digest_verify", cycle, None, async {
+            let image = match cluster
+                .request(
+                    TARGET_NODE,
+                    Request::RecoveryImageDigest {
+                        minimum_bytes: minimum_sqlite_bytes,
+                    },
+                )
+                .await?
+            {
+                Response::RecoveryImage { evidence } => evidence,
+                response => bail!("unexpected recovered image response: {response:?}"),
+            };
+            if image != expected_image {
+                bail!(
+                    "{} cycle {cycle} recovered image digest drifted",
+                    role.label()
+                );
+            }
+            Ok(image)
+        })
+        .await?;
         let applied_index = target_status
             .applied_index
             .context("target did not publish applied index")?;
@@ -1384,9 +1843,20 @@ async fn exercise_role_campaign(
         } else {
             Instant::now() + RECOVERY_DEADLINE
         };
-        let post_resources =
-            wait_for_stable_idle_resources(cluster, &[1, 2, 3, TARGET_NODE], resource_deadline)
-                .await?;
+        let post_resources = observed_phase(
+            diagnostics,
+            "resource_settle",
+            cycle,
+            None,
+            wait_for_stable_idle_resources(
+                cluster,
+                &[1, 2, 3, TARGET_NODE],
+                resource_deadline,
+                diagnostics,
+                cycle,
+            ),
+        )
+        .await?;
         match baseline_resources.as_deref() {
             None => println!(
                 "cluster-check: {} baseline resources {}",
@@ -1408,7 +1878,7 @@ async fn exercise_role_campaign(
             .as_deref()
             .context("resource baseline warmup did not complete")?;
         let node_resources = collect_node_resource_evidence(baseline_resources, &post_resources)?;
-        cycles.push(RecoveryCycleEvidence {
+        let evidence = RecoveryCycleEvidence {
             role,
             cycle,
             recovery_started_at_unix_ms,
@@ -1426,7 +1896,15 @@ async fn exercise_role_campaign(
             acknowledged_write_digest: writer_report.digest,
             target_write_digest: target_digest.sha256,
             node_resources,
-        });
+        };
+        diagnostics.checkpoint(leader, &evidence)?;
+        let phase_durations = diagnostics.cycle_phase_durations(cycle)?;
+        println!(
+            "cluster-check: {} cycle {cycle} timing {}",
+            role.label(),
+            describe_phase_durations(&phase_durations)
+        );
+        cycles.push(evidence);
     }
 
     let resource_envelopes = resource_envelopes(&cycles)?;
@@ -1485,44 +1963,50 @@ async fn trigger_and_wait_for_snapshot(
     role: RecoveryRole,
     cycle: u32,
     deadline: Instant,
+    diagnostics: &RecoveryDiagnostics,
 ) -> Result<SnapshotPurgeEvidence> {
     let previous = request_status(cluster, leader).await?.snapshot_index;
-    let mut observed = None;
-    for ordinal in 0..TRANSPORT_RECOVERY_SNAPSHOT_LOGS_SINCE_LAST.saturating_mul(3) {
-        remaining_before(deadline, "snapshot trigger")?;
-        cluster
-            .request(
-                leader,
-                Request::PutSetting {
-                    key: format!(
-                        "cluster.transport-recovery.snapshot.{}.{cycle:02}.{ordinal:04}",
-                        role.label()
-                    ),
-                    value: "snapshot-trigger".to_owned(),
-                },
-            )
-            .await?
-            .require_ok()?;
-        let status = request_status(cluster, leader).await?;
-        if status
-            .snapshot_index
-            .is_some_and(|snapshot| previous.is_none_or(|old| snapshot > old))
-        {
-            observed = Some(status);
-            break;
+    let mut status = observed_phase(diagnostics, "snapshot_trigger", cycle, None, async {
+        for ordinal in 0..TRANSPORT_RECOVERY_SNAPSHOT_LOGS_SINCE_LAST.saturating_mul(3) {
+            remaining_before(deadline, "snapshot trigger")?;
+            cluster
+                .request(
+                    leader,
+                    Request::PutSetting {
+                        key: format!(
+                            "cluster.transport-recovery.snapshot.{}.{cycle:02}.{ordinal:04}",
+                            role.label()
+                        ),
+                        value: "snapshot-trigger".to_owned(),
+                    },
+                )
+                .await?
+                .require_ok()?;
+            let status = request_status(cluster, leader).await?;
+            if status
+                .snapshot_index
+                .is_some_and(|snapshot| previous.is_none_or(|old| snapshot > old))
+            {
+                return Ok(status);
+            }
         }
-    }
-    let mut status = observed.context("low-threshold workload did not publish a new snapshot")?;
+        bail!("low-threshold workload did not publish a new snapshot")
+    })
+    .await?;
     let snapshot = status
         .snapshot_index
         .context("new snapshot index disappeared")?;
-    while status.purged_index.is_none_or(|purged| purged < snapshot) {
-        if Instant::now() >= deadline {
-            bail!("snapshot {snapshot} was not purged before recovery deadline");
+    status = observed_phase(diagnostics, "snapshot_purge", cycle, None, async {
+        while status.purged_index.is_none_or(|purged| purged < snapshot) {
+            if Instant::now() >= deadline {
+                bail!("snapshot {snapshot} was not purged before recovery deadline");
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            status = request_status(cluster, leader).await?;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        status = request_status(cluster, leader).await?;
-    }
+        Ok(status)
+    })
+    .await?;
     snapshot_purge_evidence(
         // Pin the snapshot whose purge boundary this function actually
         // awaited. The external writer can publish a newer current snapshot
@@ -1827,6 +2311,8 @@ async fn wait_for_stable_idle_resources(
     cluster: &mut ClusterProcesses,
     node_ids: &[u64],
     deadline: Instant,
+    diagnostics: &RecoveryDiagnostics,
+    cycle: u32,
 ) -> Result<Vec<(u64, ProcessResourceCount)>> {
     const PHASE: &str = "stable idle resource sampling";
     let mut previous = None;
@@ -1870,6 +2356,13 @@ async fn wait_for_stable_idle_resources(
         } else {
             stable_samples = 0;
         }
+        diagnostics.record_resource_sample(
+            cycle,
+            &busy_nodes,
+            &current,
+            stable_samples,
+            RESOURCE_STABLE_SAMPLES,
+        )?;
         if stable_samples >= RESOURCE_STABLE_SAMPLES {
             return Ok(current);
         }
@@ -1993,6 +2486,32 @@ fn describe_resource_sample(sample: &[(u64, ProcessResourceCount)]) -> String {
             format!(
                 "node {node_id} {}/{}/{}",
                 counts.threads, counts.sockets, counts.owned_async_tasks
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn describe_phase_durations(durations: &BTreeMap<String, u64>) -> String {
+    durations
+        .iter()
+        .map(|(phase, millis)| format!("{phase}={millis}ms"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn describe_timing_statistics(
+    timings: &BTreeMap<String, crate::transport_recovery_diagnostics::TimingStatistic>,
+) -> String {
+    timings
+        .iter()
+        .map(|(phase, timing)| {
+            format!(
+                "{phase}[n={},median={}ms,max={}ms,total={}ms]",
+                timing.sample_count,
+                timing.median_millis,
+                timing.maximum_millis,
+                timing.total_millis
             )
         })
         .collect::<Vec<_>>()
@@ -2348,6 +2867,7 @@ async fn spawn_writer(
     root: &Path,
     specs: &[NodeSpec],
     prefix: &str,
+    diagnostics: &RecoveryDiagnostics,
 ) -> Result<(RecoveryWriter, RecoveryWriterConfig)> {
     let control = root.join("transport-recovery-writers");
     std::fs::create_dir_all(&control).context("create recovery writer control directory")?;
@@ -2375,6 +2895,11 @@ async fn spawn_writer(
         .spawn()
         .context("spawn separate recovery writer")?;
     let stdout = child.stdout.take().context("recovery writer stdout")?;
+    let identity = diagnostics.register_process(
+        child.id().context("recovery writer has no process id")?,
+        "writer",
+        None,
+    )?;
     let stdout = tokio::spawn(async move {
         use tokio::io::AsyncReadExt;
         let mut stdout = stdout;
@@ -2386,6 +2911,7 @@ async fn spawn_writer(
         RecoveryWriter {
             child,
             stdout: Some(stdout),
+            identity: Some(identity),
         },
         config,
     ))
@@ -2465,10 +2991,21 @@ fn publish_writer_progress(
         .context("publish recovery writer progress")
 }
 
-async fn wait_writer(writer: &mut RecoveryWriter) -> Result<RecoveryWriterReport> {
-    let status = tokio::time::timeout(Duration::from_secs(30), writer.child.wait())
+async fn wait_writer(
+    writer: &mut RecoveryWriter,
+    diagnostics: &RecoveryDiagnostics,
+) -> Result<RecoveryWriterReport> {
+    let wait_result = tokio::time::timeout(Duration::from_secs(30), writer.child.wait())
         .await
-        .context("recovery writer did not stop")??;
+        .context("recovery writer did not stop")?;
+    let lifecycle_result = wait_result
+        .as_ref()
+        .map(|_| ())
+        .map_err(|error| anyhow::anyhow!("{error}"));
+    if let Some(identity) = writer.identity.as_ref() {
+        diagnostics.process_action("reap", identity, &lifecycle_result)?;
+    }
+    let status = wait_result?;
     if !status.success() {
         bail!("recovery writer exited with {status}");
     }
@@ -2952,6 +3489,7 @@ async fn spawn_recovery_node(
     cluster: &mut ClusterProcesses,
     launch: NodeLaunch,
     deadline: Instant,
+    diagnostics: &RecoveryDiagnostics,
 ) -> Result<()> {
     if launch.root != cluster.root {
         bail!("recovery node root did not match the running cluster");
@@ -2964,6 +3502,7 @@ async fn spawn_recovery_node(
         bail!("recovery node {} is already running", launch.node_id);
     }
     let mut process = NodeProcess::spawn(executable, &launch)?;
+    diagnostics.register_process(process.pid()?, "node", Some(launch.node_id))?;
     process
         .wait_ready_with_timeout(remaining_before(deadline, "recovery node readiness")?)
         .await?;
@@ -4063,6 +4602,107 @@ mod tests {
         assert!(message.contains("voter") && message.contains("learner"));
     }
 
+    #[tokio::test]
+    async fn external_cancellation_prevents_the_learner_attempt() {
+        let root = tempfile::tempdir().expect("sequence root");
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = calls.clone();
+        let results = run_role_sequence(
+            role_plan(RecoveryRole::Voter, root.path()),
+            role_plan(RecoveryRole::Learner, root.path()),
+            move |plan| {
+                let observed = observed.clone();
+                async move {
+                    observed.lock().expect("record role call").push(plan.role);
+                    Err(anyhow::Error::new(RecoveryCancelled {
+                        signal: "injected SIGTERM".to_owned(),
+                    }))
+                }
+            },
+        )
+        .await;
+        assert_eq!(
+            *calls.lock().expect("read role calls"),
+            vec![RecoveryRole::Voter]
+        );
+        assert!(results
+            .0
+            .expect_err("voter cancelled")
+            .is::<RecoveryCancelled>());
+        assert!(results
+            .1
+            .expect_err("learner suppressed")
+            .is::<RecoveryCancelled>());
+    }
+
+    #[test]
+    fn recovery_failure_after_checkpoint_retains_completed_cycle() {
+        use crate::transport_recovery_diagnostics::{
+            read_complete_jsonl, CleanupSummary, RecoveryCycleCheckpoint, RecoveryDiagnosticSummary,
+        };
+
+        let root = tempfile::tempdir().expect("diagnostic root");
+        let plan = role_plan(RecoveryRole::Voter, root.path());
+        std::fs::create_dir(&plan.diagnostics_dir).expect("create diagnostics directory");
+        let diagnostics = RecoveryDiagnostics::create(
+            &plan,
+            &"d".repeat(40),
+            &build_profile_descriptor(),
+            diagnostic_contracts(RecoveryRole::Voter),
+            1,
+        )
+        .expect("create diagnostics");
+        let evidence = role_report(RecoveryRole::Voter, 3)
+            .campaign
+            .cycles
+            .remove(0);
+        diagnostics
+            .checkpoint(1, &evidence)
+            .expect("durable checkpoint");
+        let token = diagnostics
+            .phase_start("target_install_observed", 2, None)
+            .expect("recovery phase start");
+        diagnostics
+            .phase_end(token, &Err(anyhow::anyhow!("injected recovery failure")))
+            .expect("recovery phase failure");
+        diagnostics
+            .record_terminal_observation(
+                DiagnosticOutcome::Failed,
+                Some(FailureClass::Recovery),
+                Some("injected recovery failure"),
+            )
+            .expect("terminal observation");
+        diagnostics
+            .write_summary(
+                DiagnosticOutcome::Failed,
+                false,
+                Some(FailureClass::Recovery),
+                Some("injected recovery failure"),
+                CleanupSummary {
+                    attempted: false,
+                    budget_millis: duration_millis(CLEANUP_BUDGET),
+                    registered_processes: 0,
+                    reaped_processes: 0,
+                    surviving_processes: Vec::new(),
+                },
+            )
+            .expect("failed summary");
+        let checkpoints = read_complete_jsonl::<RecoveryCycleCheckpoint>(
+            &plan.diagnostics_dir.join("cycles.jsonl"),
+        )
+        .expect("read checkpoints");
+        assert_eq!(checkpoints.records.len(), 1);
+        assert_eq!(checkpoints.records[0].cycle, 1);
+        let summary: RecoveryDiagnosticSummary = serde_json::from_slice(
+            &std::fs::read(plan.diagnostics_dir.join("summary.json"))
+                .expect("read diagnostic summary"),
+        )
+        .expect("decode diagnostic summary");
+        assert_eq!(summary.completed_cycles, 1);
+        assert_eq!(summary.failing_cycle, Some(2));
+        assert!(!plan.output.exists());
+    }
+
     #[test]
     fn smoke_aliases_are_bounded_and_cannot_claim_full_qualification() {
         let default = smoke_cycles(&[], RecoveryRole::Voter).expect("default voter smoke");
@@ -4914,6 +5554,7 @@ mod tests {
         let mut writer = RecoveryWriter {
             child,
             stdout: None,
+            identity: None,
         };
 
         let error = wait_for_writer_ready(
@@ -4947,6 +5588,7 @@ mod tests {
         let mut writer = RecoveryWriter {
             child,
             stdout: Some(stdout),
+            identity: None,
         };
         let config = RecoveryWriterConfig {
             addresses: vec!["one".into(), "two".into(), "three".into()],
