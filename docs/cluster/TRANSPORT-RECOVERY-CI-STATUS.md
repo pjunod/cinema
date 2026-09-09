@@ -48,8 +48,10 @@ a recursively closed role schema; deepest failing-phase preservation;
 UTF-8-safe diagnostic truncation; and role-schema validation routing. Focused
 unit and contract tests are now running before the reviewed candidate is
 pushed once for full M6 qualification.
-Current `main` `7bb7cf6c` was merged after that review completed; the same
-exact-source checks are being repeated on the merged tree before it is pushed.
+Current `main` moved twice after that review completed. Both updates were
+merged; the frozen candidate now includes `374e97ed`, the decoder selection
+and recovery effort promotion. The exact-source checks are being repeated on
+that final merged tree before it is pushed.
 
 ## Milestones — evidence closes the checkbox
 
