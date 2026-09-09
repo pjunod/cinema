@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["d5ff3338"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "The retained copy-segmenter regressions require a fresh Profile 7 recovery copy to preserve type-62 RPUs for the post-mux converter, remove the enhancement layer, emit a Profile 8 init record, and produce segments whose RPUs refuse a second conversion because they already declare Profile 8; the call-site regression separately requires the spawned ffmpeg argv and returned session kind to keep the same conversion presentation."

@@ -115,11 +115,11 @@ Match the voice of the strings already there; do not invent a new register.
 2. **State.** Carry it beside the existing delivered-range value, wherever
    that lives, with the same session-overrides-decision precedence. **A
    session that reports a range must clear the profile when the response omits
-   it.** This is not hypothetical: the legacy single-ffmpeg copy path (live-HLS
-   recovery) serves the HDR10 base for a title the decision said would be
-   converted, which is the *normal* first watch of a converting title, before
-   its fragment index exists. A stale profile there paints `DV → DV P8` over
-   HDR10.
+   it.** Before issue #215, the growing-HLS recovery copy served the HDR10 base
+   for a title the decision said would be converted. A fresh GOP-aware recovery
+   now performs the same post-mux conversion as VOD; only a legacy/takeover path
+   that cannot run the converter narrows to HDR10. A stale profile there still
+   paints `DV → DV P8` over HDR10.
 3. **Badge.** In `dynamicRangeFact` (or whatever now owns the chip), add the
    converted branch: source grade `dolby_vision`, delivered grade
    `dolby_vision`, both profiles known, and they differ.

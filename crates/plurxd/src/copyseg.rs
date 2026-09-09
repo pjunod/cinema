@@ -298,6 +298,7 @@ pub async fn run<R: AsyncRead + Unpin>(
     // same records in hvcC before it will accept a PQ HLS variant.
     let mut pending_init: Option<(Init, fmp4::CutPolicy)> = None;
     let mut segmenter: Option<Segmenter> = None;
+    let mut converter: Option<crate::dvpipe::Converter> = None;
     let mut buf = vec![0u8; READ_CHUNK];
     let mut warned_memory = false;
 
@@ -346,10 +347,10 @@ pub async fn run<R: AsyncRead + Unpin>(
             };
             match unit {
                 Unit::Init(mut init) => {
-                    let Some(video) = init.video() else {
+                    let Some(init_video) = init.video() else {
                         return Outcome::Unsupported("the pipe's moov has no video track".into());
                     };
-                    if video.codec.is_none() || video.nal_length_size == 0 {
+                    if init_video.codec.is_none() || init_video.nal_length_size == 0 {
                         return Outcome::Unsupported(
                             "the video track carries no hvcC/avcC to read keyframes with".into(),
                         );
@@ -370,7 +371,17 @@ pub async fn run<R: AsyncRead + Unpin>(
                             odd.id, odd.timescale
                         ));
                     }
-                    let video_timescale = video.timescale;
+                    let video_timescale = init_video.timescale;
+                    if video.converts_dolby_vision() {
+                        match crate::dvpipe::Converter::for_init(&init) {
+                            Ok(ready) => converter = Some(ready),
+                            Err(refused) => {
+                                return Outcome::InvalidHevcConfiguration(format!(
+                                    "this stream cannot be converted: {refused}"
+                                ))
+                            }
+                        }
+                    }
                     // This path builds its served init itself rather than
                     // through `fmp4::promote_from`, so the removal the VOD
                     // path gets from the stored promotion inputs has to be
@@ -437,7 +448,35 @@ pub async fn run<R: AsyncRead + Unpin>(
                     );
                     pending_init = Some((init, policy));
                 }
-                Unit::Fragment(fragment) => {
+                Unit::Fragment(mut fragment) => {
+                    if let Some(converter) = converter.as_mut() {
+                        let before = converter.report().source_profile;
+                        if let Err(refused) = converter.convert(&mut fragment) {
+                            return Outcome::ReaderFailed {
+                                reason: format!("this stream cannot be converted: {refused}"),
+                                counts: segmenter
+                                    .as_ref()
+                                    .map_or_else(SegmentCounts::default, Segmenter::counts),
+                            };
+                        }
+                        let report = converter.report();
+                        if segmenter.is_none() && report.rpus == 0 {
+                            return Outcome::InvalidHevcConfiguration(
+                                "this source is recorded as Dolby Vision Profile 7 but its first \
+                                 fragment carries no RPUs to convert"
+                                    .into(),
+                            );
+                        }
+                        if before.is_none() && report.source_profile.is_some() {
+                            tracing::info!(
+                                session = %crate::transcode::session_log_id(session_id),
+                                source_profile = report.source_profile,
+                                enhancement_layer = ?report.enhancement_layer,
+                                "converting Dolby Vision to Profile 8.1: {}",
+                                report.enhancement_layer.reason()
+                            );
+                        }
+                    }
                     if segmenter.is_none() {
                         let Some((mut init, policy)) = pending_init.take() else {
                             return Outcome::ReaderFailed {
@@ -485,6 +524,20 @@ pub async fn run<R: AsyncRead + Unpin>(
                                     reason: format!("preparing the HLS init segment: {reason}"),
                                     counts: SegmentCounts::default(),
                                 };
+                            }
+                        }
+                        if video.converts_dolby_vision() {
+                            let record =
+                                match crate::fragindex::converted_dolby_vision_record(source) {
+                                    Ok(record) => record,
+                                    Err(reason) => {
+                                        return Outcome::InvalidHevcConfiguration(reason)
+                                    }
+                                };
+                            if let Err(error) = fmp4::set_dolby_vision_record(&mut init, &record) {
+                                return Outcome::InvalidHevcConfiguration(format!(
+                                    "writing the converted Dolby Vision record: {error}"
+                                ));
                             }
                         }
                         if let Err(error) = fmp4::validate_hevc_decoder_configuration(&init) {
@@ -945,6 +998,76 @@ mod tests {
         );
     }
 
+    /// A fresh live-HLS recovery session performs the same post-mux RPU
+    /// rewrite as a VOD generation instead of silently narrowing to HDR10.
+    /// Both the served init and the segment bytes have to move together: a
+    /// Profile 8 record over Profile 7 RPUs is less playable than either
+    /// honest presentation.
+    #[tokio::test]
+    async fn a_converting_session_serves_profile_eight_init_and_rpus() {
+        let feed =
+            with_a_stale_dolby_vision_record(&plurx_core::testfixtures::with_dolby_vision_rpus(
+                &plurx_core::testfixtures::pipe("clean-cra"),
+            ));
+        let (source, video) = converting();
+        let dir = tempfile::tempdir().expect("scratch");
+        let outcome = run(
+            &feed[..],
+            dir.path().to_path_buf(),
+            "test",
+            brisk(),
+            &source,
+            video,
+        )
+        .await;
+        assert!(
+            matches!(outcome, Outcome::Completed(_)),
+            "the converting session must finish: {outcome:?}"
+        );
+
+        let init_bytes = std::fs::read(dir.path().join("init.mp4")).expect("init.mp4");
+        let mut init_reader = FragmentReader::new();
+        init_reader.push(&init_bytes);
+        let Some(Unit::Init(init)) = init_reader.next_unit().expect("served init parses") else {
+            panic!("the served init is an initialization unit");
+        };
+        let record = fmp4::dolby_vision_record(&init)
+            .expect("record parses")
+            .expect("converted init carries Dolby Vision");
+        assert_eq!(record.profile, 8);
+        assert!(!record.el_present);
+        assert_eq!(record.bl_signal_compatibility_id, 1);
+
+        let first_segment = segment_files(dir.path())
+            .into_iter()
+            .find(|name| name.ends_with(".m4s"))
+            .expect("a media segment");
+        let segment_bytes = std::fs::read(dir.path().join(first_segment)).expect("segment");
+        let mut segment_reader = FragmentReader::new();
+        segment_reader.push(&init_bytes);
+        segment_reader.push(&segment_bytes);
+        assert!(
+            matches!(
+                segment_reader.next_unit().expect("combined init parses"),
+                Some(Unit::Init(_))
+            ),
+            "the combined feed opens with its served init"
+        );
+        let Some(Unit::Fragment(mut fragment)) =
+            segment_reader.next_unit().expect("segment parses")
+        else {
+            panic!("the media segment opens with a fragment");
+        };
+        let refused = crate::dvpipe::Converter::for_init(&init)
+            .expect("served init describes the video")
+            .convert(&mut fragment)
+            .expect_err("already converted RPUs refuse a second conversion");
+        assert!(
+            refused.to_string().contains('8'),
+            "the segment's RPUs must already declare Profile 8: {refused}"
+        );
+    }
+
     /// The brand also goes when the record was never ours to remove.
     ///
     /// The other half of the same contradiction, and it needs its own session
@@ -1039,6 +1162,21 @@ mod tests {
         (
             hevc_source(Some("dolby_vision")),
             plurx_core::transcode::CopyVideoOptions::new(false, false),
+        )
+    }
+
+    fn converting() -> (MediaFile, plurx_core::transcode::CopyVideoOptions) {
+        let mut source = hevc_source(Some("dolby_vision"));
+        source.dolby_vision = plurx_core::domain::DolbyVisionFacts {
+            profile: Some(7),
+            level: Some(6),
+            bl_compat_id: Some(1),
+            ..Default::default()
+        };
+        (
+            source,
+            plurx_core::transcode::CopyVideoOptions::new(true, true)
+                .with_dolby_vision_conversion(true),
         )
     }
 

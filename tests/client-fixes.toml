@@ -1000,6 +1000,17 @@ test = "clients/apple/Tests/PlaybackControlSessionTests.swift"
 test_anchor = "private func tearDownTransport("
 
 [[fixes]]
+# tvOS does not guarantee Application Support in the local app container. The
+# short-lived restart marker uses its writable cache area, and this test drives
+# the production store through absent, armed, and cleared states.
+id = "apple.live-tv-restart-marker-storage"
+commits = ["7d0acd98"]
+source = "clients/apple/Sources/LiveTv.swift"
+source_anchor = "struct LiveTvFileBarrierStore"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testPlatformRestartMarkerStoreCanRoundTrip"
+
+[[fixes]]
 # Promotion compares counters to the current merge target. This anchor keeps
 # the Android build claim tied to the collision regression that rejects reusing
 # the build number already present on main.
