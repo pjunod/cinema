@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["e9cd6aa8"]
+points = ["live-tv.integration", "web.experience"]
+checks = ["web-static"]
+reason = "The shipped Live TV unit makes tuner release reject before fullscreen exit settles, then requires the stop promise to retain that exact failure while presentation teardown still completes and hides the host. stopLiveTv attaches both concurrent outcomes immediately, so an early network refusal cannot become an unhandled rejection or strand the stopped presentation."
