@@ -5,7 +5,7 @@ complete · frozen promotion candidate integrated with current `main` ·
 final adversarial review repaired · broader fleet qualification continues after
 merge · **Updated:** 2026-09-09 · **Integration branch:**
 `effort/decoder-selection-recovery` at `d84aa500` · **Active promotion branch:**
-`codex/decoder-final-promotion`, latest-main merge `f234427e`
+`codex/decoder-final-promotion`, latest-main merge `b8840634`
 
 The effort was created from Forgejo `main` at
 `4a6a0268bd314ad5587cb3037f12ebd992c0074e`. The original M0 research baseline was `main` at
@@ -27,7 +27,7 @@ An unchecked item is not implied by a nearby passing check.
 | M7a · advisory Developer settings | Done | Keep the prerequisites accurate as hardware contracts land; the controls advise and never gate enablement |
 | M7b · hardware diagnostic path | Merged | [Forgejo #174](http://192.168.4.7:3000/noirr/plurx/pulls/174) merged approved head `0a685526` into the effort at `0c831b88` after the complete Effort development gate. Backend-aware measurement, path-scoped qualification, same-codec recovery pairing, compatible v2 reporting, and advisory Developer readiness are implemented. A real hardware contract is separate M8 fleet evidence |
 | M7 remainder · offline durability and handoff enforcement | Merged | [Forgejo #179](http://192.168.4.7:3000/noirr/plurx/pulls/179) fast-forwarded approved head `990bf334` into the effort after its adversarial findings were fixed and the Effort development gate passed; the repair includes one replicated cluster-wide kill-switch transaction |
-| Promotion to `main` | Draft PR open; review repairs pass focused tests | Current `main` `e1780a15` is merged at `f234427e`; the one final adversarial review is complete and its three findings are repaired. The failures from #189's first unit run reproduce as stale migration/publication fixtures, two timing-sensitive probes, and one immutable-VOD filter-graph defect; their focused tests now pass. Remaining: push repaired head · smoke/fast lane · merge · watch post-merge tests |
+| Promotion to `main` | Draft PR open; review repairs pass focused tests | Current `main` `0985ac19` is merged at `b8840634`; the one final adversarial review is complete and its three findings are repaired. The failures from #189's first unit run reproduce as stale migration/publication fixtures, two timing-sensitive probes, and one immutable-VOD filter-graph defect; their focused tests now pass. Remaining: push repaired head · smoke/fast lane · merge · watch post-merge tests |
 | M8 · broader fleet qualification | Post-merge continuation | Hardware diagnostic capture · workload matrix · false-positive classification · startup/concurrency/recovered-latency evidence · three-client replacement runs; any code failure gets a new PR |
 
 **Shortest reading:** M7 and the one final effort-PR review are done. Push the
@@ -43,8 +43,8 @@ on that path rather than falsely certified.
 | Field | Current value |
 |---|---|
 | Milestone | Freeze and promote the completed decoder-selection/recovery effort |
-| Task base | Effort head `990bf334` plus current `main` `e1780a15` |
-| Task branch | `codex/decoder-final-promotion` in the agent-owned clone at `/private/tmp/codex-plurx-decoder.RRcx8j/repo`; latest-main merge `f234427e` |
+| Task base | Effort head `3ce34c30` plus current `main` `0985ac19` |
+| Task branch | `codex/decoder-final-promotion` in the agent-owned clone at `/private/tmp/codex-plurx-decoder.RRcx8j/repo`; latest-main merge `b8840634` |
 | Task PR | Final effort→`main` [Forgejo #189](http://192.168.4.7:3000/noirr/plurx/pulls/189) is open as WIP/draft; it stays draft until the repaired head is ready for the fast lane |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
 | Audit scope | Job-scoped budget persistence · alternate result references · part and final-assembly receipt verification · versioned worker capabilities · owner-handoff inheritance · default and no-live-recovery shipping-path exercise without introducing a code gate |
