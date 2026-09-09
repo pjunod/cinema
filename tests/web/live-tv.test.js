@@ -558,17 +558,30 @@ async function main() {
     assert.equal(storage.length, 0);
   });
 
-  await test("Live TV exits its own fullscreen before hiding, with iPhone entry fallback", async () => {
+  await test("Live TV awaits fullscreen exit before hiding, with iPhone entry fallback", async () => {
     const events = [], panel = { hidden: false, contains: () => false };
     const video = { webkitEnterFullscreen: () => events.push("iphone-enter") };
+    const exited = deferred(), neverSettles = deferred(), listeners = new Map();
     const document = { getElementById: id => id === "live-tv-host" ? panel : video,
-      fullscreenElement: panel, exitFullscreen: () => { events.push("exit"); document.fullscreenElement = null; return Promise.resolve(); } };
+      addEventListener: (name, listener) => listeners.set(name, listener),
+      removeEventListener: (name, listener) => { if (listeners.get(name) === listener) listeners.delete(name); },
+      fullscreenElement: panel, exitFullscreen: () => {
+        events.push("exit"); exited.promise.then(() => {
+          document.fullscreenElement = null; listeners.get("fullscreenchange")?.();
+        });
+        return neverSettles.promise;
+      } };
     const state = { serial: 0 };
     const control = new Function("document", "LIVE_TV", "LIVE_TV_LEASE", "detachLiveTvMedia",
       `${shipped("exitLiveTvPresentation")}${shipped("stopLiveTv")}${shipped("fullscreenLiveTv")}
        return {stopLiveTv,fullscreenLiveTv};`)(document, state, { stop: async () => events.push("release") }, () => events.push("detach"));
-    await control.stopLiveTv();
-    assert.deepEqual(events, ["exit", "detach", "release"]);
+    const closing = control.stopLiveTv();
+    await Promise.resolve();
+    assert.deepEqual(events, ["exit", "release"]);
+    assert.equal(panel.hidden, false, "the fullscreen subtree must remain mounted until exit settles");
+    exited.resolve();
+    await closing;
+    assert.deepEqual(events, ["exit", "release", "detach"]);
     assert.equal(panel.hidden, true);
     control.fullscreenLiveTv();
     assert.equal(events.at(-1), "iphone-enter");

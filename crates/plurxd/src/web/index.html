@@ -15250,9 +15250,15 @@ function detachLiveTvMedia(){
   if(video){ video.onerror=null; video.onended=null; video.pause(); video.removeAttribute("src"); video.load(); }
 }
 async function stopLiveTv(){
-  ++LIVE_TV.serial; exitLiveTvPresentation(); detachLiveTvMedia();
+  ++LIVE_TV.serial;
+  // Releasing the physical tuner must start immediately, but removing the
+  // fullscreen element before the browser clears fullscreenElement can strand
+  // Chromium in fullscreen indefinitely. Keep those operations concurrent,
+  // then dismantle the media tree only after presentation state settles.
+  const exiting=exitLiveTvPresentation(), stopping=LIVE_TV_LEASE.stop();
+  await exiting; detachLiveTvMedia();
   const host=document.getElementById("live-tv-host"); if(host) host.hidden=true;
-  return LIVE_TV_LEASE.stop();
+  return stopping;
 }
 async function watchLiveTv(index){
   const channel=LIVE_TV.channels[index];
@@ -15365,18 +15371,43 @@ function fullscreenLiveTv(){
     else if(video&&video.webkitEnterFullscreen) video.webkitEnterFullscreen();
   }catch(e){}
 }
-function exitLiveTvPresentation(){
+async function exitLiveTvPresentation(){
   const panel=document.getElementById("live-tv-host"), video=document.getElementById("live-tv-video");
   try{
     const full=document.fullscreenElement||document.webkitFullscreenElement;
     if(panel&&full&&(full===panel||panel.contains(full))){
       const exit=document.exitFullscreen||document.webkitExitFullscreen;
-      if(exit){ const r=exit.call(document); if(r&&r.catch) r.catch(()=>{}); }
+      if(exit){
+        // Chromium can clear fullscreenElement while leaving the returned
+        // promise pending. Observe the state-change event rather than letting
+        // that promise wedge Stop and retain the tuner forever. The timer is a
+        // bounded fallback for engines which clear state without an event.
+        let settle=()=>{};
+        const stateExit=typeof document.addEventListener==="function"
+          ?new Promise(resolve=>{
+            let done=false;
+            settle=()=>{
+              if(done) return; done=true;
+              if(document.removeEventListener){
+                document.removeEventListener("fullscreenchange",settle);
+                document.removeEventListener("webkitfullscreenchange",settle);
+              }
+              resolve();
+            };
+            document.addEventListener("fullscreenchange",settle);
+            document.addEventListener("webkitfullscreenchange",settle);
+            setTimeout(settle,1000);
+          }):Promise.resolve();
+        const result=exit.call(document); if(result&&result.catch) result.catch(()=>{});
+        const active=document.fullscreenElement||document.webkitFullscreenElement;
+        if(!active||!(active===panel||panel.contains(active))) settle();
+        await stateExit;
+      }
     }
-    if(video&&video.webkitDisplayingFullscreen&&video.webkitExitFullscreen) video.webkitExitFullscreen();
-    if(video&&document.pictureInPictureElement===video&&document.exitPictureInPicture){ const r=document.exitPictureInPicture(); if(r&&r.catch) r.catch(()=>{}); }
-    if(video&&video.webkitPresentationMode==="picture-in-picture"&&video.webkitSetPresentationMode) video.webkitSetPresentationMode("inline");
   }catch(e){}
+  try{ if(video&&video.webkitDisplayingFullscreen&&video.webkitExitFullscreen) video.webkitExitFullscreen(); }catch(e){}
+  try{ if(video&&document.pictureInPictureElement===video&&document.exitPictureInPicture) await document.exitPictureInPicture(); }catch(e){}
+  try{ if(video&&video.webkitPresentationMode==="picture-in-picture"&&video.webkitSetPresentationMode) video.webkitSetPresentationMode("inline"); }catch(e){}
 }
 window.addEventListener("pagehide",()=>{
   const info=LIVE_TV_LEASE.current;
