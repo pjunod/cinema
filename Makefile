@@ -1064,11 +1064,11 @@ cluster-harness-check: ## Run replicated growth and topology harness contracts
 	$(CARGO) run --locked -p plurx-cluster-check -- \
 	  topology target/validation/cluster-topology-semantic.json 3,4
 
-.PHONY: cluster-transport-recovery-check
-cluster-transport-recovery-check: ## Run Linux 20+20 learner/voter snapshot recovery qualification
+.PHONY: cluster-transport-recovery-contracts
+cluster-transport-recovery-contracts: ## Run transport recovery schemas, validators, and focused regressions
 	test "$$(uname -s)" = Linux
-	PLURX_EXPECT_TEST_COUNT=51 scripts/require-test-count $(CARGO) test --locked \
-	  -p plurx-cluster-check transport_recovery::tests --lib
+	PLURX_EXPECT_TEST_COUNT=59 scripts/require-test-count $(CARGO) test --locked \
+	  -p plurx-cluster-check transport_recovery --lib
 	scripts/require-test-count $(CARGO) test --locked -p plurx-cluster-check \
 	  transport_recovery::tests::writer_exit_after_readiness_fails_the_recovery_promptly \
 	  --lib -- --exact
@@ -1110,8 +1110,81 @@ cluster-transport-recovery-check: ## Run Linux 20+20 learner/voter snapshot reco
 	  --no-default-features --features auto-heal,macros,sqlite \
 	  network::snapshot_executor::tests::production_snapshot_executor_worker_is_counted_until_joined \
 	  --lib -- --exact
-	$(CARGO) run --locked -p plurx-cluster-check -- \
-	  transport-recovery target/validation/cluster-transport-recovery.json
+
+RECOVERY_EXECUTION_ID ?= local-$(shell date +%s)-$(shell sh -c 'echo $$$$')
+RECOVERY_OUTPUT_DIR ?= target/validation/transport-recovery/$(RECOVERY_EXECUTION_ID)
+RECOVERY_SMOKE_CYCLES ?= 3
+RECOVERY_MAX_RUN_SECONDS ?=
+RECOVERY_BINARY ?= $(shell $(CARGO) metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"] + "/debug/plurx-cluster-check")')
+
+.PHONY: cluster-transport-recovery-voter-check
+cluster-transport-recovery-voter-check: ## Run one full 20-cycle voter role with diagnostics
+	test "$$(uname -s)" = Linux
+	test -x "$(RECOVERY_BINARY)" || $(CARGO) build --locked -p plurx-cluster-check; \
+	  max_runtime=""; if test -n "$(RECOVERY_MAX_RUN_SECONDS)"; then max_runtime="--max-runtime-seconds $(RECOVERY_MAX_RUN_SECONDS)"; fi; \
+	  "$(RECOVERY_BINARY)" transport-recovery-role \
+	  --role voter --cycles 20 --execution-id "$(RECOVERY_EXECUTION_ID)" \
+	  --output "$(RECOVERY_OUTPUT_DIR)/voter-role.json" \
+	  --diagnostics-dir "$(RECOVERY_OUTPUT_DIR)/voter-diagnostics" $$max_runtime
+
+.PHONY: cluster-transport-recovery-learner-check
+cluster-transport-recovery-learner-check: ## Run one full 20-cycle learner role with diagnostics
+	test "$$(uname -s)" = Linux
+	test -x "$(RECOVERY_BINARY)" || $(CARGO) build --locked -p plurx-cluster-check; \
+	  max_runtime=""; if test -n "$(RECOVERY_MAX_RUN_SECONDS)"; then max_runtime="--max-runtime-seconds $(RECOVERY_MAX_RUN_SECONDS)"; fi; \
+	  "$(RECOVERY_BINARY)" transport-recovery-role \
+	  --role learner --cycles 20 --execution-id "$(RECOVERY_EXECUTION_ID)" \
+	  --output "$(RECOVERY_OUTPUT_DIR)/learner-role.json" \
+	  --diagnostics-dir "$(RECOVERY_OUTPUT_DIR)/learner-diagnostics" $$max_runtime
+
+.PHONY: cluster-transport-recovery-smoke
+cluster-transport-recovery-smoke: ## Run independent three-cycle voter and learner smokes by default
+	test "$$(uname -s)" = Linux
+	test -x "$(RECOVERY_BINARY)" || $(CARGO) build --locked -p plurx-cluster-check; \
+	  max_runtime=""; if test -n "$(RECOVERY_MAX_RUN_SECONDS)"; then max_runtime="--max-runtime-seconds $(RECOVERY_MAX_RUN_SECONDS)"; fi; \
+	  voter_status=0; learner_status=0; \
+	  "$(RECOVERY_BINARY)" transport-recovery-role \
+	    --role voter --cycles "$(RECOVERY_SMOKE_CYCLES)" \
+	    --execution-id "$(RECOVERY_EXECUTION_ID)" \
+	    --output "$(RECOVERY_OUTPUT_DIR)/voter-role.json" \
+	    --diagnostics-dir "$(RECOVERY_OUTPUT_DIR)/voter-diagnostics" $$max_runtime \
+	    || voter_status=$$?; \
+	  "$(RECOVERY_BINARY)" transport-recovery-role \
+	    --role learner --cycles "$(RECOVERY_SMOKE_CYCLES)" \
+	    --execution-id "$(RECOVERY_EXECUTION_ID)" \
+	    --output "$(RECOVERY_OUTPUT_DIR)/learner-role.json" \
+	    --diagnostics-dir "$(RECOVERY_OUTPUT_DIR)/learner-diagnostics" $$max_runtime \
+	    || learner_status=$$?; \
+	  test $$voter_status -eq 0; voter_result=$$?; \
+	  test $$learner_status -eq 0; learner_result=$$?; \
+	  test $$voter_result -eq 0 -a $$learner_result -eq 0
+
+.PHONY: cluster-transport-recovery-check
+cluster-transport-recovery-check: cluster-transport-recovery-contracts ## Run full local 20+20 qualification and assemble canonical evidence
+	test "$$(uname -s)" = Linux
+	$(RM) target/validation/cluster-transport-recovery.json
+	test -x "$(RECOVERY_BINARY)" || $(CARGO) build --locked -p plurx-cluster-check; \
+	  max_runtime=""; if test -n "$(RECOVERY_MAX_RUN_SECONDS)"; then max_runtime="--max-runtime-seconds $(RECOVERY_MAX_RUN_SECONDS)"; fi; \
+	  voter_status=0; learner_status=0; \
+	  "$(RECOVERY_BINARY)" transport-recovery-role \
+	    --role voter --cycles 20 --execution-id "$(RECOVERY_EXECUTION_ID)" \
+	    --output "$(RECOVERY_OUTPUT_DIR)/voter-role.json" \
+	    --diagnostics-dir "$(RECOVERY_OUTPUT_DIR)/voter-diagnostics" $$max_runtime \
+	    || voter_status=$$?; \
+	  "$(RECOVERY_BINARY)" transport-recovery-role \
+	    --role learner --cycles 20 --execution-id "$(RECOVERY_EXECUTION_ID)" \
+	    --output "$(RECOVERY_OUTPUT_DIR)/learner-role.json" \
+	    --diagnostics-dir "$(RECOVERY_OUTPUT_DIR)/learner-diagnostics" $$max_runtime \
+	    || learner_status=$$?; \
+	  if test $$voter_status -eq 0 -a $$learner_status -eq 0; then \
+	    "$(RECOVERY_BINARY)" transport-recovery-assemble \
+	      --execution-id "$(RECOVERY_EXECUTION_ID)" \
+	      --voter "$(RECOVERY_OUTPUT_DIR)/voter-role.json" \
+	      --learner "$(RECOVERY_OUTPUT_DIR)/learner-role.json" \
+	      --output target/validation/cluster-transport-recovery.json; \
+	  else \
+	    exit 1; \
+	  fi
 
 .PHONY: cluster-daemon-check
 cluster-daemon-check: ## Run real-daemon activation and activity contracts

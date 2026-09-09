@@ -1,6 +1,6 @@
 # Transport recovery CI — implementation status and evidence
 
-**Status:** building M3 · **Owner:** Codex · **Updated:** 2026-09-08
+**Status:** building M4 · **Owner:** Codex · **Updated:** 2026-09-08
 
 Companion to
 [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md) (how this effort reaches
@@ -10,7 +10,7 @@ Companion to
 been built, reviewed, and proved. It is updated with each milestone so a green
 checkbox means retained evidence, not intent.
 
-## Current position — M2 is complete and the old campaign is paused
+## Current position — M3 is complete and split qualification is staged
 
 The effort begins at remote `main`
 `9fcd151c98485707d2dc28195adf9c0c1e4a6d4c`, the same source reviewed by the
@@ -44,7 +44,7 @@ frozen.
   and one real Linux warmup-plus-one smoke for each role.
 - [x] **M2 — durable diagnostics.** Checkpoints, timings, failure classes,
   cancellation, and owned-child cleanup evidence.
-- [ ] **M3 — split CI.** Independent voter and learner jobs, retained aggregate
+- [x] **M3 — split CI.** Independent voter and learner jobs, retained aggregate
   job ID, current-run artifacts, and exact receipt integration.
 - [ ] **M4 — frozen candidate semantics.** Promotion runs survive unrelated
   superseding events and stale candidates cannot issue a receipt.
@@ -140,6 +140,42 @@ survivors. Its terminal summary SHA-256 is
 no passing role report was published. That deliberate failure exposed an
 early-return path which initially skipped teardown; `df8b324f` fixes it and the
 evidence above comes from an exact-source rerun after the correction.
+
+## M3 evidence — each role has its own outcome and budget
+
+Commit `b5aeaee4` replaces the combined CI process with four explicit jobs: a
+30-minute Linux contract gate, independent 240-minute voter and learner jobs,
+and a 30-minute aggregate retaining the existing
+`cluster_transport_recovery` job ID. Neither role depends on the other. Each
+builds the exact candidate first, then receives the remainder of a 13,800-
+second role budget so ten minutes remain for diagnostics and artifact upload.
+Role reports, journals, summaries, and logs are retained for 14 days even when
+the role fails.
+
+The aggregate runs under `always()`, rejects any unsuccessful prerequisite or
+download, and accepts only the two named artifacts from its own workflow run.
+It assembles reports sharing `ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}` and
+then sends the canonical artifact through the existing semantic validator and
+exact-SHA lane receipt. Local `cluster-transport-recovery-check` preserves the
+compatible entry point but attempts both roles independently and assembles
+nothing unless both pass.
+
+The complete 55-test operations contract suite, 20 lane-receipt and
+qualification tests, YAML parsing, history audit, and whitespace checks pass.
+An archived M3 Make tree at `c2771841` then ran the split smoke entry point in
+Rust 1.97.1 Linux with execution ID `m3-local-c2771841`; M3 changes no Rust, so
+the reused runner binary correctly retained parent build SHA `df8b324f`.
+
+| Role | Measured cycles | Total wall | Role SHA-256 | Summary SHA-256 |
+|---|---:|---:|---|---|
+| Voter | 1 | 149,368 ms | `3b972608193279cae5b99283b2948ff3220fd535e205658821b9416c6576de56` | `9b3178b1c29de1fc439bd2bbf042477e4907a3622321c610357840a526b3b86d` |
+| Learner | 1 | 473,463 ms | `58525bf89423e5718b9dbea7a98405a60b7ce0e6272cad4a2e2e4b4ec942404f` | `79c76e494e27b2a93463b327eb5455fe7dcabacf2d74082fd169b1a13a1732cc` |
+
+This is smoke evidence, not qualification: the resource envelope is recorded
+but not asserted below ten closing samples, and no canonical artifact or
+receipt was issued. The former combined campaign remains suppressed; the
+split 20-plus-20 lane is the implementation that will run once on the frozen
+M6 promotion candidate.
 
 ## Guardrails — this effort changes observability, not production transport
 
