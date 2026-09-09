@@ -33,8 +33,17 @@ cluster-daemon, and replicated-WAL testing, then its fast Rust lane exposed a
 test-fixture defect: after generating a 10-bit PQ source, the fixture rebuilt
 its immutable decode recipe with hard-coded 8-bit SDR facts. The correction
 derives bit depth and transfer from the same media row as production; its exact
-source archive passes the rejected HDR restart regression on Rust 1.97.1 and
-will receive a fresh fast-lane run before merge · **Updated:** 2026-09-09 · **Effort:**
+source archive passes the rejected HDR restart regression on Rust 1.97.1.
+Replacement run
+[#1300](http://192.168.4.7:3000/noirr/plurx/actions/runs/1300) passed all 2,142
+ordinary Rust tests and the HDR restart before exposing a separate retained VFR
+assertion that inspected the containing segment's leading frame instead of the
+requested film instant. The corrected assertion samples at the request offset
+inside that immutable segment; both the VFR case and the shared CFR restart case
+pass on the pinned runner. The run's amd64 packaging job stopped before build
+because its external Buildx action could not resolve `github.com`; that is
+runner-network evidence, not a source failure. A fresh fast-lane run remains
+required before merge · **Updated:** 2026-09-09 · **Effort:**
 `effort/streaming-reliability` (merged) · **Started:** 2026-09-04 ·
 **Effort fork:** `48615baf` · **Continuation merged to main:** `1f6d6645` via
 [#178](http://192.168.4.7:3000/noirr/plurx/pulls/178) on 2026-09-08 ·
@@ -171,6 +180,7 @@ or call a green unit suite physical playback evidence.
 
 | At (America/New_York) | State change |
 |---|---|
+| 2026-09-09 — VFR seek assertion corrected | Clean PR run [#1300](http://192.168.4.7:3000/noirr/plurx/actions/runs/1300) passed the complete ordinary Rust suite (2,142 passed, six ignored), the corrected HDR restart, mobile versioning, policy preflight, and cluster-daemon contracts. Its serial VFR restart check then found red at the leading frame of the segment containing a three-second seek. The rendition correctly begins at 2.002 seconds; VFR resampling can legitimately select the preceding source frame at that boundary, while the requested three-second frame is green. The regression now samples at the request's relative offset within the segment and passes together with the shared CFR restart case on pinned Rust 1.97.1. The unrelated amd64 packaging failure occurred before compilation when the runner could not resolve the external Buildx action host. |
 | 2026-09-09 — exact correction qualification green | Draft [#196](http://192.168.4.7:3000/noirr/plurx/pulls/196) passes 472/472 iOS tests, 458/458 tvOS tests, and the complete Store inventory (153 passed, two process helpers ignored) on the tree integrating current `main`. Forgejo's Apple lane also passes. Its first fast Rust retry stopped before compilation because `gha-m6-general-02` was below the 25 GB disk floor; two PPID-1 UI-baseline test daemons from completed jobs were holding deleted files and falsely keeping the janitor away from the reproducible cache. The next cluster-daemon attempt found the same condition on sibling `gha-m6-general-01`, held by fourteen stopped PPID-1 sleep helpers. Only those exact stale test helpers were terminated; the installed janitors cleared the reproducible cache where required, both runners remain active, and they now have 26 GB and 31 GB free. WAL recovery tests all passed; that job failed only in post-test cache-reserve enforcement on a different runner. |
 | 2026-09-09 — correction rebased on the newer Apple fix | `main` advanced through [#195](http://192.168.4.7:3000/noirr/plurx/pulls/195), which added the bounded final-settlement retry and claimed Apple build 124. Draft correction [#196](http://192.168.4.7:3000/noirr/plurx/pulls/196) now integrates that exact tree, retains its 250 ms retry and cooperative-test repair, adds the missing detached-reporter join, preserves the decoder Store-fixture repairs, and claims build 125 so the newest Apple code has the highest build. |
 | 2026-09-09 — default-on merged; post-merge failures under correction | [#193](http://192.168.4.7:3000/noirr/plurx/pulls/193) merged as `7bb7cf6c`, defaulting prepared handoff on across the server and all three clients while keeping explicit opt-outs and a non-gating Developer requirements card. Superseding main run [#1253](http://192.168.4.7:3000/noirr/plurx/actions/runs/1253) then exposed two source problems: Apple tests could invalidate an injected `URLSession` while a detached final report was still beginning, and decoder-effort migration tests stamped old replicated schema markers without removing the newly integrated v28–v34 objects. The first Apple candidate passed 472 iOS and 458 tvOS tests and claimed build 124 before [#195](http://192.168.4.7:3000/noirr/plurx/pulls/195) superseded that build. Fast Rust, cluster daemon, and web did not execute: all three landed on `gha-nuc4-general-01` at 24 GB free and stopped at the 25 GB preflight floor; the hourly janitor has since restored 34 GB and reports the runner idle. |
