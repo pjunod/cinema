@@ -1312,6 +1312,10 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("name: fast Rust gate", fast_rust)
         self.assertIn("run: make effort-rust-check", fast_rust)
         self.assertNotIn("cargo test", fast_rust)
+        fast_finalize = fast_rust.split(
+            "- name: Enforce persistent Cargo bounds", 1
+        )[1]
+        self.assertIn("continue-on-error: true", fast_finalize)
         self.assertIn("name: Rust unit and SQLite contracts", unit_rust)
         self.assertIn("run: make ci-rust-gate", unit_rust)
         self.assertNotIn("scripts/validate run", fast_rust)

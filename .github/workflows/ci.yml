@@ -187,6 +187,12 @@ jobs:
         run: make effort-rust-check
       - name: Enforce persistent Cargo bounds
         if: always() && steps.cargo-cache.outputs.local == 'true'
+        # This lane answers one narrow question: does the app compile? Cache
+        # maintenance still runs and reports pressure, but a shared host
+        # crossing its percentage reserve after a successful build is runner
+        # health, not a failed compiler verdict. The installed janitor owns
+        # recovery of that host-wide condition.
+        continue-on-error: true
         uses: ./.github/actions/cargo-cache-finalize
         with:
           cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
