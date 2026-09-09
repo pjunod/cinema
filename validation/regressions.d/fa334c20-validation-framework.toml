@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["fa334c20"]
+commits = ["fa334c20", "d7c55089", "9246d3bf"]
 points = ["validation.framework"]
 checks = ["history-regressions"]
-reason = "The history audit retains the M1 ownership-repair mapping after the final runtime commit and requires the exact validation receipt to cover its own corrective ledger change."
+reason = "The history audit retains the M1 ownership-repair mapping after the final runtime commit and requires the exact validation receipt to cover its own corrective ledger change. The post-merge transport status and Apple evidence updates remain explicit validation metadata: the Apple behavior commit is mapped to apple.client and operations.packaging, while these two ledger-maintenance commits are mapped to validation.framework rather than claiming client ownership."
