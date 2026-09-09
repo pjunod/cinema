@@ -3591,14 +3591,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn playback_control_preview_is_default_off_and_persists_explicit_changes() {
+    async fn playback_control_is_default_on_and_persists_explicit_changes() {
         use plurx_core::store::keys;
 
         let (app, state) = test_app_with_state();
         let admin = setup_admin(&app).await;
         let (status, initial) = call(&app, get("/api/v1/settings", Some(&admin))).await;
         assert_eq!(status, StatusCode::OK, "{initial}");
-        assert_eq!(initial["playback_control_protocol_v1"], json!(false));
+        assert_eq!(initial["playback_control_protocol_v1"], json!(true));
         assert_eq!(
             state
                 .store
@@ -3606,10 +3606,10 @@ mod tests {
                 .await
                 .expect("setting"),
             None,
-            "an upgrade must not advertise a new client contract implicitly"
+            "the default-on value remains implicit until an operator changes it"
         );
 
-        for enabled in [true, false] {
+        for enabled in [false, true] {
             let (status, body) = call(
                 &app,
                 put(
@@ -4924,7 +4924,7 @@ mod tests {
 
         let (_, before) = call(&app, get("/api/v1/developer/readiness", Some(&admin))).await;
         let (enabled, status) = control_row(&before);
-        assert_eq!(enabled, false);
+        assert_eq!(enabled, true);
         assert_eq!(
             status, "unmet",
             "this test is worthless unless the switch's own prerequisite is refused"

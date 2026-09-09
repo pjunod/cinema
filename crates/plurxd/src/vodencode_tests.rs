@@ -64,6 +64,14 @@ fn refresh_encoded_plan(file: &MediaFile, encoding: &mut crate::vodencode::Encod
     encoding.resources = resources;
 }
 
+// Each test below owns a fresh `Admissions`, while production encoders on
+// one daemon share a single admission budget. Running these restart campaigns
+// concurrently can therefore launch more real FFmpeg processes than a daemon
+// permits and make a healthy child lose its init or seek preroll under load.
+// Serialize only this real-FFmpeg integration module so the fixture preserves the
+// production resource boundary without weakening any product concurrency.
+static ENCODED_INTEGRATION_CAMPAIGN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 async fn encoded_fixture(base: &Path) -> (MediaFile, Arc<crate::vodencode::Encoding>) {
     use plurx_core::transcode::{Encoder, TranscodeOptions, VodFrameGrid};
     testfixtures::require_ffmpeg();
@@ -149,6 +157,7 @@ async fn fetched_bytes(serve: &Arc<VodServe>, session: &str, name: &str) -> Vec<
 
 #[tokio::test]
 async fn encoded_identity_never_shares_a_renderer_across_processes() {
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
     let base = crate::test_tempdir().expect("process-isolated identity");
     let (file, mut encoding) = encoded_fixture(base.path()).await;
     let dependency = base.path().join("driver");
@@ -175,6 +184,7 @@ async fn encoded_identity_never_shares_a_renderer_across_processes() {
 
 #[tokio::test]
 async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
     let base = crate::test_tempdir().expect("source replacement");
     let (mut file, mut encoding) = encoded_fixture(base.path()).await;
     for color in ["red", "blue"] {
@@ -385,6 +395,7 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
 
 #[tokio::test]
 async fn encoded_vod_restarts_obey_current_capacity_policy() {
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
     let base = crate::test_tempdir().expect("capacity policy");
     let (_, encoding) = encoded_fixture(base.path()).await;
     encoding
@@ -420,6 +431,7 @@ async fn encoded_vod_restarts_obey_current_capacity_policy() {
 
 #[tokio::test]
 async fn encoded_vod_capacity_read_has_one_deadline_and_no_orphaned_wait() {
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
     let base = crate::test_tempdir().expect("held admission policy");
     let (_, encoding) = encoded_fixture(base.path()).await;
     tokio::time::pause();
@@ -457,6 +469,7 @@ async fn encoded_vod_capacity_read_has_one_deadline_and_no_orphaned_wait() {
 #[cfg(unix)]
 #[tokio::test]
 async fn encoded_vod_held_capacity_keeps_cached_gets_open_and_rechecks_seek_after_reap() {
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
     let base = crate::test_tempdir().expect("driver admission ownership");
     let (file, encoding) = encoded_fixture(base.path()).await;
     encoding
@@ -606,6 +619,7 @@ async fn encoded_vod_held_capacity_keeps_cached_gets_open_and_rechecks_seek_afte
 
 #[tokio::test]
 async fn encoded_vod_burn_sidecar_cannot_reuse_replaced_source_captions() {
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
     let base = crate::test_tempdir().expect("burn identity");
     let video = testfixtures::source("h264");
     for caption in ["ALPHA", "BRAVO"] {
@@ -673,6 +687,7 @@ async fn encoded_vod_burn_sidecar_cannot_reuse_replaced_source_captions() {
 #[cfg(unix)]
 #[tokio::test]
 async fn burn_extractor_physically_caps_oversized_matroska_attachment() {
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
     const CAP: u64 = 64 * 1024 * 1024;
     let base = crate::test_tempdir().expect("oversized burn attachment");
     let attachment = base.path().join("oversized-font.bin");
@@ -741,6 +756,7 @@ async fn burn_extractor_physically_caps_oversized_matroska_attachment() {
 
 #[tokio::test]
 async fn encoded_vod_hdr10_gets_keep_main10_and_pq_across_restarts() {
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
     let base = crate::test_tempdir().expect("HDR10 grid");
     let (mut file, mut encoding) = encoded_fixture(base.path()).await;
     let path = base.path().join("pq-source.mkv");
@@ -949,6 +965,7 @@ async fn decoded_audio(path: &Path, init: &[u8], first: &[u8], next: &[u8]) -> V
 
 #[tokio::test]
 async fn encoded_vod_aac_is_continuous_across_independently_regenerated_neighbors() {
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
     let base = crate::test_tempdir().expect("AAC continuity fixture");
     let (file, encoding) = encoded_fixture(base.path()).await;
     let serve = bare_serve(&base.path().join("renditions"));
@@ -1032,6 +1049,7 @@ async fn encoded_vod_aac_is_continuous_across_independently_regenerated_neighbor
 
 #[tokio::test]
 async fn encoded_vod_ntsc_gets_decode_after_forward_and_backward_restarts() {
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
     let base = crate::test_tempdir().expect("encoded fixture");
     let (file, encoding) = encoded_fixture(base.path()).await;
     assert_encoded_restarts(base.path(), file, encoding).await;
@@ -1043,6 +1061,7 @@ async fn encoded_vod_ntsc_gets_decode_after_forward_and_backward_restarts() {
 #[tokio::test]
 #[ignore = "explicit two-hour audio preparation benchmark"]
 async fn encoded_vod_two_hour_audio_restart_budget() {
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
     let base = crate::test_tempdir().expect("long audio benchmark");
     let (mut file, mut encoding) = encoded_fixture(base.path()).await;
     let surround = base.path().join("surround-seed.mkv");
@@ -1319,7 +1338,9 @@ async fn assert_encoded_restarts(
 }
 
 #[tokio::test]
+#[ignore = "run serially by the Rust gate; real FFmpeg restart fixture"]
 async fn encoded_vod_vfr_input_is_sampled_on_the_declared_rational_grid() {
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
     let base = crate::test_tempdir().expect("VFR fixture");
     let (mut file, mut encoding) = encoded_fixture(base.path()).await;
     let path = base.path().join("vfr.mkv");
@@ -1402,7 +1423,9 @@ async fn encoded_vod_vfr_input_is_sampled_on_the_declared_rational_grid() {
 }
 
 #[tokio::test]
+#[ignore = "run serially by the Rust gate; real FFmpeg restart fixture"]
 async fn encoded_vod_bitmap_burn_restores_cues_that_predate_video_seek_landing() {
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
     let base = crate::test_tempdir().expect("bitmap fixture");
     let (mut file, mut encoding) = encoded_fixture(base.path()).await;
     let fixture = include_bytes!("../../../fuzz/corpus/inspect_sup/mkpgs-1920x1080.sup");
@@ -1522,6 +1545,7 @@ async fn encoded_vod_bitmap_burn_restores_cues_that_predate_video_seek_landing()
 
 #[tokio::test]
 async fn encoded_vod_manual_audio_correction_keeps_restart_init_stable() {
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
     for offset in [-250, 250] {
         let base = crate::test_tempdir().expect("audio offset fixture");
         let (mut file, mut encoding) = encoded_fixture(base.path()).await;
@@ -1536,6 +1560,7 @@ async fn encoded_vod_manual_audio_correction_keeps_restart_init_stable() {
 
 #[tokio::test]
 async fn encoded_vod_text_burn_gets_keep_absolute_cue_time_after_seek() {
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
     let base = crate::test_tempdir().expect("burn fixture");
     let (mut file, mut encoding) = encoded_fixture(base.path()).await;
     let path = base.path().join("burn.vtt");

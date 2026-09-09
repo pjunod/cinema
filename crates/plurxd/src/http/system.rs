@@ -1613,8 +1613,9 @@ pub struct SettingsDto {
     /// Temporary growing-HLS fallback for typed VOD prerequisite failures.
     /// On by default while the recovery feature is compiled in.
     pub vod_live_recovery: bool,
-    /// Additive, behavior-neutral playback-control v1 advertisement. Off by
-    /// default until clients ship passive reporters.
+    /// Additive playback-control v1 advertisement. On by default now that all
+    /// clients ship reporters and prepared-switch adapters; explicit off is
+    /// retained as an operator override.
     pub playback_control_protocol_v1: bool,
     /// Whether an operator has asked this node for the health-qualified
     /// artifact identity. What the node actually does with the request is
@@ -1952,8 +1953,10 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             setting(keys::VOD_LIVE_RECOVERY).as_deref(),
             true,
         ),
-        playback_control_protocol_v1: setting(keys::PLAYBACK_CONTROL_PROTOCOL_V1).as_deref()
-            == Some("1"),
+        playback_control_protocol_v1: plurx_core::store::stored_switch(
+            setting(keys::PLAYBACK_CONTROL_PROTOCOL_V1).as_deref(),
+            true,
+        ),
         decoder_health_qualified_artifacts: decoder_health_requested,
         decoder_health_qualification: DecoderHealthQualification::of(
             &state.transcode.published_artifact_qualification(),

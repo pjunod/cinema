@@ -1,22 +1,24 @@
 # Streaming reliability — review, repair, and promotion status
 
-**Status:** the earlier effort slice reached `main`; the continuation now has
-§4's server protocol, all three prepared-switch clients, and immutable encoded
-VOD integrated with current `main`. Draft [#178](http://192.168.4.7:3000/noirr/plurx/pulls/178)
-completed its final adversarial review at `9249ddaa`. That pass found four
-remaining P1s: Android could DELETE before commit → end settled, Apple and web
-could retain finalization retry state forever, and web treated `timeupdate` as
-proof that video reached the screen. All four are corrected locally with
-bounded finalizers and ordering/evidence regressions. Focused Apple, Android,
-web, Rust, Store, and policy evidence is green. Per maintainer direction there
-will be no further review pass. The fixed head will merge after green fast-lane
-promotion jobs;
-the remaining promotion jobs continue after merge and any code correction gets
-a new pull request. Physical two-player evidence is advisory and open; it does
-not gate the enable control · **Updated:**
-2026-09-08 · **Effort:** `effort/streaming-reliability` (promotion candidate) · **Started:** 2026-09-04 ·
-**Effort fork:** `48615baf` · **Merged to main:** `bbe0bae9` via
-[#53](http://192.168.4.7:3000/noirr/plurx/pulls/53) on 2026-09-06 ·
+**Status:** the streaming-reliability continuation reached `main` as
+`1f6d6645` through [#178](http://192.168.4.7:3000/noirr/plurx/pulls/178).
+It includes §4's server protocol, all three prepared-switch clients, and
+immutable film-addressed encoded VOD. The final adversarial review at
+`9249ddaa` found four P1s: Android could DELETE before commit → end settled,
+Apple and web could retain finalization retry state forever, and web treated
+`timeupdate` as proof that video reached the screen. All four were corrected
+with bounded finalizers and ordering/evidence regressions; per maintainer
+direction, that was the final review pass. Apple build 122 and Android build 76
+preserve release ordering over the Live TV build already on `main`.
+Post-merge CI is running on the merge commit; any source failure receives a
+new corrective pull request. The follow-up candidate defaults the server and
+all three clients on while preserving explicit opt-outs and the complete
+Developer requirements list. Physical two-player evidence remains advisory and
+does not gate or override the enabled default · **Updated:**
+2026-09-08 · **Effort:** `effort/streaming-reliability` (merged) · **Started:** 2026-09-04 ·
+**Effort fork:** `48615baf` · **Continuation merged to main:** `1f6d6645` via
+[#178](http://192.168.4.7:3000/noirr/plurx/pulls/178) on 2026-09-08 ·
+**Earlier slice:** `bbe0bae9` via [#53](http://192.168.4.7:3000/noirr/plurx/pulls/53) on 2026-09-06 ·
 **Open:** [#65](http://192.168.4.7:3000/noirr/plurx/pulls/65) (§3 capacity
 visibility, the durable outcome ledger, and the deploy status probe).
 [#54](http://192.168.4.7:3000/noirr/plurx/pulls/54),
@@ -28,8 +30,8 @@ PRs, and `git rev-list --count main..<head>` is 0 for each
 Companion to [PLAYBACK.md](../PLAYBACK.md) (the shipped playback contract),
 [PLAYBACK-CONTROL-STATUS.md](../playback-control/PLAYBACK-CONTROL-STATUS.md) (the control-protocol
 chronicle), and [VOD-CUTOVER.md](VOD-CUTOVER.md) (the immutable-HLS cutover) —
-this page answers *what the current reliability effort is doing, what has been
-proved, and what remains before it may reach `main`*.
+this page answers *what the reliability effort changed, what proved it ready,
+and what post-merge evidence remains open*.
 
 The detailed, ranked result is
 [STREAMING-RELIABILITY-REVIEW.md](STREAMING-RELIABILITY-REVIEW.md). The review
@@ -40,13 +42,12 @@ The resumable remaining-work queue, exact worktrees and verification commands
 are in [STREAMING-RELIABILITY-HANDOFF.md](STREAMING-RELIABILITY-HANDOFF.md).
 Completed tasks are removed from that queue and retained here as evidence.
 
-The working copy is an isolated clone under `/private/tmp`; the existing
-developer checkouts are not used for implementation or validation. Task
-branches merge into the effort branch through the compile-only development
-gate. This effort reaches `main` after its final adversarial review findings are
-corrected and the main-promotion fast lane is green. Longer promotion jobs keep
-running after the merge; failures are watched to completion and any source
-correction is made in a new pull request.
+The work used an isolated clone under `/private/tmp`; the existing developer
+checkouts were not used for implementation or validation. Task branches merged
+into the effort branch through the compile-only development gate. The effort
+then integrated current `main` and merged as `1f6d6645`. Longer qualification
+jobs continue on that merge commit; failures are watched to completion and any
+source correction is made in a new pull request.
 
 ## Outcome — playback changes must preserve the player
 

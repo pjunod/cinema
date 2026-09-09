@@ -4,7 +4,7 @@ import SwiftUI
 /// generation; enabling is a separate runtime mutation, never a build switch.
 struct LiveTvDeveloperView: View {
     @EnvironmentObject private var model: AppModel
-    @AppStorage("plurx.preparedHandoff") private var preparedHandoffEnabled = false
+    @AppStorage("plurx.preparedHandoff") private var preparedHandoffEnabled = true
     @State private var api: LiveTvAPI?
     @State private var saved: LiveTvSettings?
     @State private var readiness: LiveTvReadiness?
@@ -27,7 +27,7 @@ struct LiveTvDeveloperView: View {
         Form {
             Section("Prepared quality handoff · advisory enablement") {
                 Toggle("Enable two-player prepared handoff", isOn: $preparedHandoffEnabled)
-                Text("Off by default. This controls whether Apple advertises dual-player preparation. The checks below explain risk; they never disable or override the switch.")
+                Text("On by default. This controls whether Apple advertises dual-player preparation. The checks below explain risk; they never disable or override the switch, and you can turn it off here.")
                 Label("Client implementation and first-frame proof: Met", systemImage: "checkmark.circle")
                 Label("Measured Apple cohort: Met", systemImage: "checkmark.circle")
                 Text("iPhone 17 Pro Max and Apple TV 4K (3rd generation) each completed 20 of 20 same-codec and codec/HDR handoffs.")
