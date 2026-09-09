@@ -35,6 +35,7 @@ final class LiveTvPlayerController: ObservableObject {
     /// cannot tune while a guide host is slow.
     @Published private(set) var guide: LiveTvGuide?
     @Published private(set) var watching: LiveTvChannel?
+    @Published private(set) var status: LiveTvStatus?
     let player = AVPlayer()
     private var api: LiveTvAPI?
     private var lease: LiveTvLease?
@@ -130,6 +131,7 @@ final class LiveTvPlayerController: ObservableObject {
                             let status = try await api.status(info.sessionId)
                             guard self.serial == expected else { return }
                             if status.state != "active" { throw LiveTvFailure(code: "stream_failed") }
+                            self.status = status
                         } else if progress.expired {
                             if self.paused {
                                 self.message = "Paused for 30 seconds. The tuner was released; select a channel to resume live."
@@ -253,6 +255,7 @@ final class LiveTvPlayerController: ObservableObject {
         channelChange?.cancel()
         channelChange = nil
         watching = nil
+        status = nil
         player.pause()
         player.replaceCurrentItem(with: nil)
         title = nil
@@ -318,6 +321,83 @@ func liveTvTime(_ unix: Int) -> String {
     liveTvClock.string(from: Date(timeIntervalSince1970: TimeInterval(unix)))
 }
 
+func liveTvTechnicalSummary(_ channel: LiveTvChannel, status: LiveTvStatus?) -> String {
+    var facts = [String]()
+    if let source = channel.sourceFormatDescription { facts.append(source) }
+    if let value = status?.signal?.strengthPercent { facts.append("strength \(value)%") }
+    if let value = status?.signal?.qualityPercent { facts.append("quality \(value)%") }
+    if let value = status?.signal?.symbolQualityPercent { facts.append("symbol \(value)%") }
+    return facts.joined(separator: " · ")
+}
+
+struct LiveTvFormatBadges: View {
+    let channel: LiveTvChannel
+
+    var body: some View {
+        if !channel.formatBadges.isEmpty {
+            HStack(spacing: 4) {
+                ForEach(channel.formatBadges, id: \.self) { badge in
+                    Text(badge)
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(Palette.muted)
+                        .padding(.horizontal, 5).padding(.vertical, 2)
+                        .overlay(Capsule().stroke(Palette.outline))
+                }
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Source format: \(channel.formatBadges.joined(separator: ", "))")
+        }
+    }
+}
+
+struct LiveTvTechnicalDetails: View {
+    let channel: LiveTvChannel
+    let status: LiveTvStatus?
+
+    private var delivery: String? {
+        guard let status else { return nil }
+        let encoder = status.encoder == "pending" ? "" : " · \(status.encoder.uppercased()) encoder"
+        return "H.264 · \(status.outputHeight)p · AAC\(encoder)"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            if let source = channel.sourceFormatDescription {
+                detailRow("Source", source)
+            }
+            if let delivery { detailRow("Delivery", delivery) }
+            if let signal = status?.signal {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("SIGNAL").font(.system(size: 9, weight: .bold)).foregroundStyle(Palette.muted)
+                    HStack(spacing: 10) {
+                        signalMeter("Strength", signal.strengthPercent)
+                        signalMeter("Quality", signal.qualityPercent)
+                        signalMeter("Symbol", signal.symbolQualityPercent)
+                    }
+                }
+            }
+        }
+        .padding(.top, 7)
+    }
+
+    private func detailRow(_ label: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(label.uppercased()).font(.system(size: 9, weight: .bold))
+                .foregroundStyle(Palette.muted).frame(width: 54, alignment: .leading)
+            Text(value).font(.caption).foregroundStyle(Palette.muted)
+        }
+    }
+
+    @ViewBuilder private func signalMeter(_ label: String, _ value: Int?) -> some View {
+        if let value {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("\(label) \(value)%").font(.caption2).foregroundStyle(Palette.muted)
+                ProgressView(value: Double(value), total: 100).tint(Palette.accent)
+            }
+        }
+    }
+}
+
 /// One channel row: chip, number and callsign, what is on with a bar to its
 /// end, and what is next. A protected channel is dimmed, never hidden.
 struct LiveTvChannelRow: View {
@@ -333,7 +413,10 @@ struct LiveTvChannelRow: View {
                 .background(Palette.surfaceHi)
                 .clipShape(RoundedRectangle(cornerRadius: 4))
             VStack(alignment: .leading, spacing: 3) {
-                Text(channel.title).font(.subheadline.weight(.semibold))
+                HStack(spacing: 5) {
+                    Text(channel.title).font(.subheadline.weight(.semibold))
+                    LiveTvFormatBadges(channel: channel)
+                }
                 if !channel.watchable {
                     Text("Protected channel · not playable")
                         .font(.caption).foregroundStyle(Palette.muted)
@@ -388,6 +471,7 @@ struct LiveTvGuideGrid: View {
                         VStack(alignment: .leading, spacing: 1) {
                             Text(row.channel.guideNumber).font(.caption.weight(.semibold))
                             Text(row.channel.guideName).font(.caption2).foregroundStyle(Palette.muted)
+                            LiveTvFormatBadges(channel: row.channel)
                         }
                         .frame(width: LiveTvGridMetrics.channelColumnWidth, alignment: .leading)
                         ZStack(alignment: .topLeading) {
@@ -658,6 +742,7 @@ struct LiveTvView: View {
                      + (airing.next.map { " · Next: \($0.title)" } ?? ""))
                     .font(.caption).foregroundStyle(Palette.muted).lineLimit(1)
             }
+            if let channel { LiveTvTechnicalDetails(channel: channel, status: live.status) }
             HStack {
                 Button(live.paused ? "Play live" : "Pause") { live.togglePause() }
                 Button(muted ? "Unmute" : "Mute") { muted.toggle(); live.player.isMuted = muted }
@@ -703,6 +788,10 @@ struct LiveTvView: View {
                             Text(airing.now?.title ?? live.title ?? "Live television")
                                 .font(.title3.weight(.semibold))
                             Text(channel?.title ?? "").font(.caption)
+                            if let channel {
+                                Text(liveTvTechnicalSummary(channel, status: live.status))
+                                    .font(.caption2).opacity(0.78)
+                            }
                             if let now = airing.now {
                                 Text("\(liveTvTime(now.start))–\(liveTvTime(now.end))"
                                      + (airing.next.map { " · Next: \($0.title)" } ?? ""))

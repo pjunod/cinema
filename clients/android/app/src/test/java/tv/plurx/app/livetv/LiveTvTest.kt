@@ -52,6 +52,24 @@ class LiveTvTest {
         assertEquals("7.1 · Fixture News", channel.title)
     }
 
+    @Test fun lineupFormatsAndLiveSignalDecodeWithoutGuessing() {
+        val formatted = Net.json.decodeFromString<LiveTvChannel>("""{
+            "id":"7.1","guide_number":"7.1","guide_name":"Fixture News",
+            "hd":true,"video_codec":"HEVC","audio_codec":"AC4"
+        }""")
+        assertEquals(listOf("HD", "HEVC", "AC4"), formatted.formatBadges)
+        assertEquals("HD source · HEVC video · AC4 audio", formatted.sourceFormatDescription)
+        assertTrue(channel.formatBadges.isEmpty())
+
+        val status = Net.json.decodeFromString<LiveTvStatus>("""{
+            "state":"active","encoder":"vaapi","output_height":720,
+            "signal":{"strength_percent":96,"quality_percent":89,"symbol_quality_percent":100}
+        }""")
+        assertEquals(96, status.signal?.strength_percent)
+        assertEquals(89, status.signal?.quality_percent)
+        assertEquals(100, status.signal?.symbol_quality_percent)
+    }
+
     @Test fun everySwitchConfirmsReleaseBeforeNextStart() = runTest {
         val requests = Requests()
         val store = Store()

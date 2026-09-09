@@ -1906,12 +1906,17 @@ encoder.
 The response is `{freshness, age_seconds, last_success_at, refresh_error?,
 channels[]}`, where `freshness` is `fresh` (fetched within 30 s) or `stale`
 (the refresh failed and this is the last good projection, up to 5 minutes
-old). Each channel is `{id, guide_number, guide_name, favorite, drm, support}`
-where `support` is `ready` or `drm_unsupported`.
+old). Each channel is `{id, guide_number, guide_name, favorite, drm, support,
+hd?, video_codec?, audio_codec?}` where `support` is `ready` or
+`drm_unsupported`. The three format fields are the tuner's lineup claims:
+`hd` is a Boolean, and codec names are trimmed strings of at most 32 bytes.
+An absent or malformed format field is omitted, not guessed from the virtual
+channel number or from whether the channel is ATSC 1.0 or 3.0.
 
-Nothing else from the device's lineup survives. The device URL is validated
-and then **discarded** — a client never receives one, and the server never
-follows a lineup-supplied URL.
+Nothing else from the device's lineup survives. In particular, these fields
+describe the broadcast source, not the stream plurx delivers. The device URL
+is validated and then **discarded** — a client never receives one, and the
+server never follows a lineup-supplied URL.
 
 **DRM channels are marked, not hidden.** A household that can see channel 2.1
 on the TV should see why plurx will not play it rather than wonder where it
@@ -1925,7 +1930,31 @@ The refusal is enforced again at start, not only in the lineup: a start
 re-fetches the lineup forced, so it never rides the stale projection, and a
 protected channel is 415 `drm_unsupported`.
 
-### 17.4 The capability's three clocks
+### 17.4 Session status separates source, delivery and reception
+
+`GET /api/v1/live-tv/sessions/{capability}/status` returns
+`{state, channel, owner_node_id, encoder, output_height, media_sequence,
+age_seconds, idle_seconds, signal?, error?}`. `channel` carries the source
+format fields from §17.3; `encoder` and `output_height` describe plurx's
+H.264/AAC delivery stream.
+
+When the device exposes `/status.json` and names a busy tuner row for the
+session's virtual channel, `signal` is
+`{strength_percent?, quality_percent?, symbol_quality_percent?}`. All three
+values are the device's normalized `0..100` readings. Strength is received RF
+level; quality is the tuner's signal-quality reading; symbol quality reflects
+whether demodulated symbols are arriving without errors. Read them together:
+high strength with low quality can still be a bad signal, while symbol quality
+below 100 means the tuner is seeing errors.
+
+Signal is diagnostic and best-effort. It is cached for 4 seconds, a missing or
+unsupported `/status.json` answer is cached for 15 seconds, and either case
+never fails playback or the status request. The `signal` object is omitted
+when the device cannot supply a bounded matching row; absence means
+*unavailable*, not zero. The endpoint is capability-authenticated and the
+device address, tuner resource and target IP never leave the owner.
+
+### 17.5 The capability's three clocks
 
 All enforced on a 250 ms tick:
 

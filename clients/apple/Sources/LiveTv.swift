@@ -7,8 +7,31 @@ struct LiveTvChannel: Codable, Identifiable, Equatable, Sendable {
     let favorite: Bool
     let drm: Bool
     let support: String
+    let hd: Bool?
+    let videoCodec: String?
+    let audioCodec: String?
     var watchable: Bool { !drm && support == "ready" }
     var title: String { "\(guideNumber) · \(guideName)" }
+    var formatBadges: [String] {
+        var badges = [String]()
+        if let hd { badges.append(hd ? "HD" : "SD") }
+        for value in [videoCodec, audioCodec] {
+            guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !value.isEmpty else { continue }
+            let badge = value.uppercased()
+            if !badges.contains(badge) { badges.append(badge) }
+        }
+        return badges
+    }
+    var sourceFormatDescription: String? {
+        var facts = [String]()
+        if let hd { facts.append(hd ? "HD source" : "SD source") }
+        if let videoCodec = videoCodec?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !videoCodec.isEmpty { facts.append("\(videoCodec.uppercased()) video") }
+        if let audioCodec = audioCodec?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !audioCodec.isEmpty { facts.append("\(audioCodec.uppercased()) audio") }
+        return facts.isEmpty ? nil : facts.joined(separator: " · ")
+    }
 }
 
 struct LiveTvLineup: Decodable, Sendable {
@@ -28,6 +51,13 @@ struct LiveTvStatus: Decodable, Sendable {
     let ownerNodeId: String
     let encoder: String
     let outputHeight: Int
+    let signal: LiveTvSignal?
+}
+
+struct LiveTvSignal: Decodable, Equatable, Sendable {
+    let strengthPercent: Int?
+    let qualityPercent: Int?
+    let symbolQualityPercent: Int?
 }
 
 struct LiveTvSettings: Decodable, Equatable, Sendable {

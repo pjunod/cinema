@@ -439,6 +439,15 @@ not a DVR: nothing is recorded, nothing is scheduled, and nothing is kept.
   never stops the stream and never refetches — it is a re-render of the browse
   region. A protected channel is dimmed rather than hidden, with a
   `Hide protected` filter for a lineup that is mostly DRM.
+- **Source format and live reception stay distinct.** Every channel row and
+  guide row uses compact badges for the facts the tuner advertises — `HD` or
+  `SD`, video codec and audio codec — and leaves a badge out when the device
+  does not know. While a channel plays, the detail surface separately names
+  that source, plurx's delivered H.264/AAC resolution and encoder, and the
+  tuner's live strength, quality and symbol-quality percentages. Signal is a
+  best-effort diagnostic: firmware without `/status.json`, or a response that
+  cannot be tied to the playing virtual channel, hides the meters rather than
+  showing a false zero or interrupting playback.
 - **The programme data is a feed, not a dependency.** It comes from the
   HDHomeRun's own guide service by default, or from an XMLTV document an
   administrator configures. It is read-only: a future programme has a details
