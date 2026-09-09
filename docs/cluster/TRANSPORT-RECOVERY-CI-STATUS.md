@@ -1,6 +1,6 @@
 # Transport recovery CI — implementation status and evidence
 
-**Status:** M6 fixed candidate browser-verified; replacement qualification next · **Owner:** Codex · **Updated:** 2026-09-09
+**Status:** M6 second-voter startup correction in exact-source verification · **Owner:** Codex · **Updated:** 2026-09-09
 
 Companion to
 [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md) (how this effort reaches
@@ -188,6 +188,24 @@ switch, docking, typed failures, late-start cleanup, owner loss, producer
 failure, expiry, paused timeout, visibility cleanup, and reload quarantine all
 completed with bounded tuner ownership. It is ready for the replacement full
 qualification push.
+
+Replacement run
+[#1343](http://192.168.4.7:3000/noirr/plurx/actions/runs/1343) passed
+validation scope, mobile versioning, preflight, both packages, both Android
+lanes, WAL recovery, and the cluster shard graph before the real-daemon
+activity contract exposed a different loaded-runner boundary. Node B was
+durably admitted as the second voter and caught up, then both votes were not
+scheduled together for longer than the Store's ordinary five-second authority-
+read recovery budget. Its compatibility read returned the explicit
+`CheckIsLeaderError: not enough for a quorum` and the joining daemon exited.
+The run was cancelled before either 20-cycle recovery role started. The
+correction keeps that already-caught-up voter alive and retries only this exact
+quorum error inside the existing sixteen-second leader-recovery envelope;
+schema, identity, transport, leader-change, and ordinary Store timeout errors
+remain terminal. Exact committed source `f33249f8` passes Rust 1.97.1 all-
+target compilation, Clippy with warnings denied, the strict retry-classifier
+unit, and the real two-daemon activity regression. No additional review was
+requested: the one adversarial review remains the only review for this PR.
 
 ## Milestones — evidence closes the checkbox
 
