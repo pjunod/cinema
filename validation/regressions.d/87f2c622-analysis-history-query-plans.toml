@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["87f2c622"]
+points = ["core.media", "persistence.upgrades", "cluster.auth"]
+checks = ["rust-gate", "rust-gate-ci", "database-upgrades", "cluster-auth"]
+reason = "The SQLite query-plan contracts require both canonical history and summary classification to probe standalone jobs through analysis_requests_result_history by result_cache_key, and require terminal-retention's correlated newer-generation lookup to use analysis_requests_terminal_identity by file_id. Those assertions fail if either optimized predicate or either supporting partial index is removed, preventing the multi-second full scans that starved the replicated writer and expired serving authority. The v49-to-current migration contract requires the terminal identity index to appear on upgrade, schema parity covers the standalone and replicated definitions, and the populated import plus downgrade fixtures keep the new migration reversible in their test setup while preserving existing data. Backend-neutral history-cap and disposition contracts retain the terminal pruning and classification behavior whose plans were changed."
