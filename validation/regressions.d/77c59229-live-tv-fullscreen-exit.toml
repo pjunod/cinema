@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["77c59229"]
+points = ["live-tv.integration", "web.experience"]
+checks = ["web-static", "web-layout"]
+reason = "The shipped Live TV unit holds exitFullscreen's returned promise pending forever, changes fullscreenElement through the browser's state-change event, and proves tuner release begins immediately while the fullscreen subtree remains mounted; media detachment and host hiding follow the state transition rather than an unreliable native promise. The real browser acceptance enters host fullscreen, stops Live TV, requires both fullscreen exit and tuner release, and reports exact presentation/teardown state if that contract times out."
