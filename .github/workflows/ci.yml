@@ -165,8 +165,36 @@ jobs:
         if: needs.scope.outputs.docs_only == 'true'
         run: echo "Documentation-only diff; runtime and compiler surfaces are skipped."
 
-  check:
+  rust_compile:
     name: fast Rust gate
+    needs: [scope, preflight]
+    # Give main-bound pull requests an early, independent compiler verdict.
+    # The full unit and SQLite suite continues below; contributors may merge
+    # after this compile gate and policy pass, then watch that suite on main.
+    if: needs.scope.outputs.rust == 'true'
+    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
+    timeout-minutes: 10
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v4
+      - uses: https://github.com/dtolnay/rust-toolchain@1.97.1
+        with:
+          components: rustfmt, clippy
+      - id: cargo-cache
+        uses: ./.github/actions/cargo-cache
+        with:
+          lane: rust-compile
+      - name: Compile every Rust target without executing tests
+        run: make effort-rust-check
+      - name: Enforce persistent Cargo bounds
+        if: always() && steps.cargo-cache.outputs.local == 'true'
+        uses: ./.github/actions/cargo-cache-finalize
+        with:
+          cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
+          budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
+          last-used: ${{ steps.cargo-cache.outputs.last-used }}
+
+  check:
+    name: Rust unit and SQLite contracts
     needs: [scope, preflight]
     # Kotlin and Swift diffs compile nothing under crates/, so the cargo lane
     # only runs when the diff can reach it; qualification and queue runs force

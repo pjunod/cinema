@@ -1303,21 +1303,28 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("effort/*|integration/*-into-main)", workflow)
         self.assertIn("scope_event=effort_qualification", workflow)
         self.assertIn("qualification: ${{ steps.scope.outputs.qualification }}", workflow)
-        fast_rust = workflow.split("  check:", 1)[1].split(
+        fast_rust = workflow.split("  rust_compile:", 1)[1].split(
+            "\n  check:", 1
+        )[0]
+        unit_rust = workflow.split("  check:", 1)[1].split(
             "\n  cluster_store_legacy:", 1
         )[0]
         self.assertIn("name: fast Rust gate", fast_rust)
-        self.assertIn("run: make ci-rust-gate", fast_rust)
+        self.assertIn("run: make effort-rust-check", fast_rust)
+        self.assertNotIn("cargo test", fast_rust)
+        self.assertIn("name: Rust unit and SQLite contracts", unit_rust)
+        self.assertIn("run: make ci-rust-gate", unit_rust)
         self.assertNotIn("scripts/validate run", fast_rust)
         self.assertNotIn("actions/setup-node", fast_rust)
         self.assertNotIn("./.github/actions/playwright", fast_rust)
-        self.assertIn("uses: ./.github/actions/ffmpeg", fast_rust)
-        self.assertIn('major: "6"', fast_rust)
+        self.assertNotIn("uses: ./.github/actions/ffmpeg", fast_rust)
+        self.assertIn("uses: ./.github/actions/ffmpeg", unit_rust)
+        self.assertIn('major: "6"', unit_rust)
         # Membership alone would stay green with the step moved below the gate
         # it provisions, which is exactly the failure this contract records.
         self.assertLess(
-            fast_rust.index("uses: ./.github/actions/ffmpeg"),
-            fast_rust.index("run: make ci-rust-gate"),
+            unit_rust.index("uses: ./.github/actions/ffmpeg"),
+            unit_rust.index("run: make ci-rust-gate"),
         )
         self.assertIn("if: needs.scope.outputs.apple == 'true'", workflow)
         web_layout = workflow.split("\n  web_layout:", 1)[1].split(
@@ -3039,7 +3046,10 @@ assert.equal(context.ACT_TIMER, null);
                 elif path == ".github/workflows/ci.yml" and name == "cluster_wal":
                     expected = high_cpu
                 elif (
-                    path == ".github/workflows/effort-ci.yml"
+                    path in {
+                        ".github/workflows/ci.yml",
+                        ".github/workflows/effort-ci.yml",
+                    }
                     and name == "rust_compile"
                 ):
                     expected = high_cpu
