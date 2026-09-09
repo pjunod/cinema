@@ -990,6 +990,11 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     // nothing fenced a process that was already running when the schema moved,
     // because compatibility is checked at open and never again.
     crate::store::MEDIA_PLAYBACK_POINTER_DESIRED_FENCE_SCHEMA,
+    // v50: the terminal analysis-history retention trigger runs inside the
+    // durable writer transaction. Once the retained window fills, its
+    // correlated newer-generation lookup must be an indexed identity search
+    // rather than a scan for every terminal candidate.
+    crate::store::fragment_index_cluster::ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -2382,7 +2387,7 @@ mod tests {
             .expect("version");
         assert_eq!(version, MIGRATIONS.len() as i64);
         assert_eq!(
-            version, 49,
+            version, 50,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );
@@ -3770,5 +3775,38 @@ mod tests {
         assert!(columns
             .iter()
             .any(|column| column == "publication_ready_at_ms"));
+    }
+
+    #[test]
+    fn v49_adds_the_terminal_analysis_identity_index() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("plurx.db");
+        {
+            let conn = Connection::open(&db).expect("raw open");
+            for (index, sql) in MIGRATIONS.iter().enumerate().take(49) {
+                conn.execute_batch(&format!("BEGIN;\n{sql}\nCOMMIT;"))
+                    .unwrap_or_else(|error| panic!("v{}: {error}", index + 1));
+            }
+            conn.pragma_update(None, "user_version", 49)
+                .expect("v49 marker");
+        }
+
+        SqliteStore::open(&db).expect("migrate v49 to current");
+        let conn = Connection::open(&db).expect("raw reopen");
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .expect("version"),
+            SQLITE_SCHEMA_VERSION
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                  WHERE type = 'index' AND name = 'analysis_requests_terminal_identity'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("terminal identity index"),
+            1
+        );
     }
 }

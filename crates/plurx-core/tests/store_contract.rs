@@ -14070,6 +14070,7 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
              DROP TRIGGER IF EXISTS analysis_requests_supersede_source;
              DROP TRIGGER IF EXISTS analysis_requests_cancel_source;
              DROP TRIGGER IF EXISTS cluster_fragment_indexes_cancel_source;
+             DROP INDEX IF EXISTS analysis_requests_terminal_identity;
              DROP TABLE IF EXISTS analysis_attempts;
              DROP TABLE IF EXISTS cluster_fragment_index_heads;
              DROP TABLE IF EXISTS analysis_lifecycle_counters;
