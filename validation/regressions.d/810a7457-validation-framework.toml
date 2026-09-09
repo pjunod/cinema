@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["810a7457", "8a684d50", "db015e6d", "1a375303", "5abefe8e"]
+commits = ["810a7457", "8a684d50", "db015e6d", "1a375303", "5abefe8e", "0c4f9612", "e84b70e0"]
 points = ["validation.framework"]
 checks = ["history-regressions"]
 reason = "These metadata-only commits register and correct the retained offline recovery fixture regression mapping; they do not change runtime or test behavior."
