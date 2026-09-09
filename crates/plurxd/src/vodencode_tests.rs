@@ -1269,12 +1269,23 @@ async fn assert_encoded_restarts(
                 Unit::Trailer => {}
             }
         }
+        // A seek attaches at the containing segment boundary, which can
+        // precede the requested film time. With VFR input, the fps filter may
+        // legitimately choose a preceding source frame for that boundary.
+        // Inspect the frame at the actual seek target so this assertion tests
+        // destination content rather than the segment's leading preroll.
+        let entry_start_seconds = rendition.plan.entry(entry).expect("entry").start_ticks as f64
+            / f64::from(rendition.plan.timescale);
+        let marker_offset = (target - entry_start_seconds).max(0.0);
+        let marker_filter = format!(
+            "select='gte(t,{marker_offset:.9})',crop=2:2:8:8,format=rgb24"
+        );
         let pixel = tokio::process::Command::new(ffmpeg_bin())
             .args(["-hide_banner", "-loglevel", "error", "-i"])
             .arg(&output)
             .args([
                 "-vf",
-                "crop=2:2:8:8,format=rgb24",
+                &marker_filter,
                 "-frames:v",
                 "1",
                 "-an",
@@ -1287,6 +1298,7 @@ async fn assert_encoded_restarts(
             .await
             .expect("decode destination marker");
         assert!(pixel.status.success());
+        assert_eq!(pixel.stdout.len(), 12, "one 2x2 RGB marker frame");
         let channel = [0, 2, 1][ordinal];
         assert!(
             pixel.stdout[channel] > 70
