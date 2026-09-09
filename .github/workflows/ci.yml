@@ -15,7 +15,12 @@ env:
   CARGO_TERM_COLOR: always
 
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
+  # Forgejo 16 coerces `pull_request.number || github.ref` to the boolean
+  # truth value of the expression, collapsing unrelated PRs into `ci-true`.
+  # `github.ref` is already stable for repeated events of one PR and distinct
+  # across PR, main, and tag refs, so it supplies the intended isolation
+  # without an expression-level fallback.
+  group: ci-${{ github.ref }}
   # A final promotion candidate must survive a newer event long enough to
   # retain a diagnostic result. Ordinary PRs and main pushes still supersede
   # their older work; tags remain immutable evidence. Workflow concurrency is

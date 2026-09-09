@@ -2687,10 +2687,8 @@ assert.equal(context.ACT_TIMER, null);
             "github.event_name == 'push' && github.ref == 'refs/heads/main'",
         ):
             self.assertIn(contract, workflow)
-        self.assertIn(
-            "group: ci-${{ github.event.pull_request.number || github.ref }}",
-            workflow,
-        )
+        self.assertIn("group: ci-${{ github.ref }}", workflow)
+        self.assertNotIn("github.event.pull_request.number || github.ref", workflow)
         self.assertIn("cancel-in-progress: true", effort_workflow)
 
         def cancels(
