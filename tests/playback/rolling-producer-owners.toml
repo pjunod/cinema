@@ -1309,7 +1309,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # lineup precisely so it can never be a reason to talk to the device. It also
 # refuses to run off the configured owner node and while serving authority is
 # not admitted, so a fenced node's loop does nothing but sleep.
-expected_occurrences = 446
+# 446 -> 448 on the exact promotion merge: the streaming branch's bounded
+# extractor kill/reap ownership and joined cancellation fixtures coexist with
+# main's Live TV guide loop. Production tasks are cancellation-bound or own the
+# exact child through confirmed reap; fixture actors are aborted/joined or
+# awaited before teardown. Neither parent inventory may be discarded.
+expected_occurrences = 448
 
 [[module_structures]]
 id = "method-spawn"
