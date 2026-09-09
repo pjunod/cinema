@@ -238,7 +238,18 @@ def main(argv: list[str]) -> int:
             page.locator("#live-tv-body").get_by_label("Fullscreen", exact=True).click()
             page.wait_for_function("document.fullscreenElement?.id === 'live-tv-host'")
             stop()
-            page.wait_for_function("!document.fullscreenElement && document.querySelector('#live-tv-host').hidden")
+            try:
+                page.wait_for_function("!document.fullscreenElement && document.querySelector('#live-tv-host').hidden")
+            except Exception as error:
+                state = page.evaluate("""() => ({
+                    fullscreen: document.fullscreenElement?.id || null,
+                    hidden: document.querySelector('#live-tv-host')?.hidden,
+                    mode: document.querySelector('#live-tv-host')?.dataset.mode || null
+                })""")
+                raise AssertionError(
+                    f"fullscreen stop did not settle: state={state!r}, "
+                    f"active={active()!r}, page_errors={errors!r}"
+                ) from error
             until(lambda: not active(), "fullscreen stop did not release")
 
             watch()

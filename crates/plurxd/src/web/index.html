@@ -15250,8 +15250,14 @@ function detachLiveTvMedia(){
   if(video){ video.onerror=null; video.onended=null; video.pause(); video.removeAttribute("src"); video.load(); }
 }
 async function stopLiveTv(){
-  ++LIVE_TV.serial; await exitLiveTvPresentation(); detachLiveTvMedia();
-  const host=document.getElementById("live-tv-host"); if(host) host.hidden=true;
+  ++LIVE_TV.serial;
+  const host=document.getElementById("live-tv-host");
+  // `document.exitFullscreen()` resolves before Chromium dispatches its
+  // fullscreenchange event. Move out of `full` first so that late event cannot
+  // interpret this stop as an ordinary Exit and reveal the host again.
+  if(host&&host.dataset&&host.dataset.mode==="full") host.dataset.mode=location.hash==="#/live-tv"?"slot":"dock";
+  await exitLiveTvPresentation(); detachLiveTvMedia();
+  if(host) host.hidden=true;
   return LIVE_TV_LEASE.stop();
 }
 async function watchLiveTv(index){
