@@ -326,6 +326,14 @@ fixture defect on the same day.**
 
 ### 4. Executable prepared transaction and three client adapters
 
+> **Closed in current source, 2026-09-09.** The warning retained below
+> describes the preimplementation baseline. Current VOD serving resolves
+> encoded recipes, all three clients enforce contiguous runway against the
+> incumbent's current film position, and `codex/m6-server-prime` reserves and
+> attaches the successor before the actor announces it. Settings → Developer
+> exposes the direct default-on server checkbox; the readiness list is
+> advisory and is not consulted by the attach path.
+
 > **The successor's worker is blocked on a device measurement, not on code.
 > Read this before planning any of §4's remaining work.**
 >

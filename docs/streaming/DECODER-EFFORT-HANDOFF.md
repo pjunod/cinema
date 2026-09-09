@@ -112,14 +112,15 @@ Identical. `hevc` behaves the same way.
 Not buildable without hardware. A contract is a claim about a real binary on a
 real backend: run the capture on a qualifying host, add a row to
 `tests/playback/decoder-health/diagnostic-contracts.toml` with its
-`decode_backend` set, and the recovery becomes reachable for that
-(build, codec, backend) triple and no other.
+`decode_backend` set, and exact contract-qualified diagnostics become available
+for that `(build, codec, backend)` triple and no other.
 
-`tests/web/settings-sections.test.js` asserts the literal sentence
-`Not true on any node today` in the Settings → Developer card. That is a
-tripwire, not a description: when the first hardware contract lands, that test
-fails, and the card has to be corrected. Do not delete the assertion — correct
-the card and move the assertion to whatever is then true.
+Later owner direction made activation independent of that evidence. The direct
+Settings → Developer checkbox authorizes best-effort automatic recovery even
+without a matching contract; the missing contract stays visible as advisory
+readiness. That advisory observation may drive the bounded one-shot recovery
+and may never qualify an artifact for reuse. The web contract asserts that the
+checkbox remains enabled regardless of coverage.
 
 ### 3c. M7's remaining four items
 

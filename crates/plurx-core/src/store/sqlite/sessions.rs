@@ -2818,7 +2818,11 @@ impl MediaSessionStore for SqliteStore {
                         AND expires_at_ms = (SELECT lease_expires_at_ms FROM media_sessions
                           WHERE incarnation_id = ?6 AND owner_node_id = ?4 AND owner_epoch = ?5
                             AND state = 'active' AND lease_expires_at_ms > ?2
-                            AND publication_ready_at_ms != ?7
+                            AND (publication_ready_at_ms != ?7 OR EXISTS (
+                              SELECT 1 FROM media_playback_pointers pointer
+                               WHERE pointer.user_id = media_sessions.user_id
+                                 AND pointer.playback_id = media_sessions.playback_id
+                                 AND pointer.current_incarnation_id = media_sessions.incarnation_id))
                             -- A staged successor's deadline is its whole life,
                             -- and renewing it would be the one thing that can
                             -- make that deadline never arrive. The ledger's
@@ -2839,7 +2843,6 @@ impl MediaSessionStore for SqliteStore {
                               WHERE request.user_id = media_sessions.user_id
                                 AND request.incarnation_id = media_sessions.incarnation_id
                                 AND request.state = 'starting'
-                                AND media_sessions.publication_ready_at_ms = 0
                                 AND request.claim_expires_at_ms <= media_sessions.lease_expires_at_ms))",
                     params![
                         lease_expires_at_ms,
@@ -2860,12 +2863,15 @@ impl MediaSessionStore for SqliteStore {
                               media_sequence = MAX(media_sequence, ?9)
                       WHERE incarnation_id = ?3 AND owner_node_id = ?4 AND owner_epoch = ?5
                         AND state = 'active' AND lease_expires_at_ms > ?2
-                        AND publication_ready_at_ms != ?10
+                        AND (publication_ready_at_ms != ?10 OR EXISTS (
+                          SELECT 1 FROM media_playback_pointers pointer
+                           WHERE pointer.user_id = media_sessions.user_id
+                             AND pointer.playback_id = media_sessions.playback_id
+                             AND pointer.current_incarnation_id = media_sessions.incarnation_id))
                         AND NOT EXISTS (SELECT 1 FROM media_session_requests request
                           WHERE request.user_id = media_sessions.user_id
                             AND request.incarnation_id = media_sessions.incarnation_id
                             AND request.state = 'starting'
-                            AND media_sessions.publication_ready_at_ms = 0
                             AND request.claim_expires_at_ms <= media_sessions.lease_expires_at_ms)
                         AND EXISTS (SELECT 1 FROM job_leases
                           WHERE resource = ?6 AND owner_node_id = ?4 AND fence = ?5
@@ -2904,12 +2910,15 @@ impl MediaSessionStore for SqliteStore {
                                    AND session.owner_epoch = ?3
                                    AND session.state = 'active'
                                    AND session.lease_expires_at_ms = ?1
-                                   AND session.publication_ready_at_ms != ?6
+                                   AND (session.publication_ready_at_ms != ?6 OR EXISTS (
+                                     SELECT 1 FROM media_playback_pointers pointer
+                                      WHERE pointer.user_id = session.user_id
+                                        AND pointer.playback_id = session.playback_id
+                                        AND pointer.current_incarnation_id = session.incarnation_id))
                                    AND NOT EXISTS (SELECT 1 FROM media_session_requests request
                                      WHERE request.user_id = session.user_id
                                        AND request.incarnation_id = session.incarnation_id
                                        AND request.state = 'starting'
-                                       AND session.publication_ready_at_ms = 0
                                        AND request.claim_expires_at_ms <= session.lease_expires_at_ms))",
                         params![
                             lease_expires_at_ms,
@@ -2972,7 +2981,6 @@ impl MediaSessionStore for SqliteStore {
                       WHERE request.user_id = media_sessions.user_id
                         AND request.incarnation_id = media_sessions.incarnation_id
                         AND request.state = 'starting'
-                        AND media_sessions.publication_ready_at_ms = 0
                         AND request.claim_expires_at_ms <= media_sessions.lease_expires_at_ms)
                     AND (?2 = 0 OR lease_expires_at_ms > ?3
                       OR (lease_expires_at_ms = ?3 AND incarnation_id > ?4))
@@ -3575,12 +3583,17 @@ impl MediaSessionStore for SqliteStore {
                    FROM media_sessions
                   WHERE owner_node_id = ?1 AND state = 'active'
                     AND lease_expires_at_ms > ?2
-                    AND publication_ready_at_ms != ?4
+                    AND (publication_ready_at_ms != ?4 OR EXISTS (
+                      SELECT 1 FROM media_playback_pointers pointer
+                       WHERE pointer.user_id = media_sessions.user_id
+                         AND pointer.playback_id = media_sessions.playback_id
+                         AND pointer.current_incarnation_id = media_sessions.incarnation_id))
+                    AND NOT EXISTS (SELECT 1 FROM media_session_preparations staged
+                      WHERE staged.staged_incarnation_id = media_sessions.incarnation_id)
                     AND NOT EXISTS (SELECT 1 FROM media_session_requests request
                       WHERE request.user_id = media_sessions.user_id
                         AND request.incarnation_id = media_sessions.incarnation_id
                         AND request.state = 'starting'
-                        AND media_sessions.publication_ready_at_ms = 0
                         AND request.claim_expires_at_ms <= media_sessions.lease_expires_at_ms)
                   ORDER BY updated_at_ms, incarnation_id LIMIT ?3",
             )?;

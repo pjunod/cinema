@@ -124,7 +124,7 @@ page; the milestone files are contracts an executing agent works from.
 | [M6-ANDROID-CLIENT-STATUS.md](playback-control/M6-ANDROID-CLIENT-STATUS.md) | M6: what the Android client does with a staged successor, and how an operator turns it on. | built |
 | [M6-APPLE-HARDWARE-ACCEPTANCE.md](playback-control/M6-APPLE-HARDWARE-ACCEPTANCE.md) | The two M6 numbers a simulator cannot supply, and the prompt that takes them. | open |
 | [M6-WEB-CLIENT.md](playback-control/M6-WEB-CLIENT.md) | M6: what the browser does with a staged successor, and how an operator turns it on. | built |
-| [M6-SERVER-PRIME-HANDOFF.md](playback-control/M6-SERVER-PRIME-HANDOFF.md) | Phase 3 — why a staged successor serves nothing, and the copy-to-copy transition it can be built against today (§5.1). | open |
+| [M6-SERVER-PRIME-HANDOFF.md](playback-control/M6-SERVER-PRIME-HANDOFF.md) | Phase 3 — the reserve/prime constraints and the implementation that now attaches the staged VOD worker. | built |
 | [M7-REMAINDER-HANDOFF.md](playback-control/M7-REMAINDER-HANDOFF.md) | M7: subtitle readiness, bounded materialization, seek coalescing, burn-join, prewarm. | open |
 | [M7-R-M3-CLAUDE-HANDOFF.md](playback-control/M7-R-M3-CLAUDE-HANDOFF.md) | Finish M2, then build seek coalescing. | open |
 | [M7-M1-LARGE-MKV-OBSERVATION.md](playback-control/M7-M1-LARGE-MKV-OBSERVATION.md) | Large-MKV readiness and bounded subtitle publication, observed. | done |

@@ -1,6 +1,6 @@
 # Playback control rewrite — project status
 
-**Updated:** 2026-09-08 · **Baseline:** M6 Slice A review candidate [#901](https://github.com/pjunod/plurx/pull/901) ·
+**Updated:** 2026-09-09 · **Current follow-up:** `codex/m6-server-prime` on Forgejo `main` `75744fea` ·
 **Fleet:** level again — all four on `v0.3.0-260-g5b127370`, read off
 `/metrics` 2026-09-02. **nuc3 is a non-voting learner** answering `readyz` 503
 `quorum unavailable`; the other three hold quorum (required 2) with zero
@@ -33,7 +33,7 @@ one is deleted.
 | 5 | delete detached recovery loops | — | merged as #663 |
 | 6 | M5 — one client action owner | [M5](M5-CLIENT-ACTION-OWNERSHIP-HANDOFF.md) · [acceptance](M5-FLEET-ACCEPTANCE.md) | **finished.** M5a and M5b merged; **M5c and M5h are struck, not deferred** — the budgets they delete now bound the server's own answer. See §"M5c is struck" |
 | — | M5.5 — preparation feasibility | [spike](M5.5-PREPARATION-FEASIBILITY-SPIKE.md) · [execution](M5.5-SPIKE-EXECUTION-HANDOFF.md) · [staged generations](M5.5-STAGED-GENERATIONS-HANDOFF.md) | store half **merged as [#726](https://github.com/pjunod/plurx/pull/726)**; the spike **ran 2026-09-01 on all three platforms** and is complete: web and Android `false`, **Apple `true`** after a corrective instrument pass — see §"M5.5 ran, and two thirds of it settled" |
-| 7 | M6 — prepared recipe handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §3 · [handoff](M6-IMPLEMENTATION-HANDOFF.md) · [caller](M6-CALLER-HANDOFF.md) | **building — production stages and announces a successor; the current slice consumes fenced acknowledgements and commits or aborts it.** Slot [#792](https://github.com/pjunod/plurx/pull/792) · executor [#793](https://github.com/pjunod/plurx/pull/793) · outcomes [#796](https://github.com/pjunod/plurx/pull/796) · decision [#798](https://github.com/pjunod/plurx/pull/798) · caller seam [#800](https://github.com/pjunod/plurx/pull/800)/[#802](https://github.com/pjunod/plurx/pull/802) · metrics [#822](https://github.com/pjunod/plurx/pull/822) · durable staging [#894](https://github.com/pjunod/plurx/pull/894) · `Prepare` action [#901](https://github.com/pjunod/plurx/pull/901). The staged route still has no worker, so the Developer page labels the integration path unsafe for viewers and lists the evidence required before enablement. **All three client halves are on `main` (2026-09-08).** Each declares `prepare_replacement`, builds and aligns a second pipeline, acknowledges readiness, switches and commits only after a real first frame; each Developer surface carries an operator switch with an advisory readiness list rather than a literal. Web [#125](http://192.168.4.7:3000/noirr/plurx/pulls/125) as `a3997ffb` · Apple [#122](http://192.168.4.7:3000/noirr/plurx/pulls/122) as `9c5e1f9b` · Android [#136](http://192.168.4.7:3000/noirr/plurx/pulls/136) as `b266341e` — **these five are Forgejo numbers**, and the slice numbers earlier in this cell are GitHub's; the two namespaces overlap and nothing in the link text says which is which, so read the host. **Only Apple's reaches a viewer**: `dual_player_preparation` is `true` on Apple alone, so the server stages a successor for nobody else, and the web and Android halves are written, tested and dark. **And the server half is not finished as a stream**: `stage_prepared_successor`'s third phase, *reserve and prime*, is not implemented, so a staged playlist answers `503 media_owner_transition` for the whole lease and a committed successor is refused from its first request. The phase, and the copy-to-copy transition it can be built against today (§5.1), are in [M6-SERVER-PRIME-HANDOFF.md](M6-SERVER-PRIME-HANDOFF.md). See also [M6-WEB-CLIENT.md](M6-WEB-CLIENT.md), [M6-ANDROID-CLIENT-STATUS.md](M6-ANDROID-CLIENT-STATUS.md) and §"M6 is building, and what it does not yet reach" |
+| 7 | M6 — prepared recipe handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §3 · [handoff](M6-IMPLEMENTATION-HANDOFF.md) · [server prime](M6-SERVER-PRIME-HANDOFF.md) | **implementation complete on `codex/m6-server-prime`; validation and merge pending.** The server now durably reserves the successor, attaches the real VOD worker before the actor announces it, authorizes playlist/segment access from the exact live preparation ledger before commit, and keeps control/status fenced. After commit removes the ledger, the durable prepared marker plus exact current playback pointer preserve media continuity during predecessor drain. Commit publication is detached from the four-second exchange and clears the control fence after predecessor projection or the safety boundary; refusal, abort, and expiry release both worker and slot. All three client adapters are already on `main`. Settings → Developer has one direct default-on server checkbox; every readiness row remains advisory and cannot override it. Physical first-frame and fleet receipts remain post-merge evidence, not code gates. |
 | 8 | M7 — content-analysis index | [analysis](CONTENT-ANALYSIS-INDEX-HANDOFF.md) · remainder plan in [#740](https://github.com/pjunod/plurx/pull/740) | **four of five** merged as [#700](https://github.com/pjunod/plurx/pull/700); the fifth, **subtitle windows, merged as [#742](https://github.com/pjunod/plurx/pull/742)** with readiness reporting in [#741](https://github.com/pjunod/plurx/pull/741). M7's own **M3 (seek coalescing) is built as [#754](https://github.com/pjunod/plurx/pull/754)** — see §"M3's latch, and the decision that landed it". R-M1 closes the unknown-readiness contract and carries the dated [large-MKV observation](M7-M1-LARGE-MKV-OBSERVATION.md); it merged as [#775](https://github.com/pjunod/plurx/pull/775). R-M2 merged as [#789](https://github.com/pjunod/plurx/pull/789) and R-M3, one live subtitle window per playback, merged as [#830](https://github.com/pjunod/plurx/pull/830); the remainder is complete in source. Physical directed-retry evidence for R-M2 is the only piece left, and it needs a device rather than code. **M4 (burn-join) merged as [#794](https://github.com/pjunod/plurx/pull/794)**, not part of this remediation; detection is separately deferred |
 | 9 | M8 — cluster handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §4 | **partly proven at the store, one bullet built end to end.** Four of five acceptance cases are covered by the store contract and `shared_cache.rs` suites — *at the store*, not end to end — and planned drain (§10.2) is not built at all: it sits on top of M6 §3.4 and is blocked behind the same hardware run. §10.3's no-snapshot fallback is built: a lost owner answers with where to reopen instead of an unbounded retry. See §"M8 is not independent of M6" |
 | 10 | M9 — cutover and deletion | [remaining](REMAINING-ROADMAP-HANDOFF.md) §5 | not started |
@@ -624,7 +624,17 @@ than the accepted sequence: a create can outrun the snapshot that justifies it,
 and a client reporting a *higher* sequence can only look less superseded, which
 is the safe direction. Apple 108, Android 64.
 
-## The Apple client half of M6 is merged, and the server half is not what the contract says
+## M6 clients and server reserve-and-prime are implemented
+
+**Current update, 2026-09-09.** The historical finding below is closed on
+`codex/m6-server-prime`: production reserves the durable row, attaches its VOD
+worker, then publishes the actor action. The exact preparation ledger grants
+only staged media access; control/status remain fenced. Commit keeps media
+readable through predecessor drain by prepared marker plus current pointer and
+publishes control after terminal projection or the safety boundary. The VOD
+successor keeps `media_origin_ms = 0` and carries the accepted playhead in
+`start_seconds`, preventing recovery from adding the resume twice. The direct
+Developer checkbox is default-on and readiness is advisory.
 
 **Merged into `main` as `9c5e1f9b`, 2026-09-08
 ([#122](http://192.168.4.7:3000/noirr/plurx/pulls/122)). Not deployed, and not
@@ -638,7 +648,7 @@ against the film position the switch happened at. Every exit settles the
 staging, because one left to the 330-second deadline costs that session its
 only preparation for the rest of its life.
 
-**The finding that matters more than the client.** The contract says the
+**Historical finding that drove the server follow-up.** The contract said the
 server half is finished. It is finished as a *transaction* and not as a
 *stream*: `stage_prepared_successor`'s own comment says "**Stage only** …
 nothing produced yet", the third of its eight phases — *reserve and prime* —

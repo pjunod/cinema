@@ -1414,12 +1414,11 @@ fn preparation_abort_request(
 /// A staged successor is not renewable — belt and braces, not the enforcement.
 ///
 /// **Read this with `a_staged_successor_expires_on_its_own_deadline`, which is
-/// the one that matters.** The refusal below is real, but a staged row sits at
-/// the publication sentinel and `owned_media_sessions` excludes that value, so
-/// in production a staged successor is never offered for renewal in the first
-/// place. This test has to arm the handoff to reach the predicate at all — and
-/// arming is the one thing a real staged successor never does, because it is
-/// what turns a successor into an ordinary serving session.
+/// the one that matters.** The refusal below is real, and
+/// `owned_media_sessions` excludes the row by its live preparation ledger, so
+/// production never offers it for renewal. This test arms the handoff while
+/// retaining that ledger to prove the ledger predicate is the authority, not
+/// a coincidental publication-sentinel check.
 ///
 /// So this pins a guard, not a behaviour: if some future path ever does arm a
 /// row while its preparation is still outstanding, it must not thereby buy
@@ -1769,9 +1768,9 @@ async fn a_staged_successor_cannot_renew_past_its_deadline() {
 /// **Nothing else enforces it, and the reason is a deliberate design choice
 /// two layers away.** A staged row sits at the publication sentinel so takeover
 /// inventory never mistakes a successor nobody waited for for a serving route —
-/// and both `owned_media_sessions` and `expired_media_sessions` exclude that
-/// sentinel. So a staged successor is invisible to the lease loop *and* to the
-/// retirement sweep. It is not renewable, which sounds like safety and is not:
+/// and `expired_media_sessions` excludes that sentinel. The lease inventory
+/// excludes the row by the live preparation ledger instead. So a staged
+/// successor is invisible to both loops. It is not renewable, which sounds like safety and is not:
 /// nothing was pushing its deadline forward, and nothing was arriving at it
 /// either. Left alone it waits for the generic retirement to notice a lease at
 /// `now - TAKEOVER_RECOVERY_MS` on a five-minute tick, minutes past the moment
@@ -3787,15 +3786,14 @@ async fn media_session_a_committed_successor_can_renew_and_outlives_its_preparat
             "{backend}: commit moves the successor off the preparation deadline"
         );
 
-        // The successor arms its publication fence first, exactly as an
-        // activated replacement does — renewal refuses a row still at the
-        // sentinel. This is also what puts it into takeover inventory, which
-        // is the point: from here it is an ordinary serving session.
-        store
-            .arm_media_session_handoff(staged, "staged-node", 1, 400_000, 4_000)
+        let owned = store
+            .owned_media_sessions("staged-node", 4_000)
             .await
-            .unwrap_or_else(|error| panic!("{backend}: arm handoff: {error}"))
-            .unwrap_or_else(|| panic!("{backend}: arming must win"));
+            .unwrap_or_else(|error| panic!("{backend}: committed inventory: {error}"));
+        assert!(
+            owned.iter().any(|lease| lease.incarnation_id == staged),
+            "{backend}: commit removes the staging ledger and makes the successor renewable"
+        );
         let renewed = store
             .renew_media_sessions(
                 "staged-node",
@@ -3814,8 +3812,8 @@ async fn media_session_a_committed_successor_can_renew_and_outlives_its_preparat
         assert_eq!(
             renewed.len(),
             1,
-            "{backend}: a committed successor with no `job_leases` row can \
-             never renew, and renewal is the only thing keeping it alive"
+            "{backend}: the committed successor must renew even while its publication fence is \
+             still at the sentinel; crash reconciliation is what arms that fence"
         );
 
         // And it survives the moment the preparation would have expired.

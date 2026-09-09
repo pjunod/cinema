@@ -200,7 +200,7 @@ test("a card's Save wakes on a change and sleeps again once saved", () => {
 test("Playback saves per card, and each card writes only its own fields", () => {
   const writes = {};
   const run = (fn, ids) => new Function(
-    "api", "document", "cacheSettings", "toast", "setCardSaved", "SERVER", "SETTINGS", "verifiedDecodeCard",
+    "api", "document", "cacheSettings", "toast", "setCardSaved", "SERVER", "SETTINGS", "verifiedDecodeCard", "decodeRecoveryCard",
     // The newline matters: a shipped function may be followed by a line
     // comment, and `shippedSource` returns everything up to the next
     // declaration. Without it the injected `return` lands inside that comment
@@ -209,25 +209,27 @@ test("Playback saves per card, and each card writes only its own fields", () => 
   )(
     async (path, opts) => { writes[fn] = { path, body: opts.body }; return {}; },
     { getElementById: (id) => { assert.ok(ids.includes(id), `${fn} reads ${id}`); return { value: "v", checked: true, textContent: "" }; } },
-    (v) => v, () => {}, () => {}, {}, {}, () => "",
+    (v) => v, () => {}, () => {}, {}, {}, () => "", () => "",
   );
   const defaults = ["pal", "psl", "psm", "perr"];
   // The two switches that are off on purpose moved to Developer, so Streaming
   // no longer writes them: a card that saves a field it does not show can turn
   // something back on that an operator deliberately turned off.
   const streaming = ["prr", "pabr", "phr", "phb", "pha", "pvod", "pvlr", "pvws", "pvmb", "pvbg", "serr"];
-  const developer = ["pcpv1", "dverr"];
+  const developer = ["pcpv1", "pqh", "dverr"];
   // `vdcard` is read too: this handler replaces its own card rather than
   // re-rendering the panel, because the four cards beside it stage unsaved
   // edits. The handler's own catch would swallow a missing-id assertion, so
   // the id has to be listed here for the guard to mean anything.
   const verifiedDecode = ["dhqa", "dhqerr", "vdcard"];
+  const automaticRecovery = ["adr", "adrerr", "drcard"];
   const experimental = ["phs", "dxerr"];
   return Promise.all([
     run("savePlaybackDefaults", defaults)({ disabled: false }),
     run("saveStreaming", streaming)({ disabled: false }),
     run("saveDeveloper", developer)({ disabled: false }),
     run("saveVerifiedDecode", verifiedDecode)({ disabled: false }),
+    run("saveAutomaticDecoderRecovery", automaticRecovery)({ disabled: false }),
     run("saveExperimental", experimental)({ disabled: false }),
   ]).then(() => {
     assert.deepEqual(Object.keys(writes.savePlaybackDefaults.body).sort(), ["default_audio_lang", "default_sub_lang", "sub_mode"]);
@@ -237,12 +239,14 @@ test("Playback saves per card, and each card writes only its own fields", () => 
       "vod_live_recovery", "vod_materialize_budget_secs", "vod_presentation",
       "vod_working_set_bytes",
     ]);
-    assert.deepEqual(Object.keys(writes.saveDeveloper.body).sort(), ["playback_control_protocol_v1"]);
+    assert.deepEqual(Object.keys(writes.saveDeveloper.body).sort(), ["playback_control_protocol_v1", "prepared_quality_handoff"]);
     // Its own card, its own field. The verified-decode request renames cached
     // transcodes on covered paths, so it must never ride along with a save an
     // operator made for something else.
     assert.deepEqual(Object.keys(writes.saveVerifiedDecode.body).sort(), ["decoder_health_qualified_artifacts"]);
     assert.equal(writes.saveVerifiedDecode.path, "/settings");
+    assert.deepEqual(Object.keys(writes.saveAutomaticDecoderRecovery.body).sort(), ["automatic_decoder_recovery"]);
+    assert.equal(writes.saveAutomaticDecoderRecovery.path, "/settings");
     assert.deepEqual(Object.keys(writes.saveExperimental.body).sort(), ["hls_typeless_sliding"]);
     assert.equal(writes.savePlaybackDefaults.path, "/settings");
     assert.equal(writes.saveStreaming.path, "/settings");
@@ -279,49 +283,49 @@ test("Developer is where the switches that cost something live", () => {
   const readiness = { items: [{
     id: "prepared_quality_handoff",
     requirements: [
-      { id: "server_preparation_is_real", status: "unmet", evidence: "This build still stages metadata without a running worker." },
+      { id: "server_preparation_is_real", status: "met", evidence: "This build attaches a running worker before announcing it." },
       { id: "client_two_player_handoff", status: "unobservable", evidence: "This node cannot prove a physical first-frame qualification." },
       { id: "fleet_receipt", status: "unobservable", evidence: "The fleet receipt is not visible to this daemon." },
     ],
   }] };
   const html = panel({
     playback_control_protocol_v1: true,
+    prepared_quality_handoff: true,
+    automatic_decoder_recovery: true,
     hls_typeless_sliding: false,
     live_tv_guide_source: "hdhomerun",
     live_tv_guide_hours: 24,
   }, readiness);
-  for (const id of ["pcpv1", "phs", "dhqa"]) {
+  for (const id of ["pcpv1", "pqh", "pdp", "phs", "dhqa", "adr"]) {
     assert.match(html, new RegExp(`TOG:${id}\\|`), `Developer is missing the ${id} switch`);
   }
   assert.match(html, /FOOT:saveDeveloper/);
   assert.match(html, /FOOT:saveExperimental/);
   assert.match(html, /Enable prepared quality handoff/);
-  assert.match(html, /encoder: staged/);
+  assert.match(html, /This checkbox is the enable path/);
   assert.match(html, /twenty consecutive commits/);
   assert.match(html, /Apple, Android, and web contain the adapter/);
-  assert.match(html, /no separate hidden server flag/);
   // The prepared card says what has to be true *and whether it is*, because
   // a requirement an operator cannot check is a requirement they will skip.
   // None of it gates the toggle: the switch is in the card above and this one
   // has no input at all.
   assert.match(html, /What must be true first, and whether it is/);
   assert.match(html, /The server primes the successor it stages/);
-  assert.match(html, /503 media_owner_transition/);
-  assert.match(html, /no row on this card gates the enabled default/);
-  assert.match(html, /Enabled by default; the checks remain advisory/);
+  assert.match(html, /no qualification gate or restart step/);
   // The card is advisory AND it carries the switch. Those are not in tension:
   // the list says what enabling costs and whether each part is true, and
   // nothing in it disables the control. A page that refuses to let an operator
   // turn something on tells them less than one that says what will happen.
   const preparedCard = html
-    .slice(html.indexOf("Enable prepared quality handoff"))
+    .slice(html.indexOf("Prepared quality handoff"))
     .split("Experimental delivery")[0];
+  assert.match(preparedCard, /TOG:pqh\|/, "the prepared card carries the server enable switch");
   assert.match(preparedCard, /TOG:pdp\|/, "the prepared card carries the enable switch");
-  assert.doesNotMatch(preparedCard, /FOOT:/,
-    "…and no save: the switch is this browser's, not a server setting");
+  assert.match(preparedCard, /FOOT:saveDeveloper/,
+    "the server switch saves through Developer settings");
   assert.doesNotMatch(preparedCard, /disabled/,
     "nothing in the readiness list disables it");
-  const off = panel({ playback_control_protocol_v1: false, hls_typeless_sliding: false }, readiness);
+  const off = panel({ playback_control_protocol_v1: false, prepared_quality_handoff: false, hls_typeless_sliding: false }, readiness);
   assert.match(html, /The control endpoint is advertised<small>[\s\S]*?<span class="pill" style="color:var\(--good\)/);
   assert.match(off, /The control endpoint is advertised<small>[\s\S]*?<span class="pill warn">not met<\/span>/);
   assert.match(html, /Enable cluster transport recovery/);
@@ -342,29 +346,29 @@ test("Developer is where the switches that cost something live", () => {
   assert.match(html, /dual_player_preparation/,
     "…and says which field it sets, because that is the whole of Gate A");
   assert.match(html, /Nothing above blocks this switch/);
+  assert.match(html, /TOG:pqh\|[^|]*\|[^|]*\|checked=true/,
+    "the server prepared-handoff switch reflects persisted settings");
   // Readiness pills, counted rather than matched, because "not met" contains
   // "met": an assertion that only looks for the word cannot tell a met row from
   // an unmet one, and would pass with the two renderings swapped.
   const pills = html.match(/>(met|not met|not observable)<\/span>/g) || [];
   const counted = (word) => pills.filter((pill) => pill === `>${word}</span>`).length;
-  assert.ok(counted("not met") >= 1,
-    "the unmet requirements say so beside the switch — the staged route has no worker");
-  assert.ok(counted("met") >= 2, "…and the ones this page checked and found true say that");
-  // Automatic decode recovery. The section exists because the effort that
-  // built the recovery was required to say what safe enablement depends on,
-  // and the honest answer today starts with "it cannot fire yet".
+  assert.ok(counted("not observable") >= 2,
+    "physical client and fleet qualification remain explicitly advisory and unobserved");
+  assert.ok(counted("met") >= 3, "the server-prime and runtime facts this page checked say so");
+  // Automatic decode recovery has one direct switch; every measured or fleet
+  // fact below it is advice rather than a second enable path.
   assert.match(html, /Automatic decode recovery/);
-  assert.match(html, /There is no switch here/);
+  assert.match(html, /TOG:adr\|[^|]*\|[^|]*\|checked=true/);
+  assert.match(html, /FOOT:saveAutomaticDecoderRecovery/);
+  assert.match(html, /This checkbox is the enable path/);
+  assert.match(html, /missing measurements or retained contracts never turn it back off/);
   assert.match(html, /reopen loop/);
-  // The tripwire. This sentence is true only while no contract is qualified
-  // against a hardware decoder; when one is, this card is wrong and this
-  // assertion is what says so.
-  assert.match(html, /Not true on any node today/);
   assert.match(html, /One recovery per playback, and it is never given back/);
-  assert.match(html, /qualify diagnostic contracts against this node's measured hardware decoders/);
+  assert.match(html, /best-effort selected-stream diagnostics/);
   assert.ok(counted("not observable") >= 2,
     "…and a fleet fact the daemon cannot inspect is not rounded either way");
-  assert.match(html, /This build still stages metadata without a running worker/,
+  assert.match(html, /This build attaches a running worker before announcing it/,
     "the page paints the daemon's live evidence, not just a source-hardcoded label");
   assert.match(html, /HDHomeRun Live TV/);
   assert.match(html, /Save the configuration, check readiness, then enable/);
@@ -585,74 +589,54 @@ test("Verified decode states its cost, its prerequisites, and what this node mea
   assert.doesNotThrow(() => card({}));
 });
 
-test("Automatic recovery requires a covered hardware and software pair for one codec", () => {
+test("Automatic recovery is directly enabled and coverage remains advisory", () => {
   const card = new Function(
-    "setCard", "cardHead", "esc",
+    "setCard", "cardHead", "togRow", "setCardFoot", "esc",
     `${shippedSource("decodeRecoveryCard")}\nreturn decodeRecoveryCard;`,
   )(
     (body) => `CARD[${body}]`,
     (title, sub, tools) => `CARDHEAD:${title}|${sub || ""}|${tools || ""}`,
+    (id, label, note, checked) => `TOG:${id}|${label}|${note}|checked=${!!checked}`,
+    (fn) => `FOOT:${fn}`,
     esc,
   );
 
-  const crossed = card({ decoder_health_qualification: {
+  const crossed = card({ automatic_decoder_recovery: false, decoder_health_qualification: {
     measured_build: "ffmpeg version 9.0.1",
     covered_decoders: ["h264/h264"],
     covered_paths_v2: ["h264/software/h264", "hevc/videotoolbox/hevc"],
   } });
   assert.match(crossed, /✗ The same codec has covered hardware and software paths/);
-  assert.match(crossed, /different codecs do not form a recovery/);
+  assert.match(crossed, /TOG:adr\|[^|]*\|[^|]*\|checked=false/);
+  assert.match(crossed, /disabled/);
+  assert.match(crossed, /does not block the switch/);
 
-  const paired = card({ decoder_health_qualified_artifacts: true, decoder_health_qualification: {
-    policy_enabled: true,
+  const paired = card({ automatic_decoder_recovery: true, decoder_health_qualification: {
     measured_build: "ffmpeg version 9.0.1",
     covered_decoders: ["h264/h264"],
     covered_paths_v2: ["h264/software/h264", "h264/videotoolbox/h264"],
   } });
   assert.match(paired, /✓ The same codec has covered hardware and software paths/);
   assert.match(paired, /h264\/videotoolbox\/h264/);
-  assert.match(paired, /✓ The receipt-qualified decode policy is applied/);
-  assert.match(paired, /ready for eligible sessions/);
-  assert.doesNotMatch(paired, /prerequisites unmet/);
+  assert.match(paired, /TOG:adr\|[^|]*\|[^|]*\|checked=true/);
+  assert.match(paired, /enabled/);
+  assert.match(paired, /FOOT:saveAutomaticDecoderRecovery/);
 
-  const off = card({ decoder_health_qualified_artifacts: false, decoder_health_qualification: {
-    policy_enabled: false,
+  const off = card({ automatic_decoder_recovery: false, decoder_health_qualification: {
     measured_build: "ffmpeg version 9.0.1",
     covered_paths_v2: ["h264/software/h264", "h264/videotoolbox/h264"],
   } });
-  assert.match(off, /prerequisites unmet/);
-  assert.match(off, /✗ The receipt-qualified decode policy is applied/);
-  assert.match(off, /policy is off on this node/);
-  assert.match(off, /checks advise and never gate that setting/);
+  assert.match(off, /✓ The same codec has covered hardware and software paths/);
+  assert.match(off, /checked=false/);
 
-  const pendingEnable = card({ decoder_health_qualified_artifacts: true, decoder_health_qualification: {
-    policy_enabled: false, pending_restart: true,
-    measured_build: "ffmpeg version 9.0.1",
-    covered_paths_v2: ["h264/software/h264", "h264/videotoolbox/h264"],
-  } });
-  assert.match(pendingEnable, /prerequisites unmet/);
-  assert.match(pendingEnable, /✗ The receipt-qualified decode policy is applied/);
-  assert.match(pendingEnable, /must restart before the published policy enables/);
-  assert.match(pendingEnable, /Recovery stays unavailable until that restart/);
-
-  const pendingDisable = card({ decoder_health_qualified_artifacts: false, decoder_health_qualification: {
-    policy_enabled: true, pending_restart: true,
-    measured_build: "ffmpeg version 9.0.1",
-    covered_paths_v2: ["h264/software/h264", "h264/videotoolbox/h264"],
-  } });
-  assert.match(pendingDisable, /✓ The receipt-qualified decode policy is applied/);
-  assert.match(pendingDisable, /ready for eligible sessions/);
-  assert.match(pendingDisable, /will turn off at that restart/);
-  assert.doesNotMatch(pendingDisable, /prerequisites unmet/);
-
-  const legacy = card({ decoder_health_qualification: {
+  const legacy = card({ automatic_decoder_recovery: true, decoder_health_qualification: {
     enforcing: true,
     measured_build: "ffmpeg version 8.0",
     covered_decoders: ["h264/h264"],
   } });
   assert.match(legacy, /✗ The same codec has covered hardware and software paths/);
   assert.doesNotMatch(legacy, /✓ The same codec has covered hardware and software paths/);
-  assert.match(legacy, /prerequisites unmet/);
+  assert.match(legacy, /checked=true/);
 });
 
 test("Maintenance owns the timers, and each of its cards saves its own fields", () => {

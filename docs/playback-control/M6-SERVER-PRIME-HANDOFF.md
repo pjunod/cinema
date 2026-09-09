@@ -1,22 +1,23 @@
 # M6 phase 3 — reserve and prime
 
-**Status:** open, and no longer waiting on a decision — see §5.1 ·
-**Blocks:** every client half of M6 doing anything a viewer
-sees · **Written:** 2026-09-08 · **Baseline:** `main` at `3006f38a`
+**Status:** implemented on `codex/m6-server-prime`; validation and merge pending ·
+**Written:** 2026-09-08 · **Implementation update:** 2026-09-09 ·
+**Implementation base:** `main` at `75744fea`
 
-The client halves of M6 are being built now — Apple is merged, web and Android
-are in flight. None of them can fire, because the server stages a successor and
-never produces media for it. This document is what the eight-phase plan's third
-phase actually requires, what it must not break, and the one decision that has
-to be made before it can be built.
+All three client halves are merged. The server implementation now reserves the
+durable successor, attaches its VOD reader/producer before actor publication,
+authorizes only the exact staged media route, preserves that media after commit
+while the predecessor drains, and releases the worker on every abort path. This
+document retains the preimplementation diagnosis and the constraints used to
+build that change.
 
-It is deliberately not a plan you can execute end to end today. **Read §5
-first**: the only transition M6 currently admits produces a recipe the VOD
-engine refuses outright, and no amount of plumbing removes that.
+Settings → Developer exposes a direct, default-on
+`prepared_quality_handoff` checkbox. Its readiness rows are advisory only; no
+qualification result is consulted by the server enable path.
 
 ---
 
-## 1. What is missing, precisely
+## 1. What was missing, precisely
 
 `docs/playback-control/PLAYBACK-CONTROL-PROTOCOL-PLAN.md` §5.1 names eight
 phases — propose · stage · **reserve and prime** · prepare · commit · commit
@@ -166,17 +167,33 @@ is in the tree now is the finding, written where the next person reads it:
 and carries the whole mechanism in its comment, including the instruction not
 to "fix" it by publishing.
 
-**One change here is genuinely independent**, and is worth doing whenever
-someone is next in this code: `owned_media_sessions` should exclude rows that
-are *staged*, by the ledger predicate `renew_media_sessions` already uses,
-rather than rows that are *at the sentinel*. Today those two predicates
-disagree, which is why `renew_media_sessions`'s own comment — *"a committed
-successor renews normally from its first tick after the commit"* — is
-aspirational rather than true. It needs mirroring in the replicated backend,
-and on its own it changes nothing observable, because a committed successor
-without a worker is reaped by the sweep either way.
+**Implementation result, 2026-09-09.** Commit settlement now returns the
+durable outcome within the client's four-second exchange and runs publication
+separately. It tries the exact predecessor terminal projection first, then
+uses the existing safety-boundary handoff if the predecessor is still draining.
+The committed successor remains readable during that interval only when its
+stored start response carries the server's prepared marker and the exact
+current playback pointer still names the same owner, epoch, session and user.
+That is a media capability, not a second control authority: status, delete and
+control continue to honor the publication fence.
 
-## 5. The decision, taken 2026-09-08 (§5.1)
+`renew_media_sessions` and `owned_media_sessions` now use the live preparation
+ledger predicate rather than the sentinel as their definition of staged. That
+keeps a committed successor renewable and discoverable by the publication
+reconciler while keeping an uncommitted successor out of ordinary inventory.
+The SQLite and replicated queries implement the same predicate.
+
+## 5. The decision, taken 2026-09-08 (§5.1; historical baseline)
+
+**Current implementation correction, 2026-09-09.** The refusal described in
+this section no longer exists in current `main`. Both ordinary VOD creation
+and `vod_resurrect_before` resolve an encoded request through
+`prepare_vod_encoding` and pass the resulting `Encoding` into `VodServe`.
+Therefore the prepared-successor path primes supported transcoded recipes as
+well as copy recipes. The copy-to-copy transition remains the clean transaction
+control, but it is not the only recipe the shipped engine can attach. The
+numbered options below record the decision made against the older baseline;
+they are not an enable gate in the current code.
 
 **The transition the FLEET produces makes a recipe the server cannot serve.**
 
@@ -191,7 +208,8 @@ without a worker is reaped by the sweep either way.
   direct-plays and the lower rungs transcode, so the delivery method moves with
   the height every time"*. The live case is copy → transcoded rung.
 - `candidate_request` therefore produces `SessionKind::Transcode { height }`.
-- `VodServe::try_create_with_release_fence` refuses every non-`Copy` kind:
+- At the document's original baseline,
+  `VodServe::try_create_with_release_fence` refused every non-`Copy` kind:
   `vod_transcode_unavailable`, *"transcode serving is gated on the D6 device
   measurement"*. `docs/streaming/VOD-STALL-ACCEPTANCE-HANDOFF.md` confirms D6
   is open and says in as many words: do not remove the refusal, do not fake the
@@ -258,11 +276,11 @@ The module's own test asserts exactly this returns
 `Prepare { ResolutionOrBitrate }`. It is a transition a viewer makes: toggling
 Auto on a title that direct-plays.
 
-**So phase 3 is buildable today, against a real production transition, with no
-new hardware receipt and no change to the axis table.** The transcode case
-stays gated by the engine's own D6 refusal, which is the right boundary —
-nothing new is flagged or configured, and the day D6 lands the transcode case
-starts working with no code change.
+**So phase 3 was buildable against a real production transition, with no new
+hardware receipt and no change to the axis table.** At that baseline the
+transcode case still met the D6 refusal described above. The 2026-09-09
+correction at the start of this section records why that statement no longer
+describes current `main`.
 
 **What the earlier revision got wrong, recorded because the shape recurs.** It
 enumerated the copy-only transitions as *"`{AudioTrackOrOffset}` and a subtitle
@@ -290,18 +308,41 @@ VOD sessions on the same file and playback id can coexist; the differing
 `automatic` gives them distinct fingerprints, so the expectation is yes, and
 this document asserts it implicitly.
 
-**What is still blocked on D6**, unchanged: priming for the transition the
-fleet actually produces — a copy dropping to a transcoded rung. That is the
-common case, and it stays refused by the engine until the measurement lands.
-Building phase 3 on the copy-to-copy case does not front-run it; it proves the
-eight-phase transaction end to end so that D6 lands into working machinery
-rather than into an unbuilt phase.
+**Current result, 2026-09-09.** D6 is no longer a code gate on VOD transcode
+creation. A copy dropping to a supported transcoded rung resolves and attaches
+through the same VOD encoding path as an ordinary session. Device measurements
+remain valuable acceptance evidence, but their presence is not consulted by
+prepared-handoff enablement or worker creation.
 
-Everything below §4 remains unbuilt, and §6 is now the order to build it in
-rather than a conditional. The copy-to-copy case is the one to build against
-first.
+The 2026-09-09 implementation followed §6's ordering and retains the
+copy-to-copy case as the transaction control. Transcoded candidates also use
+the real VOD attach path and therefore inherit that engine's own admission and
+availability decisions; this change adds no qualification gate of its own.
 
 ## 6. The order to build it in
+
+**Implementation result, 2026-09-09.** The production path now performs the
+following sequence:
+
+1. reserve the durable successor row and its preparation ledger;
+2. attach the VOD reader/producer with the successor's exact recipe, identity,
+   adoption token and deadline;
+3. announce the prepared action only after attachment succeeds;
+4. authorize pre-commit media only through the exact live ledger capability;
+5. after commit, require the durable prepared marker and exact current pointer
+   for media during predecessor drain, while control/status stay fenced;
+6. keep the VOD timeline origin at zero and carry the accepted playhead only as
+   the recipe/bootstrap start, so recovery never adds the resume twice;
+7. renew and inventory the committed successor, then publish its control plane
+   after predecessor projection or the existing safety boundary; and
+8. release the worker and terminally settle the durable row on abort, refusal,
+   expiry or failed attachment.
+
+The live-process deadline task uses the remaining durable deadline and releases
+the actual worker. The durable preparation deadline and ordinary process
+restart semantics remain the crash backstop: a restarted daemon has no old
+in-memory VOD worker to leak, while store maintenance still aborts the expired
+row. No readiness result participates in the enable decision.
 
 1. Free the worker on every exit first — `begin_end_detached` in
    `PreparationExecutor::abort`, in the deadline task, and on every exit that

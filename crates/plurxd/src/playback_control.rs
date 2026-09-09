@@ -600,28 +600,24 @@ pub(crate) struct ActionAcknowledgement {
     pub action_id: String,
     pub state: AcknowledgementState,
     pub buffered_through_ms: Option<i64>,
-    /// The source position the client's successor timeline actually starts
-    /// at, echoed back from the offer it is committing to.
+    /// The source-timeline origin the client used for the successor, echoed
+    /// back from the offer it is committing to.
     ///
-    /// This is what a commit is proof *of*. `action_id` says which offer the
-    /// client is answering; this says the client built the thing that offer
-    /// described. Between `Prepare` and `Committed` the server's own intent
-    /// can move — a seek, a quality change, a new recipe — and an
-    /// acknowledgement that carries only an id cannot tell a client that
-    /// committed to the current offer from one that committed to a stale one
-    /// and is about to present media nobody asked for.
+    /// `action_id` says which offer the client is answering; this independently
+    /// confirms the timeline mapping it used. For VOD that origin is always
+    /// zero and the accepted playhead belongs in `start_seconds`; client
+    /// buffer readiness against the incumbent's current film position is what
+    /// prevents a stale-position switch.
     ///
     /// Required on `Committed` and compared against the offer in
     /// [`Self::bound_preparation_acknowledgement`]. A commit the server
     /// cannot contradict would not be evidence, so this field is only worth
     /// carrying because the mismatch is refused.
     ///
-    /// It closes a narrower gap than it first appears. A changed *ask* —
-    /// quality, codec, dynamic range, subtitles — is already caught at commit
-    /// by `desired_digest`. What that digest does not cover is position, so a
-    /// successor built for one point in the film and committed after the
-    /// viewer seeked elsewhere was previously indistinguishable from a
-    /// correct commit. That is the case this closes.
+    /// A changed *ask* — quality, codec, dynamic range, subtitles — is caught
+    /// at commit by `desired_digest`. Position is handled by the clients'
+    /// contiguous-runway checks and final alignment rather than by pretending
+    /// a VOD resume point is a media origin.
     pub committed_media_origin_ms: Option<i64>,
     /// When the client's first frame appeared.
     ///
@@ -1929,17 +1925,17 @@ pub(crate) enum ControlAction {
         after_ms: u32,
         reason: ProducerDecisionReason,
     },
-    /// A successor is staged; a qualified client may hold a second pipeline
-    /// on its unpublished route once a real preparation worker exists.
+    /// A successor is staged; a capable client may hold a second pipeline on
+    /// the primed route while its control publication remains fenced.
     ///
     /// **The first action that is a transaction rather than a report.** Hold,
     /// terminal and retry describe what production is already doing, so a
     /// replay recomputes them from current delivery — a hold that has since
     /// lifted must not be replayed as though it were still in force. This one
-    /// describes something the server *did*: a durable row exists, the actor's
-    /// slot is taken, and an unpublished session route exists. This slice
-    /// deliberately starts no worker behind that route. Recomputing the
-    /// transaction on a replay would either stage it twice or
+    /// describes something the server *did*: a durable row exists, its VOD
+    /// worker is attached, the actor's slot is taken, and an unpublished
+    /// session route exists. Recomputing the transaction on a replay would
+    /// either stage it twice or
     /// silently drop the one already staged, so it is recorded on
     /// `ControlState::prior_action` and replayed exactly.
     ///
@@ -5386,14 +5382,31 @@ impl PreparationExecutor {
         &self,
         preparation: &plurx_core::domain::MediaSessionPreparation,
     ) -> Result<bool, plurx_core::error::StoreError> {
-        if self
-            .store
-            .prepare_media_session(preparation)
-            .await?
-            .is_none()
-        {
+        if !self.reserve(preparation).await? {
             return Ok(false);
         }
+        self.activate_reserved(preparation).await
+    }
+
+    /// Reserve the durable row before a worker is attached. Keeping this
+    /// phase separate lets the server prime real media before the actor makes
+    /// the successor visible to a client.
+    pub(crate) async fn reserve(
+        &self,
+        preparation: &plurx_core::domain::MediaSessionPreparation,
+    ) -> Result<bool, plurx_core::error::StoreError> {
+        self.store
+            .prepare_media_session(preparation)
+            .await
+            .map(|route| route.is_some())
+    }
+
+    /// Publish an already reserved successor into the actor's one-slot
+    /// lifecycle. The caller must have attached the worker first.
+    pub(crate) async fn activate_reserved(
+        &self,
+        preparation: &plurx_core::domain::MediaSessionPreparation,
+    ) -> Result<bool, plurx_core::error::StoreError> {
         if self
             .control
             .stage_preparation_for_owner(
@@ -5408,21 +5421,33 @@ impl PreparationExecutor {
             return Ok(true);
         }
         let _ = self
-            .store
+            .discard_reserved(&preparation.incarnation_id, preparation.now_ms)
+            .await;
+        Ok(false)
+    }
+
+    /// Abort a durable reservation that was never installed into the actor
+    /// slot, for example because worker priming failed.
+    pub(crate) async fn discard_reserved(
+        &self,
+        staged_incarnation_id: &str,
+        now_ms: i64,
+    ) -> Result<bool, plurx_core::error::StoreError> {
+        self.store
             .abort_media_session_preparation(
                 self.user_id,
                 &self.playback_id,
                 &plurx_core::domain::MediaSessionPreparationAbortRequest {
-                    staged_incarnation_id: preparation.incarnation_id.clone(),
+                    staged_incarnation_id: staged_incarnation_id.to_owned(),
                     expected_predecessor_owner_node_id: self
                         .expected_predecessor_owner_node_id
                         .clone(),
                     expected_predecessor_owner_epoch: self.expected_predecessor_owner_epoch,
-                    now_ms: preparation.now_ms,
+                    now_ms,
                 },
             )
-            .await;
-        Ok(false)
+            .await
+            .map(|route| route.is_some())
     }
 
     /// Commit a staged successor, or abort it if the pointer moved.

@@ -1617,6 +1617,13 @@ pub struct SettingsDto {
     /// clients ship reporters and prepared-switch adapters; explicit off is
     /// retained as an operator override.
     pub playback_control_protocol_v1: bool,
+    /// Prime the unpublished successor offered by prepared quality handoff.
+    /// On by default and applied to the next eligible selection change.
+    pub prepared_quality_handoff: bool,
+    /// Direct operator authorization for one-shot automatic decoder recovery.
+    /// Off by default; applies immediately and is never overridden by the
+    /// advisory qualification/readiness fields below.
+    pub automatic_decoder_recovery: bool,
     /// Whether an operator has asked this node for the health-qualified
     /// artifact identity. What the node actually does with the request is
     /// `decoder_health_qualification`, below — the two are separate fields
@@ -1957,6 +1964,14 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             setting(keys::PLAYBACK_CONTROL_PROTOCOL_V1).as_deref(),
             true,
         ),
+        prepared_quality_handoff: plurx_core::store::stored_switch(
+            setting(keys::PREPARED_QUALITY_HANDOFF).as_deref(),
+            true,
+        ),
+        automatic_decoder_recovery: plurx_core::store::stored_switch(
+            setting(keys::AUTOMATIC_DECODER_RECOVERY).as_deref(),
+            false,
+        ),
         decoder_health_qualified_artifacts: decoder_health_requested,
         decoder_health_qualification: DecoderHealthQualification::of(
             &state.transcode.published_artifact_qualification(),
@@ -2162,6 +2177,8 @@ pub struct UpdateSettings {
     pub vod_presentation: Option<bool>,
     pub vod_live_recovery: Option<bool>,
     pub playback_control_protocol_v1: Option<bool>,
+    pub prepared_quality_handoff: Option<bool>,
+    pub automatic_decoder_recovery: Option<bool>,
     pub decoder_health_qualified_artifacts: Option<bool>,
     pub pgs_overlay: Option<bool>,
     pub dolby_vision_convert: Option<bool>,
@@ -2307,6 +2324,8 @@ impl UpdateSettings {
             || self.vod_presentation.is_some()
             || self.vod_live_recovery.is_some()
             || self.playback_control_protocol_v1.is_some()
+            || self.prepared_quality_handoff.is_some()
+            || self.automatic_decoder_recovery.is_some()
             || self.decoder_health_qualified_artifacts.is_some()
             || self.pgs_overlay.is_some()
             || self.dolby_vision_convert.is_some()
@@ -3140,6 +3159,19 @@ pub async fn update_settings(
                 if on { "1" } else { "0" },
             )
             .await?;
+    }
+    if let Some(on) = req.prepared_quality_handoff {
+        state
+            .store
+            .put_setting(keys::PREPARED_QUALITY_HANDOFF, if on { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(on) = req.automatic_decoder_recovery {
+        state
+            .store
+            .put_setting(keys::AUTOMATIC_DECODER_RECOVERY, if on { "1" } else { "0" })
+            .await?;
+        state.transcode.set_automatic_decoder_recovery(on);
     }
     if let Some(on) = req.decoder_health_qualified_artifacts {
         state

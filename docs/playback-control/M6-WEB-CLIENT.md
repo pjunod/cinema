@@ -33,10 +33,11 @@ equal the offer's `media_origin_ms` verbatim: `ActionAcknowledgement::validate`
 answers `400 acknowledgement.committed_media_origin_ms` without it, and
 `bound_preparation_acknowledgement` silently drops a commit that names a
 different origin. It is how the server tells *the client built what I offered*
-from *the client built something else and is asking me to publish it* —
-`desired_digest` already covers quality, codec, grade and subtitles, but not
-position. A 400 is neither retryable nor a transport error, so a client that
-omits it stops its own reporter for the rest of the session, immediately after
+from *the client used a different timeline mapping*. For VOD that value is
+zero; the accepted resume lives in `start_seconds`, while the live contiguous
+runway check prevents switching after the incumbent has moved elsewhere. A
+400 is neither retryable nor a transport error, so a client that omits the
+field stops its own reporter for the rest of the session, immediately after
 swapping the picture.
 
 **The name trap, because it is the one mistake that fails silently in both
@@ -54,9 +55,10 @@ is advisory: it says what enabling costs and whether each part is true right
 now, and it does not block the switch.
 
 ```
- Settings → Developer → Enable prepared quality handoff
-   ├── What must be true first    six rows: met / not met / not measured here
-   └── [ ] Tell the server this browser can prepare a second player
+ Settings → Developer → Prepared quality handoff
+   ├── [ ] Enable prepared quality handoff            server work
+   ├── What must be true first    advisory readiness rows
+   └── [ ] Tell the server this browser can prepare   local claim
 ```
 
 **What the switch does:** sets `capabilities.dual_player_preparation` on this
@@ -65,10 +67,10 @@ for a client that says `false`, and the retained capability document is the one
 it reads, so the switch applies to the next stream you start rather than to the
 one already playing.
 
-**Why it is per-browser and not a server setting:** the field is a claim about
-one browser on one machine. A fleet-wide value would be a claim about all of
-them — including, on web, every browser that is not the one that was measured.
-It is stored in `localStorage` under `plurx.prepared_handoff`.
+**Why there are two checkboxes:** `prepared_quality_handoff` directly enables
+server reserve-and-prime work. `dual_player_preparation` remains a claim about
+this browser on this machine and is stored in `localStorage` under
+`plurx.prepared_handoff`. Neither value is rewritten by readiness.
 
 **How to read the readiness list:** *met* is a fact this page checked. *not
 met* is a fact this page checked and it is false. *not measured here* is a
@@ -77,53 +79,24 @@ refusal.
 
 ## 3. What actually happens when you enable it today
 
-Nothing reaches a viewer, and the reason is worth stating exactly, because it
-is not the one the client briefs give.
+The server reserves a durable successor, attaches its VOD worker, and only
+then announces the action. The exact preparation ledger authorizes playlist
+and segment requests before commit without granting control or status
+authority. After commit removes the ledger, the durable prepared marker and
+exact current playback pointer keep media readable while the predecessor
+drains and the control publication fence settles.
 
-**Staging starts no worker.** `stage_prepared_successor`
-(`crates/plurxd/src/http/hls.rs`) mints an incarnation and a session, writes a
-durable `MediaSessionPreparation` row at `MEDIA_SESSION_PUBLICATION_BLOCKED`,
-takes the actor's preparation slot and arms the 330-second deadline. It creates
-no transcode and no VOD generator.
+The VOD successor keeps `media_origin_ms = 0`; its recipe and bootstrap
+`start_seconds` carry the accepted playhead. The browser starts near the
+incumbent's current film position, requires a contiguous four-second runway,
+realigns immediately before the swap, and sends `committed` only after the
+successor renders a frame. A failed prime or client preparation is settled and
+falls back to the ordinary in-place reopen.
 
-A staged route therefore classifies as `OwnerTransition` on every request —
-`classify_durable_route` sends any row whose `publication_ready_at_ms` is not
-`0` down that branch — and the playlist answers:
-
-```
- GET /api/v1/hls/<staged>/index.m3u8
-        │
-        ▼
- relay_if_remote ──▶ classify_durable_route ──▶ OwnerTransition
-        │
-        ▼
- 503 media_owner_transition       for the whole 330 s lease
-        │
-        ▼  (deadline reaps the row)
- 410 media_session_ended
-```
-
-Commit does not fix it either: `PreparationExecutor::commit` runs the store CAS
-that moves the playback pointer and retires the predecessor, and never creates
-the worker. Unblocking the publication sentinel is a separate step driven only
-from the live-worker lease loop, which a worker-less row never enters.
-
-**So a client that builds a second pipeline today reaches `failed`, not
-`buffer_ready` — on every platform, Apple included.** That is the first row of
-the readiness list, and it is why the card still says *do not enable this for
-viewers yet*.
-
-The web client's behaviour on that path is correct, tested, and deliberately
-does not repeat itself. A fatal manifest error settles the staging with
-`failed` and frees the slot rather than holding the session's only preparation
-slot until the deadline — and a successor that was **never playable** also
-withdraws the offer: `preparedHandoffOffered` reports
-`dual_player_preparation` false for the rest of that playback, so the server
-stops staging. Without it, an operator who turned the switch on would get a
-doomed second pipeline built on every quality change, which is a regression and
-not a feature. It is learned, forgotten when the player ends, and needs no
-flag; Apple's `PreparedReplacementCoordinator.canOfferPreparation` is the same
-rule in the same place.
+A successor that was **never playable** still withdraws the local offer for
+the rest of that playback, preventing repeated failed attempts on the same
+device. That learned fallback is not an enable gate: it is cleared with the
+player, while both Developer checkboxes remain under the operator's control.
 
 ## 4. The gates that keep this honest
 

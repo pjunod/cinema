@@ -1,8 +1,8 @@
 # The prepared-switch contract, for the three client adapters
 
-**Status:** protocol shipped; **the staged successor has no producer yet**, so
-no adapter can be finished · **Updated:** 2026-09-08 · **Audience:** whoever
-builds the Apple, Android or web adapter
+**Status:** protocol, three adapters, and server reserve/prime implemented;
+physical qualification remains · **Updated:** 2026-09-09 · **Audience:**
+whoever validates or changes the Apple, Android or web adapter
 
 This is the one document a client adapter needs. The protocol half of §4 is
 merged and will not change under you: `prepare_replacement` is offered,
@@ -11,22 +11,25 @@ drains.
 
 > ## Read this before starting
 >
-> **The successor you are offered is not playable yet.**
-> `stage_prepared_successor` writes a durable row and reserves the actor's
-> slot; it starts no encoder. `ControlAction::Prepare`'s own doc comment says
-> so — *"This slice deliberately starts no worker behind that route."* The
-> staged route carries `publication_ready_at_ms = MEDIA_SESSION_PUBLICATION_BLOCKED`,
-> and every public media path classifies such a route as `owner_transition`,
-> so **fetching the offered `playlist_url` answers `425` until commit.**
+> **The offered successor is now a real primed VOD worker.**
+> The server reserves its durable row, attaches the worker, and only then
+> publishes the actor action. The staged route remains blocked for control and
+> status, while its exact live preparation ledger authorizes playlist and
+> segment reads for the second player. After commit removes that ledger, the
+> server requires both the durable prepared marker and the exact current
+> playback pointer to keep media readable during predecessor drain; neither
+> condition grants control authority.
+> A VOD successor's `media_origin_ms` remains `0`; the accepted film position
+> is its `start_seconds`. Clients still echo the offered origin on commit, but
+> must not add the resume point to VOD media time a second time.
 >
-> An adapter written today can therefore implement the message plumbing —
-> declare, receive, acknowledge, commit, handle every refusal — and nothing
-> else. It cannot build, buffer or present the successor, so acceptance
-> criteria 2, 3 and 5 below are not achievable against the current server.
+> All three adapters implement declare, receive, buffer, align, acknowledge,
+> switch, commit, and fallback. A failed prime is durably aborted and its
+> worker is released; it is never announced as playable metadata.
 >
-> Starting and priming that successor is the remaining server task. This
-> banner comes out when it lands; until then, do not plan an adapter around
-> being able to demonstrate a seamless switch.
+> Settings → Developer has the direct server checkbox. It is default-on,
+> applies to the next eligible quality change, and is not gated by the
+> advisory readiness list.
 
 The three adapters are independent work in three codebases and can be built in
 parallel. They share this contract and nothing else. Where this document and

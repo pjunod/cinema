@@ -1553,6 +1553,14 @@ pub mod keys {
     /// reporter and prepared-switch adapter; explicit `0` remains an operator
     /// override.
     pub const PLAYBACK_CONTROL_PROTOCOL_V1: &str = "playback.control_protocol_v1";
+    /// Start and prime prepared quality successors. Absent/on enables the
+    /// shipped transaction; explicit `0` is the live operator override.
+    pub const PREPARED_QUALITY_HANDOFF: &str = "playback.prepared_quality_handoff";
+    /// Permit automatic hardware-to-software decoder recovery for new
+    /// producer attempts. This is an operator switch, not a qualification
+    /// request: missing diagnostic contracts are reported as advisory facts
+    /// and never override an explicit enable.
+    pub const AUTOMATIC_DECODER_RECOVERY: &str = "playback.automatic_decoder_recovery";
     /// Ask this node to plan into the health-qualified artifact identity, so a
     /// transcode may only be reused when its producer's own receipt says the
     /// decode was clean.

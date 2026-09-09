@@ -129,17 +129,14 @@ the mechanical reason the capability is not a judgement call from here.
   on `owner_epoch == 1`, carrying no acknowledgement, and not ending. That read
   always answers `Absent` while nothing is staged. Correct, not free, and said
   here rather than discovered in a dashboard.
-- With the switch **on**, a prepared handoff still fires on nothing, and the
-  reason is bigger than any capability. **`stage_prepared_successor` is
-  stage-only.** Its own comment says so — "a durable row and the actor's one
-  successor slot, nothing produced yet" — and the roadmap's third phase,
-  *reserve and prime*, is not implemented. The staged row carries
-  `publication_ready_at_ms = MEDIA_SESSION_PUBLICATION_BLOCKED`, so a GET of
-  the successor's `playlist_url` answers `503 media_owner_transition` until the
-  pointer moves, and commit does not publish it either. A client built from the
-  contract's §C8 sequence diagram therefore stands up a second pipeline that
-  can never become playable — **on every selection change, for the whole
-  film**, which is a regression rather than a feature.
+- With both the device switch and the server's Developer checkbox **on**, an
+  eligible quality change now receives a real primed VOD successor. The exact
+  preparation ledger authorizes its media before commit while control and
+  status stay fenced. After commit, the successor's durable prepared marker
+  plus the exact current playback pointer keep its media readable during the
+  predecessor drain without granting control authority. Abort, refusal and
+  expiry release the worker; commit projects the predecessor and publishes the
+  successor.
 
   So the ledger learns. The first successor that dies *before it was ever
   playable* — no track published, whether it errored or the readiness bound

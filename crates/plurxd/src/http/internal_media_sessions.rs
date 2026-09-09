@@ -641,15 +641,30 @@ pub(crate) async fn relay(
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     let request_deadline = now + budget;
-    let route = match state
-        .media_sessions
-        .authoritative_route_resolution_before(
-            &request.session_id,
-            &state.node_id,
-            request_deadline,
-        )
-        .await
-    {
+    let media_resource = !matches!(
+        &request.resource,
+        RelayResource::Status | RelayResource::Delete
+    );
+    let resolution = if media_resource {
+        state
+            .media_sessions
+            .authoritative_media_route_resolution_before(
+                &request.session_id,
+                &state.node_id,
+                request_deadline,
+            )
+            .await
+    } else {
+        state
+            .media_sessions
+            .authoritative_route_resolution_before(
+                &request.session_id,
+                &state.node_id,
+                request_deadline,
+            )
+            .await
+    };
+    let route = match resolution {
         Ok(DurableRouteResolution::ActiveLocal(route)) => route,
         Ok(DurableRouteResolution::Terminal(route))
             if matches!(&request.resource, RelayResource::Delete)

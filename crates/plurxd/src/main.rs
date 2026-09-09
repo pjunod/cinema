@@ -1407,6 +1407,9 @@ async fn boot(
     // computes, so moving it on a live node would move the key space under
     // work already running; the request is stored when written and read here.
     state.transcode.publish_artifact_qualification().await;
+    // Recovery authorization changes no artifact identity, but it still has
+    // to be published before the listener accepts the first session.
+    state.transcode.publish_automatic_decoder_recovery().await;
     let background_loops = BackgroundLoopGuard::new();
     spawn_background_loops(&state, background_loops.token());
 

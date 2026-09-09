@@ -41,6 +41,13 @@ pub(crate) const MAX_CONTROL_REQUEST_BYTES: usize = 96 * 1024;
 pub(crate) const MAX_ACTIVATION_REQUEST_BYTES: usize = 128 * 1024;
 pub(crate) const REMOTE_START_OWNERSHIP_HEADER: &str = "x-plurx-start-ownership";
 pub(crate) const REMOTE_START_OWNERSHIP_V1: &str = "created-v1";
+/// Durable marker carried by a prepared successor's persisted start response.
+///
+/// The preparation ledger authorizes media before commit. Commit removes that
+/// ledger row, so this marker plus the playback pointer is the durable proof
+/// that the same primed successor may continue serving while its control-plane
+/// publication fence waits for predecessor projection.
+pub(crate) const PREPARED_SUCCESSOR_PLAN_NOTE: &str = "prepared_quality_handoff";
 
 const MAX_START_RESPONSE_BYTES: usize = 128 * 1024;
 pub(crate) const START_DEADLINE: Duration = Duration::from_secs(50);
@@ -1638,6 +1645,24 @@ impl MediaSessionCoordinator {
         )
     }
 
+    /// Resolve a prepared media object while its control publication remains
+    /// fenced. Before commit the live preparation ledger is the authority;
+    /// after commit the prepared-response marker plus the playback pointer is.
+    /// Control and status deliberately continue to use
+    /// `route_resolution_before` until predecessor projection finishes.
+    pub(crate) async fn media_route_resolution_before(
+        &self,
+        session_id: &str,
+        local_node_id: &str,
+        request_deadline: Instant,
+    ) -> Result<DurableRouteResolution, StoreError> {
+        let resolution = self
+            .route_resolution_before(session_id, local_node_id, request_deadline)
+            .await?;
+        self.authorize_prepared_media_before(resolution, local_node_id, request_deadline)
+            .await
+    }
+
     /// Cache-bypassing durable resolution for a final HTTP status verdict.
     /// A one-second negative/old-owner cache is safe for ordinary routing but
     /// cannot prove 404 after exact publication ownership was rejected.
@@ -1672,6 +1697,74 @@ impl MediaSessionCoordinator {
             session_id,
             classify_durable_route(route, local_node_id, unix_ms()),
         )
+    }
+
+    /// Cache-bypassing form of [`Self::media_route_resolution_before`].
+    pub(crate) async fn authoritative_media_route_resolution_before(
+        &self,
+        session_id: &str,
+        local_node_id: &str,
+        request_deadline: Instant,
+    ) -> Result<DurableRouteResolution, StoreError> {
+        let resolution = self
+            .authoritative_route_resolution_before(session_id, local_node_id, request_deadline)
+            .await?;
+        self.authorize_prepared_media_before(resolution, local_node_id, request_deadline)
+            .await
+    }
+
+    async fn authorize_prepared_media_before(
+        &self,
+        resolution: DurableRouteResolution,
+        local_node_id: &str,
+        request_deadline: Instant,
+    ) -> Result<DurableRouteResolution, StoreError> {
+        let DurableRouteResolution::OwnerTransition(route) = &resolution else {
+            return Ok(resolution);
+        };
+        let now_ms = unix_ms();
+        if route.state != "active"
+            || route.publication_ready_at_ms == 0
+            || route.lease_expires_at_ms <= now_ms
+        {
+            return Ok(resolution);
+        }
+        let staged = if route.publication_ready_at_ms == MEDIA_SESSION_PUBLICATION_BLOCKED {
+            tokio::time::timeout_at(
+                tokio::time::Instant::from_std(request_deadline),
+                self.store
+                    .staged_media_session_for_playback(route.user_id, &route.playback_id),
+            )
+            .await
+            .map_err(|_| {
+                StoreError::Database("staged media authorization timed out".to_owned())
+            })??
+        } else {
+            None
+        };
+        let staged_authorized = staged.as_ref().is_some_and(|staged| {
+            staged.staged_incarnation_id == route.incarnation_id && staged.deadline_ms > now_ms
+        });
+        let committed_authorized = if !staged_authorized && prepared_successor_route(route) {
+            let current = tokio::time::timeout_at(
+                tokio::time::Instant::from_std(request_deadline),
+                self.store
+                    .media_session_route_for_playback(route.user_id, &route.playback_id),
+            )
+            .await
+            .map_err(|_| {
+                StoreError::Database("prepared media authorization timed out".to_owned())
+            })??;
+            current.is_some_and(|current| same_media_route(&current, route))
+        } else {
+            false
+        };
+        Ok(classify_prepared_media_route(
+            resolution,
+            staged_authorized || committed_authorized,
+            local_node_id,
+            now_ms,
+        ))
     }
 
     async fn raw_route_before(
@@ -2161,13 +2254,16 @@ impl MediaSessionCoordinator {
     /// Hand a freshly activated local worker to the renewal loop before its
     /// next store inventory. If the store disappears in that exact window,
     /// the worker still knows the committed expiry and self-fences on time.
+    ///
+    /// A prepared successor enters here immediately after its durable commit,
+    /// while its publication fence is still set. That route is active and no
+    /// longer has a preparation-ledger row, so it must renew while predecessor
+    /// projection completes. Callers never seed an uncommitted preparation.
     pub(crate) async fn seed_owned_lease(&self, route: &MediaSessionRoute) {
-        if route.state != "active"
-            || route.publication_ready_at_ms == MEDIA_SESSION_PUBLICATION_BLOCKED
-        {
+        if route.state != "active" {
             debug_assert!(
                 false,
-                "only confirmed active media-session routes may enter lease accounting"
+                "only active media-session routes may enter lease accounting"
             );
             return;
         }
@@ -2387,6 +2483,56 @@ impl MediaSessionCoordinator {
         relay_metric.valid_response();
         Ok(response)
     }
+}
+
+fn classify_prepared_media_route(
+    resolution: DurableRouteResolution,
+    authorized: bool,
+    local_node_id: &str,
+    now_ms: i64,
+) -> DurableRouteResolution {
+    let DurableRouteResolution::OwnerTransition(route) = resolution else {
+        return resolution;
+    };
+    let authorized = route.state == "active"
+        && route.publication_ready_at_ms != 0
+        && route.lease_expires_at_ms > now_ms
+        && authorized;
+    if !authorized {
+        return DurableRouteResolution::OwnerTransition(route);
+    }
+    if route.owner_node_id == local_node_id {
+        DurableRouteResolution::ActiveLocal(route)
+    } else {
+        DurableRouteResolution::ActiveRemote(route)
+    }
+}
+
+fn prepared_successor_route(route: &MediaSessionRoute) -> bool {
+    #[derive(Deserialize)]
+    struct ResponseMarker {
+        #[serde(default)]
+        plan_notes: Vec<String>,
+    }
+
+    serde_json::from_str::<ResponseMarker>(&route.response_json)
+        .ok()
+        .is_some_and(|response| {
+            response
+                .plan_notes
+                .iter()
+                .any(|note| note == PREPARED_SUCCESSOR_PLAN_NOTE)
+        })
+}
+
+fn same_media_route(left: &MediaSessionRoute, right: &MediaSessionRoute) -> bool {
+    left.incarnation_id == right.incarnation_id
+        && left.session_id == right.session_id
+        && left.user_id == right.user_id
+        && left.playback_id == right.playback_id
+        && left.owner_node_id == right.owner_node_id
+        && left.owner_epoch == right.owner_epoch
+        && left.state == right.state
 }
 
 fn remote_abort_legacy_retry_body(
@@ -6279,6 +6425,59 @@ mod tests {
             ),
             "and once that lease stops being renewed, the recipe decides"
         );
+    }
+
+    #[test]
+    fn only_durable_prepared_authority_bypasses_the_control_publication_fence() {
+        let now_ms = 5_000_000;
+        let mut route = media_route("session-prepared-media");
+        route.publication_ready_at_ms = MEDIA_SESSION_PUBLICATION_BLOCKED;
+        route.lease_expires_at_ms = now_ms + 30_000;
+        route.response_json = serde_json::json!({
+            "plan_notes": [PREPARED_SUCCESSOR_PLAN_NOTE]
+        })
+        .to_string();
+        assert!(prepared_successor_route(&route));
+        let staged = plurx_core::domain::MediaSessionStagedGeneration {
+            user_id: route.user_id,
+            playback_id: route.playback_id.clone(),
+            staged_incarnation_id: route.incarnation_id.clone(),
+            expected_predecessor_incarnation_id: "predecessor".to_owned(),
+            deadline_ms: now_ms + 20_000,
+            created_at_ms: now_ms,
+            updated_at_ms: now_ms,
+        };
+
+        let control = classify_durable_route(Some(route.clone()), &route.owner_node_id, now_ms);
+        assert!(matches!(
+            control,
+            DurableRouteResolution::OwnerTransition(_)
+        ));
+        assert!(matches!(
+            classify_prepared_media_route(control, true, &route.owner_node_id, now_ms),
+            DurableRouteResolution::ActiveLocal(_)
+        ));
+        assert!(matches!(
+            classify_prepared_media_route(
+                DurableRouteResolution::OwnerTransition(route.clone()),
+                false,
+                &route.owner_node_id,
+                now_ms
+            ),
+            DurableRouteResolution::OwnerTransition(_)
+        ));
+
+        let mut expired = staged;
+        expired.deadline_ms = now_ms;
+        assert!(matches!(
+            classify_prepared_media_route(
+                DurableRouteResolution::OwnerTransition(route),
+                expired.deadline_ms > now_ms,
+                "another-node",
+                now_ms
+            ),
+            DurableRouteResolution::OwnerTransition(_)
+        ));
     }
 
     fn eligible_recipe(route: &MediaSessionRoute) -> RemoteStartRequest {
