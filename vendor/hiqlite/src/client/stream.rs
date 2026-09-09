@@ -1022,7 +1022,7 @@ async fn client_stream(
                                 terminal_transport_failure = true;
                                 force_writer_abort = true;
                                 rotate_after_disconnect = client.inner.proxy_mode;
-                                let _ = ack.send(Err(Error::Connect(
+                                let _ = ack.send(Err(Error::RequestNotDispatched(
                                     "API transport ended before request dispatch".into(),
                                 )));
                                 break 'connected;
@@ -1062,7 +1062,7 @@ async fn client_stream(
                             let Ok(reader_request) = result else {
                                 terminal_transport_failure = true;
                                 rotate_after_disconnect = client.inner.proxy_mode;
-                                let _ = ack.send(Err(Error::Connect(
+                                let _ = ack.send(Err(Error::RequestNotDispatched(
                                     "API transport ended before request dispatch".into(),
                                 )));
                                 break 'connected;
@@ -1078,7 +1078,7 @@ async fn client_stream(
                                     .await;
                                     if client.inner.proxy_mode && proxy_refused {
                                         proxy_handoff = true;
-                                        let _ = ack.send(Err(Error::Connect(
+                                        let _ = ack.send(Err(Error::RequestNotDispatched(
                                             "API request was not dispatched before proxy handoff"
                                                 .into(),
                                         )));
@@ -1118,7 +1118,7 @@ async fn client_stream(
                             }
                             update_leader(&leader, Some(leader_id), Some(node)).await;
                             leader_handoff = true;
-                            let _ = ack.send(Err(Error::Connect(
+                            let _ = ack.send(Err(Error::RequestNotDispatched(
                                 "API request was not dispatched before stream handoff".into(),
                             )));
                             break 'connected;
@@ -1146,7 +1146,7 @@ async fn client_stream(
                                 let _ = pending_leader_ready.register(target, Some(ready));
                             }
                             leader_handoff = true;
-                            let _ = ack.send(Err(Error::Connect(
+                            let _ = ack.send(Err(Error::RequestNotDispatched(
                                 "API request was not dispatched before stream handoff".into(),
                             )));
                             break 'connected;
@@ -1164,7 +1164,7 @@ async fn client_stream(
                             }
                             terminal_transport_failure = true;
                             rotate_after_disconnect = client.inner.proxy_mode;
-                            let _ = ack.send(Err(Error::Connect(
+                            let _ = ack.send(Err(Error::RequestNotDispatched(
                                 "API transport ended before request dispatch".into(),
                             )));
                             break 'connected;
@@ -1176,7 +1176,7 @@ async fn client_stream(
                             terminal_transport_failure = true;
                             force_writer_abort = true;
                             rotate_after_disconnect = client.inner.proxy_mode;
-                            let _ = ack.send(Err(Error::Connect(
+                            let _ = ack.send(Err(Error::RequestNotDispatched(
                                 "API transport ended before request dispatch".into(),
                             )));
                             break 'connected;
