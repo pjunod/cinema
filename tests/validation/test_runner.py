@@ -926,9 +926,27 @@ Path(sys.argv[2]).write_text("survived", encoding="utf-8")
                         leader_identity = validation_runner._ProcessIdentity(
                             int(leader_pid), f"linux-start-ticks:{leader_started}"
                         )
-                        observed_child = validation_runner._read_linux_process_record(
-                            child_identity.pid
-                        )
+                        # killpg(SIGKILL) queues an unmaskable signal but Linux
+                        # may still report the task as runnable until the
+                        # scheduler delivers it. Give that already-signalled
+                        # identity a bounded settlement window; a genuinely
+                        # abandoned child remains live long enough to write
+                        # `marker` and fail the assertions below.
+                        settlement_deadline = time.monotonic() + 2
+                        while True:
+                            observed_child = (
+                                validation_runner._read_linux_process_record(
+                                    child_identity.pid
+                                )
+                            )
+                            if (
+                                observed_child is None
+                                or observed_child.identity != child_identity
+                                or observed_child.state.startswith("Z")
+                                or time.monotonic() >= settlement_deadline
+                            ):
+                                break
+                            time.sleep(0.01)
                         for identity in (child_identity, leader_identity):
                             record = validation_runner._read_linux_process_record(
                                 identity.pid

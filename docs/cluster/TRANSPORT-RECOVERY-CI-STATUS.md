@@ -96,9 +96,18 @@ discarded it. The run was cancelled before either recovery role started. The
 corrected filter graph trims film-clock preroll before sampling the declared
 output grid. On the exact source with Rust 1.97.1, the VFR and bitmap restart
 regressions pass, the full fast workspace unit suite passes, formatting is
-clean, and workspace Clippy passes with warnings denied. The next push is the
-frozen candidate for the one full PR qualification run; no second adversarial
-review is planned or required.
+clean, and workspace Clippy passes with warnings denied. Run
+[#1302](http://192.168.4.7:3000/noirr/plurx/actions/runs/1302) then stopped in
+fast preflight before any unit, platform, or recovery-role job started. Its
+injected cleanup-denial regression sampled a child immediately after the
+fallback queued unmaskable `SIGKILL`, while Linux could still report that
+not-yet-scheduled task as runnable. The assertion now gives the exact recorded
+identity a bounded settlement window; a genuinely abandoned child remains
+live long enough to write the existing failure marker. Ten consecutive Linux
+stress passes cover 20 injected discovery-denial positions, and the complete
+198-test validation suite passes. The next push is the frozen candidate for
+the one full PR qualification run; no second adversarial review is planned or
+required.
 
 ## Milestones — evidence closes the checkbox
 
