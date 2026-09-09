@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["0247c428"]
+reason = "This documentation-only commit freezes the reviewed transport-recovery promotion base on the maintained status page; it changes no runtime behavior. The history audit classifies its subject as corrective because it contains the word freeze, so this entry records that the commit is intentionally non-runtime work."
+ignore = true

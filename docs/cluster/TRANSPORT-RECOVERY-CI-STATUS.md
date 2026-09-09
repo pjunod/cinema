@@ -1,6 +1,6 @@
 # Transport recovery CI — implementation status and evidence
 
-**Status:** M6 review fixes complete; running unit tests · **Owner:** Codex · **Updated:** 2026-09-09
+**Status:** M6 reviewed candidate; repairing fast preflight metadata · **Owner:** Codex · **Updated:** 2026-09-09
 
 Companion to
 [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md) (how this effort reaches
@@ -45,13 +45,20 @@ Cargo freshness and an embedded qualification SHA; cancellation latched
 through cleanup, publication, and the role handoff; summary-before-report
 publication with failure repair; best-effort cleanup of every owned process;
 a recursively closed role schema; deepest failing-phase preservation;
-UTF-8-safe diagnostic truncation; and role-schema validation routing. Focused
-unit and contract tests are now running before the reviewed candidate is
-pushed once for full M6 qualification.
+UTF-8-safe diagnostic truncation; and role-schema validation routing. The
+reviewed candidate passed the focused Rust suite (65 tests), the full local
+operations suite (294 tests), the full local validation suite (198 tests with
+one platform skip), the pinned Rust 1.97.1 check and Clippy gate, formatting,
+documentation indexing, history audit, and an exact-source Linux run of all 67
+transport-recovery tests.
 Current `main` moved twice after that review completed. Both updates were
 merged; the frozen candidate now includes `374e97ed`, the decoder selection
-and recovery effort promotion. The exact-source checks are being repeated on
-that final merged tree before it is pushed.
+and recovery effort promotion. Forgejo run
+[#1256](http://192.168.4.7:3000/noirr/plurx/actions/runs/1256) stopped at fast
+preflight because the final status-only commit `0247c428` lacked the required
+non-runtime history-ledger entry. The 20-cycle voter and learner jobs never
+started. This page and `validation/regressions.d/0247c428-validation-metadata.toml`
+record that integration repair before a new candidate is pushed.
 
 ## Milestones — evidence closes the checkbox
 
