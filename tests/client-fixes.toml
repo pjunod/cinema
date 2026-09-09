@@ -918,3 +918,11 @@ source = "clients/apple/Sources/PlaybackControlReporter.swift"
 source_anchor = "func finish(_ final: PlaybackControlCapture?)"
 test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
 test_anchor = "testAnEndingCommitIsSettledBeforeTheEndExchange"
+
+[[fixes]]
+id = "apple.final-settlement-has-a-hard-deadline"
+commits = ["1f5b1f35"]
+source = "clients/apple/Sources/PlaybackControlReporter.swift"
+source_anchor = "static let finalizationDeadlineMs = 3_000"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testFinalizationStopsAtItsDeadlineDuringPersistentOutage"
