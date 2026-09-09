@@ -3,8 +3,8 @@
 **Status:** M0–M5 complete · M6 server/client implementation landed · M7
 complete · frozen promotion candidate integrated with current `main` ·
 broader fleet qualification continues after merge · **Updated:** 2026-09-08 · **Integration branch:**
-`effort/decoder-selection-recovery` at `990bf334` · **Active promotion branch:**
-`codex/decoder-final-promotion` at `e37133be`
+`effort/decoder-selection-recovery` at `990d8069` · **Active promotion branch:**
+`codex/decoder-final-promotion` at `990d8069`
 
 The effort was created from Forgejo `main` at
 `4a6a0268bd314ad5587cb3037f12ebd992c0074e`. The original M0 research baseline was `main` at
@@ -26,7 +26,7 @@ An unchecked item is not implied by a nearby passing check.
 | M7a · advisory Developer settings | Done | Keep the prerequisites accurate as hardware contracts land; the controls advise and never gate enablement |
 | M7b · hardware diagnostic path | Merged | [Forgejo #174](http://192.168.4.7:3000/noirr/plurx/pulls/174) merged approved head `0a685526` into the effort at `0c831b88` after the complete Effort development gate. Backend-aware measurement, path-scoped qualification, same-codec recovery pairing, compatible v2 reporting, and advisory Developer readiness are implemented. A real hardware contract is separate M8 fleet evidence |
 | M7 remainder · offline durability and handoff enforcement | Merged | [Forgejo #179](http://192.168.4.7:3000/noirr/plurx/pulls/179) fast-forwarded approved head `990bf334` into the effort after its adversarial findings were fixed and the Effort development gate passed; the repair includes one replicated cluster-wide kill-switch transaction |
-| Promotion to `main` | Frozen integration in progress | Current `main` `06420598` is merged locally at `e37133be`; seven integration conflicts are resolved, Rust compile/Clippy and exact schema, web, ownership, and status contracts pass. Remaining: push/open draft PR · one final adversarial review · fixes if any · smoke/fast lane · merge · watch post-merge tests |
+| Promotion to `main` | Frozen integration ready to push | Current `main` `1f6d6645` is merged at `990d8069`; integration conflicts are resolved, pinned Rust compile/Clippy and exact SQLite v54, Hiqlite v34, web, ownership, and status contracts pass. Remaining: push/open draft PR · one final adversarial review · fixes if any · smoke/fast lane · merge · watch post-merge tests |
 | M8 · broader fleet qualification | Post-merge continuation | Hardware diagnostic capture · workload matrix · false-positive classification · startup/concurrency/recovered-latency evidence · three-client replacement runs; any code failure gets a new PR |
 
 **Shortest reading:** M7 is done. Push the frozen candidate, perform exactly
@@ -42,17 +42,17 @@ on that path rather than falsely certified.
 | Field | Current value |
 |---|---|
 | Milestone | Freeze and promote the completed decoder-selection/recovery effort |
-| Task base | Effort head `990bf334` plus current `main` `06420598` |
-| Task branch | `codex/decoder-final-promotion` in the agent-owned clone at `/private/tmp/codex-plurx-decoder.RRcx8j/repo`; merge commit `e37133be` |
+| Task base | Effort head `990bf334` plus current `main` `1f6d6645` |
+| Task branch | `codex/decoder-final-promotion` in the agent-owned clone at `/private/tmp/codex-plurx-decoder.RRcx8j/repo`; merge commit `990d8069` |
 | Task PR | M7 [Forgejo #179](http://192.168.4.7:3000/noirr/plurx/pulls/179) is merged. The final effort→`main` PR is the next action and remains draft until review findings and fast-lane evidence are complete |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
 | Audit scope | Job-scoped budget persistence · alternate result references · part and final-assembly receipt verification · versioned worker capabilities · owner-handoff inheritance · default and no-live-recovery shipping-path exercise without introducing a code gate |
 | Current finding | Exact-head review showed `recipe_hash` cannot safely serve as both node-local result reference and owner-independent recovery ledger. The repaired tree adds explicit `primary -> recovery_pending -> alternate` state, preserves either consumed boundary through rehome, refuses software-primary budget creation, and gives every claim and worker mutation a monotonically increasing generation |
 | Adversarial review | Complete. Einstein found two remaining P1 boundaries: disabling fenced only the local manager, and compatible pre-v32 workers could write generation-less state/cache settlements. The working tree moves disable and every claim fence into one replicated Store transaction, predicates claims on the durable setting, and adds lifecycle/cache-publication triggers that reject legacy writers. Both findings have focused passing regressions; per owner direction there is no additional task-review loop |
 | Focused evidence | Exact review-fix commit `35f0069f`: pinned all-target core/daemon compile and denied-warning Clippy pass; SQLite offline units pass 10/10; the v51→v52 migrated-schema regression rejects legacy claim, requeue, failure, Ready, cache completion, and complete-row rewrite shapes; the cluster-wide disable contract passes on SQLite and real three-voter Hiqlite, proving a remote claim cannot publish cache or Ready after disable and cannot claim again until re-enabled. Earlier `23274c3c` direct recovery, membership, software-survivor, and error-path evidence remains unchanged |
-| Fast lane | M7's Forgejo Effort development gate passed at `990bf334`. On frozen integration `e37133be`, pinned Rust 1.97.1 compile and denied-warning Clippy pass; exact SQLite v53 and Hiqlite v33 chain/import/downgrade contracts plus web/settings and validation contracts pass. The promotion fast lane runs after push |
+| Fast lane | M7's Forgejo Effort development gate passed at `990bf334`. On frozen integration `990d8069`, pinned Rust 1.97.1 compile and denied-warning Clippy pass; exact SQLite v54 and Hiqlite v34 chain/import/downgrade contracts plus web/settings and validation contracts pass. The promotion fast lane runs after push |
 | Validation order | Task PRs into the effort do not run the full unit suite. After M7: targeted functionality smoke tests and the fast lane run on the frozen exact tree; after they pass, merge and continue watching the remaining promotion and broader suites. A code failure gets a new PR |
-| Next | Push `e37133be` to the effort · open the final draft PR · perform exactly one adversarial review · fix findings · run functionality smoke and the fast lane · merge · monitor the remainder |
+| Next | Push `990d8069` to the effort · open the final draft PR · perform exactly one adversarial review · fix findings · run functionality smoke and the fast lane · merge · monitor the remainder |
 | External blocker | None for M7 or promotion. A qualifying hardware host is still required for post-merge M8 fleet evidence; absence remains visible and advisory rather than an enable gate |
 
 ## Milestones
@@ -3765,6 +3765,7 @@ promotion. Remaining promotion, fleet, and client suites continue against
 
 | Commit/tree | Command | Result |
 |---|---|---|
+| `990d8069` | Merge current `main` `1f6d6645`; pinned Rust 1.97.1 core/daemon all-target compile and daemon denied-warning Clippy; SQLite v54 legacy-writer refusal; Hiqlite v34 chain; pre-v54 import projection; Developer settings 19/19; ownership/status contracts 28/28 | Pass · the decoder recovery schema now follows main's drain-deadline step, both advisory Developer sections render, and no code feature gate was reintroduced |
 | `e37133be` | Merge current `main` `06420598`; pinned Rust 1.97.1 core/daemon all-target compile and denied-warning Clippy; SQLite v53 legacy-writer refusal; Hiqlite v33 chain; pre-v53 import projection; v43 downgrade fixture; Developer settings 19/19; ownership/status contracts 28/28 | Pass · seven merge conflicts resolved without dropping either side; schema sequence is contiguous and both advisory Developer sections render |
 | `35f0069f` | `cargo check -p plurx-core -p plurxd --all-targets`; denied-warning Clippy; SQLite offline unit module; v51→v52 legacy-SQL migration regression; SQLite plus real three-voter Hiqlite cluster-wide disable contract | Pass · compile and Clippy clean; offline units 10/10; migration refusal 1/1; disable/publication fence contract 1/1 on both Store implementations |
 | `23274c3c` | `cargo check -p plurxd --all-targets`; denied-warning Clippy for `plurx-core`, `plurxd`, and `plurx-cluster-check`; exact direct recovery, shipping recovery, and injected-disable regressions; SQLite plus real Hiqlite offline store contract; real three-voter membership harness; v32 schema-chain and pre-v52 import projection | Pass · compilation and Clippy clean; exact daemon regressions 3/3; backend contract 1/1 across both implementations; schema/import 2/2; membership harness completed successfully |
