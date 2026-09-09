@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["5313032f"]
+reason = "This commit only mapped the preceding offline-recovery runtime repair and corrected its live status/evidence record; it changed no runtime behavior."
+ignore = true

@@ -429,14 +429,19 @@ const OFFLINE_METHODS: &[&str] = &[
     "offline_package_stats",
     "reset_interrupted_offline_packages",
     "claim_next_offline_package",
+    "offline_package_claim_is_current",
     "requeue_offline_package",
     "set_offline_package_recipe",
+    "begin_offline_decode_recovery",
+    "install_offline_decode_alternate",
     "update_offline_progress",
     "fail_offline_package",
     "invalidate_ready_offline_package",
     "put_offline_lease",
     "offline_package_for_lease",
     "mark_offline_package_ready",
+    "complete_offline_cache_entry",
+    "disable_offline_packages",
     "delete_offline_package",
     "expire_offline_packages",
     // Node removal (`CLUSTERING-PLAN.md` §6.7). Cluster-only behavior: the
@@ -526,6 +531,10 @@ const MEDIA_SESSION_METHODS: &[&str] = &[
     "staged_media_session_for_playback",
     "commit_media_session_preparation",
     "abort_media_session_preparation",
+    "reserve_producer_recovery",
+    "settle_producer_recovery",
+    "producer_recovery_for_epoch",
+    "validation_corrupt_recovery_restriction",
 ];
 const FENCED_PUBLICATION_METHODS: &[&str] = &[
     "put_setting_fenced",
@@ -691,6 +700,7 @@ async fn an_activation_is_refused_when_the_viewer_has_asked_for_something_else()
 
         let mut stale = MediaSessionActivation {
             expected_desired_revision: Some(first_ask.revision),
+            recovery_epoch: String::new(),
             incarnation_id: "11111111-1111-4111-8111-111111111103".to_owned(),
             session_id: "11111111-1111-4111-8111-111111111104".to_owned(),
             user_id: user.id,
@@ -802,6 +812,7 @@ async fn an_activation_is_refused_when_the_viewer_has_asked_for_something_else()
             .unwrap_or_else(|error| panic!("{backend}: change fresh ask: {error}"));
         let first_activation = MediaSessionActivation {
             expected_desired_revision: Some(first.revision),
+            recovery_epoch: String::new(),
             incarnation_id: "11111111-1111-4111-8111-111111111107".to_owned(),
             session_id: "11111111-1111-4111-8111-111111111108".to_owned(),
             user_id: user.id,
@@ -853,6 +864,7 @@ async fn an_activation_with_no_recorded_ask_is_still_admitted() {
         let playback = "playback-activation-no-ask";
         let activation = MediaSessionActivation {
             expected_desired_revision: Some(7),
+            recovery_epoch: String::new(),
             incarnation_id: "11111111-1111-4111-8111-111111111105".to_owned(),
             session_id: "11111111-1111-4111-8111-111111111106".to_owned(),
             user_id: user.id,
@@ -1032,6 +1044,7 @@ async fn current_media_session(
     backend: &str,
 ) -> MediaSessionActivation {
     let activation = MediaSessionActivation {
+        recovery_epoch: String::new(),
         expected_desired_revision: None,
         incarnation_id: incarnation_id.to_owned(),
         session_id: session_id.to_owned(),
@@ -1148,6 +1161,7 @@ async fn media_activation_confirmation_recovers_a_committed_timeout() {
         .await
         .expect("create committed-timeout user");
     let activation = MediaSessionActivation {
+        recovery_epoch: String::new(),
         expected_desired_revision: None,
         incarnation_id: "00000000-0000-4000-8000-00000000fc11".to_owned(),
         session_id: "00000000-0000-4000-8000-00000000fc12".to_owned(),
@@ -2433,6 +2447,7 @@ async fn media_session_rejoin_cannot_retarget_an_occupied_preparation_after_poin
 
         let current = "00000000-0000-4000-8000-00000000d365";
         let activation = MediaSessionActivation {
+            recovery_epoch: String::new(),
             expected_desired_revision: None,
             incarnation_id: current.to_owned(),
             session_id: "00000000-0000-4000-8000-00000000d366".to_owned(),
@@ -4208,6 +4223,7 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
         let request_id = "activation-settle-request";
         let incarnation_id = "00000000-0000-4000-8000-0000000000e1";
         let activation = MediaSessionActivation {
+            recovery_epoch: String::new(),
             expected_desired_revision: None,
             incarnation_id: incarnation_id.to_owned(),
             session_id: "00000000-0000-4000-8000-0000000000e2".to_owned(),
@@ -4404,6 +4420,7 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
 
         let race_incarnation = "00000000-0000-4000-8000-0000000000e3";
         let race_activation = MediaSessionActivation {
+            recovery_epoch: String::new(),
             expected_desired_revision: None,
             incarnation_id: race_incarnation.to_owned(),
             session_id: "00000000-0000-4000-8000-0000000000e4".to_owned(),
@@ -4532,6 +4549,7 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
         let finite_incarnation = "00000000-0000-4000-8000-0000000000f1";
         let finite_request_id = "activation-finite-handoff";
         let finite_activation = MediaSessionActivation {
+            recovery_epoch: String::new(),
             expected_desired_revision: None,
             incarnation_id: finite_incarnation.to_owned(),
             session_id: "00000000-0000-4000-8000-0000000000f2".to_owned(),
@@ -4773,6 +4791,7 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
 
         let failed_confirm_incarnation = "00000000-0000-4000-8000-0000000000e6";
         let failed_confirm_activation = MediaSessionActivation {
+            recovery_epoch: String::new(),
             expected_desired_revision: None,
             incarnation_id: failed_confirm_incarnation.to_owned(),
             session_id: "00000000-0000-4000-8000-0000000000e7".to_owned(),
@@ -5435,6 +5454,7 @@ async fn media_session_contract_runs_through_dyn_store() {
             .unwrap_or_else(|error| panic!("{backend}: assign request owner: {error}")));
 
         let first_activation = MediaSessionActivation {
+            recovery_epoch: String::new(),
             expected_desired_revision: None,
                 incarnation_id: incarnation_a.to_owned(),
                 session_id: session_a.to_owned(),
@@ -5534,6 +5554,7 @@ async fn media_session_contract_runs_through_dyn_store() {
         let session_b = "00000000-0000-4000-8000-0000000000b2";
         let incarnation_b = "00000000-0000-4000-8000-0000000000a3";
         let second_activation = MediaSessionActivation {
+            recovery_epoch: String::new(),
             expected_desired_revision: None,
                 incarnation_id: incarnation_b.to_owned(),
                 session_id: session_b.to_owned(),
@@ -5575,6 +5596,7 @@ async fn media_session_contract_runs_through_dyn_store() {
         let session_a2 = "00000000-0000-4000-8000-0000000000b3";
         let incarnation_a2 = "00000000-0000-4000-8000-0000000000a4";
         let superseding_activation = MediaSessionActivation {
+            recovery_epoch: String::new(),
             expected_desired_revision: None,
             incarnation_id: incarnation_a2.to_owned(),
             session_id: session_a2.to_owned(),
@@ -5820,6 +5842,7 @@ async fn media_session_contract_runs_through_dyn_store() {
         let boundary_session = "00000000-0000-4000-8000-0000000000bb";
         store
             .activate_media_session(&MediaSessionActivation {
+                recovery_epoch: String::new(),
                 expected_desired_revision: None,
                 incarnation_id: boundary_incarnation.to_owned(),
                 session_id: boundary_session.to_owned(),
@@ -5902,6 +5925,7 @@ async fn media_session_contract_runs_through_dyn_store() {
 
         let stale = store
             .activate_media_session(&MediaSessionActivation {
+                recovery_epoch: String::new(),
                 expected_desired_revision: None,
                 incarnation_id: "00000000-0000-4000-8000-0000000000a5".to_owned(),
                 session_id: "00000000-0000-4000-8000-0000000000b4".to_owned(),
@@ -5927,6 +5951,7 @@ async fn media_session_contract_runs_through_dyn_store() {
         );
         let stale_legacy = store
             .activate_media_session(&MediaSessionActivation {
+                recovery_epoch: String::new(),
                 expected_desired_revision: None,
                 incarnation_id: "00000000-0000-4000-8000-0000000000a8".to_owned(),
                 session_id: "00000000-0000-4000-8000-0000000000b6".to_owned(),
@@ -6220,6 +6245,7 @@ async fn media_session_contract_runs_through_dyn_store() {
             .unwrap_or_else(|error| panic!("{backend}: assign expiring activation: {error}")));
         assert!(store
             .activate_media_session(&MediaSessionActivation {
+                recovery_epoch: String::new(),
                 expected_desired_revision: None,
                 incarnation_id: expired_activation_incarnation.to_owned(),
                 session_id: "00000000-0000-4000-8000-0000000000b5".to_owned(),
@@ -6314,6 +6340,7 @@ async fn terminal_control_ack_atomically_fences_takeover_and_outlives_settlement
         let incarnation = "00000000-0000-4000-8000-00000000f001";
         let session = "00000000-0000-4000-8000-00000000f002";
         let terminal_activation = MediaSessionActivation {
+            recovery_epoch: String::new(),
             expected_desired_revision: None,
             incarnation_id: incarnation.to_owned(),
             session_id: session.to_owned(),
@@ -6442,6 +6469,7 @@ async fn ending_a_taken_over_session_acts_on_the_current_owner() {
         let session = "00000000-0000-4000-8000-00000000e002";
 
         let takeover_activation = MediaSessionActivation {
+            recovery_epoch: String::new(),
             expected_desired_revision: None,
             incarnation_id: incarnation.to_owned(),
             session_id: session.to_owned(),
@@ -6632,6 +6660,7 @@ async fn media_session_expired_inventory_cursor_advances_past_a_full_refused_pag
         for index in 0_u128..33 {
             let incarnation_id = uuid::Uuid::from_u128(0x4000 + index).to_string();
             let activation = MediaSessionActivation {
+                recovery_epoch: String::new(),
                 expected_desired_revision: None,
                 incarnation_id,
                 session_id: uuid::Uuid::from_u128(0x5000 + index).to_string(),
@@ -6722,6 +6751,7 @@ async fn media_session_same_playback_replacement_is_admitted_at_user_cap() {
             let session_id = uuid::Uuid::from_u128(0x2000 + index).to_string();
             let playback_id = format!("cap-playback-{index}");
             let activation = MediaSessionActivation {
+                recovery_epoch: String::new(),
                 expected_desired_revision: None,
                 incarnation_id: incarnation_id.clone(),
                 session_id,
@@ -6797,6 +6827,7 @@ async fn media_session_same_playback_replacement_is_admitted_at_user_cap() {
             .await
             .unwrap_or_else(|error| panic!("{backend}: own capped replacement: {error}")));
         let replacement_activation = MediaSessionActivation {
+            recovery_epoch: String::new(),
             expected_desired_revision: None,
             incarnation_id: replacement.clone(),
             session_id: uuid::Uuid::from_u128(0x4000).to_string(),
@@ -6904,6 +6935,7 @@ async fn hiqlite_media_activation_requires_its_lease_mutation() {
     .expect("seed exhausted media lease");
     assert!(store
         .activate_media_session(&MediaSessionActivation {
+            recovery_epoch: String::new(),
             expected_desired_revision: None,
             incarnation_id: max_incarnation.to_owned(),
             session_id: "00000000-0000-4000-8000-0000000000c2".to_owned(),
@@ -6972,6 +7004,7 @@ async fn hiqlite_media_activation_requires_its_lease_mutation() {
     .expect("mark media owner removed");
     assert!(store
         .activate_media_session(&MediaSessionActivation {
+            recovery_epoch: String::new(),
             expected_desired_revision: None,
             incarnation_id: removed_incarnation.to_owned(),
             session_id: "00000000-0000-4000-8000-0000000000c4".to_owned(),
@@ -7011,6 +7044,7 @@ async fn hiqlite_stale_activation_transaction_cannot_revoke_a_renewed_lease() {
     let incarnation_id = "00000000-0000-4000-8000-0000000000d1";
     let session_id = "00000000-0000-4000-8000-0000000000d2";
     let activation = MediaSessionActivation {
+        recovery_epoch: String::new(),
         expected_desired_revision: None,
         incarnation_id: incarnation_id.to_owned(),
         session_id: session_id.to_owned(),
@@ -7423,6 +7457,7 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
                 "node-a",
                 "contract/fenced-cache/stale",
                 999,
+                None,
                 &first,
                 &stale_replacement,
             ),
@@ -7718,6 +7753,7 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
                 "node-a",
                 "contract/fenced-cache/f2",
                 4242,
+                None,
                 &successor_current,
                 &replacement,
             )
@@ -7947,6 +7983,10 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             encoder_families: vec!["unsupported-hardware".to_owned()],
             ..capable.clone()
         };
+        let newer_protocol = PretranscodeWorkerCapabilities {
+            version: PretranscodeRequirements::VERSION.saturating_add(1),
+            ..capable.clone()
+        };
 
         let queue_clock = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -8042,6 +8082,21 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                 .unwrap_or_else(|error| panic!("{backend}: incompatible claim: {error}"))
                 .is_none(),
             "{backend}: an incompatible worker claimed a job"
+        );
+        assert!(
+            matches!(
+                store
+                    .claim_pretranscode_job(
+                        "node-newer",
+                        &newer_protocol,
+                        &[],
+                        queue_time(200),
+                        queue_time(500),
+                    )
+                    .await,
+                Err(StoreError::Task(_))
+            ),
+            "{backend}: a worker from an unsupported capability protocol was not rejected"
         );
 
         let (claim_a, claim_b, claim_c) = tokio::join!(
@@ -8384,7 +8439,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             .await
             .unwrap_or_else(|error| panic!("{backend}: legacy cache claim: {error}")));
         store
-            .complete_cache_entry(legacy_recipe, "node-legacy", 16_384)
+            .complete_cache_entry(legacy_recipe, "node-legacy", 16_384, None)
             .await
             .unwrap_or_else(|error| panic!("{backend}: legacy cache complete: {error}"));
         assert_eq!(
@@ -9739,6 +9794,7 @@ async fn fenced_cache_publication_never_regresses_activity_timestamps() {
             "clock-node",
             "fc/fenced-cache-clock-recipe",
             4_096,
+            None,
             &lease,
             &replacement,
         )
@@ -10773,6 +10829,158 @@ async fn replicated_v27_store_migrates_the_request_identity_on_daemon_open() {
     );
 }
 
+/// A v27 cluster gains the producer-recovery ledger on the next daemon open.
+///
+/// Every schema bump before this one has such a test, and the reason is that
+/// nothing else executes the migration arm at all: the contract harness
+/// bootstraps a *current* schema, which installs the table directly and stamps
+/// the marker, so the `MigrateFrom` branch is dead code under test until an
+/// upgrading tree is constructed by hand.
+///
+/// This step is `CREATE TABLE IF NOT EXISTS` rather than `ADD COLUMN`, and that
+/// difference is the interesting part. `ADD COLUMN` is not idempotent, so the
+/// existing steps treat "the shape is already there and the marker has not
+/// moved" as an inconsistent tree and refuse. Here that same state is an
+/// ordinary loser-of-the-race and must *succeed*, which the last section
+/// asserts — otherwise a restart mid-migration would leave a cluster that can
+/// never open.
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replicated_v28_store_migrates_the_producer_recovery_ledger_on_daemon_open() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("connect v28 producer-recovery migration client");
+    let telemetry = cluster
+        ._root
+        .path()
+        .join("schema-v28-producer-recovery-migration-telemetry.db");
+    let current = HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
+        .await
+        .expect("bootstrap current producer-recovery schema");
+    current
+        .put_setting("migration.v28.proof", "survives")
+        .await
+        .expect("seed unrelated replicated row");
+    drop(current);
+
+    // Rewind to v27: no ledger, marker pinned to the literal it is named for.
+    client
+        .txn([
+            (
+                "DROP TABLE IF EXISTS media_session_producer_recovery",
+                hiqlite::params!(),
+            ),
+            (
+                "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
+                hiqlite::params!(V27_SCHEMA_VERSION),
+            ),
+        ])
+        .await
+        .expect("construct v27 fixture")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("commit v27 fixture");
+
+    let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+        .await
+        .expect("daemon v27 through v28 producer-recovery migration");
+    assert_eq!(
+        migrated
+            .get_setting("migration.v28.proof")
+            .await
+            .expect("read v27 migration proof")
+            .as_deref(),
+        Some("survives"),
+        "a migration that loses unrelated rows is not a migration"
+    );
+    for (sql, expected) in [
+        (
+            "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
+            AUTH_SCHEMA_VERSION,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master
+              WHERE type = 'table' AND name = 'media_session_producer_recovery'",
+            1,
+        ),
+        // The primary key is what makes the conditional insert one decision
+        // rather than a race, so its presence is part of the migration's
+        // contract and not an implementation detail.
+        (
+            "SELECT COUNT(*) AS value FROM pragma_index_list('media_session_producer_recovery')
+              WHERE origin = 'pk'",
+            1,
+        ),
+    ] {
+        let rows: Vec<I64Value> = client
+            .query_consistent_map(sql, hiqlite::params!())
+            .await
+            .expect("inspect the migrated producer-recovery schema");
+        assert_eq!(rows[0].value, expected, "{sql}");
+    }
+
+    // The migrated store is the working store, not merely a shaped one.
+    let reservation = migrated
+        .reserve_producer_recovery(&recovery_request("migrated-1"), 1_000)
+        .await
+        .expect("reserve on the migrated ledger")
+        .expect("the migrated ledger grants its first budget");
+    assert_eq!(
+        reservation.decode_restriction.as_ref(),
+        Some(&recovery_restriction())
+    );
+
+    // A second open is a no-op: the marker is current, so the step does not
+    // run at all.
+    HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+        .await
+        .expect("re-opening an already migrated v28 store");
+
+    // The table present with the marker behind is the case `ADD COLUMN` has to
+    // refuse and this one must not: `CREATE TABLE IF NOT EXISTS` is idempotent,
+    // so the loser of a two-voter race simply finds the work done. Refusing
+    // here would leave a cluster interrupted mid-migration unable to open.
+    client
+        .execute(
+            "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
+            hiqlite::params!(V27_SCHEMA_VERSION),
+        )
+        .await
+        .expect("rewind the marker under an already-migrated shape");
+    let reopened = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+        .await
+        .expect("an idempotent step forgives a repeated attempt");
+    let rows: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("inspect the marker after the repeated attempt");
+    assert_eq!(
+        rows[0].value, AUTH_SCHEMA_VERSION,
+        "the repeated attempt moves the marker rather than refusing"
+    );
+    assert_eq!(
+        reopened
+            .producer_recovery_for_epoch(1, "pb-recovery", "migrated-1")
+            .await
+            .expect("read across the repeated attempt")
+            .map(|row| row.state),
+        Some(plurx_core::domain::ProducerRecoveryState::Reserved),
+        "and it keeps every row the table already held"
+    );
+}
+
 #[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replicated_v26_store_migrates_attempt_errors_on_daemon_open() {
@@ -10918,9 +11126,14 @@ async fn replicated_v26_store_migrates_attempt_errors_on_daemon_open() {
 /// v24 test constructing a v25 one, each then failing on the migration it was
 /// supposed to be proving.
 const V23_SCHEMA_VERSION: i64 = 23;
+#[cfg(feature = "hiqlite-contract-tests")]
 const V24_SCHEMA_VERSION: i64 = 24;
+#[cfg(feature = "hiqlite-contract-tests")]
 const V25_SCHEMA_VERSION: i64 = 25;
+#[cfg(feature = "hiqlite-contract-tests")]
 const V26_SCHEMA_VERSION: i64 = 26;
+#[cfg(feature = "hiqlite-contract-tests")]
+const V27_SCHEMA_VERSION: i64 = 27;
 
 #[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -14163,17 +14376,27 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
     connection
         .execute_batch(
             "PRAGMA foreign_keys = OFF;
-             -- v51's drain deadline first, and its trigger ahead of its
-             -- column: SQLite refuses to drop a column a trigger reads.
-             DROP TRIGGER IF EXISTS media_sessions_drain_ownership_fence_au;
-             ALTER TABLE media_sessions DROP COLUMN drain_deadline_ms;
-             -- Then v49's pointer fence: both triggers name
+             -- v54's offline recovery fences, v53's recovery epoch, v52's
+             -- durable decoder-recovery ledger, v51's drain deadline, and
+             -- v50's terminal-identity index first, then v49's pointer fence:
+             -- both of its triggers name
              -- `media_playback_desired`, so once that table is gone every
              -- write to `media_playback_pointers` fails with \"no such
              -- table\" instead of anything to do with this fixture. Then
              -- v48's desired-selection row, then v45's negative fragment
              -- index, then v44's permanent recovery-guard ledger, then v43's
              -- conversion ledger.
+             DROP TRIGGER IF EXISTS cache_publication_generation_guard;
+             DROP TRIGGER IF EXISTS offline_claim_lifecycle_guard;
+             DROP TRIGGER IF EXISTS offline_recovery_guard;
+             ALTER TABLE transcode_cache_locations DROP COLUMN publication_generation;
+             ALTER TABLE offline_packages DROP COLUMN alternate_recipe_hash;
+             ALTER TABLE offline_packages DROP COLUMN decoder_recovery_state;
+             ALTER TABLE offline_packages DROP COLUMN claim_generation;
+             ALTER TABLE media_sessions DROP COLUMN recovery_epoch;
+             DROP TABLE media_session_producer_recovery;
+             DROP TRIGGER IF EXISTS media_sessions_drain_ownership_fence_au;
+             ALTER TABLE media_sessions DROP COLUMN drain_deadline_ms;
              DROP TRIGGER IF EXISTS media_playback_pointers_desired_fence_ai;
              DROP TRIGGER IF EXISTS media_playback_pointers_desired_fence_au;
              ALTER TABLE media_playback_pointers DROP COLUMN desired_revision;
@@ -15940,11 +16163,10 @@ fn contract_inventory_matches_every_store_method() {
     .copied()
     .collect::<BTreeSet<_>>();
 
-    // 290 at the shared base, plus six credential methods from cluster
-    // recovery, five desired/settings/pointer methods from current main, and
-    // the prepared-successor platform census. Both independently reviewed
-    // method sets survive this integration.
-    assert_eq!(declared.len(), 302, "review the Store method count");
+    // Both independently reviewed method sets survive this integration. Read
+    // the total from the merged trait rather than carrying either parent's
+    // count across the promotion merge.
+    assert_eq!(declared.len(), 311, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -21329,7 +21551,7 @@ async fn replaceable_cache_touch_burst_has_one_physical_write_budget() {
 
     store.validation_reset_operation_counts();
     store
-        .complete_cache_entry("replaceable-touch-recipe", "cache-node", 4_096)
+        .complete_cache_entry("replaceable-touch-recipe", "cache-node", 4_096, None)
         .await
         .expect("terminal cache completion");
     assert_eq!(
@@ -24594,6 +24816,293 @@ async fn wait_until_after(second: i64) {
     }
 }
 
+/// `None` says "this publication carries no digest", never "clear the digest
+/// this row already has".
+///
+/// Both matter, and they pull opposite ways. Under the health-qualified
+/// artifact identity the digest is the only thing that identifies a generation
+/// to the integrity scrub, to cluster placement, and to strict offline segment
+/// serving; a later unfenced completion of the same row — a speculative warm
+/// re-completing a row a queue job already settled — must not silently erase
+/// it. And a caller that has no digest must not be forced to invent one.
+///
+/// Four implementations answer this: sqlite and hiqlite, each fenced and
+/// unfenced. All four are exercised here, because a `COALESCE` dropped from
+/// any one of them loses a qualified artifact's identity with no error
+/// anywhere.
+#[tokio::test]
+async fn a_cache_completion_without_a_digest_never_clears_the_one_on_the_row() {
+    for_each_backend(|store, backend| async move {
+        let (_, file) = seed_file(&store, "digest-coalesce").await;
+        let node = "digest-node";
+        let digest_now = |recipe: &'static str| {
+            let store = store.clone();
+            async move {
+                store
+                    .cache_hit(recipe, node)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: cache lookup: {error}"))
+                    .unwrap_or_else(|| panic!("{backend}: completed row"))
+                    .manifest_digest
+            }
+        };
+
+        // Unfenced: the lane speculative warming and offline preparation use.
+        assert!(store
+            .claim_cache_entry("digest-recipe", file, 1, node, "dd/digest-recipe")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim: {error}")));
+        store
+            .complete_cache_entry("digest-recipe", node, 4_096, Some("d1"))
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: first completion: {error}"));
+        assert_eq!(
+            digest_now("digest-recipe").await,
+            Some("d1".to_owned()),
+            "{backend}: a completion that carries a digest records it"
+        );
+        store
+            .complete_cache_entry("digest-recipe", node, 8_192, None)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: digestless completion: {error}"));
+        assert_eq!(
+            digest_now("digest-recipe").await,
+            Some("d1".to_owned()),
+            "{backend}: a completion with no digest must not clear the row's"
+        );
+        store
+            .complete_cache_entry("digest-recipe", node, 8_192, Some("d2"))
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: replacement completion: {error}"));
+        assert_eq!(
+            digest_now("digest-recipe").await,
+            Some("d2".to_owned()),
+            "{backend}: a completion that carries a different digest replaces it"
+        );
+
+        // Fenced: the lane a cluster publication uses.
+        let lease_clock = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("digest lease clock after epoch")
+            .as_millis()
+            .min(i64::MAX as u128) as i64;
+        let mut lease = acquired(
+            store
+                .acquire_lease(
+                    "candidate:digest-fenced",
+                    node,
+                    lease_clock,
+                    lease_clock.saturating_add(90_000),
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: lease: {error}")),
+            backend,
+        );
+        let replacement = publication_successor(&lease);
+        assert!(store
+            .claim_cache_entry_fenced(
+                "digest-fenced",
+                file,
+                1,
+                node,
+                "dd/digest-fenced",
+                &lease,
+                &replacement,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: fenced claim: {error}")));
+        lease = replacement;
+        for (bytes, written, expected) in [
+            (4_096_i64, Some("f1"), Some("f1")),
+            (8_192, None, Some("f1")),
+            (8_192, Some("f2"), Some("f2")),
+        ] {
+            let replacement = publication_successor(&lease);
+            store
+                .complete_cache_entry_fenced(
+                    "digest-fenced",
+                    node,
+                    "dd/digest-fenced",
+                    bytes,
+                    written,
+                    &lease,
+                    &replacement,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: fenced completion: {error}"));
+            lease = replacement;
+            assert_eq!(
+                digest_now("digest-fenced").await,
+                expected.map(str::to_owned),
+                "{backend}: fenced completion writing {written:?}"
+            );
+        }
+    })
+    .await;
+}
+
+/// The recovery epoch is written once with the session, and a staged successor
+/// inherits its predecessor's rather than being handed one.
+///
+/// It is the key to the decoder-recovery budget: one row per
+/// `(user_id, playback_id, recovery_epoch)`, so anything that mints a second
+/// epoch for one playback hands that playback a second automatic recovery. The
+/// two ways that could happen are an idempotent activation replay re-minting
+/// on the way through, and a staged successor being given a fresh one — so
+/// both are asserted here rather than left to the callers to get right.
+#[tokio::test]
+async fn a_recovery_epoch_is_written_once_and_inherited_by_a_successor() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("epoch-user", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create epoch user: {error}"))
+            .id;
+        let epoch = "epoch-one";
+        let mut activation = MediaSessionActivation {
+            recovery_epoch: epoch.to_owned(),
+            expected_desired_revision: None,
+            incarnation_id: "00000000-0000-4000-8000-0000000ec001".to_owned(),
+            session_id: "00000000-0000-4000-8000-0000000ec101".to_owned(),
+            user_id: user,
+            playback_id: "epoch-playback".to_owned(),
+            expected_predecessor_incarnation_id: None,
+            fence_predecessor: false,
+            request_id: None,
+            request_fingerprint: "a".repeat(64),
+            owner_node_id: "staged-node".to_owned(),
+            recipe_json: "{}".to_owned(),
+            response_json: r#"{"session":"current"}"#.to_owned(),
+            publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0,
+            now_ms: 1_000,
+            lease_expires_at_ms: 900_000,
+        };
+        let route = store
+            .activate_media_session(&activation)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: activate: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: activation must win"));
+        assert_eq!(
+            route.route.recovery_epoch, epoch,
+            "{backend}: the activation's epoch reaches the row"
+        );
+
+        // An idempotent replay refreshes the lease and the response. It must
+        // not re-mint the budget identity: a replay that did would let one
+        // playback present two epochs and be granted two recoveries.
+        // An idempotent replay, identical except for the epoch. That is the
+        // only shape a replay can take: `activation_route_matches` compares
+        // every field the conflict arm is able to write, so a replay differing
+        // in any of them is refused whole. The epoch is the one field it
+        // compares nothing about — which is exactly why re-minting on replay
+        // would be invisible, and why it is asserted here.
+        activation.recovery_epoch = "epoch-two".to_owned();
+        let replayed = store
+            .activate_media_session(&activation)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: replay: {error}"));
+        let observed = store
+            .media_session_route("00000000-0000-4000-8000-0000000ec101")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read back: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the session is still there"));
+        assert_eq!(
+            observed.recovery_epoch, epoch,
+            "{backend}: a replay never re-mints the epoch"
+        );
+        // Which mechanism kept it is a real difference between the backends,
+        // and asserting only the epoch would pass whether the upsert declined
+        // to touch it or never ran at all. SQLite's activate is an
+        // unconditional `ON CONFLICT DO UPDATE`, so the conflict arm fires and
+        // refreshes the lease; the replicated twin guards the whole statement
+        // on the pointer not already naming this incarnation, so a replay
+        // after activation is refused whole. Both satisfy the invariant; this
+        // pins which one happened rather than leaving the coverage ambiguous.
+        assert!(
+            replayed.is_some(),
+            "{backend}: a replay identical but for the epoch is accepted, so \
+             the epoch reached the statement and was declined rather than \
+             never having been offered"
+        );
+
+        // And the other direction: a replay that also changes something the
+        // conflict arm can write is refused whole, so there is no shape in
+        // which a second epoch arrives alongside an ordinary refresh.
+        let mut smuggled = activation.clone();
+        smuggled.recovery_epoch = "epoch-three".to_owned();
+        smuggled.response_json = r#"{"session":"smuggled"}"#.to_owned();
+        assert!(
+            store
+                .activate_media_session(&smuggled)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: smuggled replay: {error}"))
+                .is_none(),
+            "{backend}: a replay that changes anything else is refused"
+        );
+        assert_eq!(
+            store
+                .media_session_route("00000000-0000-4000-8000-0000000ec101")
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read back: {error}"))
+                .unwrap_or_else(|| panic!("{backend}: the session is still there"))
+                .recovery_epoch,
+            epoch,
+            "{backend}: and takes its epoch with it"
+        );
+        activation.recovery_epoch = epoch.to_owned();
+
+        store
+            .settle_media_session_activation(
+                &activation,
+                MediaSessionActivationSettlement::Confirm {
+                    publication_ready_at_ms: 0,
+                },
+                activation.now_ms,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: confirm: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: confirmation must win"));
+
+        // A staged successor continues one playback, so it carries the same
+        // budget. Nothing passes the epoch in: it is read from the
+        // predecessor's own row, so no caller can get it wrong.
+        store
+            .prepare_media_session(&staged_preparation(
+                user,
+                "epoch-playback",
+                "00000000-0000-4000-8000-0000000ec002",
+                "00000000-0000-4000-8000-0000000ec102",
+                "00000000-0000-4000-8000-0000000ec001",
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: prepare: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: preparation must win"));
+        let staged = store
+            .media_session_route("00000000-0000-4000-8000-0000000ec102")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: staged read: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the staged row exists"));
+        assert_eq!(
+            staged.recovery_epoch, epoch,
+            "{backend}: a successor inherits the budget it continues"
+        );
+
+        // The whole safety of `NOT NULL DEFAULT ''` rests on an empty epoch
+        // not being able to address a ledger row. That is a claim about
+        // `validated_epoch_key`, so it is asserted rather than assumed.
+        assert!(
+            store
+                .producer_recovery_for_epoch(user, "epoch-playback", "")
+                .await
+                .is_err(),
+            "{backend}: an empty epoch names no budget, so a row that has one \
+             cannot reach the ledger by accident"
+        );
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn transcode_cache_contract_runs_through_dyn_store() {
     for_each_backend(|store, backend| async move {
@@ -24652,7 +25161,7 @@ async fn transcode_cache_contract_runs_through_dyn_store() {
         );
         assert_eq!(store.all_cache_rows(node).await.expect("all rows").len(), 1);
         store
-            .complete_cache_entry("recipe", node, 4_096)
+            .complete_cache_entry("recipe", node, 4_096, None)
             .await
             .expect("complete");
         let ownership = store
@@ -25261,10 +25770,25 @@ async fn offline_lifecycles_pin_shared_generations_through_dyn_store() {
                 .unwrap_or_else(|error| panic!("{backend}: create shared package: {error}")),
             OfflineCreateOutcome::Created(_)
         ));
+        let package_claim = store
+            .claim_next_offline_package(&package.node_id)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim shared package: {error}"))
+            .expect("shared package claim");
+        assert!(store
+            .set_offline_package_recipe(
+                &package.id,
+                &package.node_id,
+                package_claim.claim_generation,
+                &package_recipe,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: bind shared package: {error}")));
         assert!(store
             .mark_offline_package_ready(
                 &package.id,
                 &package.node_id,
+                package_claim.claim_generation,
                 &package_recipe,
                 1_024,
                 60_000,
@@ -25303,10 +25827,25 @@ async fn offline_lifecycles_pin_shared_generations_through_dyn_store() {
                 .unwrap_or_else(|error| panic!("{backend}: create download package: {error}")),
             OfflineCreateOutcome::Created(_)
         ));
+        let download_claim = store
+            .claim_next_offline_package(&download.node_id)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim download package: {error}"))
+            .expect("download package claim");
+        assert!(store
+            .set_offline_package_recipe(
+                &download.id,
+                &download.node_id,
+                download_claim.claim_generation,
+                &download_recipe,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: bind download package: {error}")));
         assert!(store
             .mark_offline_package_ready(
                 &download.id,
                 &download.node_id,
+                download_claim.claim_generation,
                 &download_recipe,
                 2_048,
                 60_000,
@@ -25553,22 +26092,27 @@ async fn offline_package_contract_runs_through_dyn_store() {
                 .state,
             "queued"
         );
-        store
+        let reclaimed = store
             .claim_next_offline_package("offline-node")
             .await
             .expect("claim after reset")
             .expect("package after reset");
         assert!(store
-            .requeue_offline_package(&first.id, "offline-node")
+            .requeue_offline_package(&first.id, "offline-node", reclaimed.claim_generation,)
             .await
             .expect("requeue"));
-        store
+        let primary_claim = store
             .claim_next_offline_package("offline-node")
             .await
             .expect("claim")
             .expect("package");
         assert!(store
-            .set_offline_package_recipe(&first.id, "offline-recipe")
+            .set_offline_package_recipe(
+                &first.id,
+                "offline-node",
+                primary_claim.claim_generation,
+                "offline-recipe",
+            )
             .await
             .expect("set recipe"));
         assert_eq!(
@@ -25582,7 +26126,206 @@ async fn offline_package_contract_runs_through_dyn_store() {
             Some("offline-recipe")
         );
         assert!(store
-            .update_offline_progress(&first.id, "offline-node", "video", 500)
+            .offline_package_claim_is_current(
+                &first.id,
+                "offline-node",
+                primary_claim.claim_generation,
+                "offline-recipe",
+            )
+            .await
+            .expect("current offline claim"));
+        assert!(store
+            .claim_cache_entry(
+                "offline-recipe",
+                file_id,
+                1,
+                "offline-node",
+                "of/offline-recipe",
+            )
+            .await
+            .expect("claim incomplete offline cache entry"));
+
+        // The kill switch linearizes by returning the exact claim to the
+        // queue before signalling the producer. Neither a cache-hit return,
+        // fresh cache completion, nor final Ready publication from the old
+        // worker may cross that durable fence.
+        let fenced_generation = primary_claim.claim_generation;
+        assert!(store
+            .requeue_offline_package(&first.id, "offline-node", primary_claim.claim_generation,)
+            .await
+            .expect("durably fence first claim"));
+        assert!(!store
+            .offline_package_claim_is_current(
+                &first.id,
+                "offline-node",
+                primary_claim.claim_generation,
+                "offline-recipe",
+            )
+            .await
+            .expect("reject stale cache hit"));
+        assert!(!store
+            .complete_offline_cache_entry(
+                &first.id,
+                "offline-node",
+                primary_claim.claim_generation,
+                "offline-recipe",
+                4_096,
+                Some("stale-manifest"),
+            )
+            .await
+            .expect("reject stale fresh publication"));
+        assert!(
+            store
+                .cache_hit("offline-recipe", "offline-node")
+                .await
+                .expect("incomplete cache lookup")
+                .is_none(),
+            "a cancelled producer cannot make its incomplete cache entry serveable"
+        );
+        assert!(!store
+            .mark_offline_package_ready(
+                &first.id,
+                "offline-node",
+                primary_claim.claim_generation,
+                "offline-recipe",
+                4_096,
+                7_200_000,
+            )
+            .await
+            .expect("reject stale Ready publication"));
+        let primary_claim = store
+            .claim_next_offline_package("offline-node")
+            .await
+            .expect("reclaim after durable cancellation")
+            .expect("reclaimed package");
+        assert_eq!(primary_claim.recipe_hash.as_deref(), Some("offline-recipe"));
+        assert!(primary_claim.claim_generation > fenced_generation);
+        assert!(!store
+            .complete_offline_cache_entry(
+                &first.id,
+                "offline-node",
+                primary_claim.claim_generation,
+                "wrong-offline-recipe",
+                4_096,
+                Some("wrong-recipe-manifest"),
+            )
+            .await
+            .expect("reject wrong-recipe cache publication"));
+        assert!(store
+            .complete_offline_cache_entry(
+                &first.id,
+                "offline-node",
+                primary_claim.claim_generation,
+                "offline-recipe",
+                4_096,
+                Some("current-manifest"),
+            )
+            .await
+            .expect("publish current offline cache generation"));
+        let current_cache = store
+            .cache_hit("offline-recipe", "offline-node")
+            .await
+            .expect("current offline cache lookup")
+            .expect("current exact claim must make the cache serveable");
+        assert!(current_cache.complete);
+        assert_eq!(current_cache.bytes, 4_096);
+        assert_eq!(
+            current_cache.manifest_digest.as_deref(),
+            Some("current-manifest")
+        );
+        assert!(
+            !store
+                .begin_offline_decode_recovery(
+                    &first.id,
+                    "not-the-owner",
+                    primary_claim.claim_generation,
+                    "offline-recipe",
+                )
+                .await
+                .expect("reject stale offline recovery owner"),
+            "a stale node must not consume the package's recovery budget"
+        );
+        assert!(
+            !store
+                .begin_offline_decode_recovery(
+                    &first.id,
+                    "offline-node",
+                    primary_claim.claim_generation - 1,
+                    "offline-recipe",
+                )
+                .await
+                .expect("reject stale offline recovery claim"),
+            "a stale claim must not consume the package's recovery budget"
+        );
+        assert!(store
+            .begin_offline_decode_recovery(
+                &first.id,
+                "offline-node",
+                primary_claim.claim_generation,
+                "offline-recipe",
+            )
+            .await
+            .expect("consume offline recovery"));
+        assert!(
+            !store
+                .begin_offline_decode_recovery(
+                    &first.id,
+                    "offline-node",
+                    primary_claim.claim_generation,
+                    "offline-recipe",
+                )
+                .await
+                .expect("reject second offline recovery"),
+            "pending recovery cannot buy a second recovery"
+        );
+        assert!(store
+            .install_offline_decode_alternate(
+                &first.id,
+                "offline-node",
+                primary_claim.claim_generation,
+                "offline-recipe-alternate",
+            )
+            .await
+            .expect("install offline alternate"));
+        assert!(!store
+            .install_offline_decode_alternate(
+                &first.id,
+                "offline-node",
+                primary_claim.claim_generation,
+                "offline-recipe-second-alternate",
+            )
+            .await
+            .expect("reject second offline alternate"));
+        assert_eq!(
+            store
+                .reset_interrupted_offline_packages("offline-node")
+                .await
+                .expect("reset recovered package"),
+            1
+        );
+        let recovered = store
+            .claim_next_offline_package("offline-node")
+            .await
+            .expect("claim recovered package")
+            .expect("recovered package");
+        assert_eq!(
+            recovered.recipe_hash.as_deref(),
+            Some("offline-recipe-alternate"),
+            "a worker restart must preserve both the spent budget and alternate result reference"
+        );
+        assert_eq!(recovered.decoder_recovery_state, "alternate");
+        assert_eq!(
+            recovered.alternate_recipe_hash.as_deref(),
+            Some("offline-recipe-alternate")
+        );
+        assert!(store
+            .update_offline_progress(
+                &first.id,
+                "offline-node",
+                recovered.claim_generation,
+                "video",
+                500,
+            )
             .await
             .expect("progress"));
         let progressing = store
@@ -25592,11 +26335,23 @@ async fn offline_package_contract_runs_through_dyn_store() {
             .expect("progress package");
         assert_eq!(progressing.phase, "video");
         assert_eq!(progressing.progress_millis, 500);
+        assert!(!store
+            .mark_offline_package_ready(
+                &first.id,
+                "offline-node",
+                recovered.claim_generation,
+                "offline-recipe",
+                4_000,
+                7_200_000,
+            )
+            .await
+            .expect("reject wrong ready recipe"));
         assert!(store
             .mark_offline_package_ready(
                 &first.id,
                 "offline-node",
-                "offline-recipe",
+                recovered.claim_generation,
+                "offline-recipe-alternate",
                 4_000,
                 7_200_000
             )
@@ -25635,7 +26390,7 @@ async fn offline_package_contract_runs_through_dyn_store() {
             .invalidate_ready_offline_package(
                 &first.id,
                 "offline-node",
-                "offline-recipe",
+                "offline-recipe-alternate",
                 "cache_integrity",
                 "corrupt generation",
             )
@@ -25655,15 +26410,107 @@ async fn offline_package_contract_runs_through_dyn_store() {
             .expect("failed lease lookup")
             .is_none());
 
+        // Crash exactly after the terminal primary fault commits the budget,
+        // before alternate planning or installation. Recovery must keep that
+        // pending state across reset, reject the stale install CAS, and allow
+        // only the reclaimed generation to freeze the alternate.
+        let pending = offline_request("package-pending", "request-pending", user_id, file_id);
+        store
+            .create_offline_package(&pending, 10, 100_000, 100_000)
+            .await
+            .expect("create pending recovery fixture");
+        let pending_claim = store
+            .claim_next_offline_package("offline-node")
+            .await
+            .expect("claim pending fixture")
+            .expect("pending fixture claim");
+        assert!(store
+            .set_offline_package_recipe(
+                &pending.id,
+                "offline-node",
+                pending_claim.claim_generation,
+                "crash-primary",
+            )
+            .await
+            .expect("bind pending primary"));
+        assert!(store
+            .begin_offline_decode_recovery(
+                &pending.id,
+                "offline-node",
+                pending_claim.claim_generation,
+                "crash-primary",
+            )
+            .await
+            .expect("commit budget before crash"));
+        assert_eq!(
+            store
+                .reset_interrupted_offline_packages("offline-node")
+                .await
+                .expect("reset pending recovery"),
+            1
+        );
+        let pending_reclaimed = store
+            .claim_next_offline_package("offline-node")
+            .await
+            .expect("reclaim pending recovery")
+            .expect("pending recovery package");
+        assert_eq!(pending_reclaimed.decoder_recovery_state, "recovery_pending");
+        assert_eq!(pending_reclaimed.recipe_hash, None);
+        assert_eq!(pending_reclaimed.alternate_recipe_hash, None);
+        assert!(!store
+            .install_offline_decode_alternate(
+                &pending.id,
+                "offline-node",
+                pending_claim.claim_generation,
+                "crash-alternate",
+            )
+            .await
+            .expect("reject pre-crash alternate installation"));
+        assert!(!store
+            .set_offline_package_recipe(
+                &pending.id,
+                "offline-node",
+                pending_reclaimed.claim_generation,
+                "crash-primary",
+            )
+            .await
+            .expect("reject primary replay while pending"));
+        assert!(store
+            .install_offline_decode_alternate(
+                &pending.id,
+                "offline-node",
+                pending_reclaimed.claim_generation,
+                "crash-alternate",
+            )
+            .await
+            .expect("install alternate after restart"));
+        assert!(store
+            .fail_offline_package(
+                &pending.id,
+                "offline-node",
+                pending_reclaimed.claim_generation,
+                "video",
+                "decode_unhealthy",
+                "alternate remained unhealthy",
+            )
+            .await
+            .expect("settle pending fixture"));
+
         let failed = offline_request("package-2", "request-2", user_id, file_id);
         store
             .create_offline_package(&failed, 10, 100_000, 100_000)
             .await
             .expect("create failed fixture");
+        let failed_claim = store
+            .claim_next_offline_package("offline-node")
+            .await
+            .expect("claim failed package")
+            .expect("failed package claim");
         assert!(store
             .fail_offline_package(
                 &failed.id,
                 "offline-node",
+                failed_claim.claim_generation,
                 "video",
                 "encoder",
                 "contract failure"
@@ -25696,6 +26543,116 @@ async fn offline_package_contract_runs_through_dyn_store() {
                 .expect("delete"),
             "backend {backend}"
         );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn offline_disable_is_a_cluster_wide_claim_and_publication_fence() {
+    for_each_backend(|store, backend| async move {
+        let (user_id, file_id) = seed_file(&store, "offline-disable-contract").await;
+        store
+            .put_setting("offline.enabled", "1")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enable offline work: {error}"));
+
+        let mut node_a = offline_request("disable-a", "disable-request-a", user_id, file_id);
+        node_a.node_id = "disable-node-a".into();
+        let mut node_b = offline_request("disable-b", "disable-request-b", user_id, file_id);
+        node_b.node_id = "disable-node-b".into();
+        for package in [&node_a, &node_b] {
+            assert!(matches!(
+                store
+                    .create_offline_package(package, 10, 100_000, 100_000)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: create disable fixture: {error}")),
+                OfflineCreateOutcome::Created(_)
+            ));
+        }
+
+        let claim_a = store
+            .claim_next_offline_package("disable-node-a")
+            .await
+            .expect("claim node A")
+            .expect("node A package");
+        let claim_b = store
+            .claim_next_offline_package("disable-node-b")
+            .await
+            .expect("claim node B")
+            .expect("node B package");
+        for (package, claim, recipe) in [
+            (&node_a, &claim_a, "disable-recipe-a"),
+            (&node_b, &claim_b, "disable-recipe-b"),
+        ] {
+            assert!(store
+                .set_offline_package_recipe(
+                    &package.id,
+                    &package.node_id,
+                    claim.claim_generation,
+                    recipe,
+                )
+                .await
+                .expect("bind disable fixture recipe"));
+            assert!(store
+                .claim_cache_entry(recipe, file_id, 1, &package.node_id, recipe)
+                .await
+                .expect("claim disable fixture cache"));
+        }
+
+        assert_eq!(
+            store
+                .disable_offline_packages()
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: disable transaction: {error}")),
+            2,
+            "{backend}: every node's active claim must be fenced"
+        );
+        assert_eq!(
+            store
+                .get_setting("offline.enabled")
+                .await
+                .expect("read disabled setting")
+                .as_deref(),
+            Some("0")
+        );
+        assert!(store
+            .claim_next_offline_package("disable-node-b")
+            .await
+            .expect("disabled claim lookup")
+            .is_none());
+        assert!(!store
+            .complete_offline_cache_entry(
+                &node_b.id,
+                &node_b.node_id,
+                claim_b.claim_generation,
+                "disable-recipe-b",
+                99,
+                Some("stale-disable-manifest"),
+            )
+            .await
+            .expect("reject remote stale cache publication"));
+        assert!(!store
+            .mark_offline_package_ready(
+                &node_b.id,
+                &node_b.node_id,
+                claim_b.claim_generation,
+                "disable-recipe-b",
+                99,
+                1_000,
+            )
+            .await
+            .expect("reject remote stale Ready"));
+
+        store
+            .put_setting("offline.enabled", "1")
+            .await
+            .expect("re-enable offline work");
+        let reclaimed_b = store
+            .claim_next_offline_package("disable-node-b")
+            .await
+            .expect("reclaim node B")
+            .expect("node B package after enable");
+        assert!(reclaimed_b.claim_generation > claim_b.claim_generation);
     })
     .await;
 }
@@ -25838,4 +26795,503 @@ async fn hiqlite_preparation_commit_loser_cannot_mutate_canonical_winner() {
             .expect("read canonical commit receipt"),
         Some(receipt),
     );
+}
+
+fn recovery_restriction() -> plurx_core::domain::ContinuationDecodeRestriction {
+    plurx_core::domain::ContinuationDecodeRestriction {
+        version: plurx_core::domain::CONTINUATION_DECODE_RESTRICTION_VERSION,
+        source_revision_digest: "a".repeat(64),
+        input_video_stream: 0,
+        input_codec: "hevc".to_owned(),
+        failed_backend: "qsv".to_owned(),
+        required_backend: "software".to_owned(),
+        policy_revision: 1,
+    }
+}
+
+const RECOVERY_INCARNATION: &str = "11111111-1111-4111-8111-111111111111";
+
+fn recovery_request(epoch: &str) -> plurx_core::domain::ProducerRecoveryRequest {
+    plurx_core::domain::ProducerRecoveryRequest {
+        user_id: 1,
+        playback_id: "pb-recovery".to_owned(),
+        recovery_epoch: epoch.to_owned(),
+        failed_incarnation_id: RECOVERY_INCARNATION.to_owned(),
+        failed_producer_attempt: 3,
+        decision_sequence: 7,
+        failed_plan_digest: "b".repeat(64),
+        alternate_plan_digest: "c".repeat(64),
+        decode_restriction: Some(recovery_restriction()),
+    }
+}
+
+/// One epoch, one automatic recovery, whoever asks and however often.
+///
+/// The budget has to survive the thing it is recovering from — a producer
+/// dying, a session ending, a node handing the playback on — so it cannot be a
+/// counter in a process. Two identities racing for the same epoch is the case
+/// that matters: a read-then-insert would grant both, and it would pass every
+/// single-threaded test.
+#[tokio::test]
+async fn producer_recovery_grants_one_budget_per_epoch() {
+    for_each_backend(|store, backend| async move {
+        let first = store
+            .reserve_producer_recovery(&recovery_request("epoch-1"), 1_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reserve: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the first caller takes the budget"));
+        assert_eq!(
+            first.state,
+            plurx_core::domain::ProducerRecoveryState::Reserved
+        );
+        assert_eq!(
+            first.decode_restriction.as_ref(),
+            Some(&recovery_restriction())
+        );
+
+        // An exact replay is the same reservation, because an executor that
+        // crashed between reserving and spawning has to be able to find out
+        // what it had already decided.
+        let replay = store
+            .reserve_producer_recovery(&recovery_request("epoch-1"), 2_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: replay: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: an exact replay returns its reservation"));
+        assert_eq!(replay, first, "{backend}: a replay is not a second grant");
+
+        // A different failure is a second recovery wearing the first one's
+        // identity, and there is only one budget.
+        let mut competitor = recovery_request("epoch-1");
+        competitor.failed_producer_attempt = 4;
+        competitor.alternate_plan_digest = "d".repeat(64);
+        assert!(
+            store
+                .reserve_producer_recovery(&competitor, 3_000)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: competitor: {error}"))
+                .is_none(),
+            "{backend}: a different failure cannot reuse the epoch's budget"
+        );
+
+        // A different epoch is a different playback's allowance.
+        assert!(
+            store
+                .reserve_producer_recovery(&recovery_request("epoch-2"), 4_000)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: second epoch: {error}"))
+                .is_some(),
+            "{backend}: a new epoch has its own budget"
+        );
+    })
+    .await;
+}
+
+/// Settlement moves one way and never refunds.
+#[tokio::test]
+async fn producer_recovery_settles_once_and_never_returns_the_budget() {
+    for_each_backend(|store, backend| async move {
+        store
+            .reserve_producer_recovery(&recovery_request("settle-1"), 1_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reserve: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: reserved"));
+
+        let installed = store
+            .settle_producer_recovery(
+                1,
+                "pb-recovery",
+                "settle-1",
+                RECOVERY_INCARNATION,
+                plurx_core::domain::ProducerRecoveryState::Installed,
+                2_000,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: settle: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: a reserved recovery settles"));
+        assert_eq!(
+            installed.state,
+            plurx_core::domain::ProducerRecoveryState::Installed
+        );
+        assert_eq!(
+            installed.decode_restriction.as_ref(),
+            Some(&recovery_restriction()),
+            "{backend}: the restriction survives settlement, because every later continuation still has to avoid that decoder"
+        );
+
+        // Settling the other way afterwards finds nothing to settle: the
+        // states do not cycle, and an installed recovery is not exhaustible.
+        assert!(
+            store
+                .settle_producer_recovery(
+                    1,
+                    "pb-recovery",
+                    "settle-1",
+                    RECOVERY_INCARNATION,
+                    plurx_core::domain::ProducerRecoveryState::Exhausted,
+                    3_000,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: re-settle: {error}"))
+                .is_none(),
+            "{backend}: a settled recovery does not settle twice"
+        );
+
+        // Settling the *same* way again is a replay, and a replaying owner is
+        // told what it already did rather than handed a silence it cannot
+        // distinguish from a loss.
+        assert_eq!(
+            store
+                .settle_producer_recovery(
+                    1,
+                    "pb-recovery",
+                    "settle-1",
+                    RECOVERY_INCARNATION,
+                    plurx_core::domain::ProducerRecoveryState::Installed,
+                    3_100,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: replayed settle: {error}"))
+                .map(|row| row.state),
+            Some(plurx_core::domain::ProducerRecoveryState::Installed),
+            "{backend}: settling the same way twice is idempotent"
+        );
+
+        // And the budget is still spent.
+        assert!(
+            store
+                .reserve_producer_recovery(&recovery_request("settle-1"), 4_000)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: post-settle reserve: {error}"))
+                .is_none(),
+            "{backend}: an installed recovery does not replenish the budget"
+        );
+
+        // Settling back into `reserved` is a refund with extra steps.
+        assert!(
+            store
+                .settle_producer_recovery(
+                    1,
+                    "pb-recovery",
+                    "settle-1",
+                    RECOVERY_INCARNATION,
+                    plurx_core::domain::ProducerRecoveryState::Reserved,
+                    5_000,
+                )
+                .await
+                .is_err(),
+            "{backend}: a recovery cannot be settled back into reserved"
+        );
+    })
+    .await;
+}
+
+/// What every ordinary continuation reads before it plans.
+#[tokio::test]
+async fn producer_recovery_is_readable_by_epoch_and_refuses_a_corrupt_restriction() {
+    for_each_backend(|store, backend| async move {
+        assert!(
+            store
+                .producer_recovery_for_epoch(1, "pb-recovery", "absent")
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read absent: {error}"))
+                .is_none(),
+            "{backend}: an epoch with no recovery has none"
+        );
+        store
+            .reserve_producer_recovery(&recovery_request("read-1"), 1_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reserve: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: reserved"));
+        let read = store
+            .producer_recovery_for_epoch(1, "pb-recovery", "read-1")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the reservation is readable"));
+        assert_eq!(read.failed_producer_attempt, 3);
+        assert_eq!(read.decision_sequence, 7);
+        assert_eq!(read.decode_restriction, Some(recovery_restriction()));
+    })
+    .await;
+}
+
+/// Two identities, one epoch, at the same time — the case a read-then-insert
+/// gets wrong and every single-threaded test gets right.
+///
+/// The two callers name different failures, because that is the shape that
+/// matters: whoever loses must be told no rather than handed the winner's
+/// decision to install.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn producer_recovery_grants_one_budget_to_two_racing_identities() {
+    for_each_backend(|store, backend| async move {
+        let mine = recovery_request("race-1");
+        let mut theirs = recovery_request("race-1");
+        theirs.failed_incarnation_id = "22222222-2222-4222-8222-222222222222".to_owned();
+        theirs.failed_producer_attempt = 4;
+        theirs.alternate_plan_digest = "d".repeat(64);
+
+        let (left, right) = {
+            let store_a = Arc::clone(&store);
+            let store_b = Arc::clone(&store);
+            let a =
+                tokio::spawn(async move { store_a.reserve_producer_recovery(&mine, 1_000).await });
+            let b = tokio::spawn(
+                async move { store_b.reserve_producer_recovery(&theirs, 1_000).await },
+            );
+            (
+                a.await
+                    .expect("join")
+                    .unwrap_or_else(|error| panic!("{backend}: left: {error}")),
+                b.await
+                    .expect("join")
+                    .unwrap_or_else(|error| panic!("{backend}: right: {error}")),
+            )
+        };
+        assert_eq!(
+            usize::from(left.is_some()) + usize::from(right.is_some()),
+            1,
+            "{backend}: exactly one identity may hold the epoch's budget"
+        );
+
+        // And what the store holds is what the winner was told it holds.
+        let stored = store
+            .producer_recovery_for_epoch(1, "pb-recovery", "race-1")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read after race: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the winner's row is there"));
+        let winner = left.or(right).expect("one winner");
+        assert_eq!(
+            stored, winner,
+            "{backend}: the answer the winner got is the row the store kept"
+        );
+    })
+    .await;
+}
+
+/// A stored restriction this build cannot read is a refusal, on both backends,
+/// and the same kind of refusal.
+///
+/// Getting this wrong is silent: "no restriction" and "unreadable restriction"
+/// look identical to every caller downstream, and treating the second as the
+/// first restores automatic hardware selection for a source that already
+/// failed on hardware. Two backends disagreeing about *which* error it is is
+/// the same defect one level up — a caller that wants to tell "the row is
+/// unreadable, refuse the recovery" from "the store is unavailable, retry"
+/// cannot, and gets a different answer per backend.
+#[tokio::test]
+async fn an_unreadable_stored_restriction_is_refused_identically_on_both_backends() {
+    for_each_backend(|store, backend| async move {
+        store
+            .reserve_producer_recovery(&recovery_request("corrupt-1"), 1_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reserve: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: reserved"));
+
+        // Three ways a row can be unreadable, and the third is the one that
+        // actually happens: a build that ships a version this one predates.
+        let mut future = recovery_restriction();
+        future.version = plurx_core::domain::CONTINUATION_DECODE_RESTRICTION_VERSION + 1;
+        let future = serde_json::to_string(&future).expect("serialize a future restriction");
+        for (label, stored) in [
+            ("not json at all", "{".to_owned()),
+            ("a valid shape with an invalid field", {
+                let mut broken = recovery_restriction();
+                broken.required_backend = broken.failed_backend.clone();
+                serde_json::to_string(&broken).expect("serialize")
+            }),
+            ("a later serialization version", future),
+        ] {
+            assert!(
+                store
+                    .validation_corrupt_recovery_restriction(
+                        1,
+                        "pb-recovery",
+                        "corrupt-1",
+                        &stored,
+                    )
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: corrupt {label}: {error}")),
+                "{backend}: {label}: the row to corrupt has to exist"
+            );
+            let error = match store
+                .producer_recovery_for_epoch(1, "pb-recovery", "corrupt-1")
+                .await
+            {
+                Ok(row) => {
+                    panic!("{backend}: {label}: an unreadable restriction read back as {row:?}")
+                }
+                Err(error) => error,
+            };
+            assert!(
+                matches!(error, StoreError::Task(_)),
+                "{backend}: {label}: both backends refuse the same way, not one as a \
+                 database error and the other as a task error: {error:?}"
+            );
+            assert!(
+                error.to_string().contains("unreadable"),
+                "{backend}: {label}: {error}"
+            );
+        }
+    })
+    .await;
+}
+
+/// The restriction is part of the reservation's identity, not a payload.
+///
+/// The conditional insert does not update an existing row. So an executor that
+/// crashed, reloaded its policy, and recomputed a *different* restriction under
+/// the same failure identity must be told no — otherwise it is handed a
+/// reservation carrying a restriction the store never accepted, and every later
+/// continuation reads the old one forever.
+#[tokio::test]
+async fn a_replay_carrying_a_different_restriction_is_not_a_replay() {
+    for_each_backend(|store, backend| async move {
+        store
+            .reserve_producer_recovery(&recovery_request("restriction-1"), 1_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reserve: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: reserved"));
+
+        let mut moved_on = recovery_request("restriction-1");
+        moved_on.decode_restriction = Some(plurx_core::domain::ContinuationDecodeRestriction {
+            policy_revision: 2,
+            ..recovery_restriction()
+        });
+        assert!(
+            store
+                .reserve_producer_recovery(&moved_on, 2_000)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: moved-on replay: {error}"))
+                .is_none(),
+            "{backend}: a request whose restriction the store never took is not a replay"
+        );
+
+        // And the stored restriction is still the one that was accepted.
+        assert_eq!(
+            store
+                .producer_recovery_for_epoch(1, "pb-recovery", "restriction-1")
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read: {error}"))
+                .and_then(|row| row.decode_restriction),
+            Some(recovery_restriction()),
+            "{backend}: the row is what it always was"
+        );
+    })
+    .await;
+}
+
+/// Only the identity that reserved may spend the reservation.
+///
+/// Without the fence, anything that knows `(user, playback, epoch)` — a stale
+/// node that handled this playback before a handoff, say — can exhaust a live
+/// recovery. The owner's own settle then finds nothing to update, reads back a
+/// terminal state it did not write, and the ledger permanently records the
+/// wrong outcome for a recovery that actually installed.
+#[tokio::test]
+async fn only_the_reserving_identity_can_settle_its_recovery() {
+    for_each_backend(|store, backend| async move {
+        store
+            .reserve_producer_recovery(&recovery_request("fence-1"), 1_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reserve: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: reserved"));
+
+        assert!(
+            store
+                .settle_producer_recovery(
+                    1,
+                    "pb-recovery",
+                    "fence-1",
+                    "33333333-3333-4333-8333-333333333333",
+                    plurx_core::domain::ProducerRecoveryState::Exhausted,
+                    2_000,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: stranger settle: {error}"))
+                .is_none(),
+            "{backend}: a stranger cannot spend this reservation"
+        );
+
+        // The reservation is untouched, so its owner can still install.
+        assert_eq!(
+            store
+                .producer_recovery_for_epoch(1, "pb-recovery", "fence-1")
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read after stranger: {error}"))
+                .map(|row| row.state),
+            Some(plurx_core::domain::ProducerRecoveryState::Reserved),
+            "{backend}: a refused settle changes nothing"
+        );
+        assert_eq!(
+            store
+                .settle_producer_recovery(
+                    1,
+                    "pb-recovery",
+                    "fence-1",
+                    RECOVERY_INCARNATION,
+                    plurx_core::domain::ProducerRecoveryState::Installed,
+                    3_000,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: owner settle: {error}"))
+                .map(|row| row.state),
+            Some(plurx_core::domain::ProducerRecoveryState::Installed)
+        );
+    })
+    .await;
+}
+
+/// A restriction that cannot be parsed is not an absent restriction.
+///
+/// Getting this wrong is silent: "no restriction" and "unreadable restriction"
+/// look identical to every caller downstream, and treating the second as the
+/// first restores automatic hardware selection for a source that already
+/// failed on hardware.
+#[test]
+fn a_malformed_decode_restriction_is_refused_rather_than_ignored() {
+    use plurx_core::domain::{ContinuationDecodeRestriction, DecodeRestrictionError};
+
+    let good = recovery_restriction();
+    let encoded = good.encode().expect("a valid restriction encodes");
+    assert_eq!(
+        ContinuationDecodeRestriction::decode(&encoded).expect("round trip"),
+        good
+    );
+
+    assert!(matches!(
+        ContinuationDecodeRestriction::decode("not json"),
+        Err(DecodeRestrictionError::Malformed(_))
+    ));
+
+    let mut future = good.clone();
+    future.version = 99;
+    let encoded_future = serde_json::to_string(&future).expect("serialize");
+    assert_eq!(
+        ContinuationDecodeRestriction::decode(&encoded_future),
+        Err(DecodeRestrictionError::UnsupportedVersion(99))
+    );
+
+    let mut short_digest = good.clone();
+    short_digest.source_revision_digest = "abc".to_owned();
+    assert_eq!(
+        short_digest.encode(),
+        Err(DecodeRestrictionError::InvalidField(
+            "source_revision_digest"
+        ))
+    );
+
+    // A restriction that requires the backend that just failed is a loop, not
+    // a restriction.
+    let mut circular = good.clone();
+    circular.required_backend = circular.failed_backend.clone();
+    assert_eq!(
+        circular.encode(),
+        Err(DecodeRestrictionError::InvalidField("required_backend"))
+    );
+
+    assert!(matches!(
+        ContinuationDecodeRestriction::decode(
+            &"x".repeat(plurx_core::domain::MAX_DECODE_RESTRICTION_BYTES + 1)
+        ),
+        Err(DecodeRestrictionError::TooLarge(_))
+    ));
 }

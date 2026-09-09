@@ -54,11 +54,19 @@ pub struct SystemInfo {
     pub ffprobe: String,
     /// First line of `ffmpeg -version`, if ffmpeg ran at all.
     pub ffmpeg_version: Option<String>,
+    /// Digest of the canonical FFprobe executable bytes plus its complete
+    /// bounded `-version` output. Decoder facts are scoped to this identity.
+    pub ffprobe_build_digest: Option<String>,
+    /// Runtime-only binding to the executable that produced the digest.
+    #[serde(skip)]
+    pub(crate) decode_probe_identity: Option<crate::decode_facts::DecodeProbeIdentity>,
     /// PLURX_HWACCEL preference, or "auto".
     pub hwaccel_pref: String,
     pub encoders: EncoderCaps,
     /// Portable video decoders reported by this exact ffmpeg at boot.
     pub decoders: Vec<String>,
+    /// Which decoder that ffmpeg was measured to select for each of them.
+    pub measured_decoders: plurx_core::transcode::decoder_inventory::MeasuredDecoders,
     /// Human label of the encoder the transcoder will actually pick.
     pub encoder_selected: String,
     /// What the tone-map probe found at boot: the graph this node uses, and
@@ -848,6 +856,15 @@ impl AppState {
                 system.tone_map.selected(),
             )
             .with_decoders(system.decoders.clone())
+            // Cloned from the policy this process installed, which happens in
+            // `probe_system` before this state is built. Handing it over makes
+            // the dependency visible in one place instead of being a global
+            // this manager reaches for at an unstated moment.
+            .with_diagnostic_policy(std::sync::Arc::new(
+                crate::decoder_health::diagnostic_policy().clone(),
+            ))
+            .with_measured_decoders(system.measured_decoders.clone())
+            .with_decode_probe(system.decode_probe_identity.clone())
             .with_dv_strippable(system.dovi_rpu)
             .with_dv_convertible(system.dolby_vision_convert)
             .with_dovi_reshape(system.dovi_reshape)
@@ -8407,6 +8424,19 @@ impl JobManager {
                         .await;
                     skipped += 1;
                     *reasons.entry("source_changed").or_default() += 1;
+                }
+                Ok(PretranscodeProduceOutcome::HealthRefused) => {
+                    // Cancelled, not yielded, and deliberately not with a
+                    // re-enqueueable error code. The same plan on the same
+                    // source reaches the same decoder and settles the same
+                    // refused receipt, so a job that retried this would
+                    // re-encode the title on every discovery pass forever.
+                    let now_unix_ms = clock_ms();
+                    let _ = fence
+                        .cancel_job(self.store.as_ref(), "health_refused", now_unix_ms)
+                        .await;
+                    skipped += 1;
+                    *reasons.entry("health_refused").or_default() += 1;
                 }
                 Err(error) if crate::transcode::is_retryable_capacity_error(&error) => {
                     let now_unix_ms = clock_ms();

@@ -4,14 +4,19 @@ import contextlib
 import dataclasses
 import io
 import json
+import os
 from pathlib import Path
+import shlex
+import signal
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 import xml.etree.ElementTree as ET
 
-from validation import ci_scope
+from validation import ci_scope, runner as validation_runner
 from validation.ci_scope import (
     CI_ROUTING_PATHS,
     all_scope,
@@ -89,6 +94,24 @@ class CatalogCase(unittest.TestCase):
         self.assertIsNotNone(pattern.match("web/app.js"))
         self.assertIsNotNone(pattern.match("web/player/app.js"))
         self.assertIsNone(pattern.match("web/player/app.css"))
+
+    def test_cluster_auth_budget_covers_a_cold_serial_run(self):
+        catalog = load_catalog(ROOT / "validation/points.toml")
+        cluster_auth = next(
+            check for check in catalog.checks if check.id == "cluster-auth"
+        )
+
+        self.assertEqual(cluster_auth.timeout_seconds, 3600)
+
+    def test_gitignore_changes_select_the_validation_framework(self):
+        catalog = load_catalog(ROOT / "validation/points.toml")
+        selection = select_points(catalog, (".gitignore",))
+        check_ids = {
+            check.id for check in selected_checks(catalog, selection, profile="full")
+        }
+
+        self.assertIn("validation.framework", selection.point_ids)
+        self.assertIn("catalog-contract", check_ids)
 
     def test_provider_change_expands_consumers_and_deduplicates_checks(self):
         catalog = self.load()
@@ -598,6 +621,1095 @@ checks = ["baseline"]
         self.assertEqual(results[0].returncode, 124)
         self.assertIn("timed out", results[0].output)
 
+    @unittest.skipIf(os.name == "nt", "POSIX process census contract")
+    def test_process_census_failure_refuses_to_launch_a_check(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            marker = root / "launched"
+            with (
+                mock.patch.object(
+                    validation_runner,
+                    "_process_snapshot",
+                    side_effect=PermissionError("injected preflight denial"),
+                ),
+                self.assertRaisesRegex(PermissionError, "injected preflight denial"),
+            ):
+                validation_runner._run_shell(
+                    f"printf launched > {shlex.quote(str(marker))}", root, 1
+                )
+
+            self.assertFalse(marker.exists())
+
+    @unittest.skipIf(os.name == "nt", "POSIX process-group contract")
+    def test_timeout_terminates_descendants_across_sessions(self):
+        catalog = self.load()
+        for isolation in ("setpgrp", "setsid"):
+            with (
+                self.subTest(isolation=isolation),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory)
+                ready = root / "ready"
+                marker = root / "survived"
+                parent = root / "parent.py"
+                parent.write_text(
+                    """\
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+isolation = sys.argv[1]
+ready = sys.argv[2]
+marker = sys.argv[3]
+subprocess.Popen([
+    sys.executable,
+    "-c",
+    "from pathlib import Path; import os, signal, sys, time; "
+    "os.setpgrp() if sys.argv[1] == 'setpgrp' else os.setsid(); "
+    "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+    "Path(sys.argv[2]).write_text('ready', encoding='utf-8'); time.sleep(1.5); "
+    "Path(sys.argv[3]).write_text('survived', encoding='utf-8')",
+    isolation,
+    ready,
+    marker,
+])
+deadline = time.monotonic() + 5
+while not Path(ready).exists() and time.monotonic() < deadline:
+    time.sleep(0.01)
+if not Path(ready).exists():
+    raise RuntimeError("grandchild did not enter its independent session")
+time.sleep(30)
+""",
+                    encoding="utf-8",
+                )
+                timed_tree = dataclasses.replace(
+                    catalog.check_map["baseline"],
+                    command=f"{shlex.quote(sys.executable)} {shlex.quote(str(parent))} "
+                    f"{isolation} {shlex.quote(str(ready))} {shlex.quote(str(marker))}",
+                    timeout_seconds=1,
+                )
+                with contextlib.redirect_stdout(io.StringIO()):
+                    results = execute_checks(
+                        (timed_tree,),
+                        root,
+                        root / "artifacts",
+                        strict=True,
+                        fail_fast=True,
+                    )
+
+                self.assertEqual(results[0].returncode, 124)
+                self.assertTrue(ready.exists())
+                wait_after_ready = 1.75 - (time.time() - ready.stat().st_mtime)
+                if wait_after_ready > 0:
+                    time.sleep(wait_after_ready)
+                self.assertFalse(marker.exists())
+
+    @unittest.skipIf(os.name == "nt", "POSIX session ownership contract")
+    def test_timeout_terminates_reparented_group_in_launch_session(self):
+        catalog = self.load()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ready = root / "ready"
+            marker = root / "survived"
+            intermediate = root / "intermediate.py"
+            intermediate.write_text(
+                """\
+from pathlib import Path
+import os
+import signal
+import sys
+import time
+
+os.setpgrp()
+if os.fork() != 0:
+    os._exit(0)
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+ready = Path(sys.argv[1])
+marker = Path(sys.argv[2])
+ready.write_text("ready", encoding="utf-8")
+time.sleep(1.5)
+marker.write_text("survived", encoding="utf-8")
+""",
+                encoding="utf-8",
+            )
+            parent = root / "parent.py"
+            parent.write_text(
+                """\
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+subprocess.Popen([sys.executable, sys.argv[1], sys.argv[2], sys.argv[3]])
+deadline = time.monotonic() + 5
+while not Path(sys.argv[2]).exists() and time.monotonic() < deadline:
+    time.sleep(0.01)
+if not Path(sys.argv[2]).exists():
+    raise RuntimeError("reparented group did not become ready")
+time.sleep(30)
+""",
+                encoding="utf-8",
+            )
+            timed_tree = dataclasses.replace(
+                catalog.check_map["baseline"],
+                command=(
+                    f"{shlex.quote(sys.executable)} {shlex.quote(str(parent))} "
+                    f"{shlex.quote(str(intermediate))} {shlex.quote(str(ready))} "
+                    f"{shlex.quote(str(marker))}"
+                ),
+                timeout_seconds=1,
+            )
+            with contextlib.redirect_stdout(io.StringIO()):
+                results = execute_checks(
+                    (timed_tree,),
+                    root,
+                    root / "artifacts",
+                    strict=True,
+                    fail_fast=True,
+                )
+
+            self.assertEqual(results[0].returncode, 124)
+            self.assertTrue(ready.exists())
+            wait_after_ready = 1.75 - (time.time() - ready.stat().st_mtime)
+            if wait_after_ready > 0:
+                time.sleep(wait_after_ready)
+            self.assertFalse(marker.exists())
+
+    @unittest.skipIf(os.name == "nt", "POSIX launch-session ownership contract")
+    def test_timeout_cleans_launch_session_after_shell_leader_exits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ready = root / "ready"
+            marker = root / "survived"
+            orphan = root / "orphan.py"
+            orphan.write_text(
+                """\
+from pathlib import Path
+import os
+import signal
+import sys
+import time
+
+if os.fork() != 0:
+    os._exit(0)
+os.setpgrp()
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+ready = Path(sys.argv[1])
+marker = Path(sys.argv[2])
+ready.write_text("ready", encoding="utf-8")
+time.sleep(1.5)
+marker.write_text("survived", encoding="utf-8")
+""",
+                encoding="utf-8",
+            )
+
+            returncode, output, _ = validation_runner._run_shell(
+                f"{shlex.quote(sys.executable)} {shlex.quote(str(orphan))} "
+                f"{shlex.quote(str(ready))} {shlex.quote(str(marker))}",
+                root,
+                1,
+            )
+
+            self.assertEqual(returncode, 124, output)
+            self.assertTrue(ready.exists())
+            wait_after_ready = 1.75 - (time.time() - ready.stat().st_mtime)
+            if wait_after_ready > 0:
+                time.sleep(wait_after_ready)
+            self.assertFalse(marker.exists())
+
+    @unittest.skipUnless(
+        sys.platform.startswith("linux"),
+        "Linux pidfd lifecycle proof",
+    )
+    def test_timeout_cleanup_failure_kills_root_group_and_aborts(self):
+        catalog = self.load()
+        for cleanup_snapshots_before_failure in (0, 1):
+            with (
+                self.subTest(
+                    cleanup_snapshots_before_failure=cleanup_snapshots_before_failure
+                ),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory)
+                marker = root / "survived"
+                child_identity_path = root / "child.identity"
+                child_script = root / "child.py"
+                child_script.write_text(
+                    """\
+from pathlib import Path
+import os
+import sys
+import time
+
+
+def start_ticks(pid):
+    stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    return stat[stat.rfind(")") + 2 :].split()[19]
+
+
+pid = os.getpid()
+parent = os.getppid()
+Path(sys.argv[1]).write_text(
+    f"{pid} {parent} {start_ticks(pid)} {start_ticks(parent)}",
+    encoding="utf-8",
+)
+time.sleep(1.5)
+Path(sys.argv[2]).write_text("survived", encoding="utf-8")
+""",
+                    encoding="utf-8",
+                )
+                timed_tree = dataclasses.replace(
+                    catalog.check_map["baseline"],
+                    command=(
+                        f"{shlex.quote(sys.executable)} "
+                        f"{shlex.quote(str(child_script))} "
+                        f"{shlex.quote(str(child_identity_path))} "
+                        f"{shlex.quote(str(marker))}"
+                        + "; :"
+                    ),
+                    timeout_seconds=1,
+                )
+                original_snapshot = validation_runner._process_snapshot
+                calls = 0
+
+                def fail_discovery(
+                    deadline: float,
+                    *,
+                    root_pid: int | None = None,
+                    required_identities: set[
+                        validation_runner._ProcessIdentity
+                    ]
+                    | None = None,
+                ) -> dict[int, validation_runner._ProcessRecord]:
+                    nonlocal calls
+                    calls += 1
+                    if calls <= 1 + cleanup_snapshots_before_failure:
+                        return original_snapshot(
+                            deadline,
+                            root_pid=root_pid,
+                            required_identities=required_identities,
+                        )
+                    raise PermissionError("injected process discovery denial")
+
+                execution_error: Exception | None = None
+                observed_child: validation_runner._ProcessRecord | None = None
+                child_identity: validation_runner._ProcessIdentity | None = None
+                leader_identity: validation_runner._ProcessIdentity | None = None
+                cleanup_errors: list[str] = []
+                try:
+                    with (
+                        mock.patch.object(
+                            validation_runner,
+                            "_process_snapshot",
+                            side_effect=fail_discovery,
+                        ),
+                        contextlib.redirect_stdout(io.StringIO()),
+                    ):
+                        execute_checks(
+                            (timed_tree,),
+                            root,
+                            root / "artifacts",
+                            strict=True,
+                            fail_fast=True,
+                        )
+                except Exception as error:
+                    execution_error = error
+                finally:
+                    if child_identity_path.exists():
+                        pid, leader_pid, started, leader_started = (
+                            child_identity_path.read_text(encoding="utf-8").split()
+                        )
+                        child_identity = validation_runner._ProcessIdentity(
+                            int(pid), f"linux-start-ticks:{started}"
+                        )
+                        leader_identity = validation_runner._ProcessIdentity(
+                            int(leader_pid), f"linux-start-ticks:{leader_started}"
+                        )
+                        observed_child = validation_runner._read_linux_process_record(
+                            child_identity.pid
+                        )
+                        for identity in (child_identity, leader_identity):
+                            record = validation_runner._read_linux_process_record(
+                                identity.pid
+                            )
+                            if record is None or record.identity != identity:
+                                continue
+                            cleanup_errors.extend(
+                                validation_runner._signal_linux_identities(
+                                    (record,), signal.SIGKILL, time.monotonic() + 2
+                                )
+                            )
+
+                self.assertIsInstance(execution_error, RuntimeError)
+                assert execution_error is not None
+                self.assertRegex(
+                    str(execution_error),
+                    "could not prove the attached validation process tree",
+                )
+                causes: list[BaseException] = []
+                cause = execution_error.__cause__
+                while cause is not None:
+                    causes.append(cause)
+                    cause = cause.__cause__
+                self.assertTrue(
+                    any(isinstance(cause, PermissionError) for cause in causes),
+                    f"injected discovery denial missing from causes: {causes!r}",
+                )
+                self.assertIsNotNone(child_identity)
+                self.assertIsNotNone(leader_identity)
+                assert child_identity is not None
+                assert leader_identity is not None
+                self.assertNotEqual(child_identity.pid, leader_identity.pid)
+                self.assertFalse(marker.exists())
+                self.assertTrue(
+                    observed_child is None
+                    or observed_child.identity != child_identity
+                    or observed_child.state.startswith("Z"),
+                    f"cleanup abandoned pid {child_identity.pid} in state "
+                    f"{getattr(observed_child, 'state', 'gone')}",
+                )
+                self.assertEqual(cleanup_errors, [])
+
+    @unittest.skipIf(os.name == "nt", "POSIX process cleanup contract")
+    def test_timeout_never_resumes_a_term_handler(self):
+        catalog = self.load()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ready = root / "ready"
+            marker = root / "term-handler-ran"
+            child = root / "term_child.py"
+            child.write_text(
+                """\
+from pathlib import Path
+import signal
+import sys
+import time
+
+marker = Path(sys.argv[1])
+ready = Path(sys.argv[2])
+signal.signal(signal.SIGTERM, lambda *_: marker.write_text("ran", encoding="utf-8"))
+ready.write_text("ready", encoding="utf-8")
+time.sleep(30)
+""",
+                encoding="utf-8",
+            )
+            timed_tree = dataclasses.replace(
+                catalog.check_map["baseline"],
+                command=(
+                    f"{shlex.quote(sys.executable)} {shlex.quote(str(child))} "
+                    f"{shlex.quote(str(marker))} {shlex.quote(str(ready))}"
+                ),
+                timeout_seconds=1,
+            )
+            with contextlib.redirect_stdout(io.StringIO()):
+                results = execute_checks(
+                    (timed_tree,),
+                    root,
+                    root / "artifacts",
+                    strict=True,
+                    fail_fast=True,
+                )
+
+            self.assertEqual(results[0].returncode, 124)
+            self.assertTrue(ready.exists())
+            self.assertFalse(marker.exists())
+
+    @unittest.skipIf(os.name == "nt", "POSIX process cleanup contract")
+    def test_process_tree_freeze_requires_a_fixed_point(self):
+        calls = 0
+
+        def growing_snapshot(
+            _deadline: float,
+            **_options: object,
+        ) -> dict[int, validation_runner._ProcessRecord]:
+            nonlocal calls
+            calls += 1
+            snapshot = {
+                100: validation_runner._ProcessRecord(
+                    validation_runner._ProcessIdentity(100, "root"),
+                    1,
+                    100,
+                    100,
+                    "T",
+                )
+            }
+            for pid in range(201, 201 + calls):
+                snapshot[pid] = validation_runner._ProcessRecord(
+                    validation_runner._ProcessIdentity(pid, f"child-{pid}"),
+                    100,
+                    pid,
+                    100,
+                    "T",
+                )
+            return snapshot
+
+        frozen_groups = {100: 0}
+        frozen_identities: set[validation_runner._ProcessIdentity] = set()
+        with (
+            mock.patch.object(
+                validation_runner,
+                "_process_snapshot",
+                side_effect=growing_snapshot,
+            ),
+            mock.patch.object(
+                validation_runner, "_stop_and_confirm_group", return_value=True
+            ),
+            self.assertRaisesRegex(RuntimeError, "did not reach a frozen fixed point"),
+        ):
+            validation_runner._freeze_process_tree(
+                100, frozen_groups, frozen_identities, time.monotonic() + 0.03
+            )
+
+        self.assertGreater(len(frozen_groups), 1)
+
+    @unittest.skipIf(os.name == "nt", "POSIX process cleanup contract")
+    def test_process_tree_freeze_absorbs_a_new_group_before_converging(self):
+        root = validation_runner._ProcessRecord(
+            validation_runner._ProcessIdentity(100, "root"), 1, 100, 100, "T"
+        )
+        child_running = validation_runner._ProcessRecord(
+            validation_runner._ProcessIdentity(201, "child"), 100, 201, 100, "R"
+        )
+        child_stopped = dataclasses.replace(child_running, state="T")
+        snapshots = [
+            {100: root},
+            {100: root, 201: child_running},
+            {100: root, 201: child_stopped},
+            {100: root, 201: child_stopped},
+            {100: root, 201: child_stopped},
+        ]
+        frozen_groups = {100: 0}
+        frozen_identities: set[validation_runner._ProcessIdentity] = set()
+
+        with (
+            mock.patch.object(
+                validation_runner,
+                "_process_snapshot",
+                side_effect=snapshots,
+            ),
+            mock.patch.object(
+                validation_runner, "_stop_and_confirm_group", return_value=True
+            ) as stop_group,
+            mock.patch.object(validation_runner.time, "sleep"),
+        ):
+            validation_runner._freeze_process_tree(
+                100, frozen_groups, frozen_identities, time.monotonic() + 1
+            )
+
+        self.assertEqual(frozen_groups, {100: 0, 201: 1})
+        self.assertEqual(
+            frozen_identities,
+            {
+                validation_runner._ProcessIdentity(100, "root"),
+                validation_runner._ProcessIdentity(201, "child"),
+            },
+        )
+        self.assertEqual(
+            stop_group.call_args.args[:3],
+            (100, 201, {child_running.identity}),
+        )
+
+    @unittest.skipIf(os.name == "nt", "POSIX process cleanup contract")
+    def test_frozen_groups_are_killed_deepest_first_without_resume(self):
+        records = {
+            pid: validation_runner._ProcessRecord(
+                validation_runner._ProcessIdentity(pid, f"start-{pid}"),
+                1,
+                pid,
+                100,
+                "T",
+            )
+            for pid in (100, 200, 300)
+        }
+        identities = {record.identity for record in records.values()}
+        with (
+            mock.patch.object(validation_runner.sys, "platform", "darwin"),
+            mock.patch.object(
+                validation_runner, "_process_snapshot", return_value=records
+            ),
+            mock.patch.object(validation_runner.os, "killpg") as killpg,
+        ):
+            errors = validation_runner._kill_frozen_groups(
+                100,
+                {100: 0, 200: 1, 300: 2},
+                identities,
+                time.monotonic() + 1,
+            )
+
+        self.assertEqual(errors, [])
+        self.assertEqual(
+            killpg.call_args_list,
+            [
+                mock.call(300, signal.SIGKILL),
+                mock.call(200, signal.SIGKILL),
+                mock.call(100, signal.SIGKILL),
+            ],
+        )
+
+    def test_process_snapshot_rejects_a_malformed_row(self):
+        completed = subprocess.CompletedProcess(
+            args=["ps"], returncode=0, stdout="not-a-process-row\n", stderr=""
+        )
+        with (
+            mock.patch.object(
+                validation_runner.subprocess, "run", return_value=completed
+            ),
+            self.assertRaisesRegex(RuntimeError, "malformed process inventory row"),
+        ):
+            validation_runner._process_snapshot(time.monotonic() + 1)
+
+    def test_process_snapshot_ignores_unowned_linux_kernel_rows(self):
+        completed = subprocess.CompletedProcess(
+            args=["ps"],
+            returncode=0,
+            stdout="2 0 0 0 S Tue Aug 25 13:05:11 2026\n",
+            stderr="",
+        )
+        with (
+            mock.patch.object(
+                validation_runner.subprocess, "run", return_value=completed
+            ),
+            mock.patch.object(validation_runner.sys, "platform", "linux"),
+        ):
+            snapshot = validation_runner._process_snapshot(time.monotonic() + 1)
+
+        self.assertEqual(snapshot, {})
+
+    def test_linux_process_snapshot_uses_kernel_start_ticks(self):
+        completed = subprocess.CompletedProcess(
+            args=["ps"],
+            returncode=0,
+            stdout="200 100 200 100 T Tue Aug 25 13:05:11 2026\n",
+            stderr="",
+        )
+        with (
+            mock.patch.object(
+                validation_runner.subprocess, "run", return_value=completed
+            ) as run,
+            mock.patch.object(validation_runner.sys, "platform", "linux"),
+            mock.patch.object(
+                validation_runner,
+                "_read_linux_process_record",
+                return_value=validation_runner._ProcessRecord(
+                    validation_runner._ProcessIdentity(
+                        200, "linux-start-ticks:123"
+                    ),
+                    100,
+                    200,
+                    100,
+                    "T",
+                ),
+            ),
+            mock.patch.object(validation_runner.os, "getpgid") as getpgid,
+            mock.patch.object(validation_runner.os, "getsid") as getsid,
+        ):
+            snapshot = validation_runner._process_snapshot(time.monotonic() + 1)
+
+        self.assertEqual(snapshot[200].process_group, 200)
+        self.assertEqual(snapshot[200].session_id, 100)
+        self.assertEqual(snapshot[200].identity.started, "linux-start-ticks:123")
+        self.assertIn("sid=", run.call_args.args[0][2])
+        getpgid.assert_not_called()
+        getsid.assert_not_called()
+
+    def test_linux_process_record_uses_proc_start_ticks(self):
+        payload = (
+            "200 (worker with spaces) S 100 200 100 0 -1 0 0 0 0 0 0 0 0 "
+            "0 20 0 1 0 12345 0\n"
+        )
+        with mock.patch.object(Path, "read_text", return_value=payload):
+            record = validation_runner._read_linux_process_record(200)
+
+        self.assertIsNotNone(record)
+        assert record is not None
+        self.assertEqual(record.identity.started, "linux-start-ticks:12345")
+        self.assertEqual(record.parent_pid, 100)
+        self.assertEqual(record.process_group, 200)
+        self.assertEqual(record.session_id, 100)
+
+    def test_linux_pidfd_signal_refuses_a_reused_identity(self):
+        original = validation_runner._ProcessRecord(
+            validation_runner._ProcessIdentity(200, "linux-start-ticks:10"),
+            100,
+            200,
+            100,
+            "T",
+        )
+        replacement = dataclasses.replace(
+            original,
+            identity=validation_runner._ProcessIdentity(
+                200, "linux-start-ticks:11"
+            ),
+        )
+        with (
+            mock.patch.object(
+                validation_runner.os, "pidfd_open", return_value=9, create=True
+            ),
+            mock.patch.object(validation_runner.os, "close") as close,
+            mock.patch.object(
+                validation_runner.signal, "pidfd_send_signal", create=True
+            ) as pidfd_signal,
+            mock.patch.object(
+                validation_runner,
+                "_read_linux_process_record",
+                return_value=replacement,
+            ),
+        ):
+            errors = validation_runner._signal_linux_identities(
+                (original,), signal.SIGKILL, time.monotonic() + 1
+            )
+
+        self.assertEqual(errors, [])
+        pidfd_signal.assert_not_called()
+        close.assert_called_once_with(9)
+
+    def test_darwin_process_snapshot_preserves_identity_across_state_and_parent_change(self):
+        first = subprocess.CompletedProcess(
+            args=["ps"],
+            returncode=0,
+            stdout="200 100 200 R Tue Aug 25 13:05:11 2026\n",
+            stderr="",
+        )
+        changed = subprocess.CompletedProcess(
+            args=["ps"],
+            returncode=0,
+            stdout="200 1 200 S Tue Aug 25 13:05:11 2026\n",
+            stderr="",
+        )
+        with (
+            mock.patch.object(
+                validation_runner.subprocess, "run", side_effect=[first, changed]
+            ) as run,
+            mock.patch.object(validation_runner.sys, "platform", "darwin"),
+            mock.patch.object(validation_runner.os, "getpgid", return_value=200),
+            mock.patch.object(validation_runner.os, "getsid", return_value=100),
+        ):
+            snapshot = validation_runner._process_snapshot(time.monotonic() + 1)
+
+        self.assertEqual(snapshot[200].parent_pid, 1)
+        self.assertEqual(snapshot[200].state, "S")
+        self.assertEqual(snapshot[200].identity.started, "Tue Aug 25 13:05:11 2026")
+        self.assertEqual(run.call_count, 2)
+        self.assertNotIn("sid=", run.call_args.args[0][2])
+
+    def test_darwin_process_snapshot_retries_unresolved_group_identity(self):
+        completed = subprocess.CompletedProcess(
+            args=["ps"],
+            returncode=0,
+            stdout="200 100 200 S Tue Aug 25 13:05:11 2026\n",
+            stderr="",
+        )
+        groups = iter((201, 200) * 100)
+        with (
+            mock.patch.object(
+                validation_runner.subprocess, "run", return_value=completed
+            ),
+            mock.patch.object(validation_runner.sys, "platform", "darwin"),
+            mock.patch.object(
+                validation_runner.os, "getpgid", side_effect=lambda _pid: next(groups)
+            ),
+            mock.patch.object(validation_runner.os, "getsid", return_value=100),
+            self.assertRaisesRegex(
+                RuntimeError, "unambiguous snapshot|cleanup exceeded"
+            ),
+        ):
+            validation_runner._process_snapshot(
+                time.monotonic() + 0.03, root_pid=100
+            )
+
+    def test_darwin_process_snapshot_checks_every_reappeared_ambiguity(self):
+        completed = subprocess.CompletedProcess(
+            args=["ps"],
+            returncode=0,
+            stdout=(
+                "100 1 100 T Tue Aug 25 13:05:10 2026\n"
+                "200 1 200 T Tue Aug 25 13:05:11 2026\n"
+                "201 100 201 T Tue Aug 25 13:05:12 2026\n"
+            ),
+            stderr="",
+        )
+
+        def observe_group(pid: int) -> int:
+            if pid == 100:
+                return 100
+            raise ProcessLookupError
+
+        with (
+            mock.patch.object(
+                validation_runner.subprocess, "run", return_value=completed
+            ),
+            mock.patch.object(validation_runner.sys, "platform", "darwin"),
+            mock.patch.object(
+                validation_runner.os, "getpgid", side_effect=observe_group
+            ),
+            mock.patch.object(validation_runner.os, "getsid", return_value=100),
+            self.assertRaisesRegex(
+                RuntimeError, "unambiguous snapshot|cleanup exceeded"
+            ),
+        ):
+            validation_runner._process_snapshot(
+                time.monotonic() + 0.03, root_pid=100
+            )
+
+    def test_process_snapshot_rejects_an_oversized_inventory(self):
+        completed = subprocess.CompletedProcess(
+            args=["ps"],
+            returncode=0,
+            stdout="x" * (validation_runner.MAX_PROCESS_CENSUS_BYTES + 1),
+            stderr="",
+        )
+        with (
+            mock.patch.object(
+                validation_runner.subprocess, "run", return_value=completed
+            ),
+            mock.patch.object(validation_runner.sys, "platform", "linux"),
+            self.assertRaisesRegex(RuntimeError, "byte limit"),
+        ):
+            validation_runner._process_snapshot(time.monotonic() + 1)
+
+    def test_post_kill_verification_waits_for_recorded_identities_to_disappear(self):
+        identity = validation_runner._ProcessIdentity(200, "start")
+        running = validation_runner._RawProcessRecord(100, 200, None, "R", "start")
+        sleeping = validation_runner._RawProcessRecord(1, 200, None, "S", "start")
+        with (
+            mock.patch.object(
+                validation_runner,
+                "_read_process_rows",
+                side_effect=[{200: running}, {200: sleeping}, {}, {}],
+            ) as census,
+            mock.patch.object(validation_runner.sys, "platform", "darwin"),
+            mock.patch.object(validation_runner.time, "sleep"),
+        ):
+            validation_runner._verify_processes_gone(
+                {identity}, time.monotonic() + 1
+            )
+
+        self.assertEqual(census.call_count, 4)
+
+    def test_post_kill_verification_accepts_a_zombie_as_non_executable(self):
+        identity = validation_runner._ProcessIdentity(200, "start")
+        zombie = validation_runner._RawProcessRecord(1, 200, None, "Z", "start")
+        with mock.patch.object(
+            validation_runner,
+            "_read_process_rows",
+            side_effect=[{200: zombie}, {200: zombie}],
+        ) as census, mock.patch.object(validation_runner.sys, "platform", "darwin"):
+            validation_runner._verify_processes_gone(
+                {identity}, time.monotonic() + 1
+            )
+
+        self.assertEqual(census.call_count, 2)
+
+    @unittest.skipIf(os.name == "nt", "POSIX process cleanup contract")
+    def test_timeout_termination_invokes_recorded_identity_verification(self):
+        process = mock.Mock()
+        process.pid = 100
+        process.poll.return_value = 0
+        identity = validation_runner._ProcessIdentity(200, "start")
+
+        def freeze(
+            _root_pid: int,
+            _groups: dict[int, int],
+            identities: set[validation_runner._ProcessIdentity],
+            _deadline: float,
+            *,
+            attempted_groups: dict[int, int],
+        ) -> None:
+            self.assertEqual(attempted_groups, {})
+            identities.add(identity)
+
+        with (
+            mock.patch.object(validation_runner.os, "killpg") as killpg,
+            mock.patch.object(validation_runner, "_freeze_process_tree", side_effect=freeze),
+            mock.patch.object(validation_runner, "_kill_frozen_groups", return_value=[]),
+            mock.patch.object(validation_runner, "_reap_owned_process", return_value=None),
+            mock.patch.object(validation_runner, "_verify_processes_gone") as verify,
+        ):
+            validation_runner._terminate_process_tree(process, time.monotonic() + 1)
+
+        self.assertEqual(verify.call_args.args[0], {identity})
+
+    @unittest.skipIf(os.name == "nt", "POSIX process cleanup contract")
+    def test_kill_stage_exception_still_kills_and_reaps_owned_shell(self):
+        process = mock.Mock()
+        process.pid = 100
+        process.poll.return_value = None
+        process.wait.return_value = 0
+
+        with (
+            mock.patch.object(validation_runner.os, "killpg") as killpg,
+            mock.patch.object(validation_runner, "_freeze_process_tree"),
+            mock.patch.object(
+                validation_runner,
+                "_kill_frozen_groups",
+                side_effect=RuntimeError("injected final census failure"),
+            ),
+            mock.patch.object(validation_runner, "_verify_processes_gone") as verify,
+            self.assertRaisesRegex(RuntimeError, "kill stage"),
+        ):
+            validation_runner._terminate_process_tree(
+                process, time.monotonic() + 1
+            )
+
+        self.assertIn(mock.call(100, signal.SIGKILL), killpg.call_args_list)
+        process.kill.assert_not_called()
+        process.wait.assert_called_once()
+        verify.assert_not_called()
+
+    @unittest.skipIf(os.name == "nt", "POSIX process cleanup contract")
+    def test_linux_final_census_failure_still_kills_and_reaps_owned_shell(self):
+        process = mock.Mock()
+        process.pid = 100
+        process.poll.return_value = None
+        process.wait.return_value = 0
+        child = validation_runner._ProcessRecord(
+            validation_runner._ProcessIdentity(200, "linux-start-ticks:10"),
+            100,
+            200,
+            100,
+            "T",
+        )
+
+        def freeze(
+            _root_pid: int,
+            groups: dict[int, int],
+            identities: set[validation_runner._ProcessIdentity],
+            _deadline: float,
+            *,
+            attempted_groups: dict[int, int],
+        ) -> None:
+            self.assertEqual(attempted_groups, {})
+            groups[200] = 1
+            identities.add(child.identity)
+
+        with (
+            mock.patch.object(validation_runner.sys, "platform", "linux"),
+            mock.patch.object(validation_runner.os, "killpg") as killpg,
+            mock.patch.object(
+                validation_runner, "_freeze_process_tree", side_effect=freeze
+            ),
+            mock.patch.object(
+                validation_runner,
+                "_process_snapshot",
+                side_effect=[
+                    {200: child},
+                    RuntimeError("injected second Linux census failure"),
+                    {},
+                ],
+            ),
+            mock.patch.object(
+                validation_runner.os, "pidfd_open", return_value=9, create=True
+            ),
+            mock.patch.object(validation_runner.os, "close") as close,
+            mock.patch.object(
+                validation_runner.signal, "pidfd_send_signal", create=True
+            ) as pidfd_signal,
+            self.assertRaisesRegex(RuntimeError, "second Linux census failure"),
+        ):
+            validation_runner._terminate_process_tree(
+                process, time.monotonic() + 1
+            )
+
+        pidfd_signal.assert_not_called()
+        close.assert_called_once_with(9)
+        self.assertIn(mock.call(100, signal.SIGKILL), killpg.call_args_list)
+        process.kill.assert_not_called()
+        process.wait.assert_called_once()
+
+    @unittest.skipIf(os.name == "nt", "POSIX process cleanup contract")
+    def test_post_stop_census_failure_kills_attempted_owned_group(self):
+        process = mock.Mock()
+        process.pid = 100
+        process.poll.return_value = None
+        process.wait.return_value = 0
+        root = validation_runner._ProcessRecord(
+            validation_runner._ProcessIdentity(100, "root"), 1, 100, 100, "T"
+        )
+        child = validation_runner._ProcessRecord(
+            validation_runner._ProcessIdentity(200, "child"),
+            100,
+            200,
+            100,
+            "T",
+        )
+
+        with (
+            mock.patch.object(validation_runner.sys, "platform", "darwin"),
+            mock.patch.object(validation_runner.os, "killpg") as killpg,
+            mock.patch.object(
+                validation_runner,
+                "_process_snapshot",
+                side_effect=[
+                    {100: root, 200: dataclasses.replace(child, state="R")},
+                    RuntimeError("injected post-stop census failure"),
+                    {100: root, 200: child},
+                    {100: root, 200: child},
+                ],
+            ),
+            self.assertRaisesRegex(RuntimeError, "could not prove"),
+        ):
+            validation_runner._terminate_process_tree(
+                process, time.monotonic() + 1
+            )
+
+        self.assertIn(mock.call(200, signal.SIGKILL), killpg.call_args_list)
+        self.assertIn(mock.call(100, signal.SIGKILL), killpg.call_args_list)
+        process.kill.assert_not_called()
+        process.wait.assert_called_once()
+
+    def test_reused_process_group_is_not_killed(self):
+        original = validation_runner._ProcessIdentity(200, "start-old")
+        replacement = validation_runner._ProcessRecord(
+            validation_runner._ProcessIdentity(201, "start-new"),
+            1,
+            200,
+            200,
+            "T",
+        )
+        with (
+            mock.patch.object(validation_runner.sys, "platform", "darwin"),
+            mock.patch.object(
+                validation_runner,
+                "_process_snapshot",
+                return_value={201: replacement},
+            ),
+            mock.patch.object(validation_runner.os, "killpg") as killpg,
+        ):
+            errors = validation_runner._kill_frozen_groups(
+                100, {200: 1}, {original}, time.monotonic() + 1
+            )
+
+        self.assertRegex(errors[0], "acquired unowned identities")
+        killpg.assert_not_called()
+
+    @unittest.skipIf(os.name == "nt", "POSIX process cleanup contract")
+    def test_reused_group_after_stop_is_never_committed_or_killed(self):
+        root = validation_runner._ProcessRecord(
+            validation_runner._ProcessIdentity(100, "root"), 1, 100, 100, "T"
+        )
+        child = validation_runner._ProcessRecord(
+            validation_runner._ProcessIdentity(200, "child-old"),
+            100,
+            200,
+            100,
+            "R",
+        )
+        replacement = validation_runner._ProcessRecord(
+            validation_runner._ProcessIdentity(201, "child-new"),
+            1,
+            200,
+            200,
+            "T",
+        )
+        snapshots = [
+            {100: root, 200: child},
+            {100: root, 201: replacement},
+        ]
+        frozen_groups = {100: 0}
+        attempted_groups: dict[int, int] = {}
+        frozen_identities: set[validation_runner._ProcessIdentity] = set()
+        with (
+            mock.patch.object(validation_runner.sys, "platform", "darwin"),
+            mock.patch.object(
+                validation_runner, "_process_snapshot", side_effect=snapshots
+            ),
+            mock.patch.object(validation_runner.os, "killpg") as killpg,
+            mock.patch.object(validation_runner.time, "sleep"),
+            self.assertRaisesRegex(RuntimeError, "changed ownership after stop"),
+        ):
+            validation_runner._freeze_process_tree(
+                100,
+                frozen_groups,
+                frozen_identities,
+                time.monotonic() + 1,
+                attempted_groups=attempted_groups,
+            )
+
+        self.assertNotIn(200, frozen_groups)
+        self.assertEqual(attempted_groups, {200: 1})
+        self.assertIn(mock.call(200, signal.SIGSTOP), killpg.call_args_list)
+        self.assertNotIn(mock.call(200, signal.SIGKILL), killpg.call_args_list)
+
+    def test_windows_tree_kill_nonzero_is_always_fatal(self):
+        process = mock.Mock()
+        process.pid = 4242
+        process.poll.return_value = 0
+        process.wait.return_value = 0
+        completed = subprocess.CompletedProcess(
+            args=["taskkill"], returncode=5, stdout="", stderr=""
+        )
+
+        with (
+            mock.patch.object(validation_runner.os, "name", "nt"),
+            mock.patch.object(
+                validation_runner.subprocess, "run", return_value=completed
+            ),
+            self.assertRaisesRegex(RuntimeError, "taskkill refused.*5"),
+        ):
+            validation_runner._terminate_process_tree(process)
+
+        process.wait.assert_not_called()
+
+    def test_windows_tree_kill_timeout_is_fatal_and_reaps_shell(self):
+        process = mock.Mock()
+        process.pid = 4242
+        process.poll.return_value = None
+        process.wait.return_value = 0
+        timeout = subprocess.TimeoutExpired(cmd="taskkill", timeout=10)
+
+        with (
+            mock.patch.object(validation_runner.os, "name", "nt"),
+            mock.patch.object(
+                validation_runner.subprocess, "run", side_effect=timeout
+            ),
+            self.assertRaisesRegex(RuntimeError, "timed out terminating"),
+        ):
+            validation_runner._terminate_process_tree(process)
+
+        process.kill.assert_called_once_with()
+        process.wait.assert_called_once()
+
+    def test_windows_tree_kill_launch_error_is_fatal_and_reaps_shell(self):
+        process = mock.Mock()
+        process.pid = 4242
+        process.poll.return_value = None
+        process.wait.return_value = 0
+
+        with (
+            mock.patch.object(validation_runner.os, "name", "nt"),
+            mock.patch.object(
+                validation_runner.subprocess,
+                "run",
+                side_effect=FileNotFoundError("taskkill missing"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "could not launch Windows"),
+        ):
+            validation_runner._terminate_process_tree(process)
+
+        process.kill.assert_called_once_with()
+        process.wait.assert_called_once()
+
+    def test_windows_tree_kill_success_waits_within_cleanup_deadline(self):
+        process = mock.Mock()
+        process.pid = 4242
+        process.poll.return_value = None
+        process.wait.return_value = 0
+        completed = subprocess.CompletedProcess(
+            args=["taskkill"], returncode=0, stdout="", stderr=""
+        )
+
+        with (
+            mock.patch.object(validation_runner.os, "name", "nt"),
+            mock.patch.object(
+                validation_runner.subprocess, "run", return_value=completed
+            ),
+        ):
+            validation_runner._terminate_process_tree(process)
+
+        process.kill.assert_not_called()
+        process.wait.assert_called_once()
+
     def test_reports_preserve_point_status_and_parse_as_junit(self):
         catalog = self.load()
         selection = select_named(catalog, ("core",))
@@ -688,7 +1800,7 @@ def routing_catalog(
         "crates/plurxd/src/http/cluster.rs",
     ),
     cluster_auth_contract: str = "Three voters agree on the replicated Store.",
-    cluster_check_timeout: int = 1800,
+    cluster_check_timeout: int = 3600,
     vendor_clippy_command: str = "make hiqlite-vendor-clippy",
     web_paths: tuple[str, ...] = ("crates/plurxd/src/web/app.js",),
     web_contract: str = "The browser renders every library.",

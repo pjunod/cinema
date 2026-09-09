@@ -904,7 +904,7 @@ pub(crate) struct DeliveryView {
     pub hold_reason: Option<String>,
     /// Why the producer stopped, when it stopped for a reason this server has
     /// named. `producer_state` says only `failed`; this says which of the
-    /// nineteen decisions that was, and therefore whether trying again could
+    /// twenty-one decisions that was, and therefore whether trying again could
     /// ever work. Optional: an older peer relaying a response has no such
     /// field, and absence means "not classified here", never "healthy".
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1920,8 +1920,9 @@ pub(crate) enum ControlAction {
     },
     /// Production stopped for a reason that may not recur.
     ///
-    /// Sixteen of the nineteen producer decisions are timing, process, plan or
-    /// executor facts. The client should try again on the server's own
+    /// Seventeen of the twenty-one producer decisions are timing, process,
+    /// plan, executor or recovery facts, and this is what a client is told
+    /// about every one of them. The client should try again on the server's own
     /// cadence rather than deciding for itself how hard to retry, which is
     /// what every client does today.
     RetryResource {
@@ -2278,6 +2279,9 @@ fn terminal_message(decision: ProducerDecisionReason) -> String {
         }
         ProducerDecisionReason::InvalidConfiguration => {
             "the requested delivery configuration is not a legal one"
+        }
+        ProducerDecisionReason::SourceDecodeFailed => {
+            "this source did not decode, and trying again will not change that"
         }
         ProducerDecisionReason::EngineChanged => {
             "this server must restart before it can serve this title again"
@@ -4434,6 +4438,25 @@ pub(crate) enum ProducerDecisionReason {
     FlowResumeDeadline,
     InstallDeadline,
     ExecutorLost,
+    /// The producer's own diagnostics said this source did not decode, and a
+    /// software-decode alternate is being installed for it.
+    ///
+    /// The counterpart to [`Self::SourceDecodeFailed`] and deliberately *not*
+    /// permanent: a restricted retry is the entire point, and a permanent
+    /// reason on a retry reaches the client as a terminal answer while the
+    /// node is still bringing the successor up. This is what the operator sees
+    /// when the recovery this effort exists for actually fires — distinct from
+    /// the timing verdict that triggered the decision, so a dashboard can tell
+    /// "we tried again because it stalled" from "we tried again because the
+    /// decoder said the source did not decode".
+    SourceDecodeRetry,
+    /// The producer's own diagnostics said this source did not decode, under a
+    /// grammar qualified against this build.
+    ///
+    /// Not a timing verdict and not a process verdict. The process may well
+    /// exit zero — that is the failure this whole effort is named after — and
+    /// every timing reason tells a client to try again, which reproduces it.
+    SourceDecodeFailed,
     /// The file this rendition was planned against is no longer the file on
     /// disk. VOD renditions are immutable and fragment-indexed, so a source
     /// that changes underneath one invalidates the plan rather than the media.
@@ -4475,6 +4498,8 @@ impl ProducerDecisionReason {
             Self::FlowResumeDeadline => "flow_resume_deadline",
             Self::InstallDeadline => "install_deadline",
             Self::ExecutorLost => "executor_lost",
+            Self::SourceDecodeRetry => "source_decode_retry",
+            Self::SourceDecodeFailed => "source_decode_failed",
             Self::SourceChanged => "source_changed",
             Self::EngineChanged => "engine_changed",
             Self::ProducerLaunchFailed => "producer_launch_failed",
@@ -4485,15 +4510,25 @@ impl ProducerDecisionReason {
 
     /// Whether retrying, unchanged, can ever succeed on this node.
     ///
-    /// Sixteen of these nineteen reasons are timing, process, executor or plan
-    /// facts: the same file on the same pipeline may well work on the next
-    /// attempt. Three cannot be retried into working. Two are verdicts about
-    /// the source itself — this container cannot be carried by this pipeline,
-    /// or the recipe that was asked for is not a legal one. The third,
-    /// `EngineChanged`, is a verdict about this *process*: the fragment-index
-    /// engine baseline is a per-process `OnceCell`, so once it has moved,
-    /// every planned rendition fails the same way until the node restarts, and
-    /// a reopen re-plans straight back into it.
+    /// Seventeen of these twenty-one reasons are timing, process, executor or
+    /// plan facts: the same file on the same pipeline may well work on the
+    /// next attempt. Four cannot be retried into working.
+    ///
+    /// Two are verdicts about the source itself — this container cannot be
+    /// carried by this pipeline, or the recipe that was asked for is not a
+    /// legal one. `EngineChanged` is a verdict about this *process*: the
+    /// fragment-index engine baseline is a per-process `OnceCell`, so once it
+    /// has moved, every planned rendition fails the same way until the node
+    /// restarts, and a reopen re-plans straight back into it. Telling that
+    /// client to retry is telling it to poll until an operator intervenes.
+    ///
+    /// `SourceDecodeFailed` is the fourth, and it is the one to read
+    /// carefully, because [`Self::SourceDecodeRetry`] carries the *same
+    /// finding* and sits on the impermanent side. What separates them is not
+    /// the evidence, which is identical; it is whether this node holds a
+    /// software-decode alternate to install. A decode fault with an alternate
+    /// is a retry the client should wait through; the same fault without one
+    /// is the answer.
     ///
     /// The other four VOD reasons are genuinely retryable, because a VOD
     /// rendition is planned once against an exact source and an exact engine
@@ -4511,19 +4546,51 @@ impl ProducerDecisionReason {
     /// not yet change what a viewer sees — it is the fact M5 needs in order to.
     ///
     /// The distinction is the whole reason a client cannot decide for itself.
-    /// `producer_state` flattens all nineteen to the word `failed`, so a
+    /// `producer_state` flattens all twenty-one to the word `failed`, so a
     /// client seeing a failure has no way to tell "try again" from "this will
     /// never work", and every client currently guesses toward retry: it
     /// reopens the session, gets the same verdict, and reopens again.
     pub(crate) fn is_permanent(self) -> bool {
         matches!(
             self,
-            Self::Unsupported | Self::InvalidConfiguration | Self::EngineChanged
+            Self::Unsupported
+                | Self::InvalidConfiguration
+                | Self::SourceDecodeFailed
+                | Self::EngineChanged
+        )
+    }
+
+    /// Whether a qualified decode fault may replace this verdict.
+    ///
+    /// The four reasons that say *the producer stopped without producing*, and
+    /// nothing else. Each exclusion is deliberate:
+    ///
+    /// * `PartialSuccessExit` is reached only with a published frontier, so
+    ///   the source demonstrably decoded.
+    /// * `ReaderFailed` already names a more specific fault than "it did not
+    ///   decode", and trading it away tells the operator less.
+    /// * `FlowStopFailed`, `FlowResumeFailed`, `FlowStopDeadline`,
+    ///   `FlowResumeDeadline`, `InstallDeadline` and `ExecutorLost` are facts
+    ///   about this server, not about the file. Relabelling them would make a
+    ///   permanent claim about a source over an outage that will pass.
+    /// * The four VOD plan reasons — `SourceChanged`, `EngineChanged`,
+    ///   `ProducerLaunchFailed`, `MediaLandingFailed` and
+    ///   `ProducerWriteFailed` — belong to a rendition planned once against an
+    ///   exact source and engine. A decode fault latched under one of them is
+    ///   evidence about a plan this node is no longer running.
+    /// * The four permanent reasons already know at least as much.
+    fn yields_to_decode_evidence(self) -> bool {
+        matches!(
+            self,
+            Self::StartupDeadline
+                | Self::ProgressDeadline
+                | Self::ExitClassificationDeadline
+                | Self::ProcessExit
         )
     }
 
     /// The bounded vocabulary, in the order the wire and metrics use.
-    pub(crate) const ALL: [Self; 19] = [
+    pub(crate) const ALL: [Self; 21] = [
         Self::StartupDeadline,
         Self::ProgressDeadline,
         Self::ExitClassificationDeadline,
@@ -4538,6 +4605,8 @@ impl ProducerDecisionReason {
         Self::FlowResumeDeadline,
         Self::InstallDeadline,
         Self::ExecutorLost,
+        Self::SourceDecodeRetry,
+        Self::SourceDecodeFailed,
         Self::SourceChanged,
         Self::EngineChanged,
         Self::ProducerLaunchFailed,
@@ -4653,6 +4722,13 @@ pub(crate) enum CopyProducerExitClassification {
 pub(crate) enum ProducerStartupKind {
     Hardware,
     Software,
+    /// A hardware encoder fed by software decode and software filters. It
+    /// starts on the software budget rather than the hardware one, because the
+    /// slow part of a start is the decode, not the encoder — and calling it
+    /// `Hardware` would give it twelve seconds to do thirty seconds of work.
+    /// A separate variant rather than a reuse of `Software` so the diagnostics
+    /// surface can say which of the two a session actually is.
+    MixedSoftwareDecode,
     Copy,
 }
 
@@ -4660,7 +4736,7 @@ impl ProducerStartupKind {
     pub(crate) fn startup_budget(self) -> Duration {
         match self {
             Self::Hardware => PREPUBLICATION_HARDWARE_STARTUP_BUDGET,
-            Self::Software => PREPUBLICATION_SOFTWARE_STARTUP_BUDGET,
+            Self::Software | Self::MixedSoftwareDecode => PREPUBLICATION_SOFTWARE_STARTUP_BUDGET,
             Self::Copy => PREPUBLICATION_COPY_STARTUP_BUDGET,
         }
     }
@@ -4669,6 +4745,7 @@ impl ProducerStartupKind {
         match self {
             Self::Hardware => "hardware",
             Self::Software => "software",
+            Self::MixedSoftwareDecode => "mixed-software-decode",
             Self::Copy => "copy",
         }
     }
@@ -4696,6 +4773,19 @@ pub(crate) struct InitialProducerPolicy {
     pub startup_kind: ProducerStartupKind,
     pub progress_budget: Duration,
     pub retry_recipe: Option<ValidatedRetryRecipe>,
+    /// The successor a qualified decode fault installs: the same delivery,
+    /// decoded in software.
+    ///
+    /// Separate from `retry_recipe` rather than replacing it, because the two
+    /// answer different questions and a session can need either. The
+    /// colour-safe retry is what a *stopped encode* asks for; this is what a
+    /// *source that did not decode* asks for, and choosing between them is the
+    /// decision's job rather than the policy's.
+    ///
+    /// `None` on every session whose executor could not build one — a software
+    /// encoder has no hardware slot to keep, and a delivery that already
+    /// decodes in software has no alternate at all.
+    pub decode_alternate: Option<ValidatedRetryRecipe>,
     pub presentation_contract_fingerprint: String,
     exit_classifier: ProducerExitClassifier,
     retry_eligibility: ProducerRetryEligibility,
@@ -4704,21 +4794,40 @@ pub(crate) struct InitialProducerPolicy {
 }
 
 impl InitialProducerPolicy {
-    pub(crate) fn hardware(
+    /// A hardware-encoder policy, told which of the two shapes this is.
+    ///
+    /// A hardware encoder fed by a software decode starts on the software
+    /// budget, because the slow part of that start is the decode: calling it
+    /// `Hardware` gives it twelve seconds to do thirty seconds of work, and it
+    /// is killed for being slow at something it was never going to finish.
+    pub(crate) fn hardware_with_startup(
         presentation_contract_fingerprint: String,
         progress_budget: Duration,
         retry_recipe: ValidatedRetryRecipe,
+        startup_kind: ProducerStartupKind,
     ) -> Self {
         Self {
-            startup_kind: ProducerStartupKind::Hardware,
+            startup_kind,
             progress_budget,
             retry_recipe: Some(retry_recipe),
+            decode_alternate: None,
             presentation_contract_fingerprint,
             exit_classifier: ProducerExitClassifier::Immediate,
             retry_eligibility: ProducerRetryEligibility::AnyPrepublicationFailure,
             expected_remaining_ms: None,
             completion_tolerance_ms: 10_000,
         }
+    }
+
+    /// Attach the software-decode alternate this session's executor built.
+    ///
+    /// A builder rather than a fifth positional argument on
+    /// [`Self::hardware_with_startup`], because the alternate is optional for
+    /// reasons that have nothing to do with the rest of the policy and every
+    /// existing caller would otherwise gain a `None`.
+    pub(crate) fn with_decode_alternate(mut self, recipe: Option<ValidatedRetryRecipe>) -> Self {
+        self.decode_alternate = recipe;
+        self
     }
 
     pub(crate) fn software(
@@ -4729,6 +4838,7 @@ impl InitialProducerPolicy {
             startup_kind: ProducerStartupKind::Software,
             progress_budget,
             retry_recipe: None,
+            decode_alternate: None,
             presentation_contract_fingerprint,
             exit_classifier: ProducerExitClassifier::Immediate,
             retry_eligibility: ProducerRetryEligibility::Never,
@@ -4755,6 +4865,10 @@ impl InitialProducerPolicy {
             startup_kind: ProducerStartupKind::Copy,
             progress_budget,
             retry_recipe,
+            // A copy has no decode to restrict: it is a remux, and its one
+            // validated fallback is the transcode the `Unsupported` verdict
+            // selects.
+            decode_alternate: None,
             presentation_contract_fingerprint,
             exit_classifier: ProducerExitClassifier::CopyReader,
             retry_eligibility,
@@ -4774,6 +4888,7 @@ impl InitialProducerPolicy {
             startup_kind: ProducerStartupKind::Copy,
             progress_budget,
             retry_recipe: None,
+            decode_alternate: None,
             presentation_contract_fingerprint,
             exit_classifier: ProducerExitClassifier::Immediate,
             retry_eligibility: ProducerRetryEligibility::Never,
@@ -4816,7 +4931,7 @@ impl InitialProducerPolicy {
                     self.retry_recipe.is_some(),
                 ),
                 (
-                    ProducerStartupKind::Hardware,
+                    ProducerStartupKind::Hardware | ProducerStartupKind::MixedSoftwareDecode,
                     ProducerExitClassifier::Immediate,
                     ProducerRetryEligibility::AnyPrepublicationFailure,
                     true,
@@ -4845,7 +4960,12 @@ impl InitialProducerPolicy {
         {
             return Err(ProducerAttemptRejection::InvalidPolicy);
         }
-        if let Some(recipe) = &self.retry_recipe {
+        // Both recipes, by the same rule. A session can install either, so an
+        // invariant that held for one of them is not an invariant.
+        for recipe in [self.retry_recipe.as_ref(), self.decode_alternate.as_ref()]
+            .into_iter()
+            .flatten()
+        {
             if recipe.identity.is_empty()
                 || recipe.identity.len() > MAX_RECIPE_IDENTITY_BYTES
                 || recipe.fingerprint.is_empty()
@@ -4900,6 +5020,325 @@ pub(crate) struct PreparationExecutor {
     /// `None` from the paths that stage without an observed selection; the
     /// slot treats an absent record as no evidence rather than as a change.
     desired_digest: Option<String>,
+}
+
+/// What a reservation attempt found.
+///
+/// Not a `bool`. The store answers `Ok(None)` for six different situations —
+/// no row, a row that is no longer `Reserved`, and any of five request fields
+/// differing from the row that is there — and they are not the same fact. The
+/// neighbour this type is modelled on made the same call for the same reason:
+/// [`PreparationCommitOutcome`] exists because a commit that lost a CAS and a
+/// commit that was never staged need different answers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) enum RecoveryReservation {
+    /// This attempt holds the budget. Carries the stored row, because a
+    /// replaying executor needs to read back what it had already decided —
+    /// including the restriction the row carries, which is the only place a
+    /// later continuation can learn it.
+    Held(Box<plurx_core::domain::ProducerRecoveryReservation>),
+    /// The budget is gone: an earlier attempt of this playback took it and
+    /// settled it. The honest answer to a viewer is the permanent one.
+    Spent(Box<plurx_core::domain::ProducerRecoveryReservation>),
+    /// A *live* reservation for this playback that this request does not
+    /// match — a different attempt, sequence, digest pair, or restriction.
+    ///
+    /// Distinct from `Spent` and the distinction is load-bearing: the budget
+    /// has not been used up, it is held, possibly by this very session under
+    /// a decision it has since changed. Reading this as `Spent` and giving up
+    /// leaves a `reserved` row nothing will ever settle, and the schema never
+    /// deletes one — so every later continuation sees a live reservation for
+    /// a recovery that was abandoned.
+    Mismatched(Box<plurx_core::domain::ProducerRecoveryReservation>),
+    /// The insert did not take and no row can be read. Nothing is known, so
+    /// nothing is claimed.
+    Unavailable,
+}
+
+/// What a settlement found. `bool` hides the case the store fenced on purpose.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) enum RecoverySettlement {
+    /// The row moved to the state asked for, or was already in it.
+    Settled,
+    /// A row exists and this identity does not own it.
+    ///
+    /// The store fences on `failed_incarnation_id` so that a stale holder
+    /// cannot write an outcome over the real owner's. Rendering that as "there
+    /// was nothing to settle" is what makes the split-brain invisible.
+    NotOurs,
+    /// No row for this epoch — nothing was ever reserved.
+    Absent,
+    /// The row is this identity's, and it is already closed the other way.
+    ///
+    /// The store is idempotent for the same terminal state, so the only way
+    /// here is settling `Installed` over an `Exhausted` row or the reverse:
+    /// two different answers about one attempt, which is a caller bug rather
+    /// than a race. It is named so it stays out of `NotOurs`, where it would
+    /// read as a fencing failure and send whoever debugs it looking for a
+    /// second node that does not exist.
+    Conflicting,
+}
+
+/// The two ways a reservation can end. The store rejects `Reserved` here with
+/// an error, so it is not offered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) enum RecoveryOutcome {
+    Installed,
+    Exhausted,
+}
+
+impl RecoveryOutcome {
+    fn state(self) -> plurx_core::domain::ProducerRecoveryState {
+        match self {
+            Self::Installed => plurx_core::domain::ProducerRecoveryState::Installed,
+            Self::Exhausted => plurx_core::domain::ProducerRecoveryState::Exhausted,
+        }
+    }
+}
+
+/// The durable per-playback recovery budget, addressed.
+///
+/// Modelled on [`PreparationExecutor`]: store plus identity, doing durable
+/// work on the actor's behalf. The difference is where it is consumed — that
+/// one is built and used on the HTTP side, and this one has to be reachable
+/// from the producer executor, which is why the identity travels down the
+/// start chain rather than being read off a route at the point of use.
+///
+/// **The budget is never refunded.** `ProducerRecoveryState` goes
+/// `Reserved → Installed | Exhausted` and never returns, so a reservation
+/// taken for an alternate that then fails to install has spent this playback's
+/// one recovery. Settling on every path out — including the ones that never
+/// reach an installer — is the whole correctness of using this type.
+#[derive(Clone)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct ProducerRecoveryLedger {
+    store: std::sync::Arc<dyn plurx_core::store::Store>,
+    user_id: i64,
+    playback_id: String,
+    recovery_epoch: String,
+    failed_incarnation_id: String,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl ProducerRecoveryLedger {
+    /// `None` unless every identity field the store validates is present and
+    /// within bounds.
+    ///
+    /// The store refuses a non-positive user id, an empty or over-long
+    /// playback id, an empty or over-long epoch, and an empty or over-long
+    /// failed incarnation — separately, and at the moment a reservation is
+    /// needed, which is the worst moment to learn a session never had a
+    /// budget. Refusing to construct the handle moves that discovery to
+    /// session start, where "this playback has no durable bound" is a fact a
+    /// caller can act on.
+    ///
+    /// It moves *that* discovery and no other. The per-call refusals — a zero
+    /// attempt or sequence, a digest that is not sixty-four lowercase hex
+    /// bytes, or the two digests being equal — depend on values this type does
+    /// not hold, so [`Self::reserve`] still returns a `StoreError` and a caller
+    /// still handles one.
+    pub(crate) fn new(
+        store: std::sync::Arc<dyn plurx_core::store::Store>,
+        user_id: i64,
+        playback_id: &str,
+        recovery_epoch: &str,
+        failed_incarnation_id: &str,
+    ) -> Option<Self> {
+        // The same bound the store applies, spelled once here.
+        const MAX_KEY_BYTES: usize = 128;
+        let bounded = |value: &str| !value.is_empty() && value.len() <= MAX_KEY_BYTES;
+        if user_id <= 0
+            || !bounded(playback_id)
+            || !bounded(recovery_epoch)
+            || !bounded(failed_incarnation_id)
+        {
+            return None;
+        }
+        Some(Self {
+            store,
+            user_id,
+            playback_id: playback_id.to_owned(),
+            recovery_epoch: recovery_epoch.to_owned(),
+            failed_incarnation_id: failed_incarnation_id.to_owned(),
+        })
+    }
+
+    /// Take this playback's one automatic recovery, and say what was found.
+    ///
+    /// The store's conditional insert answers `Ok(None)` for every case that
+    /// is not "this exact request now owns the row", so a refusal is read back
+    /// and classified rather than reported as one fact. Without the read back,
+    /// a request that differs from a live reservation — the same session
+    /// changing its mind about the alternate, most obviously — is
+    /// indistinguishable from a budget an earlier attempt already spent, and
+    /// the two call for opposite behaviour.
+    ///
+    /// The read is deliberately local rather than a quorum read: it is used to
+    /// explain a refusal, never to grant one. The grant is the conditional
+    /// insert, which is linearizable.
+    pub(crate) async fn reserve(
+        &self,
+        failed_producer_attempt: u64,
+        decision_sequence: u64,
+        failed_plan_digest: &str,
+        alternate_plan_digest: &str,
+        now_ms: i64,
+    ) -> Result<RecoveryReservation, plurx_core::error::StoreError> {
+        let request = plurx_core::domain::ProducerRecoveryRequest {
+            user_id: self.user_id,
+            playback_id: self.playback_id.clone(),
+            recovery_epoch: self.recovery_epoch.clone(),
+            failed_incarnation_id: self.failed_incarnation_id.clone(),
+            failed_producer_attempt,
+            decision_sequence,
+            failed_plan_digest: failed_plan_digest.to_owned(),
+            alternate_plan_digest: alternate_plan_digest.to_owned(),
+            // Deliberately null, and deliberately recorded as a decision.
+            //
+            // The restriction is what makes the *next* session inherit this
+            // answer rather than rediscovering it, and it cannot be built
+            // here: `ContinuationDecodeRestriction` is not referenced anywhere
+            // in this daemon, and `source_revision_digest` and
+            // `policy_revision` have no producer at all. So the null is forced
+            // rather than preferred.
+            //
+            // **It is part of the row's identity.** The store compares this
+            // field when deciding whether a repeat is a replay, so a later
+            // build that starts writing a real restriction will find its
+            // replay refused as `Mismatched` rather than accepted as an
+            // upgrade — and the row it cannot replace stays null forever,
+            // which means the continuation re-plans onto the decoder that
+            // already failed. Whoever writes the first restriction has to
+            // settle the existing row and take a new epoch, not replay.
+            decode_restriction: None,
+        };
+        if let Some(reservation) = self
+            .store
+            .reserve_producer_recovery(&request, now_ms)
+            .await?
+        {
+            return Ok(RecoveryReservation::Held(Box::new(reservation)));
+        }
+        let Some(existing) = self
+            .store
+            .producer_recovery_for_epoch(self.user_id, &self.playback_id, &self.recovery_epoch)
+            .await?
+        else {
+            return Ok(RecoveryReservation::Unavailable);
+        };
+        if existing.state == plurx_core::domain::ProducerRecoveryState::Reserved {
+            Ok(RecoveryReservation::Mismatched(Box::new(existing)))
+        } else {
+            Ok(RecoveryReservation::Spent(Box::new(existing)))
+        }
+    }
+
+    /// What this epoch has already decided, if anything — a read, and only a
+    /// read.
+    ///
+    /// The point of asking is to *withhold* an alternate, never to grant one.
+    /// A caller that finds nothing here has learned that no attempt of this
+    /// playback has reserved yet, which is not the same as learning that its
+    /// own reservation will succeed; only [`Self::reserve`] can tell it that,
+    /// and it is that conditional insert which makes the answer linearizable.
+    ///
+    /// It exists because the one component that decides whether a recovery is
+    /// on offer at all — the producer actor — is synchronous and holds no
+    /// store handle. Reading the budget once at session start and simply not
+    /// offering an alternate is what lets a playback that has already
+    /// recovered reach its permanent verdict on its first qualified fault,
+    /// instead of being told to retry and then failing at install.
+    pub(crate) async fn existing(
+        &self,
+    ) -> Result<
+        Option<plurx_core::domain::ProducerRecoveryReservation>,
+        plurx_core::error::StoreError,
+    > {
+        self.store
+            .producer_recovery_for_epoch(self.user_id, &self.playback_id, &self.recovery_epoch)
+            .await
+    }
+
+    /// Close this playback's reservation, whatever happened to it.
+    ///
+    /// `Installed` when the alternate is running, `Exhausted` on every other
+    /// way out. Neither returns the budget, and that is the point: a recovery
+    /// that was attempted and failed has been attempted.
+    ///
+    /// The three answers are separated because the store fences settlement on
+    /// the reserving incarnation, and it does that so a stale holder cannot
+    /// write an outcome over the real owner's. Collapsing `NotOurs` into "no
+    /// row" is what would make that split-brain invisible.
+    pub(crate) async fn settle(
+        &self,
+        outcome: RecoveryOutcome,
+        now_ms: i64,
+    ) -> Result<RecoverySettlement, plurx_core::error::StoreError> {
+        if self
+            .store
+            .settle_producer_recovery(
+                self.user_id,
+                &self.playback_id,
+                &self.recovery_epoch,
+                &self.failed_incarnation_id,
+                outcome.state(),
+                now_ms,
+            )
+            .await?
+            .is_some()
+        {
+            return Ok(RecoverySettlement::Settled);
+        }
+        match self
+            .store
+            .producer_recovery_for_epoch(self.user_id, &self.playback_id, &self.recovery_epoch)
+            .await?
+        {
+            None => Ok(RecoverySettlement::Absent),
+            Some(existing) if existing.failed_incarnation_id != self.failed_incarnation_id => {
+                Ok(RecoverySettlement::NotOurs)
+            }
+            // Ours, and the store still refused: it is already in the other
+            // terminal state. That is a double settle with two different
+            // answers, which is a caller bug rather than a race, and it is not
+            // this type's to paper over — nor to disguise as a lost fence.
+            Some(_) => Ok(RecoverySettlement::Conflicting),
+        }
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl RecoveryReservation {
+    /// The operator-facing name of this answer.
+    ///
+    /// A log line about a refused recovery has to say which refusal it was —
+    /// that is the whole reason this is not a `bool` — but it must not carry
+    /// the row, which is a durable record of somebody's decision and not a
+    /// field in somebody else's message.
+    pub(crate) fn label(&self) -> &'static str {
+        match self {
+            Self::Held(_) => "held",
+            Self::Spent(_) => "spent",
+            Self::Mismatched(_) => "mismatched",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl RecoverySettlement {
+    /// The operator-facing name of this answer, for the same reason.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Settled => "settled",
+            Self::NotOurs => "not_ours",
+            Self::Absent => "absent",
+            Self::Conflicting => "conflicting",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -5446,6 +5885,14 @@ pub struct RollingProducerOperationalSnapshot {
     pub last_probe_outcome: &'static str,
     pub producer_ended_with_proposal: bool,
     pub proposal: Option<RollingProducerProposalSnapshot>,
+    /// The latched decode fault's kind, if this attempt has one. A bounded
+    /// vocabulary, never a message: §9 keeps raw diagnostics out of the
+    /// operational snapshot.
+    pub decode_fault: Option<&'static str>,
+    /// Structural primary records observed on the selected video stream.
+    pub decode_error_records: Option<u64>,
+    /// What the settled observation concluded, once it has settled.
+    pub diagnostics_qualification: Option<&'static str>,
     pub completion: &'static str,
     pub completion_attempt: Option<u64>,
     pub completion_final_segment: Option<i64>,
@@ -6317,6 +6764,16 @@ struct RollingProducerIngressState {
     progress_watermark_out_time_ms: Option<i64>,
     progress: Option<ProgressCoverageBatch>,
     exit: Option<SequencedProducerBarrier>,
+    /// The attempt's decode fault, if one latched. Its own slot, outside the
+    /// progress batch: a batch collapses to one observation at drain, so
+    /// anything riding on an intermediate sample is dropped silently — and a
+    /// progress publication for an older attempt is discarded before it
+    /// reaches any slot at all.
+    health: Option<SequencedProducerBarrier>,
+    /// The attempt's settled receipt. Separate from `exit` because §7.4 keeps
+    /// diagnostic completion separate from process exit, and separate from
+    /// `health` because an attempt can have both.
+    diagnostics: Option<SequencedProducerBarrier>,
     flow: std::collections::VecDeque<SequencedProducerBarrier>,
     flow_reservations: usize,
     /// Applied flow barriers moved into queued command envelopes still occupy
@@ -6335,6 +6792,8 @@ impl Default for RollingProducerIngressState {
             progress_watermark_out_time_ms: None,
             progress: None,
             exit: None,
+            health: None,
+            diagnostics: None,
             flow: std::collections::VecDeque::new(),
             flow_reservations: 0,
             sealed_flow_barriers: 0,
@@ -6351,11 +6810,49 @@ struct SequencedProducerEvent {
     event: RollingProducerEvent,
 }
 
+/// One attempt's decode fault, as §7.4 specifies it.
+///
+/// Delivered the moment the reader latches, not at exit: the whole point is
+/// that it arrives *before* the success facts that would otherwise be the last
+/// word about this attempt.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ProducerDecodeFault {
+    producer_attempt: u64,
+    plan_digest: String,
+    fault: crate::decoder_health::DecodeFaultKind,
+    input_video_stream: u32,
+    primary_error_records: u64,
+    diagnostic_contract: Option<String>,
+    /// Whether §7.3's gate permits this fault to drive an automatic action,
+    /// answered about the window that latched it.
+    ///
+    /// Travels with the fault rather than being asked later, because "later"
+    /// is after the deadline that would otherwise classify this attempt: the
+    /// receipt settles when the child's stderr reaches EOF, and a producer
+    /// that decodes nothing writes no segments, so a timing verdict is already
+    /// committed by then. The barrier exists to arrive first; the answer it
+    /// carries has to arrive with it.
+    action_qualified: bool,
+}
+
+/// One attempt's settled observation.
+///
+/// §7.4 keeps diagnostic completion separate from process exit, because the
+/// two are separate facts: a process can exit long before its stderr reaches
+/// EOF, and "the process finished" is not "we saw everything it said".
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ProducerDiagnosticsComplete {
+    producer_attempt: u64,
+    receipt: crate::decoder_health::ProducerHealthReceipt,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum RollingProducerEvent {
     Progress(RollingProducerProgressObservation),
     Exit(RollingProducerExitObservation),
     FlowApplied(RollingProducerFlowObservation),
+    DecodeFault(ProducerDecodeFault),
+    DiagnosticsComplete(ProducerDiagnosticsComplete),
 }
 
 impl RollingProducerEvent {
@@ -6364,6 +6861,43 @@ impl RollingProducerEvent {
             Self::Progress(observation) => observation.producer_attempt,
             Self::Exit(observation) => observation.producer_attempt,
             Self::FlowApplied(observation) => observation.producer_attempt,
+            Self::DecodeFault(observation) => observation.producer_attempt,
+            Self::DiagnosticsComplete(observation) => observation.producer_attempt,
+        }
+    }
+}
+
+/// Which sticky slot an ingress publication belongs in.
+///
+/// Progress is the only one that coalesces; the rest are barriers, and each
+/// barrier kind has its own slot so that one cannot overwrite another. A
+/// health fault sharing the exit slot would be lost the moment the process
+/// exited, which is the ordering §7.4 exists to fix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProducerIngressSlot {
+    Progress,
+    Exit,
+    Health,
+    Diagnostics,
+}
+
+impl ProducerIngressSlot {
+    fn is_progress(self) -> bool {
+        matches!(self, Self::Progress)
+    }
+
+    /// Which published ingress counter this publication belongs to.
+    ///
+    /// Health and diagnostics share one bucket and neither borrows the exit
+    /// label: folding them into `event="exit"` would make that series read
+    /// three times the number of exits, and a rejected fault would be
+    /// indistinguishable from a rejected stale exit — which is exactly the
+    /// signal an operator would go looking for.
+    fn metric_index(self) -> usize {
+        match self {
+            Self::Progress => 0,
+            Self::Exit => 1,
+            Self::Health | Self::Diagnostics => 2,
         }
     }
 }
@@ -6554,11 +7088,31 @@ impl RollingProducerIngress {
     }
 
     fn publish_progress(&self, observation: RollingProducerProgressObservation) {
-        self.publish(RollingProducerEvent::Progress(observation), false);
+        self.publish(
+            RollingProducerEvent::Progress(observation),
+            ProducerIngressSlot::Progress,
+        );
     }
 
     fn publish_exit(&self, observation: RollingProducerExitObservation) {
-        self.publish(RollingProducerEvent::Exit(observation), true);
+        self.publish(
+            RollingProducerEvent::Exit(observation),
+            ProducerIngressSlot::Exit,
+        );
+    }
+
+    fn publish_decode_fault(&self, observation: ProducerDecodeFault) {
+        self.publish(
+            RollingProducerEvent::DecodeFault(observation),
+            ProducerIngressSlot::Health,
+        );
+    }
+
+    fn publish_diagnostics_complete(&self, observation: ProducerDiagnosticsComplete) {
+        self.publish(
+            RollingProducerEvent::DiagnosticsComplete(observation),
+            ProducerIngressSlot::Diagnostics,
+        );
     }
 
     fn set_progress_budget(&self, progress_budget: Duration) {
@@ -6680,19 +7234,24 @@ impl RollingProducerIngress {
         self.notify.notify_one();
     }
 
-    fn publish(&self, event: RollingProducerEvent, is_exit: bool) {
-        self.publish_with_timestamp(event, is_exit, None);
+    fn publish(&self, event: RollingProducerEvent, slot: ProducerIngressSlot) {
+        self.publish_with_timestamp(event, slot, None);
     }
 
     #[cfg(test)]
-    fn publish_at(&self, event: RollingProducerEvent, is_exit: bool, published_at: Instant) {
-        self.publish_with_timestamp(event, is_exit, Some(published_at));
+    fn publish_at(
+        &self,
+        event: RollingProducerEvent,
+        slot: ProducerIngressSlot,
+        published_at: Instant,
+    ) {
+        self.publish_with_timestamp(event, slot, Some(published_at));
     }
 
     fn publish_with_timestamp(
         &self,
         mut event: RollingProducerEvent,
-        is_exit: bool,
+        slot: ProducerIngressSlot,
         published_at: Option<Instant>,
     ) {
         let mut state = self
@@ -6703,7 +7262,7 @@ impl RollingProducerIngress {
         // fence is held. A producer task cannot obtain a pre-deadline stamp,
         // lose the CPU, and insert the event after that deadline.
         let published_at = published_at.unwrap_or_else(rolling_now);
-        let metric_index = usize::from(is_exit);
+        let metric_index = slot.metric_index();
         ROLLING_PRODUCER_EVENT_INGRESS[metric_index].fetch_add(1, Ordering::Relaxed);
         if let RollingProducerEvent::Progress(observation) = &mut event {
             let attempt = observation.producer_attempt;
@@ -6730,8 +7289,18 @@ impl RollingProducerIngress {
             }
         }
         let incoming_attempt = event.producer_attempt();
-        if is_exit {
-            if let Some(pending) = state.exit.as_ref() {
+        // Every barrier slot is first-write-wins for one attempt and replaced
+        // only by a later attempt — an attempt has one terminal outcome, one
+        // latched fault, and one settled receipt. Written as one rule so a
+        // third barrier kind cannot quietly acquire a fourth policy.
+        if !slot.is_progress() {
+            let pending = match slot {
+                ProducerIngressSlot::Exit => state.exit.as_ref(),
+                ProducerIngressSlot::Health => state.health.as_ref(),
+                ProducerIngressSlot::Diagnostics => state.diagnostics.as_ref(),
+                ProducerIngressSlot::Progress => None,
+            };
+            if let Some(pending) = pending {
                 // An attempt has exactly one terminal outcome. Preserve the
                 // first observation even if a contradictory waiter or test
                 // source reports another; only a later attempt can replace
@@ -6777,16 +7346,25 @@ impl RollingProducerIngress {
         }
         state.next_sequence = state.next_sequence.saturating_add(1);
         let sequence = state.next_sequence;
-        if is_exit {
+        if !slot.is_progress() {
+            // The barrier absorbs the open progress batch, which is what makes
+            // it a barrier: everything published before it is applied before
+            // it, and nothing published after can reorder ahead of it.
             let preceding_progress = state.progress.take();
-            state.exit = Some(SequencedProducerBarrier {
+            let barrier = SequencedProducerBarrier {
                 preceding_progress,
                 event: SequencedProducerEvent {
                     sequence,
                     published_at,
                     event,
                 },
-            });
+            };
+            match slot {
+                ProducerIngressSlot::Exit => state.exit = Some(barrier),
+                ProducerIngressSlot::Health => state.health = Some(barrier),
+                ProducerIngressSlot::Diagnostics => state.diagnostics = Some(barrier),
+                ProducerIngressSlot::Progress => unreachable!("progress is not a barrier"),
+            }
         } else {
             let RollingProducerEvent::Progress(observation) = event else {
                 unreachable!("progress publication contains a progress event");
@@ -6805,9 +7383,15 @@ impl RollingProducerIngress {
     }
 
     fn take_blocks(state: &mut RollingProducerIngressState) -> Vec<RollingProducerIngressBlock> {
-        let mut pending = Vec::with_capacity(2 + state.flow.len());
+        let mut pending = Vec::with_capacity(4 + state.flow.len());
         if let Some(exit) = state.exit.take() {
             pending.push(RollingProducerIngressBlock::Barrier(exit));
+        }
+        if let Some(health) = state.health.take() {
+            pending.push(RollingProducerIngressBlock::Barrier(health));
+        }
+        if let Some(diagnostics) = state.diagnostics.take() {
+            pending.push(RollingProducerIngressBlock::Barrier(diagnostics));
         }
         pending.extend(
             state
@@ -7835,6 +8419,12 @@ struct RollingControlActor {
     last_decision: Option<Arc<ProducerDecision>>,
     decision_committed_at: Option<Instant>,
     executor_lost: bool,
+    /// This attempt's decode fault, latched. Kept on the actor rather than on
+    /// the prepublication control because a fault can arrive for a producer
+    /// that has already published, and §7.4's precedence rule is about the
+    /// attempt, not about the phase it was in.
+    producer_decode_fault: Option<ProducerDecodeFault>,
+    producer_diagnostics: Option<ProducerDiagnosticsComplete>,
     prepublication: Option<PrepublicationProducerControl>,
     response_publication_contract: Option<RollingResponsePublicationContract>,
     next_install_revision: u64,
@@ -7940,6 +8530,8 @@ impl RollingControlActor {
             last_decision: None,
             decision_committed_at: None,
             executor_lost: false,
+            producer_decode_fault: None,
+            producer_diagnostics: None,
             prepublication: prepublication_transcode.then(PrepublicationProducerControl::new),
             response_publication_contract: None,
             next_install_revision: 1,
@@ -8190,6 +8782,21 @@ impl RollingControlActor {
                 source: proposal.source,
                 severity: proposal.severity,
             }),
+            decode_fault: self.latched_decode_fault().map(|fault| fault.fault.name()),
+            // From the fault when there is one, and otherwise from the settled
+            // receipt: four records is below the fault threshold and still not
+            // zero, and reporting `null` there is indistinguishable from a
+            // stream that never failed to decode at all.
+            decode_error_records: self
+                .latched_decode_fault()
+                .map(|fault| fault.primary_error_records)
+                .or_else(|| {
+                    self.settled_diagnostics()
+                        .map(|settled| settled.receipt.video_decode_error_records)
+                }),
+            diagnostics_qualification: self
+                .settled_diagnostics()
+                .map(|settled| settled.receipt.qualification.name()),
             completion: completion.status(),
             completion_attempt,
             completion_final_segment,
@@ -8644,6 +9251,14 @@ impl RollingControlActor {
         })
     }
 
+    /// Forget the previous attempt's health. A successor gets fresh counters
+    /// (§7.3), and a predecessor's fault is not evidence about work it never
+    /// touched.
+    fn clear_producer_health(&mut self) {
+        self.producer_decode_fault = None;
+        self.producer_diagnostics = None;
+    }
+
     fn begin_producer_attempt_with_budget_at(
         &mut self,
         now: Instant,
@@ -8677,6 +9292,7 @@ impl RollingControlActor {
             desired: ProducerPhysicalFlowState::Running,
         };
         self.producer_flow_signal_outstanding = false;
+        self.clear_producer_health();
         self.pending_producer_action = None;
         self.producer_signal_authorized = true;
         self.arm_producer_deadline(
@@ -8828,6 +9444,19 @@ impl RollingControlActor {
         {
             return false;
         }
+        // §7.4: classifying exit must first observe every preceding health
+        // barrier. Read before `prepublication` is borrowed mutably, and
+        // through the one accessor, so this site cannot drift from the others
+        // — `failed_attempt` is the current attempt here, because the guard
+        // above returns early otherwise.
+        let latched_fault = self.latched_decode_fault().map(|fault| {
+            (
+                fault.fault,
+                fault.primary_error_records,
+                fault.plan_digest.clone(),
+                fault.action_qualified,
+            )
+        });
         let Some(control) = self.prepublication.as_mut() else {
             return false;
         };
@@ -8842,7 +9471,76 @@ impl RollingControlActor {
         let decision_sequence = control.next_decision_sequence;
         control.next_decision_sequence = control.next_decision_sequence.saturating_add(1);
 
+        // §7.4: classifying an exit must observe every preceding health
+        // barrier, whatever the decision turns out to be. The record is
+        // unconditional; acting on it is not, and that happens on the failing
+        // branch below.
+        if let Some((fault, records, plan_digest, action_qualified)) = latched_fault.as_ref() {
+            tracing::warn!(
+                producer_attempt = failed_attempt,
+                decision_sequence,
+                fault = fault.name(),
+                primary_error_records = records,
+                plan = %plan_digest,
+                observed_reason = ?reason,
+                action_qualified,
+                "producer decision observes a latched decode fault"
+            );
+        }
+
         let producer_media_published = control.producer_media_published;
+        // Which successor a qualified decode fault asks for, when the retry
+        // this session is holding is available at all.
+        //
+        // The colour-safe recipe answers "this encode route stopped"; the
+        // alternate answers "this source did not decode". They are different
+        // questions and a session can be handed either, so the choice is the
+        // decision's rather than the policy's — and a decode fault picks the
+        // alternate, because retrying the identical decode is the loop.
+        //
+        // It rides on the same eligibility test as the ordinary retry rather
+        // than getting its own, and that ordering is load-bearing:
+        // `retry_eligibility.allows` is asked about the *incoming* timing
+        // verdict, before any rewrite, so a copy path holding
+        // `UnsupportedOnly` never installs an alternate for a timing reason it
+        // would not have retried anyway. The alternate widens what a retry
+        // *does*, never when one is permitted.
+        let decode_alternate = policy.decode_alternate.as_ref().and_then(|alternate| {
+            // Named rather than chained, because "the alternate was not
+            // installed" is four different findings and an operator watching
+            // the recovery this effort exists for needs to know which. The
+            // sibling failing branch logs its own decision; this is the other
+            // half of that record.
+            let withheld = if producer_media_published {
+                Some("media_published")
+            } else if !reason.yields_to_decode_evidence() {
+                Some("reason_is_not_decode_evidence")
+            } else if !latched_fault
+                .as_ref()
+                .is_some_and(|(_, _, _, action_qualified)| *action_qualified)
+            {
+                Some("no_qualified_fault")
+            } else if alternate.presentation_contract_fingerprint
+                != policy.presentation_contract_fingerprint
+            {
+                Some("presentation_contract")
+            } else {
+                None
+            };
+            match withheld {
+                Some(withheld) => {
+                    tracing::debug!(
+                        producer_attempt = failed_attempt,
+                        decision_sequence,
+                        observed_reason = ?reason,
+                        withheld,
+                        "a software-decode alternate was held back"
+                    );
+                    None
+                }
+                None => Some(alternate.clone()),
+            }
+        });
         let retry_recipe = match &control.retry_state {
             PrepublicationRetryState::Available(recipe)
                 if !producer_media_published
@@ -8851,7 +9549,24 @@ impl RollingControlActor {
                     && recipe.presentation_contract_fingerprint
                         == policy.presentation_contract_fingerprint =>
             {
-                Some(recipe.clone())
+                // The alternate wins where both are available, and the reason
+                // moves with it so the operator can tell the two apart. It is
+                // impermanent by construction: a permanent reason on a retry
+                // reaches the client as a terminal answer while this very
+                // successor is coming up.
+                if let Some(alternate) = decode_alternate {
+                    tracing::warn!(
+                        producer_attempt = failed_attempt,
+                        decision_sequence,
+                        replaced_reason = ?reason,
+                        recipe = %alternate.identity,
+                        "installing the software-decode alternate for a qualified decode fault"
+                    );
+                    reason = ProducerDecisionReason::SourceDecodeRetry;
+                    Some(alternate)
+                } else {
+                    Some(recipe.clone())
+                }
             }
             PrepublicationRetryState::Available(recipe)
                 if recipe.presentation_contract_fingerprint
@@ -8876,6 +9591,55 @@ impl RollingControlActor {
         } else {
             if matches!(&control.retry_state, PrepublicationRetryState::Available(_)) {
                 control.retry_state = PrepublicationRetryState::Consumed;
+            }
+            // A qualified decode fault names the verdict the client is about
+            // to be given — and only that one.
+            //
+            // This is the seam the effort is named after. A source the decoder
+            // could not decode answers a retry with the identical failure, and
+            // every reason outside `is_permanent` tells the client to retry,
+            // so the reopen loop is the default. The decoder's own diagnostics
+            // are the only evidence that separates "this attempt was unlucky"
+            // from "this source will never decode".
+            //
+            // Three things bound it, and each was a defect in the first draft:
+            //
+            // * **Only on the failing branch.** The reason on a `Retry` is not
+            //   private to the server: it reaches `DeliveryView`, and
+            //   `resolve_action` turns any permanent reason into
+            //   `ControlAction::Terminal`. Rewriting before the retry was
+            //   chosen told the client the source was dead while the server was
+            //   still bringing up its software fallback — which, on a source
+            //   the hardware decoder alone refused, would very likely have
+            //   played. `last_decision` is never cleared, so that was not a
+            //   race window but the rest of the session.
+            // * **Only when nothing was published.** `PartialSuccessExit` is
+            //   reached only after a completion probe found a published
+            //   frontier that fell short. A long title with one corrupt region
+            //   latches a fault, publishes most of itself and exits zero;
+            //   calling that permanent tears down a player that is still
+            //   holding good buffer.
+            // * **Only over a verdict that says the producer stopped without
+            //   producing.** Named rather than `!is_permanent()`, because that
+            //   test also swept up `ExecutorLost` and the flow and install
+            //   deadlines — facts about this server, not about the source —
+            //   and relabelled them as a permanent property of the file.
+            let qualified_fault = latched_fault
+                .as_ref()
+                .filter(|(_, _, _, action_qualified)| *action_qualified);
+            if !producer_media_published && reason.yields_to_decode_evidence() {
+                if let Some((fault, records, plan_digest, _)) = qualified_fault {
+                    tracing::warn!(
+                        producer_attempt = failed_attempt,
+                        decision_sequence,
+                        fault = fault.name(),
+                        primary_error_records = records,
+                        plan = %plan_digest,
+                        replaced_reason = ?reason,
+                        "a qualified decode fault names this producer decision"
+                    );
+                    reason = ProducerDecisionReason::SourceDecodeFailed;
+                }
             }
             ProducerDecision::Fail {
                 decision_sequence,
@@ -9556,7 +10320,83 @@ impl RollingControlActor {
                     },
                 );
             }
+            RollingProducerEvent::DecodeFault(observation) => {
+                let accepted = self.observe_producer_decode_fault(observation);
+                ROLLING_PRODUCER_EVENT_OUTCOMES[4 + usize::from(!accepted)]
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            RollingProducerEvent::DiagnosticsComplete(observation) => {
+                let accepted = self.observe_producer_diagnostics_complete(observation);
+                ROLLING_PRODUCER_EVENT_OUTCOMES[4 + usize::from(!accepted)]
+                    .fetch_add(1, Ordering::Relaxed);
+            }
         }
+    }
+
+    /// Latch this attempt's decode fault.
+    ///
+    /// Sticky and first-wins: §7.4 requires a fault to survive every later
+    /// success fact for the same attempt, and re-latching would let a second
+    /// observation relabel a decision that has already been made from the
+    /// first. A fault for an attempt that is no longer current is dropped —
+    /// its successor gets fresh counters, and a predecessor's fault following
+    /// it would condemn work it never touched.
+    fn observe_producer_decode_fault(&mut self, observation: ProducerDecodeFault) -> bool {
+        if self.retired || observation.producer_attempt != self.delivery.producer_attempt {
+            return false;
+        }
+        // Attempt-scoped, through the accessor. A bare `is_some()` here is
+        // the same words and a different rule: a stale fault from a
+        // predecessor would refuse the successor's *first* fault, so the
+        // recovery attempt — the one this whole feature exists to inform —
+        // would be the one running blind, silently.
+        if self.latched_decode_fault().is_some() {
+            return false;
+        }
+        tracing::warn!(
+            producer_attempt = observation.producer_attempt,
+            fault = observation.fault.name(),
+            input_video_stream = observation.input_video_stream,
+            primary_error_records = observation.primary_error_records,
+            contract = observation.diagnostic_contract.as_deref().unwrap_or("none"),
+            "producer decode fault observed"
+        );
+        self.producer_decode_fault = Some(observation);
+        true
+    }
+
+    /// Record this attempt's settled observation.
+    ///
+    /// Last-wins rather than first-wins, and deliberately so: unlike a fault,
+    /// which is a claim about something that happened, a receipt is the
+    /// summary of an attempt that has finished, and the only way a second one
+    /// arrives for the same attempt is a caller correcting the first.
+    fn observe_producer_diagnostics_complete(
+        &mut self,
+        observation: ProducerDiagnosticsComplete,
+    ) -> bool {
+        if self.retired || observation.producer_attempt != self.delivery.producer_attempt {
+            return false;
+        }
+        self.producer_diagnostics = Some(observation);
+        true
+    }
+
+    /// This attempt's latched fault, if it has one.
+    ///
+    /// The accessor every decision point goes through, so that "observe the
+    /// health barrier first" is one call rather than a field read repeated at
+    /// several sites with several chances to compare the wrong attempt.
+    fn latched_decode_fault(&self) -> Option<&ProducerDecodeFault> {
+        self.producer_decode_fault
+            .as_ref()
+            .filter(|fault| fault.producer_attempt == self.delivery.producer_attempt)
+    }
+
+    fn settled_diagnostics(&self) -> Option<&ProducerDiagnosticsComplete> {
+        self.producer_diagnostics
+            .as_ref()
+            .filter(|settled| settled.producer_attempt == self.delivery.producer_attempt)
     }
 
     fn handle_producer_block_at(&mut self, now: Instant, block: RollingProducerIngressBlock) {
@@ -9645,6 +10485,12 @@ impl RollingControlActor {
     fn handle_producer_event(&mut self, event: RollingProducerEvent) {
         let now = rolling_now();
         let (metric_index, accepted) = match event {
+            RollingProducerEvent::DecodeFault(observation) => {
+                (4, self.observe_producer_decode_fault(observation))
+            }
+            RollingProducerEvent::DiagnosticsComplete(observation) => {
+                (4, self.observe_producer_diagnostics_complete(observation))
+            }
             RollingProducerEvent::Progress(observation) => {
                 (0, self.observe_producer_progress_at(now, observation))
             }
@@ -11404,6 +12250,77 @@ impl RollingControlHandle {
             });
     }
 
+    /// Report that this attempt's diagnostic reader latched a decode fault.
+    ///
+    /// Published the moment it latches, not at exit. That is the whole
+    /// ordering §7.4 asks for: the fault reaches the actor before the success
+    /// facts that would otherwise be the last word about the attempt, and it
+    /// travels in its own sticky slot so the progress batch — which collapses
+    /// to a single observation at drain — cannot swallow it.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn observe_producer_decode_fault(
+        &self,
+        producer_attempt: u64,
+        plan_digest: String,
+        fault: crate::decoder_health::DecodeFaultKind,
+        input_video_stream: u32,
+        primary_error_records: u64,
+        diagnostic_contract: Option<String>,
+        action_qualified: bool,
+    ) {
+        let _transition = self
+            .producer_transition
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.retired.load(Ordering::Acquire)
+            || self.sender.is_closed()
+            || self.current_producer_attempt() != producer_attempt
+        {
+            ROLLING_PRODUCER_EVENT_INGRESS[1].fetch_add(1, Ordering::Relaxed);
+            ROLLING_PRODUCER_EVENT_COALESCED[1].fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        self.producer_events
+            .publish_decode_fault(ProducerDecodeFault {
+                producer_attempt,
+                plan_digest,
+                fault,
+                input_video_stream,
+                primary_error_records,
+                diagnostic_contract,
+                action_qualified,
+            });
+    }
+
+    /// Report this attempt's settled observation.
+    ///
+    /// Separate from exit because §7.4 keeps the two apart: a process can exit
+    /// long before its stderr reaches EOF, and "the process finished" is not
+    /// "we saw everything it said".
+    pub(crate) fn observe_producer_diagnostics_complete(
+        &self,
+        producer_attempt: u64,
+        receipt: crate::decoder_health::ProducerHealthReceipt,
+    ) {
+        let _transition = self
+            .producer_transition
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.retired.load(Ordering::Acquire)
+            || self.sender.is_closed()
+            || self.current_producer_attempt() != producer_attempt
+        {
+            ROLLING_PRODUCER_EVENT_INGRESS[1].fetch_add(1, Ordering::Relaxed);
+            ROLLING_PRODUCER_EVENT_COALESCED[1].fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        self.producer_events
+            .publish_diagnostics_complete(ProducerDiagnosticsComplete {
+                producer_attempt,
+                receipt,
+            });
+    }
+
     /// Publish one exact-attempt terminal process fact without making a
     /// recovery decision. The actor rejects stale attempts and preserves the
     /// first terminal observation for the current one.
@@ -12562,10 +13479,12 @@ static ROLLING_LEASE_EXPIRATIONS: AtomicU64 = AtomicU64::new(0);
 static ROLLING_LEASE_RETIREMENTS: AtomicU64 = AtomicU64::new(0);
 static ROLLING_PRODUCER_HOLDS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 static ROLLING_PRODUCER_RESUMES: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
-static ROLLING_PRODUCER_EVENT_INGRESS: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
-static ROLLING_PRODUCER_EVENT_COALESCED: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
-/// Progress accepted/rejected, then exit accepted/rejected.
-static ROLLING_PRODUCER_EVENT_OUTCOMES: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+static ROLLING_PRODUCER_EVENT_INGRESS: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+static ROLLING_PRODUCER_EVENT_COALESCED: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+/// Progress accepted/rejected, exit accepted/rejected, then health
+/// accepted/rejected — where health covers both the decode fault and the
+/// settled receipt.
+static ROLLING_PRODUCER_EVENT_OUTCOMES: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
 static ROLLING_PRODUCER_FLOW_DEFERRALS: AtomicU64 = AtomicU64::new(0);
 static ROLLING_PRODUCER_DEADLINE_OBSERVATIONS: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
 static ROLLING_PRODUCER_EXIT_CLASSIFICATIONS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
@@ -13257,7 +14176,7 @@ pub(crate) fn prometheus() -> String {
          # HELP plurx_playback_rolling_producer_event_coalesced_total Rolling producer observations folded or deduplicated into bounded same-attempt ingress evidence, or superseded by a newer attempt before actor drain.\n\
          # TYPE plurx_playback_rolling_producer_event_coalesced_total counter\n",
     );
-    for (index, event) in ["progress", "exit"].iter().enumerate() {
+    for (index, event) in ["progress", "exit", "health"].iter().enumerate() {
         output.push_str(&format!(
             "plurx_playback_rolling_producer_event_ingress_total{{event=\"{event}\"}} {}\n\
              plurx_playback_rolling_producer_event_coalesced_total{{event=\"{event}\"}} {}\n",
@@ -13269,7 +14188,7 @@ pub(crate) fn prometheus() -> String {
         "# HELP plurx_playback_rolling_producer_event_outcomes_total Rolling producer observations accepted or rejected by the exact-attempt actor fence.\n\
          # TYPE plurx_playback_rolling_producer_event_outcomes_total counter\n",
     );
-    for (event_index, event) in ["progress", "exit"].iter().enumerate() {
+    for (event_index, event) in ["progress", "exit", "health"].iter().enumerate() {
         for (outcome_index, outcome) in ["accepted", "rejected"].iter().enumerate() {
             output.push_str(&format!(
                 "plurx_playback_rolling_producer_event_outcomes_total{{event=\"{event}\",outcome=\"{outcome}\"}} {}\n",
@@ -14399,20 +15318,34 @@ mod tests {
     #[test]
     fn only_a_verdict_no_retry_can_change_is_permanent() {
         // The split that decides whether a client should ever be told to give
-        // up. Sixteen of the nineteen are timing, process, executor or plan
-        // facts: the same file on the same pipeline may work on the next
-        // attempt. Three cannot be retried into working — two verdicts about
-        // the source, and one about this daemon process. `EngineChanged` is
-        // the third because the fragment-index engine baseline is a
-        // per-process `OnceCell`: once it has moved, every planned rendition
-        // fails identically until the node restarts, and a reopen re-plans
-        // straight back into it. Telling that client to retry is telling it to
-        // poll until an operator intervenes.
+        // up. Seventeen of the twenty-one are timing, process, executor or
+        // plan facts: the same file on the same pipeline may work on the next
+        // attempt. Four cannot be retried into working — two verdicts about
+        // the source, one about this daemon process, and one about the decode.
+        //
+        // `EngineChanged` is the process one, because the fragment-index
+        // engine baseline is a per-process `OnceCell`: once it has moved,
+        // every planned rendition fails identically until the node restarts,
+        // and a reopen re-plans straight back into it. Telling that client to
+        // retry is telling it to poll until an operator intervenes.
+        //
+        // `SourceDecodeRetry` sits on the impermanent side on purpose, and it
+        // is the pair that is easiest to get backwards: it and
+        // `SourceDecodeFailed` describe the same finding, and what separates
+        // them is whether there is an alternate to install. One is a retry the
+        // client should wait through; the other is the answer.
+        //
+        // `SourceDecodeFailed` is the one that mattered most to get on this
+        // side of the line: it is produced when the decoder itself said the
+        // source did not decode, and the process very often exits zero.
+        // Classified as timing, a client reopens and reproduces it — which is
+        // the loop this whole effort exists to end.
         for reason in ProducerDecisionReason::ALL {
             let expected = matches!(
                 reason,
                 ProducerDecisionReason::Unsupported
                     | ProducerDecisionReason::InvalidConfiguration
+                    | ProducerDecisionReason::SourceDecodeFailed
                     | ProducerDecisionReason::EngineChanged
             );
             assert_eq!(
@@ -14427,7 +15360,7 @@ mod tests {
                 .into_iter()
                 .filter(|reason| reason.is_permanent())
                 .count(),
-            3,
+            4,
         );
         // A permanent reason must carry a sentence a viewer could be shown,
         // not the wire name falling through `terminal_message`'s default.
@@ -14455,7 +15388,42 @@ mod tests {
                 Some(reason),
             );
         }
-        assert_eq!(ProducerDecisionReason::ALL.len(), 19);
+        assert_eq!(ProducerDecisionReason::ALL.len(), 21);
+        // A variant present in the enum and absent from `ALL` is caught by
+        // nothing else. `status` is exhaustive, so the compiler forces a
+        // spelling to be written; `ALL` is a hand-maintained array it cannot
+        // check, and both this test and the permanence test iterate `ALL` — so
+        // a forgotten variant is invisible to both while being unnameable by
+        // `from_status`, which is the hazard the paragraph above describes.
+        //
+        // The match is exhaustive over the variants, so adding one fails to
+        // compile here, and the arm it forces you to write is the reminder to
+        // extend `ALL` with it.
+        for reason in ProducerDecisionReason::ALL {
+            match reason {
+                ProducerDecisionReason::StartupDeadline
+                | ProducerDecisionReason::ProgressDeadline
+                | ProducerDecisionReason::ExitClassificationDeadline
+                | ProducerDecisionReason::ProcessExit
+                | ProducerDecisionReason::PartialSuccessExit
+                | ProducerDecisionReason::Unsupported
+                | ProducerDecisionReason::InvalidConfiguration
+                | ProducerDecisionReason::ReaderFailed
+                | ProducerDecisionReason::FlowStopFailed
+                | ProducerDecisionReason::FlowResumeFailed
+                | ProducerDecisionReason::FlowStopDeadline
+                | ProducerDecisionReason::FlowResumeDeadline
+                | ProducerDecisionReason::InstallDeadline
+                | ProducerDecisionReason::ExecutorLost
+                | ProducerDecisionReason::SourceDecodeRetry
+                | ProducerDecisionReason::SourceDecodeFailed
+                | ProducerDecisionReason::SourceChanged
+                | ProducerDecisionReason::EngineChanged
+                | ProducerDecisionReason::ProducerLaunchFailed
+                | ProducerDecisionReason::MediaLandingFailed
+                | ProducerDecisionReason::ProducerWriteFailed => {}
+            }
+        }
         assert_eq!(ProducerDecisionReason::from_status("invented"), None);
         // The names are wire-safe: lowercase, underscored, no spaces.
         for reason in ProducerDecisionReason::ALL {
@@ -18951,7 +19919,7 @@ mod tests {
                     900,
                     started + Duration::from_secs(seconds),
                 )),
-                false,
+                ProducerIngressSlot::Progress,
                 started + Duration::from_secs(seconds),
             );
         }
@@ -18990,7 +19958,7 @@ mod tests {
                     900,
                     started + Duration::from_secs(seconds),
                 )),
-                false,
+                ProducerIngressSlot::Progress,
                 started + Duration::from_secs(seconds),
             );
         }
@@ -19100,7 +20068,7 @@ mod tests {
                 900,
                 started + Duration::from_secs(60),
             )),
-            false,
+            ProducerIngressSlot::Progress,
             started + Duration::from_secs(5),
         );
         actor.handle_producer_blocks_at(started + Duration::from_secs(6), ingress.drain_blocks());
@@ -19122,7 +20090,7 @@ mod tests {
                 1_000,
                 started + Duration::from_secs(7),
             )),
-            false,
+            ProducerIngressSlot::Progress,
             started + Duration::from_secs(16),
         );
         actor.handle_producer_blocks_at(started + Duration::from_secs(16), ingress.drain_blocks());
@@ -19147,7 +20115,7 @@ mod tests {
         let ingress = RollingProducerIngress::new();
         ingress.publish_at(
             RollingProducerEvent::Progress(producer_progress(1, 100, 1_000, 900, started)),
-            false,
+            ProducerIngressSlot::Progress,
             started + PRODUCER_STARTUP_BUDGET,
         );
 
@@ -19182,7 +20150,7 @@ mod tests {
                     900,
                     started + Duration::from_secs(seconds),
                 )),
-                false,
+                ProducerIngressSlot::Progress,
                 started + Duration::from_secs(seconds),
             );
         }
@@ -19212,7 +20180,7 @@ mod tests {
                     900,
                     started + Duration::from_secs(seconds),
                 )),
-                false,
+                ProducerIngressSlot::Progress,
                 started + Duration::from_secs(seconds),
             );
         }
@@ -19239,7 +20207,7 @@ mod tests {
         let ingress = RollingProducerIngress::new();
         ingress.publish_at(
             RollingProducerEvent::Progress(producer_progress(1, 100, 1_000, 900, started)),
-            false,
+            ProducerIngressSlot::Progress,
             started + Duration::from_secs(1),
         );
         ingress.publish_at(
@@ -19250,7 +20218,7 @@ mod tests {
                 None,
                 started + Duration::from_secs(2),
             )),
-            true,
+            ProducerIngressSlot::Exit,
             started + Duration::from_secs(2),
         );
         ingress.publish_at(
@@ -19261,7 +20229,7 @@ mod tests {
                 1_000,
                 started + Duration::from_secs(3),
             )),
-            false,
+            ProducerIngressSlot::Progress,
             started + Duration::from_secs(3),
         );
         actor.handle_producer_blocks_at(started + Duration::from_secs(3), ingress.drain_blocks());
@@ -19289,7 +20257,7 @@ mod tests {
         let ingress = RollingProducerIngress::new();
         ingress.publish_at(
             RollingProducerEvent::Exit(producer_exit(1, false, Some(9), None, deadline)),
-            true,
+            ProducerIngressSlot::Exit,
             deadline,
         );
         actor.handle_producer_blocks_at(deadline + Duration::from_secs(1), ingress.drain_blocks());
@@ -19315,7 +20283,7 @@ mod tests {
         let ingress = RollingProducerIngress::new();
         ingress.publish_at(
             RollingProducerEvent::Progress(producer_progress(1, 100, 900, 800, started)),
-            false,
+            ProducerIngressSlot::Progress,
             started + Duration::from_secs(5),
         );
         actor.handle_producer_blocks_at(started + Duration::from_secs(6), ingress.drain_blocks());
@@ -19323,7 +20291,7 @@ mod tests {
 
         ingress.publish_at(
             RollingProducerEvent::Progress(producer_progress(1, 100, 1_100, 1_000, started)),
-            false,
+            ProducerIngressSlot::Progress,
             started + Duration::from_secs(8),
         );
         actor.handle_producer_blocks_at(started + Duration::from_secs(9), ingress.drain_blocks());
@@ -19345,7 +20313,11 @@ mod tests {
             Ok(1)
         );
         let ingress = RollingProducerIngress::new();
-        ingress.publish_at(RollingProducerEvent::Exit(exit.clone()), true, exit_at);
+        ingress.publish_at(
+            RollingProducerEvent::Exit(exit.clone()),
+            ProducerIngressSlot::Exit,
+            exit_at,
+        );
         before_classification.handle_producer_blocks_at(
             classification_at - Duration::from_millis(1),
             ingress.drain_blocks(),
@@ -19382,7 +20354,11 @@ mod tests {
             Ok(1)
         );
         let ingress = RollingProducerIngress::new();
-        ingress.publish_at(RollingProducerEvent::Exit(exit), true, exit_at);
+        ingress.publish_at(
+            RollingProducerEvent::Exit(exit),
+            ProducerIngressSlot::Exit,
+            exit_at,
+        );
         after_classification.handle_producer_blocks_at(
             classification_at + Duration::from_secs(1),
             ingress.drain_blocks(),
@@ -19406,12 +20382,12 @@ mod tests {
 
         ingress.publish_at(
             RollingProducerEvent::Exit(first.clone()),
-            true,
+            ProducerIngressSlot::Exit,
             started + Duration::from_secs(1),
         );
         ingress.publish_at(
             RollingProducerEvent::Exit(first.clone()),
-            true,
+            ProducerIngressSlot::Exit,
             started + Duration::from_secs(2),
         );
 
@@ -19444,7 +20420,7 @@ mod tests {
                 None,
                 started + Duration::from_secs(31),
             )),
-            true,
+            ProducerIngressSlot::Exit,
             started + Duration::from_secs(31),
         );
         ingress.publish_at(
@@ -19455,7 +20431,7 @@ mod tests {
                 900,
                 started + Duration::from_secs(35),
             )),
-            false,
+            ProducerIngressSlot::Progress,
             started + Duration::from_secs(35),
         );
         actor.handle_producer_blocks_at(started + Duration::from_secs(43), ingress.drain_blocks());
@@ -19481,7 +20457,7 @@ mod tests {
         let ingress = Arc::clone(&actor.producer_events);
         ingress.publish_at(
             RollingProducerEvent::Progress(producer_progress(1, 100, 1_000, 900, started)),
-            false,
+            ProducerIngressSlot::Progress,
             started + Duration::from_secs(25),
         );
 
@@ -19498,7 +20474,7 @@ mod tests {
         cutoff_started.recv().expect("cutoff started");
         ingress.publish_at(
             RollingProducerEvent::Progress(producer_progress(1, 200, 1_100, 1_000, started)),
-            false,
+            ProducerIngressSlot::Progress,
             started + Duration::from_secs(34),
         );
         drop(transition_guard);
@@ -19862,7 +20838,7 @@ mod tests {
         let ingress = RollingProducerIngress::new();
         ingress.publish_at(
             RollingProducerEvent::Progress(producer_progress(1, 100, 1_000, 900, started)),
-            false,
+            ProducerIngressSlot::Progress,
             started + Duration::from_secs(50),
         );
         actor.handle_producer_blocks_at(started + Duration::from_secs(51), ingress.drain_blocks());
@@ -19886,7 +20862,7 @@ mod tests {
         let ingress = Arc::clone(&actor.producer_events);
         ingress.publish_at(
             RollingProducerEvent::Progress(producer_progress(1, 100, 900, 800, started)),
-            false,
+            ProducerIngressSlot::Progress,
             started + Duration::from_secs(20),
         );
         ingress.publish_flow_at(
@@ -19898,7 +20874,7 @@ mod tests {
         );
         ingress.publish_at(
             RollingProducerEvent::Progress(producer_progress(1, 200, 900, 800, started)),
-            false,
+            ProducerIngressSlot::Progress,
             started + Duration::from_secs(30),
         );
         ingress.publish_flow_at(
@@ -19910,7 +20886,7 @@ mod tests {
         );
         ingress.publish_at(
             RollingProducerEvent::Progress(producer_progress(1, 300, 900, 800, started)),
-            false,
+            ProducerIngressSlot::Progress,
             started + Duration::from_secs(50),
         );
 
@@ -20209,7 +21185,7 @@ mod tests {
         let ingress = RollingProducerIngress::new();
         ingress.publish_at(
             RollingProducerEvent::Progress(producer_progress(1, 100, 900, 800, started)),
-            false,
+            ProducerIngressSlot::Progress,
             started,
         );
         ingress.publish_at(
@@ -20220,7 +21196,7 @@ mod tests {
                 850,
                 started + Duration::from_secs(1),
             )),
-            false,
+            ProducerIngressSlot::Progress,
             started + Duration::from_secs(1),
         );
         let (reply, _response) = tokio::sync::oneshot::channel();
@@ -20248,7 +21224,7 @@ mod tests {
                 900,
                 started + Duration::from_secs(2),
             )),
-            false,
+            ProducerIngressSlot::Progress,
             started + Duration::from_secs(2),
         );
         let successor_blocks = ingress.drain_blocks();
@@ -20274,7 +21250,7 @@ mod tests {
         let ingress = Arc::clone(&actor.producer_events);
         ingress.publish_at(
             RollingProducerEvent::Progress(producer_progress(1, 100, 900, 800, started)),
-            false,
+            ProducerIngressSlot::Progress,
             started + Duration::from_secs(1),
         );
         let (reply, response) = tokio::sync::oneshot::channel();
@@ -20284,7 +21260,7 @@ mod tests {
         sender.try_send(envelope).expect("command queued");
         ingress.publish_at(
             RollingProducerEvent::Progress(producer_progress(1, 200, 900, 800, started)),
-            false,
+            ProducerIngressSlot::Progress,
             started + Duration::from_secs(2),
         );
 
@@ -20541,7 +21517,7 @@ mod tests {
         let ingress = RollingProducerIngress::new();
         ingress.publish_at(
             RollingProducerEvent::Progress(producer_progress(1, 100, 900, 800, started)),
-            false,
+            ProducerIngressSlot::Progress,
             started,
         );
         let initial_blocks = ingress.drain_blocks();
@@ -20564,7 +21540,7 @@ mod tests {
                 850,
                 started + Duration::from_secs(5),
             )),
-            false,
+            ProducerIngressSlot::Progress,
             started + Duration::from_secs(5),
         );
         ingress.publish_at(
@@ -20575,7 +21551,7 @@ mod tests {
                 900,
                 started + Duration::from_secs(14),
             )),
-            false,
+            ProducerIngressSlot::Progress,
             started + Duration::from_secs(14),
         );
         let repeated_blocks = ingress.drain_blocks();
@@ -20609,7 +21585,7 @@ mod tests {
         let ingress = RollingProducerIngress::new();
         ingress.publish_at(
             RollingProducerEvent::Progress(producer_progress(1, 50_000, 900, 800, started)),
-            false,
+            ProducerIngressSlot::Progress,
             started,
         );
         let predecessor_blocks = ingress.drain_blocks();
@@ -20633,7 +21609,7 @@ mod tests {
                 900,
                 started + Duration::from_secs(1),
             )),
-            false,
+            ProducerIngressSlot::Progress,
             started + Duration::from_secs(1),
         );
         ingress.publish_at(
@@ -20644,7 +21620,7 @@ mod tests {
                 1_900,
                 started + Duration::from_secs(2),
             )),
-            false,
+            ProducerIngressSlot::Progress,
             started + Duration::from_secs(2),
         );
         ingress.publish_at(
@@ -20655,7 +21631,7 @@ mod tests {
                 1_000,
                 started + Duration::from_secs(3),
             )),
-            false,
+            ProducerIngressSlot::Progress,
             started + Duration::from_secs(3),
         );
         let successor_blocks = ingress.drain_blocks();
@@ -22006,6 +22982,7 @@ mod tests {
             .await
             .expect("assign owner"));
         let activation = plurx_core::domain::MediaSessionActivation {
+            recovery_epoch: String::new(),
             expected_desired_revision: None,
             incarnation_id: incarnation.clone(),
             session_id: session.clone(),
@@ -23463,6 +24440,7 @@ mod tests {
 
         let winner = uuid::Uuid::new_v4().to_string();
         let advance = plurx_core::domain::MediaSessionActivation {
+            recovery_epoch: String::new(),
             expected_desired_revision: None,
             incarnation_id: winner.clone(),
             session_id: uuid::Uuid::new_v4().to_string(),
@@ -23773,10 +24751,11 @@ mod tests {
     }
 
     fn hardware_policy(contract: &str, fingerprint: &str) -> InitialProducerPolicy {
-        InitialProducerPolicy::hardware(
+        InitialProducerPolicy::hardware_with_startup(
             contract.to_owned(),
             PRODUCER_PROGRESS_BUDGET,
             retry_recipe(contract, fingerprint),
+            ProducerStartupKind::Hardware,
         )
     }
 
@@ -26063,6 +27042,7 @@ mod tests {
                     startup_kind: ProducerStartupKind::Hardware,
                     progress_budget: PRODUCER_PROGRESS_BUDGET,
                     retry_recipe: Some(invalid_recipe),
+                    decode_alternate: None,
                     presentation_contract_fingerprint: "presentation-retry".to_owned(),
                     exit_classifier: ProducerExitClassifier::Immediate,
                     retry_eligibility: ProducerRetryEligibility::AnyPrepublicationFailure,
@@ -26154,7 +27134,7 @@ mod tests {
                 1_000,
                 progressed_at,
             )),
-            false,
+            ProducerIngressSlot::Progress,
             progressed_at,
         );
         let preceding_producer = actor.producer_events.drain_blocks();
@@ -26234,7 +27214,7 @@ mod tests {
                     signal: None,
                     observed_at: exit_at,
                 }),
-                true,
+                ProducerIngressSlot::Exit,
                 exit_at,
             );
             actor.producer_events.publish_at(
@@ -26245,7 +27225,7 @@ mod tests {
                     signal: None,
                     observed_at: exit_at + Duration::from_nanos(1),
                 }),
-                true,
+                ProducerIngressSlot::Exit,
                 exit_at + Duration::from_nanos(1),
             );
             let preceding_producer = actor.producer_events.drain_blocks();
@@ -26956,5 +27936,1175 @@ mod tests {
         })
         .await
         .expect("actor must exit promptly after its final external sender is dropped");
+    }
+
+    // -----------------------------------------------------------------------
+    // M3b2 — the health barrier
+    // -----------------------------------------------------------------------
+
+    fn decode_fault(producer_attempt: u64, records: u64) -> ProducerDecodeFault {
+        decode_fault_qualified(producer_attempt, records, true)
+    }
+
+    /// The same fault with §7.3's gate answered either way.
+    ///
+    /// Separate from [`decode_fault`] rather than a parameter on it because
+    /// every pre-M5c test wants the qualified answer and reads better without
+    /// a bare `true` at each call site.
+    fn decode_fault_qualified(
+        producer_attempt: u64,
+        records: u64,
+        action_qualified: bool,
+    ) -> ProducerDecodeFault {
+        ProducerDecodeFault {
+            action_qualified,
+            producer_attempt,
+            plan_digest: "plan-digest".to_owned(),
+            fault: crate::decoder_health::DecodeFaultKind::VideoDecodeFailure,
+            input_video_stream: 0,
+            primary_error_records: records,
+            diagnostic_contract: Some("contract".to_owned()),
+        }
+    }
+
+    fn health_receipt(
+        qualification: crate::decoder_health::Qualification,
+    ) -> crate::decoder_health::ProducerHealthReceipt {
+        crate::decoder_health::ProducerHealthReceipt {
+            receipt_version: crate::decoder_health::PRODUCER_HEALTH_RECEIPT_VERSION,
+            plan_digest: "plan-digest".to_owned(),
+            diagnostic_contract: Some("contract".to_owned()),
+            // Deliberately different from the fault's record count, so a
+            // snapshot field sourced from the wrong one is visible.
+            observation_complete: true,
+            video_decode_error_records: 4,
+            contract_qualified_error_records: 3,
+            terminal_fault: None,
+            exit_disposition: crate::decoder_health::ExitDisposition::CleanEnd,
+            qualification,
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // M5c — a qualified decode fault replaces the timing verdict
+    // -----------------------------------------------------------------------
+
+    /// The loop this whole effort exists to end.
+    ///
+    /// A source the decoder cannot decode produces no segments, so a timing or
+    /// process verdict always arrives, and every one of those tells the client
+    /// to try again. It does, gets the identical failure, and tries again. The
+    /// decoder's own diagnostics are the only evidence that separates "this
+    /// attempt was unlucky" from "this source will never decode", and they
+    /// reach the decision as a latched fault.
+    #[test]
+    fn a_qualified_decode_fault_replaces_the_process_verdict_a_client_would_retry() {
+        let started = Instant::now();
+        let exited_at = started + Duration::from_secs(2);
+        let mut actor = registered_prepublication_actor(started);
+        assert_eq!(
+            actor.begin_initial_producer_attempt_at(
+                started,
+                copy_policy("presentation-m5c-qualified", "recipe-m5c-qualified"),
+            ),
+            Ok(1)
+        );
+        assert!(actor.observe_producer_decode_fault(decode_fault_qualified(1, 5, true)));
+        assert_eq!(
+            actor.observe_producer_exit_at(
+                exited_at,
+                RollingProducerExitObservation {
+                    producer_attempt: 1,
+                    success: false,
+                    code: Some(9),
+                    signal: None,
+                    observed_at: exited_at,
+                },
+            ),
+            ProducerExitAcceptance::Accepted
+        );
+        assert!(actor.maybe_commit_producer_decision_at(exited_at));
+        assert!(
+            matches!(
+                actor.pending_decision.as_deref(),
+                Some(ProducerDecision::Fail {
+                    reason: ProducerDecisionReason::SourceDecodeFailed,
+                    ..
+                })
+            ),
+            "a qualified fault must rewrite the process verdict, not merely be logged beside it"
+        );
+    }
+
+    /// The gate is the whole difference between a verdict and a guess.
+    ///
+    /// An unqualified window is one this build cannot vouch for — an
+    /// unqualified grammar, a compressed log, a window that never met the
+    /// threshold. Acting on it would condemn a source on evidence the build
+    /// itself does not trust, and a permanent verdict is the one mistake a
+    /// client cannot recover from by trying again.
+    #[test]
+    fn an_unqualified_decode_fault_leaves_the_process_verdict_alone() {
+        let started = Instant::now();
+        let exited_at = started + Duration::from_secs(2);
+        let mut actor = registered_prepublication_actor(started);
+        assert_eq!(
+            actor.begin_initial_producer_attempt_at(
+                started,
+                copy_policy("presentation-m5c-unqualified", "recipe-m5c-unqualified"),
+            ),
+            Ok(1)
+        );
+        assert!(actor.observe_producer_decode_fault(decode_fault_qualified(1, 5, false)));
+        assert_eq!(
+            actor.observe_producer_exit_at(
+                exited_at,
+                RollingProducerExitObservation {
+                    producer_attempt: 1,
+                    success: false,
+                    code: Some(9),
+                    signal: None,
+                    observed_at: exited_at,
+                },
+            ),
+            ProducerExitAcceptance::Accepted
+        );
+        assert!(actor.maybe_commit_producer_decision_at(exited_at));
+        assert!(
+            matches!(
+                actor.pending_decision.as_deref(),
+                Some(ProducerDecision::Fail {
+                    reason: ProducerDecisionReason::ProcessExit,
+                    ..
+                })
+            ),
+            "an unqualified window must not condemn a source"
+        );
+    }
+
+    /// The `!is_permanent` clause, and it is not a nicety.
+    ///
+    /// `Unsupported` is the copy pipeline saying it cannot carry this source —
+    /// and `UnsupportedOnly` eligibility exists precisely so that verdict
+    /// selects the one validated fallback. Overwriting it with
+    /// `SourceDecodeFailed`, which that eligibility does not allow, would
+    /// silently cancel a fallback the server was about to take and fail a
+    /// source that the successor recipe would have played.
+    #[test]
+    fn a_qualified_decode_fault_does_not_overwrite_a_verdict_that_already_knows_more() {
+        let started = Instant::now();
+        let classified_at = started + Duration::from_secs(1);
+        let mut actor = registered_prepublication_actor(started);
+        assert_eq!(
+            actor.begin_initial_producer_attempt_at(
+                started,
+                copy_policy("presentation-m5c-permanent", "recipe-m5c-permanent"),
+            ),
+            Ok(1)
+        );
+        assert!(actor.observe_producer_decode_fault(decode_fault_qualified(1, 5, true)));
+        assert_eq!(
+            actor.classify_copy_producer_exit_at(
+                classified_at,
+                1,
+                CopyProducerExitClassification::Unsupported,
+            ),
+            Ok(())
+        );
+        assert!(
+            matches!(
+                actor.pending_decision.as_deref(),
+                Some(ProducerDecision::Retry {
+                    reason: ProducerDecisionReason::Unsupported,
+                    ..
+                })
+            ),
+            "a permanent verdict that still selects a fallback must survive the fault"
+        );
+    }
+
+    /// A ledger handle for the tests below, at the one identity they share.
+    fn recovery_ledger(
+        store: &std::sync::Arc<dyn plurx_core::store::Store>,
+        playback: &str,
+        epoch: &str,
+        incarnation: &str,
+    ) -> ProducerRecoveryLedger {
+        ProducerRecoveryLedger::new(
+            std::sync::Arc::clone(store),
+            7,
+            playback,
+            epoch,
+            incarnation,
+        )
+        .expect("a complete identity")
+    }
+
+    /// The budget is one per playback, and it is never given back.
+    ///
+    /// Everything this milestone is for lives in the second half of this test.
+    /// The in-process one-shot M5c2 uses makes a session take one recovery; a
+    /// reopen, a seek or a track change mints a fresh session and therefore a
+    /// fresh one-shot, which is one automatic recovery per *attempt* against a
+    /// file that cannot be decoded. The durable row is what makes the second
+    /// attempt find the budget already gone.
+    ///
+    /// The two refusals in here are different facts and the test asserts them
+    /// separately, because a `bool` cannot tell them apart and reading one as
+    /// the other is a live bug in either direction: a held reservation read as
+    /// spent abandons a `reserved` row that nothing will ever settle, and a
+    /// spent one read as held hands out a second recovery.
+    #[tokio::test]
+    async fn the_recovery_budget_is_taken_once_per_playback_and_never_returned() {
+        use plurx_core::domain::ProducerRecoveryState;
+        use plurx_core::store::SqliteStore;
+
+        let store: std::sync::Arc<dyn plurx_core::store::Store> =
+            std::sync::Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let failed = "a".repeat(64);
+        let alternate = "b".repeat(64);
+
+        let first = recovery_ledger(&store, "playback-1", "epoch-1", "incarnation-1");
+        assert!(
+            matches!(
+                first
+                    .reserve(1, 1, &failed, &alternate, 1_000)
+                    .await
+                    .expect("reserve"),
+                RecoveryReservation::Held(_)
+            ),
+            "the first fault of a playback takes its one budget"
+        );
+
+        // The same session asking again for the same thing is a replay, not a
+        // second budget: the store compares every field and answers with the
+        // row it already wrote. The row comes back because a replaying
+        // executor has to be able to read what it had already decided.
+        let RecoveryReservation::Held(replayed) = first
+            .reserve(1, 1, &failed, &alternate, 1_100)
+            .await
+            .expect("replay")
+        else {
+            panic!("an exact replay is the same reservation");
+        };
+        assert_eq!(replayed.state, ProducerRecoveryState::Reserved);
+        assert_eq!(replayed.failed_incarnation_id, "incarnation-1");
+        assert_eq!(replayed.alternate_plan_digest, alternate);
+
+        // A later session of the same playback — a reopen, a seek, a track
+        // change — is a new incarnation and a new attempt. It inherits the
+        // epoch, and the epoch is what the budget is keyed by, so it finds a
+        // row. The row is still `Reserved`, so what it has found is the
+        // predecessor *holding* the budget, not a budget spent: the store
+        // fences on the reserving incarnation, and this is that fence.
+        let successor = recovery_ledger(&store, "playback-1", "epoch-1", "incarnation-2");
+        assert!(
+            matches!(
+                successor
+                    .reserve(1, 1, &failed, &alternate, 1_200)
+                    .await
+                    .expect("second reserve"),
+                RecoveryReservation::Mismatched(_)
+            ),
+            "a continuation does not get a second recovery, and the one it \
+             cannot have is held rather than gone"
+        );
+
+        // Settling does not return it, whichever way the attempt went. Now,
+        // and only now, is the budget spent.
+        assert_eq!(
+            first
+                .settle(RecoveryOutcome::Exhausted, 1_300)
+                .await
+                .expect("settle"),
+            RecoverySettlement::Settled,
+            "the reserving identity settles its own row"
+        );
+        assert!(
+            matches!(
+                successor
+                    .reserve(1, 1, &failed, &alternate, 1_400)
+                    .await
+                    .expect("after settle"),
+                RecoveryReservation::Spent(_)
+            ),
+            "a settled budget is spent, not released"
+        );
+        assert!(
+            matches!(
+                first
+                    .reserve(1, 1, &failed, &alternate, 1_450)
+                    .await
+                    .expect("reserver after settle"),
+                RecoveryReservation::Spent(_)
+            ),
+            "not even the identity that settled it gets it back"
+        );
+
+        // A different playback is a different budget, which is the other half
+        // of "one per playback".
+        let other = recovery_ledger(&store, "playback-2", "epoch-2", "incarnation-3");
+        assert!(
+            matches!(
+                other
+                    .reserve(1, 1, &failed, &alternate, 1_500)
+                    .await
+                    .expect("other playback"),
+                RecoveryReservation::Held(_)
+            ),
+            "one playback spending its budget does not spend another's"
+        );
+    }
+
+    /// A live reservation the request no longer matches is a mismatch, and the
+    /// session that made it is the likeliest one to hit it.
+    ///
+    /// Every field of the request is part of the row's identity, so an
+    /// executor that reserved against one alternate and then re-planned onto
+    /// another asks for something the stored row does not describe. It has not
+    /// spent anything; it is holding a reservation it has to settle before it
+    /// can take a different one. `decode_restriction` is in this list too and
+    /// cannot be exercised from here — nothing in this daemon builds a
+    /// `ContinuationDecodeRestriction` yet — which is exactly why the
+    /// reservation doc says the first build that writes one has to settle and
+    /// re-epoch rather than replay.
+    #[tokio::test]
+    async fn a_changed_request_against_its_own_live_reservation_is_a_mismatch() {
+        use plurx_core::store::SqliteStore;
+
+        let store: std::sync::Arc<dyn plurx_core::store::Store> =
+            std::sync::Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let failed = "a".repeat(64);
+        let alternate = "b".repeat(64);
+        let other_digest = "c".repeat(64);
+
+        let ledger = recovery_ledger(&store, "playback-1", "epoch-1", "incarnation-1");
+        assert!(
+            matches!(
+                ledger
+                    .reserve(1, 1, &failed, &alternate, 1_000)
+                    .await
+                    .expect("reserve"),
+                RecoveryReservation::Held(_)
+            ),
+            "the reservation under test"
+        );
+
+        for (attempt, sequence, failed_digest, alternate_digest, why) in [
+            (2, 1, &failed, &alternate, "a later producer attempt"),
+            (1, 2, &failed, &alternate, "a later decision"),
+            (1, 1, &other_digest, &alternate, "a different failed plan"),
+            (1, 1, &failed, &other_digest, "a different alternate"),
+        ] {
+            assert!(
+                matches!(
+                    ledger
+                        .reserve(attempt, sequence, failed_digest, alternate_digest, 1_100)
+                        .await
+                        .expect("changed request"),
+                    RecoveryReservation::Mismatched(_)
+                ),
+                "{why} does not replay onto a row that describes a different decision"
+            );
+        }
+    }
+
+    /// Settlement names the fence it hit, because a fence reported as "there
+    /// was nothing there" is a split brain nobody looks for.
+    #[tokio::test]
+    async fn a_settlement_says_which_of_the_three_refusals_it_found() {
+        use plurx_core::store::SqliteStore;
+
+        let store: std::sync::Arc<dyn plurx_core::store::Store> =
+            std::sync::Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let failed = "a".repeat(64);
+        let alternate = "b".repeat(64);
+
+        // Nothing was ever reserved for this epoch. A caller settling on a
+        // path out that never reserved is the ordinary case, not an error.
+        let never = recovery_ledger(&store, "playback-absent", "epoch-absent", "incarnation-1");
+        assert_eq!(
+            never
+                .settle(RecoveryOutcome::Exhausted, 1_000)
+                .await
+                .expect("absent"),
+            RecoverySettlement::Absent
+        );
+
+        let owner = recovery_ledger(&store, "playback-1", "epoch-1", "incarnation-1");
+        assert!(
+            matches!(
+                owner
+                    .reserve(1, 1, &failed, &alternate, 1_100)
+                    .await
+                    .expect("reserve"),
+                RecoveryReservation::Held(_)
+            ),
+            "the reservation under test"
+        );
+
+        // A stale holder of the three key fields — a node that handled this
+        // playback before a handoff — cannot exhaust a live reservation.
+        let stale = recovery_ledger(&store, "playback-1", "epoch-1", "incarnation-2");
+        assert_eq!(
+            stale
+                .settle(RecoveryOutcome::Exhausted, 1_200)
+                .await
+                .expect("stale"),
+            RecoverySettlement::NotOurs
+        );
+        assert!(
+            matches!(
+                owner
+                    .reserve(1, 1, &failed, &alternate, 1_250)
+                    .await
+                    .expect("still held"),
+                RecoveryReservation::Held(_)
+            ),
+            "the fence left the owner's reservation alone"
+        );
+
+        assert_eq!(
+            owner
+                .settle(RecoveryOutcome::Installed, 1_300)
+                .await
+                .expect("owner settles"),
+            RecoverySettlement::Settled
+        );
+        assert_eq!(
+            owner
+                .settle(RecoveryOutcome::Installed, 1_400)
+                .await
+                .expect("owner settles again"),
+            RecoverySettlement::Settled,
+            "an owner that crashed after settling and settles again is told \
+             what happened, not handed a silence it cannot read"
+        );
+        assert_eq!(
+            owner
+                .settle(RecoveryOutcome::Exhausted, 1_500)
+                .await
+                .expect("owner contradicts itself"),
+            RecoverySettlement::Conflicting,
+            "two different answers about one attempt is a caller bug, and it \
+             is not the fencing failure `NotOurs` would send someone hunting"
+        );
+    }
+
+    /// An incomplete identity is refused at construction, not at reservation.
+    ///
+    /// The store refuses a non-positive user id, an empty playback id and an
+    /// empty epoch separately, and it refuses them at the moment a recovery is
+    /// needed — the worst moment to learn a session never had a budget. Three
+    /// real start paths carry exactly those gaps: a legacy process-local
+    /// start, a relayed worker start, and any session predating the epoch
+    /// column.
+    #[test]
+    fn an_incomplete_identity_has_no_ledger_handle_at_all() {
+        use plurx_core::store::SqliteStore;
+        let store: std::sync::Arc<dyn plurx_core::store::Store> =
+            std::sync::Arc::new(SqliteStore::open_in_memory().expect("store"));
+        for (user_id, playback, epoch, incarnation, why) in [
+            (
+                0,
+                "playback",
+                "epoch",
+                "incarnation",
+                "a legacy start has no user id",
+            ),
+            (7, "", "epoch", "incarnation", "no playback is no key"),
+            (
+                7,
+                "playback",
+                "",
+                "incarnation",
+                "a relayed start carries no epoch",
+            ),
+            (
+                7,
+                "playback",
+                "epoch",
+                "",
+                "a reservation names the attempt that failed",
+            ),
+        ] {
+            assert!(
+                ProducerRecoveryLedger::new(
+                    std::sync::Arc::clone(&store),
+                    user_id,
+                    playback,
+                    epoch,
+                    incarnation,
+                )
+                .is_none(),
+                "{why}"
+            );
+        }
+    }
+
+    /// The recovery this whole effort exists for, at the moment it fires.
+    ///
+    /// A qualified decode fault reaches a decision that a timing deadline
+    /// triggered. Without an alternate the honest answer is permanent, and
+    /// M5c1 made it so. With one, the honest answer is a retry — but a retry
+    /// on a *different* recipe, because retrying the identical decode is the
+    /// loop this effort is named after, and with an impermanent reason,
+    /// because a permanent one on a retry reaches the client as a terminal
+    /// answer while this very successor is coming up.
+    #[test]
+    fn a_qualified_fault_installs_the_software_decode_alternate_rather_than_the_colour_safe_one() {
+        let started = Instant::now();
+        let deadline = started + PREPUBLICATION_HARDWARE_STARTUP_BUDGET;
+        let mut actor = registered_prepublication_actor(started);
+        let alternate = ValidatedRetryRecipe::new(
+            "software-decode-alternate".to_owned(),
+            "alternate-fingerprint".to_owned(),
+            "presentation-m5c2d".to_owned(),
+            ProducerStartupKind::MixedSoftwareDecode,
+        );
+        assert_eq!(
+            actor.begin_initial_producer_attempt_at(
+                started,
+                hardware_policy("presentation-m5c2d", "recipe-m5c2d")
+                    .with_decode_alternate(Some(alternate.clone())),
+            ),
+            Ok(1)
+        );
+        assert!(actor.observe_producer_decode_fault(decode_fault_qualified(1, 5, true)));
+        assert!(actor.settle_due_deadlines_at(deadline).is_some());
+
+        let Some(ProducerDecision::Retry { recipe, reason, .. }) =
+            actor.pending_decision.as_deref()
+        else {
+            panic!("a qualified fault with an alternate must install it, not fail");
+        };
+        assert_eq!(
+            recipe, &alternate,
+            "the colour-safe recipe answers a stopped encode; this fault is about the decode"
+        );
+        assert_eq!(*reason, ProducerDecisionReason::SourceDecodeRetry);
+        assert!(
+            !reason.is_permanent(),
+            "a permanent reason here ends the session the successor was going to rescue"
+        );
+    }
+
+    /// The alternate is offered to a decode fault and to nothing else.
+    ///
+    /// An ordinary stall is not evidence about the source, and installing a
+    /// software decode for one would spend the session's one retry on a
+    /// different recipe than the failure called for — and quietly move the
+    /// artifact, since the decode backend feeds the plan digest.
+    #[test]
+    fn a_timing_verdict_without_a_qualified_fault_still_takes_the_colour_safe_recipe() {
+        let started = Instant::now();
+        let deadline = started + PREPUBLICATION_HARDWARE_STARTUP_BUDGET;
+        let alternate = ValidatedRetryRecipe::new(
+            "software-decode-alternate".to_owned(),
+            "alternate-fingerprint".to_owned(),
+            "presentation-m5c2d-plain".to_owned(),
+            ProducerStartupKind::MixedSoftwareDecode,
+        );
+
+        // No fault at all.
+        let mut plain = registered_prepublication_actor(started);
+        assert_eq!(
+            plain.begin_initial_producer_attempt_at(
+                started,
+                hardware_policy("presentation-m5c2d-plain", "recipe-m5c2d-plain")
+                    .with_decode_alternate(Some(alternate.clone())),
+            ),
+            Ok(1)
+        );
+        assert!(plain.settle_due_deadlines_at(deadline).is_some());
+        let Some(ProducerDecision::Retry { recipe, reason, .. }) =
+            plain.pending_decision.as_deref()
+        else {
+            panic!("a startup deadline still retries");
+        };
+        assert_ne!(recipe, &alternate);
+        assert_eq!(*reason, ProducerDecisionReason::StartupDeadline);
+
+        // A fault this build cannot vouch for is not evidence either.
+        let mut unqualified = registered_prepublication_actor(started);
+        assert_eq!(
+            unqualified.begin_initial_producer_attempt_at(
+                started,
+                hardware_policy("presentation-m5c2d-plain", "recipe-m5c2d-plain")
+                    .with_decode_alternate(Some(alternate.clone())),
+            ),
+            Ok(1)
+        );
+        assert!(unqualified.observe_producer_decode_fault(decode_fault_qualified(1, 5, false)));
+        assert!(unqualified.settle_due_deadlines_at(deadline).is_some());
+        let Some(ProducerDecision::Retry { recipe, reason, .. }) =
+            unqualified.pending_decision.as_deref()
+        else {
+            panic!("a startup deadline still retries");
+        };
+        assert_ne!(
+            recipe, &alternate,
+            "an unqualified window cannot spend the retry on a different recipe"
+        );
+        assert_eq!(*reason, ProducerDecisionReason::StartupDeadline);
+    }
+
+    /// An alternate written for a different presentation is refused before the
+    /// session starts, not quietly at the decision.
+    ///
+    /// This is the fence `validate` already applied to the colour-safe recipe,
+    /// now applied to both — because a session can install either, and an
+    /// invariant that held for one of them is not an invariant. Failing closed
+    /// at admission is the right end to fail at: a policy carrying a recipe
+    /// from another presentation contract is a caller bug, and discovering it
+    /// at decision time means discovering it during a recovery.
+    ///
+    /// The decision keeps its own presentation filter as a second fence, for a
+    /// policy assembled by hand rather than through a constructor. Nothing in
+    /// production can reach it, which is the point.
+    #[test]
+    fn an_alternate_from_another_presentation_contract_is_refused() {
+        let started = Instant::now();
+        let mut actor = registered_prepublication_actor(started);
+        assert_eq!(
+            actor.begin_initial_producer_attempt_at(
+                started,
+                hardware_policy("presentation-m5c2d-fence", "recipe-m5c2d-fence")
+                    .with_decode_alternate(Some(ValidatedRetryRecipe::new(
+                        "software-decode-alternate".to_owned(),
+                        "alternate-fingerprint".to_owned(),
+                        "a-different-presentation".to_owned(),
+                        ProducerStartupKind::MixedSoftwareDecode,
+                    ))),
+            ),
+            Err(ProducerAttemptRejection::InvalidPolicy),
+            "an alternate is held to the presentation fence the colour-safe \
+             recipe has always been held to"
+        );
+
+        // And an empty identity or fingerprint is refused by the same loop,
+        // which is the half a decision-time filter could never have caught.
+        assert_eq!(
+            actor.begin_initial_producer_attempt_at(
+                started,
+                hardware_policy("presentation-m5c2d-fence", "recipe-m5c2d-fence")
+                    .with_decode_alternate(Some(ValidatedRetryRecipe::new(
+                        String::new(),
+                        "alternate-fingerprint".to_owned(),
+                        "presentation-m5c2d-fence".to_owned(),
+                        ProducerStartupKind::MixedSoftwareDecode,
+                    ))),
+            ),
+            Err(ProducerAttemptRejection::InvalidPolicy),
+        );
+    }
+
+    /// A retry keeps its own reason, because the client is watching.
+    ///
+    /// The reason on a `Retry` is not private to the server. It reaches
+    /// `DeliveryView::producer_decision`, and `resolve_action` turns any
+    /// permanent reason into `ControlAction::Terminal` — so a `Retry` carrying
+    /// `SourceDecodeFailed` tells the viewer the file is dead while the server
+    /// is still bringing up its software fallback, which on a source only the
+    /// hardware decoder refused would very likely have played. `last_decision`
+    /// is never cleared, so that is not a race window; it is the rest of the
+    /// session.
+    ///
+    /// The first draft of this milestone rewrote the reason before the retry
+    /// was chosen and shipped a test named for this property that asserted the
+    /// opposite of it. This is the assertion that draft needed.
+    #[test]
+    fn a_retry_is_never_handed_a_permanent_reason_while_the_fallback_is_still_coming() {
+        let started = Instant::now();
+        let mut actor = registered_prepublication_actor(started);
+        assert_eq!(
+            actor.begin_initial_producer_attempt_at(
+                started,
+                hardware_policy("presentation-m5c-fallback", "recipe-m5c-fallback"),
+            ),
+            Ok(1)
+        );
+        assert!(actor.observe_producer_decode_fault(decode_fault_qualified(1, 5, true)));
+        let deadline = started + PREPUBLICATION_HARDWARE_STARTUP_BUDGET;
+        assert!(actor.settle_due_deadlines_at(deadline).is_some());
+        let Some(decision) = actor.pending_decision.as_deref() else {
+            panic!("the startup deadline must commit a decision");
+        };
+        assert!(
+            matches!(decision, ProducerDecision::Retry { .. }),
+            "a latched fault must not consume a fallback on another pipeline"
+        );
+        assert_eq!(
+            decision.reason(),
+            ProducerDecisionReason::StartupDeadline,
+            "the retry keeps the verdict that actually ended the attempt"
+        );
+        assert!(
+            !decision.reason().is_permanent(),
+            "a permanent reason on a retry reaches the client as Terminal"
+        );
+    }
+
+    /// A producer that published is a producer that decoded.
+    ///
+    /// Five contract-qualified decode errors inside two seconds is an ordinary
+    /// property of a slightly damaged source, not proof that nothing decoded.
+    /// A long title with one corrupt region latches a fault, skips the bad
+    /// GOPs, publishes most of itself and exits — and calling that permanent
+    /// tears down a player that is still holding good buffer for a title that
+    /// mostly plays.
+    #[test]
+    fn a_fault_on_a_producer_that_published_is_recorded_and_not_acted_on() {
+        let started = Instant::now();
+        let published_at = started + Duration::from_secs(1);
+        let exited_at = started + Duration::from_secs(2);
+        let mut actor = registered_prepublication_actor(started);
+        assert_eq!(
+            actor.begin_initial_producer_attempt_at(
+                started,
+                copy_policy("presentation-m5c-published", "recipe-m5c-published"),
+            ),
+            Ok(1)
+        );
+        assert!(actor
+            .authorize_response_publication_at(
+                published_at,
+                RollingResponsePublication::attempt_media(
+                    RollingResponseObject::MediaSegment,
+                    1,
+                    Some(1),
+                ),
+            )
+            .is_ok());
+        assert!(actor.observe_producer_decode_fault(decode_fault_qualified(1, 5, true)));
+        assert_eq!(
+            actor.observe_producer_exit_at(
+                exited_at,
+                RollingProducerExitObservation {
+                    producer_attempt: 1,
+                    success: false,
+                    code: Some(9),
+                    signal: None,
+                    observed_at: exited_at,
+                },
+            ),
+            ProducerExitAcceptance::Accepted
+        );
+        assert!(actor.maybe_commit_producer_decision_at(exited_at));
+        let Some(decision) = actor.pending_decision.as_deref() else {
+            panic!("a non-zero exit must commit a decision");
+        };
+        assert_eq!(
+            decision.reason(),
+            ProducerDecisionReason::ProcessExit,
+            "published media is proof the source decoded; the fault stays a record"
+        );
+    }
+
+    /// The server's own outages are not verdicts about the file.
+    ///
+    /// `ExecutorLost` says this node lost the process that was doing the work.
+    /// Relabelling it `SourceDecodeFailed` because a fault happened to be
+    /// latched makes a permanent claim about a source over an outage that will
+    /// pass, and the client cannot recover from a permanent claim by trying
+    /// again. The same argument covers the flow and install deadlines, which
+    /// is why the gate is a named list rather than `!is_permanent()`.
+    #[test]
+    fn a_server_side_loss_is_never_relabelled_as_a_verdict_about_the_source() {
+        let started = Instant::now();
+        let lost_at = started + Duration::from_secs(2);
+        let mut actor = registered_prepublication_actor(started);
+        assert_eq!(
+            actor.begin_initial_producer_attempt_at(
+                started,
+                copy_policy("presentation-m5c-executor", "recipe-m5c-executor"),
+            ),
+            Ok(1)
+        );
+        assert!(actor.observe_producer_decode_fault(decode_fault_qualified(1, 5, true)));
+        actor.mark_executor_lost(lost_at);
+        let Some(decision) = actor.pending_decision.as_deref() else {
+            panic!("executor loss must commit a decision");
+        };
+        assert_eq!(
+            decision.reason(),
+            ProducerDecisionReason::ExecutorLost,
+            "a lost executor is a fact about this server, not about the file"
+        );
+    }
+
+    /// The property this milestone exists for: a fault observed mid-attempt is
+    /// still the answer after the burst of healthy progress and the successful
+    /// exit that follow it.
+    ///
+    /// Progress compaction is what makes this non-trivial. A batch collapses
+    /// to exactly one observation at drain, so anything riding on an
+    /// intermediate sample is dropped silently — which is why the fault has
+    /// its own sticky slot rather than a field on a progress observation.
+    #[test]
+    fn a_decode_fault_survives_the_healthy_progress_and_clean_exit_that_follow_it() {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        let attempt = actor
+            .begin_producer_attempt_at(started)
+            .expect("initial producer attempt");
+        let ingress = RollingProducerIngress::new();
+
+        ingress.publish_at(
+            RollingProducerEvent::Progress(producer_progress(
+                attempt,
+                1_000,
+                1_000,
+                1_000,
+                started + Duration::from_millis(100),
+            )),
+            ProducerIngressSlot::Progress,
+            started + Duration::from_millis(100),
+        );
+        ingress.publish_at(
+            RollingProducerEvent::DecodeFault(decode_fault(attempt, 5)),
+            ProducerIngressSlot::Health,
+            started + Duration::from_millis(200),
+        );
+        // Everything a producer does after it stops decoding: more output,
+        // faster, and then a clean exit. None of it is evidence that the
+        // picture was ever decoded.
+        for step in 1..=20_u64 {
+            ingress.publish_at(
+                RollingProducerEvent::Progress(producer_progress(
+                    attempt,
+                    1_000 + step as i64 * 1_000,
+                    2_000,
+                    2_000,
+                    started + Duration::from_millis(200 + step * 10),
+                )),
+                ProducerIngressSlot::Progress,
+                started + Duration::from_millis(200 + step * 10),
+            );
+        }
+        ingress.publish_at(
+            RollingProducerEvent::Exit(producer_exit(
+                attempt,
+                true,
+                Some(0),
+                None,
+                started + Duration::from_secs(1),
+            )),
+            ProducerIngressSlot::Exit,
+            started + Duration::from_secs(1),
+        );
+
+        // Twenty-two progress publications, one open batch: the coalescing is
+        // real, and it is what a fault riding on a progress observation would
+        // have been collapsed into.
+        let blocks = ingress.drain_blocks();
+        let progress_blocks = blocks
+            .iter()
+            .filter(|block| matches!(block, RollingProducerIngressBlock::Progress(_)))
+            .count();
+        assert!(
+            progress_blocks <= 1,
+            "the progress publications coalesce: {blocks:?}"
+        );
+        let order: Vec<_> = blocks
+            .iter()
+            .filter_map(|block| match block {
+                RollingProducerIngressBlock::Barrier(barrier) => match barrier.event.event {
+                    RollingProducerEvent::DecodeFault(_) => Some("fault"),
+                    RollingProducerEvent::Exit(_) => Some("exit"),
+                    _ => None,
+                },
+                RollingProducerIngressBlock::Progress(_) => None,
+            })
+            .collect();
+        assert_eq!(
+            order,
+            vec!["fault", "exit"],
+            "the fault is applied before the exit that would otherwise be the \
+             last word about this attempt"
+        );
+
+        actor.handle_producer_blocks_at(started + Duration::from_secs(2), blocks);
+        let latched = actor
+            .latched_decode_fault()
+            .expect("a fault observed mid-attempt is still the answer at the end of it");
+        assert_eq!(latched.producer_attempt, attempt);
+        assert_eq!(latched.primary_error_records, 5);
+        assert_eq!(
+            latched.fault,
+            crate::decoder_health::DecodeFaultKind::VideoDecodeFailure
+        );
+        // And the exit really did reach the actor after it, so this is not a
+        // fault that survived by never meeting one.
+        assert!(actor.producer_exit_at.is_some(), "the exit was applied too");
+    }
+
+    /// A barrier absorbs the progress batch open when it arrives, which is
+    /// what makes it a barrier: everything published before it is applied
+    /// before it, and it cannot be reordered behind later progress.
+    #[test]
+    fn a_health_barrier_takes_the_open_progress_batch_with_it() {
+        let started = Instant::now();
+        let ingress = RollingProducerIngress::new();
+        ingress.publish_at(
+            RollingProducerEvent::Progress(producer_progress(1, 1_000, 1_000, 1_000, started)),
+            ProducerIngressSlot::Progress,
+            started,
+        );
+        ingress.publish_at(
+            RollingProducerEvent::DecodeFault(decode_fault(1, 5)),
+            ProducerIngressSlot::Health,
+            started + Duration::from_millis(10),
+        );
+        ingress.publish_at(
+            RollingProducerEvent::Progress(producer_progress(
+                1,
+                2_000,
+                1_000,
+                1_000,
+                started + Duration::from_millis(20),
+            )),
+            ProducerIngressSlot::Progress,
+            started + Duration::from_millis(20),
+        );
+
+        let blocks = ingress.drain_blocks();
+        assert_eq!(blocks.len(), 2, "the barrier and the progress after it");
+        let RollingProducerIngressBlock::Barrier(barrier) = &blocks[0] else {
+            panic!("the barrier is applied first: {blocks:?}");
+        };
+        assert!(
+            matches!(
+                barrier.event.event,
+                RollingProducerEvent::DecodeFault(ref fault) if fault.primary_error_records == 5
+            ),
+            "{blocks:?}"
+        );
+        assert!(
+            barrier.preceding_progress.is_some(),
+            "the batch open when the fault landed travels with it, not after it"
+        );
+        assert!(matches!(
+            blocks[1],
+            RollingProducerIngressBlock::Progress(_)
+        ));
+
+        // Carried is not applied. Drive the blocks through an actor and assert
+        // the absorbed batch reached the delivery snapshot: gutting the
+        // `preceding_progress` arm of `handle_producer_block_at` would leave
+        // the ingress assertions above green and silently drop that progress.
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        let attempt = actor
+            .begin_producer_attempt_at(started)
+            .expect("initial producer attempt");
+        assert_eq!(attempt, 1);
+        assert_eq!(actor.delivery.producer_out_time_ms, None);
+        actor.handle_producer_blocks_at(started + Duration::from_millis(30), blocks);
+        assert_eq!(
+            actor.delivery.producer_out_time_ms,
+            Some(2_000),
+            "the batch the barrier absorbed is applied, and so is the one after it"
+        );
+    }
+
+    /// A fault, an exit and a receipt are three facts about one attempt, and
+    /// each has its own slot. Sharing one would lose whichever arrived first.
+    #[test]
+    fn a_health_barrier_and_an_exit_barrier_do_not_displace_each_other() {
+        let started = Instant::now();
+        let ingress = RollingProducerIngress::new();
+        ingress.publish_at(
+            RollingProducerEvent::DecodeFault(decode_fault(1, 5)),
+            ProducerIngressSlot::Health,
+            started,
+        );
+        ingress.publish_at(
+            RollingProducerEvent::Exit(producer_exit(
+                1,
+                true,
+                Some(0),
+                None,
+                started + Duration::from_millis(10),
+            )),
+            ProducerIngressSlot::Exit,
+            started + Duration::from_millis(10),
+        );
+        ingress.publish_at(
+            RollingProducerEvent::DiagnosticsComplete(ProducerDiagnosticsComplete {
+                producer_attempt: 1,
+                receipt: health_receipt(crate::decoder_health::Qualification::Rejected),
+            }),
+            ProducerIngressSlot::Diagnostics,
+            started + Duration::from_millis(20),
+        );
+
+        let blocks = ingress.drain_blocks();
+        assert_eq!(blocks.len(), 3, "three facts, three slots: {blocks:?}");
+        let kinds: Vec<_> = blocks
+            .iter()
+            .map(|block| match block {
+                RollingProducerIngressBlock::Barrier(barrier) => match barrier.event.event {
+                    RollingProducerEvent::DecodeFault(_) => "fault",
+                    RollingProducerEvent::Exit(_) => "exit",
+                    RollingProducerEvent::DiagnosticsComplete(_) => "diagnostics",
+                    _ => "other",
+                },
+                RollingProducerIngressBlock::Progress(_) => "progress",
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["fault", "exit", "diagnostics"],
+            "and they are applied in the order they were published"
+        );
+    }
+
+    /// One barrier per attempt. A second observation cannot relabel a decision
+    /// already made from the first, and a predecessor's fault cannot follow
+    /// the attempt that replaced it.
+    #[test]
+    fn a_fault_latches_once_per_attempt_and_never_crosses_into_the_next() {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        let first = actor
+            .begin_producer_attempt_at(started)
+            .expect("initial producer attempt");
+        assert!(actor.observe_producer_decode_fault(decode_fault(first, 5)));
+        assert!(
+            !actor.observe_producer_decode_fault(decode_fault(first, 9)),
+            "a second fault for one attempt is not a second barrier"
+        );
+        assert_eq!(
+            actor
+                .latched_decode_fault()
+                .expect("latched")
+                .primary_error_records,
+            5,
+            "and the first observation is the one that stands"
+        );
+
+        let second = actor
+            .begin_producer_attempt_at(started + Duration::from_secs(1))
+            .expect("prepublication replacement");
+        assert_ne!(first, second);
+        assert!(
+            actor.latched_decode_fault().is_none(),
+            "a successor gets fresh counters; the predecessor's fault is not \
+             evidence about work it never touched"
+        );
+        assert!(
+            !actor.observe_producer_decode_fault(decode_fault(first, 5)),
+            "and a late fault for the predecessor cannot condemn the successor"
+        );
+        assert!(actor.latched_decode_fault().is_none());
+
+        // The direction that matters most, and the one a bare `is_some()`
+        // re-latch guard gets wrong: the successor's *own* first fault. A
+        // stale predecessor fault refusing it would leave the recovery attempt
+        // — the one this whole feature exists to inform — running blind.
+        assert!(
+            actor.observe_producer_decode_fault(decode_fault(second, 9)),
+            "the successor's first fault is its first fault"
+        );
+        assert_eq!(
+            actor
+                .latched_decode_fault()
+                .expect("the successor's own fault")
+                .primary_error_records,
+            9
+        );
+    }
+
+    /// The settled receipt is a separate fact from the fault and from the
+    /// exit, and it reaches the operational snapshot so an operator can see
+    /// that a producer which exited cleanly was failing to decode.
+    #[test]
+    fn a_settled_receipt_reaches_the_operational_snapshot() {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        let attempt = actor
+            .begin_producer_attempt_at(started)
+            .expect("initial producer attempt");
+        let snapshot = actor.producer_operational_snapshot_at(started);
+        assert_eq!(snapshot.decode_fault, None);
+        assert_eq!(snapshot.diagnostics_qualification, None);
+
+        assert!(actor.observe_producer_decode_fault(decode_fault(attempt, 5)));
+        assert!(
+            actor.observe_producer_diagnostics_complete(ProducerDiagnosticsComplete {
+                producer_attempt: attempt,
+                receipt: health_receipt(crate::decoder_health::Qualification::Rejected),
+            })
+        );
+        let snapshot = actor.producer_operational_snapshot_at(started);
+        assert_eq!(snapshot.decode_fault, Some("video_decode_failure"));
+        assert_eq!(
+            snapshot.decode_error_records,
+            Some(5),
+            "the fault's own count, not the receipt's"
+        );
+        assert_eq!(snapshot.diagnostics_qualification, Some("rejected"));
+
+        // A later receipt for the same attempt corrects the earlier one: a
+        // receipt is a summary of a finished attempt, and the only way a
+        // second arrives is a caller correcting the first.
+        assert!(
+            actor.observe_producer_diagnostics_complete(ProducerDiagnosticsComplete {
+                producer_attempt: attempt,
+                receipt: health_receipt(crate::decoder_health::Qualification::Unqualified),
+            })
+        );
+        assert_eq!(
+            actor
+                .producer_operational_snapshot_at(started)
+                .diagnostics_qualification,
+            Some("unqualified")
+        );
+
+        // A receipt for an attempt that is no longer current is not this
+        // attempt's evidence.
+        let _ = actor
+            .begin_producer_attempt_at(started + Duration::from_secs(1))
+            .expect("prepublication replacement");
+        let snapshot = actor.producer_operational_snapshot_at(started + Duration::from_secs(1));
+        assert_eq!(snapshot.decode_fault, None);
+        assert_eq!(snapshot.diagnostics_qualification, None);
+    }
+
+    /// A retired session accepts neither. There is nobody left to act on them
+    /// and nothing left for them to be evidence about.
+    #[test]
+    fn a_retired_session_accepts_no_health_observations() {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        let attempt = actor
+            .begin_producer_attempt_at(started)
+            .expect("initial producer attempt");
+        // Both guards have two clauses, and both clauses are load-bearing.
+        assert!(
+            !actor.observe_producer_decode_fault(decode_fault(attempt + 1, 5)),
+            "an attempt this session is not running is not this session's evidence"
+        );
+        assert!(
+            !actor.observe_producer_diagnostics_complete(ProducerDiagnosticsComplete {
+                producer_attempt: attempt + 1,
+                receipt: health_receipt(crate::decoder_health::Qualification::Qualified),
+            })
+        );
+
+        actor.retired = true;
+        assert!(!actor.observe_producer_decode_fault(decode_fault(attempt, 5)));
+        assert!(
+            !actor.observe_producer_diagnostics_complete(ProducerDiagnosticsComplete {
+                producer_attempt: attempt,
+                receipt: health_receipt(crate::decoder_health::Qualification::Qualified),
+            })
+        );
+        assert!(actor.latched_decode_fault().is_none());
     }
 }

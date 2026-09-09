@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["c2248aa7"]
+points = ["playback.pipeline", "validation.framework"]
+checks = ["rust-gate", "catalog-contract"]
+reason = "The Rust gate rejects known allocating error constructors in the enumerated post-fork helpers, establishes stack-local interruption injection, and proves a stalled final source observation releases the offset lane before real legacy FFmpeg fallback. The successor bfd623e5 mapping owns single-attempt notification receipt and persistent deadline coverage. The catalog contract records the exact effort base, trusted-parser limitation, unsupported-architecture evidence limit, and M1-only MPEG-4 scope."

@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["7005741d"]
+points = ["validation.framework"]
+checks = ["history-regressions"]
+reason = "The corrective-history audit retains the final M1 review-repair mapping and rejects a receipt that claims exact-head coverage before its classified corrective validation commit is itself mapped."

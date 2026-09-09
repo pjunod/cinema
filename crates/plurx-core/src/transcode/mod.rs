@@ -12,20 +12,34 @@
 //! graphs that keeps frames on the GPU. Which a node uses is decided by probe,
 //! not by version (PERF-PLAN §5).
 
+mod decode;
+pub mod decoder_inventory;
 pub mod dvconvert;
 mod encoder;
+pub mod health;
 pub mod manifest;
 mod pipeline;
 mod recipe;
 mod vod;
 
+pub use decode::{
+    plan_can_name_decoder, resolve_transcode, ArtifactQualification, AttemptRestrictions,
+    CapabilityStatus, DecodeBackend, DecodeCacheIdentity, DecodeCapabilities, DecodeCapability,
+    DecodeCapabilitySnapshotIdentity, DecodeCatalogMetadata, DecodeEvidence, DecodeFacts,
+    DecodePlanPolicy, DecodePolicySnapshot, DecodeReason, DecodeSourceIdentity,
+    DecodeSurfaceContract, DynamicRangeClass, FrameDomain, FrameRate, FrameRateProvenance,
+    OutputWidthRule, PlanError, PlanSourceBinding, PresentationContract, Rational, ResolvedDecode,
+    ResolvedTranscode, SoftwareDecoder, StreamSelectionProvenance, SubtitleRendering,
+    TranscodeMediaOptions, TranscodeRequest, HEALTH_QUALIFIED_ARTIFACT_NAMESPACE,
+    RESOLVED_TRANSCODE_PLAN_VERSION, UNQUALIFIED_ARTIFACT_NAMESPACE,
+};
 pub use encoder::{
     detect_encoders, detect_video_decoders, validate_quality_rate_control,
     validate_quality_rate_control_yielding, EffectiveRateControl, Encoder, EncoderCaps,
     OutputGrade, QualityRateControlValidation, QualityRc, RateMode,
 };
 pub use pipeline::{Pipeline, CANDIDATES as PIPELINE_CANDIDATES};
-pub use recipe::{PipelineDigest, Recipe};
+pub use recipe::{PipelineDigest, Recipe, CACHE_RECIPE_VERSION};
 pub use vod::{
     vod_audio_anchor, vod_pipe_args, VodFrameGrid, VOD_AAC_FRAME_SAMPLES, VOD_AUDIO_RATE,
 };
@@ -737,6 +751,133 @@ pub struct TranscodeOptions {
     pub software_threads: Option<u32>,
 }
 
+/// Attempt-local values consumed by the HLS command builder after semantic
+/// planning is complete. Construction copies only execution fields from the
+/// legacy aggregate; decoder, renderer, encoder, tracks, and output grade come
+/// exclusively from [`ResolvedTranscode`].
+#[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
+pub enum TranscodeExecutionError {
+    #[error("invalid transcode execution: {0}")]
+    Invalid(&'static str),
+}
+
+#[derive(Debug, Clone)]
+pub struct TranscodeExecution {
+    pub source_path: PathBuf,
+    pub start_seconds: f64,
+    pub start_number: i64,
+    pub subtitle_file: Option<PathBuf>,
+    pub force_idr: bool,
+    pub software_threads: Option<u32>,
+    pub pacing: Pacing,
+    pub out_dir: String,
+    /// How much this attempt asks the child to say about itself.
+    ///
+    /// Execution context rather than plan: the same semantic plan run on a
+    /// node whose diagnostics are qualified and on one whose are not is the
+    /// same work and must resolve to the same artifact identity. Only the
+    /// flags differ.
+    pub diagnostics: DiagnosticLogging,
+}
+
+/// The `-loglevel` contract between the daemon and one child.
+///
+/// §7.1 requires `repeat+level+error` for a build whose grammar is qualified:
+/// `level` supplies the severity labels the contract matches on, and `repeat`
+/// stops FFmpeg compressing repeated messages into a summary whose timestamps
+/// the sliding window cannot honestly evaluate.
+///
+/// It is not the default, and that is deliberate rather than cautious. A node
+/// asks for the qualified flags only when a retained contract covers the exact
+/// binary it is about to run — so a fleet with no qualified build emits the
+/// arguments it has always emitted, and the frozen argv baselines keep
+/// describing what ships.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DiagnosticLogging {
+    #[default]
+    Legacy,
+    Qualified,
+}
+
+impl DiagnosticLogging {
+    pub fn flags(self) -> &'static str {
+        match self {
+            Self::Legacy => "error",
+            Self::Qualified => "repeat+level+error",
+        }
+    }
+}
+
+impl TranscodeExecution {
+    pub fn from_options(
+        source: &MediaFile,
+        options: &TranscodeOptions,
+        pacing: Pacing,
+        out_dir: &str,
+    ) -> Result<Self, TranscodeExecutionError> {
+        if source.path.as_os_str().is_empty() {
+            return Err(TranscodeExecutionError::Invalid("source path is empty"));
+        }
+        if out_dir.is_empty() {
+            return Err(TranscodeExecutionError::Invalid(
+                "output directory is empty",
+            ));
+        }
+        if !options.start_seconds.is_finite() || options.start_seconds < 0.0 {
+            return Err(TranscodeExecutionError::Invalid(
+                "start offset must be finite and nonnegative",
+            ));
+        }
+        if options.start_number < 0 {
+            return Err(TranscodeExecutionError::Invalid(
+                "HLS start number must be nonnegative",
+            ));
+        }
+        if options.software_threads == Some(0) {
+            return Err(TranscodeExecutionError::Invalid(
+                "software thread budget must be positive",
+            ));
+        }
+        if pacing
+            .readrate
+            .is_some_and(|rate| !rate.is_finite() || rate <= 0.0)
+            || pacing
+                .initial_burst
+                .is_some_and(|burst| !burst.is_finite() || burst <= 0.0)
+        {
+            return Err(TranscodeExecutionError::Invalid(
+                "pacing values must be finite and positive",
+            ));
+        }
+        Ok(Self {
+            source_path: source.path.clone(),
+            start_seconds: options.start_seconds,
+            start_number: options.start_number,
+            subtitle_file: options.subtitle_file.clone(),
+            force_idr: options.force_idr,
+            software_threads: options.software_threads,
+            pacing,
+            out_dir: out_dir.to_owned(),
+            diagnostics: DiagnosticLogging::Legacy,
+        })
+    }
+
+    /// Ask this attempt's child for the diagnostics a qualified grammar reads.
+    ///
+    /// Only a caller holding a contract that covers the exact binary it is
+    /// about to run may say yes. Asking for `repeat+level+error` from a build
+    /// nobody has qualified buys nothing — there is no grammar to read the
+    /// severities it would add — and changes the arguments that ship.
+    pub fn observing_qualified_grammar(mut self, qualified: bool) -> Self {
+        self.diagnostics = if qualified {
+            DiagnosticLogging::Qualified
+        } else {
+            DiagnosticLogging::Legacy
+        };
+        self
+    }
+}
+
 /// The AAC bitrate every HLS transcode uses unless asked otherwise — public
 /// because the quality ladder's advertised totals must include the audio a
 /// session will actually carry, from the same constant rather than a copy.
@@ -799,8 +940,15 @@ pub fn output_size(source: &MediaFile, target_height: i64) -> Option<(i64, i64)>
 /// output frame first puts it back where it was authored, whichever way the
 /// two sizes differ.
 fn bitmap_overlay(source: &MediaFile, opts: &TranscodeOptions) -> Option<String> {
+    bitmap_overlay_for_size(output_size(source, opts.target_height), opts)
+}
+
+fn bitmap_overlay_for_size(
+    output_size: Option<(i64, i64)>,
+    opts: &TranscodeOptions,
+) -> Option<String> {
     let burn = opts.subtitle_burn.as_ref().filter(|b| b.bitmap)?;
-    let (w, h) = output_size(source, opts.target_height)?;
+    let (w, h) = output_size?;
     Some(format!(
         "[0:s:{idx}]scale={w}:{h}[sburn]",
         idx = burn.subtitle_index
@@ -811,6 +959,24 @@ fn bitmap_overlay(source: &MediaFile, opts: &TranscodeOptions) -> Option<String>
 /// source is HDR) → subtitle burn-in. Returns `None` when no filtering is
 /// needed (rare for transcode, but keeps the caller simple).
 fn video_filters(source: &MediaFile, opts: &TranscodeOptions, source_path: &str) -> String {
+    video_filters_for_contract(
+        output_size(source, opts.target_height),
+        source.hdr.as_deref(),
+        source.hdr.is_some(),
+        routing_hdr(source),
+        opts,
+        source_path,
+    )
+}
+
+fn video_filters_for_contract(
+    output_size: Option<(i64, i64)>,
+    input_dynamic_range: Option<&str>,
+    input_is_hdr: bool,
+    routing_dynamic_range: Option<&str>,
+    opts: &TranscodeOptions,
+    source_path: &str,
+) -> String {
     let mut chain: Vec<String> = Vec::new();
 
     // A GPU pipeline owns scale and tone-map together: they are one pass on
@@ -826,11 +992,11 @@ fn video_filters(source: &MediaFile, opts: &TranscodeOptions, source_path: &str)
     let text_burn = opts.subtitle_burn.as_ref().is_some_and(|b| !b.bitmap);
     // Always give GPU scalers the same explicit even, no-upscale dimensions
     // the CPU path promises. `w=-1` can resolve to an odd NV12 width.
-    let gpu_size = output_size(source, opts.target_height);
+    let gpu_size = output_size;
     if let Some(gpu) = opts.pipeline.filters(
         gpu_size.map(|(w, _)| w),
         gpu_size.map_or(opts.target_height, |(_, h)| h),
-        source.hdr.as_deref(),
+        input_dynamic_range,
     ) {
         if (bitmap_burn || text_burn)
             && matches!(opts.pipeline, Pipeline::VppQsv | Pipeline::TonemapVaapi)
@@ -849,7 +1015,7 @@ fn video_filters(source: &MediaFile, opts: &TranscodeOptions, source_path: &str)
     chain.push(format!("scale=-2:'min({h},ih)'", h = opts.target_height));
 
     // HDR → SDR tone-map when the source carries HDR.
-    if source.hdr.is_some() && opts.tone_map != ToneMap::None {
+    if input_is_hdr && opts.tone_map != ToneMap::None {
         match opts.tone_map {
             ToneMap::None => {} // guarded out above; format normalize happens below
             ToneMap::Libplacebo => chain.push(
@@ -869,7 +1035,7 @@ fn video_filters(source: &MediaFile, opts: &TranscodeOptions, source_path: &str)
                 // hwdownload, so an inferred `t=linear` mis-maps the PQ signal to
                 // a flat gray picture — the exact 4K-HDR/DV symptom. HDR is
                 // BT.2020; PQ (HDR10/HDR10+/DV) vs HLG differ only in transfer.
-                let tin = if routing_hdr(source) == Some("hlg") {
+                let tin = if routing_dynamic_range == Some("hlg") {
                     "arib-std-b67"
                 } else {
                     "smpte2084"
@@ -1065,15 +1231,21 @@ pub fn heavy_source(source: &MediaFile) -> bool {
     ) && (source.hdr.is_some() || source.height.unwrap_or(0) >= 2160)
 }
 
-fn decode_setup(encoder: Encoder, source: &MediaFile) -> (Vec<String>, Option<String>) {
+#[cfg(test)]
+fn compatibility_value_forces_software_decode(value: Option<&str>) -> bool {
+    matches!(value, Some("off" | "0" | "false" | "no"))
+}
+
+fn decode_setup_with_compatibility(
+    encoder: Encoder,
+    source: &MediaFile,
+    force_software_decode: bool,
+) -> (Vec<String>, Option<String>) {
     let arg = |x: &str| x.to_owned();
     // Escape hatch: force software decode (still hardware-encodes). Set when a
     // GPU decodes a stream to garbage — some Dolby Vision profiles — so you can
     // fall back without giving up the hardware encoder.
-    if matches!(
-        std::env::var("PLURX_HWDECODE").as_deref(),
-        Ok("off" | "0" | "false" | "no")
-    ) {
+    if force_software_decode {
         return (Vec::new(), None);
     }
     let heavy = heavy_source(source);
@@ -1142,16 +1314,99 @@ pub fn audio_offset_filter(offset_ms: i64) -> Option<String> {
     }
 }
 
-/// Shared source selection, decode, filters, and encoder recipe. Presentation
-/// builders append their own timestamp, keyframe, and muxer contracts.
-fn encode_input_args(
+/// Build the full ffmpeg argument vector to transcode `source` into HLS in
+/// `out_dir` (which must exist). Produces `index.m3u8` + `seg%05d.ts`.
+#[cfg(test)]
+fn hls_args(
     source: &MediaFile,
     encoder: Encoder,
     opts: &TranscodeOptions,
     pacing: Pacing,
+    out_dir: &str,
 ) -> Vec<String> {
-    let source_path = source.path.to_string_lossy().into_owned();
-    let mut args: Vec<String> = vec!["-hide_banner".into(), "-loglevel".into(), "error".into()];
+    hls_args_with_compatibility(source, encoder, opts, pacing, out_dir, false)
+}
+
+/// Build a movie HLS command exclusively from one validated semantic plan and
+/// its attempt-local execution context.
+#[cfg(not(test))]
+pub fn hls_args(plan: &ResolvedTranscode, execution: &TranscodeExecution) -> Vec<String> {
+    hls_args_for_plan(plan, execution)
+}
+
+/// Explicit name retained so core unit tests can exercise the plan builder
+/// while their baseline-only helper keeps freezing the pre-M2 token vectors.
+pub fn hls_args_for_plan(plan: &ResolvedTranscode, execution: &TranscodeExecution) -> Vec<String> {
+    let media = plan.options();
+    let options = TranscodeOptions {
+        target_height: media.target_height,
+        video_bitrate_kbps: media.video_bitrate_kbps,
+        effective_rate_control: media.effective_rate_control,
+        audio_channels: media.audio_channels,
+        audio_bitrate_kbps: media.audio_bitrate_kbps,
+        audio_index: media.audio_index,
+        start_seconds: execution.start_seconds,
+        start_number: execution.start_number,
+        tone_map: media.tone_map,
+        pipeline: media.pipeline,
+        subtitle_burn: media.subtitle_burn.clone(),
+        subtitle_file: execution.subtitle_file.clone(),
+        force_idr: execution.force_idr,
+        software_threads: execution.software_threads,
+    };
+    hls_args_inner(
+        None,
+        &execution.source_path.to_string_lossy(),
+        plan.encoder(),
+        &options,
+        execution.pacing,
+        &execution.out_dir,
+        None,
+        Some(plan),
+        execution.diagnostics,
+    )
+}
+
+#[cfg(test)]
+fn hls_args_with_compatibility(
+    source: &MediaFile,
+    encoder: Encoder,
+    opts: &TranscodeOptions,
+    pacing: Pacing,
+    out_dir: &str,
+    force_software_decode: bool,
+) -> Vec<String> {
+    hls_args_inner(
+        Some(source),
+        &source.path.to_string_lossy(),
+        encoder,
+        opts,
+        pacing,
+        out_dir,
+        Some(force_software_decode),
+        None,
+        DiagnosticLogging::Legacy,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn hls_args_inner(
+    legacy_source: Option<&MediaFile>,
+    source_path: &str,
+    encoder: Encoder,
+    opts: &TranscodeOptions,
+    pacing: Pacing,
+    out_dir: &str,
+    legacy_force_software_decode: Option<bool>,
+    plan: Option<&ResolvedTranscode>,
+    diagnostics: DiagnosticLogging,
+) -> Vec<String> {
+    let source_path = source_path.to_owned();
+    let mut args: Vec<String> = vec![
+        "-hide_banner".into(),
+        "-loglevel".into(),
+        diagnostics.flags().into(),
+    ];
 
     // Hardware device init (VAAPI/QSV) must precede the input, and so must a
     // filter device the pipeline brings of its own (Vulkan for libplacebo,
@@ -1175,10 +1430,52 @@ fn encode_input_args(
     // the `PLURX_HWDECODE=off` escape hatch for Dolby Vision profiles that
     // hardware-decode to garbage).
     let pipeline_decode = opts.pipeline.decode_args();
-    let (decode_args, hwdownload) = if opts.pipeline.requires_software_decode() {
+    let (decode_args, hwdownload) = if let Some(plan) = plan {
+        let decode = plan.decode();
+        let args = match decode.backend() {
+            // A named implementation is one the inventory measured, so the
+            // command names it. With none measured the command names none,
+            // which is what shipped before decode planning existed: FFmpeg
+            // chooses, and for some codecs its choice is better than the
+            // decoder named after the codec.
+            DecodeBackend::Software => {
+                let mut args = vec!["-hwaccel".to_owned(), "none".to_owned()];
+                if let Some(implementation) = decode.software_decoder() {
+                    args.push("-c:v".to_owned());
+                    args.push(implementation.to_owned());
+                }
+                args
+            }
+            DecodeBackend::VideoToolbox => {
+                vec!["-hwaccel".to_owned(), "videotoolbox".to_owned()]
+            }
+            DecodeBackend::Cuda => vec!["-hwaccel".to_owned(), "cuda".to_owned()],
+            DecodeBackend::Qsv => vec![
+                "-hwaccel".to_owned(),
+                "qsv".to_owned(),
+                "-hwaccel_output_format".to_owned(),
+                "qsv".to_owned(),
+            ],
+            DecodeBackend::Vaapi => vec![
+                "-hwaccel".to_owned(),
+                "vaapi".to_owned(),
+                "-hwaccel_output_format".to_owned(),
+                "vaapi".to_owned(),
+            ],
+        };
+        let download = decode
+            .surface()
+            .decoder_download_format()
+            .map(|format| format!("hwdownload,format={format}"));
+        (args, download)
+    } else if opts.pipeline.requires_software_decode() {
         (Vec::new(), None)
     } else if pipeline_decode.is_empty() {
-        decode_setup(encoder, source)
+        decode_setup_with_compatibility(
+            encoder,
+            legacy_source.expect("legacy argument construction has source metadata"),
+            legacy_force_software_decode.unwrap_or(false),
+        )
     } else {
         (pipeline_decode, None)
     };
@@ -1197,11 +1494,20 @@ fn encode_input_args(
     // source again for nothing but its audio (review §3.4). Guarded on the
     // file actually having audio: a simple `-af` with no audio stream to
     // attach to is a hard ffmpeg error, where the old optional map was inert.
-    let audio_offset = if source.audio_streams.is_empty() {
-        None
-    } else {
-        audio_offset_filter(source.audio_offset_ms)
-    };
+    let audio_offset = plan.map_or_else(
+        || {
+            let source = legacy_source.expect("legacy argument construction has source metadata");
+            (!source.audio_streams.is_empty())
+                .then(|| audio_offset_filter(source.audio_offset_ms))
+                .flatten()
+        },
+        |plan| {
+            plan.options()
+                .input_has_audio
+                .then(|| audio_offset_filter(plan.options().audio_offset_ms))
+                .flatten()
+        },
+    );
 
     // Video filter chain: [hwdownload for GPU-decoded frames →] scale / tonemap /
     // subs [→ GPU upload suffix for VAAPI/QSV] → encoder.
@@ -1224,18 +1530,55 @@ fn encode_input_args(
         vf.push_str(prefix);
         vf.push(',');
     }
-    vf.push_str(&video_filters(source, opts, &source_path));
+    let planned_output_size = plan.and_then(|plan| {
+        Some((
+            i64::from(plan.output_contract().effective_width()?),
+            i64::from(plan.output_contract().effective_height()?),
+        ))
+    });
+    let filters = plan.map_or_else(
+        || {
+            video_filters(
+                legacy_source.expect("legacy argument construction has source metadata"),
+                opts,
+                &source_path,
+            )
+        },
+        |plan| {
+            video_filters_for_contract(
+                planned_output_size,
+                plan.input_hdr_format(),
+                plan.input_is_hdr(),
+                plan.routing_dynamic_range(),
+                opts,
+                &source_path,
+            )
+        },
+    );
+    vf.push_str(&filters);
 
     // A bitmap subtitle is a picture, so burning one is a *composite* — two
     // streams into one filter — and that needs `-filter_complex` and a mapped
     // output label rather than the single-stream `-vf`. Everything above stays
     // the chain it was; this only wraps it.
-    let overlay = bitmap_overlay(source, opts);
+    let overlay = plan.map_or_else(
+        || {
+            bitmap_overlay(
+                legacy_source.expect("legacy argument construction has source metadata"),
+                opts,
+            )
+        },
+        |_| bitmap_overlay_for_size(planned_output_size, opts),
+    );
     // Map the chosen (or default) audio, and video from wherever it now comes.
     args.push("-map".into());
+    let selected_video = plan.map_or_else(
+        || "0:v:0".to_owned(),
+        |plan| format!("0:{}", plan.decode().input_video_stream()),
+    );
     args.push(match &overlay {
         Some(_) => BURNED_VIDEO_LABEL.to_owned(),
-        None => "0:v:0".to_owned(),
+        None => selected_video.clone(),
     });
     args.push("-map".into());
     match opts.audio_index {
@@ -1263,8 +1606,12 @@ fn encode_input_args(
                 OutputGrade::Hdr10 => ":format=yuv420p10",
                 OutputGrade::Sdr => "",
             };
+            let filter_input = plan.map_or_else(
+                || "0:v".to_owned(),
+                |plan| format!("0:{}", plan.decode().input_video_stream()),
+            );
             let complex = format!(
-                "[0:v]{vf}[vburn];{sub};\
+                "[{filter_input}]{vf}[vburn];{sub};\
                  [vburn][sburn]overlay=eof_action=pass{overlay_format}{up}{BURNED_VIDEO_LABEL}"
             );
             assert_no_pq_at_8_bit(&complex);
@@ -1309,20 +1656,6 @@ fn encode_input_args(
     args.push("-b:a".into());
     args.push(format!("{}k", opts.audio_bitrate_kbps));
 
-    args
-}
-
-/// Build the growing-HLS presentation from the shared decode/filter/encode
-/// recipe. Immutable VOD uses the same recipe with its own timeline and muxer.
-pub fn hls_args(
-    source: &MediaFile,
-    encoder: Encoder,
-    opts: &TranscodeOptions,
-    pacing: Pacing,
-    out_dir: &str,
-) -> Vec<String> {
-    let mut args = encode_input_args(source, encoder, opts, pacing);
-
     // Start the MPEG-TS timeline at zero.
     //
     // ffmpeg's mpegts muxer defaults to `muxpreload 0.5` + `muxdelay 0.7`, so
@@ -1362,6 +1695,23 @@ pub fn hls_args(
         .map(|s| s.to_string()),
     );
     args.push(format!("{out_dir}/index.m3u8"));
+    args
+}
+
+/// Shared resolved source selection, decode, filters, and encoder recipe used
+/// by immutable VOD before it appends its own timestamp, keyframe, and muxer
+/// contracts. Semantic choices come only from `plan`; the execution carries
+/// attempt-local paths, offsets, thread caps, and diagnostics.
+fn encode_input_args_for_plan(
+    plan: &ResolvedTranscode,
+    execution: &TranscodeExecution,
+) -> Vec<String> {
+    let mut args = hls_args_for_plan(plan, execution);
+    let presentation = args
+        .iter()
+        .position(|argument| argument == "-muxdelay")
+        .expect("the shared encode recipe precedes the HLS presentation");
+    args.truncate(presentation);
     args
 }
 
@@ -1983,6 +2333,217 @@ mod tests {
             audio_offset_ms: 0,
             probed: true,
             dolby_vision: crate::domain::DolbyVisionFacts::default(),
+        }
+    }
+
+    fn normalized_m0_args(
+        source: &MediaFile,
+        encoder: Encoder,
+        options: &TranscodeOptions,
+        force_software_decode: bool,
+    ) -> Vec<String> {
+        let mut arguments = hls_args_with_compatibility(
+            source,
+            encoder,
+            options,
+            Pacing::unpaced(),
+            "/tmp/m0-output",
+            force_software_decode,
+        );
+        for index in 1..arguments.len() {
+            if arguments[index - 1] == "-vaapi_device" {
+                arguments[index] = "<vaapi-device>".to_owned();
+            }
+        }
+        arguments
+            .into_iter()
+            .map(|argument| {
+                argument
+                    .replace("/media/movie.mkv", "<source>")
+                    .replace("/tmp/m0-output", "<output>")
+            })
+            .collect()
+    }
+
+    /// M0 migration fixture: M1 and M2 may change only the cases whose policy
+    /// change is named in the decoder plan. Every other token stays stable.
+    #[test]
+    fn decoder_selection_m0_argument_baseline_is_stable() {
+        let mut light_h264 = file(None);
+        light_h264.container = Some("mkv".into());
+        light_h264.video_codec = Some("h264".into());
+        light_h264.video_profile = Some("High".into());
+        light_h264.width = Some(1920);
+        light_h264.height = Some(1080);
+        light_h264.bit_depth = Some(8);
+        light_h264.hdr = None;
+
+        let mut incident_mpeg4 = light_h264.clone();
+        incident_mpeg4.container = Some("avi".into());
+        incident_mpeg4.video_codec = Some("mpeg4".into());
+        incident_mpeg4.video_profile = Some("Advanced Simple Profile".into());
+        incident_mpeg4.width = Some(624);
+        incident_mpeg4.height = Some(352);
+        incident_mpeg4.bitrate = None;
+
+        let heavy_hevc = file(Some("hdr10"));
+        let dovi = file(Some("dolby_vision"));
+        let options = |pipeline| TranscodeOptions {
+            pipeline,
+            ..TranscodeOptions::default()
+        };
+
+        let cases = [
+            (
+                "software-sdr-h264",
+                &light_h264,
+                Encoder::Software,
+                TranscodeOptions::default(),
+                false,
+            ),
+            (
+                "qsv-light-h264",
+                &light_h264,
+                Encoder::Qsv,
+                TranscodeOptions::default(),
+                false,
+            ),
+            (
+                "vaapi-light-h264",
+                &light_h264,
+                Encoder::Vaapi,
+                TranscodeOptions::default(),
+                false,
+            ),
+            (
+                "qsv-heavy-hevc-hdr",
+                &heavy_hevc,
+                Encoder::Qsv,
+                TranscodeOptions::default(),
+                false,
+            ),
+            (
+                "vaapi-heavy-hevc-hdr",
+                &heavy_hevc,
+                Encoder::Vaapi,
+                TranscodeOptions::default(),
+                false,
+            ),
+            (
+                "qsv-vendor-renderer",
+                &heavy_hevc,
+                Encoder::Qsv,
+                options(Pipeline::VppQsv),
+                false,
+            ),
+            (
+                "vaapi-vendor-renderer",
+                &heavy_hevc,
+                Encoder::Vaapi,
+                options(Pipeline::TonemapVaapi),
+                false,
+            ),
+            (
+                "nvenc-libplacebo-renderer",
+                &heavy_hevc,
+                Encoder::Nvenc,
+                options(Pipeline::Libplacebo),
+                false,
+            ),
+            (
+                "vaapi-opencl-renderer",
+                &heavy_hevc,
+                Encoder::Vaapi,
+                options(Pipeline::TonemapOpencl),
+                false,
+            ),
+            (
+                "nvenc-light-h264",
+                &light_h264,
+                Encoder::Nvenc,
+                TranscodeOptions::default(),
+                false,
+            ),
+            (
+                "videotoolbox-sdr-h264",
+                &light_h264,
+                Encoder::VideoToolbox,
+                TranscodeOptions::default(),
+                false,
+            ),
+            (
+                "videotoolbox-avi-mpeg4",
+                &incident_mpeg4,
+                Encoder::VideoToolbox,
+                TranscodeOptions::default(),
+                false,
+            ),
+            (
+                "qsv-heavy-hevc-hdr-forced-software",
+                &heavy_hevc,
+                Encoder::Qsv,
+                TranscodeOptions::default(),
+                true,
+            ),
+            (
+                "dovi-tonemapx-videotoolbox",
+                &dovi,
+                Encoder::VideoToolbox,
+                options(Pipeline::DoviTonemapx),
+                false,
+            ),
+            (
+                "dovi-passthrough-qsv",
+                &dovi,
+                Encoder::Qsv,
+                options(Pipeline::DoviPassthrough),
+                false,
+            ),
+            (
+                "hdr10-passthrough-qsv",
+                &heavy_hevc,
+                Encoder::Qsv,
+                options(Pipeline::Hdr10Passthrough),
+                false,
+            ),
+        ];
+        let actual = cases
+            .into_iter()
+            .map(|(name, source, encoder, options, force_software_decode)| {
+                serde_json::json!({
+                    "name": name,
+                    "encoder": encoder.label(),
+                    "renderer": options.pipeline.name(),
+                    "compatibility_force_software_decode": force_software_decode,
+                    "args": normalized_m0_args(
+                        source,
+                        encoder,
+                        &options,
+                        force_software_decode,
+                    ),
+                })
+            })
+            .collect::<Vec<_>>();
+        let expected: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../tests/playback/decoder-selection-m0-args.json"
+        ))
+        .expect("M0 argument fixture is JSON");
+        assert_eq!(serde_json::Value::Array(actual), expected);
+    }
+
+    #[test]
+    fn decoder_compatibility_override_values_are_stable() {
+        for value in ["off", "0", "false", "no"] {
+            assert!(
+                compatibility_value_forces_software_decode(Some(value)),
+                "legacy override {value:?} must force software decode"
+            );
+        }
+        for value in [None, Some(""), Some("1"), Some("on"), Some("OFF")] {
+            assert!(
+                !compatibility_value_forces_software_decode(value),
+                "legacy override {value:?} must retain automatic decode selection"
+            );
         }
     }
 

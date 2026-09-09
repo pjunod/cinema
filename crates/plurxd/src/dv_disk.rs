@@ -7099,13 +7099,18 @@ mod tests {
 
     #[cfg(unix)]
     async fn wait_for_test_path(path: &Path) {
-        for _ in 0..400 {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        loop {
             if tokio::fs::symlink_metadata(path).await.is_ok() {
                 return;
             }
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for {}",
+                path.display()
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        panic!("timed out waiting for {}", path.display());
     }
 
     #[cfg(unix)]

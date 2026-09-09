@@ -1250,28 +1250,44 @@ mod tests {
                 // Everything v44 and later built has to go, or the replayed
                 // migration meets its own leftovers instead of a v43 database:
                 // v44's recovery guards, v45's negative index, v46's attempt
-                // history, v48's desired-selection row, v49's pointer fence.
-                // Leaving any of them makes the replay fail on a column or
-                // table that is already there.
+                // history, v47's request identity, v48's desired-selection
+                // row, v49's pointer fence, v50's terminal-identity index,
+                // v51's drain deadline, v52's producer-recovery ledger, v53's
+                // recovery epoch, and v54's offline recovery fences.
                 //
-                // The fence triggers go first, and they have to: they name
-                // `media_playback_desired`, so once that table is dropped any
-                // write to `media_playback_pointers` fails with "no such
-                // table" rather than with anything about this fixture. A
-                // trigger outliving the table it reads is a hazard the real
-                // schema never has — both arrive in the same migration line —
-                // but it is exactly what winding a database backwards by hand
-                // produces.
-                "DROP TRIGGER IF EXISTS media_sessions_drain_ownership_fence_au;
+                // Leaving a *column* behind makes the replay fail outright on
+                // an `ADD COLUMN` against a table that already has it.
+                // Leaving a *table* behind is silent, because those steps are
+                // `CREATE TABLE IF NOT EXISTS`: the fixture would keep a v50
+                // table while calling itself v43 and nothing would say so. The
+                // count assertion below is the only thing that catches that,
+                // which is why it is maintained by hand.
+                //
+                // Newest first, because winding backwards by hand has an
+                // ordering the forward path never needs. The fence triggers in
+                // particular have to go before the table they name: once
+                // `media_playback_desired` is dropped, any write to
+                // `media_playback_pointers` fails with "no such table" rather
+                // than with anything about this fixture.
+                "DROP TRIGGER IF EXISTS cache_publication_generation_guard;
+                 DROP TRIGGER IF EXISTS offline_claim_lifecycle_guard;
+                 DROP TRIGGER IF EXISTS offline_recovery_guard;
+                 ALTER TABLE transcode_cache_locations DROP COLUMN publication_generation;
+                 ALTER TABLE offline_packages DROP COLUMN alternate_recipe_hash;
+                 ALTER TABLE offline_packages DROP COLUMN decoder_recovery_state;
+                 ALTER TABLE offline_packages DROP COLUMN claim_generation;
+                 ALTER TABLE media_sessions DROP COLUMN recovery_epoch;
+                 DROP TABLE IF EXISTS media_session_producer_recovery;
+                 DROP TRIGGER IF EXISTS media_sessions_drain_ownership_fence_au;
                  ALTER TABLE media_sessions DROP COLUMN drain_deadline_ms;
                  DROP TRIGGER IF EXISTS media_playback_pointers_desired_fence_ai;
                  DROP TRIGGER IF EXISTS media_playback_pointers_desired_fence_au;
                  ALTER TABLE media_playback_pointers DROP COLUMN desired_revision;
+                 DROP TABLE IF EXISTS media_playback_desired;
                  DROP INDEX dv_conversions_recovery_guard;
                  DROP INDEX IF EXISTS analysis_requests_terminal_identity;
                  DROP TABLE dv_recovery_guards;
                  DROP TABLE IF EXISTS fragment_index_outcomes;
-                 DROP TABLE IF EXISTS media_playback_desired;
                  ALTER TABLE dv_conversions DROP COLUMN recovery_guard_id;
                  ALTER TABLE cluster_fragment_index_jobs DROP COLUMN attempt_errors;
                  ALTER TABLE analysis_requests DROP COLUMN video_identity;
@@ -1364,7 +1380,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 7] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 10] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1372,6 +1388,13 @@ mod tests {
             "desired_revision",
             "analysis_requests_terminal_identity",
             "drain_deadline_ms",
+            "media_session_producer_recovery",
+            // Not the bare column name: `recovery_epoch` is also a column of
+            // v51's ledger table, so the guard's "some migration after the
+            // guard creates this" check would pass for it whether or not v52
+            // existed. The `ADD COLUMN` text belongs to v52 alone.
+            "ADD COLUMN recovery_epoch",
+            "ADD COLUMN claim_generation",
         ];
 
         assert!(

@@ -611,11 +611,16 @@ impl<'a> PublicationStore<'a> {
         node_id: &str,
         relative_dir: &str,
         bytes: i64,
+        manifest_digest: Option<&str>,
     ) -> Result<(), StoreError> {
+        // The digest has to reach both arms. This wrapper degrades to the
+        // unfenced method when there is no fence, so a parameter added only to
+        // the fenced one would be silently dropped for every unfenced caller —
+        // which is most of them.
         if self.fence.is_none() {
             return self
                 .store
-                .complete_cache_entry(recipe_hash, node_id, bytes)
+                .complete_cache_entry(recipe_hash, node_id, bytes, manifest_digest)
                 .await;
         }
         self.fenced_call(move |lease, replacement| {
@@ -626,6 +631,7 @@ impl<'a> PublicationStore<'a> {
                         node_id,
                         relative_dir,
                         bytes,
+                        manifest_digest,
                         &lease,
                         &replacement,
                     )

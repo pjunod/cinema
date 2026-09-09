@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["73180743"]
+points = ["playback.pipeline", "validation.framework"]
+checks = ["rust-gate", "catalog-contract"]
+reason = "The Rust gate runs the production post-fork readiness/acknowledgement handshake and injected pre-transfer supervisor failure under absolute deadlines, proving descriptor numbers stay owned until fork and failed handshakes unblock Command::spawn. The catalog contract binds that Linux ownership claim and the failed-then-corrected validation chronology."

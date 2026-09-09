@@ -1,6 +1,8 @@
 mod admission;
 mod cachekeep;
 mod copyseg;
+mod decode_facts;
+mod decoder_health;
 mod delivery;
 mod dv_disk;
 mod dvpipe;
@@ -1400,6 +1402,11 @@ async fn boot(
     // production rate-control arguments against this boot's real drivers and
     // publish only the effective result before any session can start.
     state.transcode.initialize_rate_control().await?;
+    // Which artifact identity this node plans into, before anything can plan,
+    // and the only time it is decided. It is part of every cache key the node
+    // computes, so moving it on a live node would move the key space under
+    // work already running; the request is stored when written and read here.
+    state.transcode.publish_artifact_qualification().await;
     let background_loops = BackgroundLoopGuard::new();
     spawn_background_loops(&state, background_loops.token());
 
@@ -1794,9 +1801,39 @@ async fn probe_system(
     transcode_dir: &std::path::Path,
 ) -> anyhow::Result<(plurx_core::transcode::EncoderCaps, SystemInfo)> {
     let ffmpeg = crate::ffmpeg::ffmpeg_bin();
+    let configured_ffprobe = crate::ffmpeg::ffprobe_bin();
+    let decode_probe_identity = match crate::decode_facts::DecodeProbeIdentity::discover(
+        &configured_ffprobe,
+    )
+    .await
+    {
+        Ok(identity) => Some(identity),
+        Err(error) => {
+            tracing::warn!(%error, "FFprobe identity is unavailable; explicit decoder facts remain unavailable");
+            None
+        }
+    };
+    let ffprobe = decode_probe_identity.as_ref().map_or_else(
+        || configured_ffprobe.clone(),
+        |identity| identity.executable().display().to_string(),
+    );
     // Detect available hardware encoders once at startup.
     let encoder_caps = plurx_core::transcode::detect_encoders(&ffmpeg).await;
     let decoders = plurx_core::transcode::detect_video_decoders(&ffmpeg).await;
+    // Which decoder this build actually selects for each of those families.
+    // Read only by qualified planning, but measured unconditionally: it is a
+    // handful of fractional-second probes, and an operator deciding whether to
+    // enable qualification needs to see what this node measured before they
+    // decide, not after.
+    let measured_decoders = plurx_core::transcode::decoder_inventory::measure_selected_decoders(
+        &ffmpeg,
+        &decoders,
+        transcode_dir,
+    )
+    .await;
+    for (codec, backend, decoder) in measured_decoders.measured_paths() {
+        tracing::info!(%codec, backend = backend.name(), %decoder, "measured the decoder this ffmpeg selects");
+    }
 
     let hwaccel_pref = resolve_hwaccel_pref(store).await?;
     seed_switch_settings(store).await?;
@@ -1807,8 +1844,19 @@ async fn probe_system(
     // a few seconds on a box with a GPU worth testing and nothing at all on one
     // without.
     let tone_map = pipeprobe::probe(transcode_dir, encoder_caps.choose(&probe_pref)).await;
+    // Measure this node's own FFmpeg once, and decide from it whether any
+    // retained contract covers the binary that is about to run. A node with no
+    // covering contract still reads every child's stderr; it simply reads it
+    // without a grammar, which is the honest state for a build nobody has
+    // qualified — and it is the state the deployed fleet is in today, because
+    // FFmpeg 5.1.9 reports decode failures without naming a stream.
+    install_decoder_diagnostic_policy(&ffmpeg).await;
     let measured = Measured {
         ffmpeg_version: ffmpeg_version(&ffmpeg).await,
+        ffprobe_build_digest: decode_probe_identity
+            .as_ref()
+            .map(|identity| identity.build_digest().to_owned()),
+        decode_probe_identity,
         pacing: crate::ffmpeg::pacing_caps().await,
         dovi_rpu: crate::ffmpeg::has_dovi_rpu().await,
         dovi_reshape: crate::ffmpeg::has_dovi_reshape().await,
@@ -1826,16 +1874,26 @@ async fn probe_system(
         },
         encoder_selected,
         decoders,
+        measured_decoders,
         tone_map,
         dv_disk: crate::dv_disk::probe_capabilities().await,
     };
-    let system = system_info(config, ffmpeg, hwaccel_pref, encoder_caps.clone(), measured);
+    let system = system_info(
+        config,
+        ffmpeg,
+        ffprobe,
+        hwaccel_pref,
+        encoder_caps.clone(),
+        measured,
+    );
     Ok((encoder_caps, system))
 }
 
 /// What the boot probes learned about this machine's ffmpeg.
 struct Measured {
     ffmpeg_version: Option<String>,
+    ffprobe_build_digest: Option<String>,
+    decode_probe_identity: Option<crate::decode_facts::DecodeProbeIdentity>,
     pacing: crate::ffmpeg::PacingCaps,
     dovi_rpu: bool,
     dovi_reshape: bool,
@@ -1845,6 +1903,7 @@ struct Measured {
     hdr10_passthrough_qsv: bool,
     encoder_selected: String,
     decoders: Vec<String>,
+    measured_decoders: plurx_core::transcode::decoder_inventory::MeasuredDecoders,
     tone_map: pipeprobe::PipelineReport,
     dv_disk: crate::dv_disk::DvDiskCapabilities,
 }
@@ -1858,6 +1917,7 @@ struct Measured {
 fn system_info(
     config: &Config,
     ffmpeg: String,
+    ffprobe: String,
     hwaccel_pref: String,
     encoders: plurx_core::transcode::EncoderCaps,
     measured: Measured,
@@ -1865,11 +1925,14 @@ fn system_info(
     SystemInfo {
         data_dir: config.storage.data_dir.display().to_string(),
         ffmpeg_version: measured.ffmpeg_version,
+        ffprobe_build_digest: measured.ffprobe_build_digest,
+        decode_probe_identity: measured.decode_probe_identity,
         ffmpeg,
-        ffprobe: crate::ffmpeg::ffprobe_bin(),
+        ffprobe,
         hwaccel_pref,
         encoders,
         decoders: measured.decoders,
+        measured_decoders: measured.measured_decoders,
         encoder_selected: measured.encoder_selected,
         tone_map: measured.tone_map,
         pacing: measured.pacing,
@@ -2789,6 +2852,40 @@ fn truncate_to_bytes(value: &str, budget: usize) -> String {
         out.push(ch);
     }
     out
+}
+
+/// Resolve and install this process's diagnostic policy.
+///
+/// Every failure is silence rather than a refusal to start: a node that cannot
+/// hash its own FFmpeg loses automatic decoder actions and loses nothing else,
+/// and turning a diagnostic capability into an availability requirement would
+/// trade a cache problem for an outage.
+async fn install_decoder_diagnostic_policy(ffmpeg: &str) {
+    let contracts = match crate::decoder_health::DiagnosticContract::load(
+        crate::decoder_health::RETAINED_DIAGNOSTIC_CONTRACTS,
+    ) {
+        Ok(contracts) => contracts,
+        Err(error) => {
+            tracing::warn!("retained diagnostic contracts are unreadable: {error}");
+            Vec::new()
+        }
+    };
+    let build = crate::decoder_health::MeasuredBuild::measure(ffmpeg).await;
+    if build.is_none() {
+        tracing::info!(
+            "ffmpeg build identity could not be measured; diagnostics are observation only"
+        );
+    }
+    let policy = crate::decoder_health::DiagnosticPolicy::new(build, contracts);
+    let qualified = policy.measured_build().is_some();
+    if !crate::decoder_health::install_diagnostic_policy(policy) {
+        tracing::warn!("a decoder diagnostic policy was already installed for this process");
+        return;
+    }
+    tracing::info!(
+        measured_build = qualified,
+        "decoder diagnostic policy installed"
+    );
 }
 
 /// First line of `ffmpeg -version` (e.g. "ffmpeg version 6.1.1 …"), if the
@@ -5138,10 +5235,26 @@ mod startup_tests {
         let system = system_info(
             &config_in(tmp.path()),
             "/opt/jellyfin-ffmpeg/ffmpeg".to_owned(),
+            "/opt/jellyfin-ffmpeg/ffprobe".to_owned(),
             "auto".to_owned(),
             caps.clone(),
             Measured {
                 ffmpeg_version: Some("ffmpeg version 7.1.1".to_owned()),
+                ffprobe_build_digest: Some("a".repeat(64)),
+                decode_probe_identity: None,
+                measured_decoders:
+                    plurx_core::transcode::decoder_inventory::MeasuredDecoders::from_measured(&[
+                        (
+                            "h264",
+                            plurx_core::transcode::DecodeBackend::Software,
+                            "h264",
+                        ),
+                        (
+                            "h264",
+                            plurx_core::transcode::DecodeBackend::VideoToolbox,
+                            "h264",
+                        ),
+                    ]),
                 pacing: crate::ffmpeg::PacingCaps {
                     readrate: true,
                     initial_burst: true,
@@ -5179,6 +5292,15 @@ mod startup_tests {
         assert_eq!(
             system.tone_map.selected(),
             plurx_core::transcode::Pipeline::Cpu
+        );
+        let wire = serde_json::to_value(&system).expect("serialize /api/v1/system info");
+        assert_eq!(
+            wire["measured_decoders"]["by_codec"]["h264"], "h264",
+            "the v1 field keeps string values for existing API consumers"
+        );
+        assert_eq!(
+            wire["measured_decoders"]["by_codec_and_backend_v2"]["h264"]["videotoolbox"], "h264",
+            "the versioned sibling carries the backend-aware path"
         );
     }
 

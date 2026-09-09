@@ -17,7 +17,12 @@ replacement = "the sole actor-owned rolling producer progress budget before and 
 [[symbols]]
 id = "replacement-mask-flag"
 pattern = "replacing_child"
-expected_occurrences = 29
+# 29 -> 30 with M5c3: one test-only read. The durable recovery budget is
+# reserved before `begin_child_replacement`, so a refused reservation must
+# leave the failed producer where the actor left it; the regression asserts
+# the mask is still clear at that point. No production reader was added and
+# nothing new elects a replacement.
+expected_occurrences = 30
 kind = "recovery_election"
 replacement = "retained process-replacement serialization projection; actor decisions and exact attempts own transcode prepublication"
 
@@ -31,7 +36,12 @@ replacement = "specific attempt, response-admission, copy replacement, published
 [[symbols]]
 id = "replacement-transaction"
 pattern = "begin_child_replacement"
-expected_occurrences = 7
+# 7 -> 9 with M5c3, both in prose. The pattern is a plain string match, and
+# the two additions are a production comment and a test doc explaining why the
+# recovery reservation is taken *before* this call — reserving after it would
+# turn "this playback already recovered" into a session with no producer. No
+# new call site: the transaction still has exactly one authorized entry.
+expected_occurrences = 9
 kind = "replacement_owner"
 replacement = "one actor-authorized prepublication retry action"
 
@@ -59,7 +69,12 @@ replacement = "typed producer facts entering the actor; only prepublication and 
 [[symbols]]
 id = "supervisor-registration"
 pattern = "AttemptChild::new\\("
-expected_occurrences = 20
+# 20 -> 22 with M5c3: two test-only predecessor children. The retry executor
+# terminates the exact failed attempt before it clears scratch, so both
+# recovery-budget regressions need a child bound to that attempt or the
+# transaction fails before reaching what they are about. Both are killed or
+# reaped by the fixture. No production supervisor was added.
+expected_occurrences = 22
 kind = "process_owner"
 replacement = "retained as the sole OS-child supervisor, registered before publication"
 
@@ -132,7 +147,12 @@ replacement = "response EOF enters the actor with a move-only RollingMediaCommit
 [[symbols]]
 id = "all-detached-tokio-tasks"
 pattern = "tokio::spawn\\("
-expected_occurrences = 79
+# 79 -> 80 with M3b2's end-to-end reporting test: one `tokio::spawn` runs a
+# real diagnostic reader against a duplex so the fault can travel through the
+# real sink, handle and actor. It is joined by the test before any assertion —
+# without it, replacing `DecodeFaultSink::report` with an empty body left the
+# whole workspace green and the feature dead in production.
+expected_occurrences = 80
 kind = "structural_task_scan"
 replacement = "every detached task requires ownership-catalog review; published failure, completion, and executor-loss cleanup transfer exact child ownership before awaiting, while the removed published-transcode watchdog contributes no task"
 
@@ -153,7 +173,18 @@ pattern = "tokio::time::sleep\\("
 # one. `#[cfg(test)]`-only, bounded by a 20s deadline that asserts rather than
 # hangs, and it decides nothing about producer recovery: it waits for a log
 # line that has already been written or is about to be.
-expected_occurrences = 35
+# 35 -> 37 with M4's mixed-pipeline admission. Both are shipped polls of the
+# software pool, both on the existing `ADMISSION_POLL` cadence, and both clamp
+# their final wait to the deadline they already hold rather than overrunning
+# it. One is a live start that has a hardware slot and needs the CPU its
+# software decode will spend; the other is a recovery that keeps its encoder
+# and moves the chain to the CPU. Neither owns a producer or a process — a
+# deadline that expires in either place declines to begin work rather than
+# abandoning any — and both exist because the pool's usual refusal is a
+# background producer that yields only after a live waiter is registered and
+# only at its next checkpoint, so a single non-blocking try turns "wait two
+# seconds" into "destroy the session".
+expected_occurrences = 37
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
 
@@ -263,7 +294,12 @@ expected_occurrences = 0
 [[module_symbols]]
 id = "legacy-child-transition"
 pattern = "child_transition"
-expected_occurrences = 32
+# 32 -> 33 with M3b's comment in `terminate_exact_prepublication_child`
+# explaining why the diagnostic receipt is *not* settled there: two of its
+# callers hold `child_transition` across the call and its own comment forbids
+# sleeping under it. The symbol count sees prose as well as code, and the
+# reason this teardown may not sleep is exactly the reason worth writing down.
+expected_occurrences = 33
 
 [[module_symbols]]
 id = "legacy-watchdog-election"
@@ -273,7 +309,9 @@ expected_occurrences = 0
 [[module_symbols]]
 id = "legacy-replacement-mask"
 pattern = "replacing_child"
-expected_occurrences = 29
+# 29 -> 30 with M5c3; the module-wide twin of `replacement-mask-flag` above,
+# and the same single test-only read.
+expected_occurrences = 30
 
 [[module_symbols]]
 id = "legacy-downgrade-owner"
@@ -777,10 +815,13 @@ pattern = "publication_ready_at_ms"
 # proposed successor is still held at the blocked publication fence before
 # asking the existing actor slot to authorize its announcement. It writes no
 # fence and creates no publication authority.
+# 79 -> 80 with M5b's recovery-epoch test: one test-only `MediaSessionRoute`
+# fixture, built to exercise the mint-or-inherit decision. It stamps the fence
+# at zero like any ordinary live route and no shipped path writes one.
 # 79 -> 80 with the drain-release test: one test-only activation, built the
 # way every other fixture in that file builds one, so the predecessor it
 # drains is a published row rather than a hand-written one.
-expected_occurrences = 80
+expected_occurrences = 81
 
 [[module_symbols]]
 id = "m4-durable-projection-safety-window"
@@ -909,6 +950,9 @@ pattern = "terminal_reason"
 # 20 -> 21 after settlement review: the public post-retirement replay test
 # asserts the predecessor's durable `superseded` cause before exercising the
 # retained exact response. This is a test-only read of the existing writer.
+# 21 -> 22 with M5b's recovery-epoch test: the same one test-only route
+# fixture, which sets `terminal_reason: None` because it stands for a live
+# session. No new writer of a terminal cause.
 # 21 -> 20 when `preparation_ack_replay` stopped gating on that cause. Reading
 # `terminal_reason == 'superseded'` there was the same fact as "this commit
 # already happened" only while the commit retires the predecessor inside its
@@ -925,7 +969,7 @@ pattern = "terminal_reason"
 # 22 -> 23 with the drain-release test, which asserts the predecessor ends
 # with cause `superseded` rather than merely ending. Test-only: the cause is
 # written by the release that already existed on this branch.
-expected_occurrences = 23
+expected_occurrences = 24
 
 [[module_symbols]]
 id = "m4-release-terminal-cause"
@@ -1277,6 +1321,34 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # value describes the merged tree. 417 is what the checker reads off the
 # merge, so it is what is recorded -- the two inventories above are both
 # still true, and the total is measured rather than added up.
+# 417 -> 423 with M1 bound decoder facts: one blocking digest worker and one
+# probe singleflight owner ship in `decode_facts`; four additional probe/cache
+# race tasks are test-only. The blocking worker retains its semaphore permit
+# until the operating-system read ends, the singleflight owner publishes one
+# shared result, and every fixture task is joined before its test returns.
+# None chooses or replaces a rolling producer.
+# 423 -> 425 after bound-cleanup review: one production owner retains the
+# version child, group terminator, and admission permit when its caller times
+# out; one test-only task proves detached cleanup retains its owned permit.
+# Both finish independently of the caller, and neither chooses a producer.
+# 425 -> 428 after fifth-review deadline repair: one blocking owner contains
+# `Command::spawn` and the inherited pre-exec handshake; a second holds both
+# source-identity and probe admissions through an uninterruptible metadata
+# syscall; a third owns final source revalidation. Caller timeout detaches each
+# owner without releasing its permits, and no task selects recovery policy.
+# 428 -> 427 after sixth-review offset-lane repair: final source observation
+# remains authoritative but no longer runs inside the collection task. The
+# probe tree restores the shared offset and releases its permit immediately
+# after reap; only the final fstat owner can remain detached.
+# 427 -> 437 with M3b's owned observation. Two are shipped and are the point of
+# the milestone: both FFmpeg readers become `tokio::spawn` handles the attempt
+# *holds*, where before they were spawned and forgotten — the same construct,
+# now with an owner that joins it. The other eight are in the `decoder_health`
+# suite, each awaited or aborted by the test that made it, several of them
+# proving precisely that a reader is not left running.
+# 437 -> 439 with M3b2's two test spawns: the reader above, and the
+# `RollingControlHandle::spawn` that gives that test a real actor to report
+# into. Both are owned by the test that made them; neither is shipped.
 # 394 + (393 - 389) -> 398 when integrating the independent effort and M6
 # settlement task: retain all five demand-regression owners and all four
 # settlement owners. No source spawn or ownership obligation is discarded.
@@ -1309,12 +1381,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # lineup precisely so it can never be a reason to talk to the device. It also
 # refuses to run off the configured owner node and while serving authority is
 # not admitted, so a fenced node's loop does nothing but sleep.
+expected_occurrences = 470
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
 # exact child through confirmed reap; fixture actors are aborted/joined or
 # awaited before teardown. Neither parent inventory may be discarded.
-expected_occurrences = 448
 
 [[module_structures]]
 id = "method-spawn"
@@ -1331,6 +1403,16 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # +1 HDHomeRun M2: spawn_live_ffmpeg launches the sole per-session encoder.
 # The session retains child and foreground admission through confirmed reap;
 # shutdown closes registry insertion before collecting existing owners.
+# 42 -> 44 with M1: the two descriptor-bound FFprobe launches collect the
+# configured-build version and selected-stream facts. Both children are
+# kill-on-drop, output-bounded, process-group signalled on cancellation or
+# timeout, and awaited before their source/build ownership is released.
+# 44 -> 45 after one-shot exec supervision: one named standard thread owns the
+# seccomp notification listener from the trusted pre-exec call through process
+# reap. It denies every later exec request and is explicitly stopped and joined.
+# 45 -> 44 after fifth-review launch consolidation: two chained command-spawn
+# expressions became one shared `command.spawn()` inside the blocking launch
+# owner counted above. The named seccomp supervisor is unchanged and joined.
 # 41 -> 42 with abb872ba: the Unix-only zero-progress eviction regression
 # launches `sleep 60` as a fake running producer. It transfers the child to
 # ProducerSlot, then awaits driver_pass; the capacity-hold Terminate step
@@ -1342,6 +1424,10 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # and live_tv.rs's per-session encoder on main's. Neither side's total
 # describes the merged tree, so the count is measured off it rather than
 # carried across from one parent.
+# Merged inventory: both parents moved this counter from a shared base, so
+# neither parent's value describes the merged tree. Every ownership
+# obligation reviewed above is retained on both sides; the total is read
+# off the merge rather than added up.
 # +1 encoded VOD: ProducerSlot::Inner::drop transfers its exact child and
 # admission resources to a runtime-owned reap task after start_kill. Capacity
 # is released after child.wait, not when the pipe reader or slot disappears.
@@ -1351,7 +1437,7 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # +1 after the immutable-input review: spawn_piped_output is the daemon-owned
 # stdout variant of the existing extractor owner. Its child stays kill-on-drop,
 # its copy and diagnostics are joined, and every terminal path awaits reap.
-expected_occurrences = 49
+expected_occurrences = 51
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -1495,6 +1581,52 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # value describes the merged tree. 609 is what the checker reads off the
 # merge, so it is what is recorded -- the two inventories above are both
 # still true, and the total is measured rather than added up.
+# 609 -> 626 with M1 bound decoder facts. Seven production constructors bound
+# digest admission/completion, probe singleflight admission, source-offset
+# ownership, version collection, and selected-stream collection. Ten test-only
+# sleeps/timeouts make cancellation, deadline, and ownership races
+# deterministic. Every child deadline is paired with group termination and
+# reap; no timer decides producer recovery or selects a replacement plan.
+# 626 -> 630 after bound-cleanup review: three production constructors bound
+# version admission, detached version cleanup, and the caller-facing fact
+# deadline. One test-only timeout proves cleanup retains ownership after that
+# deadline. None initiates recovery or chooses a replacement plan.
+# 630 -> 631 after pidfd cleanup review: one test-only sleep crosses the
+# descendant marker deadline after normal-exit process-group cleanup. It starts
+# no work and makes a surviving inherited-pipe owner fail deterministically.
+# 631 -> 636 with pidfd fault injection: two injected cleanup delays and three
+# bounded test waits prove caller deadlines detach without releasing the version
+# or held-source ownership before explicit reap. All five are test-only.
+# 636 -> 644 after fifth-review deadline repair: one injected supervisor delay,
+# one inner whole-launch timeout, four source-identity admission/owner timers,
+# and two ownership-return assertions. Production delays remain zero; the
+# timeouts retain permits until the corresponding blocking owner really exits.
+# The sixth-review unsupported-Unix regression bounds the public discovery
+# call. The EINTR seam is stack-local and the final-observation fallback
+# regression reuses the existing production deadline; the reviewed total
+# remains 644.
+# 644 -> 645 after persistent bootstrap interruption coverage: one test-only
+# timeout awaits return of the version owner after the shared absolute launch
+# deadline. It starts no work and cannot release until supervisor teardown.
+# 645 -> 646 after steady-response interruption coverage: one test-only
+# timeout proves the detached version owner returns after deliberately slow
+# reap and the stop/deadline-aware supervisor join. It starts no shipped work.
+# 646 -> 647 after mutation-sensitive response bounds: one test-only timeout
+# waits for the supervisor's deadline-exit receipt, preventing outer teardown
+# from masquerading as response-loop evidence. It starts no shipped work.
+# 647 -> 649 with M4's two mixed-pipeline admission polls, which are the same
+# two occurrences `all-async-sleeps` above counts. Both are bounded waits for
+# CPU the pipeline is about to spend, on the existing admission cadence, and
+# both decline rather than detach when their deadline expires.
+# 649 -> 651 with M3b's drain bound: two `tokio::time::timeout_at` calls in
+# `ObservedDiagnostics::settle`, sharing one deadline so a teardown cannot spend
+# twice the budget its caller was told. Neither owns a producer; each bounds a
+# wait for a reader whose child is already reaped, and expiry aborts the reader
+# and settles an incomplete observation rather than waiting.
+# 651 -> 652 with M5c3: one test-only `tokio::time::timeout` bounding the wait
+# for actor retirement after a recovery whose transaction failed, the same
+# shape as its neighbour in the scratch-clear fencing regression. It is awaited
+# before fixture teardown and owns nothing.
 # 560 + (577 - 557) -> 580 on effort integration: both independently reviewed
 # timer deltas remain, including the demand episode retention and bounded
 # settlement owner. This is a merged inventory, not a relaxed sentinel.
@@ -1564,7 +1696,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # between refreshes, not a deadline over any work. The guide's actual request
 # deadlines are the `timeout` parameter of `fetch_bounded`, which is the
 # existing lineup fetch's bound made a parameter rather than a new constructor.
-expected_occurrences = 659
+expected_occurrences = 702
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -1608,6 +1740,17 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # was already counted. Both new children use kill-on-drop; production also
 # retains admission and requires confirmed reap before retirement. The finite
 # source generator has no separate output timeout; it is not a live producer.
+# 70 -> 73 with M1: two production commands execute the retained FFprobe
+# snapshot for version and selected-stream facts; one Linux-only fixture
+# command verifies collision-safe assignment of crossed source/executable
+# descriptors. The fixture waits synchronously and owns no rolling producer.
+# 73 -> 74 after parser-closure review: one Linux-only native-launcher fixture
+# proves Landlock refuses its attempted second exec. The synchronous status is
+# collected before return; this test-only child owns no rolling producer.
+# 74 -> 75 with M3b's build measurement: one `Command::new` in
+# `MeasuredBuild::run`, an informational `-version`/`-buildconf` invocation on
+# the startup path with null stdin, awaited to completion, producing no media
+# and owning no session.
 # 67 -> 68 with abb872ba: the test-only `sleep 60` child described under
 # method-spawn. ProducerSlot owns it through the awaited kill/reap; this is a
 # running-child capacity regression, not another production encoder path.
@@ -1631,7 +1774,7 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # source fixtures; and one finite FFmpeg call creates an oversized attachment.
 # Shipped probes use bounded_command_output or BoundedDiagnosticChild; every
 # fixture awaits kill-on-drop output or the exact bounded child owner.
-expected_occurrences = 100
+expected_occurrences = 105
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -1726,6 +1869,22 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # the owner's internal Live TV snapshot. Same category as the M3 and M7 rows
 # above: an HTTP status code on an in-process `oneshot` response, launching no
 # process and owning no producer.
+# 237 -> 240 with M1: the two retained FFprobe commands call `.spawn()` and
+# the Linux crossed-descriptor fixture calls `.status()`. The former are the
+# bounded process owners described above; the latter waits for one finite
+# shell assertion and ships in no binary.
+# 240 -> 241 after parser-closure review: the Linux native-launcher fixture
+# waits synchronously for Landlock to refuse its attempted downstream exec.
+# 241 -> 242 after the escape review: `std::thread::Builder::spawn` starts the
+# named seccomp-notification owner described under method-spawn; it is not a
+# second parser process and its result is joined after the child is reaped.
+# 242 -> 241 after fifth-review launch consolidation: the two descriptor-bound
+# command chains now share one `command.spawn()` in the blocking launch owner.
+# Both callers still receive and reap their own child; this is a syntax-count
+# decrease, not removal of a process owner.
+# 241 -> 242 for the same call: `.output()` on that informational invocation.
+# It is the only launch this milestone adds; both FFmpeg spawns keep the ones
+# they had.
 # 222 + (217 - 216) -> 223 retains the six effort additions and the one
 # settlement response-status assertion from their common 216-site base.
 # 223 -> 226 with P1-3's VOD delivery measurement: three `VodServe::status`
@@ -1789,7 +1948,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # +2 net after the immutable-input review: the daemon-owned piped child adds an
 # explicit spawn and two finite media fixtures add awaited output calls, while
 # burn extraction removes its old direct output call in favor of that owner.
-expected_occurrences = 305
+expected_occurrences = 310
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -1820,6 +1979,17 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # +4 HDHomeRun M2: cleanup_session calls start_kill and bounded wait while
 # retaining child/admission on failure; the session observer calls try_wait;
 # the real video-only fixture awaits its production-graph child.
+# 310 -> 313 with M1: version and selected-stream collection each await their
+# retained FFprobe child, and the common group-termination helper performs the
+# final reap after signalling. Source/build leases survive all three waits.
+# 313 -> 315 with Linux pidfd exit anchoring: each shipping probe path has
+# mutually exclusive Linux and non-Linux reap expressions in source. Linux
+# waits for exit without reaping, kills the anchored process group, then reaps;
+# non-Linux production refuses before spawn and retains its fixture-only arm.
+# 315 -> 313 after pidfd error ownership repair: both Linux branches now use
+# the same explicit reap helper as termination instead of spelling a second
+# `.wait()` at each call site. The helper retains the owned child, source, and
+# permits until the one wait completes, including injected anchor failures.
 # 306 -> 319 with abb872ba: nine Barrier::wait calls belong to the two
 # deterministic control-acceptance/file-open cancellation seams (five behind
 # cfg(test) in the production methods and four in their fixtures). Four more
@@ -1849,11 +2019,14 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # +2 after the immutable-input review: bounded sidecar output explicitly
 # start-kills on a cap or daemon I/O error and awaits the exact child before
 # returning. Ordinary completion uses the same wait.
-expected_occurrences = 343
+expected_occurrences = 346
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
 pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3|wait4|exec|execl|execle|execlp|execv|execve|execvp|execvpe)|(?<![:.\\w])(?:kill|signal|raise|wait|waitpid|waitid|wait3|wait4|exec|execl|execle|execlp|execv|execve|execvp|execvpe))\\s*\\("
+# 32 -> 33 with M1: `libc::kill` targets the negative process-group id on
+# cancellation or timeout so descendants inheriting the held media descriptor
+# cannot outlive the probe owner. The direct child is then awaited above.
 # 32 -> 33 with abb872ba: this deliberately conservative pattern also matches
 # the new `pub async fn wait(` declaration on RegisteredWait. It is the
 # oneshot/timeout method inventoried above, not a free OS wait or reap call.
@@ -1864,9 +2037,13 @@ pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3
 # the before and the after. The actual termination is still `ProducerSlot`'s,
 # through `Step::Terminate`; the probes are how the test proves that happened
 # to a real process rather than only to a belief.
+# Merged inventory: both parents moved this counter from a shared base, so
+# neither parent's value describes the merged tree. Every ownership
+# obligation reviewed above is retained on both sides; the total is read
+# off the merge rather than added up.
 # +2 final encoded review: test-only libc::kill(pid, 0) checks after confirmed
 # reaping. These observe exact fixture PIDs and deliver no signal.
-expected_occurrences = 38
+expected_occurrences = 39
 
 [[module_structures]]
 id = "kill-on-drop-construction"
@@ -1883,6 +2060,9 @@ pattern = "kill_on_drop\\s*\\("
 # +2 HDHomeRun M2: production encoder and finite video-only source generator.
 # kill-on-drop is a fallback; successful production drain still requires
 # explicit confirmed reap rather than treating drop as cleanup proof.
+# 40 -> 42 with M1: both retained FFprobe commands enable kill-on-drop as the
+# last-resort cancellation fence in addition to explicit process-group signal
+# and reap on every owned completion path.
 # 37 -> 38 with abb872ba: cancellation/unwind protection for the test-only
 # `sleep 60` child. The normal regression path still explicitly kills and
 # reaps it through ProducerSlot; kill-on-drop is not the success assertion.
@@ -1899,12 +2079,14 @@ pattern = "kill_on_drop\\s*\\("
 # +3 after the immutable-input review: the piped-output owner and both finite
 # media fixture commands use kill-on-drop as cancellation protection. Their
 # normal paths still await output or confirmed child reap.
-expected_occurrences = 64
+expected_occurrences = 66
 
 [[module_structures]]
 id = "rolling-supervisor-construction"
 pattern = "AttemptChild::new\\s*\\("
-expected_occurrences = 20
+# 20 -> 22 with M5c3; the module-wide twin of `supervisor-registration`, and
+# the same two test-only predecessor children.
+expected_occurrences = 22
 
 [[module_structures]]
 id = "forbidden-timer-or-task-alias"

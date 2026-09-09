@@ -708,8 +708,13 @@ pub fn parse_encoder_list(output: &str) -> EncoderCaps {
 /// from ffprobe's `codec_name`, and advertising every alias or hardware-only
 /// decoder would let an unproved path claim work. Presence here means this
 /// exact ffmpeg build exposes the portable decoder Plurx will invoke.
+/// Every codec family this node may advertise, and the only ones a decoder
+/// inventory ever has to measure.
+pub(crate) const PORTABLE_DECODE_CODECS: &[&str] =
+    &["h264", "hevc", "vp8", "vp9", "av1", "mpeg4", "mpeg2video"];
+
 pub fn parse_video_decoder_list(output: &str) -> Vec<String> {
-    const CODECS: &[&str] = &["h264", "hevc", "vp8", "vp9", "av1", "mpeg4", "mpeg2video"];
+    const CODECS: &[&str] = PORTABLE_DECODE_CODECS;
     let available = output
         .lines()
         .filter_map(|line| {

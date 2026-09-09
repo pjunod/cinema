@@ -98,6 +98,24 @@ pub enum TransactionShape {
     ReadBranchWrite,
     ReadExpandWrite,
     VerbatimBatch,
+    /// A conditional write, then a read of the row it may or may not have
+    /// written, returned to the caller — inside one transaction.
+    ///
+    /// Deliberately not [`Self::BranchOnRowsAffected`], and the difference is
+    /// why these sites are written this way: the affected-row count says only
+    /// whether *this* statement wrote. The row already there may belong to an
+    /// earlier, different decision that the caller has to be told about rather
+    /// than handed, so the count is discarded and the row is read.
+    ///
+    /// The replicated twin cannot hold this shape, and does not pretend to.
+    /// `hiqlite_sessions.rs` says so at the site: `txn` cannot carry the read,
+    /// because it returns affected rows — so the port issues the conditional
+    /// write and the read-back as two independently committed operations. The
+    /// race that opens is benign only because the write is a primary-key
+    /// `ON CONFLICT DO NOTHING` and the read is of the winning row either way.
+    /// That is a real difference in atomicity between the backends, recorded
+    /// here rather than left to be rediscovered.
+    WriteReadBack,
     WriteUntilStable,
 }
 
@@ -231,6 +249,13 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::BranchOnRowsAffected,
+    },
+    SqliteTransactionSite {
+        module: "offline.rs",
+        method: "disable_offline_packages",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::VerbatimBatch,
     },
     SqliteTransactionSite {
         module: "offline.rs",
@@ -465,6 +490,20 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "sessions.rs",
+        method: "reserve_producer_recovery",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::WriteReadBack,
+    },
+    SqliteTransactionSite {
+        module: "sessions.rs",
+        method: "settle_producer_recovery",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::WriteReadBack,
     },
     SqliteTransactionSite {
         module: "sessions.rs",
@@ -888,17 +927,30 @@ mod tests {
         methods.sort_unstable();
         methods.dedup();
         assert_eq!(methods.len(), original_len);
-        // 69: the 67 above plus the two `users.rs` boundaries that pair a
-        // password change with revoking that user's tokens —
-        // `reset_password_and_revoke_tokens` and
-        // `promote_user_and_reset_password`. They existed unclassified, which
-        // is what `every_sqlite_transaction_site_is_classified` was failing on;
-        // registering them is what moved this count.
+        // 72 on the merge. Both parents moved this counter from a shared 66
+        // and neither parent's total describes the merged tree, so it is read
+        // off the merge rather than added up — but every boundary each of them
+        // classified is retained, and the arithmetic happens to agree:
+        //
+        // * main reached 69 — 67 after `put_settings_if_generation`'s
+        //   generation-fenced write, plus the two `users.rs` boundaries that
+        //   pair a password change with revoking that user's tokens,
+        //   `reset_password_and_revoke_tokens` and
+        //   `promote_user_and_reset_password`. Those existed unclassified,
+        //   which is what `every_sqlite_transaction_site_is_classified` was
+        //   failing on.
+        // * this effort added `reserve_producer_recovery` and
+        //   `settle_producer_recovery`. The durable decoder-recovery ledger
+        //   has three store methods and two boundaries:
+        //   `producer_recovery_for_epoch` is a read and deliberately opens
+        //   none, because the connection mutex already serializes it against
+        //   every write in the store.
         //
         // The number is written out rather than derived so that adding a
         // transaction boundary has to be a deliberate edit here. That is the
-        // point of the assertion: the two above reached main without one.
-        assert_eq!(methods.len(), 69);
+        // point of the assertion: two of the sites above reached main without
+        // one.
+        assert_eq!(methods.len(), 72);
     }
 
     #[test]

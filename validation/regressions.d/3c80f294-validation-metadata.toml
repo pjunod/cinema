@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["3c80f294"]
+reason = "This commit only records the retained offline decoder recovery evidence in a regressions.d fragment; it does not change runtime or validation behavior."
+ignore = true

@@ -54,9 +54,12 @@ use crate::error::StoreError;
 // permanent recovery guard; v26 retains per-attempt failure history; v27
 // records the requested video identity; v28 stores desired playback
 // selection; v29 fences pointer writes against that selection; v30 indexes
-// terminal analysis identity lookups so retention cannot stall Raft; v31 adds
-// the predecessor drain deadline and its old-writer ownership fence. Every
-// additive step is applied through Raft before the daemon opens the store. v5 remains a
+// terminal analysis identity lookups so retention cannot stall Raft; v31
+// adds the predecessor drain deadline and its old-writer ownership fence; v32
+// persists the decoder-recovery budget; v33 gives sessions a durable recovery
+// epoch; v34 adds an incarnation fence and monotone decoder-recovery state to
+// offline package claims. Every additive step is applied through Raft before
+// the daemon opens the store. v5 remains a
 // supported direct-upgrade source so an offline node is
 // not forced to install every intermediate Cinema release; older or future
 // schemas still fail closed. Version-step targets are named independently of
@@ -82,7 +85,10 @@ const DESIRED_SELECTION_SCHEMA_VERSION: i64 = 28;
 const POINTER_DESIRED_FENCE_SCHEMA_VERSION: i64 = 29;
 const ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA_VERSION: i64 = 30;
 const DRAIN_DEADLINE_SCHEMA_VERSION: i64 = 31;
-pub const AUTH_SCHEMA_VERSION: i64 = DRAIN_DEADLINE_SCHEMA_VERSION;
+const PRODUCER_RECOVERY_SCHEMA_VERSION: i64 = 32;
+const RECOVERY_EPOCH_SCHEMA_VERSION: i64 = 33;
+const OFFLINE_RECOVERY_CLAIM_SCHEMA_VERSION: i64 = 34;
+pub const AUTH_SCHEMA_VERSION: i64 = OFFLINE_RECOVERY_CLAIM_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -109,9 +115,15 @@ const ATTEMPT_ERRORS_SCHEMA_MIGRATION_SOURCE: i64 = DV_RECOVERY_GUARDS_SCHEMA_VE
 const REQUEST_IDENTITY_SCHEMA_MIGRATION_SOURCE: i64 = ATTEMPT_ERRORS_SCHEMA_VERSION;
 const DESIRED_SELECTION_SCHEMA_MIGRATION_SOURCE: i64 = REQUEST_IDENTITY_SCHEMA_VERSION;
 const POINTER_DESIRED_FENCE_SCHEMA_MIGRATION_SOURCE: i64 = DESIRED_SELECTION_SCHEMA_VERSION;
+// The decoder-recovery pair moved behind the desired-selection pair in the
+// first merge, then behind main's terminal-identity index in this freeze. The
+// chain is positional, so a source is whichever version now precedes the step.
 const ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA_MIGRATION_SOURCE: i64 =
     POINTER_DESIRED_FENCE_SCHEMA_VERSION;
 const DRAIN_DEADLINE_SCHEMA_MIGRATION_SOURCE: i64 = ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA_VERSION;
+const PRODUCER_RECOVERY_SCHEMA_MIGRATION_SOURCE: i64 = DRAIN_DEADLINE_SCHEMA_VERSION;
+const RECOVERY_EPOCH_SCHEMA_MIGRATION_SOURCE: i64 = PRODUCER_RECOVERY_SCHEMA_VERSION;
+const OFFLINE_RECOVERY_CLAIM_SCHEMA_MIGRATION_SOURCE: i64 = RECOVERY_EPOCH_SCHEMA_VERSION;
 // Session routing and shared-cache identity are additive durable state and use
 // the existing Hiqlite transport contract. Protocol 4 stays supported so a
 // healthy v9/v10 cluster can authorize the daemon that advances its schema.
@@ -2232,16 +2244,115 @@ impl HiqliteAuthStore {
                             ),
                         ),
                     ];
-                    // A fresh install already declares the column, while a
-                    // stale marker can still name the predecessor version.
-                    // Drop the non-idempotent ALTER in that shape and retain
-                    // the trigger plus version CAS.
                     if self.drain_deadline_column_present().await? {
                         statements.remove(0);
                     }
                     let attempt = self.client().txn(statements).await;
                     self.settle_migration_attempt(DRAIN_DEADLINE_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(PRODUCER_RECOVERY_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    // `CREATE TABLE IF NOT EXISTS` is idempotent, so unlike the
+                    // `ADD COLUMN` steps this one is safe for both voters to
+                    // attempt: the loser's transaction still commits, and its
+                    // conditional `UPDATE` simply matches nothing because the
+                    // winner already moved the marker. `settle_migration_attempt`
+                    // is not what makes that safe — it inspects the marker only
+                    // when the transaction *failed* — so the safety here is the
+                    // statement's own idempotence, and it is worth saying so
+                    // rather than borrowing a guarantee from the wrong place.
+                    let attempt = self
+                        .client()
+                        .txn([
+                            (super::MEDIA_SESSION_PRODUCER_RECOVERY_SCHEMA, params!()),
+                            (
+                                "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                                 WHERE singleton = 1 AND schema_version = $3",
+                                params!(
+                                    PRODUCER_RECOVERY_SCHEMA_VERSION,
+                                    now,
+                                    PRODUCER_RECOVERY_SCHEMA_MIGRATION_SOURCE
+                                ),
+                            ),
+                        ])
+                        .await;
+                    self.settle_migration_attempt(
+                        PRODUCER_RECOVERY_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(RECOVERY_EPOCH_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    // `ADD COLUMN`, so the `REQUEST_IDENTITY` shape rather than
+                    // the `PRODUCER_RECOVERY` one: not idempotent, two voters
+                    // can observe the same predecessor, and
+                    // `settle_migration_attempt` is what turns the loser's
+                    // duplicate-column failure into an observation that the
+                    // step is already done.
+                    let attempt = self
+                        .client()
+                        .txn([
+                            (
+                                super::MEDIA_SESSION_RECOVERY_EPOCH_SCHEMA.to_owned(),
+                                params!(),
+                            ),
+                            (
+                                "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                                 WHERE singleton = 1 AND schema_version = $3"
+                                    .to_owned(),
+                                params!(
+                                    RECOVERY_EPOCH_SCHEMA_VERSION,
+                                    now,
+                                    RECOVERY_EPOCH_SCHEMA_MIGRATION_SOURCE
+                                ),
+                            ),
+                        ])
+                        .await;
+                    self.settle_migration_attempt(RECOVERY_EPOCH_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(
+                    OFFLINE_RECOVERY_CLAIM_SCHEMA_MIGRATION_SOURCE,
+                ) => {
+                    let now = self.now()?;
+                    let attempt = self
+                        .client()
+                        .txn([
+                            (super::OFFLINE_CLAIM_GENERATION_SCHEMA.to_owned(), params!()),
+                            (super::OFFLINE_RECOVERY_STATE_SCHEMA.to_owned(), params!()),
+                            (super::OFFLINE_ALTERNATE_RECIPE_SCHEMA.to_owned(), params!()),
+                            (
+                                super::CACHE_PUBLICATION_GENERATION_SCHEMA.to_owned(),
+                                params!(),
+                            ),
+                            (
+                                super::CACHE_PUBLICATION_GENERATION_GUARD_SCHEMA.to_owned(),
+                                params!(),
+                            ),
+                            (
+                                super::OFFLINE_CLAIM_LIFECYCLE_GUARD_SCHEMA.to_owned(),
+                                params!(),
+                            ),
+                            (super::OFFLINE_RECOVERY_GUARD_SCHEMA.to_owned(), params!()),
+                            (
+                                "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                                 WHERE singleton = 1 AND schema_version = $3"
+                                    .to_owned(),
+                                params!(
+                                    OFFLINE_RECOVERY_CLAIM_SCHEMA_VERSION,
+                                    now,
+                                    OFFLINE_RECOVERY_CLAIM_SCHEMA_MIGRATION_SOURCE
+                                ),
+                            ),
+                        ])
+                        .await;
+                    self.settle_migration_attempt(
+                        OFFLINE_RECOVERY_CLAIM_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
                 }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
@@ -3984,7 +4095,10 @@ fn schema_migration_action(
         | DESIRED_SELECTION_SCHEMA_MIGRATION_SOURCE
         | POINTER_DESIRED_FENCE_SCHEMA_MIGRATION_SOURCE
         | ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA_MIGRATION_SOURCE
-        | DRAIN_DEADLINE_SCHEMA_MIGRATION_SOURCE => {
+        | DRAIN_DEADLINE_SCHEMA_MIGRATION_SOURCE
+        | PRODUCER_RECOVERY_SCHEMA_MIGRATION_SOURCE
+        | RECOVERY_EPOCH_SCHEMA_MIGRATION_SOURCE
+        | OFFLINE_RECOVERY_CLAIM_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -5806,9 +5920,39 @@ mod tests {
             "v30 must advance exactly one step to the drain deadline schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 26,
+            PRODUCER_RECOVERY_SCHEMA_MIGRATION_SOURCE, DRAIN_DEADLINE_SCHEMA_VERSION,
+            "the producer-recovery migration must start from the exact v31 shape"
+        );
+        assert_eq!(
+            PRODUCER_RECOVERY_SCHEMA_MIGRATION_SOURCE + 1,
+            PRODUCER_RECOVERY_SCHEMA_VERSION,
+            "v31 must advance exactly one step to the producer-recovery schema"
+        );
+        assert_eq!(
+            RECOVERY_EPOCH_SCHEMA_MIGRATION_SOURCE, 32,
+            "the recovery-epoch migration must start from the exact v32 shape. \
+             The literal is the point: every other step in this chain asserts \
+             its source against the constant it is defined as, which cannot \
+             fail, so it guards the version bump and not the source"
+        );
+        assert_eq!(
+            RECOVERY_EPOCH_SCHEMA_MIGRATION_SOURCE + 1,
+            RECOVERY_EPOCH_SCHEMA_VERSION,
+            "v32 must advance exactly one step to the recovery-epoch schema"
+        );
+        assert_eq!(
+            OFFLINE_RECOVERY_CLAIM_SCHEMA_MIGRATION_SOURCE, RECOVERY_EPOCH_SCHEMA_VERSION,
+            "the offline recovery-claim migration must start from the exact v33 shape"
+        );
+        assert_eq!(
+            OFFLINE_RECOVERY_CLAIM_SCHEMA_MIGRATION_SOURCE + 1,
+            OFFLINE_RECOVERY_CLAIM_SCHEMA_VERSION,
+            "v33 must advance exactly one step to the offline recovery-claim schema"
+        );
+        assert_eq!(
+            AUTH_SCHEMA_MIGRATION_SOURCE + 29,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v31 step"
+            "this implementation contains every additive v5→v34 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,

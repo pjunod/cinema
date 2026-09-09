@@ -829,6 +829,15 @@ pub struct MediaSessionRoute {
     pub session_id: String,
     pub user_id: i64,
     pub playback_id: String,
+    /// The server-owned budget identity this session belongs to.
+    ///
+    /// Empty for a session that predates the column, which had no epoch and
+    /// therefore no budget. Never a fence and never client-supplied: the
+    /// point of it is that a new request id, a new client session id or a
+    /// different node cannot present themselves as a fresh playback and be
+    /// granted a second automatic recovery.
+    #[serde(default)]
+    pub recovery_epoch: String,
     pub request_fingerprint: String,
     pub owner_node_id: String,
     pub owner_epoch: i64,
@@ -927,6 +936,15 @@ pub struct MediaSessionActivation {
     pub session_id: String,
     pub user_id: i64,
     pub playback_id: String,
+    /// The budget identity this activation belongs to.
+    ///
+    /// A deliberate new play mints one; every continuation carries its
+    /// predecessor's. The caller decides which, because only the caller knows
+    /// whether the playback pointer named a predecessor — and that decision is
+    /// the entire difference between one automatic recovery per playback and
+    /// one per attempt.
+    #[serde(default)]
+    pub recovery_epoch: String,
     /// Activation uses a predecessor CAS when `fence_predecessor` is true:
     /// `Some` requires the playback pointer to name this exact incarnation,
     /// while `None` requires the pointer to be absent. Ordinary starts and
@@ -1382,6 +1400,18 @@ pub struct OfflinePackage {
     pub source_size: i64,
     pub source_mtime: i64,
     pub recipe_hash: Option<String>,
+    /// Monotone token minted every time a queued package is claimed. Every
+    /// worker mutation is fenced by this value so a prior daemon incarnation
+    /// cannot publish after a reset, requeue, or owner handoff.
+    pub claim_generation: i64,
+    /// Owner-independent one-shot decoder recovery state. Unlike
+    /// `recipe_hash`, this survives moving the package to another node.
+    pub decoder_recovery_state: String,
+    /// Current owner's frozen alternate identity once recovery planning
+    /// succeeds. A recovery- or rehome-pending state deliberately has no hash:
+    /// the budget is already spent, but a restart or re-homed owner may still
+    /// finish planning its one permitted alternate.
+    pub alternate_recipe_hash: Option<String>,
     /// Effective encoder rate control captured when the request was created.
     /// A queued package may yield and resume after the global setting changes,
     /// so its recipe must never be rebuilt from mutable policy.
@@ -1923,4 +1953,249 @@ mod tests {
         // Degenerate: the whole title is an article-ish word.
         assert_eq!(sort_title_for("The "), "the ");
     }
+}
+
+/// The most a serialized [`ContinuationDecodeRestriction`] may occupy.
+///
+/// Matches the ledger column's `CHECK`. Bounded because this string is read
+/// back on every ordinary continuation — a seek, a track change, a reopen —
+/// and an unbounded field on that path is an unbounded parse on that path.
+pub const MAX_DECODE_RESTRICTION_BYTES: usize = 4_096;
+
+/// What a playback may no longer do, because doing it once already failed.
+///
+/// After an automatic decode recovery installs software decode, every later
+/// continuation of that playback has to keep it. Not because software is
+/// better, but because the hardware decoder demonstrably could not decode this
+/// source: a seek that silently re-planned onto it would reproduce the fault
+/// the recovery just spent the playback's one attempt on, and the viewer would
+/// watch it fail again with nothing left to try.
+///
+/// Bound to the source and the stream, not to the session. A different source
+/// or a different selected video stream is different work and is entitled to
+/// its own hardware attempt; the same bytes are not.
+///
+/// `deny_unknown_fields` is not tidiness. A later build that adds a field while
+/// keeping `version = 1` would otherwise have it silently dropped here, and a
+/// restriction read as a weaker restriction is the same failure the version
+/// check exists to prevent, one level down.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContinuationDecodeRestriction {
+    /// Serialization version. A restriction this build cannot parse is a
+    /// refusal, never an absence — see [`Self::decode`].
+    pub version: u32,
+    /// Which bytes this is about.
+    pub source_revision_digest: String,
+    /// The absolute input stream index that failed, as the plan names it.
+    pub input_video_stream: u32,
+    pub input_codec: String,
+    /// The backend that could not decode it.
+    pub failed_backend: String,
+    /// What every later continuation must use instead.
+    pub required_backend: String,
+    /// The policy snapshot the restriction was decided under, so a later
+    /// policy change is visible rather than silently inherited.
+    pub policy_revision: u32,
+}
+
+/// The only serialization version this build understands.
+pub const CONTINUATION_DECODE_RESTRICTION_VERSION: u32 = 1;
+
+/// The largest absolute input stream index a restriction may name. Generous
+/// against any real container and finite, which is the property that matters
+/// for a value parsed out of storage on a continuation path.
+pub const MAX_INPUT_VIDEO_STREAM_INDEX: u32 = 4_095;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DecodeRestrictionError {
+    Malformed(String),
+    UnsupportedVersion(u32),
+    TooLarge(usize),
+    InvalidField(&'static str),
+    /// The record is well formed and this build does not know the decoder
+    /// family it names.
+    ///
+    /// Distinct from [`Self::InvalidField`], which every other producer uses
+    /// to mean *the stored record is malformed*. A record that reaches this
+    /// has already passed [`ContinuationDecodeRestriction::decode`]: its
+    /// fields are the right shape and the right length. What is unknown is the
+    /// vocabulary, which is what [`Self::UnsupportedVersion`] says about the
+    /// schema and nothing said about the names. An operator diagnosing a
+    /// mixed-version fleet needs to be told "newer", not "invalid".
+    UnknownBackend(String),
+}
+
+impl std::fmt::Display for DecodeRestrictionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Malformed(detail) => write!(formatter, "decode restriction is malformed: {detail}"),
+            Self::UnsupportedVersion(version) => {
+                write!(formatter, "decode restriction version {version} is unsupported")
+            }
+            Self::TooLarge(bytes) => write!(
+                formatter,
+                "decode restriction is {bytes} bytes, over the {MAX_DECODE_RESTRICTION_BYTES}-byte bound"
+            ),
+            Self::InvalidField(field) => write!(formatter, "decode restriction field {field} is invalid"),
+            Self::UnknownBackend(name) => write!(
+                formatter,
+                "decode restriction names decoder backend {name}, which this build does not know"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DecodeRestrictionError {}
+
+impl ContinuationDecodeRestriction {
+    pub fn encode(&self) -> Result<String, DecodeRestrictionError> {
+        self.validate()?;
+        let encoded = serde_json::to_string(self)
+            .map_err(|error| DecodeRestrictionError::Malformed(error.to_string()))?;
+        if encoded.len() > MAX_DECODE_RESTRICTION_BYTES {
+            return Err(DecodeRestrictionError::TooLarge(encoded.len()));
+        }
+        Ok(encoded)
+    }
+
+    /// Parse a stored restriction, refusing anything it cannot fully validate.
+    ///
+    /// The failure mode this exists to prevent is quiet: a restriction that
+    /// cannot be read is *not* an absent restriction. Treating it as absent
+    /// restores automatic hardware selection for a source that already failed
+    /// on hardware, which is precisely the outcome the row was written to
+    /// prevent — and it would do it invisibly, because "no restriction" and
+    /// "unreadable restriction" look identical to every caller downstream.
+    pub fn decode(stored: &str) -> Result<Self, DecodeRestrictionError> {
+        if stored.len() > MAX_DECODE_RESTRICTION_BYTES {
+            return Err(DecodeRestrictionError::TooLarge(stored.len()));
+        }
+        let parsed: Self = serde_json::from_str(stored)
+            .map_err(|error| DecodeRestrictionError::Malformed(error.to_string()))?;
+        parsed.validate()?;
+        Ok(parsed)
+    }
+
+    fn validate(&self) -> Result<(), DecodeRestrictionError> {
+        if self.version != CONTINUATION_DECODE_RESTRICTION_VERSION {
+            return Err(DecodeRestrictionError::UnsupportedVersion(self.version));
+        }
+        if self.source_revision_digest.len() != 64
+            || !self
+                .source_revision_digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(DecodeRestrictionError::InvalidField(
+                "source_revision_digest",
+            ));
+        }
+        if self.input_codec.is_empty() || self.input_codec.len() > 64 {
+            return Err(DecodeRestrictionError::InvalidField("input_codec"));
+        }
+        // Bounded because this is read back from storage, and a value outside
+        // the range this build could ever have written is evidence the row did
+        // not come from this build.
+        if self.input_video_stream > MAX_INPUT_VIDEO_STREAM_INDEX {
+            return Err(DecodeRestrictionError::InvalidField("input_video_stream"));
+        }
+        // One-based, like every other counter this ledger stores. Zero means
+        // "no policy snapshot", which is exactly what a restriction may not be
+        // vague about.
+        if self.policy_revision == 0 {
+            return Err(DecodeRestrictionError::InvalidField("policy_revision"));
+        }
+        if self.failed_backend.is_empty() || self.failed_backend.len() > 64 {
+            return Err(DecodeRestrictionError::InvalidField("failed_backend"));
+        }
+        // A restriction that requires the backend that just failed is not a
+        // restriction; it is a loop.
+        if self.required_backend.is_empty()
+            || self.required_backend.len() > 64
+            || self.required_backend == self.failed_backend
+        {
+            return Err(DecodeRestrictionError::InvalidField("required_backend"));
+        }
+        Ok(())
+    }
+}
+
+/// Where one epoch's automatic recovery stands.
+///
+/// There is no state that returns to `Reserved`, and no state that releases
+/// the budget. `Exhausted` is not "try again later" — it is this playback's
+/// one automatic attempt, spent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProducerRecoveryState {
+    /// The budget is spent and the successor has not yet been installed.
+    Reserved,
+    /// The alternative ran.
+    Installed,
+    /// The alternative could not be installed, and no second one follows.
+    Exhausted,
+}
+
+impl ProducerRecoveryState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Reserved => "reserved",
+            Self::Installed => "installed",
+            Self::Exhausted => "exhausted",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "reserved" => Some(Self::Reserved),
+            "installed" => Some(Self::Installed),
+            "exhausted" => Some(Self::Exhausted),
+            _ => None,
+        }
+    }
+}
+
+/// One logical playback's automatic decoder recovery, as a durable fact.
+///
+/// The budget has to survive the thing it is recovering from. A producer dies,
+/// a session ends, a node hands the playback to another node — an allowance
+/// held in a process survives none of those, and a viewer whose file cannot be
+/// decoded would get a fresh attempt after every one of them, forever. So the
+/// ledger is keyed by `(user_id, playback_id, recovery_epoch)` and the epoch is
+/// server-owned: a new request id, a new client session, or a different node
+/// cannot present themselves as a new playback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProducerRecoveryReservation {
+    pub user_id: i64,
+    pub playback_id: String,
+    pub recovery_epoch: String,
+    pub failed_incarnation_id: String,
+    pub failed_producer_attempt: u64,
+    pub decision_sequence: u64,
+    pub failed_plan_digest: String,
+    pub alternate_plan_digest: String,
+    pub decode_restriction: Option<ContinuationDecodeRestriction>,
+    pub state: ProducerRecoveryState,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+/// What a caller asks for when it wants the epoch's one attempt.
+///
+/// Carries the exact failure it is recovering from. A replay of the same
+/// request returns the same reservation; a request naming a *different*
+/// failure cannot reuse the row, because that would be a second recovery
+/// wearing the first one's identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProducerRecoveryRequest {
+    pub user_id: i64,
+    pub playback_id: String,
+    pub recovery_epoch: String,
+    pub failed_incarnation_id: String,
+    pub failed_producer_attempt: u64,
+    pub decision_sequence: u64,
+    pub failed_plan_digest: String,
+    pub alternate_plan_digest: String,
+    pub decode_restriction: Option<ContinuationDecodeRestriction>,
 }

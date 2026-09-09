@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["0dcbcdf2"]
+points = ["playback.pipeline", "validation.framework"]
+checks = ["rust-gate", "catalog-contract"]
+reason = "The Rust gate exercises direct parser identity refusal, bounded caller detachment, retained source and admission ownership, selected-stream fact collection, and process-group cleanup across success, timeout, cancellation, and post-spawn error paths. The catalog contract separately freezes the new owned task and deadline shapes and cross-checks the review findings and exact evidence recorded in the decoder recovery status ledger."

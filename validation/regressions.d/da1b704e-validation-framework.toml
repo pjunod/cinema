@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["da1b704e"]
+points = ["validation.framework"]
+checks = ["history-regressions"]
+reason = "The corrective-history audit retains the M1 qualification-repair mapping, including the reviewed module-wide task, timer, and process ownership increments, before an exact receipt or full-suite qualification can be claimed."

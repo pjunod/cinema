@@ -16,21 +16,25 @@ use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use plurx_core::domain::{
-    CacheConsumerKind, CacheConsumerPin, PlaybackEvent, PretranscodeJob,
+    CacheConsumerKind, CacheConsumerPin, OfflinePackage, PlaybackEvent, PretranscodeJob,
     PretranscodeWorkerCapabilities,
 };
 use plurx_core::error::StoreError;
 use plurx_core::store::{keys, PublicationFence, PublicationStore, Store};
 use plurx_core::transcode::{
-    self, EffectiveRateControl, Encoder, EncoderCaps, OutputGrade, Pacing, Pipeline,
-    PipelineDigest, QualityRateControlValidation, QualityRc, RateMode, Recipe, ToneMap,
-    TranscodeOptions,
+    self, AttemptRestrictions, DecodeCacheIdentity, DecodeCapabilities,
+    DecodeCapabilitySnapshotIdentity, DecodeCatalogMetadata, DecodeFacts, DecodePlanPolicy,
+    DecodePolicySnapshot, DecodeSourceIdentity, EffectiveRateControl, Encoder, EncoderCaps,
+    OutputGrade, Pacing, Pipeline, PipelineDigest, QualityRateControlValidation, QualityRc,
+    RateMode, Recipe, ResolvedTranscode, SoftwareDecoder, ToneMap, TranscodeExecution,
+    TranscodeMediaOptions, TranscodeOptions, TranscodeRequest, CACHE_RECIPE_VERSION,
 };
 use sha2::{Digest as _, Sha256};
 use tokio::process::Child;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::admission::Admission;
+use crate::admission::TranscodeResourceEstimate;
 use crate::admission::{
     Admissions, HwSlot, Priority, Workload, DEFAULT_MAX_HW_SESSIONS, QUEUE_WAIT,
 };
@@ -52,6 +56,41 @@ const SESSION_IDLE_SECS: u64 = crate::playback_control::ROLLING_LEASE_TIMEOUT_MS
 const RETRYABLE_CAPACITY_PREFIX: &str = "transcode capacity is temporarily unavailable: ";
 const SERVING_FENCE_PREFIX: &str = "media serving authority is unavailable: ";
 const START_INFRASTRUCTURE_PREFIX: &str = "media session infrastructure is unavailable: ";
+/// How long descriptor-bound fact collection may borrow from a producer's
+/// deadline.
+///
+/// The bound probe is an improvement on the stored-probe plan, not a
+/// precondition for producing anything. Left unbounded it takes the whole
+/// production window from a title whose source probes slowly, and the producer
+/// then makes nothing — every cycle, forever, for that title. Bounded, the
+/// worst case is two seconds and a plan built from stored facts, which is what
+/// every other path already uses. The elapsed time is added back to the
+/// production deadline so observing costs the encode nothing.
+const DECODE_PLAN_PROBE_BUDGET: Duration = Duration::from_secs(2);
+
+/// How long a mixed recovery waits for the CPU it newly needs.
+///
+/// Bounded rather than instantaneous because the usual reason the pool refuses
+/// is a background producer holding a permit, and a background producer yields
+/// — but only once a live waiter is registered, and only at its next
+/// checkpoint. A single non-blocking try turns "wait two seconds" into
+/// "destroy the session", because by this point the predecessor is already
+/// terminated and its scratch already cleared. Bounded rather than unlimited
+/// because §5 says to use the existing startup budget, not to invent a new
+/// wait: a viewer is watching a stall while this runs.
+const MIXED_RECOVERY_CAPACITY_WAIT: Duration = Duration::from_secs(5);
+
+/// Give back what observation spent, so a bounded probe cannot shorten the
+/// encode it was meant to inform.
+fn retain_production_budget_after_planning(
+    production_deadline: Instant,
+    observation_duration: Duration,
+) -> Instant {
+    production_deadline
+        .checked_add(observation_duration)
+        .unwrap_or(production_deadline)
+}
+
 const ADMISSION_POLL: Duration = Duration::from_millis(250);
 const SCRATCH_SAMPLE_INTERVAL: Duration = Duration::from_secs(30);
 const SCRATCH_SAMPLE_MAX_AGE: Duration = Duration::from_secs(45);
@@ -1567,6 +1606,209 @@ impl FfmpegProgressObserver {
     }
 }
 
+/// What one attempt asks its child's stderr to be read as.
+///
+/// `grammar` is `Some` only when a retained contract covers the exact binary
+/// about to run *and* this attempt asked for the log flags that contract was
+/// qualified under. Everything else reads the stream, bounds it, and logs it
+/// without claiming any of it is evidence.
+#[derive(Clone, Default)]
+struct DiagnosticObservation {
+    plan_digest: String,
+    contract_id: Option<String>,
+    grammar: Option<crate::decoder_health::DiagnosticGrammar>,
+}
+
+/// Where a latched fault goes.
+///
+/// Holds the actor handle, the attempt it belongs to, and the identity §7.4's
+/// `ProducerDecodeFault` carries. Built once at spawn so the reader task owns
+/// everything it needs and borrows nothing.
+#[derive(Clone)]
+struct DecodeFaultSink {
+    control: crate::playback_control::RollingControlHandle,
+    producer_attempt: u64,
+    plan_digest: String,
+    input_video_stream: u32,
+    diagnostic_contract: Option<String>,
+}
+
+impl DecodeFaultSink {
+    fn report(
+        &self,
+        fault: crate::decoder_health::DecodeFaultKind,
+        records: u64,
+        action_qualified: bool,
+    ) {
+        self.control.observe_producer_decode_fault(
+            self.producer_attempt,
+            self.plan_digest.clone(),
+            fault,
+            self.input_video_stream,
+            records,
+            self.diagnostic_contract.clone(),
+            action_qualified,
+        );
+    }
+}
+
+impl DiagnosticObservation {
+    /// The sink this attempt's reader reports a latch to, when there is both a
+    /// grammar that can latch one and an actor to receive it.
+    fn fault_sink(&self, observer: &FfmpegProgressObserver) -> Option<DecodeFaultSink> {
+        let grammar = self.grammar.as_ref()?;
+        let control = observer.control.clone()?;
+        Some(DecodeFaultSink {
+            control,
+            producer_attempt: observer.generation,
+            plan_digest: self.plan_digest.clone(),
+            input_video_stream: grammar.selected_stream(),
+            diagnostic_contract: self.contract_id.clone(),
+        })
+    }
+
+    /// The observation this plan's attempt is entitled to.
+    ///
+    /// A grammar only when the installed policy has a contract covering the
+    /// exact binary about to run, for this codec and the decoder measured on
+    /// the plan's exact backend. Everything else is read, bounded and logged
+    /// without being evidence — which is the honest state on a fleet whose
+    /// FFmpeg prints its decode failures without naming a stream.
+    fn for_plan(
+        plan: &ResolvedTranscode,
+        measured: &plurx_core::transcode::decoder_inventory::MeasuredDecoders,
+    ) -> Self {
+        Self::for_plan_against(crate::decoder_health::diagnostic_policy(), plan, measured)
+    }
+
+    fn for_plan_against(
+        policy: &crate::decoder_health::DiagnosticPolicy,
+        plan: &ResolvedTranscode,
+        measured: &plurx_core::transcode::decoder_inventory::MeasuredDecoders,
+    ) -> Self {
+        // The inventory is measured on every boot so the settings surface can
+        // advise before an operator opts in. Reading it must not make an
+        // unqualified plan start asking for diagnostic flags: that would
+        // change the shipping command merely because the daemon upgraded.
+        let named_decoder = if plan.enforces_receipt() {
+            plan.decode()
+                .input_codec()
+                .and_then(|codec| measured.implementation(codec, plan.decode().backend()))
+        } else {
+            None
+        };
+        Self::resolve(
+            policy,
+            plan.plan_digest(),
+            plan.decode().input_codec(),
+            plan.decode().backend(),
+            named_decoder,
+            plan.decode().input_video_stream(),
+        )
+    }
+
+    /// The same decision from the plan facts it actually uses, against an
+    /// explicit policy — so the rule can be tested without a process-wide
+    /// policy and without assembling a plan.
+    fn resolve(
+        policy: &crate::decoder_health::DiagnosticPolicy,
+        plan_digest: String,
+        codec: Option<&str>,
+        backend: plurx_core::transcode::DecodeBackend,
+        named_decoder: Option<&str>,
+        input_video_stream: u32,
+    ) -> Self {
+        let unqualified = Self {
+            plan_digest: plan_digest.clone(),
+            ..Self::default()
+        };
+        let Some(codec) = codec else {
+            return unqualified;
+        };
+        // Only a plan that *names* its decoder may be matched to a contract.
+        //
+        // Guessing the family name here was a real defect: a hardware backend
+        // substitutes `<codec>_qsv` and prints that in `[dec:…]`, and a
+        // software plan with no measured implementation emits no `-c:v` at all
+        // so FFmpeg picks its own default — `av1` selects the native decoder
+        // where it would otherwise choose `libdav1d`. A contract found under
+        // the guessed name yields a grammar that matches nothing, and a
+        // grammar that matches nothing certifies every stream as clean. That
+        // is the exact substitution this milestone exists to remove, so the
+        // answer is no unless the command says the decoder out loud.
+        //
+        // The backend used to be refused here outright, and that refusal was
+        // right about the danger and wrong about the remedy: it made the
+        // recovery this effort exists for unreachable, because only a
+        // software-decode plan could ever latch a qualified fault and only a
+        // hardware-decode plan has a software alternate to be given. The
+        // refusal now lives where the danger actually is — the backend is part
+        // of the contract's coverage key, so a contract qualified on software
+        // `h264` cannot answer for a VideoToolbox `h264`, which prints the
+        // identical `[dec:h264 @ …]` context. Naming the backend is what makes
+        // the two distinguishable; refusing one of them made them moot.
+        let Some(decoder) = named_decoder else {
+            return unqualified;
+        };
+        let Some(contract) = policy.contract_for(
+            codec,
+            decoder,
+            backend.name(),
+            crate::decoder_health::QUALIFIED_STDERR_MODE,
+        ) else {
+            return unqualified;
+        };
+        Self {
+            plan_digest,
+            contract_id: Some(contract.id.clone()),
+            // Input file 0: every movie command builds the video input first,
+            // and a subtitle input that follows it is a later index.
+            grammar: Some(crate::decoder_health::DiagnosticGrammar::new(
+                contract.clone(),
+                0,
+                input_video_stream,
+            )),
+        }
+    }
+
+    /// Whether this attempt may ask its child for the qualified log flags.
+    ///
+    /// Asking without a grammar buys nothing and changes the arguments that
+    /// ship, so the answer is the same question as "is there a grammar".
+    fn qualified_logging(&self) -> bool {
+        self.grammar.is_some()
+    }
+
+    /// An attempt with no semantic plan behind it — a stream copy. It is still
+    /// read and still bounded; there is simply no decode to attribute.
+    ///
+    /// It is named by the session it belongs to rather than by a plan digest,
+    /// because an empty digest names nothing and is indistinguishable across
+    /// attempts — and a receipt that names nothing is evidence about nothing.
+    fn copy(session_id: &str) -> Self {
+        Self {
+            plan_digest: format!("copy:{}", session_log_id(session_id)),
+            ..Self::default()
+        }
+    }
+}
+
+/// A running child and the observation that belongs to it.
+///
+/// §7.1: "The session/producer remains the owner of that handle." The two
+/// travel together from the spawn to the install so that a producer cannot
+/// exist without the reader that decides whether its output is trustworthy.
+struct ObservedFfmpeg {
+    child: Child,
+    diagnostics: crate::decoder_health::ObservedDiagnostics,
+}
+
+impl ObservedFfmpeg {
+    fn into_parts(self) -> (Child, crate::decoder_health::ObservedDiagnostics) {
+        (self.child, self.diagnostics)
+    }
+}
+
 fn spawn_ffmpeg(
     args: &[String],
     encoder_label: &'static str,
@@ -1574,7 +1816,8 @@ fn spawn_ffmpeg(
     progress_observer: FfmpegProgressObserver,
     runtime_cache: &std::path::Path,
     descriptors: FfmpegDescriptors,
-) -> Result<Child, String> {
+    observation: DiagnosticObservation,
+) -> Result<ObservedFfmpeg, String> {
     // `-progress pipe:1` is a global option, so it can lead the vector; the
     // HLS muxer writes to files, which leaves stdout free to carry it.
     let mut full: Vec<String> = vec!["-progress".into(), "pipe:1".into()];
@@ -1633,24 +1876,44 @@ fn spawn_ffmpeg(
         .kill_on_drop(true)
         .spawn()
         .map_err(|e| format!("spawning ffmpeg: {e}"))?;
-    if let Some(stdout) = child.stdout.take() {
+    // Built before the progress observer is moved into its own task: the sink
+    // needs the actor handle and the attempt, and both live on the observer.
+    let fault_sink = observation.fault_sink(&progress_observer);
+    // Both readers are owned. They used to be detached `tokio::spawn`s, which
+    // is why a reader that died looked exactly like a stream that was clean —
+    // and a stream that looked clean is what let a broken title into the
+    // cache. §7.1: detached best-effort logging is insufficient for cache
+    // qualification.
+    let progress = child.stdout.take().map(|stdout| {
         tokio::spawn(async move {
             use tokio::io::{AsyncBufReadExt, BufReader};
             let mut lines = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 progress_observer.apply_line(&line);
             }
-        });
-    }
-    if let Some(stderr) = child.stderr.take() {
+        })
+    });
+    // The fault reaches the actor when it latches, not when the stream ends: a
+    // producer that stops decoding and keeps running holds its stderr open for
+    // the rest of the film, and a fault delivered then arrives after every
+    // success fact it was supposed to precede.
+    let reader = child.stderr.take().map(|stderr| {
         let sid = session_id.to_owned();
         let started = Instant::now();
+        let grammar = observation.grammar.clone();
         tokio::spawn(async move {
-            use tokio::io::{AsyncBufReadExt, BufReader};
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                log_ffmpeg_stderr(&sid, encoder_label, &line);
-            }
+            let accumulator = crate::decoder_health::read_diagnostics_reporting(
+                stderr,
+                grammar,
+                |line| log_ffmpeg_stderr(&sid, encoder_label, line),
+                |_| false,
+                |fault, records, action_qualified| {
+                    if let Some(sink) = fault_sink.as_ref() {
+                        sink.report(fault, records, action_qualified);
+                    }
+                },
+            )
+            .await;
             // Stderr closing means the process ended. Logging it (with how long
             // it ran) distinguishes "ffmpeg died early" from "ffmpeg is still
             // running but produced nothing".
@@ -1659,9 +1922,18 @@ fn spawn_ffmpeg(
                 elapsed_s = started.elapsed().as_secs(),
                 "transcode ffmpeg process ended"
             );
-        });
-    }
-    Ok(child)
+            accumulator
+        })
+    });
+    Ok(ObservedFfmpeg {
+        child,
+        diagnostics: crate::decoder_health::ObservedDiagnostics::new(
+            observation.plan_digest,
+            observation.contract_id,
+            reader,
+            progress,
+        ),
+    })
 }
 
 /// Spawn a copy-session ffmpeg whose **stdout is the media**, not telemetry.
@@ -1678,7 +1950,8 @@ fn spawn_ffmpeg_pipe(
     session_id: &str,
     progress_observer: FfmpegProgressObserver,
     runtime_cache: &std::path::Path,
-) -> Result<(Child, tokio::process::ChildStdout), String> {
+    observation: DiagnosticObservation,
+) -> Result<(ObservedFfmpeg, tokio::process::ChildStdout), String> {
     let mut full: Vec<String> = vec!["-progress".into(), "pipe:2".into()];
     full.extend_from_slice(args);
     let mut command = tokio::process::Command::new(ffmpeg_bin());
@@ -1695,27 +1968,48 @@ fn spawn_ffmpeg_pipe(
         .stdout
         .take()
         .ok_or_else(|| "ffmpeg started without a stdout pipe".to_owned())?;
-    if let Some(stderr) = child.stderr.take() {
+    let reader = child.stderr.take().map(|stderr| {
         let sid = session_id.to_owned();
         let started = Instant::now();
+        let grammar = observation.grammar.clone();
         tokio::spawn(async move {
-            use tokio::io::{AsyncBufReadExt, BufReader};
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                if is_progress_line(&line) {
-                    progress_observer.apply_line(&line);
-                } else {
-                    log_ffmpeg_stderr(&sid, "copy", &line);
-                }
-            }
+            // Progress blocks share this stream with the log, so they are
+            // sorted out before classification: a `key=value` line can never
+            // become a decode record, and the log is not drowned in telemetry.
+            let accumulator = crate::decoder_health::read_diagnostics(
+                stderr,
+                grammar,
+                |line| log_ffmpeg_stderr(&sid, "copy", line),
+                |line| {
+                    if is_progress_line(line) {
+                        progress_observer.apply_line(line);
+                        true
+                    } else {
+                        false
+                    }
+                },
+            )
+            .await;
             tracing::warn!(
                 session = %session_log_id(&sid), encoder = "copy",
                 elapsed_s = started.elapsed().as_secs(),
                 "transcode ffmpeg process ended"
             );
-        });
-    }
-    Ok((child, stdout))
+            accumulator
+        })
+    });
+    Ok((
+        ObservedFfmpeg {
+            child,
+            diagnostics: crate::decoder_health::ObservedDiagnostics::new(
+                observation.plan_digest,
+                observation.contract_id,
+                reader,
+                None,
+            ),
+        },
+        stdout,
+    ))
 }
 
 /// Give libraries loaded by ffmpeg a cache owned by plurxd.
@@ -1734,6 +2028,11 @@ pub(crate) fn configure_ffmpeg_runtime(
     runtime_cache: &std::path::Path,
 ) {
     command.env("XDG_CACHE_HOME", runtime_cache);
+    // §7.1: disable terminal colouring for the child. FFmpeg suppresses it on
+    // a pipe today, but the grammar matches on exact bracketed contexts and a
+    // build or environment that decided otherwise would make every qualified
+    // line unreadable — silently, since an unmatched line is simply unrelated.
+    command.env("AV_LOG_FORCE_NOCOLOR", "1");
 }
 
 /// Is this stderr line one of ffmpeg's `-progress` blocks rather than a log
@@ -1816,8 +2115,74 @@ struct PrepublicationTranscodeRetry {
     file: plurx_core::domain::MediaFile,
     target_height: i64,
     software_threads: Option<usize>,
+    /// The whole CPU cost of this retry's pipeline, read off its resolved
+    /// plan. `Some` only when the encoder is retained, which is the mixed
+    /// case; the demotion path uses `software_threads` instead.
+    ///
+    /// A total rather than a difference, because the difference depends on what
+    /// the session holds *at the moment of the retry* and this recipe is
+    /// frozen before then. The executor subtracts.
+    cpu_total: Option<usize>,
+    /// The pool bound this retry will be admitted against, frozen with the
+    /// rest of the recipe so the executor cannot read a different number than
+    /// the one the recipe was validated under.
+    software_budget: usize,
     software_pool: crate::admission::SwPool,
     runtime_cache: PathBuf,
+    /// Frozen with the rest of the recipe, for the same reason: the grammar
+    /// that will read this attempt is a property of the plan it was resolved
+    /// from, and resolving it again at execution time could answer differently
+    /// from the resolution the actor validated.
+    observation: DiagnosticObservation,
+    /// The same delivery decoded in software, frozen beside this one.
+    ///
+    /// Boxed because it is the same type: an alternate has no alternate of its
+    /// own, and nothing constructs a second level. Held here rather than in a
+    /// second executor slot so the two cannot be reached independently — the
+    /// actor names exactly one of them in its decision, and
+    /// `execute_prepublication_transcode_retry` resolves that name against
+    /// this pair and refuses anything else.
+    decode_alternate: Option<Box<PrepublicationTranscodeRetry>>,
+    /// The durable recovery budget this recipe spends when it is installed.
+    ///
+    /// `Some` only on a decode alternate that a session start found an unspent
+    /// budget for. `None` on the colour-safe retry, on an alternate belonging
+    /// to a session with no durable identity, and on an alternate whose
+    /// playback has already recovered — in which last case there is no
+    /// alternate at all.
+    recovery: Option<Box<DecodeRecoveryReservation>>,
+}
+
+/// The durable recovery budget a decode alternate spends, frozen beside it.
+///
+/// Held on the alternate and on nothing else. The colour-safe retry answers
+/// "this encode route stopped" rather than "this source did not decode", so it
+/// is not a recovery from a decode fault and does not spend the budget; and
+/// [`PrepublicationCopyRetry`] has no field to carry one at all, which is how
+/// the copy path is excluded — structurally, rather than by a runtime check a
+/// later edit could forget to keep. A copy attempt's diagnostic identity is
+/// `copy:<session>` rather than a plan digest, so the store would refuse its
+/// reservation anyway; being unable to write the call is better than finding
+/// out at the store, in the middle of a recovery.
+#[derive(Clone)]
+struct DecodeRecoveryReservation {
+    ledger: crate::playback_control::ProducerRecoveryLedger,
+    /// The plan the fault will be about: the delivered plan this session
+    /// started on.
+    ///
+    /// Frozen here for the reason every other field of this recipe is frozen,
+    /// and for one more — the fault that names the failed plan is reported to
+    /// the *actor*, and the executor that installs the alternate never sees
+    /// it. There is no install-time source for this value that is not a
+    /// re-derivation, and re-deriving a plan in the middle of a recovery is
+    /// exactly what this type exists to prevent.
+    failed_plan_digest: String,
+}
+
+struct PreparedTranscodeRetry {
+    opts: TranscodeOptions,
+    encoder: Encoder,
+    software_threads: Option<usize>,
 }
 
 /// Frozen fallback for the copy reader's one structural-unsupported verdict.
@@ -1899,22 +2264,137 @@ impl Drop for PrepublicationStartSettlement {
     }
 }
 
+/// Build the same delivery options for a software-decoded alternate.
+///
+/// This contract is shared by live replacement and durable offline jobs. It
+/// is intentionally outside the temporary live-HLS feature: offline recovery
+/// is a shipping producer path in both builds, and decoder safety is not a
+/// feature-gated behavior.
+fn decode_restricted_options(
+    delivered: &ResolvedTranscode,
+    alternate: &ResolvedTranscode,
+    opts: &TranscodeOptions,
+) -> Result<Option<TranscodeOptions>, String> {
+    if alternate.decode().backend() != plurx_core::transcode::DecodeBackend::Software {
+        return Err(
+            "the decode-restricted alternate did not resolve to software decode".to_owned(),
+        );
+    }
+    if alternate.decode().input_codec() != delivered.decode().input_codec() {
+        return Err("the decode-restricted alternate changed the input codec".to_owned());
+    }
+    if alternate.encoder() != delivered.encoder() {
+        return Err("the decode-restricted alternate changed the encoder".to_owned());
+    }
+    if alternate.plan_digest() == delivered.plan_digest() {
+        return Ok(None);
+    }
+    if !delivered.enforces_receipt() || !alternate.enforces_receipt() {
+        return Ok(None);
+    }
+    let mut retry_opts = opts.clone();
+    retry_opts.pipeline = alternate.options().pipeline;
+    if retry_opts.pipeline.output_grade() != opts.pipeline.output_grade() {
+        return Err("the decode-restricted alternate changed the frozen color contract".to_owned());
+    }
+    Ok(Some(retry_opts))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OfflineRecoveryState {
+    Primary,
+    Pending,
+    RehomePending,
+    Alternate,
+}
+
+impl OfflineRecoveryState {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "primary" => Ok(Self::Primary),
+            "recovery_pending" => Ok(Self::Pending),
+            "rehome_pending" => Ok(Self::RehomePending),
+            "alternate" => Ok(Self::Alternate),
+            value => Err(format!("unknown offline decoder recovery state {value}")),
+        }
+    }
+}
+
 impl PrepublicationTranscodeRetry {
-    // Keep the frozen source, retry policy, and detached admission ownership as
-    // separate arguments; bundling them would obscure which snapshot each
-    // retry phase is allowed to retain.
-    #[allow(clippy::too_many_arguments)]
-    fn build(
+    /// The alternate a decode fault asks for: the same delivery, decoded in
+    /// software — or `None` when there is no such thing to install.
+    ///
+    /// Deliberately *not* [`Self::prepare`]. That one answers a different
+    /// question — "this encode route failed, what is the one-step colour-safe
+    /// fallback" — and it answers it by changing the pipeline or the encoder.
+    /// A decode fault says nothing about the encoder. The picture that reached
+    /// the viewer's screen was fine when it arrived; what failed was reading
+    /// the source, and the fix is to read it differently.
+    ///
+    /// **The pipeline is taken from the alternate plan, not from the delivered
+    /// options, and that is the whole correctness of this function.** Forcing
+    /// software decode can rewrite the renderer: a vendor-native graph accepts
+    /// only its own decoder, so `resolve_transcode` moves `VppQsv` and
+    /// `TonemapVaapi` to their colour-preserving software renderer on the way
+    /// past. Copying the delivered pipeline instead would disagree with the
+    /// plan and `build`'s guard would refuse the alternate — on exactly the two
+    /// pipelines that decode on the GPU, which is the population that produces
+    /// hardware decode faults in the first place. A first draft did precisely
+    /// that and its test did not catch it, because the fixture was already on
+    /// `Pipeline::Cpu`, where nothing is rewritten.
+    ///
+    /// Reading the pipeline off the plan rather than re-deriving the rule also
+    /// keeps one authority: the rule lives in `resolve_transcode` and is
+    /// private to it, and a copy here would drift the first time a renderer is
+    /// added.
+    ///
+    /// `Ok(None)` for the two cases where an alternate is not a thing that
+    /// exists, both of which would otherwise install a producer that cannot
+    /// help:
+    ///
+    /// * a software encoder has no hardware slot to keep, so there is no mixed
+    ///   transition to make and nothing this function returns would be true of
+    ///   the recipe `build` produced;
+    /// * a delivered plan that already decoded in software has no alternate —
+    ///   the digests are equal, so the "recovery" would tear down the failed
+    ///   child and respawn the identical command.
+    /// * both the failed path and its same-codec software successor must use
+    ///   the receipt-qualified identity. A qualified fault is not permission
+    ///   to install a producer whose output cannot carry qualified evidence.
+    ///
+    /// `software_threads` is `None`, which is what makes this the mixed
+    /// transition rather than a demotion. The encoder and its hardware slot
+    /// stay; what grows is the CPU reservation, by the difference the executor
+    /// takes from `cpu_total`. Returning `Some` here would hand the hardware
+    /// slot back and leave a live hardware encoder with nothing reserved for
+    /// it.
+    ///
+    fn prepare_decode_restricted(
+        delivered: &ResolvedTranscode,
+        alternate: &ResolvedTranscode,
+        opts: &TranscodeOptions,
+        encoder: Encoder,
+    ) -> Result<Option<PreparedTranscodeRetry>, String> {
+        if encoder == Encoder::Software {
+            return Ok(None);
+        }
+        Ok(
+            decode_restricted_options(delivered, alternate, opts)?.map(|retry_opts| {
+                PreparedTranscodeRetry {
+                    opts: retry_opts,
+                    encoder,
+                    software_threads: None,
+                }
+            }),
+        )
+    }
+
+    fn prepare(
         file: &plurx_core::domain::MediaFile,
         opts: &TranscodeOptions,
         encoder: Encoder,
         software_rate_control: EffectiveRateControl,
-        pacing: Pacing,
-        dir: &std::path::Path,
-        presentation_contract_fingerprint: &str,
-        software_pool: crate::admission::SwPool,
-        runtime_cache: PathBuf,
-    ) -> Result<Self, String> {
+    ) -> Result<PreparedTranscodeRetry, String> {
         let mut retry_opts = opts.clone();
         let retry_encoder = if opts.pipeline.on_gpu() {
             retry_opts.pipeline = opts.pipeline.fallback().ok_or_else(|| {
@@ -1930,6 +2410,7 @@ impl PrepublicationTranscodeRetry {
         };
         let software_threads = (retry_encoder == Encoder::Software)
             .then(|| Workload::of(file, opts.target_height).software_threads());
+
         if retry_opts.target_height != opts.target_height
             || retry_opts.pipeline.output_grade() != opts.pipeline.output_grade()
             || retry_opts.audio_index != opts.audio_index
@@ -1941,28 +2422,79 @@ impl PrepublicationTranscodeRetry {
             );
         }
         retry_opts.software_threads = software_threads.map(|threads| threads as u32);
-        let args = transcode::hls_args(
-            file,
-            retry_encoder,
-            &retry_opts,
-            pacing,
-            &dir.to_string_lossy(),
-        );
+        Ok(PreparedTranscodeRetry {
+            opts: retry_opts,
+            encoder: retry_encoder,
+            software_threads,
+        })
+    }
+
+    // Keep the frozen source, retry policy, resolved decoder plan, and
+    // detached admission ownership separate: each belongs to a different
+    // immutable snapshot.
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        file: &plurx_core::domain::MediaFile,
+        prepared: PreparedTranscodeRetry,
+        plan: &ResolvedTranscode,
+        pacing: Pacing,
+        dir: &std::path::Path,
+        presentation_contract_fingerprint: &str,
+        software_pool: crate::admission::SwPool,
+        software_budget: usize,
+        runtime_cache: PathBuf,
+        measured_decoders: &plurx_core::transcode::decoder_inventory::MeasuredDecoders,
+        // What this recipe is for, in the operator-facing identity. `build` is
+        // shared by the colour-safe retry and the software-decode alternate,
+        // and the identity is `pub` on a serialized type — so labelling both
+        // `one-step-color-safe` would name the alternate for the thing it is
+        // explicitly not, and contradict the reason the decision puts beside
+        // it.
+        kind: &'static str,
+    ) -> Result<Self, String> {
+        let PreparedTranscodeRetry {
+            opts: retry_opts,
+            encoder: retry_encoder,
+            software_threads,
+        } = prepared;
+        // Encoder and pipeline alone are not "this plan is for this retry".
+        // They happen to catch the plan of the route being replaced, because
+        // `prepare` always changes one of them — but a plan for a different
+        // title, height, audio track or rate control would pass, and the retry
+        // publishes under that plan's key. Check the whole prepared request.
+        if plan.encoder() != retry_encoder
+            || plan.options().pipeline != retry_opts.pipeline
+            || plan.options().target_height != retry_opts.target_height
+            || plan.options().audio_index != retry_opts.audio_index
+            || plan.options().effective_rate_control != retry_opts.effective_rate_control
+            || plan.cache_identity() != &DecodeCacheIdentity::from_media_file(file)
+        {
+            return Err("one-step retry plan disagrees with its prepared encode route".to_owned());
+        }
+        let observation = DiagnosticObservation::for_plan(plan, measured_decoders);
+        let execution =
+            TranscodeExecution::from_options(file, &retry_opts, pacing, &dir.to_string_lossy())
+                .map_err(|error| error.to_string())?
+                .observing_qualified_grammar(observation.qualified_logging());
+        let args = transcode::hls_args(plan, &execution);
         let fingerprint_body = serde_json::json!({
-            "version": 1,
+            "version": 2,
             "args": &args,
+            "plan": plan.plan_digest(),
             "encoder": retry_encoder.label(),
             "pipeline": retry_opts.pipeline.name(),
             "presentation_contract_fingerprint": presentation_contract_fingerprint,
         });
         let fingerprint = hex::encode(Sha256::digest(fingerprint_body.to_string().as_bytes()));
         let identity = format!(
-            "one-step-color-safe:{}:{}",
+            "{kind}:{}:{}",
             retry_encoder.label(),
             retry_opts.pipeline.name()
         );
         let startup_kind = if retry_encoder == Encoder::Software {
             crate::playback_control::ProducerStartupKind::Software
+        } else if plan.decode().backend() == plurx_core::transcode::DecodeBackend::Software {
+            crate::playback_control::ProducerStartupKind::MixedSoftwareDecode
         } else {
             crate::playback_control::ProducerStartupKind::Hardware
         };
@@ -1977,11 +2509,46 @@ impl PrepublicationTranscodeRetry {
             encoder: retry_encoder,
             pipeline: retry_opts.pipeline,
             file: file.clone(),
-            target_height: opts.target_height,
+            target_height: retry_opts.target_height,
             software_threads,
+            // Read off the resolved retry plan, not off the encoder's name:
+            // the mixed cost is a property of the pipeline this retry will
+            // actually run, and the estimate is the one type that knows it.
+            cpu_total: (retry_encoder != Encoder::Software).then(|| {
+                crate::admission::TranscodeResourceEstimate::of(
+                    plan,
+                    &Workload::of(file, retry_opts.target_height),
+                )
+                .cpu_threads
+            }),
+            software_budget,
             software_pool,
             runtime_cache,
+            observation,
+            decode_alternate: None,
+            recovery: None,
         })
+    }
+
+    /// Freeze the software-decode alternate beside this recipe.
+    ///
+    /// A builder rather than a tenth argument to [`Self::build`], which
+    /// already carries `#[allow(clippy::too_many_arguments)]` and whose
+    /// argument list is the thing that attribute is apologising for.
+    fn with_decode_alternate(mut self, alternate: Option<PrepublicationTranscodeRetry>) -> Self {
+        self.decode_alternate = alternate.map(Box::new);
+        self
+    }
+    /// Freeze the durable recovery budget onto this alternate.
+    ///
+    /// Separate from [`Self::with_decode_alternate`] and applied to the
+    /// alternate rather than to the recipe that holds it, because the budget
+    /// belongs to the recipe that spends it. Threading it through the holder
+    /// would put a ledger on the colour-safe retry, where the next reader
+    /// would reasonably conclude that an ordinary retry spends the recovery.
+    fn with_recovery(mut self, recovery: DecodeRecoveryReservation) -> Self {
+        self.recovery = Some(Box::new(recovery));
+        self
     }
 }
 
@@ -2051,8 +2618,54 @@ async fn terminate_exact_prepublication_child(
             "producer attempt {producer_attempt} termination returned before confirmed reap"
         ));
     }
+    // The diagnostics are deliberately left alone here. The child's supervisor
+    // owns them: it is the one task that knows how the process actually ended,
+    // so it derives the disposition rather than assuming one, and it holds no
+    // session lock while it settles. Taking them here would be a race for the
+    // same handle — whoever won would decide whether the attempt got a receipt
+    // at all — and two of this function's callers hold `child_transition`
+    // across the call, whose own comment forbids sleeping under it.
+    //
+    // The child is confirmed reaped by this point, so the supervisor's own
+    // `wait` has already returned and its settle is imminent.
     *slot = None;
     Ok(())
+}
+
+/// Log what one attempt's observation concluded.
+///
+/// M3b owns the reading; M3b2 is what carries the fault to the actor and M3c
+/// is what lets a receipt refuse a cache artifact. Until then this is the
+/// visible half: an operator can see that a producer which exited cleanly was
+/// failing to decode the whole time, which before this could not be seen at
+/// all.
+fn report_producer_health(attempt: &str, receipt: &crate::decoder_health::ProducerHealthReceipt) {
+    let fault = receipt
+        .terminal_fault
+        .map(crate::decoder_health::DecodeFaultKind::name);
+    if fault.is_some() || receipt.video_decode_error_records > 0 {
+        tracing::warn!(
+            attempt,
+            plan = %receipt.plan_digest,
+            qualification = receipt.qualification.name(),
+            exit = receipt.exit_disposition.name(),
+            decode_errors = receipt.video_decode_error_records,
+            contract_qualified_errors = receipt.contract_qualified_error_records,
+            fault = fault.unwrap_or("none"),
+            contract = receipt.diagnostic_contract.as_deref().unwrap_or("none"),
+            "producer decode diagnostics"
+        );
+        return;
+    }
+    tracing::debug!(
+        attempt,
+        plan = %receipt.plan_digest,
+        qualification = receipt.qualification.name(),
+        exit = receipt.exit_disposition.name(),
+        observation_complete = receipt.observation_complete,
+        contract = receipt.diagnostic_contract.as_deref().unwrap_or("none"),
+        "producer decode diagnostics"
+    );
 }
 
 async fn terminate_current_prepublication_child(session: &Session) -> Result<(), String> {
@@ -3042,6 +3655,42 @@ async fn fail_prepublication_transaction(session: &Arc<Session>, reason: String)
     let _ = settled.await;
 }
 
+/// Close a decode alternate's reservation, and never fail a session over it.
+///
+/// The budget is not refunded either way, so the outcome recorded is a fact
+/// about what happened rather than a permission for what happens next. What
+/// makes it worth writing at all is the next continuation of this playback:
+/// a settled row reads as a spent budget, and a row left `Reserved` reads as a
+/// live one — which withholds every later alternate for this playback. That is
+/// the safe direction to fail in, and it is why a settlement that does not
+/// land is logged at error rather than retried or escalated.
+async fn settle_decode_recovery(
+    recovery: &DecodeRecoveryReservation,
+    outcome: crate::playback_control::RecoveryOutcome,
+    decision_sequence: u64,
+    sid: &str,
+) {
+    match recovery.ledger.settle(outcome, unix_ms()).await {
+        Ok(crate::playback_control::RecoverySettlement::Settled) => {}
+        Ok(settlement) => tracing::error!(
+            session = %session_log_id(sid),
+            decision_sequence,
+            outcome = ?outcome,
+            settlement = settlement.label(),
+            "a recovery reservation could not be closed; later continuations of \
+             this playback will find it still held"
+        ),
+        Err(error) => tracing::error!(
+            session = %session_log_id(sid),
+            decision_sequence,
+            outcome = ?outcome,
+            %error,
+            "settling a recovery reservation failed; later continuations of \
+             this playback will find it still held"
+        ),
+    }
+}
+
 async fn execute_prepublication_transcode_retry(
     session: Arc<Session>,
     retry: &PrepublicationTranscodeRetry,
@@ -3051,10 +3700,74 @@ async fn execute_prepublication_transcode_retry(
     first_reason: crate::playback_control::ProducerDecisionReason,
     sid: &str,
 ) -> Result<(), String> {
-    if actor_recipe != &retry.actor_recipe {
+    // The actor names exactly one of the two frozen recipes. Resolve the name
+    // rather than assuming the colour-safe one: a qualified decode fault
+    // installs the software-decode alternate, and installing the wrong one
+    // would respawn the identical command the fault was about.
+    let retry = if actor_recipe == &retry.actor_recipe {
+        retry
+    } else if retry
+        .decode_alternate
+        .as_deref()
+        .is_some_and(|alternate| actor_recipe == &alternate.actor_recipe)
+    {
+        retry
+            .decode_alternate
+            .as_deref()
+            .expect("the alternate matched on the line above")
+    } else {
         return Err(format!(
             "actor retry recipe did not match immutable executor recipe ({first_reason:?})"
         ));
+    };
+    // The durable budget, taken before anything is torn down.
+    //
+    // Ordering is the correctness here. `begin_child_replacement` is the point
+    // after which this session has no producer until a new one is installed,
+    // so a refusal that arrives later turns "this playback already recovered"
+    // into "this playback has nothing playing". Reserving first means a
+    // refusal leaves the failed producer exactly where the actor left it.
+    //
+    // Only the alternate carries a ledger; see `DecodeRecoveryReservation`.
+    let recovery = retry.recovery.as_deref();
+    if let Some(recovery) = recovery {
+        let reservation = recovery
+            .ledger
+            .reserve(
+                failed_attempt,
+                decision_sequence,
+                &recovery.failed_plan_digest,
+                // The successor's own plan, read off the recipe that is about
+                // to run, so the row records the plan this session installs
+                // rather than one computed a second time from policy.
+                &retry.observation.plan_digest,
+                unix_ms(),
+            )
+            .await
+            .map_err(|error| format!("the recovery budget could not be reserved: {error}"))?;
+        if !matches!(
+            reservation,
+            crate::playback_control::RecoveryReservation::Held(_)
+        ) {
+            // Session start already read this epoch and withheld the alternate
+            // when it found a row, so an alternate that reaches here and is
+            // refused means the row appeared between that read and now: two
+            // nodes reaching the same playback's fault at once, or a
+            // predecessor settling late. The budget is not this attempt's to
+            // spend, and installing anyway is the second automatic recovery
+            // the ledger exists to make impossible.
+            tracing::warn!(
+                session = %session_log_id(sid),
+                decision_sequence,
+                failed_attempt,
+                reservation = reservation.label(),
+                "a decode alternate was refused its recovery budget"
+            );
+            return Err(format!(
+                "this playback's recovery budget is {}",
+                reservation.label()
+            ));
+        }
     }
     let mut replacement = session.begin_child_replacement().await;
     // Cancellation after the actor decision has been observed must fence the
@@ -3080,6 +3793,9 @@ async fn execute_prepublication_transcode_retry(
             .await;
 
         if let Some(threads) = retry.software_threads {
+            // A real demotion: the encoder becomes software, so the hardware
+            // slot goes back. Forced, because the viewer is already watching
+            // and this is the documented mid-session fallback.
             let work = Workload::of(&retry.file, retry.target_height);
             let permit = retry.software_pool.take_forced(threads);
             if permit.threads() != threads {
@@ -3089,6 +3805,40 @@ async fn execute_prepublication_transcode_retry(
                 ));
             }
             session.demote_to_software(work, permit);
+        } else if let Some(total) = retry.cpu_total {
+            // Not a demotion. The encoder — and its hardware slot — stay
+            // exactly where they are; what changes is how much of the pipeline
+            // runs on the CPU. The session is already paying for what it
+            // reserved at admission, so what it owes is the difference. Asking
+            // for the whole estimate again would make it pay twice to end up
+            // owning once — and on a box where twice does not fit, the retry
+            // would fail over capacity the session already held.
+            let held = session.software_threads_held();
+            if let Some(delta) = total.checked_sub(held).filter(|delta| *delta > 0) {
+                // Registering the wait is what makes a background producer
+                // checkpoint and yield; without it the pool refuses a live
+                // caller outright while background work runs, and this failure
+                // arrives after the predecessor is already gone.
+                let _queued = retry.software_pool.wait_for_capacity();
+                let deadline = Instant::now() + MIXED_RECOVERY_CAPACITY_WAIT;
+                let permit = loop {
+                    if let Some(permit) = retry
+                        .software_pool
+                        .try_take_delta(retry.software_budget, delta)
+                    {
+                        break permit;
+                    }
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Err(format!(
+                            "no CPU capacity for a {delta}-thread mixed decode retry within {:.1}s",
+                            MIXED_RECOVERY_CAPACITY_WAIT.as_secs_f64()
+                        ));
+                    }
+                    tokio::time::sleep(ADMISSION_POLL.min(deadline - now)).await;
+                };
+                session.add_cpu_decode_reservation(permit);
+            }
         }
 
         session
@@ -3110,19 +3860,24 @@ async fn execute_prepublication_transcode_retry(
                             .map(std::os::fd::AsRawFd::as_raw_fd),
                         ..FfmpegDescriptors::default()
                     },
+                    retry.observation.clone(),
                 )
                 .map_err(|error| format!("spawning immutable fallback recipe: {error}"))
             })
             .await?;
         *session.encoder_label.lock().await = retry.encoder.label();
-        *session.class.lock().expect("class mutex") =
-            Workload::of(&retry.file, retry.target_height).class(
-                if retry.encoder == Encoder::Software {
-                    crate::admission::SOFTWARE
-                } else {
-                    retry.encoder.label()
-                },
-            );
+        // One writer for the class, and it knows which of the three shapes
+        // this attempt is. A mixed pipeline filed under the all-hardware
+        // bucket poisons that bucket's measured speed for the work actually in
+        // it, and the measurement is what admits the next session.
+        let work = Workload::of(&retry.file, retry.target_height);
+        *session.class.lock().expect("class mutex") = if retry.encoder == Encoder::Software {
+            work.class(crate::admission::SOFTWARE)
+        } else if retry.cpu_total.is_some() {
+            work.mixed_class(retry.encoder.family_name())
+        } else {
+            work.class(retry.encoder.label())
+        };
         session
             .control
             .decision_applied(decision_sequence, Some(producer_attempt))
@@ -3152,11 +3907,33 @@ async fn execute_prepublication_transcode_retry(
                     "actor rejected failed retry DecisionApplied acknowledgement"
                 );
             }
+            // The budget is spent by the attempt, not by the outcome. A
+            // recovery that was reserved and then failed to install has been
+            // attempted, and refunding it here would hand the same playback a
+            // second try at the decode that just failed twice.
+            if let Some(recovery) = recovery {
+                settle_decode_recovery(
+                    recovery,
+                    crate::playback_control::RecoveryOutcome::Exhausted,
+                    decision_sequence,
+                    sid,
+                )
+                .await;
+            }
             replacement.settle_terminal_rejection();
             return Err(error);
         }
     };
     replacement.complete();
+    if let Some(recovery) = recovery {
+        settle_decode_recovery(
+            recovery,
+            crate::playback_control::RecoveryOutcome::Installed,
+            decision_sequence,
+            sid,
+        )
+        .await;
+    }
     tracing::info!(
         session = %session_log_id(sid),
         producer_attempt,
@@ -3219,6 +3996,7 @@ async fn execute_prepublication_copy_retry(
                     ),
                     &retry.runtime_cache,
                     FfmpegDescriptors::default(),
+                    DiagnosticObservation::copy(sid),
                 )
                 .map_err(|error| format!("spawning immutable copy fallback: {error}"))
             })
@@ -4017,6 +4795,11 @@ impl LifecycleTestPause {
 struct AttemptChild {
     producer_attempt: u64,
     pid: Option<u32>,
+    /// The reader that decides whether this attempt's output can be trusted.
+    ///
+    /// It lives with the child rather than with the session because it is
+    /// scoped to one attempt: a successor gets its own counters, and a
+    /// predecessor's fault must not follow the attempt that replaced it.
     terminal: Arc<std::sync::Mutex<Option<AttemptChildTerminal>>>,
     terminal_notify: Arc<tokio::sync::Notify>,
     commands: tokio::sync::mpsc::UnboundedSender<AttemptChildCommand>,
@@ -4056,12 +4839,26 @@ impl AttemptChildTerminal {
 }
 
 impl AttemptChild {
+    /// Construct the child and, with it, the reader that decides whether its
+    /// output can be trusted.
+    ///
+    /// The reader is a constructor argument rather than something attached
+    /// afterwards, because the supervisor is spawned inside this function and
+    /// takes the reader when the process ends: a child that is already dead
+    /// when construction returns could otherwise reach that take before the
+    /// reader was stored, and settle nothing at all.
     fn new(
         producer_attempt: u64,
         mut child: Child,
         control: crate::playback_control::RollingControlHandle,
+        diagnostics: Option<crate::decoder_health::ObservedDiagnostics>,
     ) -> Self {
         let pid = child.id();
+        // Owned by the supervisor alone. Nothing else may take it: two owners
+        // would race for one handle, and whoever won would decide whether the
+        // attempt got a receipt at all.
+        let supervisor_diagnostics = std::sync::Mutex::new(diagnostics);
+        let supervisor_control = control.clone();
         let terminal = Arc::new(std::sync::Mutex::new(None));
         let terminal_notify = Arc::new(tokio::sync::Notify::new());
         let (commands, mut command_receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -4220,6 +5017,26 @@ impl AttemptChild {
             for reply in terminate_replies {
                 let _ = reply.send(terminal.wait_result());
             }
+            // The one place that knows how this attempt's process actually
+            // ended, and the one place with no session lock held. §7.4 keeps
+            // diagnostic completion separate from process exit: the receipt is
+            // settled *after* the terminal is published, because a process can
+            // exit long before its stderr reaches EOF and "the process
+            // finished" is not "we saw everything it said".
+            let diagnostics = supervisor_diagnostics
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some(diagnostics) = diagnostics {
+                let receipt = diagnostics
+                    .settle(
+                        crate::decoder_health::DIAGNOSTIC_DRAIN_BUDGET,
+                        Self::attempt_exit_disposition(&terminal),
+                    )
+                    .await;
+                report_producer_health(&format!("attempt {producer_attempt}"), &receipt);
+                supervisor_control.observe_producer_diagnostics_complete(producer_attempt, receipt);
+            }
         });
         Self {
             producer_attempt,
@@ -4233,6 +5050,25 @@ impl AttemptChild {
             signal_after_flow_reservation_pause,
             #[cfg(test)]
             terminate_before_reap_pause,
+        }
+    }
+
+    /// How this attempt's process ended, in the receipt's vocabulary.
+    ///
+    /// Only a process that exited zero on its own ran to the end of its input.
+    /// Everything else — a non-zero exit, a signal, a wait this daemon could
+    /// not perform — is a failed termination, and a failed termination never
+    /// qualifies whatever its stream looked like.
+    fn attempt_exit_disposition(
+        terminal: &AttemptChildTerminal,
+    ) -> crate::decoder_health::ExitDisposition {
+        match terminal {
+            AttemptChildTerminal::Exited(status, _) if status.success() => {
+                crate::decoder_health::ExitDisposition::CleanEnd
+            }
+            AttemptChildTerminal::Exited(_, _) | AttemptChildTerminal::WaitFailed(_, _) => {
+                crate::decoder_health::ExitDisposition::FailedTermination
+            }
         }
     }
 
@@ -4783,6 +5619,11 @@ struct Session {
     supersession_user: String,
     /// The player instance that owns this session — the supersession key.
     playback_id: String,
+    /// The durable identity this session reserves its recovery budget against.
+    ///
+    /// `None` for a cached serve and for a test fixture: neither has a
+    /// producer, so neither can fault, so neither can spend a budget.
+    recovery: Option<SessionRecoveryIdentity>,
     /// Whether this session's height came from server Auto policy. A manual
     /// height is sticky across a stall reopen; only Auto sessions may move
     /// down the ladder without another viewer choice.
@@ -4905,6 +5746,11 @@ struct Session {
     /// released the same two ways as the hardware slot, for the same two
     /// reasons: promptly via `release_software`, completely via drop.
     sw_permit: std::sync::Mutex<Option<crate::admission::SwPermit>>,
+    /// Additional CPU this session reserved *after* admission, when a recovery
+    /// moved more of its pipeline onto the CPU. Held separately rather than
+    /// replacing `sw_permit`, because replacing it drops the original — the
+    /// session would pay for both and end up owning only the second.
+    sw_delta_permit: std::sync::Mutex<Option<crate::admission::SwPermit>>,
     /// Bytes of segment actually handed to this client, and how fast.
     ///
     /// The player cannot measure this for itself on every transport: native
@@ -5136,6 +5982,34 @@ fn ahead_of(index: &SegmentIndex, fetched_end_ms: i64) -> Option<Ahead> {
 }
 
 impl Session {
+    /// The identity a reservation against the recovery ledger is keyed by,
+    /// when this session has one.
+    ///
+    /// `None` for a cached serve and a test fixture, which have no producer.
+    /// `None` too for a legacy process-local start and a relayed worker start:
+    /// both reach the daemon without a server-minted epoch, so both mean *no
+    /// budget* rather than *an unspent budget* — a distinction a caller must
+    /// not collapse, because reading "no epoch" as "a fresh one" grants an
+    /// automatic recovery per attempt on exactly the paths that have no
+    /// durable bound.
+    ///
+    /// The filter checks all three fields rather than the epoch alone. The
+    /// store refuses a non-positive `user_id`, an empty incarnation and an
+    /// empty epoch, and it refuses them separately — so a `Some` this method
+    /// returned on the strength of the epoch alone would be a reservation the
+    /// store rejects at the moment it is needed. Today the three legacy sites
+    /// zero all three together and the epoch check happens to catch them, but
+    /// "happens to" is not a contract, and this method is the one place a
+    /// caller is entitled to trust.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn recovery_identity(&self) -> Option<&SessionRecoveryIdentity> {
+        self.recovery.as_ref().filter(|recovery| {
+            recovery.user_id > 0
+                && !recovery.incarnation_id.is_empty()
+                && !recovery.recovery_epoch.is_empty()
+        })
+    }
+
     fn compatibility_producer_attempt(&self) -> u64 {
         *self
             .compatibility_attempt
@@ -5603,7 +6477,7 @@ impl Session {
         spawn: F,
     ) -> Result<(), String>
     where
-        F: FnOnce() -> Result<Child, String>,
+        F: FnOnce() -> Result<ObservedFfmpeg, String>,
     {
         let mut slot = self.child.lock().await;
         if let Some(child) = slot.as_ref() {
@@ -5612,11 +6486,12 @@ impl Session {
                 child.producer_attempt
             ));
         }
-        let candidate = spawn()?;
+        let (candidate, diagnostics) = spawn()?.into_parts();
         *slot = Some(AttemptChild::new(
             producer_attempt,
             candidate,
             self.control.clone(),
+            Some(diagnostics),
         ));
         drop(slot);
 
@@ -5682,7 +6557,7 @@ impl Session {
         spawn: F,
     ) -> Result<tokio::process::ChildStdout, String>
     where
-        F: FnOnce() -> Result<(Child, tokio::process::ChildStdout), String>,
+        F: FnOnce() -> Result<(ObservedFfmpeg, tokio::process::ChildStdout), String>,
     {
         let mut slot = self.child.lock().await;
         if let Some(child) = slot.as_ref() {
@@ -5691,11 +6566,13 @@ impl Session {
                 child.producer_attempt
             ));
         }
-        let (candidate, stdout) = spawn()?;
+        let (observed, stdout) = spawn()?;
+        let (candidate, diagnostics) = observed.into_parts();
         *slot = Some(AttemptChild::new(
             producer_attempt,
             candidate,
             self.control.clone(),
+            Some(diagnostics),
         ));
         drop(slot);
 
@@ -5846,6 +6723,7 @@ impl Session {
                         producer_attempt,
                         candidate,
                         self.control.clone(),
+                        None,
                     ));
                     drop(install);
                     None
@@ -5886,6 +6764,11 @@ impl Session {
 
     fn release_software_after_confirmed_reap(&self) {
         let _ = self.sw_permit.lock().expect("sw permit mutex").take();
+        let _ = self
+            .sw_delta_permit
+            .lock()
+            .expect("sw delta permit mutex")
+            .take();
     }
 
     /// The bookkeeping half of the hardware→software fallback, split out so a
@@ -5896,6 +6779,43 @@ impl Session {
     /// admission class flips to software, so the speeds measured from here on
     /// are recorded as what they are rather than poisoning the hardware
     /// class's record with a software encoder's numbers.
+    /// The mixed transition: keep the encoder and its hardware slot, add the
+    /// CPU the pipeline has started spending.
+    ///
+    /// Deliberately not [`Self::demote_to_software`]. Releasing the hardware
+    /// slot here would leave a live hardware encoder running with nothing
+    /// reserved for it, and the next hardware start would be admitted onto the
+    /// same block — one slot authorizing two encoders, which is the exact
+    /// contention the cap exists to prevent. The class becomes a mixed one for
+    /// the same reason the demotion changes class: measurements recorded under
+    /// the all-hardware class would make every later hardware admission
+    /// decision from numbers a software decode produced.
+    fn add_cpu_decode_reservation(&self, permit: crate::admission::SwPermit) {
+        *self.sw_delta_permit.lock().expect("sw delta permit mutex") = Some(permit);
+    }
+
+    /// CPU threads this session has reserved, across both slots.
+    ///
+    /// A recovery that moves more of the pipeline onto the CPU owes the
+    /// *difference*, not the whole estimate: the session is already paying for
+    /// what it reserved at admission, and asking for the full amount again
+    /// makes it pay twice to end up owning once.
+    fn software_threads_held(&self) -> usize {
+        let base = self
+            .sw_permit
+            .lock()
+            .expect("sw permit mutex")
+            .as_ref()
+            .map_or(0, crate::admission::SwPermit::threads);
+        let delta = self
+            .sw_delta_permit
+            .lock()
+            .expect("sw delta permit mutex")
+            .as_ref()
+            .map_or(0, crate::admission::SwPermit::threads);
+        base + delta
+    }
+
     fn demote_to_software(&self, work: Workload<'_>, permit: crate::admission::SwPermit) {
         self.release_hardware_after_confirmed_reap();
         *self.class.lock().expect("class mutex") = work.software_class();
@@ -7838,6 +8758,36 @@ pub struct DeliveryCandidate {
     pub started_unix: i64,
 }
 
+/// The durable identity a session reserves its recovery budget against.
+///
+/// Three values that travel together because they are one thing: the ledger
+/// `media_session_producer_recovery` is keyed by `(user_id, playback_id,
+/// recovery_epoch)`, and a reservation additionally names the incarnation that
+/// failed. `playback_id` is already on [`SessionRequest`] because a client
+/// supplies it; these three are not, and deliberately.
+///
+/// **Not on [`SessionRequest`].** That type is `deny_unknown_fields` and it
+/// crosses the cluster relay, so a field added to it is refused outright by a
+/// node that has not been upgraded — a fleet rollout, taken on behalf of a
+/// value the client never sends. Its own doc says what it carries: what a
+/// client asked for. The recovery epoch is server-minted and is never
+/// client-supplied, which is the entire property that makes it a budget rather
+/// than a suggestion.
+///
+/// The epoch may be empty, for a session that predates the column. An empty
+/// epoch is refused by the store's own validator, so it means *this playback
+/// has no budget* rather than *this playback has an unused one* — a caller
+/// must treat it as "no reservation is possible" and not as a fresh grant.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionRecoveryIdentity {
+    pub user_id: i64,
+    /// The coordination identity of the generation being started, which is
+    /// what a reservation records as the attempt that failed.
+    pub incarnation_id: String,
+    /// The server-owned budget identity. Empty means no budget.
+    pub recovery_epoch: String,
+}
+
 /// What a client asked for, normalised. Two requests with the same
 /// fingerprint would produce byte-identical output, which is what makes a
 /// repeated create safe to answer with the session that already exists.
@@ -8221,11 +9171,6 @@ impl Default for ProducerTuning {
 /// from the same boundary.
 const PRODUCER_MAX_PARTS: usize = 64;
 
-/// The recipe format this build writes into new claims. Stored per row so a
-/// future change to what a recipe *means* can be recognised rather than
-/// guessed at.
-const CACHE_RECIPE_VERSION: i64 = 1;
-
 /// Why a producer part stopped.
 #[derive(Debug)]
 enum PartEnd {
@@ -8236,6 +9181,22 @@ enum PartEnd {
     /// This producer run is out of time.
     Deadline,
     Failed(String),
+}
+
+/// What a part's ending was, in the receipt's vocabulary.
+///
+/// §6.2 asks the receipt to distinguish "ran to the end of its input" from
+/// "stopped because we asked it to". Preemption and the producer deadline are
+/// both the second: a yielded part may still retain the segments it finished,
+/// and calling that a failure would throw away work that is complete.
+fn part_exit_disposition(ended: &PartEnd) -> crate::decoder_health::ExitDisposition {
+    match ended {
+        PartEnd::Finished => crate::decoder_health::ExitDisposition::CleanEnd,
+        PartEnd::Preempted | PartEnd::Deadline => {
+            crate::decoder_health::ExitDisposition::IntentionalYield
+        }
+        PartEnd::Failed(_) => crate::decoder_health::ExitDisposition::FailedTermination,
+    }
 }
 
 /// The owner-aware permits a foreground encoder keeps for its whole lifetime.
@@ -8263,7 +9224,7 @@ struct Tracks {
 }
 
 /// A published cache entry, as measured on disk.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Published {
     bytes: i64,
     duration_ms: i64,
@@ -8275,6 +9236,9 @@ struct Published {
     /// test of the resume path has to assert on, or that test passes on a
     /// fixture small enough to finish before it is ever interrupted.
     parts: usize,
+    /// What observation concluded about every part these bytes came from, or
+    /// `None` when this pass did not produce them and so cannot say.
+    health: Option<crate::decoder_health::ProducerHealthReceipt>,
 }
 
 /// What one `produce` call achieved.
@@ -8323,6 +9287,9 @@ pub enum PretranscodeProduceOutcome {
     StoreUnavailable,
     PolicyChanged,
     SourceChanged,
+    /// Produced and served, refused durable retention by its health receipt.
+    /// Terminal: the same plan on the same source reaches the same decoder.
+    HealthRefused,
 }
 
 /// A validated, zero-origin portable package request. Native subtitles are a
@@ -8354,6 +9321,13 @@ pub enum OfflineProduceOutcome {
     StoreUnavailable,
     PolicyChanged,
     SourceChanged,
+    /// The generation was produced and served, and refused durable retention
+    /// because its producer health receipt does not permit reuse.
+    ///
+    /// A terminal answer, not a yield. The same plan on the same source will
+    /// reach the same decoder and produce the same refused receipt, so a caller
+    /// that retried this would re-encode the title forever.
+    HealthRefused,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -8583,6 +9557,10 @@ pub struct BoundPretranscodeSource {
     snapshot: LocalSourceSnapshot,
     path: std::path::PathBuf,
     handle: Arc<std::fs::File>,
+    /// FFprobe and FFmpeg inherit duplicates of the same open-file
+    /// description. One owned permit spans each child lifetime so their seeks
+    /// cannot race, including when a waiting task is cancelled.
+    offset_gate: Arc<tokio::sync::Semaphore>,
 }
 
 pub async fn pretranscode_source_snapshot(
@@ -8648,6 +9626,7 @@ pub async fn pretranscode_source_snapshot(
                 snapshot,
                 path,
                 handle: Arc::new(handle),
+                offset_gate: Arc::new(tokio::sync::Semaphore::new(1)),
             })
     }
 }
@@ -8981,11 +9960,12 @@ mod pretranscode_renewal_tests {
 struct PortableProduction<'a> {
     file: &'a plurx_core::domain::MediaFile,
     opts: &'a TranscodeOptions,
-    encoder: Encoder,
+    plan: &'a ResolvedTranscode,
     deadline: Instant,
     yield_to_offline: bool,
     cancelled: Option<&'a tokio_util::sync::CancellationToken>,
     offline_package_id: Option<&'a str>,
+    offline_claim_generation: Option<i64>,
     publication_fence: Option<PublicationFence>,
     pretranscode_fence: Option<PretranscodeFence>,
     expected_policy_generation: Option<String>,
@@ -9092,10 +10072,22 @@ pub(crate) async fn quarantine_remove_cache_tree(
     }
 }
 
+/// Everything an earlier pass left behind for this generation, with what it
+/// observed while leaving it.
+struct ResumedParts {
+    parts: Vec<crate::produce::Part>,
+    /// One receipt per element of `parts`, in the same order. A part with no
+    /// readable record of its own is `unobserved`, so a resumed generation is
+    /// certified only from records that still bind to the bytes on disk.
+    receipts: Vec<crate::decoder_health::ProducerHealthReceipt>,
+}
+
 async fn resume_parts(
     temp: &plurx_core::fs_secure::SecureDirectory,
-) -> Result<Vec<crate::produce::Part>, String> {
+    plan_digest: &str,
+) -> Result<ResumedParts, String> {
     let mut parts = Vec::new();
+    let mut receipts: Vec<crate::decoder_health::ProducerHealthReceipt> = Vec::new();
     let mut playlist_bytes = 0_u64;
     let mut segments = 0_usize;
     let mut duration_ms = 0_i64;
@@ -9106,30 +10098,48 @@ async fn resume_parts(
         let name = crate::produce::part_dir(parts.len());
         let Ok(dir) = temp.open_child_directory(&name).await else {
             discard_dependent_parts(temp, parts.len(), false).await?;
-            return Ok(parts);
+            return Ok(ResumedParts { parts, receipts });
         };
         let remaining_playlist_bytes = MAX_RETAINED_PLAYLIST_BYTES.saturating_sub(playlist_bytes);
-        let Some((part, part_playlist_bytes)) =
-            read_validated_part(&dir, remaining_playlist_bytes).await
-        else {
+        let Some(validated) = read_validated_part(&dir, remaining_playlist_bytes).await else {
             // A directory with no listed segments contributes nothing and
             // would shift every later part's numbering if it were counted.
             discard_dependent_parts(temp, parts.len(), true).await?;
-            return Ok(parts);
+            return Ok(ResumedParts { parts, receipts });
         };
+        let ValidatedPart {
+            part,
+            playlist_bytes: part_playlist_bytes,
+            shape,
+        } = validated;
         playlist_bytes = playlist_bytes.saturating_add(part_playlist_bytes);
         segments = segments.saturating_add(part.segments.len());
         let Some(total_duration) = duration_ms.checked_add(part.duration_ms()) else {
             discard_dependent_parts(temp, parts.len(), true).await?;
-            return Ok(parts);
+            return Ok(ResumedParts { parts, receipts });
         };
         duration_ms = total_duration;
         if segments >= plurx_core::transcode::manifest::MAX_OBJECTS
             || duration_ms > MAX_RETAINED_TOTAL_DURATION_MS
         {
             discard_dependent_parts(temp, parts.len(), true).await?;
-            return Ok(parts);
+            return Ok(ResumedParts { parts, receipts });
         }
+        // Read after the part validates, and against the shape validation just
+        // measured: a record is only evidence about the bytes that are
+        // actually there.
+        receipts.push(
+            resumed_part_health(&dir, plan_digest, &shape)
+                .await
+                .unwrap_or_else(|| {
+                    crate::decoder_health::ProducerHealthReceipt::unobserved(
+                        plan_digest.to_owned(),
+                        // The disposition of the read. The receipt is
+                        // unqualified regardless of it.
+                        crate::decoder_health::ExitDisposition::CleanEnd,
+                    )
+                }),
+        );
         parts.push(part);
     }
 }
@@ -9140,20 +10150,50 @@ async fn resume_parts(
 /// the segment that was being written when the process was killed and the
 /// playlist does not — an unlisted `.ts` file is a truncated one, and treating
 /// it as content puts a corrupt two seconds into the middle of a film.
-async fn read_part(part_dir: &plurx_core::fs_secure::SecureDirectory) -> crate::produce::Part {
+async fn read_part(part_dir: &plurx_core::fs_secure::SecureDirectory) -> ValidatedPart {
     read_validated_part(part_dir, MAX_PRETRANSCODE_PART_PLAYLIST_BYTES)
         .await
-        .map(|(part, _)| part)
-        .unwrap_or_else(|| crate::produce::Part {
-            segments: Vec::new(),
-            durations_ms: Vec::new(),
+        .unwrap_or_else(|| ValidatedPart {
+            part: crate::produce::Part {
+                segments: Vec::new(),
+                durations_ms: Vec::new(),
+            },
+            playlist_bytes: 0,
+            shape: Vec::new(),
         })
+}
+
+/// The name of the record a part carries about its own health.
+///
+/// Dotted so it cannot collide with a segment name, and never placed into the
+/// assembled generation: this is staging-local evidence about how the part was
+/// made, not one of the objects the manifest inventories.
+pub(crate) const PART_HEALTH_FILE: &str = ".part-health.json";
+/// The staging-root ledger of observed attempts that left no part behind.
+///
+/// A part record can only describe a part that exists, and the attempt this
+/// effort is named after leaves none — FFmpeg drops every frame, exits zero,
+/// writes no segment, and the retry reuses the same directory. This is where
+/// that receipt is kept so it survives a preemption.
+pub(crate) const GENERATION_HEALTH_FILE: &str = ".generation-health.json";
+/// A record holding one receipt with two short digests and a bounded contract
+/// id. Generous by a wide margin, and bounded so a corrupt staging directory
+/// cannot turn a resume into an unbounded read.
+const MAX_PART_HEALTH_BYTES: u64 = 4 * 1024;
+
+/// One validated part, with what is needed to tie a receipt to it.
+struct ValidatedPart {
+    part: crate::produce::Part,
+    playlist_bytes: u64,
+    /// `(name, bytes, duration_ms)` for every listed segment, in playlist
+    /// order — the shape a retained receipt is bound to.
+    shape: Vec<(String, u64, i64)>,
 }
 
 async fn read_validated_part(
     part_dir: &plurx_core::fs_secure::SecureDirectory,
     remaining_playlist_bytes: u64,
-) -> Option<(crate::produce::Part, u64)> {
+) -> Option<ValidatedPart> {
     let bytes = part_dir
         .read_bounded_child(
             "index.m3u8",
@@ -9173,6 +10213,7 @@ async fn read_validated_part(
         return None;
     }
     let mut names = std::collections::HashSet::with_capacity(part.segments.len());
+    let mut shape = Vec::with_capacity(part.segments.len());
     for (index, (name, duration_ms)) in part.segments.iter().zip(&part.durations_ms).enumerate() {
         if name != &format!("seg{index:05}.ts")
             || !names.insert(name.as_str())
@@ -9188,8 +10229,149 @@ async fn read_validated_part(
         {
             return None;
         }
+        shape.push((name.clone(), metadata.identity.size, *duration_ms));
     }
-    Some((part, encoded_len))
+    Some(ValidatedPart {
+        part,
+        playlist_bytes: encoded_len,
+        shape,
+    })
+}
+
+/// Write what this attempt observed beside the part it produced.
+///
+/// Best effort by design. The bytes are already on disk and already listed in
+/// a playlist; a staging directory that will not take a 4 KiB record is not a
+/// reason to throw away an encoded part. The cost of failing is that a later
+/// pass reads no record and calls the part unobserved, which is exactly what
+/// it did before this record existed.
+async fn retain_part_health(
+    part_dir: &plurx_core::fs_secure::SecureDirectory,
+    shape: &[(String, u64, i64)],
+    receipt: &crate::decoder_health::ProducerHealthReceipt,
+) {
+    let part_shape = plurx_core::transcode::health::part_shape_digest(&receipt.plan_digest, shape);
+    let sealed =
+        plurx_core::transcode::health::RetainedPartReceipt::seal(part_shape, receipt.clone())
+            .and_then(|record| {
+                serde_json::to_vec(&record)
+                    .map_err(|error| format!("serializing a retained part receipt: {error}"))
+            });
+    let encoded = match sealed {
+        Ok(encoded) if encoded.len() as u64 <= MAX_PART_HEALTH_BYTES => encoded,
+        Ok(encoded) => {
+            tracing::warn!(
+                bytes = encoded.len(),
+                "a part health record exceeded its bound and was not retained"
+            );
+            return;
+        }
+        Err(error) => {
+            tracing::warn!(%error, "a part health record could not be sealed");
+            return;
+        }
+    };
+    if let Err(error) = part_dir
+        .atomic_write_child(PART_HEALTH_FILE, &encoded)
+        .await
+    {
+        tracing::warn!(%error, "a part health record could not be written");
+    }
+}
+
+/// Carry forward what earlier passes observed in attempts that produced
+/// nothing.
+///
+/// `None` when the ledger is absent, which is the honest reading of "no pass
+/// has claimed an unproductive attempt". A ledger that is *present* and will
+/// not open is a different statement — something was recorded and cannot be
+/// read — so that yields `unobserved`, which refuses reuse. The asymmetry with
+/// a missing part record is deliberate: a part's bytes exist whether or not a
+/// record describes them, and an absent ledger describes no bytes at all.
+async fn carried_generation_health(
+    temp: &plurx_core::fs_secure::SecureDirectory,
+    plan_digest: &str,
+) -> Option<crate::decoder_health::ProducerHealthReceipt> {
+    let bytes = temp
+        .read_bounded_child(GENERATION_HEALTH_FILE, MAX_PART_HEALTH_BYTES)
+        .await
+        .ok()?;
+    let unreadable = || {
+        Some(crate::decoder_health::ProducerHealthReceipt::unobserved(
+            plan_digest.to_owned(),
+            crate::decoder_health::ExitDisposition::CleanEnd,
+        ))
+    };
+    let Ok(record) =
+        serde_json::from_slice::<plurx_core::transcode::health::RetainedGenerationHealth>(&bytes)
+    else {
+        return unreadable();
+    };
+    match record.opened(plan_digest) {
+        Some(receipt) => Some(receipt.clone()),
+        None => unreadable(),
+    }
+}
+
+/// Write the ledger back after joining this pass's own unproductive attempts.
+///
+/// Best effort, like the part records: the alternative to a ledger that will
+/// not write is throwing away an encode. What it costs is that the next pass
+/// reads no ledger, which is what happened before it existed.
+async fn retain_generation_health(
+    temp: &plurx_core::fs_secure::SecureDirectory,
+    receipt: &crate::decoder_health::ProducerHealthReceipt,
+) {
+    let sealed = plurx_core::transcode::health::RetainedGenerationHealth::seal(receipt.clone())
+        .and_then(|record| {
+            serde_json::to_vec(&record)
+                .map_err(|error| format!("serializing a retained generation record: {error}"))
+        });
+    let encoded = match sealed {
+        Ok(encoded) if encoded.len() as u64 <= MAX_PART_HEALTH_BYTES => encoded,
+        Ok(encoded) => {
+            tracing::warn!(
+                bytes = encoded.len(),
+                "a generation health ledger exceeded its bound and was not retained"
+            );
+            return;
+        }
+        Err(error) => {
+            tracing::warn!(%error, "a generation health ledger could not be sealed");
+            return;
+        }
+    };
+    if let Err(error) = temp
+        .atomic_write_child(GENERATION_HEALTH_FILE, &encoded)
+        .await
+    {
+        tracing::warn!(%error, "a generation health ledger could not be written");
+    }
+}
+
+/// Read back what an earlier pass observed about this part.
+///
+/// `unobserved` for anything that is not a record binding a receipt to exactly
+/// these bytes: no record, an unreadable one, a version this build does not
+/// know, a torn one, or one sealed over a different shape. Every one of those
+/// is the honest answer, and all of them refuse reuse.
+/// The shape is digested under *this pass's* plan, not the one the record
+/// names, so a record can only be opened by the plan it was written for. A
+/// receipt from another plan is evidence about other bytes even when the
+/// segment sizes happen to line up.
+async fn resumed_part_health(
+    part_dir: &plurx_core::fs_secure::SecureDirectory,
+    plan_digest: &str,
+    shape: &[(String, u64, i64)],
+) -> Option<crate::decoder_health::ProducerHealthReceipt> {
+    let bytes = part_dir
+        .read_bounded_child(PART_HEALTH_FILE, MAX_PART_HEALTH_BYTES)
+        .await
+        .ok()?;
+    let record: plurx_core::transcode::health::RetainedPartReceipt =
+        serde_json::from_slice(&bytes).ok()?;
+    let shape_digest = plurx_core::transcode::health::part_shape_digest(plan_digest, shape);
+    record.opened(&shape_digest).cloned()
 }
 
 fn is_pretranscode_part_segment(name: &str) -> bool {
@@ -9228,10 +10410,28 @@ fn is_pretranscode_part_path(path: &str) -> bool {
 pub(crate) const ASSEMBLED_DIR: &str = "assembled";
 pub(crate) const ASSEMBLED_TEMP_DIR: &str = ".assembled.tmp";
 
+/// Adopt an assembly an earlier pass already placed, if it is *this* set of
+/// parts' assembly.
+///
+/// The tie is the playlist. `publish_from` writes exactly the bytes
+/// `crate::produce::assemble` produces, so a byte-equal playlist means these
+/// parts, in this order, with these durations — and the assembled segments are
+/// hard links to their bytes. When it matches, the parts' own receipts describe
+/// the assembled bytes and the caller's settled health is the generation's.
+///
+/// When it does not, the assembly was built from something else and this pass
+/// can certify nothing about it, so the receipt is dropped. Getting this wrong
+/// in the safe-looking direction is expensive: a long film is assembled and
+/// then re-hashed for its manifest, and that hash can yield. Refusing to carry
+/// the receipt across that yield would make the next pass adopt a receipt-less
+/// assembly and, under the qualified identity, refuse the film permanently —
+/// the very outcome the per-part records exist to prevent.
 async fn assembled_publication(
     directory: &plurx_core::fs_secure::SecureDirectory,
-    parts: usize,
+    parts: &[crate::produce::Part],
+    health: Option<crate::decoder_health::ProducerHealthReceipt>,
 ) -> Option<Published> {
+    let expected = crate::produce::assemble(parts);
     let bytes = directory
         .read_bounded_child(
             "index.m3u8",
@@ -9255,11 +10455,21 @@ async fn assembled_publication(
         }
         measured = measured.saturating_add(metadata.identity.size.min(i64::MAX as u64) as i64);
     }
+    if playlist != expected.playlist {
+        // Not this set of parts' assembly. The bytes may still be a perfectly
+        // good generation, so it is still adopted — but nothing this pass
+        // observed describes them.
+        tracing::info!(
+            "adopting an assembled generation that these parts did not produce; \
+             it carries no producer health receipt"
+        );
+    }
     Some(Published {
         bytes: measured,
         duration_ms: parsed.duration_ms(),
         segments: parsed.segments.len(),
-        parts,
+        parts: parts.len(),
+        health: health.filter(|_| playlist == expected.playlist),
     })
 }
 
@@ -9269,12 +10479,397 @@ async fn assembled_publication(
 /// placement boundary leaves only `.assembled.tmp`, which the retry rebuilds;
 /// the numbered parts remain the authoritative encode checkpoint until the
 /// final generation is durably settled.
+/// Release a claim this pass took and will not settle.
+///
+/// A queue-fenced production does not own an unfenced claim row, so it has
+/// nothing to release; every other path does.
+async fn forget_unfenced_claim_with(
+    store: &dyn Store,
+    hash: &str,
+    node_id: &str,
+    publication_fence: Option<&PublicationFence>,
+) {
+    match publication_fence {
+        Some(fence) => {
+            let _ = PublicationStore::fenced(store, fence.clone())
+                .forget_cache_entry(hash, node_id, "local")
+                .await;
+        }
+        None => {
+            let _ = store.forget_cache_entry(hash, node_id, "local").await;
+        }
+    }
+}
+
+/// What prevents complete, unambiguous health-qualified coverage.
+///
+/// Ordered by what an operator should do about it, and stated rather than
+/// implied: a control whose only feedback is "still off" tells the person who
+/// turned it on nothing at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QualificationRefusal {
+    /// Nobody asked. The ordinary state of every deployed node.
+    NotRequested,
+    /// This node never measured its own FFmpeg, so no contract can be matched
+    /// to it and nothing it prints is evidence.
+    BuildUnmeasured,
+    /// The boot probe named no decoder implementation. A plan that names no
+    /// decoder can never be matched to a contract, which is qualified against
+    /// a named one.
+    NoDecoderMeasured,
+    /// The build is measured and decoders are named, but no retained
+    /// diagnostic contract covers this binary under the qualified log flags.
+    /// This is the fleet's ordinary state today and the one that takes real
+    /// work to leave: it needs a capture from this build.
+    NoContractCoversThisBuild,
+    /// At least one selectable path is measured and covered, but at least one
+    /// other selectable path is unmeasured or not uniquely covered. The
+    /// enabled policy applies only to the covered paths; this warning prevents
+    /// a partial rollout being mistaken for fleet-wide enforcement.
+    IncompleteCoverage,
+    /// More than one retained contract covers this build for the same codec,
+    /// decoder and log mode. `contract_for` refuses ambiguity, so this reads
+    /// as "no grammar" to everything downstream — but the fix is the opposite
+    /// of the one for having none, and an operator told to capture a contract
+    /// they already have twice would make it worse.
+    AmbiguousContract,
+    /// The request could not be read from the store at all, so this node does
+    /// not know what was asked of it. It keeps the identity it has, which is
+    /// the one every deployed node already has.
+    SettingUnreadable,
+}
+
+impl QualificationRefusal {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::NotRequested => "not_requested",
+            Self::BuildUnmeasured => "build_unmeasured",
+            Self::NoDecoderMeasured => "no_decoder_measured",
+            Self::NoContractCoversThisBuild => "no_contract_covers_this_build",
+            Self::IncompleteCoverage => "incomplete_coverage",
+            Self::AmbiguousContract => "ambiguous_contract",
+            Self::SettingUnreadable => "setting_unreadable",
+        }
+    }
+
+    /// One sentence an operator can act on, for the settings surface.
+    pub fn explanation(self) -> &'static str {
+        match self {
+            Self::NotRequested => "Not requested on this node.",
+            Self::BuildUnmeasured => {
+                "This node has not measured its own FFmpeg build, so no diagnostic \
+                 contract can be matched to it."
+            }
+            Self::NoDecoderMeasured => {
+                "The startup probe named no decoder implementation, and a diagnostic \
+                 contract is qualified against a named decoder."
+            }
+            Self::NoContractCoversThisBuild => {
+                "No retained diagnostic contract covers this node's FFmpeg build under \
+                 the qualified log flags. Capture one from this build before expecting \
+                 verified artifacts."
+            }
+            Self::IncompleteCoverage => {
+                "Only some selectable decode paths are measured and uniquely covered. The \
+                 enabled policy applies only to qualified paths; complete the missing \
+                 measurements or contracts before treating this node as fully covered."
+            }
+            Self::AmbiguousContract => {
+                "More than one retained diagnostic contract covers this build for the \
+                 same decoder. Remove the duplicate; capturing another makes it worse."
+            }
+            Self::SettingUnreadable => {
+                "This node could not read the setting, so it kept the identity it had. \
+                 It will read it again on its next start."
+            }
+        }
+    }
+}
+
+/// What this node measured, which paths can honour the request, and its
+/// operator-selected policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactQualificationReadiness {
+    /// Whether an operator asked for the qualified identity on this node.
+    pub requested: bool,
+    /// The FFmpeg version this node measured for itself, if it measured one.
+    pub measured_build: Option<String>,
+    /// Every `(codec, backend, decoder implementation)` the boot probe measured.
+    pub measured_decoders: Vec<(String, plurx_core::transcode::DecodeBackend, String)>,
+    /// The subset of those a retained diagnostic contract covers on this
+    /// build, under the qualified log flags.
+    pub covered_decoders: Vec<(String, plurx_core::transcode::DecodeBackend, String)>,
+    /// Conservative whole-node projection retained for existing API clients.
+    /// This is qualified only when every selectable path is measured and
+    /// uniquely covered;
+    /// individual plans still apply `requested` to exact covered paths.
+    pub effective: plurx_core::transcode::ArtifactQualification,
+    /// Readiness advisory for incomplete or ambiguous coverage, if any.
+    pub refusal: Option<QualificationRefusal>,
+}
+
+impl ArtifactQualificationReadiness {
+    /// Whether at least one measured path could honour a request, whether or
+    /// not one was made.
+    ///
+    /// Conjoined with the build rather than derived from coverage alone, so
+    /// this cannot answer "yes" on a node that never identified the binary the
+    /// coverage is about. Coverage is computed from the measured build, so the
+    /// two agree today; stating it here keeps the invariant local instead of
+    /// borrowing it from another module.
+    pub fn eligible(&self) -> bool {
+        self.measured_build.is_some() && !self.covered_decoders.is_empty()
+    }
+
+    /// What a node with no answer at all reports: the identity every deployed
+    /// node has, and a stated reason rather than a silent default.
+    fn unreadable() -> Self {
+        Self {
+            requested: false,
+            measured_build: None,
+            measured_decoders: Vec::new(),
+            covered_decoders: Vec::new(),
+            effective: plurx_core::transcode::ArtifactQualification::Unqualified,
+            refusal: Some(QualificationRefusal::SettingUnreadable),
+        }
+    }
+}
+
+/// The operator request and its advisory readiness report.
+///
+/// The request is never refused because a prerequisite is missing. Planning
+/// applies it per decode path: a uniquely covered `(codec, backend, decoder)`
+/// uses the qualified identity, while every other path keeps its existing
+/// unqualified identity. That makes the prerequisites advisory without
+/// rotating uncovered work into a namespace whose receipts it cannot produce.
+///
+/// A free function, and deliberately not a method: it takes only immutable
+/// boot facts and the paths planning may select, so the whole rule can be
+/// tested without a manager, a store, a cache or an FFmpeg.
+pub fn artifact_qualification_readiness(
+    requested: bool,
+    policy: &crate::decoder_health::DiagnosticPolicy,
+    measured: &plurx_core::transcode::decoder_inventory::MeasuredDecoders,
+    selectable_paths: &[(String, plurx_core::transcode::DecodeBackend)],
+) -> ArtifactQualificationReadiness {
+    use plurx_core::transcode::ArtifactQualification;
+
+    let measured_build = policy
+        .measured_build()
+        .map(|build| build.ffmpeg_version.clone());
+    let mut measured_decoders = measured
+        .measured_paths()
+        .map(|(codec, backend, decoder)| (codec.to_owned(), backend, decoder.to_owned()))
+        .collect::<Vec<_>>();
+    measured_decoders.sort();
+    // Covered means covered *as this node will run it*: the same codec, the
+    // same decoder implementation the probe measured, and the qualified log
+    // flags. A contract qualified under different flags describes a different
+    // log and cannot certify this one.
+    let covering = |codec: &str, backend: plurx_core::transcode::DecodeBackend, decoder: &str| {
+        policy.covering_contracts(
+            codec,
+            decoder,
+            backend.name(),
+            crate::decoder_health::QUALIFIED_STDERR_MODE,
+        )
+    };
+    let covered_decoders = measured_decoders
+        .iter()
+        .filter(|(codec, backend, decoder)| covering(codec, *backend, decoder) == 1)
+        .cloned()
+        .collect::<Vec<_>>();
+    // Ambiguity is refused upstream by returning no contract at all, so
+    // without this it would present as "capture one" to an operator who has
+    // captured two.
+    let ambiguous = measured_decoders
+        .iter()
+        .any(|(codec, backend, decoder)| covering(codec, *backend, decoder) > 1);
+    // Successful measurements are not a completeness denominator. The probe
+    // deliberately omits a codec whose decoder exists but whose probe encoder
+    // does not, and planning can still select that codec. Legacy whole-node
+    // fields may say qualified only when every path the manager can select is
+    // both measured and uniquely covered.
+    let all_selectable_paths_covered = !selectable_paths.is_empty()
+        && selectable_paths.iter().all(|(codec, backend)| {
+            covered_decoders
+                .iter()
+                .any(|(covered_codec, covered_backend, _)| {
+                    covered_codec == codec && covered_backend == backend
+                })
+        });
+
+    let refusal = if !requested {
+        Some(QualificationRefusal::NotRequested)
+    } else if measured_build.is_none() {
+        Some(QualificationRefusal::BuildUnmeasured)
+    } else if measured_decoders.is_empty() {
+        Some(QualificationRefusal::NoDecoderMeasured)
+    } else if ambiguous {
+        Some(QualificationRefusal::AmbiguousContract)
+    } else if covered_decoders.is_empty() {
+        Some(QualificationRefusal::NoContractCoversThisBuild)
+    } else if !all_selectable_paths_covered || covered_decoders.len() != measured_decoders.len() {
+        Some(QualificationRefusal::IncompleteCoverage)
+    } else {
+        None
+    };
+
+    ArtifactQualificationReadiness {
+        requested,
+        measured_build,
+        measured_decoders,
+        covered_decoders,
+        effective: if requested && refusal.is_none() {
+            ArtifactQualification::HealthQualified
+        } else {
+            ArtifactQualification::Unqualified
+        },
+        refusal,
+    }
+}
+
+/// The final directory's own name, which is what identifies one production.
+///
+/// `relative` is `<shard>/<identity>`, and the shard prefix is a directory
+/// shared by many recipes, so only the last component identifies anything.
+///
+/// The shape is checked rather than asserted in prose. This value becomes a
+/// manifest `generation_id`, and `publish_controlled_directory` rejects one
+/// that is not `safe_generation_id`-shaped — a rejection its callers treat as
+/// a retryable production error, so a name that can never be accepted would
+/// retry the title on a backoff forever and report it as an encoder fault.
+fn identity_for(relative: &str) -> Result<&str, String> {
+    let (shard, identity) = relative
+        .rsplit_once('/')
+        .ok_or_else(|| format!("cache publication {relative} has no shard prefix"))?;
+    if shard.is_empty() || !plurx_core::transcode::manifest::is_safe_generation_id(identity) {
+        return Err(format!(
+            "cache publication {relative} has no safe generation identity"
+        ));
+    }
+    Ok(identity)
+}
+
+/// Whether a generation may be kept, or reused, under this plan's identity.
+///
+/// One rule for both directions, and it reads the *manifest* rather than any
+/// in-memory value, because the manifest is what a future request will have to
+/// re-read. A receipt that exists only in this process cannot certify anything
+/// tomorrow, so under the qualified identity a generation with no manifest is
+/// refused exactly as one whose receipt refuses itself is.
+///
+/// The unqualified identity keeps its present behaviour exactly: it never
+/// asked for a receipt and it still does not.
+///
+/// There is deliberately no third case for "old artifact, be lenient".
+/// Relabelling an artifact that predates the contract as health-qualified is
+/// what separate namespaces exist to make impossible, and a leniency here
+/// would put it straight back.
+fn generation_permits_reuse(
+    plan: &ResolvedTranscode,
+    manifest: Option<&plurx_core::transcode::manifest::GenerationManifest>,
+) -> bool {
+    if !plan.enforces_receipt() {
+        return true;
+    }
+    manifest.is_some_and(|manifest| {
+        manifest
+            .producer_health
+            .as_ref()
+            .is_some_and(plurx_core::transcode::health::ProducerHealthReceipt::permits_reuse)
+    })
+}
+
+/// Everything this pass knows about the health of one generation.
+///
+/// Not "one receipt per part". Every producer attempt made toward the
+/// generation is recorded, whether or not it left bytes behind, because the
+/// case this effort exists for is an attempt that decodes nothing and exits
+/// zero: FFmpeg drops every frame, writes no segment, and `read_part` returns
+/// an empty part. Keying the record on "did it produce" would discard exactly
+/// the receipt worth keeping, and the producer's progress observer carries no
+/// control handle, so nothing else in the process would ever see it.
+///
+/// A part carried over from an earlier pass is recorded too, with whatever
+/// that pass sealed beside it — or `unobserved` when no record still binds to
+/// those bytes. Certifying a resumed film from the tail this pass happened to
+/// encode is exactly the false certificate this effort exists to prevent;
+/// refusing to read back a record that *is* there would make every film long
+/// enough to need two passes permanently uncertifiable, which is not the
+/// conservative answer, only the useless one.
+struct GenerationObservation {
+    plan_digest: String,
+    attempts: Vec<crate::decoder_health::ProducerHealthReceipt>,
+    /// The join of this pass's attempts that produced nothing, carried
+    /// separately because no part exists for them to be sealed beside.
+    unproductive: Option<crate::decoder_health::ProducerHealthReceipt>,
+}
+
+impl GenerationObservation {
+    /// Start from what an earlier pass left on disk: one receipt per resumed
+    /// part, plus whatever the staging ledger carried about attempts that
+    /// produced nothing.
+    fn inheriting(
+        inherited: Vec<crate::decoder_health::ProducerHealthReceipt>,
+        carried: Option<crate::decoder_health::ProducerHealthReceipt>,
+        plan_digest: &str,
+    ) -> Self {
+        let mut attempts = inherited;
+        attempts.extend(carried);
+        Self {
+            plan_digest: plan_digest.to_owned(),
+            attempts,
+            unproductive: None,
+        }
+    }
+
+    /// Record one producer attempt. Bounded by `PRODUCER_MAX_PARTS`, which is
+    /// what bounds the spawn loop this is called from.
+    ///
+    /// `produced` decides only whether the attempt's own bytes carry the
+    /// receipt or the staging ledger does — never whether it is recorded.
+    fn record(&mut self, receipt: crate::decoder_health::ProducerHealthReceipt, produced: bool) {
+        if !produced {
+            self.unproductive = Some(match self.unproductive.take() {
+                Some(carried) => crate::decoder_health::ProducerHealthReceipt::join(
+                    &self.plan_digest,
+                    &[carried, receipt.clone()],
+                )
+                .unwrap_or_else(|| receipt.clone()),
+                None => receipt.clone(),
+            });
+        }
+        self.attempts.push(receipt);
+    }
+
+    /// The join of every attempt this pass made that left no part behind, or
+    /// `None` when every attempt produced. This is what the staging ledger
+    /// has to carry so a preemption cannot forget it.
+    fn unproductive(&self) -> Option<&crate::decoder_health::ProducerHealthReceipt> {
+        self.unproductive.as_ref()
+    }
+
+    /// The one receipt the generation may present, or `None` when this pass
+    /// attempted nothing and inherited nothing.
+    fn settle(&self) -> Option<crate::decoder_health::ProducerHealthReceipt> {
+        crate::decoder_health::ProducerHealthReceipt::join(&self.plan_digest, &self.attempts)
+    }
+}
+
 async fn publish_from(
     temp: &plurx_core::fs_secure::SecureDirectory,
     parts: &[crate::produce::Part],
+    health: Option<crate::decoder_health::ProducerHealthReceipt>,
 ) -> Result<Option<Published>, String> {
     if let Ok(generation) = temp.open_child_directory(ASSEMBLED_DIR).await {
-        if let Some(published) = assembled_publication(&generation, parts.len()).await {
+        if let Some(published) = assembled_publication(&generation, parts, health.clone()).await {
+            // An assembly an earlier pass already placed. Whether this pass's
+            // receipt describes it is `assembled_publication`'s question, and
+            // it answers by comparing the on-disk playlist against the one
+            // these parts assemble to — a byte-equal playlist means these
+            // parts, in this order, and the assembled segments are hard links
+            // to their bytes.
             return Ok(Some(published));
         }
     }
@@ -9325,6 +10920,7 @@ async fn publish_from(
         duration_ms: assembled.duration_ms,
         segments: assembled.placements.len(),
         parts: parts.len(),
+        health,
     }))
 }
 
@@ -9503,9 +11099,62 @@ pub struct TranscodeManager {
     caps: EncoderCaps,
     /// Portable decoder names inventoried from this exact ffmpeg at boot.
     decoders: Vec<String>,
+    /// The diagnostic contracts this process resolved for its own FFmpeg.
+    ///
+    /// Handed to the manager rather than reached for, so the readiness this
+    /// node publishes is computed from a value someone had to supply — and so
+    /// a test can supply one. The default is the empty policy, which is the
+    /// honest answer for a manager nobody told anything.
+    diagnostic_policy: std::sync::Arc<crate::decoder_health::DiagnosticPolicy>,
+    /// Which decoder this build was measured to select, per codec.
+    ///
+    /// Empty until the boot probe runs, and empty forever on a build whose
+    /// codecs cannot be probed. Read only by qualified planning: naming a
+    /// decoder changes an artifact's identity, and doing that for every node
+    /// on the strength of a boot probe would rotate an unqualified fleet's
+    /// cache for a value nothing yet enforces.
+    measured_decoders: plurx_core::transcode::decoder_inventory::MeasuredDecoders,
+    /// How many generation manifests this manager has published.
+    ///
+    /// The only durable trace a manifest leaves on a refused generation is the
+    /// generation itself, and a refusal quarantines that — so without this
+    /// counter no test can tell a manifest that was written and thrown away
+    /// from one that was never written, and the milestone's central change
+    /// would revert green.
+    #[cfg(test)]
+    manifests_published: std::sync::atomic::AtomicUsize,
+    /// Tests that exercise receipt enforcement without installing a real
+    /// diagnostic policy can explicitly force the old all-plan identity. The
+    /// production path is always contract-scoped.
+    #[cfg(test)]
+    force_artifact_qualification: std::sync::atomic::AtomicBool,
+    /// Deterministic offline coordinator outcomes. Production always enters
+    /// `produce_normalized`; tests use this only to prove the durable
+    /// primary-to-alternate transition without depending on host hardware.
+    #[cfg(test)]
+    offline_produce_script: std::sync::Mutex<std::collections::VecDeque<OfflineProduceOutcome>>,
+    #[cfg(test)]
+    offline_produced_recipes: std::sync::Mutex<Vec<String>>,
+    /// Inject the authority-write failure at the exact primary-fault boundary.
+    #[cfg(test)]
+    fail_next_offline_recovery_begin: std::sync::atomic::AtomicBool,
+    /// Descriptor-bound per-source decode facts, scoped to the configured
+    /// FFprobe build rather than to a mutable pathname.
+    decode_facts: crate::decode_facts::DecodeFactCache,
+    decode_probe_identity: Option<crate::decode_facts::DecodeProbeIdentity>,
+    #[cfg(test)]
+    decode_source_final_identity_delay: Duration,
     /// Validated hot rate-control state. Published only after every usable
     /// family has completed its production-argument probe.
     rate_control: std::sync::RwLock<RateControlSnapshot>,
+    /// The published request and its measured path coverage.
+    ///
+    /// Published rather than read per plan, for the same reason the rate
+    /// control is: changing which paths use a different artifact name between
+    /// claim and settlement would settle one identity's bytes under another's
+    /// key. Each plan then intersects this stable request with its own exact
+    /// measured diagnostic contract; uncovered paths keep their old identity.
+    artifact_qualification: std::sync::RwLock<ArtifactQualificationReadiness>,
     /// Serializes probe → durable settings → publication. Without this, two
     /// concurrent admin PUTs can leave the store describing one request and
     /// the in-memory effective snapshot describing the other.
@@ -9839,9 +11488,36 @@ impl TranscodeManager {
             runtime_cache,
             subtitle_cache,
             rate_control: std::sync::RwLock::new(RateControlSnapshot::bitrate(caps.quality_rc)),
+            artifact_qualification: std::sync::RwLock::new(ArtifactQualificationReadiness {
+                requested: false,
+                measured_build: None,
+                measured_decoders: Vec::new(),
+                covered_decoders: Vec::new(),
+                effective: plurx_core::transcode::ArtifactQualification::Unqualified,
+                refusal: Some(QualificationRefusal::NotRequested),
+            }),
             rate_control_update: Mutex::new(()),
             caps,
             decoders: Vec::new(),
+            diagnostic_policy: std::sync::Arc::new(
+                crate::decoder_health::DiagnosticPolicy::default(),
+            ),
+            measured_decoders: plurx_core::transcode::decoder_inventory::MeasuredDecoders::default(
+            ),
+            #[cfg(test)]
+            manifests_published: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            force_artifact_qualification: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            offline_produce_script: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            #[cfg(test)]
+            offline_produced_recipes: std::sync::Mutex::new(Vec::new()),
+            #[cfg(test)]
+            fail_next_offline_recovery_begin: std::sync::atomic::AtomicBool::new(false),
+            decode_facts: crate::decode_facts::DecodeFactCache::new(),
+            decode_probe_identity: None,
+            #[cfg(test)]
+            decode_source_final_identity_delay: Duration::ZERO,
             pipeline,
             admissions: Admissions::new(),
             cache: None,
@@ -9956,6 +11632,39 @@ impl TranscodeManager {
 
     pub fn with_decoders(mut self, decoders: Vec<String>) -> Self {
         self.decoders = decoders;
+        self
+    }
+
+    /// Install the boot measurement of which decoder this build selects.
+    /// The contracts this node resolved for its own FFmpeg.
+    #[must_use]
+    pub fn with_diagnostic_policy(
+        mut self,
+        policy: std::sync::Arc<crate::decoder_health::DiagnosticPolicy>,
+    ) -> Self {
+        self.diagnostic_policy = policy;
+        self
+    }
+
+    pub fn with_measured_decoders(
+        mut self,
+        measured: plurx_core::transcode::decoder_inventory::MeasuredDecoders,
+    ) -> Self {
+        self.measured_decoders = measured;
+        self
+    }
+
+    pub fn with_decode_probe(
+        mut self,
+        identity: Option<crate::decode_facts::DecodeProbeIdentity>,
+    ) -> Self {
+        self.decode_probe_identity = identity;
+        self
+    }
+
+    #[cfg(test)]
+    fn with_decode_source_final_identity_delay(mut self, delay: Duration) -> Self {
+        self.decode_source_final_identity_delay = delay;
         self
     }
 
@@ -10352,7 +12061,21 @@ impl TranscodeManager {
             None,
             grade,
         );
-        let cache_hit = self.verified_cache_hit(file, &opts, encoder).await;
+        // An offer cannot bind or stat the source, and it does not need to:
+        // the artifact key is the catalog identity plus stored probe facts,
+        // both of which this node already has. `cache_hit` is an *eligibility*
+        // input downstream, not a preference — a node holding a complete
+        // byte-verified generation whose source is momentarily unreadable is
+        // exactly the node that should serve, and answering `false` here would
+        // refuse it. Plan resolution failing means we cannot name the artifact,
+        // so we claim nothing and fail closed.
+        let cache_hit = match self.resolve_movie_plan(file, &opts, encoder).await {
+            Ok(plan) => self.verified_cache_hit(&plan).await,
+            Err(reason) => {
+                tracing::debug!(file_id = file.id, %reason, "offer cannot name an artifact");
+                false
+            }
+        };
         let (hardware_used, hardware_max) = self.hardware_slots().await;
         let software_max = self.software_budget().await;
         let software_used = self.admissions.software_in_use();
@@ -10517,8 +12240,401 @@ impl TranscodeManager {
         let cache = self.cache.as_ref()?;
         Some(PipelineDigest {
             ffmpeg_build: cache.ffmpeg_build.clone(),
-            encoder: Encoder::Software, // replaced per lookup
         })
+    }
+
+    /// The stored-probe path has no descriptor to fingerprint, so it derives a
+    /// stable placeholder from the catalog row. This is *not* evidence that the
+    /// file still holds the bytes that were probed; plans built this way carry
+    /// [`PlanSourceBinding::CatalogRow`] and callers that need proof must
+    /// refuse them. It no longer enters any artifact key — the key uses
+    /// [`DecodeCacheIdentity`], which every path computes identically.
+    fn plan_source_identity(
+        file: &plurx_core::domain::MediaFile,
+    ) -> Result<DecodeSourceIdentity, String> {
+        let mut digest = Sha256::new();
+        for value in [
+            file.id.to_string(),
+            file.size.to_string(),
+            file.mtime.to_string(),
+        ] {
+            digest.update((value.len() as u64).to_be_bytes());
+            digest.update(value.as_bytes());
+        }
+        DecodeSourceIdentity::from_sha256(hex::encode(digest.finalize()))
+            .map_err(|error| error.to_string())
+    }
+
+    /// What the catalog row alone can say about the source, as FFprobe would
+    /// have said it.
+    ///
+    /// `probe_json IS NULL` is an expected, first-class row state — the scan's
+    /// repair pass and the probe retry job exist for exactly those rows — so a
+    /// missing probe cannot be allowed to mean "this title is unplayable".
+    /// Before decode planning, such a file transcoded fine: the command named
+    /// no decoder and FFmpeg read the container. Planning has to be able to say
+    /// the same thing.
+    ///
+    /// Everything here is a value the scan actually recorded. There is no frame
+    /// rate, because the row has none and inventing 24 fps would be exactly the
+    /// silent default the plan forbids; the facts carry it as unknown. The
+    /// resulting plan differs from a stored-probe plan and therefore names a
+    /// different artifact, which is correct — they are different measurements,
+    /// and the one made from real probe output wins the moment it exists.
+    fn catalog_plan_probe(file: &plurx_core::domain::MediaFile) -> serde_json::Value {
+        let transfer = match transcode::routing_hdr(file) {
+            Some("hdr10" | "hdr10plus" | "dolby_vision") => Some("smpte2084"),
+            Some("hlg") => Some("arib-std-b67"),
+            _ => Some("bt709"),
+        };
+        serde_json::json!({
+            "streams": [{
+                "index": 0,
+                "codec_type": "video",
+                "codec_name": file.video_codec,
+                "profile": file.video_profile,
+                "width": file.width,
+                "height": file.height,
+                "pix_fmt": if file.bit_depth.unwrap_or(8) >= 10 { "yuv420p10le" } else { "yuv420p" },
+                "color_transfer": transfer,
+                "disposition": {"attached_pic": 0}
+            }]
+        })
+    }
+
+    async fn resolve_movie_plan(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        options: &TranscodeOptions,
+        encoder: Encoder,
+    ) -> Result<ResolvedTranscode, String> {
+        self.resolve_restricted_movie_plan(file, options, encoder, &AttemptRestrictions::none())
+            .await
+    }
+
+    /// The same resolution, under a decode restriction.
+    ///
+    /// Separate from [`Self::resolve_movie_plan`] rather than a parameter on
+    /// it, because every existing caller wants the unrestricted answer and a
+    /// fourth positional argument spelled `&AttemptRestrictions::none()` at
+    /// two dozen call sites is a place for the wrong value to be pasted.
+    ///
+    /// A restricted plan is a **different artifact**: the decode backend feeds
+    /// `plan_digest`, so a generation produced under a restriction has its own
+    /// cache identity and the cache cannot serve one for the other. That is
+    /// intended.
+    ///
+    /// It also changes `TranscodeResourceEstimate::of`, because forcing
+    /// software decode rewrites what the pipeline costs. The session is
+    /// already paying for what it reserved at admission, so what a mid-session
+    /// alternate owes is the *difference* — `build` records the restricted
+    /// plan's whole estimate as `cpu_total` and the executor takes
+    /// `cpu_total - software_threads_held()`. Asking for the whole estimate
+    /// again would make the session pay twice to end up owning once, and on a
+    /// box where twice does not fit the recovery would fail over capacity it
+    /// already held.
+    ///
+    /// And it can rewrite the renderer, because a vendor-native graph accepts
+    /// only its own decoder. That is why
+    /// [`PrepublicationTranscodeRetry::prepare_decode_restricted`] reads the
+    /// pipeline off the plan this returns rather than off the options it was
+    /// given.
+    async fn resolve_restricted_movie_plan(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        options: &TranscodeOptions,
+        encoder: Encoder,
+        restrictions: &AttemptRestrictions,
+    ) -> Result<ResolvedTranscode, String> {
+        let stored_probe = self
+            .store
+            .get_file_probe_json(file.id)
+            .await
+            .map_err(|error| format!("reading decoder planning facts: {error}"))?;
+        // One expression for both builds: a row without probe output plans
+        // from what the scan recorded rather than refusing to play.
+        let probe: serde_json::Value = match stored_probe.as_deref() {
+            Some(encoded) => serde_json::from_str(encoded)
+                .map_err(|error| format!("decoder planning facts are invalid: {error}"))?,
+            None => Self::catalog_plan_probe(file),
+        };
+        let source_identity = Self::plan_source_identity(file)?;
+        let catalog = DecodeCatalogMetadata::from_media_file(file)
+            .map_err(|error| format!("decoder catalog facts are invalid: {error}"))?;
+        // The same stream the bound route selects, by the same rule. This used
+        // to ask for "the first playable video stream" while the bound route
+        // asked for FFmpeg's `0:v:0`. On a file carrying cover art those are
+        // two different streams, so the producer and the player planned
+        // different work and named different artifacts — and only one of them
+        // matched the command the shipping builder emits. One rule, and it is
+        // the one the command uses.
+        let index = crate::decode_facts::absolute_video_ordinal(&probe, 0)
+            .ok_or_else(|| "decoder planning facts name no video stream".to_owned())?;
+        let facts = crate::decode_facts::legacy_ordinal_facts(
+            &probe,
+            source_identity,
+            index,
+            Some(&catalog),
+        )
+        .map_err(|error| format!("decoder planning facts are incompatible: {error}"))?;
+        self.resolve_movie_plan_with_facts(file, options, encoder, &facts, restrictions)
+    }
+
+    fn resolve_movie_plan_with_facts(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        options: &TranscodeOptions,
+        encoder: Encoder,
+        facts: &DecodeFacts,
+        restrictions: &AttemptRestrictions,
+    ) -> Result<ResolvedTranscode, String> {
+        use plurx_core::transcode::ArtifactQualification;
+
+        #[cfg(test)]
+        if self
+            .force_artifact_qualification
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return self.resolve_movie_plan_with_qualification(
+                file,
+                options,
+                encoder,
+                facts,
+                restrictions,
+                self.artifact_qualification(),
+            );
+        }
+
+        // Resolve once under the stable identity every node already has. The
+        // decode backend does not depend on artifact qualification, and this
+        // gives us the exact path whose contract must be checked without
+        // guessing from the encoder or the host.
+        let unqualified = self.resolve_movie_plan_with_qualification(
+            file,
+            options,
+            encoder,
+            facts,
+            restrictions,
+            ArtifactQualification::Unqualified,
+        )?;
+        if !self.published_artifact_qualification().requested {
+            return Ok(unqualified);
+        }
+        let Some(codec) = unqualified.decode().input_codec() else {
+            return Ok(unqualified);
+        };
+        let backend = unqualified.decode().backend();
+        let Some(decoder) = self.measured_decoders.implementation(codec, backend) else {
+            return Ok(unqualified);
+        };
+        if self
+            .diagnostic_policy
+            .contract_for(
+                codec,
+                decoder,
+                backend.name(),
+                crate::decoder_health::QUALIFIED_STDERR_MODE,
+            )
+            .is_none()
+        {
+            return Ok(unqualified);
+        }
+
+        let qualified = self.resolve_movie_plan_with_qualification(
+            file,
+            options,
+            encoder,
+            facts,
+            restrictions,
+            ArtifactQualification::HealthQualified,
+        )?;
+        if qualified.decode().backend() != backend
+            || qualified.decode().input_codec() != Some(codec)
+        {
+            tracing::warn!(
+                codec,
+                backend = backend.name(),
+                "artifact qualification changed the resolved decode path; keeping its stable identity"
+            );
+            return Ok(unqualified);
+        }
+        Ok(qualified)
+    }
+
+    fn resolve_movie_plan_with_qualification(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        options: &TranscodeOptions,
+        encoder: Encoder,
+        facts: &DecodeFacts,
+        restrictions: &AttemptRestrictions,
+        qualification: plurx_core::transcode::ArtifactQualification,
+    ) -> Result<ResolvedTranscode, String> {
+        let build = self
+            .cache
+            .as_ref()
+            .map_or("unconfigured-ffmpeg", |cache| cache.ffmpeg_build.as_str());
+        let identity = DecodeCapabilitySnapshotIdentity::new(
+            hex::encode(Sha256::digest(build.as_bytes())),
+            "legacy-unqualified-node".to_owned(),
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+        let qualifying = qualification.enforces_receipt();
+        #[allow(unused_mut)]
+        let mut decoders = self.decoders.clone();
+        #[cfg(test)]
+        if decoders.is_empty() {
+            if let Some(codec) = facts.codec() {
+                decoders.push(codec.to_owned());
+            }
+        }
+        let capabilities = DecodeCapabilities::new(
+            identity,
+            Vec::new(),
+            decoders
+                .into_iter()
+                // A measured name, or none — never the family. This node's
+                // advertised inventory is family names, and a family is not an
+                // implementation: naming `av1` here would force `-c:v av1`
+                // where FFmpeg would otherwise choose `libdav1d`, and bake
+                // that different, slower decoder into the artifact's identity.
+                //
+                // The measurement is read only under the qualified identity.
+                // Naming a decoder changes an artifact's name, so letting a
+                // boot probe do it for every node would rotate an unqualified
+                // fleet's whole cache in exchange for a value nothing there
+                // enforces. Under the qualified identity it is the point: a
+                // diagnostic contract is qualified against a *named* decoder,
+                // so a plan that names none can never be matched to one, and
+                // an attempt nothing can classify can never be certified.
+                .map(|codec| SoftwareDecoder {
+                    implementation: qualifying
+                        .then(|| {
+                            self.measured_decoders.implementation(
+                                &codec,
+                                plurx_core::transcode::DecodeBackend::Software,
+                            )
+                        })
+                        .flatten()
+                        .map(str::to_owned),
+                    codec,
+                })
+                .collect(),
+        )
+        .map_err(|error| format!("decoder capability snapshot is invalid: {error}"))?;
+        let compatibility = std::env::var("PLURX_HWDECODE").ok();
+        let policy = DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, compatibility.as_deref())
+            .qualifying_artifacts(qualification);
+        transcode::resolve_transcode(
+            &TranscodeRequest::new(encoder, TranscodeMediaOptions::from_options(file, options)),
+            facts,
+            &capabilities,
+            &policy,
+            restrictions,
+        )
+        .map_err(|error| format!("decoder plan refused: {error}"))
+    }
+
+    async fn resolve_bound_movie_plan(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        options: &TranscodeOptions,
+        encoder: Encoder,
+        source: &Arc<BoundPretranscodeSource>,
+        deadline: Instant,
+        cancelled: Option<&tokio_util::sync::CancellationToken>,
+    ) -> Result<ResolvedTranscode, String> {
+        self.resolve_held_movie_plan(
+            file,
+            options,
+            encoder,
+            crate::decode_facts::DecodeFactSource::new(
+                Arc::clone(&source.handle),
+                Arc::clone(&source.offset_gate),
+            ),
+            deadline,
+            cancelled,
+        )
+        .await
+    }
+
+    /// Resolve decoder facts through the exact source description the caller
+    /// already owns. Both background artifacts and immutable VOD use this
+    /// seam; neither is allowed to derive its key from scanner-time facts and
+    /// later run a different object opened by name.
+    async fn resolve_held_movie_plan(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        options: &TranscodeOptions,
+        encoder: Encoder,
+        fact_source: crate::decode_facts::DecodeFactSource,
+        deadline: Instant,
+        cancelled: Option<&tokio_util::sync::CancellationToken>,
+    ) -> Result<ResolvedTranscode, String> {
+        let Some(probe) = self.decode_probe_identity.as_ref() else {
+            return self.resolve_movie_plan(file, options, encoder).await;
+        };
+        let catalog = DecodeCatalogMetadata::from_media_file(file)
+            .map_err(|error| format!("decoder catalog facts are invalid: {error}"))?;
+        #[cfg(test)]
+        let fact_source =
+            fact_source.with_final_identity_delay(self.decode_source_final_identity_delay);
+        let facts = self
+            .decode_facts
+            .get_or_probe(
+                probe,
+                fact_source,
+                Some(&catalog),
+                crate::decode_facts::ProbeStreamSelection::LegacyVideoOrdinal(0),
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .min(DECODE_PLAN_PROBE_BUDGET),
+                cancelled,
+            )
+            .await;
+        match facts {
+            Ok(facts) => self.resolve_movie_plan_with_facts(
+                file,
+                options,
+                encoder,
+                &facts,
+                &AttemptRestrictions::none(),
+            ),
+            // A probe that could not finish inside its budget, or a node with
+            // no probe artifact at all, must not make the title unproducible.
+            // Fall back to the same stored-probe plan live and offline already
+            // use; the plan records `CatalogRow` so nothing downstream can
+            // mistake it for a descriptor-bound measurement.
+            Err(error) => {
+                tracing::debug!(
+                    file_id = file.id,
+                    %error,
+                    "bound decoder planning fell back to stored probe facts"
+                );
+                self.resolve_movie_plan(file, options, encoder).await
+            }
+        }
+    }
+
+    /// Whether a plan describes the request it is sitting next to.
+    ///
+    /// Several call paths still carry `file` and `opts` alongside the plan
+    /// because they need values the plan does not hold — the source path, the
+    /// resume position, the scratch directory. Nothing checked that the two
+    /// described the same work, which is the fault `Recipe::new` used to have
+    /// one layer down: the key comes from the plan and the advertised shape
+    /// from the options, so a mis-wired caller could look up one title and
+    /// describe another. Cheap to check, and it fails closed.
+    fn plan_matches_request(
+        plan: &ResolvedTranscode,
+        file: &plurx_core::domain::MediaFile,
+        opts: &TranscodeOptions,
+    ) -> bool {
+        plan.cache_identity() == &DecodeCacheIdentity::from_media_file(file)
+            && plan.options().target_height == opts.target_height
+            && plan.options().audio_index == opts.audio_index
+            && plan.options().effective_rate_control == opts.effective_rate_control
     }
 
     /// The only constructor for a content-addressed transcode recipe.
@@ -10531,19 +12647,11 @@ impl TranscodeManager {
     /// contract, not part of N1.
     fn effective_recipe<'a>(
         &self,
-        digest: &'a mut PipelineDigest,
-        file: &'a plurx_core::domain::MediaFile,
-        opts: &'a TranscodeOptions,
-        encoder: Encoder,
+        digest: &'a PipelineDigest,
+        plan: &'a ResolvedTranscode,
         audio_copied: bool,
     ) -> Recipe<'a> {
-        digest.encoder = encoder;
-        Recipe {
-            digest,
-            file,
-            opts,
-            audio_copied,
-        }
+        Recipe::new(digest, plan, audio_copied)
     }
 
     /// Which audio track a session carries, and which subtitle it burns.
@@ -11318,21 +13426,28 @@ impl TranscodeManager {
     /// Prove that the complete local generation for this exact recipe is
     /// byte-verified. This is the non-reserving subset of `serve_cached`: it
     /// neither creates a session nor updates last-used metadata.
-    async fn verified_cache_hit(
-        &self,
-        file: &plurx_core::domain::MediaFile,
-        opts: &TranscodeOptions,
-        encoder: Encoder,
-    ) -> bool {
+    ///
+    /// It takes the plan and nothing else: the plan carries which source it is
+    /// for, so there is no second argument that could name a different film.
+    /// What it does *not* yet prove is that the bytes on disk are still the
+    /// bytes that were measured — `plan.source_binding()` records whether the
+    /// facts were descriptor-bound.
+    ///
+    /// A health receipt does not belong in this answer, and the temptation to
+    /// put one here is worth naming. Its only caller feeds cluster offer
+    /// eligibility, so answering `false` does not decline to *keep* a
+    /// generation — it moves a viewer to a node that has to encode the title
+    /// again. Unqualified bytes may still be served to the viewer waiting for
+    /// them; refusing to reuse them is a decision for the paths that publish
+    /// and claim, not for the one that says which node already has the film.
+    async fn verified_cache_hit(&self, plan: &ResolvedTranscode) -> bool {
         let Some(cache) = self.cache.as_ref() else {
             return false;
         };
-        let Some(mut digest) = self.digest() else {
+        let Some(digest) = self.digest() else {
             return false;
         };
-        let hash = self
-            .effective_recipe(&mut digest, file, opts, encoder, false)
-            .hash();
+        let hash = self.effective_recipe(&digest, plan, false).hash();
         let Some((identity, cache_root)) =
             self.cache_read_location(&hash, cache).await.ok().flatten()
         else {
@@ -11725,15 +13840,20 @@ impl TranscodeManager {
         &self,
         file: &plurx_core::domain::MediaFile,
         opts: &TranscodeOptions,
-        encoder: Encoder,
+        plan: &ResolvedTranscode,
         item_title: &str,
         owner: SessionOwner<'_>,
     ) -> Option<StartInfo> {
         let cache = self.cache.as_ref()?;
-        let mut digest = self.digest()?;
-        let hash = self
-            .effective_recipe(&mut digest, file, opts, encoder, false)
-            .hash();
+        if !Self::plan_matches_request(plan, file, opts) {
+            tracing::error!(
+                file_id = file.id,
+                "cache lookup refused: the plan does not describe this request"
+            );
+            return None;
+        }
+        let digest = self.digest()?;
+        let hash = self.effective_recipe(&digest, plan, false).hash();
         let session_id = uuid::Uuid::new_v4().to_string();
         let (mut cache_location, mut cache_root) =
             match self.cache_read_location(&hash, cache).await {
@@ -12013,6 +14133,9 @@ impl TranscodeManager {
             user_name: owner.user_name.to_owned(),
             supersession_user: owner.supersession_user.to_owned(),
             playback_id: owner.playback_id.to_owned(),
+            // A cached serve has no producer, so it cannot fault and cannot
+            // spend a budget.
+            recovery: None,
             automatic: owner.automatic,
             kind: cached_kind,
             // A cache hit only ever answers a transcode request (`serve_cached`
@@ -12045,6 +14168,7 @@ impl TranscodeManager {
             class: std::sync::Mutex::new(String::new()),
             hw_slot: std::sync::Mutex::new(None),
             sw_permit: std::sync::Mutex::new(None),
+            sw_delta_permit: std::sync::Mutex::new(None),
             delivery: Meter::new(),
             readrate: 0.0,
             suspended: AtomicBool::new(false),
@@ -12144,7 +14268,12 @@ impl TranscodeManager {
                 PretranscodeProduceOutcome::Yielded
                 | PretranscodeProduceOutcome::StoreUnavailable
                 | PretranscodeProduceOutcome::PolicyChanged
-                | PretranscodeProduceOutcome::SourceChanged => None,
+                | PretranscodeProduceOutcome::SourceChanged
+                // Speculative warming has nothing to settle: it holds no queue
+                // row and no package. The bytes were served if anyone was
+                // waiting and are gone; there is nothing to report but the
+                // absence of a warmed entry.
+                | PretranscodeProduceOutcome::HealthRefused => None,
             },
         )
     }
@@ -12248,10 +14377,28 @@ impl TranscodeManager {
             audio_index,
             subtitle_burn,
         );
-        let mut digest = self.digest().ok_or("no cache digest")?;
-        let hash = self
-            .effective_recipe(&mut digest, file, &opts, encoder, false)
-            .hash();
+        // Bind decoder facts and the immutable plan before deriving any cache,
+        // singleflight, staging, or publication identity. The held descriptor
+        // used here is the same source descriptor later inherited by ffmpeg.
+        let planning_started = Instant::now();
+        let plan = match bound_source.as_ref() {
+            Some(source) => {
+                self.resolve_bound_movie_plan(
+                    file,
+                    &opts,
+                    encoder,
+                    source,
+                    deadline,
+                    Some(cancelled),
+                )
+                .await?
+            }
+            None => self.resolve_movie_plan(file, &opts, encoder).await?,
+        };
+        let deadline =
+            retain_production_budget_after_planning(deadline, planning_started.elapsed());
+        let digest = self.digest().ok_or("no cache digest")?;
+        let hash = self.effective_recipe(&digest, &plan, false).hash();
         if cancelled.is_cancelled() {
             return Ok(PretranscodeProduceOutcome::Yielded);
         }
@@ -12263,11 +14410,12 @@ impl TranscodeManager {
                     PortableProduction {
                         file,
                         opts: &opts,
-                        encoder,
+                        plan: &plan,
                         deadline,
                         yield_to_offline: true,
                         cancelled: Some(cancelled),
                         offline_package_id: None,
+                        offline_claim_generation: None,
                         publication_fence,
                         pretranscode_fence,
                         expected_policy_generation: queue_owned
@@ -12290,6 +14438,7 @@ impl TranscodeManager {
                 OfflineProduceOutcome::StoreUnavailable => {
                     PretranscodeProduceOutcome::StoreUnavailable
                 }
+                OfflineProduceOutcome::HealthRefused => PretranscodeProduceOutcome::HealthRefused,
                 OfflineProduceOutcome::Cached(_)
                 | OfflineProduceOutcome::Yielded
                 | OfflineProduceOutcome::ClaimedElsewhere => PretranscodeProduceOutcome::Yielded,
@@ -12307,12 +14456,49 @@ impl TranscodeManager {
             .map_or("", |cache| cache.node_id.as_str())
     }
 
+    async fn offline_decode_alternate(
+        &self,
+        package_id: &str,
+        file: &plurx_core::domain::MediaFile,
+        opts: &TranscodeOptions,
+        primary_plan: &ResolvedTranscode,
+        encoder: Encoder,
+        digest: &PipelineDigest,
+    ) -> Option<(TranscodeOptions, ResolvedTranscode, String)> {
+        let alternate_plan = match self
+            .resolve_restricted_movie_plan(
+                file,
+                opts,
+                encoder,
+                &AttemptRestrictions::requiring(plurx_core::transcode::DecodeBackend::Software),
+            )
+            .await
+        {
+            Ok(plan) => plan,
+            Err(error) => {
+                tracing::warn!(package = package_id, %error, "offline decode alternate did not resolve");
+                return None;
+            }
+        };
+        match decode_restricted_options(primary_plan, &alternate_plan, opts) {
+            Ok(Some(alternate_opts)) => {
+                let hash = self.effective_recipe(digest, &alternate_plan, false).hash();
+                Some((alternate_opts, alternate_plan, hash))
+            }
+            Ok(None) => None,
+            Err(error) => {
+                tracing::warn!(package = package_id, %error, "offline decode alternate is unsafe");
+                None
+            }
+        }
+    }
+
     /// Prepare the exact mobile package requested by an authenticated user.
     /// Unlike speculative production, this preserves the file's A/V offset,
     /// accepts explicit tracks, and forces SDR even on a passthrough node.
     pub async fn ensure_offline(
         &self,
-        package_id: &str,
+        package: &OfflinePackage,
         file: &plurx_core::domain::MediaFile,
         spec: &OfflineSpec,
         deadline: Instant,
@@ -12351,41 +14537,206 @@ impl TranscodeManager {
             OfflineSubtitle::None | OfflineSubtitle::Native(_) => None,
         };
         let opts = self.offline_package_options(encoder, file, spec, subtitle_burn);
-        let mut digest = self.digest().ok_or("no cache digest")?;
-        let hash = self
-            .effective_recipe(&mut digest, file, &opts, encoder, false)
-            .hash();
-        if !self
-            .store
-            .set_offline_package_recipe(package_id, &hash)
-            .await
-            .map_err(|error| error.to_string())?
-        {
-            return if cancelled.is_cancelled() {
-                Ok(OfflineProduceOutcome::Yielded)
-            } else {
-                Err("offline package is no longer preparing".to_owned())
-            };
-        }
-        let outcome = self
-            .produce_normalized(
-                PortableProduction {
+        let plan = self.resolve_movie_plan(file, &opts, encoder).await?;
+        let digest = self.digest().ok_or("no cache digest")?;
+        let primary_hash = self.effective_recipe(&digest, &plan, false).hash();
+        let mut recovery_state = OfflineRecoveryState::parse(&package.decoder_recovery_state)?;
+        let mut recovery_began_now = false;
+        let mut outcome = OfflineProduceOutcome::HealthRefused;
+        if recovery_state == OfflineRecoveryState::Primary {
+            if package.alternate_recipe_hash.is_some()
+                || package
+                    .recipe_hash
+                    .as_deref()
+                    .is_some_and(|stored| stored != primary_hash)
+            {
+                return Err("primary offline recovery state carries a mismatched recipe".to_owned());
+            }
+            if !self
+                .store
+                .set_offline_package_recipe(
+                    &package.id,
+                    &package.node_id,
+                    package.claim_generation,
+                    &primary_hash,
+                )
+                .await
+                .map_err(|error| error.to_string())?
+            {
+                return Ok(OfflineProduceOutcome::Yielded);
+            }
+            outcome = self
+                .produce_offline_candidate(
+                    package,
                     file,
-                    opts: &opts,
-                    encoder,
+                    &opts,
+                    &plan,
+                    &primary_hash,
                     deadline,
-                    yield_to_offline: false,
-                    cancelled: Some(cancelled),
-                    offline_package_id: Some(package_id),
-                    publication_fence: None,
-                    pretranscode_fence: None,
-                    expected_policy_generation: None,
-                    expected_source_snapshot: None,
-                    bound_source: None,
-                },
-                hash,
-            )
-            .await?;
+                    cancelled,
+                )
+                .await?;
+            if matches!(outcome, OfflineProduceOutcome::HealthRefused) {
+                // Software is already the terminal safe route, and an
+                // unqualified plan has no receipt authority to recover from.
+                // Neither case may mint a consumed budget that a later node
+                // could mistake for a failed hardware-primary attempt.
+                if plan.decode().backend() == plurx_core::transcode::DecodeBackend::Software
+                    || !plan.enforces_receipt()
+                {
+                    return Ok(OfflineProduceOutcome::HealthRefused);
+                }
+                // The terminal fault consumes the budget *before* alternate
+                // planning. A crash, cancellation, or store outage from this
+                // point can only resume pending recovery; it cannot run the
+                // failed primary again.
+                #[cfg(test)]
+                let recovery_begin = if self
+                    .fail_next_offline_recovery_begin
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    Err(plurx_core::error::StoreError::Database(
+                        "injected offline recovery-begin failure".to_owned(),
+                    ))
+                } else {
+                    self.store
+                        .begin_offline_decode_recovery(
+                            &package.id,
+                            &package.node_id,
+                            package.claim_generation,
+                            &primary_hash,
+                        )
+                        .await
+                };
+                #[cfg(not(test))]
+                let recovery_begin = self
+                    .store
+                    .begin_offline_decode_recovery(
+                        &package.id,
+                        &package.node_id,
+                        package.claim_generation,
+                        &primary_hash,
+                    )
+                    .await;
+                let consumed = match recovery_begin {
+                    Ok(consumed) => consumed,
+                    Err(error) => {
+                        tracing::warn!(package = %package.id, %error, "offline recovery budget could not be consumed");
+                        // Retrying primary without authoritative proof that
+                        // the one-shot budget was consumed is unsafe. Settle
+                        // this attempt as terminal; the package coordinator
+                        // records decode_unhealthy instead of requeueing the
+                        // failed decoder.
+                        return Ok(OfflineProduceOutcome::HealthRefused);
+                    }
+                };
+                if !consumed || cancelled.is_cancelled() {
+                    return Ok(OfflineProduceOutcome::Yielded);
+                }
+                recovery_state = OfflineRecoveryState::Pending;
+                recovery_began_now = true;
+                tracing::warn!(
+                    package = %package.id,
+                    failed_recipe = primary_hash,
+                    "offline decode fault consumed the durable recovery budget"
+                );
+            }
+        }
+        if recovery_state != OfflineRecoveryState::Primary {
+            // A consumed job re-homed from a hardware owner may land on a
+            // software-only survivor. On that node the ordinary plan is
+            // already the safe route, so restricting it to software produces
+            // the same digest and the ordinary alternate helper correctly
+            // answers None. `rehome_pending` is the durable proof that this is
+            // not a same-owner retry of a failed software primary: the old
+            // owner had already consumed the budget before removal, and the
+            // removal transaction cleared any owner-local identity without
+            // restoring the budget to primary.
+            let survivor_local_software = recovery_state == OfflineRecoveryState::RehomePending
+                || (recovery_state == OfflineRecoveryState::Alternate
+                    && package.alternate_recipe_hash.as_deref() == Some(primary_hash.as_str()));
+            let alternate = if survivor_local_software
+                && plan.decode().backend() == plurx_core::transcode::DecodeBackend::Software
+                && plan.enforces_receipt()
+            {
+                Some((opts.clone(), plan.clone(), primary_hash.clone()))
+            } else {
+                self.offline_decode_alternate(&package.id, file, &opts, &plan, encoder, &digest)
+                    .await
+            };
+            let Some((alternate_opts, alternate_plan, alternate_hash)) = alternate else {
+                return Ok(OfflineProduceOutcome::HealthRefused);
+            };
+            match recovery_state {
+                OfflineRecoveryState::Primary => unreachable!("handled above"),
+                OfflineRecoveryState::Pending | OfflineRecoveryState::RehomePending => {
+                    if !recovery_began_now
+                        && (package.recipe_hash.is_some()
+                            || package.alternate_recipe_hash.is_some())
+                    {
+                        return Err(
+                            "pending offline recovery already carries an alternate recipe"
+                                .to_owned(),
+                        );
+                    }
+                    let installed = match self
+                        .store
+                        .install_offline_decode_alternate(
+                            &package.id,
+                            &package.node_id,
+                            package.claim_generation,
+                            &alternate_hash,
+                        )
+                        .await
+                    {
+                        Ok(installed) => installed,
+                        Err(error) => {
+                            tracing::warn!(package = %package.id, %error, "offline recovery alternate could not be installed");
+                            return Ok(OfflineProduceOutcome::StoreUnavailable);
+                        }
+                    };
+                    if !installed || cancelled.is_cancelled() {
+                        return Ok(OfflineProduceOutcome::Yielded);
+                    }
+                }
+                OfflineRecoveryState::Alternate => {
+                    if package.alternate_recipe_hash.as_deref() != Some(alternate_hash.as_str())
+                        || package
+                            .recipe_hash
+                            .as_deref()
+                            .is_some_and(|stored| stored != alternate_hash)
+                    {
+                        return Err(
+                            "stored offline alternate does not match the frozen plan".to_owned()
+                        );
+                    }
+                    if !self
+                        .store
+                        .set_offline_package_recipe(
+                            &package.id,
+                            &package.node_id,
+                            package.claim_generation,
+                            &alternate_hash,
+                        )
+                        .await
+                        .map_err(|error| error.to_string())?
+                    {
+                        return Ok(OfflineProduceOutcome::Yielded);
+                    }
+                }
+            }
+            outcome = self
+                .produce_offline_candidate(
+                    package,
+                    file,
+                    &alternate_opts,
+                    &alternate_plan,
+                    &alternate_hash,
+                    deadline,
+                    cancelled,
+                )
+                .await?;
+        }
         if matches!(
             outcome,
             OfflineProduceOutcome::Ready(_) | OfflineProduceOutcome::Cached(_)
@@ -12394,8 +14745,9 @@ impl TranscodeManager {
                 let _ = self
                     .store
                     .update_offline_progress(
-                        package_id,
-                        self.offline_owner(),
+                        &package.id,
+                        &package.node_id,
+                        package.claim_generation,
                         "extracting_subtitles",
                         999,
                     )
@@ -12404,6 +14756,53 @@ impl TranscodeManager {
             }
         }
         Ok(outcome)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn produce_offline_candidate(
+        &self,
+        package: &OfflinePackage,
+        file: &plurx_core::domain::MediaFile,
+        opts: &TranscodeOptions,
+        plan: &ResolvedTranscode,
+        hash: &str,
+        deadline: Instant,
+        cancelled: &tokio_util::sync::CancellationToken,
+    ) -> Result<OfflineProduceOutcome, String> {
+        #[cfg(test)]
+        {
+            let scripted = self
+                .offline_produce_script
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pop_front();
+            if let Some(outcome) = scripted {
+                self.offline_produced_recipes
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(hash.to_owned());
+                return Ok(outcome);
+            }
+        }
+        self.produce_normalized(
+            PortableProduction {
+                file,
+                opts,
+                plan,
+                deadline,
+                yield_to_offline: false,
+                cancelled: Some(cancelled),
+                offline_package_id: Some(&package.id),
+                offline_claim_generation: Some(package.claim_generation),
+                publication_fence: None,
+                pretranscode_fence: None,
+                expected_policy_generation: None,
+                expected_source_snapshot: None,
+                bound_source: None,
+            },
+            hash.to_owned(),
+        )
+        .await
     }
 
     /// Shared content-addressed production tail. Track and eligibility policy
@@ -12417,11 +14816,12 @@ impl TranscodeManager {
         let PortableProduction {
             file,
             opts,
-            encoder: _,
+            plan,
             deadline,
             yield_to_offline: _,
             cancelled,
             offline_package_id,
+            offline_claim_generation,
             publication_fence,
             pretranscode_fence,
             expected_policy_generation,
@@ -12430,6 +14830,7 @@ impl TranscodeManager {
         } = &request;
         let cancelled = *cancelled;
         let offline_package_id = *offline_package_id;
+        let offline_claim_generation = *offline_claim_generation;
         let pretranscode_fence = pretranscode_fence.clone();
         let cache = self.cache.as_ref().ok_or("no cache configured")?;
         let queue_job = if let Some(fence) = &pretranscode_fence {
@@ -12510,6 +14911,28 @@ impl TranscodeManager {
             } else {
                 None
             };
+            if !generation_permits_reuse(plan, manifest.as_deref()) {
+                // Unreachable while the retention rule below holds, because a
+                // row under this identity is only ever written for a
+                // generation whose receipt permitted it, and the namespace
+                // names the receipt version so a build that cannot read one
+                // never computes this key. Reaching it means that invariant is
+                // broken.
+                //
+                // Terminal rather than `Err`, and that distinction is the
+                // whole point: `Err` is retryable in both callers, so a
+                // condition stored on disk would be retried on a backoff
+                // forever and reported to a user as an encoder fault. It also
+                // does not invalidate — deleting bytes and failing dependent
+                // packages over a bookkeeping fault is the trade this rule
+                // exists to refuse.
+                tracing::error!(
+                    recipe = %hash,
+                    namespace = plan.artifact_namespace(),
+                    "a health-qualified cache row has no receipt permitting its reuse"
+                );
+                return Ok(OfflineProduceOutcome::HealthRefused);
+            }
             let playlist_bytes = match &manifest {
                 Some(manifest) => manifest
                     .read_verified_playlist(&root, "index.m3u8")
@@ -12539,9 +14962,17 @@ impl TranscodeManager {
             };
             let mut settled_bytes = cached.bytes;
             if let Some(package_id) = offline_package_id {
+                let claim_generation = offline_claim_generation
+                    .ok_or("offline package production lost its claim generation")?;
                 let _ = self
                     .store
-                    .update_offline_progress(package_id, &cache.node_id, "transcoding", 999)
+                    .update_offline_progress(
+                        package_id,
+                        &cache.node_id,
+                        claim_generation,
+                        "transcoding",
+                        999,
+                    )
                     .await;
             }
             if let Some(fence) = &pretranscode_fence {
@@ -12569,6 +15000,10 @@ impl TranscodeManager {
                             &root,
                             &generation_id,
                             &names,
+                            // Adopting a generation an earlier build published.
+                            // This run watched none of those bytes being made,
+                            // and a receipt is a claim about bytes you watched.
+                            None,
                             || {
                                 cancelled
                                     .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
@@ -12631,6 +15066,29 @@ impl TranscodeManager {
                     }
                 };
                 if !completed {
+                    return Ok(OfflineProduceOutcome::Yielded);
+                }
+            }
+            if let Some(package_id) = offline_package_id {
+                let claim_generation = offline_claim_generation
+                    .ok_or("offline package production lost its claim generation")?;
+                let current = match self
+                    .store
+                    .offline_package_claim_is_current(
+                        package_id,
+                        &cache.node_id,
+                        claim_generation,
+                        &hash,
+                    )
+                    .await
+                {
+                    Ok(current) => current,
+                    Err(error) => {
+                        tracing::warn!(package = package_id, %error, "offline cache-hit claim check unavailable");
+                        return Ok(OfflineProduceOutcome::StoreUnavailable);
+                    }
+                };
+                if !current {
                     return Ok(OfflineProduceOutcome::Yielded);
                 }
             }
@@ -12836,17 +15294,67 @@ impl TranscodeManager {
             .open_child_directory(ASSEMBLED_DIR)
             .await
             .map_err(|error| format!("opening assembled generation: {error}"))?;
-        let manifest = if let Some(job) = &queue_job {
+        // A queue job publishes a manifest because the queue's readers require
+        // one. Under the qualified identity every publication needs one, for a
+        // different reason: the retention rule reads the manifest, so a
+        // generation without one cannot be kept at all — speculative warming
+        // and offline preparation would settle a clean receipt and then have
+        // it refused for having written it nowhere.
+        //
+        // Deliberately not extended to the unqualified identity. A row that
+        // records a manifest digest is offered to cluster placement, is
+        // enrolled in the integrity scrub, and serves offline segments fatally
+        // rather than leniently on pre-existing bit rot — three behaviour
+        // changes for rows deployed nodes already hold, in exchange for a
+        // receipt nothing there consults. (Shared-cache fanout would have been
+        // a fourth; it is refused outright below, under either identity.)
+        // Under the qualified identity none of those rows exist yet, so each
+        // of those becomes a property of a new key space rather than a change
+        // to a live one.
+        let manifest = if queue_job.is_some() || plan.enforces_receipt() {
+            let generation_id = match &queue_job {
+                Some(job) => format!("{}:{}", job.id, job.fence),
+                // Off the queue there is no job to name it after, so the
+                // final directory's own identity names it. What matters is
+                // that it is *stable across the resume passes of one
+                // production*: the digest checkpoint a preempted manifest hash
+                // leaves behind is keyed by this id, and a value that changed
+                // per pass would silently rehash the whole film every time.
+                //
+                // Unfenced it is the recipe hash, which is also stable across
+                // *unrelated* productions of the same recipe — and that is
+                // safe for three reasons worth writing down, because the whole
+                // argument rests on them. The checkpoint file lives inside the
+                // generation directory, so it dies with the staging tree it
+                // describes. Its header must carry this same id or the
+                // checkpoint is discarded. And every object digest in it is
+                // reused only while that file's device, inode, size and mtime
+                // still match, so re-encoded bytes are rehashed rather than
+                // certified from a record of bytes that no longer exist.
+                None => identity_for(&relative)?.to_owned(),
+            };
             let names = std::iter::once("index.m3u8".to_owned())
                 .chain((0..published.segments).map(|index| format!("seg{index:05}.ts")))
                 .collect::<Vec<_>>();
+            // Which lanes owe the idle courtesy. Both background lanes do —
+            // the queue and speculative warming exist to be interrupted by
+            // people pressing play. An offline package does not: a user is
+            // waiting on that download, and `pretranscode_worker_idle` is
+            // false while one is waiting, so applying it there would yield on
+            // the first check and every check after it, and the package would
+            // never become ready.
+            let owes_idle_courtesy = offline_package_id.is_none();
             let manifest = plurx_core::transcode::manifest::publish_controlled_directory(
                 &generation,
-                &format!("{}:{}", job.id, job.fence),
+                &generation_id,
                 &names,
+                // The join of every contributing part's receipt, and `None`
+                // when this pass adopted an assembly it did not make. This is
+                // the only place a producer receipt reaches durable storage.
+                published.health.clone(),
                 || {
                     cancelled.is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
-                        || !self.pretranscode_worker_idle()
+                        || (owes_idle_courtesy && !self.pretranscode_worker_idle())
                         || Instant::now() >= request.deadline
                 },
             )
@@ -12854,11 +15362,18 @@ impl TranscodeManager {
             let Some(manifest) = manifest else {
                 return Ok(OfflineProduceOutcome::Yielded);
             };
+            #[cfg(test)]
+            self.manifests_published
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if let Some(expected) = expected_policy_generation.as_deref() {
                 if let Some(outcome) = self.pretranscode_policy_interruption(expected).await {
                     return Ok(outcome);
                 }
             }
+            // The manifest file is bytes on disk like any other. Charging it
+            // to the ledger on one path and not the other would leave the cache
+            // budget under-counting every generation the other path made, with
+            // no reconciliation anywhere.
             published.bytes = published.bytes.saturating_add(
                 generation
                     .child_metadata(plurx_core::transcode::manifest::MANIFEST_FILE)
@@ -12875,10 +15390,7 @@ impl TranscodeManager {
         // durable completion. This is intentionally acquired before ensuring
         // the shared fanout parent: the parent guard closes its otherwise
         // empty ensure -> child-install race with orphan cleanup.
-        let identity = final_dir
-            .file_name()
-            .and_then(std::ffi::OsStr::to_str)
-            .ok_or("cache publication has no safe final-directory identity")?;
+        let identity = identity_for(&relative)?;
         let Some(publication_guard) = self.cache_readers.begin_publication(&hash, identity) else {
             return Ok(OfflineProduceOutcome::Yielded);
         };
@@ -12901,6 +15413,55 @@ impl TranscodeManager {
             .rename_child_to(ASSEMBLED_DIR, final_parent, identity)
             .await
             .map_err(|error| format!("publishing {}: {error}", final_dir.display()))?;
+        // The same rule, applied before any write that would let a future
+        // request find these bytes. The session that asked for them already
+        // has them: the generation is assembled and renamed into place above,
+        // and refusing here declines to *keep* it, never to serve it.
+        //
+        // It reads the manifest, never an in-memory value, because the
+        // manifest is what the next request will have to re-read: a receipt
+        // this process never wrote down cannot certify these bytes to anyone
+        // tomorrow. Every path that publishes under this identity now writes
+        // one, so a refusal here is a refusal about what the receipt *says*
+        // rather than about where it was filed.
+        if !generation_permits_reuse(plan, manifest.as_ref()) {
+            tracing::warn!(
+                recipe = %hash,
+                namespace = plan.artifact_namespace(),
+                manifest = manifest.is_some(),
+                qualification = manifest
+                    .as_ref()
+                    .and_then(|manifest| manifest.producer_health.as_ref())
+                    .map_or("absent", |receipt| receipt.qualification.name()),
+                terminal_fault = manifest
+                    .as_ref()
+                    .and_then(|manifest| manifest.producer_health.as_ref())
+                    .and_then(|receipt| receipt.terminal_fault)
+                    .map(crate::decoder_health::DecodeFaultKind::name),
+                "refusing to retain a generation whose producer health receipt does not permit reuse"
+            );
+            let _ = quarantine_remove_cache_tree(&final_dir, 1).await;
+            drop(publication_guard);
+            let _ = quarantine_remove_cache_tree(&temp, 3).await;
+            // The same cleanup the failure arm does, and for a sharper reason.
+            // A refused generation leaves the `complete = 0` claim behind
+            // unless this runs, and that claim is not merely litter: the next
+            // request for this recipe cannot claim it, finds no staging tree
+            // to resume, and stands down as `ClaimedElsewhere` — while
+            // `stale_cache_claims` refuses to reap a claim whose package is
+            // still queued. The package holds the claim and the claim holds
+            // the package, forever.
+            if pretranscode_fence.is_none() {
+                forget_unfenced_claim_with(
+                    self.store.as_ref(),
+                    &hash,
+                    &cache.node_id,
+                    publication_fence.as_ref(),
+                )
+                .await;
+            }
+            return Ok(OfflineProduceOutcome::HealthRefused);
+        }
         if let (Some(fence), Some(manifest)) = (pretranscode_fence.as_ref(), manifest.as_ref()) {
             if let Some(expected) = expected_policy_generation.as_deref() {
                 if let Some(outcome) = self.pretranscode_policy_interruption(expected).await {
@@ -12936,20 +15497,77 @@ impl TranscodeManager {
                 let _ = quarantine_remove_cache_tree(&final_dir, 1).await;
                 return Ok(OfflineProduceOutcome::Yielded);
             }
-        } else if let Some(fence) = publication_fence {
-            PublicationStore::fenced(self.store.as_ref(), fence.clone())
-                .complete_cache_entry(&hash, &cache.node_id, &relative, published.bytes)
-                .await
-                .map_err(|error| error.to_string())?;
         } else {
-            self.store
-                .complete_cache_entry(&hash, &cache.node_id, published.bytes)
-                .await
-                .map_err(|error| error.to_string())?;
+            // Every queue completion is settled by the branch above, because
+            // `queue_job` is `Some` exactly when `pretranscode_fence` is.
+            debug_assert!(
+                queue_job.is_none(),
+                "a queue completion must settle through its own fence"
+            );
+            // A digest only where the identity asks for one. Deriving it from
+            // the manifest alone would work today and would put the safety in
+            // the invariant asserted above rather than here: a queue job that
+            // ever reached this branch would newly stamp a digest onto an
+            // unqualified row, and a row that has one is scrubbed, is offered
+            // to placement, and serves offline segments fatally rather than
+            // leniently. Those must not move for rows deployed nodes already
+            // hold.
+            let digest = plan
+                .enforces_receipt()
+                .then(|| {
+                    manifest
+                        .as_ref()
+                        .map(|manifest| manifest.manifest_digest.as_str())
+                })
+                .flatten();
+            if let Some(package_id) = offline_package_id {
+                let claim_generation = offline_claim_generation
+                    .ok_or("offline package production lost its claim generation")?;
+                let completed = match self
+                    .store
+                    .complete_offline_cache_entry(
+                        package_id,
+                        &cache.node_id,
+                        claim_generation,
+                        &hash,
+                        published.bytes,
+                        digest,
+                    )
+                    .await
+                {
+                    Ok(completed) => completed,
+                    Err(error) => {
+                        tracing::warn!(package = package_id, recipe = %hash, %error, "offline cache completion unavailable");
+                        return Ok(OfflineProduceOutcome::StoreUnavailable);
+                    }
+                };
+                if !completed {
+                    let _ = quarantine_remove_cache_tree(&final_dir, 1).await;
+                    return Ok(OfflineProduceOutcome::Yielded);
+                }
+            } else if let Some(fence) = publication_fence {
+                PublicationStore::fenced(self.store.as_ref(), fence.clone())
+                    .complete_cache_entry(&hash, &cache.node_id, &relative, published.bytes, digest)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            } else {
+                self.store
+                    .complete_cache_entry(&hash, &cache.node_id, published.bytes, digest)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
         }
-        if let (Some(shared_cache), Some(manifest)) =
-            (self.shared_cache.as_ref(), manifest.as_ref())
-        {
+        // Queue-owned generations only, exactly as before. A manifest is now
+        // published off the queue too, and that alone must not enrol a
+        // speculative or offline generation in shared-cluster fanout: that is
+        // a second full copy onto a shared mount, other nodes routing work to
+        // it, and cluster quota — a decision of its own, not a side effect of
+        // carrying a receipt.
+        if let (Some(shared_cache), Some(manifest), true) = (
+            self.shared_cache.as_ref(),
+            manifest.as_ref(),
+            queue_job.is_some(),
+        ) {
             match shared_cache
                 .publish_generation(&hash, file.id, CACHE_RECIPE_VERSION, &final_dir, manifest)
                 .await
@@ -13013,28 +15631,41 @@ impl TranscodeManager {
         let PortableProduction {
             file,
             opts,
-            encoder,
+            plan,
             deadline,
             yield_to_offline,
             cancelled,
             offline_package_id,
+            offline_claim_generation,
             publication_fence: _,
             pretranscode_fence: _,
             expected_policy_generation: _,
             expected_source_snapshot: _,
             bound_source,
         } = request.clone();
+        let encoder = plan.encoder();
         let max = self.max_hw_sessions().await;
         // Whatever an earlier pass got through. Usually nothing; on a busy box
         // making a long film, this is how it eventually finishes.
-        let mut parts = resume_parts(temp).await?;
+        let plan_digest = plan.plan_digest();
+        let ResumedParts {
+            mut parts,
+            receipts: inherited_receipts,
+        } = resume_parts(temp, &plan_digest).await?;
+        let mut generation_health = GenerationObservation::inheriting(
+            inherited_receipts,
+            carried_generation_health(temp, &plan_digest).await,
+            &plan_digest,
+        );
         let mut retained_segments = parts.iter().map(|part| part.segments.len()).sum::<usize>();
         let mut retained_duration_ms = parts
             .iter()
             .try_fold(0_i64, |total, part| total.checked_add(part.duration_ms()))
             .ok_or("retained transcode duration overflow")?;
         if let Ok(assembled) = temp.open_child_directory(ASSEMBLED_DIR).await {
-            if let Some(published) = assembled_publication(&assembled, parts.len()).await {
+            if let Some(published) =
+                assembled_publication(&assembled, &parts, generation_health.settle()).await
+            {
                 tracing::info!(
                     recipe = %hash,
                     segments = published.segments,
@@ -13125,6 +15756,31 @@ impl TranscodeManager {
                 software_threads: sw_hold.as_ref().map(|p| p.threads() as u32),
                 ..opts.clone()
             };
+            let source_offset_permit = if let Some(source) = &bound_source {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Ok(None);
+                }
+                Some(tokio::select! {
+                    biased;
+                    _ = async {
+                        match cancelled {
+                            Some(cancelled) => cancelled.cancelled().await,
+                            None => std::future::pending::<()>().await,
+                        }
+                    } => return Ok(None),
+                    permit = tokio::time::timeout(
+                        remaining,
+                        Arc::clone(&source.offset_gate).acquire_owned(),
+                    ) => {
+                        permit
+                            .map_err(|_| "timed out waiting for bound-source offset ownership")?
+                            .map_err(|_| "bound-source offset owner closed")?
+                    }
+                })
+            } else {
+                None
+            };
             // Unpaced, deliberately. Pacing exists so a live session does not
             // write a film ahead of a playhead that will never reach it; a
             // producer has no playhead and every second it spends holding the
@@ -13150,20 +15806,23 @@ impl TranscodeManager {
             } else {
                 format!("/dev/fd/4/{part_name}")
             };
-            let args = transcode::hls_args(
+            let execution = TranscodeExecution::from_options(
                 ffmpeg_file,
-                encoder,
                 &part_opts,
                 self.producer.pacing,
                 &output_directory,
-            );
+            )
+            .map_err(|error| error.to_string())?;
+            let observation = DiagnosticObservation::for_plan(plan, &self.measured_decoders);
+            let execution = execution.observing_qualified_grammar(observation.qualified_logging());
+            let args = transcode::hls_args(plan, &execution);
             tracing::info!(
                 recipe = %hash, part = parts.len(), from_s = part_opts.start_seconds,
                 encoder = encoder.label(), "pre-transcode part starting"
             );
             let progress = Arc::new(Progress::new());
             let generation = progress.begin_attempt();
-            let mut child = spawn_ffmpeg(
+            let (mut child, diagnostics) = spawn_ffmpeg(
                 &args,
                 encoder.label(),
                 hash,
@@ -13174,15 +15833,49 @@ impl TranscodeManager {
                     output: Some(temp.raw_fd()),
                     subtitle: subtitle_handle.map(std::os::fd::AsRawFd::as_raw_fd),
                 },
-            )?;
+                observation.clone(),
+            )?
+            .into_parts();
 
             let ended = self
                 .run_part(&mut child, deadline, yield_to_offline, cancelled)
                 .await;
+            drop(source_offset_permit);
             drop(slot); // before anything else: a viewer is probably waiting on it
             drop(sw_hold); // and the pool share with it
-            let part = read_part(&part_dir).await;
+                           // The part's own observation, settled after the permits are back:
+                           // the child is already reaped, so the drain is normally instant,
+                           // and holding a hardware slot through a bounded wait for a reader
+                           // is exactly the trade the comment above refuses. M3b records the
+                           // receipt; M3c is what makes it refuse a part.
+            let receipt = diagnostics
+                .settle(
+                    crate::decoder_health::DIAGNOSTIC_DRAIN_BUDGET,
+                    part_exit_disposition(&ended),
+                )
+                .await;
+            report_producer_health(&format!("{hash} part {}", parts.len()), &receipt);
+            let ValidatedPart { part, shape, .. } = read_part(&part_dir).await;
             let produced = !part.is_empty();
+            if produced {
+                // Sealed beside the bytes it describes, so whichever pass
+                // resumes this film does not have to call the part unobserved.
+                retain_part_health(&part_dir, &shape, &receipt).await;
+            }
+            // Recorded whether or not it produced. An attempt that decoded
+            // nothing and exited zero writes no segment, and that receipt is
+            // the one that matters most.
+            generation_health.record(receipt, produced);
+            if !produced {
+                // Its directory is about to be removed or reused by the retry,
+                // so there is nothing for it to be sealed beside. The ledger is
+                // written now rather than at the end of the pass, because a
+                // pass that is about to be preempted is exactly the one whose
+                // observation would otherwise be lost.
+                if let Some(unproductive) = generation_health.unproductive() {
+                    retain_generation_health(temp, unproductive).await;
+                }
+            }
             if produced {
                 if parts.len().saturating_add(1) > MAX_RETAINED_PART_DIRECTORIES {
                     let _ = remove_staged_child(temp, &part_name).await;
@@ -13207,6 +15900,8 @@ impl TranscodeManager {
                     offline_package_id,
                     file.duration_ms.filter(|duration| *duration > 0),
                 ) {
+                    let claim_generation = offline_claim_generation
+                        .expect("offline package progress requires its claim generation");
                     let completed_ms = crate::produce::resume_at_ms(&parts);
                     let progress = completed_ms
                         .saturating_mul(1000)
@@ -13217,6 +15912,7 @@ impl TranscodeManager {
                         .update_offline_progress(
                             package_id,
                             self.offline_owner(),
+                            claim_generation,
                             "transcoding",
                             progress,
                         )
@@ -13229,7 +15925,7 @@ impl TranscodeManager {
                     if cancelled.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
                         return Ok(None);
                     }
-                    return publish_from(temp, &parts).await;
+                    return publish_from(temp, &parts, generation_health.settle()).await;
                 }
                 PartEnd::Preempted | PartEnd::Deadline => {
                     tracing::info!(
@@ -13346,9 +16042,25 @@ impl TranscodeManager {
         user_name: &str,
     ) -> Result<StartInfo, String> {
         let supersession_user = serde_json::json!(["username", user_name]).to_string();
-        self.create_session_inner(req, user_name, &supersession_user, None, None, None)
-            .await
-            .map(|creation| creation.info)
+        // A legacy process-local start has no cluster identity: no user id, no
+        // incarnation, and therefore no epoch. The ledger refuses an empty
+        // epoch, so this is "no budget" rather than "an unused one".
+        let recovery = SessionRecoveryIdentity {
+            user_id: 0,
+            incarnation_id: String::new(),
+            recovery_epoch: String::new(),
+        };
+        self.create_session_inner(
+            req,
+            user_name,
+            &supersession_user,
+            &recovery,
+            None,
+            None,
+            None,
+        )
+        .await
+        .map(|creation| creation.info)
     }
 
     /// Start a cluster-owned replacement while retaining its process-local
@@ -13356,11 +16068,12 @@ impl TranscodeManager {
     pub async fn create_cluster_session(
         &self,
         req: &SessionRequest,
-        user_id: i64,
+        recovery: &SessionRecoveryIdentity,
         user_name: &str,
         deadline: tokio::time::Instant,
         admitted_serving_generation: u64,
     ) -> Result<ClusterSessionStart, String> {
+        let user_id = recovery.user_id;
         let serving_admission = ClusterServingAdmission {
             generation: admitted_serving_generation,
             deadline,
@@ -13387,6 +16100,7 @@ impl TranscodeManager {
                 req,
                 user_name,
                 &supersession_user,
+                recovery,
                 Some(deadline),
                 None,
                 Some(serving_admission),
@@ -13443,12 +16157,12 @@ impl TranscodeManager {
     pub(crate) async fn create_cluster_takeover_session_under_guard(
         &self,
         req: &SessionRequest,
-        user_id: i64,
+        recovery: &SessionRecoveryIdentity,
         user_name: &str,
         deadline: tokio::time::Instant,
         takeover: SessionTakeoverStart,
     ) -> Result<StartInfo, String> {
-        let supersession_user = serde_json::json!(["user_id", user_id]).to_string();
+        let supersession_user = serde_json::json!(["user_id", recovery.user_id]).to_string();
         // Same check the ordinary cluster start makes after its gate wait: a
         // start with no budget left cannot finish, and spawning ffmpeg only to
         // abandon it costs an admission slot for nothing.
@@ -13461,6 +16175,7 @@ impl TranscodeManager {
             req,
             user_name,
             &supersession_user,
+            recovery,
             Some(deadline),
             Some(takeover),
             None,
@@ -13517,11 +16232,13 @@ impl TranscodeManager {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn create_session_inner(
         &self,
         req: &SessionRequest,
         user_name: &str,
         supersession_user: &str,
+        recovery: &SessionRecoveryIdentity,
         replacement_deadline: Option<tokio::time::Instant>,
         takeover: Option<SessionTakeoverStart>,
         serving_admission: Option<ClusterServingAdmission>,
@@ -13578,6 +16295,7 @@ impl TranscodeManager {
                     req,
                     user_name,
                     supersession_user,
+                    recovery,
                     replacement_deadline,
                     takeover,
                 )
@@ -13605,9 +16323,9 @@ impl TranscodeManager {
                     // whether a code may fall back and which reason it is
                     // counted under, so adding a fifth code cannot produce
                     // sessions the engine serves and nothing attributes.
-                    let recovery = vod_refusal(&error)
+                    let live_recovery_reason = vod_refusal(&error)
                         .and_then(|(code, _)| LiveRecoveryReason::from_refusal(code));
-                    if let Some(reason) = recovery {
+                    if let Some(reason) = live_recovery_reason {
                         if self.live_hls_recovery_enabled().await? {
                             tracing::warn!(
                                 file_id = req.file_id,
@@ -13619,6 +16337,7 @@ impl TranscodeManager {
                                     req,
                                     user_name,
                                     supersession_user,
+                                    recovery,
                                     replacement_deadline,
                                     takeover,
                                 )
@@ -13692,6 +16411,7 @@ impl TranscodeManager {
         req: &SessionRequest,
         user_name: &str,
         supersession_user: &str,
+        recovery: &SessionRecoveryIdentity,
         replacement_deadline: Option<tokio::time::Instant>,
         takeover: Option<SessionTakeoverStart>,
     ) -> Result<StartInfo, String> {
@@ -13706,6 +16426,7 @@ impl TranscodeManager {
                     req.audio_offset_ms,
                     user_name,
                     supersession_user,
+                    recovery,
                     replacement_deadline,
                     takeover,
                     &req.playback_id,
@@ -13731,6 +16452,7 @@ impl TranscodeManager {
                     },
                     user_name,
                     supersession_user,
+                    recovery,
                     replacement_deadline,
                     takeover,
                     &req.playback_id,
@@ -13888,6 +16610,27 @@ impl TranscodeManager {
         } else {
             None
         };
+        let held_plan_handle = source.handle.try_clone().map(Arc::new).map_err(|error| {
+            vod_refusal_error(
+                "vod_decoder_plan_refused",
+                format!("the held source could not be retained for decoder planning: {error}"),
+            )
+        })?;
+        let plan = self
+            .resolve_held_movie_plan(
+                file,
+                &options,
+                encoder,
+                crate::decode_facts::DecodeFactSource::new(
+                    held_plan_handle,
+                    Arc::new(tokio::sync::Semaphore::new(1)),
+                ),
+                Instant::now() + DECODE_PLAN_PROBE_BUDGET,
+                None,
+            )
+            .await
+            .map_err(|error| vod_refusal_error("vod_decoder_plan_refused", error))?;
+        let resources = TranscodeResourceEstimate::of(&plan, &Workload::of(file, target_height));
         if !source.unchanged() {
             return Err(vod_refusal_error(
                 "vod_source_rescan_required",
@@ -13919,7 +16662,8 @@ impl TranscodeManager {
         }
         Ok(Some(Arc::new(crate::vodencode::Encoding {
             source_object_version,
-            encoder,
+            plan,
+            resources,
             options,
             grid,
             subtitle,
@@ -13999,7 +16743,7 @@ impl TranscodeManager {
             });
         let encoder = encoding
             .as_ref()
-            .map_or("vod", |encoding| encoding.encoder.label());
+            .map_or("vod", |encoding| encoding.plan.encoder().label());
         let prepared = crate::vodserve::VodRecipeRequest {
             request: req,
             encoding,
@@ -14741,6 +17485,202 @@ impl TranscodeManager {
         self.caps.choose(&prefer)
     }
 
+    /// The conservative whole-node projection retained for legacy readers.
+    ///
+    /// Production planning additionally intersects this with the exact
+    /// resolved decode path; this accessor remains for the direct-identity
+    /// test seam and startup transition logging.
+    pub fn artifact_qualification(&self) -> plurx_core::transcode::ArtifactQualification {
+        self.artifact_qualification
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .effective
+    }
+
+    /// The answer this node published, exactly as it published it.
+    pub fn published_artifact_qualification(&self) -> ArtifactQualificationReadiness {
+        self.artifact_qualification
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// What this node measured, and what it may therefore honour.
+    ///
+    /// Reads no setting: it answers "could this node do it", which the
+    /// settings surface needs in order to explain a refusal *before* an
+    /// operator asks for one and gets it.
+    pub fn artifact_qualification_readiness(
+        &self,
+        requested: bool,
+    ) -> ArtifactQualificationReadiness {
+        let selectable_paths = self.selectable_decode_paths();
+        artifact_qualification_readiness(
+            requested,
+            &self.diagnostic_policy,
+            &self.measured_decoders,
+            &selectable_paths,
+        )
+    }
+
+    /// Every `(codec, backend)` the manager can select under its boot-time
+    /// encoder capabilities. Failed probes stay in this denominator: their
+    /// absence is evidence that whole-node qualification cannot be proven,
+    /// not evidence that the route disappeared.
+    fn selectable_decode_paths(&self) -> Vec<(String, plurx_core::transcode::DecodeBackend)> {
+        use plurx_core::transcode::{DecodeBackend, Encoder};
+
+        let backends = [
+            (Encoder::Software, DecodeBackend::Software),
+            (Encoder::VideoToolbox, DecodeBackend::VideoToolbox),
+            (Encoder::Nvenc, DecodeBackend::Cuda),
+            (Encoder::Qsv, DecodeBackend::Qsv),
+            (Encoder::Vaapi, DecodeBackend::Vaapi),
+        ];
+        self.decoders
+            .iter()
+            .flat_map(|codec| {
+                backends
+                    .iter()
+                    .filter(|(encoder, _)| self.caps.available(*encoder))
+                    .map(|(_, backend)| (codec.clone(), *backend))
+            })
+            .collect()
+    }
+
+    /// Read and publish the operator's requested path-scoped policy.
+    ///
+    /// **Called once, at start.** Not on every write, and that is the whole
+    /// design rather than an omission. This value can change the cache key for
+    /// every covered path, so moving it on a live node moves those key spaces
+    /// under work that is already running: a session that resolved its plan a
+    /// second ago publishes into a directory the next lookup will not name, a
+    /// resumable production cannot find its own earlier parts and — under the
+    /// qualified identity — those parts carry no receipt, so the film it
+    /// restarts can never be kept. A control that quietly did that to a busy
+    /// node would be a worse failure than the one this effort exists to fix,
+    /// because it would be caused by the fix.
+    ///
+    /// So the request is stored when it is written and read when the node next
+    /// starts, which is also how a fleet rolls one out. Each later plan applies
+    /// that stable request only to an exact path with one covering contract.
+    /// The settings surface reports the stored request and the published
+    /// answer as separate facts, so an operator can see that a restart is owed.
+    ///
+    /// A store that cannot be read is not an excuse to guess, and it is also
+    /// not a reason to refuse to start a media server. The node keeps the
+    /// identity every deployed node already has and says it could not read the
+    /// setting, which is true and is visible on the settings surface.
+    pub async fn publish_artifact_qualification(&self) -> ArtifactQualificationReadiness {
+        #[cfg(test)]
+        self.force_artifact_qualification
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        let stored = self
+            .store
+            .get_setting(plurx_core::store::keys::DECODER_HEALTH_QUALIFIED_ARTIFACTS)
+            .await;
+        let readiness = match stored {
+            Ok(value) => self.artifact_qualification_readiness(value.as_deref() == Some("1")),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "could not read the verified-decode request; keeping the unqualified identity"
+                );
+                ArtifactQualificationReadiness::unreadable()
+            }
+        };
+        let requested = readiness.requested;
+        let previous = self.artifact_qualification();
+        *self
+            .artifact_qualification
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = readiness.clone();
+        if previous != readiness.effective {
+            tracing::warn!(
+                namespace = readiness.effective.namespace(),
+                previous = previous.namespace(),
+                requested,
+                covered = readiness.covered_decoders.len(),
+                refusal = readiness.refusal.map(QualificationRefusal::name),
+                "the verified-artifact policy changed; uniquely covered decode paths use its identity"
+            );
+        } else {
+            tracing::info!(
+                namespace = readiness.effective.namespace(),
+                requested,
+                covered = readiness.covered_decoders.len(),
+                refusal = readiness.refusal.map(QualificationRefusal::name),
+                "published the effective artifact identity"
+            );
+        }
+        readiness
+    }
+
+    /// Publish an identity directly, without per-path contract selection.
+    ///
+    /// Test-only, and it must stay that way. Every test of the enforcement
+    /// behind this control runs on a host no diagnostic contract covers, so
+    /// the real publisher would — correctly — refuse them all. This says
+    /// "pretend the prerequisites are met"; the real publisher is what decides
+    /// whether they are.
+    #[cfg(test)]
+    pub(crate) fn test_publish_artifact_qualification(
+        &self,
+        qualification: plurx_core::transcode::ArtifactQualification,
+    ) {
+        {
+            let mut published = self
+                .artifact_qualification
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            published.effective = qualification;
+            published.requested = qualification.enforces_receipt();
+            published.refusal = None;
+        }
+        self.force_artifact_qualification.store(
+            qualification.enforces_receipt(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        tracing::info!(
+            namespace = qualification.namespace(),
+            "published the effective artifact identity"
+        );
+    }
+
+    /// Replace real offline production with deterministic outcomes and retain
+    /// the exact recipe reference each attempt received.
+    #[cfg(test)]
+    pub(crate) fn test_script_offline_production(
+        &self,
+        outcomes: impl IntoIterator<Item = OfflineProduceOutcome>,
+    ) {
+        self.offline_produce_script
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend(outcomes);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_offline_produced_recipes(&self) -> Vec<String> {
+        self.offline_produced_recipes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_fail_next_offline_recovery_begin(&self) {
+        self.fail_next_offline_recovery_begin
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// How many generation manifests this manager has published.
+    #[cfg(test)]
+    pub(crate) fn test_manifests_published(&self) -> usize {
+        self.manifests_published
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     fn rate_control_snapshot(&self) -> RateControlSnapshot {
         *self
             .rate_control
@@ -15364,6 +18304,13 @@ impl TranscodeManager {
         playback_id: &str,
     ) -> Result<StartInfo, String> {
         let supersession_user = serde_json::json!(["username", user_name]).to_string();
+        // A legacy process-local start carries no cluster identity, so no
+        // budget. The ledger refuses an empty epoch, which is the answer.
+        let recovery = SessionRecoveryIdentity {
+            user_id: 0,
+            incarnation_id: String::new(),
+            recovery_epoch: String::new(),
+        };
         self.start_with_audio_offset(
             file_id,
             target_height,
@@ -15373,6 +18320,7 @@ impl TranscodeManager {
             0,
             user_name,
             &supersession_user,
+            &recovery,
             None,
             None,
             playback_id,
@@ -15393,6 +18341,7 @@ impl TranscodeManager {
     async fn admit_live(
         &self,
         preferred: Encoder,
+        plan: Option<&ResolvedTranscode>,
         work: Workload<'_>,
         max_wait: Duration,
     ) -> Result<LiveAdmission, String> {
@@ -15402,14 +18351,60 @@ impl TranscodeManager {
 
         if preferred != Encoder::Software {
             let max = self.max_hw_sessions().await;
+            // What this pipeline will actually spend, read off the plan rather
+            // than off the encoder's name. A hardware encoder fed by a software
+            // decode spends most of a box's cores on the decode, and admitting
+            // it as "hardware, therefore no CPU" is how several of them end up
+            // on one node with every counter reading healthy.
+            let estimate = plan.map(|plan| TranscodeResourceEstimate::of(plan, &work));
+            let mixed =
+                estimate.is_some_and(|estimate| estimate.hardware_slot && estimate.cpu_threads > 0);
             loop {
                 let decision = self.admissions.admit(max, work);
                 if let Admission::Hardware(slot) = decision {
-                    return Ok(LiveAdmission {
-                        encoder: preferred,
-                        hw_slot: Some(slot),
-                        sw_permit: None,
-                    });
+                    if !mixed {
+                        return Ok(LiveAdmission {
+                            encoder: preferred,
+                            hw_slot: Some(slot),
+                            sw_permit: None,
+                        });
+                    }
+                    // Release the slot before re-taking both together. The two
+                    // pools are one mutex, so the bundle is granted whole or
+                    // not at all; holding this slot while waiting for CPU is
+                    // the shape that deadlocks against a start doing the same
+                    // in the other order.
+                    drop(slot);
+                    let estimate = estimate.expect("a mixed pipeline has an estimate");
+                    if let Some(bundle) =
+                        self.admissions
+                            .try_admit_bundle(max, sw_budget, &estimate, Priority::Live)
+                    {
+                        let (hw_slot, sw_permit) = bundle.into_parts();
+                        tracing::info!(
+                            threads = estimate.cpu_threads,
+                            "software decode into a hardware encoder; reserving the CPU it will spend"
+                        );
+                        return Ok(LiveAdmission {
+                            encoder: preferred,
+                            hw_slot,
+                            sw_permit,
+                        });
+                    }
+                    // A slot exists but the CPU the decode needs does not.
+                    // Bounded, and answered honestly: the old accounting would
+                    // have started here and simply not reserved the cores.
+                    let now = Instant::now();
+                    if now < deadline {
+                        tokio::time::sleep(ADMISSION_POLL.min(deadline - now)).await;
+                        continue;
+                    }
+                    let why = format!(
+                        "a hardware slot is free but this title decodes in software and the CPU pool is spent ({} of {sw_budget} threads reserved); try again in a moment",
+                        self.admissions.software_in_use()
+                    );
+                    tracing::warn!(class = %work.software_class(), "{why}");
+                    return Err(capacity_error(why));
                 }
 
                 let now = Instant::now();
@@ -15509,7 +18504,9 @@ impl TranscodeManager {
             hdr: Some("hdr"),
             target_height: i64::from(target_height),
         };
-        self.admit_live(preferred, work, max_wait).await
+        // Live TV plans its own command and is never served from the movie
+        // cache, so there is no resolved movie plan to read an estimate from.
+        self.admit_live(preferred, None, work, max_wait).await
     }
 
     #[allow(clippy::too_many_arguments)] // one stream's worth of knobs
@@ -15523,6 +18520,7 @@ impl TranscodeManager {
         audio_offset_ms: i64,
         user_name: &str,
         supersession_user: &str,
+        recovery: &SessionRecoveryIdentity,
         replacement_deadline: Option<tokio::time::Instant>,
         takeover: Option<SessionTakeoverStart>,
         playback_id: &str,
@@ -15593,12 +18591,13 @@ impl TranscodeManager {
         if let Some(takeover) = takeover.as_ref() {
             opts.start_number = takeover.media_sequence;
         }
+        let plan = self.resolve_movie_plan(&file, &opts, encoder).await?;
         if takeover.is_none() {
             if let Some(info) = self
                 .serve_cached(
                     &file,
                     &opts,
-                    encoder,
+                    &plan,
                     &item_title,
                     SessionOwner {
                         user_name,
@@ -15644,7 +18643,9 @@ impl TranscodeManager {
         // (a superseded session, a closed tab), and someone who has pressed
         // play will forgive five seconds far sooner than a hang.
         let work = Workload::of(&file, target_height);
-        let admission = self.admit_live(encoder, work, QUEUE_WAIT).await?;
+        let admission = self
+            .admit_live(encoder, Some(&plan), work, QUEUE_WAIT)
+            .await?;
         encoder = admission.encoder;
         if grade == OutputGrade::Hdr10
             && target_height == HDR10_4K_HEIGHT
@@ -15689,11 +18690,20 @@ impl TranscodeManager {
         if let Some(takeover) = takeover.as_ref() {
             opts.start_number = takeover.media_sequence;
         }
+        // Admission is allowed to demote the encoder. That is a different
+        // byte-producing decision, so it receives a fresh complete plan;
+        // neither the old encoder nor its decode surface is patched in place.
+        let plan = self.resolve_movie_plan(&file, &opts, encoder).await?;
         let pacing = self.pacing(false).await;
         let typeless_sliding = self
             .stable_playlist_shape(replacement_deadline.is_some(), takeover.is_some())
             .await;
-        let args = transcode::hls_args(&file, encoder, &opts, pacing, &dir.to_string_lossy());
+        let observation = DiagnosticObservation::for_plan(&plan, &self.measured_decoders);
+        let execution =
+            TranscodeExecution::from_options(&file, &opts, pacing, &dir.to_string_lossy())
+                .map_err(|error| error.to_string())?
+                .observing_qualified_grammar(observation.qualified_logging());
+        let args = transcode::hls_args(&plan, &execution);
         // Log the exact command — the single most useful diagnostic. It reveals
         // the decode/filter/encode pipeline actually used (e.g. whether heavy
         // HEVC is being hardware-decoded), and confirms which build is running.
@@ -15744,18 +18754,178 @@ impl TranscodeManager {
         let retry = if encoder == Encoder::Software {
             None
         } else {
-            match PrepublicationTranscodeRetry::build(
+            // One read for both recipes: they are frozen together, and a
+            // budget that moved between them would put the pair on two
+            // different pictures of the node. Inside this branch rather than
+            // above it, because a software encoder builds neither recipe and
+            // has no reason to pay for a settings read on the start path.
+            let software_budget = self.software_budget().await;
+            let prepared = PrepublicationTranscodeRetry::prepare(
                 &file,
                 &opts,
                 encoder,
                 rate_control.effective_for(Encoder::Software),
-                pacing,
-                &dir,
-                &presentation_contract_fingerprint,
-                self.admissions.software_pool(),
-                self.runtime_cache.clone(),
-            ) {
-                Ok(retry) => Some(retry),
+            );
+            let retry = match prepared {
+                Ok(prepared) => match self
+                    .resolve_movie_plan(&file, &prepared.opts, prepared.encoder)
+                    .await
+                {
+                    Ok(retry_plan) => PrepublicationTranscodeRetry::build(
+                        &file,
+                        prepared,
+                        &retry_plan,
+                        pacing,
+                        &dir,
+                        &presentation_contract_fingerprint,
+                        self.admissions.software_pool(),
+                        software_budget,
+                        self.runtime_cache.clone(),
+                        &self.measured_decoders,
+                        "one-step-color-safe",
+                    ),
+                    Err(error) => Err(error),
+                },
+                Err(error) => Err(error),
+            };
+            match retry {
+                Ok(retry) => {
+                    // The software-decode alternate, frozen beside the
+                    // colour-safe one and by the same rule: resolved now, from
+                    // this plan, so that nothing re-runs policy in the middle
+                    // of a recovery.
+                    //
+                    // A failure to build it is *not* a failure to start the
+                    // session. The colour-safe retry is what this session has
+                    // always had and it is unaffected; an absent alternate
+                    // costs a decode fault its recovery and nothing else, and
+                    // refusing to play a title because its hypothetical
+                    // second recipe would not resolve is a worse trade than
+                    // any recovery it buys.
+                    let alternate = match self
+                        .resolve_restricted_movie_plan(
+                            &file,
+                            &opts,
+                            encoder,
+                            &plurx_core::transcode::AttemptRestrictions::requiring(
+                                plurx_core::transcode::DecodeBackend::Software,
+                            ),
+                        )
+                        .await
+                    {
+                        Ok(alternate_plan) => {
+                            PrepublicationTranscodeRetry::prepare_decode_restricted(
+                                &plan,
+                                &alternate_plan,
+                                &opts,
+                                encoder,
+                            )
+                            .and_then(|prepared| {
+                                prepared
+                                    .map(|prepared| {
+                                        PrepublicationTranscodeRetry::build(
+                                            &file,
+                                            prepared,
+                                            &alternate_plan,
+                                            pacing,
+                                            &dir,
+                                            &presentation_contract_fingerprint,
+                                            self.admissions.software_pool(),
+                                            software_budget,
+                                            self.runtime_cache.clone(),
+                                            &self.measured_decoders,
+                                            "software-decode",
+                                        )
+                                    })
+                                    .transpose()
+                            })
+                            .unwrap_or_else(|error| {
+                                tracing::warn!(
+                                    session = %session_log_id(&session_id),
+                                    "no software-decode alternate for this session: {error}"
+                                );
+                                None
+                            })
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                session = %session_log_id(&session_id),
+                                "software-decode alternate did not resolve: {error}"
+                            );
+                            None
+                        }
+                    };
+                    // The durable budget, consulted once, here — and only to
+                    // withhold.
+                    //
+                    // The actor chooses between the two frozen recipes, and it
+                    // cannot ask the store: it is synchronous and holds no
+                    // handle. So "has this playback already spent its one
+                    // automatic recovery" is answered where a store and the
+                    // identity are both in hand, by not giving the actor an
+                    // alternate to name. A reopen of a playback that already
+                    // recovered then reaches M5c1's permanent verdict on its
+                    // first qualified fault — the honest terminal answer this
+                    // effort exists to produce — instead of being told to
+                    // retry and then failing at install.
+                    //
+                    // A row in *any* state withholds. `Reserved` is a recovery
+                    // in flight or one abandoned by a cancelled executor, and
+                    // both terminal states are a budget already spent.
+                    let alternate = match (
+                        alternate,
+                        crate::playback_control::ProducerRecoveryLedger::new(
+                            Arc::clone(&self.store),
+                            recovery.user_id,
+                            playback_id,
+                            &recovery.recovery_epoch,
+                            // The generation being started is the one that will
+                            // fail, which is what a reservation records.
+                            &recovery.incarnation_id,
+                        ),
+                    ) {
+                        (Some(alternate), Some(ledger)) => match ledger.existing().await {
+                            Ok(None) => Some(alternate.with_recovery(DecodeRecoveryReservation {
+                                ledger,
+                                failed_plan_digest: plan.plan_digest(),
+                            })),
+                            Ok(Some(existing)) => {
+                                tracing::info!(
+                                    session = %session_log_id(&session_id),
+                                    state = existing.state.as_str(),
+                                    "this playback has already used its recovery budget; \
+                                     no software-decode alternate for this session"
+                                );
+                                None
+                            }
+                            Err(error) => {
+                                // Fail closed. An unreadable budget is not an
+                                // unspent one, and the cost of being wrong the
+                                // other way is a second automatic recovery on
+                                // a source that has already proven it does not
+                                // decode.
+                                tracing::warn!(
+                                    session = %session_log_id(&session_id),
+                                    %error,
+                                    "the recovery budget could not be read; withholding the \
+                                     software-decode alternate"
+                                );
+                                None
+                            }
+                        },
+                        // No durable identity: a legacy process-local start, a
+                        // relayed worker start, or a session predating the
+                        // epoch column. Those keep the in-process one-shot they
+                        // have always had — one automatic recovery per session
+                        // — because withholding recovery from them would be a
+                        // regression rather than a fix, and the reopen loop
+                        // they can still reach is the loop that existed before
+                        // this effort, not one it introduced.
+                        (alternate, None) => alternate,
+                        (None, _) => None,
+                    };
+                    Some(retry.with_decode_alternate(alternate))
+                }
                 Err(error) => {
                     let _ = tokio::fs::remove_dir_all(&dir).await;
                     start_settlement.disarm();
@@ -15773,10 +18943,25 @@ impl TranscodeManager {
                 });
         let completion_tolerance_ms = (transcode::SEGMENT_SECONDS as i64).saturating_mul(1_000);
         let policy = if let Some(retry) = retry.as_ref() {
-            crate::playback_control::InitialProducerPolicy::hardware(
+            crate::playback_control::InitialProducerPolicy::hardware_with_startup(
                 presentation_contract_fingerprint,
                 PROGRESS_STALL,
                 retry.actor_recipe.clone(),
+                if plan.decode().backend() == plurx_core::transcode::DecodeBackend::Software {
+                    crate::playback_control::ProducerStartupKind::MixedSoftwareDecode
+                } else {
+                    crate::playback_control::ProducerStartupKind::Hardware
+                },
+            )
+            // The actor decides between the two; it can only do that if it can
+            // see both. The executor holds the material either way, so an
+            // alternate the policy did not name is one the actor will never
+            // ask for and the executor will never install.
+            .with_decode_alternate(
+                retry
+                    .decode_alternate
+                    .as_deref()
+                    .map(|alternate| alternate.actor_recipe.clone()),
             )
         } else {
             crate::playback_control::InitialProducerPolicy::software(
@@ -15854,6 +19039,7 @@ impl TranscodeManager {
             user_name: user_name.to_owned(),
             supersession_user: supersession_user.to_owned(),
             playback_id: playback_id.to_owned(),
+            recovery: Some(recovery.clone()),
             automatic,
             kind: session_kind,
             method: crate::delivery::Method::Transcode,
@@ -15888,6 +19074,7 @@ impl TranscodeManager {
             })),
             hw_slot: std::sync::Mutex::new(hw_slot),
             sw_permit: std::sync::Mutex::new(sw_permit),
+            sw_delta_permit: std::sync::Mutex::new(None),
             delivery: Meter::new(),
             readrate: pacing
                 .readrate
@@ -15959,6 +19146,7 @@ impl TranscodeManager {
                             .map(std::os::fd::AsRawFd::as_raw_fd),
                         ..FfmpegDescriptors::default()
                     },
+                    observation.clone(),
                 )
             })
             .await
@@ -16035,6 +19223,12 @@ impl TranscodeManager {
         playback_id: &str,
     ) -> Result<StartInfo, String> {
         let supersession_user = serde_json::json!(["username", user_name]).to_string();
+        // As above: no cluster identity, no budget.
+        let recovery = SessionRecoveryIdentity {
+            user_id: 0,
+            incarnation_id: String::new(),
+            recovery_epoch: String::new(),
+        };
         self.start_copy_with_audio_offset(
             file_id,
             start_seconds,
@@ -16043,6 +19237,7 @@ impl TranscodeManager {
             options,
             user_name,
             &supersession_user,
+            &recovery,
             None,
             None,
             playback_id,
@@ -16061,6 +19256,7 @@ impl TranscodeManager {
         options: CopySessionOptions,
         user_name: &str,
         supersession_user: &str,
+        recovery: &SessionRecoveryIdentity,
         replacement_deadline: Option<tokio::time::Instant>,
         takeover: Option<SessionTakeoverStart>,
         playback_id: &str,
@@ -16360,6 +19556,7 @@ impl TranscodeManager {
             user_name: user_name.to_owned(),
             supersession_user: supersession_user.to_owned(),
             playback_id: playback_id.to_owned(),
+            recovery: Some(recovery.clone()),
             automatic,
             kind: copy_kind,
             method: crate::delivery::Method::HlsCopy,
@@ -16387,6 +19584,7 @@ impl TranscodeManager {
             class: std::sync::Mutex::new(String::new()),
             hw_slot: std::sync::Mutex::new(None),
             sw_permit: std::sync::Mutex::new(None),
+            sw_delta_permit: std::sync::Mutex::new(None),
             delivery: Meter::new(),
             readrate: pacing
                 .readrate
@@ -16448,6 +19646,7 @@ impl TranscodeManager {
                             session.control.clone(),
                         ),
                         &self.runtime_cache,
+                        DiagnosticObservation::copy(&session_id),
                     )
                 })
                 .await
@@ -16477,6 +19676,7 @@ impl TranscodeManager {
                         ),
                         &self.runtime_cache,
                         FfmpegDescriptors::default(),
+                        DiagnosticObservation::copy(&session_id),
                     )
                 })
                 .await
@@ -21822,6 +25022,7 @@ fn test_session(dir: PathBuf) -> Session {
     let control = crate::playback_control::RollingControlHandle::spawn("test-start");
     Session {
         dir,
+        recovery: None,
         response_incarnation: uuid::Uuid::new_v4(),
         frozen_presentation: None,
         actor_managed_response_publication: false,
@@ -21837,7 +25038,7 @@ fn test_session(dir: PathBuf) -> Session {
         scratch_cleanup_started: AtomicBool::new(false),
         retirement_context: None,
         cache_integrity_cleanup_started: AtomicBool::new(false),
-        child: Mutex::new(Some(AttemptChild::new(0, child, control.clone()))),
+        child: Mutex::new(Some(AttemptChild::new(0, child, control.clone(), None))),
         child_transition: Mutex::new(()),
         replacing_child: AtomicBool::new(false),
         replacement_pause: std::sync::Mutex::new(None),
@@ -21901,6 +25102,7 @@ fn test_session(dir: PathBuf) -> Session {
         class: std::sync::Mutex::new(String::new()),
         hw_slot: std::sync::Mutex::new(None),
         sw_permit: std::sync::Mutex::new(None),
+        sw_delta_permit: std::sync::Mutex::new(None),
         delivery: Meter::new(),
         readrate: 0.0,
         suspended: AtomicBool::new(false),
@@ -21916,6 +25118,200 @@ fn test_session(dir: PathBuf) -> Session {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prepared_plan_is_not_reprobed_during_producer_execution() {
+        use plurx_core::store::SqliteStore;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        super::require_ffmpeg();
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let media = crate::test_tempdir().expect("media");
+        let source_path = media.path().join("neutral-probe-timeout.mkv");
+        write_real_video(&source_path, 2);
+        let file_id = seed_real_file(&store, &source_path).await;
+        let mut file = store
+            .get_file(file_id)
+            .await
+            .expect("get file")
+            .expect("media file");
+        let source_metadata = std::fs::metadata(&source_path).expect("source metadata");
+        file.size = source_metadata.len() as i64;
+        file.mtime = source_metadata
+            .modified()
+            .expect("source modified time")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("source after epoch")
+            .as_secs() as i64;
+
+        let probe = media.path().join("slow-ffprobe");
+        std::fs::write(
+            &probe,
+            "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then\n  printf '%s\\n' 'ffprobe version neutral-timeout'\n  exit 0\nfi\nsleep 5\nprintf '%s\\n' '{\"streams\":[{\"index\":0,\"codec_type\":\"video\",\"codec_name\":\"h264\"}]}'\n",
+        )
+        .expect("write slow probe");
+        let mut permissions = std::fs::metadata(&probe)
+            .expect("probe metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&probe, permissions).expect("executable probe");
+        let probe = crate::decode_facts::DecodeProbeIdentity::discover_fixture(
+            probe.to_str().expect("probe path"),
+        )
+        .await
+        .expect("fixture probe identity");
+
+        let (manager, _work, _cache) = cached_manager(&store);
+        let manager = manager.with_decode_probe(Some(probe));
+        let output = crate::test_tempdir().expect("output");
+        let output = plurx_core::fs_secure::SecureDirectory::open(output.path())
+            .await
+            .expect("secure output");
+        let bound_source = pretranscode_source_snapshot(&file, &[media.path().to_path_buf()])
+            .await
+            .expect("bound source");
+        let options = manager.options_for_tone_map(
+            Encoder::Software,
+            &file,
+            120,
+            0.0,
+            None,
+            None,
+            Some(1),
+            ToneMap::None,
+            OutputGrade::Sdr,
+        );
+        let production_budget = Duration::from_secs(2);
+        let started = Instant::now();
+        let plan = manager
+            .resolve_movie_plan(&file, &options, Encoder::Software)
+            .await
+            .expect("resolve producer plan");
+        let produced = manager
+            .produce_into(
+                &output,
+                "neutral-probe-timeout",
+                &PortableProduction {
+                    file: &file,
+                    opts: &options,
+                    plan: &plan,
+                    deadline: started + production_budget,
+                    yield_to_offline: false,
+                    cancelled: None,
+                    offline_package_id: None,
+                    offline_claim_generation: None,
+                    publication_fence: None,
+                    pretranscode_fence: None,
+                    expected_policy_generation: None,
+                    expected_source_snapshot: None,
+                    bound_source: Some(Arc::new(bound_source)),
+                },
+                None,
+            )
+            .await
+            .expect("legacy producer after neutral observation")
+            .expect("legacy FFmpeg completed inside its retained budget");
+        assert!(produced.segments > 0, "the legacy FFmpeg produced no media");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prepared_plan_keeps_producer_execution_out_of_the_probe_lane() {
+        use plurx_core::store::SqliteStore;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        super::require_ffmpeg();
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let media = crate::test_tempdir().expect("media");
+        let source_path = media.path().join("final-probe-observation-timeout.mkv");
+        write_real_video(&source_path, 2);
+        let file_id = seed_real_file(&store, &source_path).await;
+        let mut file = store
+            .get_file(file_id)
+            .await
+            .expect("get file")
+            .expect("media file");
+        let source_metadata = std::fs::metadata(&source_path).expect("source metadata");
+        file.size = source_metadata.len() as i64;
+        file.mtime = source_metadata
+            .modified()
+            .expect("source modified time")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("source after epoch")
+            .as_secs() as i64;
+
+        let probe = media.path().join("fast-ffprobe");
+        std::fs::write(
+            &probe,
+            "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then\n  printf '%s\\n' 'ffprobe version final-observation-timeout'\n  exit 0\nfi\nprintf '%s\\n' '{\"streams\":[{\"index\":0,\"codec_type\":\"video\",\"codec_name\":\"h264\"}]}'\n",
+        )
+        .expect("write fast probe");
+        let mut permissions = std::fs::metadata(&probe)
+            .expect("probe metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&probe, permissions).expect("executable probe");
+        let probe = crate::decode_facts::DecodeProbeIdentity::discover_fixture(
+            probe.to_str().expect("probe path"),
+        )
+        .await
+        .expect("fixture probe identity");
+
+        let (manager, _work, _cache) = cached_manager(&store);
+        let manager = manager
+            .with_decode_probe(Some(probe))
+            .with_decode_source_final_identity_delay(Duration::from_secs(5));
+        let output = crate::test_tempdir().expect("output");
+        let output = plurx_core::fs_secure::SecureDirectory::open(output.path())
+            .await
+            .expect("secure output");
+        let bound_source = pretranscode_source_snapshot(&file, &[media.path().to_path_buf()])
+            .await
+            .expect("bound source");
+        let options = manager.options_for_tone_map(
+            Encoder::Software,
+            &file,
+            120,
+            0.0,
+            None,
+            None,
+            Some(1),
+            ToneMap::None,
+            OutputGrade::Sdr,
+        );
+        let production_budget = Duration::from_secs(2);
+        let started = Instant::now();
+        let plan = manager
+            .resolve_movie_plan(&file, &options, Encoder::Software)
+            .await
+            .expect("resolve producer plan");
+        let produced = manager
+            .produce_into(
+                &output,
+                "final-probe-observation-timeout",
+                &PortableProduction {
+                    file: &file,
+                    opts: &options,
+                    plan: &plan,
+                    deadline: started + production_budget,
+                    yield_to_offline: false,
+                    cancelled: None,
+                    offline_package_id: None,
+                    offline_claim_generation: None,
+                    publication_fence: None,
+                    pretranscode_fence: None,
+                    expected_policy_generation: None,
+                    expected_source_snapshot: None,
+                    bound_source: Some(Arc::new(bound_source)),
+                },
+                None,
+            )
+            .await
+            .expect("legacy producer after final observation timeout")
+            .expect("legacy FFmpeg completed after the probe released its source offset lane");
+        assert!(produced.segments > 0, "the legacy FFmpeg produced no media");
+    }
 
     #[tokio::test]
     async fn orphan_sweep_never_enters_the_live_tv_owned_namespace() {
@@ -22061,6 +25457,7 @@ pub(crate) mod tests {
             .await
             .expect("assign route owner"));
         let activation = plurx_core::domain::MediaSessionActivation {
+            recovery_epoch: String::new(),
             expected_desired_revision: None,
             incarnation_id: generation.to_owned(),
             session_id: session_id.to_owned(),
@@ -24339,14 +27736,15 @@ pub(crate) mod tests {
         );
         assert_eq!(live, offline, "offline normalization drifted from live");
 
-        let hash = |opts: &TranscodeOptions| {
-            let mut digest = mgr.digest().expect("cache configured");
-            mgr.effective_recipe(&mut digest, &file, opts, encoder, false)
-                .hash()
-        };
-        let expected = hash(&live);
-        assert_eq!(hash(&speculative), expected);
-        assert_eq!(hash(&offline), expected);
+        let expected = recipe_hash_for_options(&mgr, &file, &live, encoder).await;
+        assert_eq!(
+            recipe_hash_for_options(&mgr, &file, &speculative, encoder).await,
+            expected
+        );
+        assert_eq!(
+            recipe_hash_for_options(&mgr, &file, &offline, encoder).await,
+            expected
+        );
 
         // Mutation sentinels: each path's rate-control input independently
         // changes both its normalized options and its content identity. These
@@ -24363,7 +27761,10 @@ pub(crate) mod tests {
             OutputGrade::Sdr,
         );
         assert_ne!(live_vbr, live);
-        assert_ne!(hash(&live_vbr), expected);
+        assert_ne!(
+            recipe_hash_for_options(&mgr, &file, &live_vbr, encoder).await,
+            expected
+        );
 
         let speculative_q22 = mgr.speculative_producer_options(
             RateControlSnapshot {
@@ -24378,7 +27779,10 @@ pub(crate) mod tests {
             None,
         );
         assert_ne!(speculative_q22, speculative);
-        assert_ne!(hash(&speculative_q22), expected);
+        assert_ne!(
+            recipe_hash_for_options(&mgr, &file, &speculative_q22, encoder).await,
+            expected
+        );
 
         let offline_q23 = OfflineSpec {
             effective_rate_control: EffectiveRateControl::Qvbr { quality: 23 },
@@ -24386,7 +27790,10 @@ pub(crate) mod tests {
         };
         let offline_q23 = mgr.offline_package_options(encoder, &file, &offline_q23, None);
         assert_ne!(offline_q23, offline);
-        assert_ne!(hash(&offline_q23), expected);
+        assert_ne!(
+            recipe_hash_for_options(&mgr, &file, &offline_q23, encoder).await,
+            expected
+        );
     }
 
     #[tokio::test]
@@ -24431,7 +27838,7 @@ pub(crate) mod tests {
                 .expect("create package"),
             OfflineCreateOutcome::Created(_)
         ));
-        store
+        let claimed = store
             .claim_next_offline_package(NODE)
             .await
             .expect("claim")
@@ -24455,7 +27862,7 @@ pub(crate) mod tests {
         set_quality(21);
         assert!(matches!(
             mgr.ensure_offline(
-                package_id,
+                &claimed,
                 &file,
                 &spec,
                 Instant::now(),
@@ -24474,10 +27881,10 @@ pub(crate) mod tests {
             .expect("pinned recipe");
 
         assert!(store
-            .requeue_offline_package(package_id, NODE)
+            .requeue_offline_package(package_id, NODE, claimed.claim_generation)
             .await
             .expect("requeue"));
-        store
+        let resumed = store
             .claim_next_offline_package(NODE)
             .await
             .expect("claim again")
@@ -24485,7 +27892,7 @@ pub(crate) mod tests {
         set_quality(29);
         assert!(matches!(
             mgr.ensure_offline(
-                package_id,
+                &resumed,
                 &file,
                 &spec,
                 Instant::now(),
@@ -24505,6 +27912,493 @@ pub(crate) mod tests {
                 .as_deref(),
             Some(first_hash.as_str()),
             "ensure_offline must keep the package's legacy identity across a hot quality change"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_offline_decode_fault_persists_one_alternate_across_restart() {
+        use plurx_core::domain::{NewOfflinePackage, OfflineCreateOutcome};
+        use plurx_core::store::{keys, SqliteStore};
+        use plurx_core::transcode::ArtifactQualification;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let user = store.create_user("paul", "hash", true).await.expect("user");
+        let file_id = seed_file(&store).await;
+        let file = store.get_file(file_id).await.expect("get").expect("file");
+        store
+            .put_setting(keys::HWACCEL, "videotoolbox")
+            .await
+            .expect("select the hardware encoder");
+        let (mut mgr, _work, _cache) = cached_manager(&store);
+        mgr.caps.videotoolbox = true;
+        mgr.test_publish_artifact_qualification(ArtifactQualification::HealthQualified);
+        mgr.test_script_offline_production([
+            OfflineProduceOutcome::HealthRefused,
+            OfflineProduceOutcome::Yielded,
+            OfflineProduceOutcome::HealthRefused,
+        ]);
+
+        let package_id = "offline-one-shot-decode-recovery";
+        let requested = NewOfflinePackage {
+            id: package_id.to_owned(),
+            request_id: "offline-one-shot-decode-recovery-request".to_owned(),
+            user_id: user.id,
+            file_id,
+            node_id: NODE.to_owned(),
+            source_path: file.path.to_string_lossy().into_owned(),
+            source_size: file.size,
+            source_mtime: file.mtime,
+            effective_rate_control: "vbr".to_owned(),
+            target_height: 720,
+            output_width: Some(1280),
+            output_height: Some(720),
+            audio_index: None,
+            audio_offset_ms: 0,
+            subtitle_index: None,
+            subtitle_language: None,
+            subtitle_mode: "none".to_owned(),
+            estimated_bytes: 1_000_000,
+            reserved_bytes: 1_100_000,
+            expires_at: i64::MAX,
+        };
+        assert!(matches!(
+            store
+                .create_offline_package(&requested, 10, 10_000_000, 20_000_000)
+                .await
+                .expect("create package"),
+            OfflineCreateOutcome::Created(_)
+        ));
+        let claimed = store
+            .claim_next_offline_package(NODE)
+            .await
+            .expect("claim")
+            .expect("queued package");
+        let spec = OfflineSpec {
+            target_height: 720,
+            audio_index: None,
+            subtitle: OfflineSubtitle::None,
+            effective_rate_control: EffectiveRateControl::Vbr,
+        };
+
+        assert!(matches!(
+            mgr.ensure_offline(
+                &claimed,
+                &file,
+                &spec,
+                Instant::now(),
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("first offline pass"),
+            OfflineProduceOutcome::Yielded
+        ));
+        let attempts = mgr.test_offline_produced_recipes();
+        assert_eq!(attempts.len(), 2, "one refused primary gets one alternate");
+        assert_ne!(
+            attempts[0], attempts[1],
+            "the software-decode recovery must publish under a distinct artifact identity"
+        );
+        let primary_hash = attempts[0].clone();
+        let alternate_hash = store
+            .offline_package_for_user(package_id, user.id)
+            .await
+            .expect("read recovered package")
+            .expect("recovered package")
+            .recipe_hash
+            .expect("durable alternate result reference");
+        assert_eq!(alternate_hash, attempts[1]);
+
+        assert_eq!(
+            store
+                .reset_interrupted_offline_packages(NODE)
+                .await
+                .expect("reset interrupted package"),
+            1
+        );
+        let resumed = store
+            .claim_next_offline_package(NODE)
+            .await
+            .expect("reclaim")
+            .expect("recovered package");
+        assert_eq!(
+            resumed.recipe_hash.as_deref(),
+            Some(alternate_hash.as_str())
+        );
+        assert!(matches!(
+            mgr.ensure_offline(
+                &resumed,
+                &file,
+                &spec,
+                Instant::now(),
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("resumed offline pass"),
+            OfflineProduceOutcome::HealthRefused
+        ));
+        assert_eq!(
+            mgr.test_offline_produced_recipes(),
+            vec![
+                primary_hash.clone(),
+                alternate_hash.clone(),
+                alternate_hash.clone()
+            ],
+            "restart must retry the consumed alternate once and must not mint another recovery"
+        );
+        assert_eq!(
+            store
+                .offline_package_for_user(package_id, user.id)
+                .await
+                .expect("read resumed package")
+                .expect("resumed package")
+                .recipe_hash
+                .as_deref(),
+            Some(alternate_hash.as_str()),
+            "a failed alternate cannot move the durable result reference again"
+        );
+        assert!(store
+            .fail_offline_package(
+                package_id,
+                NODE,
+                resumed.claim_generation,
+                "transcoding",
+                "decode_unhealthy",
+                "settle the first fixture",
+            )
+            .await
+            .expect("settle first fixture"));
+
+        // A store outage at the fault boundary cannot authorize either a
+        // primary retry or an alternate. The coordinator receives a terminal
+        // refusal and will settle the package as decode_unhealthy.
+        let begin_error_id = "offline-recovery-begin-store-error";
+        let mut begin_error_request = requested.clone();
+        begin_error_request.id = begin_error_id.to_owned();
+        begin_error_request.request_id = "offline-recovery-begin-store-error-request".to_owned();
+        assert!(matches!(
+            store
+                .create_offline_package(&begin_error_request, 10, 10_000_000, 20_000_000)
+                .await
+                .expect("create begin-error fixture"),
+            OfflineCreateOutcome::Created(_)
+        ));
+        let begin_error_claim = store
+            .claim_next_offline_package(NODE)
+            .await
+            .expect("claim begin-error fixture")
+            .expect("begin-error fixture");
+        mgr.test_script_offline_production([OfflineProduceOutcome::HealthRefused]);
+        mgr.test_fail_next_offline_recovery_begin();
+        assert!(matches!(
+            mgr.ensure_offline(
+                &begin_error_claim,
+                &file,
+                &spec,
+                Instant::now(),
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("recovery-begin store failure"),
+            OfflineProduceOutcome::HealthRefused
+        ));
+        let begin_error_stored = store
+            .offline_package_for_user(begin_error_id, user.id)
+            .await
+            .expect("read begin-error package")
+            .expect("begin-error package");
+        assert_eq!(begin_error_stored.decoder_recovery_state, "primary");
+        assert_eq!(begin_error_stored.alternate_recipe_hash, None);
+        assert!(store
+            .fail_offline_package(
+                begin_error_id,
+                NODE,
+                begin_error_claim.claim_generation,
+                "transcoding",
+                "decode_unhealthy",
+                "settle recovery-begin store error fixture",
+            )
+            .await
+            .expect("settle begin-error fixture"));
+
+        let pending_id = "offline-recovery-pending-crash";
+        let mut pending_request = requested.clone();
+        pending_request.id = pending_id.to_owned();
+        pending_request.request_id = "offline-recovery-pending-crash-request".to_owned();
+        assert!(matches!(
+            store
+                .create_offline_package(&pending_request, 10, 10_000_000, 20_000_000)
+                .await
+                .expect("create pending fixture"),
+            OfflineCreateOutcome::Created(_)
+        ));
+        let pending_claim = store
+            .claim_next_offline_package(NODE)
+            .await
+            .expect("claim pending fixture")
+            .expect("pending fixture");
+        assert!(store
+            .set_offline_package_recipe(
+                pending_id,
+                NODE,
+                pending_claim.claim_generation,
+                &primary_hash,
+            )
+            .await
+            .expect("bind primary before terminal fault"));
+        assert!(store
+            .begin_offline_decode_recovery(
+                pending_id,
+                NODE,
+                pending_claim.claim_generation,
+                &primary_hash,
+            )
+            .await
+            .expect("consume recovery before simulated crash"));
+        assert_eq!(
+            store
+                .reset_interrupted_offline_packages(NODE)
+                .await
+                .expect("restart pending fixture"),
+            1
+        );
+        let pending_resumed = store
+            .claim_next_offline_package(NODE)
+            .await
+            .expect("reclaim pending fixture")
+            .expect("pending fixture after restart");
+        assert_eq!(pending_resumed.decoder_recovery_state, "recovery_pending");
+        assert_eq!(pending_resumed.recipe_hash, None);
+        mgr.test_script_offline_production([OfflineProduceOutcome::Yielded]);
+        assert!(matches!(
+            mgr.ensure_offline(
+                &pending_resumed,
+                &file,
+                &spec,
+                Instant::now(),
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("resume from pending recovery"),
+            OfflineProduceOutcome::Yielded
+        ));
+        assert_eq!(
+            mgr.test_offline_produced_recipes().last(),
+            Some(&alternate_hash),
+            "restart at the fault-before-planning boundary must run only the frozen alternate"
+        );
+        let pending_installed = store
+            .offline_package_for_user(pending_id, user.id)
+            .await
+            .expect("read pending recovery")
+            .expect("pending recovery package");
+        assert_eq!(pending_installed.decoder_recovery_state, "alternate");
+        assert_eq!(
+            pending_installed.alternate_recipe_hash.as_deref(),
+            Some(alternate_hash.as_str())
+        );
+
+        // The real three-voter membership harness proves the durable
+        // alternate -> rehome_pending transition. Exercise the other half
+        // here with the production coordinator: the new owner has no hardware
+        // decoder, so its ordinary qualified plan is already software and the
+        // generic restricted-plan comparison would otherwise return None.
+        assert!(store
+            .fail_offline_package(
+                pending_id,
+                NODE,
+                pending_resumed.claim_generation,
+                "transcoding",
+                "fixture_complete",
+                "settle the pending-crash fixture",
+            )
+            .await
+            .expect("settle pending-crash fixture"));
+        let survivor_node = "software-survivor";
+        let rehome_id = "offline-recovery-software-survivor";
+        let mut rehome_request = requested.clone();
+        rehome_request.id = rehome_id.to_owned();
+        rehome_request.request_id = "offline-recovery-software-survivor-request".to_owned();
+        rehome_request.node_id = survivor_node.to_owned();
+        assert!(matches!(
+            store
+                .create_offline_package(&rehome_request, 10, 10_000_000, 20_000_000)
+                .await
+                .expect("create survivor fixture"),
+            OfflineCreateOutcome::Created(_)
+        ));
+        let survivor_claim = store
+            .claim_next_offline_package(survivor_node)
+            .await
+            .expect("claim survivor fixture")
+            .expect("survivor fixture");
+        assert!(store
+            .set_offline_package_recipe(
+                rehome_id,
+                survivor_node,
+                survivor_claim.claim_generation,
+                &primary_hash,
+            )
+            .await
+            .expect("bind departed owner's primary identity"));
+        assert!(store
+            .begin_offline_decode_recovery(
+                rehome_id,
+                survivor_node,
+                survivor_claim.claim_generation,
+                &primary_hash,
+            )
+            .await
+            .expect("preserve consumed origin budget"));
+        let mut rehomed = store
+            .offline_package_for_user(rehome_id, user.id)
+            .await
+            .expect("read rehomed package")
+            .expect("rehomed package");
+        rehomed.decoder_recovery_state = "rehome_pending".to_owned();
+
+        let survivor_work = crate::test_tempdir().expect("survivor work");
+        let survivor_cache = crate::test_tempdir().expect("survivor cache");
+        let survivor = TranscodeManager::new(
+            Arc::clone(&store),
+            survivor_work.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        )
+        .with_cache(
+            survivor_cache.path().to_path_buf(),
+            "ffmpeg version software-survivor".into(),
+            survivor_node.into(),
+        );
+        survivor.test_publish_artifact_qualification(ArtifactQualification::HealthQualified);
+        survivor.test_script_offline_production([
+            OfflineProduceOutcome::Yielded,
+            OfflineProduceOutcome::HealthRefused,
+            OfflineProduceOutcome::HealthRefused,
+        ]);
+        assert!(matches!(
+            survivor
+                .ensure_offline(
+                    &rehomed,
+                    &file,
+                    &spec,
+                    Instant::now(),
+                    &tokio_util::sync::CancellationToken::new(),
+                )
+                .await
+                .expect("software survivor recovery"),
+            OfflineProduceOutcome::Yielded
+        ));
+        let survivor_attempts = survivor.test_offline_produced_recipes();
+        assert_eq!(survivor_attempts.len(), 1);
+        assert_ne!(survivor_attempts[0], primary_hash);
+        assert_ne!(survivor_attempts[0], alternate_hash);
+        assert_eq!(
+            store
+                .reset_interrupted_offline_packages(survivor_node)
+                .await
+                .expect("restart survivor"),
+            1
+        );
+        let survivor_resumed = store
+            .claim_next_offline_package(survivor_node)
+            .await
+            .expect("reclaim survivor package")
+            .expect("survivor package after restart");
+        assert_eq!(survivor_resumed.decoder_recovery_state, "alternate");
+        assert!(matches!(
+            survivor
+                .ensure_offline(
+                    &survivor_resumed,
+                    &file,
+                    &spec,
+                    Instant::now(),
+                    &tokio_util::sync::CancellationToken::new(),
+                )
+                .await
+                .expect("resume survivor alternate"),
+            OfflineProduceOutcome::HealthRefused
+        ));
+        assert_eq!(
+            survivor.test_offline_produced_recipes(),
+            vec![survivor_attempts[0].clone(), survivor_attempts[0].clone()],
+            "the survivor must retry only its one bound software alternate"
+        );
+        assert!(store
+            .fail_offline_package(
+                rehome_id,
+                survivor_node,
+                survivor_resumed.claim_generation,
+                "transcoding",
+                "fixture_complete",
+                "settle survivor fixture",
+            )
+            .await
+            .expect("settle survivor fixture"));
+
+        // A genuinely fresh software-primary package has no failed hardware
+        // attempt to recover from. Its terminal refusal must therefore remain
+        // primary rather than minting a budget that rehome could reinterpret.
+        let software_primary_id = "offline-recovery-software-primary";
+        let mut software_primary_request = requested.clone();
+        software_primary_request.id = software_primary_id.to_owned();
+        software_primary_request.request_id =
+            "offline-recovery-software-primary-request".to_owned();
+        software_primary_request.node_id = survivor_node.to_owned();
+        assert!(matches!(
+            store
+                .create_offline_package(&software_primary_request, 10, 10_000_000, 20_000_000,)
+                .await
+                .expect("create software primary fixture"),
+            OfflineCreateOutcome::Created(_)
+        ));
+        let software_primary = store
+            .claim_next_offline_package(survivor_node)
+            .await
+            .expect("claim software primary fixture")
+            .expect("software primary fixture");
+        assert!(matches!(
+            survivor
+                .ensure_offline(
+                    &software_primary,
+                    &file,
+                    &spec,
+                    Instant::now(),
+                    &tokio_util::sync::CancellationToken::new(),
+                )
+                .await
+                .expect("run software primary fixture"),
+            OfflineProduceOutcome::HealthRefused
+        ));
+        let stored_software_primary = store
+            .offline_package_for_user(software_primary_id, user.id)
+            .await
+            .expect("read software primary fixture")
+            .expect("software primary package");
+        assert_eq!(stored_software_primary.decoder_recovery_state, "primary");
+        assert_eq!(stored_software_primary.alternate_recipe_hash, None);
+    }
+
+    #[test]
+    fn offline_recovery_state_parsing_is_closed_and_monotone() {
+        assert_eq!(
+            OfflineRecoveryState::parse("primary").expect("primary"),
+            OfflineRecoveryState::Primary
+        );
+        assert_eq!(
+            OfflineRecoveryState::parse("recovery_pending").expect("pending"),
+            OfflineRecoveryState::Pending
+        );
+        assert_eq!(
+            OfflineRecoveryState::parse("rehome_pending").expect("rehome pending"),
+            OfflineRecoveryState::RehomePending
+        );
+        assert_eq!(
+            OfflineRecoveryState::parse("alternate").expect("alternate"),
+            OfflineRecoveryState::Alternate
+        );
+        assert!(
+            OfflineRecoveryState::parse("unknown").is_err(),
+            "unknown durable state must fail closed"
         );
     }
 
@@ -24674,12 +28568,12 @@ pub(crate) mod tests {
         );
         opts.pipeline = Pipeline::Cpu;
         opts.effective_rate_control = captured.effective_for(Encoder::VideoToolbox);
-        let sw_pool = mgr.admissions.software_pool();
         // The rung is chosen when the retry recipe is frozen, at session
         // start, and that recipe is what the actor later authorizes. So the
         // generation question is asked of the frozen recipe, not of a
         // downgrade helper that production no longer runs.
-        let retry = PrepublicationTranscodeRetry::build(
+        let retry = build_test_transcode_retry(
+            &mgr,
             &file,
             &opts,
             Encoder::VideoToolbox,
@@ -24687,9 +28581,8 @@ pub(crate) mod tests {
             Pacing::unpaced(),
             dir.path(),
             "generation-test",
-            sw_pool,
-            mgr.runtime_cache.clone(),
         )
+        .await
         .expect("a CPU-pipeline hardware attempt has a software rung");
         drop(session);
 
@@ -25283,7 +29176,7 @@ pub(crate) mod tests {
             .kill_on_drop(true)
             .spawn()
             .expect("spawn exiting producer");
-        let mut current = AttemptChild::new(current_attempt, child, control.clone());
+        let mut current = AttemptChild::new(current_attempt, child, control.clone(), None);
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 if current
@@ -25320,7 +29213,7 @@ pub(crate) mod tests {
             .kill_on_drop(true)
             .spawn()
             .expect("spawn delayed predecessor");
-        let mut predecessor = AttemptChild::new(predecessor_attempt, child, control.clone());
+        let mut predecessor = AttemptChild::new(predecessor_attempt, child, control.clone(), None);
         let successor_attempt = control
             .begin_producer_attempt()
             .await
@@ -25354,7 +29247,7 @@ pub(crate) mod tests {
             .begin_producer_attempt()
             .await
             .expect("producer attempt");
-        let mut child = AttemptChild::new(attempt, long_running_child(), control.clone());
+        let mut child = AttemptChild::new(attempt, long_running_child(), control.clone(), None);
         let pid = child.id().expect("running producer pid");
 
         assert_eq!(
@@ -25411,7 +29304,7 @@ pub(crate) mod tests {
             .begin_producer_attempt()
             .await
             .expect("producer attempt");
-        let mut child = AttemptChild::new(attempt, long_running_child(), control.clone());
+        let mut child = AttemptChild::new(attempt, long_running_child(), control.clone(), None);
         assert!(control.reserve_producer_flow_capacity_for_test());
         assert!(control.reserve_producer_flow_capacity_for_test());
 
@@ -25449,7 +29342,7 @@ pub(crate) mod tests {
             .begin_producer_attempt()
             .await
             .expect("producer attempt");
-        let mut child = AttemptChild::new(attempt, long_running_child(), control.clone());
+        let mut child = AttemptChild::new(attempt, long_running_child(), control.clone(), None);
         assert!(control.reserve_producer_flow_capacity_for_test());
         assert!(control.reserve_producer_flow_capacity_for_test());
 
@@ -25485,6 +29378,7 @@ pub(crate) mod tests {
             attempt,
             long_running_child(),
             control.clone(),
+            None,
         ));
         let pause = Arc::new(std::sync::Barrier::new(2));
         child.pause_signal_after_flow_reservation(Arc::clone(&pause));
@@ -25540,6 +29434,7 @@ pub(crate) mod tests {
             attempt,
             long_running_child(),
             control.clone(),
+            None,
         ));
         let pause = Arc::new(std::sync::Barrier::new(2));
         child.pause_signal_after_authorization(Arc::clone(&pause));
@@ -25616,7 +29511,7 @@ pub(crate) mod tests {
             .begin_producer_attempt()
             .await
             .expect("producer attempt");
-        let child = AttemptChild::new(attempt, long_running_child(), control.clone());
+        let child = AttemptChild::new(attempt, long_running_child(), control.clone(), None);
         let pid = child.id().expect("running producer pid");
         drop(child);
 
@@ -25666,7 +29561,7 @@ pub(crate) mod tests {
             .kill_on_drop(true)
             .spawn()
             .expect("spawn terminal producer");
-        *session.child.get_mut() = Some(AttemptChild::new(0, child, session.control.clone()));
+        *session.child.get_mut() = Some(AttemptChild::new(0, child, session.control.clone(), None));
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 if session
@@ -25740,6 +29635,7 @@ pub(crate) mod tests {
             predecessor,
             long_running_child(),
             session.control.clone(),
+            None,
         ));
 
         let pause = Arc::new(tokio::sync::Barrier::new(2));
@@ -25786,8 +29682,12 @@ pub(crate) mod tests {
             .kill_on_drop(true)
             .spawn()
             .expect("spawn successor terminal producer");
-        *session.child.lock().await =
-            Some(AttemptChild::new(successor, child, session.control.clone()));
+        *session.child.lock().await = Some(AttemptChild::new(
+            successor,
+            child,
+            session.control.clone(),
+            None,
+        ));
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 let terminal = session
@@ -26062,7 +29962,16 @@ pub(crate) mod tests {
             "an empty resumable segment must not become a checkpoint"
         );
         assert!(
-            assembled_publication(&capability, 1).await.is_none(),
+            assembled_publication(
+                &capability,
+                &[crate::produce::Part {
+                    segments: vec!["seg00000.ts".to_owned()],
+                    durations_ms: vec![2_000],
+                }],
+                None
+            )
+            .await
+            .is_none(),
             "an empty assembled segment must not become a published generation"
         );
     }
@@ -26096,11 +30005,16 @@ pub(crate) mod tests {
         )
         .await
         .expect("killed tail playlist");
-        let (part, _) = read_validated_part(&capability, MAX_PRETRANSCODE_PART_PLAYLIST_BYTES)
+        let validated = read_validated_part(&capability, MAX_PRETRANSCODE_PART_PLAYLIST_BYTES)
             .await
             .expect("one unmatched killed tail is droppable");
-        assert_eq!(part.segments, ["seg00000.ts"]);
-        assert_eq!(part.durations_ms, [2_000]);
+        assert_eq!(validated.part.segments, ["seg00000.ts"]);
+        assert_eq!(validated.part.durations_ms, [2_000]);
+        // The shape measures only what the playlist lists: the truncated tail
+        // the kill left behind is not part of what a receipt would be bound to.
+        assert_eq!(validated.shape.len(), 1);
+        assert_eq!(validated.shape[0].0, "seg00000.ts");
+        assert_eq!(validated.shape[0].2, 2_000);
     }
 
     /// A live EVENT playlist needs both more than one segment and enough media
@@ -27901,6 +31815,7 @@ pub(crate) mod tests {
             session.control.current_producer_attempt(),
             long_running_child(),
             session.control.clone(),
+            None,
         ));
         replacement.complete();
         attempt
@@ -28792,6 +32707,259 @@ pub(crate) mod tests {
         session.kill_child().await;
     }
 
+    /// A playback that has already spent its recovery does not get a second
+    /// one — and finding that out costs it nothing.
+    ///
+    /// The ordering is the assertion. `begin_child_replacement` is the point
+    /// after which this session has no producer until a new one is installed,
+    /// so the reservation is taken before it: a refusal that arrived later
+    /// would turn "this playback already recovered" into "this playback has
+    /// nothing playing".
+    ///
+    /// The fixture puts the ledger on the recipe the actor names directly
+    /// rather than building an alternate to hang it off. Which of the two
+    /// frozen recipes a decision resolves to is tested where that resolution
+    /// lives; what is under test here is what the executor does with a budget
+    /// once it has one.
+    #[tokio::test]
+    async fn a_spent_recovery_budget_refuses_the_retry_before_anything_is_torn_down() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let file = store.get_file(file_id).await.expect("get").expect("file");
+        let (mgr, _work, _cache) = cached_manager(&store);
+        let dir = crate::test_tempdir().expect("session dir");
+        seeded_session_dir(dir.path(), 1, 4.0).await;
+        let session = Arc::new(test_session(dir.path().to_path_buf()));
+
+        // An earlier attempt of this playback took the budget and settled it.
+        let failed_plan_digest = "a".repeat(64);
+        let predecessor = crate::playback_control::ProducerRecoveryLedger::new(
+            Arc::clone(&store),
+            7,
+            "playback-spent",
+            "epoch-spent",
+            "incarnation-1",
+        )
+        .expect("a complete identity");
+        assert!(
+            matches!(
+                predecessor
+                    .reserve(1, 1, &failed_plan_digest, &"b".repeat(64), 1_000)
+                    .await
+                    .expect("reserve"),
+                crate::playback_control::RecoveryReservation::Held(_)
+            ),
+            "the predecessor takes the budget"
+        );
+        assert_eq!(
+            predecessor
+                .settle(crate::playback_control::RecoveryOutcome::Exhausted, 1_100)
+                .await
+                .expect("settle"),
+            crate::playback_control::RecoverySettlement::Settled
+        );
+
+        let mut opts = mgr.options_for_tone_map(
+            Encoder::VideoToolbox,
+            &file,
+            720,
+            0.0,
+            None,
+            None,
+            None,
+            ToneMap::Zscale,
+            OutputGrade::Sdr,
+        );
+        opts.pipeline = Pipeline::Cpu;
+        let retry = build_test_transcode_retry(
+            &mgr,
+            &file,
+            &opts,
+            Encoder::VideoToolbox,
+            EffectiveRateControl::Vbr,
+            Pacing::unpaced(),
+            dir.path(),
+            "spent-budget",
+        )
+        .await
+        .expect("a CPU-pipeline hardware attempt has a software rung")
+        .with_recovery(DecodeRecoveryReservation {
+            ledger: crate::playback_control::ProducerRecoveryLedger::new(
+                Arc::clone(&store),
+                7,
+                "playback-spent",
+                "epoch-spent",
+                // A continuation of the same playback: same epoch, new
+                // incarnation. This is the reopen the durable budget exists
+                // for.
+                "incarnation-2",
+            )
+            .expect("a complete identity"),
+            failed_plan_digest,
+        });
+
+        let failed_attempt = session
+            .control
+            .begin_producer_attempt()
+            .await
+            .expect("admit the predecessor attempt");
+        *session.child.lock().await = Some(AttemptChild::new(
+            failed_attempt,
+            long_running_child(),
+            session.control.clone(),
+            None,
+        ));
+
+        let result = execute_prepublication_transcode_retry(
+            Arc::clone(&session),
+            &retry,
+            1,
+            failed_attempt,
+            &retry.actor_recipe,
+            crate::playback_control::ProducerDecisionReason::SourceDecodeRetry,
+            "spent-budget",
+        )
+        .await;
+
+        assert!(
+            matches!(&result, Err(error) if error.contains("spent")),
+            "the refusal names which refusal it was, got {result:?}"
+        );
+        assert!(
+            !session.replacing_child.load(Acquire),
+            "a refused budget must not have opened a replacement"
+        );
+        assert!(
+            !session.failed.load(Relaxed),
+            "the session is not failed by a recovery it was never entitled to"
+        );
+        assert!(
+            session
+                .child
+                .lock()
+                .await
+                .as_ref()
+                .is_some_and(|child| child.id().is_some()),
+            "the failed producer is still exactly where the actor left it"
+        );
+        session.kill_child().await;
+    }
+
+    /// A recovery that was reserved and then failed to install has been
+    /// attempted, and the row says so.
+    ///
+    /// This is the whole reason the budget is not refunded. The alternate is
+    /// installed against a source whose decode already failed once; a refund
+    /// on the failure path would hand the same playback another try at it, and
+    /// the reopen loop this effort is named after is exactly a sequence of
+    /// attempts that each looked like the first.
+    ///
+    /// The failure is a real one — an unclearable predecessor scratch, the
+    /// same fixture the fencing test uses — rather than an injected error, so
+    /// the settle under test is on the path a real transaction takes out.
+    #[tokio::test]
+    async fn a_recovery_that_fails_to_install_still_spends_the_budget() {
+        use plurx_core::domain::ProducerRecoveryState;
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let file = store.get_file(file_id).await.expect("get").expect("file");
+        let (mgr, _work, _cache) = cached_manager(&store);
+        let dir = crate::test_tempdir().expect("session dir");
+        seeded_session_dir(dir.path(), 1, 4.0).await;
+        let served_name = dir.path().join("init.mp4");
+        tokio::fs::create_dir(&served_name)
+            .await
+            .expect("undeletable served-name fixture");
+        let session = Arc::new(test_session(dir.path().to_path_buf()));
+
+        let mut opts = mgr.options_for_tone_map(
+            Encoder::VideoToolbox,
+            &file,
+            720,
+            0.0,
+            None,
+            None,
+            None,
+            ToneMap::Zscale,
+            OutputGrade::Sdr,
+        );
+        opts.pipeline = Pipeline::Cpu;
+        let retry = build_test_transcode_retry(
+            &mgr,
+            &file,
+            &opts,
+            Encoder::VideoToolbox,
+            EffectiveRateControl::Vbr,
+            Pacing::unpaced(),
+            dir.path(),
+            "budget-spent-on-failure",
+        )
+        .await
+        .expect("a CPU-pipeline hardware attempt has a software rung")
+        .with_recovery(DecodeRecoveryReservation {
+            ledger: crate::playback_control::ProducerRecoveryLedger::new(
+                Arc::clone(&store),
+                7,
+                "playback-failing",
+                "epoch-failing",
+                "incarnation-1",
+            )
+            .expect("a complete identity"),
+            failed_plan_digest: "a".repeat(64),
+        });
+
+        let failed_attempt = session
+            .control
+            .begin_producer_attempt()
+            .await
+            .expect("admit the predecessor attempt");
+        *session.child.lock().await = Some(AttemptChild::new(
+            failed_attempt,
+            long_running_child(),
+            session.control.clone(),
+            None,
+        ));
+
+        let result = execute_prepublication_transcode_retry(
+            Arc::clone(&session),
+            &retry,
+            1,
+            failed_attempt,
+            &retry.actor_recipe,
+            crate::playback_control::ProducerDecisionReason::SourceDecodeRetry,
+            "budget-spent-on-failure",
+        )
+        .await;
+        assert!(
+            matches!(&result, Err(error) if error.contains("clearing predecessor scratch")),
+            "the fixture must fail inside the transaction, got {result:?}"
+        );
+
+        let row = store
+            .producer_recovery_for_epoch(7, "playback-failing", "epoch-failing")
+            .await
+            .expect("read the row")
+            .expect("the executor reserved before it installed");
+        assert_eq!(
+            row.state,
+            ProducerRecoveryState::Exhausted,
+            "a failed install settles the budget rather than leaving it held"
+        );
+        assert_eq!(row.failed_incarnation_id, "incarnation-1");
+        assert_eq!(row.alternate_plan_digest, retry.observation.plan_digest);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !session.control.is_retired() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("storage failure retires actor ownership");
+    }
+
     #[tokio::test]
     async fn production_fallback_stays_fenced_when_predecessor_cleanup_fails() {
         use plurx_core::store::SqliteStore;
@@ -28825,11 +32993,11 @@ pub(crate) mod tests {
             OutputGrade::Sdr,
         );
         opts.pipeline = Pipeline::Cpu;
-        let sw_pool = mgr.admissions.software_pool();
         // The production retry executor is what clears predecessor scratch,
         // and its transaction is what has to stay fenced when the clear
         // fails. Drive that, not the retired ladder helper.
-        let retry = PrepublicationTranscodeRetry::build(
+        let retry = build_test_transcode_retry(
+            &mgr,
             &file,
             &opts,
             Encoder::VideoToolbox,
@@ -28837,9 +33005,8 @@ pub(crate) mod tests {
             Pacing::unpaced(),
             dir.path(),
             "fallback-clear-failure",
-            sw_pool,
-            mgr.runtime_cache.clone(),
         )
+        .await
         .expect("a CPU-pipeline hardware attempt has a software rung");
         let failed_attempt = session
             .control
@@ -28854,6 +33021,7 @@ pub(crate) mod tests {
             failed_attempt,
             long_running_child(),
             session.control.clone(),
+            None,
         ));
         let result = execute_prepublication_transcode_retry(
             Arc::clone(&session),
@@ -29311,6 +33479,7 @@ pub(crate) mod tests {
                     session.control.current_producer_attempt(),
                     long_running_child(),
                     session.control.clone(),
+                    None,
                 ));
                 replacement.complete();
                 attempt
@@ -30134,6 +34303,7 @@ pub(crate) mod tests {
         let error = match mgr
             .admit_live(
                 Encoder::Nvenc,
+                None,
                 Workload {
                     source_height: 1080,
                     codec: "h264",
@@ -30193,6 +34363,7 @@ pub(crate) mod tests {
             tokio::spawn(async move {
                 mgr.admit_live(
                     Encoder::Nvenc,
+                    None,
                     Workload {
                         source_height: 1080,
                         codec: "h264",
@@ -30306,7 +34477,7 @@ pub(crate) mod tests {
         for _ in 0..5 {
             let mgr = Arc::clone(&mgr);
             starts.push(tokio::spawn(async move {
-                mgr.admit_live(Encoder::Nvenc, workload, Duration::ZERO)
+                mgr.admit_live(Encoder::Nvenc, None, workload, Duration::ZERO)
                     .await
             }));
         }
@@ -30332,6 +34503,844 @@ pub(crate) mod tests {
 
         drop(admitted);
         assert_eq!(mgr.admissions.in_use(), 0, "slots come back");
+    }
+
+    /// The other transition, and the one that had no accounting at all: a
+    /// retry that keeps its hardware encoder and moves the rest of the chain
+    /// onto the CPU.
+    ///
+    /// It must not go through the demotion path. Releasing the slot here would
+    /// leave a live hardware encoder running against nothing, and the next
+    /// hardware start would be admitted onto the same video block — one slot
+    /// authorizing two encoders, which is the contention the cap exists to
+    /// prevent. What it must do instead is reserve the CPU the pipeline has
+    /// started spending, which before this milestone it did not do at all.
+    #[tokio::test]
+    async fn a_retry_that_keeps_its_encoder_keeps_its_slot_and_pays_for_its_decode() {
+        super::require_ffmpeg();
+        use plurx_core::store::SqliteStore;
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let work = crate::test_tempdir().expect("work");
+        let mgr = TranscodeManager::new(
+            Arc::clone(&store),
+            work.path().to_path_buf(),
+            EncoderCaps {
+                nvenc: true,
+                ..Default::default()
+            },
+            Pipeline::Cpu,
+        );
+        store
+            .put_setting(keys::MAX_HW_SESSIONS, "1")
+            .await
+            .expect("cap");
+
+        let info = mgr
+            .start(file_id, 1080, 0.0, None, None, "paul", "pb-mixed")
+            .await
+            .expect("hardware start");
+        assert_eq!(mgr.admissions.in_use(), 1, "the start holds the only slot");
+        let session = mgr
+            .sessions
+            .lock()
+            .await
+            .get(&info.session_id)
+            .cloned()
+            .expect("session");
+        let file = store.get_file(file_id).await.expect("get").expect("file");
+        let work_class = Workload::of(&file, session.target_height);
+
+        // This start already reserved CPU at admission, because its renderer
+        // is the CPU chain — which is the point of the estimate. A recovery
+        // that moves more of the pipeline onto the CPU therefore owes the
+        // *difference*, and here there is none.
+        let admitted = session.software_threads_held();
+        assert_eq!(
+            admitted,
+            work_class.software_threads(),
+            "the CPU this pipeline spends was reserved when it was admitted"
+        );
+        assert_eq!(mgr.admissions.software_in_use(), admitted);
+
+        // A retry whose total equals what is already held asks for nothing.
+        assert_eq!(
+            work_class.software_threads().checked_sub(admitted),
+            Some(0),
+            "no delta is owed, so the recovery reserves nothing further"
+        );
+
+        // And when it does owe one, the second reservation is additive rather
+        // than a replacement — replacing would drop the first and leave the
+        // session paying for both to own one.
+        let permit = mgr
+            .admissions
+            .software_pool()
+            .try_take_delta(mgr.software_budget().await + admitted, 2)
+            .expect("an idle pool grants a two-thread delta");
+        session.add_cpu_decode_reservation(permit);
+        assert_eq!(
+            session.software_threads_held(),
+            admitted + 2,
+            "the delta adds to the reservation instead of replacing it"
+        );
+        assert_eq!(mgr.admissions.software_in_use(), admitted + 2);
+
+        assert_eq!(
+            mgr.admissions.in_use(),
+            1,
+            "the encoder is still running, so its slot is still held"
+        );
+        // With the cap at one and this session still encoding on hardware, no
+        // second hardware start may be admitted.
+        assert!(
+            !matches!(
+                mgr.admissions
+                    .admit(1, Workload::of(&file, session.target_height)),
+                Admission::Hardware(_)
+            ),
+            "one slot authorized a second encoder while the first still runs"
+        );
+        assert!(mgr.stop_session(&info.session_id, "test").await);
+    }
+
+    fn execution_file_for_retry() -> plurx_core::domain::MediaFile {
+        plurx_core::domain::MediaFile {
+            id: 91,
+            item_id: 3,
+            path: PathBuf::from("/media/retry.mkv"),
+            size: 12_345,
+            mtime: 67_890,
+            duration_ms: Some(7_200_000),
+            container: Some("matroska".into()),
+            video_codec: Some("hevc".into()),
+            video_profile: Some("Main 10".into()),
+            width: Some(3840),
+            height: Some(2160),
+            bit_depth: Some(10),
+            hdr: None,
+            hdr_format: None,
+            bitrate: Some(20_000_000),
+            audio_streams: vec![],
+            subtitle_streams: vec![],
+            scanned_at: 1,
+            audio_offset_ms: 0,
+            probed: true,
+            dolby_vision: Default::default(),
+        }
+    }
+
+    fn execution_options_for_retry() -> TranscodeOptions {
+        TranscodeOptions {
+            target_height: 1080,
+            video_bitrate_kbps: 8_000,
+            effective_rate_control: EffectiveRateControl::Vbr,
+            audio_channels: 2,
+            audio_bitrate_kbps: 160,
+            audio_index: None,
+            tone_map: ToneMap::Zscale,
+            pipeline: Pipeline::Cpu,
+            ..TranscodeOptions::default()
+        }
+    }
+
+    /// The identity reaches the session, and an absent budget is not an
+    /// unspent one.
+    ///
+    /// This is the whole of M5c3's first slice, and the distinction in the
+    /// second half is the one everything after it rests on. Three starts reach
+    /// the daemon without a server-minted epoch — a legacy process-local
+    /// start, a relayed worker start, and a cached serve — and the ledger
+    /// refuses an empty epoch. A caller that read "no epoch" as "a fresh
+    /// budget" would grant one automatic recovery per attempt on exactly the
+    /// paths that have no durable bound at all, which is the failure the
+    /// budget exists to prevent.
+    #[tokio::test]
+    async fn a_session_without_a_server_minted_epoch_reports_no_budget_rather_than_a_fresh_one() {
+        let dir = crate::test_tempdir().expect("dir");
+        let mut session = test_session(dir.path().to_path_buf());
+
+        assert!(
+            session.recovery_identity().is_none(),
+            "a session with no identity at all has no budget"
+        );
+
+        session.recovery = Some(SessionRecoveryIdentity {
+            user_id: 7,
+            incarnation_id: "incarnation".to_owned(),
+            recovery_epoch: String::new(),
+        });
+        assert!(
+            session.recovery_identity().is_none(),
+            "an empty epoch is what the legacy and relayed starts carry, and the \
+             ledger refuses it — so it is no budget, not an unspent one"
+        );
+
+        // Each field the store refuses, refused here too. A `Some` returned on
+        // the strength of the epoch alone is a reservation that fails at the
+        // moment it is needed, and this method is the one place a caller is
+        // entitled to trust.
+        session.recovery = Some(SessionRecoveryIdentity {
+            user_id: 0,
+            incarnation_id: "incarnation".to_owned(),
+            recovery_epoch: "epoch-1".to_owned(),
+        });
+        assert!(
+            session.recovery_identity().is_none(),
+            "the store refuses a non-positive user id"
+        );
+        session.recovery = Some(SessionRecoveryIdentity {
+            user_id: 7,
+            incarnation_id: String::new(),
+            recovery_epoch: "epoch-1".to_owned(),
+        });
+        assert!(
+            session.recovery_identity().is_none(),
+            "the store refuses an empty failed incarnation"
+        );
+
+        session.recovery = Some(SessionRecoveryIdentity {
+            user_id: 7,
+            incarnation_id: "incarnation".to_owned(),
+            recovery_epoch: "epoch-1".to_owned(),
+        });
+        let identity = session
+            .recovery_identity()
+            .expect("a server-minted epoch is a budget");
+        assert_eq!(identity.user_id, 7);
+        assert_eq!(identity.incarnation_id, "incarnation");
+        assert_eq!(identity.recovery_epoch, "epoch-1");
+    }
+
+    /// The alternate M5c installs, frozen at session start like the one beside
+    /// it, and different from it in exactly one way.
+    ///
+    /// A decode fault says nothing about the encoder — the picture was fine
+    /// when it arrived, and what failed was reading the source. So the
+    /// alternate keeps the encode route and changes only how the source is
+    /// read, which is why it goes through `prepare_decode_restricted` rather
+    /// than `prepare`, and why `build`'s guard passes on a plan whose decode
+    /// backend moved: that guard compares the encode route, and the decode
+    /// backend is not part of it.
+    #[tokio::test]
+    async fn the_software_decode_alternate_is_a_distinct_artifact_that_keeps_its_encoder() {
+        use plurx_core::store::SqliteStore;
+        use plurx_core::transcode::{
+            ArtifactQualification, AttemptRestrictions, DecodeBackend, DecodeReason,
+        };
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let file = store.get_file(file_id).await.expect("get").expect("file");
+        let (mgr, _work, _cache) = cached_manager(&store);
+        // This test isolates the mixed-resource and recipe shape. The
+        // production-policy pairing rule has its own real-policy regression
+        // below; force both plans qualified here so this test reaches the
+        // shape it is responsible for.
+        mgr.test_publish_artifact_qualification(ArtifactQualification::HealthQualified);
+        let work = Workload::of(&file, 1080);
+
+        let mut opts = mgr.options_for_tone_map(
+            Encoder::Software,
+            &file,
+            1080,
+            0.0,
+            None,
+            None,
+            None,
+            tone_map_pref(),
+            OutputGrade::Sdr,
+        );
+        opts.pipeline = Pipeline::Cpu;
+
+        let delivered = mgr
+            .resolve_movie_plan(&file, &opts, Encoder::VideoToolbox)
+            .await
+            .expect("delivered plan");
+        let alternate = mgr
+            .resolve_restricted_movie_plan(
+                &file,
+                &opts,
+                Encoder::VideoToolbox,
+                &AttemptRestrictions::requiring(DecodeBackend::Software),
+            )
+            .await
+            .expect("software-decode alternate");
+
+        assert_eq!(alternate.decode().backend(), DecodeBackend::Software);
+        assert_eq!(
+            alternate.decode().reason(),
+            DecodeReason::ContinuationRestriction,
+            "the plan says why it moved, so a badge cannot report it as a preference"
+        );
+        assert_eq!(
+            alternate.encoder(),
+            delivered.encoder(),
+            "a decode fault is not a reason to change the encoder"
+        );
+        assert_ne!(
+            alternate.plan_digest(),
+            delivered.plan_digest(),
+            "the decode backend feeds the plan digest, so the alternate is a different artifact"
+        );
+
+        assert_ne!(
+            delivered.decode().backend(),
+            DecodeBackend::Software,
+            "the fixture has to actually be moving the backend, or this test proves nothing"
+        );
+
+        // The mixed shape: whatever else changes, the encode keeps its
+        // hardware slot. Releasing it would leave a live hardware encoder with
+        // nothing reserved for it, and the next hardware start admitted onto
+        // the same block.
+        let delivered_cost = crate::admission::TranscodeResourceEstimate::of(&delivered, &work);
+        let alternate_cost = crate::admission::TranscodeResourceEstimate::of(&alternate, &work);
+        assert!(
+            alternate_cost.hardware_slot,
+            "the encode still holds a slot"
+        );
+        assert!(
+            alternate_cost.cpu_threads >= delivered_cost.cpu_threads,
+            "forcing software decode cannot cost less CPU: \
+             {delivered_cost:?} then {alternate_cost:?}"
+        );
+        // And on this fixture it costs exactly the same, which is worth
+        // asserting rather than glossing. `TranscodeResourceEstimate::of`
+        // reserves the whole pipeline's software estimate whenever *any* stage
+        // runs on the CPU, and `Pipeline::Cpu` already puts the filters there
+        // — so the session was already paying for these cores before the
+        // decode moved. That is why the mixed transition takes a *delta* from
+        // `software_threads_held()` and not a fresh whole estimate: on a
+        // CPU-filtered route the delta is zero and the retry must reserve
+        // nothing rather than pay twice to end up owning once.
+        assert_eq!(
+            alternate_cost.cpu_threads, delivered_cost.cpu_threads,
+            "a CPU-filtered route already reserved the cores the decode now uses"
+        );
+
+        // And the recipe built from it is the mixed transition rather than a
+        // demotion: no software thread claim, so nothing hands the hardware
+        // slot back, and a total for the CPU delta to be taken from.
+        let prepared = PrepublicationTranscodeRetry::prepare_decode_restricted(
+            &delivered,
+            &alternate,
+            &opts,
+            Encoder::VideoToolbox,
+        )
+        .expect("a legal alternate")
+        .expect("an alternate exists for a hardware-decoded delivery");
+        assert_eq!(
+            prepared.software_threads, None,
+            "a Some here would demote and release the slot the encoder is using"
+        );
+        assert_eq!(
+            prepared.opts.pipeline,
+            alternate.options().pipeline,
+            "the pipeline comes from the plan, because forcing software decode \
+             can rewrite the renderer and the guard compares the two"
+        );
+        let dir = std::env::temp_dir().join(format!("plurx-m5c2b-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let recipe = PrepublicationTranscodeRetry::build(
+            &file,
+            prepared,
+            &alternate,
+            Pacing::unpaced(),
+            &dir,
+            "presentation-m5c2b",
+            mgr.admissions.software_pool(),
+            mgr.software_budget().await,
+            mgr.runtime_cache.clone(),
+            &mgr.measured_decoders,
+            "software-decode",
+        )
+        .expect("the alternate is a legal retry for this encode route");
+        assert_eq!(
+            recipe.actor_recipe.startup_kind,
+            crate::playback_control::ProducerStartupKind::MixedSoftwareDecode,
+        );
+        assert!(
+            recipe.cpu_total.is_some(),
+            "the mixed transition needs a total to take its delta from"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A qualified fault may install only a successor that can produce the
+    /// same class of evidence.
+    ///
+    /// The operator request remains enabled under partial coverage; this is
+    /// the recovery boundary, not a settings gate. Hardware-only coverage is
+    /// enough to classify the failed producer, but not enough to call an
+    /// unqualified software producer a verified recovery. Once the same-codec
+    /// pair is covered, the exact same construction becomes attachable.
+    #[tokio::test]
+    async fn automatic_decode_recovery_requires_a_qualified_same_codec_pair() {
+        use plurx_core::store::keys::DECODER_HEALTH_QUALIFIED_ARTIFACTS;
+        use plurx_core::store::SqliteStore;
+        use plurx_core::transcode::decoder_inventory::MeasuredDecoders;
+        use plurx_core::transcode::{ArtifactQualification, AttemptRestrictions, DecodeBackend};
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let file = store.get_file(file_id).await.expect("get").expect("file");
+        store
+            .put_setting(DECODER_HEALTH_QUALIFIED_ARTIFACTS, "1")
+            .await
+            .expect("enable path-scoped policy");
+        let measured = MeasuredDecoders::from_measured(&[
+            ("hevc", DecodeBackend::Software, "hevc"),
+            ("hevc", DecodeBackend::VideoToolbox, "hevc"),
+        ]);
+        let contract = |id: &str, backend: DecodeBackend| {
+            let mut contract = decode_contract_fixture(backend);
+            contract.id = id.to_owned();
+            contract.input_codec = "hevc".to_owned();
+            contract.decoder = "hevc".to_owned();
+            contract
+        };
+        let build = || crate::decoder_health::MeasuredBuild {
+            ffmpeg_version: "9.0.1".to_owned(),
+            binary_sha256: "b".repeat(64),
+            buildconf_sha256: "c".repeat(64),
+        };
+        let options = |mgr: &TranscodeManager| {
+            let mut opts = mgr.options_for_tone_map(
+                Encoder::Software,
+                &file,
+                1080,
+                0.0,
+                None,
+                None,
+                None,
+                tone_map_pref(),
+                OutputGrade::Sdr,
+            );
+            opts.pipeline = Pipeline::Cpu;
+            opts
+        };
+
+        let (mut hardware_only, _work, _cache) = cached_manager(&store);
+        hardware_only.caps.videotoolbox = true;
+        let hardware_only = hardware_only
+            .with_decoders(vec!["hevc".to_owned()])
+            .with_measured_decoders(measured.clone())
+            .with_diagnostic_policy(Arc::new(crate::decoder_health::DiagnosticPolicy::new(
+                Some(build()),
+                vec![contract("hardware", DecodeBackend::VideoToolbox)],
+            )));
+        let published = hardware_only.publish_artifact_qualification().await;
+        assert!(published.requested, "the operator policy remains enabled");
+        assert_eq!(
+            published.effective,
+            ArtifactQualification::Unqualified,
+            "legacy whole-node state stays conservative for a partial pair"
+        );
+        let opts = options(&hardware_only);
+        let delivered = hardware_only
+            .resolve_movie_plan(&file, &opts, Encoder::VideoToolbox)
+            .await
+            .expect("covered hardware delivery");
+        let uncovered_software = hardware_only
+            .resolve_restricted_movie_plan(
+                &file,
+                &opts,
+                Encoder::VideoToolbox,
+                &AttemptRestrictions::requiring(DecodeBackend::Software),
+            )
+            .await
+            .expect("uncovered software plan");
+        assert!(delivered.enforces_receipt());
+        assert!(!uncovered_software.enforces_receipt());
+        assert!(
+            PrepublicationTranscodeRetry::prepare_decode_restricted(
+                &delivered,
+                &uncovered_software,
+                &opts,
+                Encoder::VideoToolbox,
+            )
+            .expect("the unqualified successor is a safe refusal")
+            .is_none(),
+            "hardware-only coverage must attach no automatic decode alternate"
+        );
+
+        let (mut paired, _paired_work, _paired_cache) = cached_manager(&store);
+        paired.caps.videotoolbox = true;
+        let paired = paired
+            .with_decoders(vec!["hevc".to_owned()])
+            .with_measured_decoders(measured)
+            .with_diagnostic_policy(Arc::new(crate::decoder_health::DiagnosticPolicy::new(
+                Some(build()),
+                vec![
+                    contract("hardware", DecodeBackend::VideoToolbox),
+                    contract("software", DecodeBackend::Software),
+                ],
+            )));
+        let published = paired.publish_artifact_qualification().await;
+        assert_eq!(
+            published.effective,
+            ArtifactQualification::HealthQualified,
+            "both selectable paths are now covered"
+        );
+        let opts = options(&paired);
+        let delivered = paired
+            .resolve_movie_plan(&file, &opts, Encoder::VideoToolbox)
+            .await
+            .expect("qualified hardware delivery");
+        let software = paired
+            .resolve_restricted_movie_plan(
+                &file,
+                &opts,
+                Encoder::VideoToolbox,
+                &AttemptRestrictions::requiring(DecodeBackend::Software),
+            )
+            .await
+            .expect("qualified software plan");
+        assert!(delivered.enforces_receipt() && software.enforces_receipt());
+        let prepared = PrepublicationTranscodeRetry::prepare_decode_restricted(
+            &delivered,
+            &software,
+            &opts,
+            Encoder::VideoToolbox,
+        )
+        .expect("the covered pair is compatible")
+        .expect("the covered pair has an automatic alternate");
+        let dir = std::env::temp_dir().join(format!("plurx-m7b-pair-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let alternate = PrepublicationTranscodeRetry::build(
+            &file,
+            prepared,
+            &software,
+            Pacing::unpaced(),
+            &dir,
+            "presentation-m7b-pair",
+            paired.admissions.software_pool(),
+            paired.software_budget().await,
+            paired.runtime_cache.clone(),
+            &paired.measured_decoders,
+            "software-decode",
+        )
+        .expect("qualified alternate recipe");
+        let colour_safe = build_test_transcode_retry(
+            &paired,
+            &file,
+            &opts,
+            Encoder::VideoToolbox,
+            EffectiveRateControl::Vbr,
+            Pacing::unpaced(),
+            &dir,
+            "presentation-m7b-pair",
+        )
+        .await
+        .expect("colour-safe retry");
+        assert!(
+            colour_safe
+                .with_decode_alternate(Some(alternate))
+                .decode_alternate
+                .is_some(),
+            "paired coverage attaches the alternate the actor may select"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The executor installs the recipe the actor named, and only that one.
+    ///
+    /// Two recipes are frozen on the same structure and the actor names one of
+    /// them in its decision. Assuming the colour-safe one — which is what the
+    /// code did before it learned to resolve the name — would respawn the exact
+    /// command the decode fault was about, under a reason that told the client
+    /// a recovery was under way. Every later use in that function reads the
+    /// selected recipe, so getting this wrong is not one wrong field but the
+    /// whole attempt: the arguments, the reservation and the diagnostic
+    /// grammar.
+    #[tokio::test]
+    async fn the_executor_installs_the_recipe_the_actor_named() {
+        use plurx_core::store::SqliteStore;
+        use plurx_core::transcode::{ArtifactQualification, AttemptRestrictions, DecodeBackend};
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let file = store.get_file(file_id).await.expect("get").expect("file");
+        let (mgr, _work, _cache) = cached_manager(&store);
+        mgr.test_publish_artifact_qualification(ArtifactQualification::HealthQualified);
+
+        let mut opts = mgr.options_for_tone_map(
+            Encoder::Software,
+            &file,
+            1080,
+            0.0,
+            None,
+            None,
+            None,
+            tone_map_pref(),
+            OutputGrade::Sdr,
+        );
+        opts.pipeline = Pipeline::Cpu;
+
+        let delivered = mgr
+            .resolve_movie_plan(&file, &opts, Encoder::VideoToolbox)
+            .await
+            .expect("delivered plan");
+        let alternate_plan = mgr
+            .resolve_restricted_movie_plan(
+                &file,
+                &opts,
+                Encoder::VideoToolbox,
+                &AttemptRestrictions::requiring(DecodeBackend::Software),
+            )
+            .await
+            .expect("alternate plan");
+
+        let dir = std::env::temp_dir().join(format!("plurx-m5c2d-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let colour_safe = build_test_transcode_retry(
+            &mgr,
+            &file,
+            &opts,
+            Encoder::VideoToolbox,
+            EffectiveRateControl::Vbr,
+            Pacing::unpaced(),
+            &dir,
+            "presentation-m5c2d-exec",
+        )
+        .await
+        .expect("colour-safe recipe");
+        let alternate = PrepublicationTranscodeRetry::build(
+            &file,
+            PrepublicationTranscodeRetry::prepare_decode_restricted(
+                &delivered,
+                &alternate_plan,
+                &opts,
+                Encoder::VideoToolbox,
+            )
+            .expect("a legal alternate")
+            .expect("an alternate exists"),
+            &alternate_plan,
+            Pacing::unpaced(),
+            &dir,
+            "presentation-m5c2d-exec",
+            mgr.admissions.software_pool(),
+            mgr.software_budget().await,
+            mgr.runtime_cache.clone(),
+            &mgr.measured_decoders,
+            "software-decode",
+        )
+        .expect("alternate recipe");
+
+        // The two really are distinguishable, which is what makes the rest of
+        // this test mean anything.
+        assert_ne!(colour_safe.actor_recipe, alternate.actor_recipe);
+        assert_ne!(colour_safe.args, alternate.args);
+        assert!(
+            alternate
+                .actor_recipe
+                .identity
+                .starts_with("software-decode:"),
+            "the identity names what the recipe is for: {}",
+            alternate.actor_recipe.identity
+        );
+
+        let paired = colour_safe
+            .clone()
+            .with_decode_alternate(Some(alternate.clone()));
+        assert_eq!(
+            paired
+                .decode_alternate
+                .as_deref()
+                .map(|held| held.actor_recipe.clone()),
+            Some(alternate.actor_recipe.clone()),
+            "the executor holds the material the policy advertises"
+        );
+        // And the pair does not lose the recipe it was built from.
+        assert_eq!(paired.actor_recipe, colour_safe.actor_recipe);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// There is no alternate when the delivery already decodes in software,
+    /// and saying so is the whole job.
+    ///
+    /// `prepare` structurally cannot produce a retry identical to the attempt
+    /// that just failed — it always moves the pipeline or the encoder. This one
+    /// moves neither, so nothing but an explicit refusal stops it from tearing
+    /// down the failed child and respawning the identical command: same plan
+    /// digest, same arguments, same recipe fingerprint. A recovery that is a
+    /// no-op is worse than none, because it spends an attempt and reads in the
+    /// ledger as though something was tried.
+    #[tokio::test]
+    async fn there_is_no_software_decode_alternate_for_a_delivery_already_decoding_in_software() {
+        use plurx_core::store::SqliteStore;
+        use plurx_core::transcode::{AttemptRestrictions, DecodeBackend};
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let file = store.get_file(file_id).await.expect("get").expect("file");
+        let (mgr, _work, _cache) = cached_manager(&store);
+
+        let mut opts = mgr.options_for_tone_map(
+            Encoder::Software,
+            &file,
+            1080,
+            0.0,
+            None,
+            None,
+            None,
+            tone_map_pref(),
+            OutputGrade::Sdr,
+        );
+        opts.pipeline = Pipeline::Cpu;
+
+        // Resolve the delivered plan *under the restriction*, which is the
+        // shape of a session whose delivery already decodes in software.
+        let already_software = mgr
+            .resolve_restricted_movie_plan(
+                &file,
+                &opts,
+                Encoder::VideoToolbox,
+                &AttemptRestrictions::requiring(DecodeBackend::Software),
+            )
+            .await
+            .expect("software-decoded delivery");
+        assert_eq!(already_software.decode().backend(), DecodeBackend::Software);
+        assert!(
+            PrepublicationTranscodeRetry::prepare_decode_restricted(
+                &already_software,
+                &already_software,
+                &opts,
+                Encoder::VideoToolbox,
+            )
+            .expect("a legal answer")
+            .is_none(),
+            "an alternate with the delivered plan's own digest is not an alternate"
+        );
+
+        // A software encoder has no hardware slot to keep, so there is no
+        // mixed transition to make and every sentence the recipe's doc claims
+        // about one would be false.
+        let software_plan = mgr
+            .resolve_movie_plan(&file, &opts, Encoder::Software)
+            .await
+            .expect("software plan");
+        assert!(
+            PrepublicationTranscodeRetry::prepare_decode_restricted(
+                &software_plan,
+                &already_software,
+                &opts,
+                Encoder::Software,
+            )
+            .expect("a legal answer")
+            .is_none(),
+            "a software encoder is not a mixed transition"
+        );
+    }
+
+    /// The derivation this whole milestone rests on, exercised through a real
+    /// resolved plan rather than a hand-built estimate.
+    ///
+    /// Without this, `TranscodeResourceEstimate::of` has no coverage at all:
+    /// every other test constructs the estimate by hand, so `hardware_slot`,
+    /// `cpu_threads` and the filter-chain rule are free to change and stay
+    /// green.
+    #[tokio::test]
+    async fn the_estimate_reads_the_cost_off_the_plan_and_not_off_the_encoders_name() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let file = store.get_file(file_id).await.expect("get").expect("file");
+        let (mgr, _work, _cache) = cached_manager(&store);
+        let work = Workload::of(&file, 1080);
+
+        let mut software = mgr.options_for_tone_map(
+            Encoder::Software,
+            &file,
+            1080,
+            0.0,
+            None,
+            None,
+            None,
+            tone_map_pref(),
+            OutputGrade::Sdr,
+        );
+        software.pipeline = Pipeline::Cpu;
+        let software_plan = mgr
+            .resolve_movie_plan(&file, &software, Encoder::Software)
+            .await
+            .expect("software plan");
+        let estimate = crate::admission::TranscodeResourceEstimate::of(&software_plan, &work);
+        assert!(!estimate.hardware_slot, "software encoding needs no slot");
+        assert_eq!(estimate.cpu_threads, work.software_threads());
+        assert_eq!(
+            estimate.decoder_threads, None,
+            "no implementation was measured, so no cap is claimed"
+        );
+
+        // A hardware encoder whose decode is in software still spends the
+        // cores the decode uses. This is the case that reserved nothing at all
+        // before this milestone.
+        let mut mixed = software.clone();
+        mixed.pipeline = Pipeline::Cpu;
+        let mixed_plan = mgr
+            .resolve_movie_plan(&file, &mixed, Encoder::VideoToolbox)
+            .await
+            .expect("mixed plan");
+        let estimate = crate::admission::TranscodeResourceEstimate::of(&mixed_plan, &work);
+        assert!(estimate.hardware_slot, "the encode holds a slot");
+        assert!(
+            estimate.cpu_threads > 0,
+            "and the CPU the rest of the pipeline spends is reserved: {estimate:?}"
+        );
+
+        // The two vendor graphs are the only ones that keep every frame off the
+        // CPU, and a subtitle burn takes even them back to system memory.
+        assert!(Pipeline::VppQsv.keeps_frames_off_the_cpu());
+        assert!(Pipeline::TonemapVaapi.keeps_frames_off_the_cpu());
+        for cpu_touching in [
+            Pipeline::Cpu,
+            Pipeline::Libplacebo,
+            Pipeline::TonemapOpencl,
+            Pipeline::Hdr10Passthrough,
+        ] {
+            assert!(
+                !cpu_touching.keeps_frames_off_the_cpu(),
+                "{cpu_touching:?} runs real filter work on the CPU"
+            );
+        }
+    }
+
+    /// A GPU pipeline's one-step retry keeps the encoder and moves to the CPU
+    /// chain, so it owes a CPU delta and not a demotion. A CPU pipeline's
+    /// retry replaces the encoder, so it owes the demotion and no delta. The
+    /// two must never both be set: that would reserve the pipeline twice.
+    #[test]
+    fn a_retry_owes_either_a_demotion_or_a_cpu_delta_and_never_both() {
+        let file = execution_file_for_retry();
+        let mut gpu = execution_options_for_retry();
+        gpu.pipeline = Pipeline::VppQsv;
+        let retained = PrepublicationTranscodeRetry::prepare(
+            &file,
+            &gpu,
+            Encoder::Qsv,
+            EffectiveRateControl::Vbr,
+        )
+        .expect("a GPU pipeline has a color-safe CPU retry");
+        assert_eq!(retained.encoder, Encoder::Qsv, "the encoder is retained");
+        assert_eq!(retained.software_threads, None, "so this is not a demotion");
+
+        let mut cpu = execution_options_for_retry();
+        cpu.pipeline = Pipeline::Cpu;
+        let demoted = PrepublicationTranscodeRetry::prepare(
+            &file,
+            &cpu,
+            Encoder::Qsv,
+            EffectiveRateControl::Vbr,
+        )
+        .expect("a CPU pipeline retries in software");
+        assert_eq!(demoted.encoder, Encoder::Software);
+        assert_eq!(
+            demoted.software_threads,
+            Some(Workload::of(&file, cpu.target_height).software_threads())
+        );
     }
 
     /// The hardware→software fallback must return its slot at the transition,
@@ -30482,12 +35491,22 @@ pub(crate) mod tests {
             .expect("budget");
 
         let first = mgr
-            .admit_live(Encoder::Software, Workload::of(&file, 1080), Duration::ZERO)
+            .admit_live(
+                Encoder::Software,
+                None,
+                Workload::of(&file, 1080),
+                Duration::ZERO,
+            )
             .await
             .expect("first fits an empty pool");
         assert_eq!(mgr.admissions.software_in_use(), 6);
         let refused = match mgr
-            .admit_live(Encoder::Software, Workload::of(&file, 1080), Duration::ZERO)
+            .admit_live(
+                Encoder::Software,
+                None,
+                Workload::of(&file, 1080),
+                Duration::ZERO,
+            )
             .await
         {
             Err(why) => why,
@@ -30498,7 +35517,12 @@ pub(crate) mod tests {
         drop(first);
         assert_eq!(mgr.admissions.software_in_use(), 0);
         let second = mgr
-            .admit_live(Encoder::Software, Workload::of(&file, 1080), Duration::ZERO)
+            .admit_live(
+                Encoder::Software,
+                None,
+                Workload::of(&file, 1080),
+                Duration::ZERO,
+            )
             .await
             .expect("freed weight is grantable again");
         assert_eq!(mgr.admissions.software_in_use(), 6);
@@ -30579,6 +35603,7 @@ pub(crate) mod tests {
     ) -> Arc<Session> {
         Arc::new(Session {
             dir: dir.to_path_buf(),
+            recovery: None,
             response_incarnation: uuid::Uuid::new_v4(),
             frozen_presentation: None,
             actor_managed_response_publication: actor_managed_prepublication,
@@ -30595,7 +35620,8 @@ pub(crate) mod tests {
             retirement_context: None,
             cache_integrity_cleanup_started: AtomicBool::new(false),
             child: Mutex::new(
-                child.map(|child| AttemptChild::new(producer_attempt, child, control.clone())),
+                child
+                    .map(|child| AttemptChild::new(producer_attempt, child, control.clone(), None)),
             ),
             child_transition: Mutex::new(()),
             replacing_child: AtomicBool::new(false),
@@ -30656,6 +35682,7 @@ pub(crate) mod tests {
             class: std::sync::Mutex::new(String::new()),
             hw_slot: std::sync::Mutex::new(None),
             sw_permit: std::sync::Mutex::new(None),
+            sw_delta_permit: std::sync::Mutex::new(None),
             delivery: Meter::new(),
             readrate: 0.0,
             suspended: AtomicBool::new(false),
@@ -32644,6 +37671,7 @@ pub(crate) mod tests {
                     producer_attempt,
                     long_running_child(),
                     session.control.clone(),
+                    None,
                 ));
                 replacement.complete();
             }
@@ -32794,12 +37822,12 @@ pub(crate) mod tests {
             OutputGrade::Sdr,
         );
         opts.pipeline = Pipeline::Cpu;
-        let sw_pool = mgr.admissions.software_pool();
         // Retirement has already won. The production retry executor is the
         // thing that must refuse to resurrect an encoder afterwards, so it is
         // what this regression drives — the retired ladder helper would prove
         // nothing about the path production takes.
-        let retry = PrepublicationTranscodeRetry::build(
+        let retry = build_test_transcode_retry(
+            &mgr,
             &file,
             &opts,
             Encoder::VideoToolbox,
@@ -32807,9 +37835,8 @@ pub(crate) mod tests {
             Pacing::unpaced(),
             dir.path(),
             "retirement-first",
-            sw_pool,
-            mgr.runtime_cache.clone(),
         )
+        .await
         .expect("a CPU-pipeline hardware attempt has a software rung");
         let refused = execute_prepublication_transcode_retry(
             Arc::clone(&session),
@@ -32865,6 +37892,51 @@ pub(crate) mod tests {
         (mgr, work, cache)
     }
 
+    async fn recipe_hash_for_options(
+        mgr: &TranscodeManager,
+        file: &plurx_core::domain::MediaFile,
+        opts: &TranscodeOptions,
+        encoder: Encoder,
+    ) -> String {
+        let plan = mgr
+            .resolve_movie_plan(file, opts, encoder)
+            .await
+            .expect("resolve recipe plan");
+        let digest = mgr.digest().expect("cache configured");
+        mgr.effective_recipe(&digest, &plan, false).hash()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn build_test_transcode_retry(
+        mgr: &TranscodeManager,
+        file: &plurx_core::domain::MediaFile,
+        opts: &TranscodeOptions,
+        encoder: Encoder,
+        software_rate_control: EffectiveRateControl,
+        pacing: Pacing,
+        dir: &std::path::Path,
+        fingerprint: &str,
+    ) -> Result<PrepublicationTranscodeRetry, String> {
+        let prepared =
+            PrepublicationTranscodeRetry::prepare(file, opts, encoder, software_rate_control)?;
+        let plan = mgr
+            .resolve_movie_plan(file, &prepared.opts, prepared.encoder)
+            .await?;
+        PrepublicationTranscodeRetry::build(
+            file,
+            prepared,
+            &plan,
+            pacing,
+            dir,
+            fingerprint,
+            mgr.admissions.software_pool(),
+            mgr.software_budget().await,
+            mgr.runtime_cache.clone(),
+            &mgr.measured_decoders,
+            "one-step-color-safe",
+        )
+    }
+
     /// The name `start()` would look this session up under. Computed through
     /// the manager's own builders, because a test that spelled the recipe out
     /// by hand would keep passing after the two spellings diverged — which is
@@ -32886,9 +37958,224 @@ pub(crate) mod tests {
             tone_map_pref(),
             OutputGrade::Sdr,
         );
-        let mut digest = mgr.digest().expect("cache configured");
-        mgr.effective_recipe(&mut digest, file, &opts, encoder, false)
-            .hash()
+        let plan = mgr
+            .resolve_movie_plan(file, &opts, encoder)
+            .await
+            .expect("resolve cache recipe plan");
+        let digest = mgr.digest().expect("cache configured");
+        mgr.effective_recipe(&digest, &plan, false).hash()
+    }
+
+    /// A retry that changes the decode route is a different production, and
+    /// the two ways it could pretend otherwise are publishing under the failed
+    /// plan's name and resuming the failed producer's prefix. Both are closed
+    /// here: the alternative resolves to its own key, and the retry builder
+    /// refuses to carry a plan that disagrees with the route it prepared.
+    #[tokio::test]
+    async fn an_alternative_plan_cannot_publish_or_resume_under_the_failed_plans_key() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let file = store.get_file(file_id).await.expect("get").expect("file");
+        let (mgr, _work, _cache) = cached_manager(&store);
+        let dir = crate::test_tempdir().expect("session dir");
+
+        let mut opts = mgr.options_for_tone_map(
+            Encoder::VideoToolbox,
+            &file,
+            720,
+            0.0,
+            None,
+            None,
+            None,
+            ToneMap::Zscale,
+            OutputGrade::Sdr,
+        );
+        opts.pipeline = Pipeline::Cpu;
+
+        let digest = mgr.digest().expect("cache configured");
+        let failed_plan = mgr
+            .resolve_movie_plan(&file, &opts, Encoder::VideoToolbox)
+            .await
+            .expect("the failed hardware plan");
+        let failed_hash = mgr.effective_recipe(&digest, &failed_plan, false).hash();
+
+        let prepared = PrepublicationTranscodeRetry::prepare(
+            &file,
+            &opts,
+            Encoder::VideoToolbox,
+            EffectiveRateControl::Vbr,
+        )
+        .expect("a CPU-pipeline hardware attempt has a software rung");
+        let alternative_plan = mgr
+            .resolve_movie_plan(&file, &prepared.opts, prepared.encoder)
+            .await
+            .expect("the alternative plan");
+        let alternative_hash = mgr
+            .effective_recipe(&digest, &alternative_plan, false)
+            .hash();
+
+        assert_ne!(
+            failed_plan.plan_digest(),
+            alternative_plan.plan_digest(),
+            "a changed decode route is a changed plan"
+        );
+        assert_ne!(
+            failed_hash, alternative_hash,
+            "the alternative must not publish under the failed plan's key"
+        );
+
+        let retry = build_test_transcode_retry(
+            &mgr,
+            &file,
+            &opts,
+            Encoder::VideoToolbox,
+            EffectiveRateControl::Vbr,
+            Pacing::unpaced(),
+            dir.path(),
+            "alternative-plan-key",
+        )
+        .await
+        .expect("build the alternative");
+        // The retry's fingerprint and the recipe hash are digests over
+        // different field lists, so asserting they differ proves nothing but
+        // the absence of a SHA-256 collision. What is worth proving is below.
+        let _ = &retry.actor_recipe.fingerprint;
+
+        // The prefix protection itself: a retry prepared for the software
+        // route cannot be constructed carrying the hardware plan it replaced,
+        // so there is no assembled object that could resume it.
+        let prepared_again = PrepublicationTranscodeRetry::prepare(
+            &file,
+            &opts,
+            Encoder::VideoToolbox,
+            EffectiveRateControl::Vbr,
+        )
+        .expect("prepare again");
+        let mismatched = PrepublicationTranscodeRetry::build(
+            &file,
+            prepared_again,
+            &failed_plan,
+            Pacing::unpaced(),
+            dir.path(),
+            "alternative-plan-key",
+            mgr.admissions.software_pool(),
+            mgr.software_budget().await,
+            mgr.runtime_cache.clone(),
+            &mgr.measured_decoders,
+            "one-step-color-safe",
+        );
+        assert!(
+            mismatched.is_err(),
+            "a retry must refuse the plan of the route it is replacing"
+        );
+    }
+
+    /// Staged parts are only worth resuming if they were produced under the
+    /// same recipe. A prefix staged under a different plan carries a different
+    /// v3 hash, so it must be quarantined rather than assembled into this
+    /// encode — the one cache failure that is not an error, just the wrong
+    /// film.
+    ///
+    /// Both hashes come from `effective_recipe`, not from two arbitrary
+    /// strings: a test that hand-wrote them would pass on any recipe
+    /// composition, including one that had stopped telling the two plans apart.
+    #[tokio::test]
+    async fn a_staged_prefix_from_another_plan_is_quarantined_by_the_v3_recipe_hash() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let staged_file = store.get_file(file_id).await.expect("get").expect("file");
+        let (mgr, _work, _cache) = cached_manager(&store);
+        let stale_hash = recipe_hash_for(&mgr, &staged_file, 480).await;
+        let planned_hash = recipe_hash_for(&mgr, &staged_file, 1080).await;
+        assert_ne!(
+            stale_hash, planned_hash,
+            "two plans, two names — otherwise this test proves nothing"
+        );
+
+        let root = crate::test_tempdir().expect("staging root");
+        let parent = plurx_core::fs_secure::SecureDirectory::open(root.path())
+            .await
+            .expect("open staging parent");
+        let staging = parent
+            .create_child_directory("job-staging")
+            .await
+            .expect("create staging");
+
+        let source_path = root.path().join("source.mkv");
+        tokio::fs::write(&source_path, b"source bytes")
+            .await
+            .expect("write source");
+        let source = LocalSourceSnapshot::from_metadata(
+            &tokio::fs::metadata(&source_path).await.expect("metadata"),
+        );
+
+        let job = pretranscode_job_fixture();
+        let stale = PretranscodeStagingIdentity {
+            job_id: job.id.clone(),
+            file_id: job.file_id,
+            source_size: job.source_size,
+            source_mtime: job.source_mtime,
+            policy_generation: job.policy_generation.clone(),
+            // What a producer working under a different plan wrote.
+            recipe_hash: stale_hash.clone(),
+            source,
+        };
+        write_pretranscode_staging_identity(&staging, &stale)
+            .await
+            .expect("write the stale identity");
+        staging
+            .atomic_write_child("part-000.ts", b"bytes from the old encode")
+            .await
+            .expect("retain a part");
+        assert!(staging
+            .read_bounded_child("part-000.ts", 4_096)
+            .await
+            .is_ok());
+
+        let rebound =
+            bind_pretranscode_staging(&parent, "job-staging", staging, &job, &planned_hash, source)
+                .await
+                .expect("rebind the staging root");
+
+        assert!(
+            rebound
+                .read_bounded_child("part-000.ts", 4_096)
+                .await
+                .is_err(),
+            "a part produced under another recipe must not survive into this one"
+        );
+        let bound = read_pretranscode_staging_identity(&rebound)
+            .await
+            .expect("the replacement carries an identity");
+        assert_eq!(bound.recipe_hash, planned_hash);
+        assert_eq!(bound.job_id, job.id);
+    }
+
+    fn pretranscode_job_fixture() -> plurx_core::domain::PretranscodeJob {
+        plurx_core::domain::PretranscodeJob {
+            id: "job-under-test".to_owned(),
+            dedupe_key: "dedupe-under-test".to_owned(),
+            file_id: 7,
+            source_size: 12_345,
+            source_mtime: 67_890,
+            target_height: 720,
+            policy_generation: "policy-1".to_owned(),
+            requirements_json: "{}".to_owned(),
+            reason: "test".to_owned(),
+            priority: 0,
+            state: "running".to_owned(),
+            owner_node_id: NODE.to_owned(),
+            fence: 1,
+            lease_expires_ms: 0,
+            attempts: 1,
+            not_before_ms: 0,
+            created_at_ms: 0,
+            updated_at_ms: 0,
+        }
     }
 
     /// Write what a finished transcode looks like on disk.
@@ -33275,14 +38562,18 @@ pub(crate) mod tests {
             tone_map_pref(),
             OutputGrade::Sdr,
         );
+        let plan = mgr
+            .resolve_movie_plan(&file, &opts, encoder)
+            .await
+            .expect("resolve offer-verification plan");
 
         assert!(
-            !mgr.verified_cache_hit(&file, &opts, encoder).await,
+            !mgr.verified_cache_hit(&plan).await,
             "an offer fails closed while its single verifier is running"
         );
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
-                if mgr.verified_cache_hit(&file, &opts, encoder).await {
+                if mgr.verified_cache_hit(&plan).await {
                     break;
                 }
                 tokio::task::yield_now().await;
@@ -33297,7 +38588,7 @@ pub(crate) mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&hash);
-        assert!(!mgr.verified_cache_hit(&file, &opts, encoder).await);
+        assert!(!mgr.verified_cache_hit(&plan).await);
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 if store
@@ -33371,11 +38662,15 @@ pub(crate) mod tests {
             tone_map_pref(),
             OutputGrade::Sdr,
         );
+        let plan = mgr
+            .resolve_movie_plan(&file, &opts, encoder)
+            .await
+            .expect("resolve lookup plan");
         let look = || {
             mgr.serve_cached(
                 &file,
                 &opts,
-                encoder,
+                &plan,
                 "Heat",
                 SessionOwner {
                     user_name: "paul",
@@ -33401,7 +38696,7 @@ pub(crate) mod tests {
         );
 
         store
-            .complete_cache_entry(&hash, NODE, 1_234)
+            .complete_cache_entry(&hash, NODE, 1_234, None)
             .await
             .expect("complete");
         let hit = look().await.expect("a finished entry serves");
@@ -33451,7 +38746,7 @@ pub(crate) mod tests {
             .await
             .expect("claim");
         store
-            .complete_cache_entry(&hash, NODE, 1_234)
+            .complete_cache_entry(&hash, NODE, 1_234, None)
             .await
             .expect("complete");
 
@@ -33534,7 +38829,7 @@ pub(crate) mod tests {
             .await
             .expect("claim");
         store
-            .complete_cache_entry(&hash, NODE, 1_234)
+            .complete_cache_entry(&hash, NODE, 1_234, None)
             .await
             .expect("complete");
         store
@@ -33950,15 +39245,12 @@ pub(crate) mod tests {
                 .expect("create package"),
             OfflineCreateOutcome::Created(_)
         ));
-        assert_eq!(
-            store
-                .claim_next_offline_package(NODE)
-                .await
-                .expect("claim package")
-                .expect("queued package")
-                .id,
-            package_id
-        );
+        let claimed = store
+            .claim_next_offline_package(NODE)
+            .await
+            .expect("claim package")
+            .expect("queued package");
+        assert_eq!(claimed.id, package_id);
 
         let (mgr, _work, cache) = cached_manager(&store);
         let mgr = Arc::new(mgr.with_producer_tuning(ProducerTuning {
@@ -33981,7 +39273,7 @@ pub(crate) mod tests {
 
         let outcome = mgr
             .ensure_offline(
-                package_id,
+                &claimed,
                 &file,
                 &OfflineSpec {
                     target_height: 240,
@@ -34301,7 +39593,7 @@ pub(crate) mod tests {
                 while let Ok(Some(entry)) = entries.next_entry().await {
                     let dir = entry.path().join(crate::produce::part_dir(index));
                     if let Ok(dir) = plurx_core::fs_secure::SecureDirectory::open(&dir).await {
-                        if !read_part(&dir).await.is_empty() {
+                        if !read_part(&dir).await.part.is_empty() {
                             return;
                         }
                     }
@@ -34388,11 +39680,15 @@ pub(crate) mod tests {
             tone_map_pref(),
             OutputGrade::Sdr,
         );
+        let plan = mgr
+            .resolve_movie_plan(&file, &opts, encoder)
+            .await
+            .expect("resolve cacheless plan");
         assert!(mgr
             .serve_cached(
                 &file,
                 &opts,
-                encoder,
+                &plan,
                 "Heat",
                 SessionOwner {
                     user_name: "paul",
@@ -34732,13 +40028,34 @@ pub(crate) mod tests {
         );
 
         let supersession_user = serde_json::json!(["username", "paul"]).to_string();
+        let recovery = SessionRecoveryIdentity {
+            user_id: 0,
+            incarnation_id: String::new(),
+            recovery_epoch: String::new(),
+        };
         let first_creation = mgr
-            .create_session_inner(&request, "paul", &supersession_user, None, None, None)
+            .create_session_inner(
+                &request,
+                "paul",
+                &supersession_user,
+                &recovery,
+                None,
+                None,
+                None,
+            )
             .await
             .expect("create");
         assert!(first_creation.created);
         let again_creation = mgr
-            .create_session_inner(&request, "paul", &supersession_user, None, None, None)
+            .create_session_inner(
+                &request,
+                "paul",
+                &supersession_user,
+                &recovery,
+                None,
+                None,
+                None,
+            )
             .await
             .expect("replay");
         assert!(!again_creation.created);
@@ -35264,7 +40581,7 @@ pub(crate) mod tests {
         for (name, idle_ms, published_end_ms, why) in [
             (
                 "still-delivering",
-                WEDGE_IDLE_MS - 1,
+                WEDGE_IDLE_MS / 2,
                 WEDGE_GAP_MS,
                 "a delivery completed a moment ago is a slow link, not a wedge",
             ),
@@ -35307,6 +40624,14 @@ pub(crate) mod tests {
             );
             drop(claim);
         }
+    }
+
+    #[test]
+    fn delivery_wedge_thresholds_are_exact() {
+        assert!(!delivery_wedge(WEDGE_IDLE_MS - 1, Some(WEDGE_GAP_MS), 0));
+        assert!(!delivery_wedge(WEDGE_IDLE_MS, Some(WEDGE_GAP_MS - 1), 0));
+        assert!(!delivery_wedge(WEDGE_IDLE_MS, None, 0));
+        assert!(delivery_wedge(WEDGE_IDLE_MS, Some(WEDGE_GAP_MS), 0));
     }
 
     #[tokio::test]
@@ -35903,5 +41228,2241 @@ pub(crate) mod tests {
             Some(720)
         );
         drop(claim);
+    }
+
+    /// Which decoder the command will *name* is the only thing that may be
+    /// matched to a contract.
+    ///
+    /// A grammar built on a guessed decoder name matches nothing, and a
+    /// grammar that matches nothing certifies every stream as clean — the
+    /// exact substitution this milestone exists to remove. So the answer is no
+    /// unless the plan says the decoder out loud.
+    #[test]
+    fn only_a_plan_that_names_its_decoder_gets_a_grammar() {
+        use plurx_core::transcode::DecodeBackend;
+
+        let contract = crate::decoder_health::DiagnosticContract {
+            id: "fixture".to_owned(),
+            host: "test".to_owned(),
+            ffmpeg_version: "8.0.1".to_owned(),
+            binary_sha256: "b".repeat(64),
+            buildconf_sha256: "c".repeat(64),
+            stderr_mode: crate::decoder_health::QUALIFIED_STDERR_MODE.to_owned(),
+            input_codec: "h264".to_owned(),
+            decoder: "h264".to_owned(),
+            decode_backend: plurx_core::transcode::DecodeBackend::Software
+                .name()
+                .to_owned(),
+            require_context_addresses: true,
+            primary_message: "Error submitting packet to decoder:".to_owned(),
+            subordinate_message: Some("No frame decoded?".to_owned()),
+            attributes_every_failure: true,
+            error_detail: "corrupt input packet".to_owned(),
+            fixture: "f".to_owned(),
+            fixture_sha256: "d".repeat(64),
+            scope: "test".to_owned(),
+            backend_fault_detail: None,
+        };
+        let policy = crate::decoder_health::DiagnosticPolicy::new(
+            Some(crate::decoder_health::MeasuredBuild {
+                ffmpeg_version: contract.ffmpeg_version.clone(),
+                binary_sha256: contract.binary_sha256.clone(),
+                buildconf_sha256: contract.buildconf_sha256.clone(),
+            }),
+            vec![contract],
+        );
+        let resolve = |backend, decoder| {
+            DiagnosticObservation::resolve(
+                &policy,
+                "digest".to_owned(),
+                Some("h264"),
+                backend,
+                decoder,
+                0,
+            )
+        };
+
+        let named = resolve(DecodeBackend::Software, Some("h264"));
+        assert!(
+            named.grammar.is_some(),
+            "the command names h264, and h264 is qualified"
+        );
+        assert!(named.qualified_logging());
+        assert_eq!(named.contract_id.as_deref(), Some("fixture"));
+
+        for (label, observation) in [
+            // The daemon's startup inventory names no implementation, so this
+            // is every software plan in production today: the command emits no
+            // `-c:v` and FFmpeg picks its own default.
+            (
+                "software, no implementation measured",
+                resolve(DecodeBackend::Software, None),
+            ),
+            // A hardware backend, which is no longer refused for being one.
+            // It is refused here because the only contract in this policy was
+            // qualified on software, and a decode path nobody qualified gets
+            // no grammar — which is the same rule as every other line in this
+            // list rather than a special case for hardware.
+            (
+                "a backend no contract covers",
+                resolve(DecodeBackend::Qsv, Some("h264")),
+            ),
+            // A named implementation no contract covers.
+            (
+                "an implementation nobody qualified",
+                resolve(DecodeBackend::Software, Some("libdav1d_h264")),
+            ),
+        ] {
+            assert!(observation.grammar.is_none(), "{label}");
+            assert!(
+                !observation.qualified_logging(),
+                "{label}: and it does not ask for flags it has no grammar for"
+            );
+            assert!(observation.contract_id.is_none(), "{label}");
+            assert_eq!(observation.plan_digest, "digest", "{label}");
+        }
+    }
+
+    /// One contract, on the backend asked for. `h264` on both, because that is
+    /// the measured fact the tests below are about: the accelerated and the
+    /// software decode of h264 print the same decoder name.
+    fn decode_contract_fixture(
+        backend: plurx_core::transcode::DecodeBackend,
+    ) -> crate::decoder_health::DiagnosticContract {
+        crate::decoder_health::DiagnosticContract {
+            id: "fixture".to_owned(),
+            host: "test".to_owned(),
+            ffmpeg_version: "9.0.1".to_owned(),
+            binary_sha256: "b".repeat(64),
+            buildconf_sha256: "c".repeat(64),
+            stderr_mode: crate::decoder_health::QUALIFIED_STDERR_MODE.to_owned(),
+            input_codec: "h264".to_owned(),
+            decoder: "h264".to_owned(),
+            decode_backend: backend.name().to_owned(),
+            require_context_addresses: true,
+            primary_message: "Decoding error:".to_owned(),
+            subordinate_message: None,
+            attributes_every_failure: false,
+            error_detail: "corrupt input packet".to_owned(),
+            fixture: "f".to_owned(),
+            fixture_sha256: "d".repeat(64),
+            scope: "test".to_owned(),
+            backend_fault_detail: None,
+        }
+    }
+
+    /// A contract is qualified on a decode *path*, and the decoder name does
+    /// not carry the path.
+    ///
+    /// Measured on the local Apple toolchain, FFmpeg 9.0.1: a VideoToolbox
+    /// decode of h264 and a software decode of h264 print the identical
+    /// context, `[vist#0:0/h264 @ …] [dec:h264 @ …]`. That backend attaches an
+    /// accelerator to the same decoder rather than selecting a
+    /// differently-named one, and the only line that says so at all is
+    /// `Selecting decoder 'h264' because of requested hwaccel method
+    /// videotoolbox` — which is not in the context grammar.
+    ///
+    /// So a contract keyed on the name alone would answer for a decode path
+    /// nobody qualified. This is the assertion that it does not, and it is the
+    /// reason M7b exists rather than simply deleting a refusal.
+    #[test]
+    fn a_contract_qualified_on_one_backend_does_not_answer_for_another() {
+        use plurx_core::transcode::DecodeBackend;
+
+        let software = decode_contract_fixture(DecodeBackend::Software);
+        let accelerated = decode_contract_fixture(DecodeBackend::VideoToolbox);
+        assert_eq!(
+            software.decoder, accelerated.decoder,
+            "the premise: both decode paths print the same decoder name"
+        );
+
+        let policy = crate::decoder_health::DiagnosticPolicy::new(
+            Some(crate::decoder_health::MeasuredBuild {
+                ffmpeg_version: software.ffmpeg_version.clone(),
+                binary_sha256: software.binary_sha256.clone(),
+                buildconf_sha256: software.buildconf_sha256.clone(),
+            }),
+            vec![software.clone()],
+        );
+        assert!(
+            policy
+                .contract_for(
+                    "h264",
+                    "h264",
+                    DecodeBackend::Software.name(),
+                    crate::decoder_health::QUALIFIED_STDERR_MODE,
+                )
+                .is_some(),
+            "the software contract covers the path it was qualified on"
+        );
+        assert!(
+            policy
+                .contract_for(
+                    "h264",
+                    "h264",
+                    DecodeBackend::VideoToolbox.name(),
+                    crate::decoder_health::QUALIFIED_STDERR_MODE,
+                )
+                .is_none(),
+            "and answers for no other, even though the decoder name matches"
+        );
+
+        // And the reverse, so this is a key rather than a one-way refusal.
+        let policy = crate::decoder_health::DiagnosticPolicy::new(
+            Some(crate::decoder_health::MeasuredBuild {
+                ffmpeg_version: accelerated.ffmpeg_version.clone(),
+                binary_sha256: accelerated.binary_sha256.clone(),
+                buildconf_sha256: accelerated.buildconf_sha256.clone(),
+            }),
+            vec![accelerated],
+        );
+        assert!(policy
+            .contract_for(
+                "h264",
+                "h264",
+                DecodeBackend::VideoToolbox.name(),
+                crate::decoder_health::QUALIFIED_STDERR_MODE,
+            )
+            .is_some());
+        assert!(
+            policy
+                .contract_for(
+                    "h264",
+                    "h264",
+                    DecodeBackend::Software.name(),
+                    crate::decoder_health::QUALIFIED_STDERR_MODE,
+                )
+                .is_none(),
+            "a hardware contract is not a licence to read a software decode"
+        );
+    }
+
+    /// A hardware plan that names its decoder and is covered gets a grammar.
+    ///
+    /// This is the refusal M7a found and the whole reason the recovery could
+    /// not fire: the backend used to be rejected before the contract was ever
+    /// consulted, so a hardware decode could not produce the evidence that
+    /// triggers the software-decode alternate — while a software decode, which
+    /// can produce it, has no alternate to be given.
+    #[test]
+    fn a_covered_hardware_decode_is_no_longer_refused_for_being_hardware() {
+        use plurx_core::transcode::DecodeBackend;
+
+        let contract = decode_contract_fixture(DecodeBackend::VideoToolbox);
+        let policy = crate::decoder_health::DiagnosticPolicy::new(
+            Some(crate::decoder_health::MeasuredBuild {
+                ffmpeg_version: contract.ffmpeg_version.clone(),
+                binary_sha256: contract.binary_sha256.clone(),
+                buildconf_sha256: contract.buildconf_sha256.clone(),
+            }),
+            vec![contract],
+        );
+        let observation = DiagnosticObservation::resolve(
+            &policy,
+            "digest".to_owned(),
+            Some("h264"),
+            DecodeBackend::VideoToolbox,
+            Some("h264"),
+            0,
+        );
+        assert!(observation.grammar.is_some());
+        assert!(observation.qualified_logging());
+        assert_eq!(observation.contract_id.as_deref(), Some("fixture"));
+
+        // The refusals that remain are the ones that were always right: a
+        // plan that names no decoder still gets nothing, whatever its backend.
+        assert!(
+            DiagnosticObservation::resolve(
+                &policy,
+                "digest".to_owned(),
+                Some("h264"),
+                DecodeBackend::VideoToolbox,
+                None,
+                0,
+            )
+            .grammar
+            .is_none(),
+            "a plan that does not say the decoder out loud is still unqualified"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_qualified_hardware_plan_reads_its_name_from_the_backend_inventory() {
+        use plurx_core::store::SqliteStore;
+        use plurx_core::transcode::decoder_inventory::MeasuredDecoders;
+        use plurx_core::transcode::{ArtifactQualification, DecodeBackend};
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let file = store.get_file(file_id).await.expect("get").expect("file");
+        let measured =
+            MeasuredDecoders::from_measured(&[("hevc", DecodeBackend::VideoToolbox, "hevc")]);
+        let (mgr, _work, _cache) = cached_manager(&store);
+        let mgr = mgr.with_measured_decoders(measured.clone());
+        mgr.test_publish_artifact_qualification(ArtifactQualification::HealthQualified);
+        let opts = mgr.options_for_tone_map(
+            Encoder::Software,
+            &file,
+            720,
+            0.0,
+            None,
+            None,
+            None,
+            ToneMap::Zscale,
+            OutputGrade::Sdr,
+        );
+        let plan = mgr
+            .resolve_movie_plan(&file, &opts, Encoder::VideoToolbox)
+            .await
+            .expect("hardware plan");
+        assert_eq!(plan.decode().backend(), DecodeBackend::VideoToolbox);
+        assert_eq!(
+            plan.decode().software_decoder(),
+            None,
+            "the measured hardware name does not enter the plan or its digest"
+        );
+
+        let mut contract = decode_contract_fixture(DecodeBackend::VideoToolbox);
+        contract.input_codec = "hevc".to_owned();
+        contract.decoder = "hevc".to_owned();
+        let policy = crate::decoder_health::DiagnosticPolicy::new(
+            Some(crate::decoder_health::MeasuredBuild {
+                ffmpeg_version: contract.ffmpeg_version.clone(),
+                binary_sha256: contract.binary_sha256.clone(),
+                buildconf_sha256: contract.buildconf_sha256.clone(),
+            }),
+            vec![contract],
+        );
+        let observation = DiagnosticObservation::for_plan_against(&policy, &plan, &measured);
+        assert!(observation.grammar.is_some());
+        assert_eq!(observation.contract_id.as_deref(), Some("fixture"));
+
+        let only_software =
+            MeasuredDecoders::from_measured(&[("hevc", DecodeBackend::Software, "hevc")]);
+        assert!(
+            DiagnosticObservation::for_plan_against(&policy, &plan, &only_software)
+                .grammar
+                .is_none(),
+            "a software measurement with the same name says nothing about VideoToolbox"
+        );
+    }
+
+    /// A contract table written before the backend key parses as software.
+    ///
+    /// The retained tables on disk have no `decode_backend`, and they describe
+    /// software decodes. A default that widened them to every backend would
+    /// hand a software grammar to a hardware decode on the first node that
+    /// upgraded — the exact confusion this key exists to prevent, arriving
+    /// through the door marked backwards compatibility.
+    #[test]
+    fn a_contract_written_before_the_backend_key_means_software() {
+        let table = r#"
+version = 2
+
+[[contracts]]
+id = "legacy"
+host = "test"
+ffmpeg_version = "8.0.1"
+binary_sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+buildconf_sha256 = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+stderr_mode = "repeat+level+error"
+input_codec = "h264"
+decoder = "h264"
+require_context_addresses = true
+primary_message = "Error submitting packet to decoder:"
+attributes_every_failure = true
+error_detail = "corrupt input packet"
+fixture = "f"
+fixture_sha256 = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+scope = "test"
+"#;
+        let contracts = crate::decoder_health::DiagnosticContract::load(table).expect("load");
+        assert_eq!(contracts.len(), 1);
+        assert_eq!(
+            contracts[0].decode_backend,
+            plurx_core::transcode::DecodeBackend::Software.name(),
+        );
+    }
+
+    /// The flags a child is launched with are the flags the contract was
+    /// selected under. One decision, read twice, and nothing that can drift.
+    #[test]
+    fn the_flags_asked_for_are_the_flags_the_contract_was_matched_under() {
+        assert_eq!(
+            crate::decoder_health::QUALIFIED_STDERR_MODE,
+            plurx_core::transcode::DiagnosticLogging::Qualified.flags(),
+            "the mode a contract is matched under and the token the command \
+             emits are one string, or a qualified node reads a stream that \
+             carries no severity labels"
+        );
+        assert_eq!(
+            crate::decoder_health::LEGACY_STDERR_MODE,
+            plurx_core::transcode::DiagnosticLogging::Legacy.flags()
+        );
+        let unqualified = DiagnosticObservation::default();
+        assert!(!unqualified.qualified_logging());
+        assert!(DiagnosticObservation::copy("session-abc")
+            .plan_digest
+            .starts_with("copy:"));
+    }
+
+    /// A part that ran to the end, one that yielded, and one that failed are
+    /// three different receipts. Collapsing them loses the distinction §6.2
+    /// keeps a yielded part's finished segments on.
+    #[test]
+    fn a_parts_ending_maps_to_its_own_disposition() {
+        use crate::decoder_health::ExitDisposition;
+        assert_eq!(
+            part_exit_disposition(&PartEnd::Finished),
+            ExitDisposition::CleanEnd
+        );
+        assert_eq!(
+            part_exit_disposition(&PartEnd::Preempted),
+            ExitDisposition::IntentionalYield
+        );
+        assert_eq!(
+            part_exit_disposition(&PartEnd::Deadline),
+            ExitDisposition::IntentionalYield
+        );
+        assert_eq!(
+            part_exit_disposition(&PartEnd::Failed("boom".to_owned())),
+            ExitDisposition::FailedTermination
+        );
+    }
+
+    /// The reporting path end to end: a grammar latches, the sink reports, the
+    /// handle publishes, the actor stores it.
+    ///
+    /// Without this, `DecodeFaultSink::report` could be replaced with an empty
+    /// body and every other test in the workspace would still pass — the
+    /// feature would be dead in production and the suite silent about it.
+    #[tokio::test]
+    async fn a_latched_fault_travels_from_the_reader_to_the_actor() {
+        let control = crate::playback_control::RollingControlHandle::spawn("session-start");
+        let attempt = control
+            .begin_producer_attempt()
+            .await
+            .expect("initial producer attempt");
+
+        let contract = crate::decoder_health::DiagnosticContract {
+            id: "fixture".to_owned(),
+            host: "test".to_owned(),
+            ffmpeg_version: "8.0.1".to_owned(),
+            binary_sha256: "b".repeat(64),
+            buildconf_sha256: "c".repeat(64),
+            stderr_mode: crate::decoder_health::QUALIFIED_STDERR_MODE.to_owned(),
+            input_codec: "h264".to_owned(),
+            decoder: "h264".to_owned(),
+            decode_backend: plurx_core::transcode::DecodeBackend::Software
+                .name()
+                .to_owned(),
+            require_context_addresses: true,
+            primary_message: "Error submitting packet to decoder:".to_owned(),
+            subordinate_message: Some("No frame decoded?".to_owned()),
+            attributes_every_failure: true,
+            error_detail: "corrupt input packet".to_owned(),
+            fixture: "f".to_owned(),
+            fixture_sha256: "d".repeat(64),
+            scope: "test".to_owned(),
+            backend_fault_detail: None,
+        };
+        let observation = DiagnosticObservation {
+            plan_digest: "plan-digest".to_owned(),
+            contract_id: Some(contract.id.clone()),
+            grammar: Some(crate::decoder_health::DiagnosticGrammar::new(
+                contract, 0, 0,
+            )),
+        };
+        let observer =
+            FfmpegProgressObserver::rolling(Arc::new(Progress::new()), attempt, control.clone());
+        let sink = observation
+            .fault_sink(&observer)
+            .expect("a grammar and an actor is a sink");
+
+        // Through the reader, not around it: the callback fires exactly on the
+        // line that latches, which is what makes one barrier per attempt a
+        // property of the accumulator rather than of this test.
+        let (mut writer, reader) = tokio::io::duplex(8192);
+        let line = "[vist#0:0/h264 @ 0x1] [dec:h264 @ 0x2] [error] Error submitting packet to decoder: corrupt input packet\n";
+        let grammar = observation.grammar.clone();
+        let reads = tokio::spawn(async move {
+            crate::decoder_health::read_diagnostics_reporting(
+                reader,
+                grammar,
+                |_| {},
+                |_| false,
+                move |fault, records, action_qualified| {
+                    sink.report(fault, records, action_qualified);
+                },
+            )
+            .await
+        });
+        {
+            use tokio::io::AsyncWriteExt;
+            for _ in 0..crate::decoder_health::VIDEO_DECODE_ERROR_LIMIT {
+                writer
+                    .write_all(line.as_bytes())
+                    .await
+                    .expect("write a primary record");
+            }
+        }
+        drop(writer);
+        let accumulator = reads.await.expect("join the reader");
+        assert_eq!(
+            accumulator.fault(),
+            Some(crate::decoder_health::DecodeFaultKind::VideoDecodeFailure)
+        );
+
+        let snapshot = control
+            .snapshot()
+            .await
+            .expect("the session is live")
+            .producer_control;
+        assert_eq!(
+            snapshot.decode_fault,
+            Some("video_decode_failure"),
+            "the fault the reader latched reached the actor"
+        );
+        assert_eq!(
+            snapshot.decode_error_records,
+            Some(crate::decoder_health::VIDEO_DECODE_ERROR_LIMIT as u64)
+        );
+    }
+
+    /// A sink exists only when there is both a grammar that can latch a fault
+    /// and an actor to receive it. An offline part has neither.
+    #[test]
+    fn an_attempt_with_no_grammar_or_no_actor_has_no_sink() {
+        let observer = FfmpegProgressObserver::offline(Arc::new(Progress::new()), 1);
+        assert!(
+            DiagnosticObservation::default()
+                .fault_sink(&observer)
+                .is_none(),
+            "no grammar, no sink"
+        );
+    }
+
+    fn health_plan_digest() -> String {
+        "9".repeat(64)
+    }
+
+    fn health_receipt(
+        qualification: crate::decoder_health::Qualification,
+    ) -> crate::decoder_health::ProducerHealthReceipt {
+        crate::decoder_health::ProducerHealthReceipt {
+            receipt_version: crate::decoder_health::PRODUCER_HEALTH_RECEIPT_VERSION,
+            plan_digest: health_plan_digest(),
+            diagnostic_contract: Some("ffmpeg-test-v1".to_owned()),
+            observation_complete: true,
+            video_decode_error_records: 0,
+            contract_qualified_error_records: 0,
+            terminal_fault: None,
+            exit_disposition: crate::decoder_health::ExitDisposition::CleanEnd,
+            qualification,
+        }
+    }
+
+    /// One part directory with `count` one-second segments, plus the playlist
+    /// `assemble` reads to place them.
+    async fn write_health_part(
+        temp: &plurx_core::fs_secure::SecureDirectory,
+        index: usize,
+        count: usize,
+    ) -> crate::produce::Part {
+        let name = crate::produce::part_dir(index);
+        let part = temp
+            .create_child_directory(&name)
+            .await
+            .expect("part directory");
+        let mut playlist = String::from("#EXTM3U\n#EXT-X-TARGETDURATION:2\n");
+        let mut segments = Vec::new();
+        for segment in 0..count {
+            let file = format!("seg{segment:05}.ts");
+            part.atomic_write_child(&file, format!("part {index} segment {segment}").as_bytes())
+                .await
+                .expect("segment");
+            playlist.push_str("#EXTINF:1.000,\n");
+            playlist.push_str(&file);
+            playlist.push('\n');
+            segments.push(file);
+        }
+        playlist.push_str("#EXT-X-ENDLIST\n");
+        part.atomic_write_child("index.m3u8", playlist.as_bytes())
+            .await
+            .expect("part playlist");
+        crate::produce::Part {
+            segments,
+            durations_ms: vec![1_000; count],
+        }
+    }
+
+    #[test]
+    fn a_pass_that_attempted_nothing_settles_to_no_receipt() {
+        let observation =
+            GenerationObservation::inheriting(Vec::new(), None, &health_plan_digest());
+        assert_eq!(observation.settle(), None);
+        // And a pass whose only attempt was clean certifies its own work, so
+        // the test above is about inheritance rather than about nothing ever
+        // qualifying.
+        let mut clean = GenerationObservation::inheriting(Vec::new(), None, &health_plan_digest());
+        clean.record(
+            health_receipt(crate::decoder_health::Qualification::Qualified),
+            true,
+        );
+        assert!(clean.settle().expect("settled receipt").permits_reuse());
+    }
+
+    #[test]
+    fn an_attempt_that_produced_no_bytes_still_refuses_the_generation() {
+        // The defect this type exists to make structurally impossible. An
+        // attempt whose decode failed writes no segment and exits zero, so a
+        // record keyed on "did it produce bytes" would drop precisely the
+        // receipt saying the film is truncated at a corrupt region — and the
+        // producer's progress observer carries no control handle, so nothing
+        // else in the process ever sees that fault.
+        let digest = health_plan_digest();
+        let mut observation = GenerationObservation::inheriting(Vec::new(), None, &digest);
+        observation.record(
+            health_receipt(crate::decoder_health::Qualification::Qualified),
+            true,
+        );
+        let mut failed = health_receipt(crate::decoder_health::Qualification::Rejected);
+        failed.terminal_fault = Some(crate::decoder_health::DecodeFaultKind::VideoDecodeFailure);
+        failed.video_decode_error_records = 5;
+        failed.contract_qualified_error_records = 5;
+        // No part accompanies this one: the attempt left nothing on disk. It
+        // is recorded regardless.
+        observation.record(failed, true);
+        observation.record(
+            health_receipt(crate::decoder_health::Qualification::Qualified),
+            true,
+        );
+        let settled = observation.settle().expect("settled receipt");
+        assert_eq!(
+            settled.qualification,
+            crate::decoder_health::Qualification::Rejected
+        );
+        assert_eq!(
+            settled.terminal_fault,
+            Some(crate::decoder_health::DecodeFaultKind::VideoDecodeFailure)
+        );
+        assert!(!settled.permits_reuse());
+    }
+
+    #[tokio::test]
+    async fn a_fresh_assembly_carries_the_receipt_its_parts_earned() {
+        let directory = crate::test_tempdir().expect("staging");
+        let temp = plurx_core::fs_secure::SecureDirectory::open(directory.path())
+            .await
+            .expect("staging capability");
+        let parts = vec![
+            write_health_part(&temp, 0, 2).await,
+            write_health_part(&temp, 1, 1).await,
+        ];
+        let receipt = health_receipt(crate::decoder_health::Qualification::Qualified);
+        let published = publish_from(&temp, &parts, Some(receipt.clone()))
+            .await
+            .expect("publish")
+            .expect("assembled generation");
+        assert_eq!(published.segments, 3);
+        assert_eq!(published.health, Some(receipt));
+    }
+
+    #[tokio::test]
+    async fn adopting_this_pass_parts_own_assembly_keeps_their_receipt() {
+        // The case that makes long films certifiable at all. Assembling a film
+        // and then hashing it for its manifest is preemptible, so a pass can
+        // leave a finished assembly behind and yield. If the next pass adopted
+        // it without a receipt, every film long enough to be interrupted there
+        // would be refused permanently under the qualified identity — the exact
+        // failure the per-part records exist to prevent, reached one step
+        // later.
+        let directory = crate::test_tempdir().expect("staging");
+        let temp = plurx_core::fs_secure::SecureDirectory::open(directory.path())
+            .await
+            .expect("staging capability");
+        let parts = vec![
+            write_health_part(&temp, 0, 2).await,
+            write_health_part(&temp, 1, 1).await,
+        ];
+        let receipt = health_receipt(crate::decoder_health::Qualification::Qualified);
+        publish_from(&temp, &parts, Some(receipt.clone()))
+            .await
+            .expect("first publish")
+            .expect("assembled generation");
+
+        let assembled = temp
+            .open_child_directory(ASSEMBLED_DIR)
+            .await
+            .expect("assembled directory");
+        let adopted = assembled_publication(&assembled, &parts, Some(receipt.clone()))
+            .await
+            .expect("adopted generation");
+        assert_eq!(adopted.segments, 3);
+        assert_eq!(adopted.health, Some(receipt));
+    }
+
+    #[tokio::test]
+    async fn an_assembly_these_parts_did_not_produce_carries_no_receipt() {
+        // The tie is the playlist, because `publish_from` writes exactly the
+        // bytes `assemble` produces. A generation assembled from something
+        // else is still adopted — the bytes may be perfectly good — but
+        // nothing this pass observed describes them.
+        let directory = crate::test_tempdir().expect("staging");
+        let temp = plurx_core::fs_secure::SecureDirectory::open(directory.path())
+            .await
+            .expect("staging capability");
+        let parts = vec![write_health_part(&temp, 0, 2).await];
+        publish_from(&temp, &parts, None)
+            .await
+            .expect("first publish")
+            .expect("assembled generation");
+
+        let assembled = temp
+            .open_child_directory(ASSEMBLED_DIR)
+            .await
+            .expect("assembled directory");
+        // The same segments, described by a part list that is not the one that
+        // made them.
+        let mistaken = vec![crate::produce::Part {
+            segments: vec!["seg00000.ts".to_owned(), "seg00001.ts".to_owned()],
+            durations_ms: vec![1_000, 2_500],
+        }];
+        let adopted = assembled_publication(
+            &assembled,
+            &mistaken,
+            Some(health_receipt(
+                crate::decoder_health::Qualification::Qualified,
+            )),
+        )
+        .await
+        .expect("adopted generation");
+        assert_eq!(
+            adopted.health, None,
+            "a receipt describes the parts it was settled over, not whatever is on disk"
+        );
+    }
+
+    /// The shape `read_validated_part` would measure for a part directory.
+    async fn measured_shape(
+        temp: &plurx_core::fs_secure::SecureDirectory,
+        index: usize,
+    ) -> Vec<(String, u64, i64)> {
+        let dir = temp
+            .open_child_directory(&crate::produce::part_dir(index))
+            .await
+            .expect("part directory");
+        read_validated_part(&dir, MAX_PRETRANSCODE_PART_PLAYLIST_BYTES)
+            .await
+            .expect("validated part")
+            .shape
+    }
+
+    async fn seal_part_health(
+        temp: &plurx_core::fs_secure::SecureDirectory,
+        index: usize,
+        receipt: &crate::decoder_health::ProducerHealthReceipt,
+    ) {
+        let shape = measured_shape(temp, index).await;
+        let dir = temp
+            .open_child_directory(&crate::produce::part_dir(index))
+            .await
+            .expect("part directory");
+        retain_part_health(&dir, &shape, receipt).await;
+    }
+
+    async fn resumed_health(
+        temp: &plurx_core::fs_secure::SecureDirectory,
+        plan_digest: &str,
+    ) -> Vec<crate::decoder_health::ProducerHealthReceipt> {
+        resume_parts(temp, plan_digest)
+            .await
+            .expect("resume parts")
+            .receipts
+    }
+
+    #[tokio::test]
+    async fn a_sealed_part_record_lets_a_resumed_film_still_be_certified() {
+        // Without this, every film long enough to need a second pass is
+        // permanently uncertifiable, and the qualified artifact namespace could
+        // never hold a long title at all.
+        let directory = crate::test_tempdir().expect("staging");
+        let temp = plurx_core::fs_secure::SecureDirectory::open(directory.path())
+            .await
+            .expect("staging capability");
+        write_health_part(&temp, 0, 2).await;
+        write_health_part(&temp, 1, 1).await;
+        let clean = health_receipt(crate::decoder_health::Qualification::Qualified);
+        seal_part_health(&temp, 0, &clean).await;
+        seal_part_health(&temp, 1, &clean).await;
+
+        let digest = health_plan_digest();
+        let inherited = resumed_health(&temp, &digest).await;
+        assert_eq!(inherited.len(), 2);
+        let mut observation = GenerationObservation::inheriting(inherited, None, &digest);
+        observation.record(clean, true);
+        let settled = observation.settle().expect("settled receipt");
+        assert!(
+            settled.permits_reuse(),
+            "a resumed film whose every part carries a clean record is certifiable"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_part_with_no_record_resumes_unobserved() {
+        let directory = crate::test_tempdir().expect("staging");
+        let temp = plurx_core::fs_secure::SecureDirectory::open(directory.path())
+            .await
+            .expect("staging capability");
+        write_health_part(&temp, 0, 1).await;
+        let inherited = resumed_health(&temp, &health_plan_digest()).await;
+        assert_eq!(inherited.len(), 1);
+        assert!(!inherited[0].permits_reuse());
+        assert!(!inherited[0].observation_complete);
+    }
+
+    #[tokio::test]
+    async fn a_record_no_longer_bound_to_the_bytes_beside_it_is_refused() {
+        // Why the record is sealed over a shape at all. Re-encoding a part and
+        // leaving the old record behind would carry a clean certificate onto
+        // bytes nobody watched being made.
+        let directory = crate::test_tempdir().expect("staging");
+        let temp = plurx_core::fs_secure::SecureDirectory::open(directory.path())
+            .await
+            .expect("staging capability");
+        write_health_part(&temp, 0, 1).await;
+        seal_part_health(
+            &temp,
+            0,
+            &health_receipt(crate::decoder_health::Qualification::Qualified),
+        )
+        .await;
+        assert!(resumed_health(&temp, &health_plan_digest()).await[0].permits_reuse());
+
+        // Same name, same playlist, different bytes.
+        let part = temp
+            .open_child_directory(&crate::produce::part_dir(0))
+            .await
+            .expect("part directory");
+        part.atomic_write_child("seg00000.ts", b"a differently sized segment")
+            .await
+            .expect("rewrite segment");
+        let inherited = resumed_health(&temp, &health_plan_digest()).await;
+        assert!(
+            !inherited[0].permits_reuse(),
+            "a record sealed over other bytes must not certify these"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_record_sealed_for_another_plan_is_refused() {
+        let directory = crate::test_tempdir().expect("staging");
+        let temp = plurx_core::fs_secure::SecureDirectory::open(directory.path())
+            .await
+            .expect("staging capability");
+        write_health_part(&temp, 0, 1).await;
+        seal_part_health(
+            &temp,
+            0,
+            &health_receipt(crate::decoder_health::Qualification::Qualified),
+        )
+        .await;
+        let other_plan = "7".repeat(64);
+        let inherited = resumed_health(&temp, &other_plan).await;
+        assert!(
+            !inherited[0].permits_reuse(),
+            "a record can only be opened by the plan it was sealed for"
+        );
+        assert_eq!(inherited[0].plan_digest, other_plan);
+    }
+
+    #[tokio::test]
+    async fn an_edited_record_is_refused_rather_than_read() {
+        let directory = crate::test_tempdir().expect("staging");
+        let temp = plurx_core::fs_secure::SecureDirectory::open(directory.path())
+            .await
+            .expect("staging capability");
+        write_health_part(&temp, 0, 1).await;
+        seal_part_health(
+            &temp,
+            0,
+            &health_receipt(crate::decoder_health::Qualification::Unqualified),
+        )
+        .await;
+        let part = temp
+            .open_child_directory(&crate::produce::part_dir(0))
+            .await
+            .expect("part directory");
+        let encoded = part
+            .read_bounded_child(PART_HEALTH_FILE, MAX_PART_HEALTH_BYTES)
+            .await
+            .expect("read record");
+        let text = String::from_utf8(encoded).expect("utf8 record");
+        let promoted = text.replace("\"unqualified\"", "\"qualified\"");
+        assert_ne!(
+            promoted, text,
+            "the qualification must appear in the record"
+        );
+        part.atomic_write_child(PART_HEALTH_FILE, promoted.as_bytes())
+            .await
+            .expect("write promoted record");
+        let inherited = resumed_health(&temp, &health_plan_digest()).await;
+        assert!(
+            !inherited[0].permits_reuse(),
+            "a record whose own digest does not check out is not read"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_record_is_never_placed_into_the_assembled_generation() {
+        // It is staging-local evidence about how a part was made, not one of
+        // the objects the manifest inventories.
+        let directory = crate::test_tempdir().expect("staging");
+        let temp = plurx_core::fs_secure::SecureDirectory::open(directory.path())
+            .await
+            .expect("staging capability");
+        let parts = vec![write_health_part(&temp, 0, 2).await];
+        seal_part_health(
+            &temp,
+            0,
+            &health_receipt(crate::decoder_health::Qualification::Qualified),
+        )
+        .await;
+        publish_from(&temp, &parts, None)
+            .await
+            .expect("publish")
+            .expect("assembled generation");
+        let mut placed = Vec::new();
+        let mut entries = tokio::fs::read_dir(directory.path().join(ASSEMBLED_DIR))
+            .await
+            .expect("read assembled directory");
+        while let Some(entry) = entries.next_entry().await.expect("assembled entry") {
+            placed.push(entry.file_name().to_string_lossy().into_owned());
+        }
+        placed.sort();
+        // The whole listing, not one probe for one name: a generation holds
+        // its playlist and its segments and nothing else, whatever the record
+        // is called.
+        assert_eq!(placed, ["index.m3u8", "seg00000.ts", "seg00001.ts"]);
+    }
+
+    #[tokio::test]
+    async fn an_attempt_that_left_no_part_is_carried_across_a_pass_boundary() {
+        // Whether a film certifies must not depend on where preemption fell.
+        // Within one pass a failed non-producing attempt is recorded and
+        // refuses the generation; the ledger is what makes the same sequence
+        // refuse it when a pass boundary lands in the middle.
+        let directory = crate::test_tempdir().expect("staging");
+        let temp = plurx_core::fs_secure::SecureDirectory::open(directory.path())
+            .await
+            .expect("staging capability");
+        let digest = health_plan_digest();
+
+        // Pass one: an attempt that decoded nothing and wrote no segment,
+        // then a clean retry that produced the part.
+        let mut first = GenerationObservation::inheriting(Vec::new(), None, &digest);
+        let mut failed = health_receipt(crate::decoder_health::Qualification::Rejected);
+        failed.terminal_fault = Some(crate::decoder_health::DecodeFaultKind::VideoDecodeFailure);
+        first.record(failed, false);
+        retain_generation_health(&temp, first.unproductive().expect("unproductive")).await;
+        write_health_part(&temp, 0, 1).await;
+        let clean = health_receipt(crate::decoder_health::Qualification::Qualified);
+        first.record(clean.clone(), true);
+        seal_part_health(&temp, 0, &clean).await;
+        // …and then the pass is preempted, publishing nothing.
+
+        // Pass two resumes, and must reach the same conclusion.
+        let second = GenerationObservation::inheriting(
+            resumed_health(&temp, &digest).await,
+            carried_generation_health(&temp, &digest).await,
+            &digest,
+        );
+        let settled = second.settle().expect("settled receipt");
+        assert_eq!(
+            settled.qualification,
+            crate::decoder_health::Qualification::Rejected
+        );
+        assert_eq!(
+            settled.terminal_fault,
+            Some(crate::decoder_health::DecodeFaultKind::VideoDecodeFailure)
+        );
+        assert!(!settled.permits_reuse());
+    }
+
+    #[tokio::test]
+    async fn a_ledger_that_is_there_and_will_not_open_is_unobserved() {
+        // Absent means no pass claimed an unproductive attempt. Present and
+        // unreadable means one did and it cannot be read, which is a different
+        // statement and refuses reuse.
+        let directory = crate::test_tempdir().expect("staging");
+        let temp = plurx_core::fs_secure::SecureDirectory::open(directory.path())
+            .await
+            .expect("staging capability");
+        let digest = health_plan_digest();
+        assert_eq!(carried_generation_health(&temp, &digest).await, None);
+
+        temp.atomic_write_child(GENERATION_HEALTH_FILE, b"{\"not\":\"a ledger\"}")
+            .await
+            .expect("write a ledger nobody can read");
+        let carried = carried_generation_health(&temp, &digest)
+            .await
+            .expect("an unreadable ledger is still a statement");
+        assert!(!carried.permits_reuse());
+        assert!(!carried.observation_complete);
+    }
+
+    #[tokio::test]
+    async fn a_ledger_sealed_for_another_plan_does_not_certify_this_one() {
+        let directory = crate::test_tempdir().expect("staging");
+        let temp = plurx_core::fs_secure::SecureDirectory::open(directory.path())
+            .await
+            .expect("staging capability");
+        retain_generation_health(
+            &temp,
+            &health_receipt(crate::decoder_health::Qualification::Qualified),
+        )
+        .await;
+        let carried = carried_generation_health(&temp, &"7".repeat(64))
+            .await
+            .expect("a ledger for another plan is still a statement");
+        assert!(!carried.permits_reuse());
+    }
+
+    #[tokio::test]
+    async fn a_record_too_large_for_its_bound_is_not_written() {
+        // `retain_part_health` is best effort, and this is the branch that
+        // makes "best effort" mean something rather than being unreachable
+        // prose. A plan digest is a digest everywhere it is produced, but the
+        // type does not say so.
+        let directory = crate::test_tempdir().expect("staging");
+        let temp = plurx_core::fs_secure::SecureDirectory::open(directory.path())
+            .await
+            .expect("staging capability");
+        write_health_part(&temp, 0, 1).await;
+        let shape = measured_shape(&temp, 0).await;
+        let part = temp
+            .open_child_directory(&crate::produce::part_dir(0))
+            .await
+            .expect("part directory");
+        let mut oversized = health_receipt(crate::decoder_health::Qualification::Qualified);
+        oversized.plan_digest = "f".repeat(MAX_PART_HEALTH_BYTES as usize * 2);
+        retain_part_health(&part, &shape, &oversized).await;
+        assert!(part
+            .child_metadata(PART_HEALTH_FILE)
+            .await
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound));
+        // And the part reads back as unobserved rather than as anything else.
+        assert!(!resumed_health(&temp, &health_plan_digest()).await[0].permits_reuse());
+    }
+
+    // ---- the qualified artifact identity's receipt contract -----------------
+
+    fn generation_manifest_with(
+        health: Option<crate::decoder_health::ProducerHealthReceipt>,
+    ) -> plurx_core::transcode::manifest::GenerationManifest {
+        plurx_core::transcode::manifest::GenerationManifest {
+            format_version: 1,
+            generation_id: "generation-under-test".to_owned(),
+            object_count: 1,
+            objects: vec![plurx_core::transcode::manifest::GenerationObject {
+                name: "index.m3u8".to_owned(),
+                bytes: 32,
+                sha256: "a".repeat(64),
+            }],
+            manifest_digest: "b".repeat(64),
+            producer_health: health,
+        }
+    }
+
+    async fn plan_under(
+        qualification: plurx_core::transcode::ArtifactQualification,
+    ) -> (
+        ResolvedTranscode,
+        TranscodeManager,
+        tempfile::TempDir,
+        tempfile::TempDir,
+    ) {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let file = store.get_file(file_id).await.expect("get").expect("file");
+        let (mgr, work, cache) = cached_manager(&store);
+        mgr.test_publish_artifact_qualification(qualification);
+        let opts = mgr.options_for_tone_map(
+            Encoder::Software,
+            &file,
+            720,
+            0.0,
+            None,
+            None,
+            None,
+            ToneMap::Zscale,
+            OutputGrade::Sdr,
+        );
+        let plan = mgr
+            .resolve_movie_plan(&file, &opts, Encoder::Software)
+            .await
+            .expect("resolve plan");
+        (plan, mgr, work, cache)
+    }
+
+    #[tokio::test]
+    async fn the_published_identity_reaches_the_plan_and_renames_the_artifact() {
+        use plurx_core::transcode::{
+            ArtifactQualification, HEALTH_QUALIFIED_ARTIFACT_NAMESPACE,
+            UNQUALIFIED_ARTIFACT_NAMESPACE,
+        };
+
+        let (unqualified, mgr, _work, _cache) =
+            plan_under(ArtifactQualification::Unqualified).await;
+        assert_eq!(
+            unqualified.artifact_namespace(),
+            UNQUALIFIED_ARTIFACT_NAMESPACE
+        );
+        assert!(!unqualified.enforces_receipt());
+
+        let (qualified, other, _work2, _cache2) =
+            plan_under(ArtifactQualification::HealthQualified).await;
+        assert_eq!(
+            qualified.artifact_namespace(),
+            HEALTH_QUALIFIED_ARTIFACT_NAMESPACE
+        );
+        assert!(qualified.enforces_receipt());
+
+        // Two identities, two artifact names: nothing produced under an
+        // enforced receipt contract can land on a key an unenforced production
+        // could also compute.
+        let digest = mgr.digest().expect("cache configured");
+        let other_digest = other.digest().expect("cache configured");
+        assert_ne!(
+            mgr.effective_recipe(&digest, &unqualified, false).hash(),
+            other
+                .effective_recipe(&other_digest, &qualified, false)
+                .hash()
+        );
+    }
+
+    #[tokio::test]
+    async fn the_unqualified_identity_asks_a_generation_for_nothing() {
+        use plurx_core::transcode::ArtifactQualification;
+
+        let (plan, _mgr, _work, _cache) = plan_under(ArtifactQualification::Unqualified).await;
+        // Every shape, including the ones the qualified identity refuses.
+        assert!(generation_permits_reuse(&plan, None));
+        assert!(generation_permits_reuse(
+            &plan,
+            Some(&generation_manifest_with(None))
+        ));
+        assert!(generation_permits_reuse(
+            &plan,
+            Some(&generation_manifest_with(Some(health_receipt(
+                crate::decoder_health::Qualification::Rejected
+            ))))
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_qualified_identity_keeps_only_what_a_written_receipt_permits() {
+        use plurx_core::transcode::ArtifactQualification;
+
+        let (plan, _mgr, _work, _cache) = plan_under(ArtifactQualification::HealthQualified).await;
+
+        // No manifest at all. This is the case the paths that publish none —
+        // speculative warming, offline preparation — land in, and it has to be
+        // a refusal: a receipt this process never wrote down cannot certify
+        // the bytes to whatever reads them next.
+        assert!(!generation_permits_reuse(&plan, None));
+
+        // A manifest that carries no receipt. Every generation published
+        // before receipts existed looks like this, which is exactly why the
+        // qualified identity is a separate key space rather than a flag.
+        assert!(!generation_permits_reuse(
+            &plan,
+            Some(&generation_manifest_with(None))
+        ));
+
+        for refused in [
+            crate::decoder_health::Qualification::Rejected,
+            crate::decoder_health::Qualification::Unqualified,
+        ] {
+            assert!(
+                !generation_permits_reuse(
+                    &plan,
+                    Some(&generation_manifest_with(Some(health_receipt(refused))))
+                ),
+                "{refused:?} must not be kept"
+            );
+        }
+
+        assert!(generation_permits_reuse(
+            &plan,
+            Some(&generation_manifest_with(Some(health_receipt(
+                crate::decoder_health::Qualification::Qualified
+            ))))
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_receipt_from_a_version_this_build_does_not_know_is_not_permission() {
+        use plurx_core::transcode::ArtifactQualification;
+
+        let (plan, _mgr, _work, _cache) = plan_under(ArtifactQualification::HealthQualified).await;
+        let mut future = health_receipt(crate::decoder_health::Qualification::Qualified);
+        future.receipt_version = crate::decoder_health::PRODUCER_HEALTH_RECEIPT_VERSION + 1;
+        assert!(!generation_permits_reuse(
+            &plan,
+            Some(&generation_manifest_with(Some(future)))
+        ));
+    }
+
+    /// The retention rule, driven through a real production.
+    ///
+    /// Every other test of it calls the predicate. This one runs the producer:
+    /// a real ffmpeg makes a real generation, and the qualified identity
+    /// refuses to keep it — now for the reason that will still be true on a
+    /// deployed node. The path publishes a manifest, the manifest carries the
+    /// receipt, and the receipt does not permit reuse, because no diagnostic
+    /// contract covers this host's build so nothing it printed is evidence.
+    /// The two things that must be true afterwards are checked: nothing is
+    /// left claimed, and nothing is left served.
+    ///
+    /// The claim half is the one worth having. A refusal that quarantined the
+    /// bytes and left the `complete = 0` row behind would deadlock the recipe:
+    /// the next request cannot claim it, finds no staging tree to resume, and
+    /// stands down — while the reaper refuses to collect a claim whose package
+    /// is still queued.
+    #[tokio::test]
+    async fn a_refused_generation_is_neither_kept_nor_left_claimed() {
+        super::require_ffmpeg();
+        use plurx_core::store::SqliteStore;
+        use plurx_core::transcode::ArtifactQualification;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let media = crate::test_tempdir().expect("media");
+        let source = media.path().join("Refused.mkv");
+        write_real_video(&source, 2);
+        let file_id = seed_real_file(&store, &source).await;
+        let (mgr, _work, cache) = cached_manager(&store);
+        mgr.test_publish_artifact_qualification(ArtifactQualification::HealthQualified);
+        let mgr = Arc::new(mgr);
+        let file = store.get_file(file_id).await.expect("get").expect("file");
+
+        let hash = recipe_hash_for(&mgr, &file, 240).await;
+        assert!(
+            mgr.produce(&file, 240, Instant::now() + Duration::from_secs(120))
+                .await
+                .expect("produce")
+                .is_none(),
+            "a generation with no written receipt must not be reported as produced"
+        );
+
+        assert!(
+            store
+                .cache_hit(&hash, NODE)
+                .await
+                .expect("cache lookup")
+                .is_none(),
+            "a refused generation must not be reusable"
+        );
+        assert!(
+            !cache.path().join(&hash[..2]).join(&hash).exists(),
+            "a refused generation must not be left on disk"
+        );
+        // And the claim is released, so the next request for this recipe can
+        // take it rather than standing down against a row nothing will reap.
+        assert!(
+            mgr.store
+                .claim_cache_entry(
+                    &hash,
+                    file.id,
+                    CACHE_RECIPE_VERSION,
+                    NODE,
+                    &format!("{}/{hash}", &hash[..2]),
+                )
+                .await
+                .expect("claim after a refusal"),
+            "a refused production must not leave its claim behind"
+        );
+
+        // The same producer under the identity that asks for nothing keeps its
+        // work, so the assertion above is about the receipt contract and not
+        // about the fixture failing to encode.
+        let (lenient, _work2, lenient_cache) = cached_manager(&store);
+        let lenient = Arc::new(lenient);
+        let lenient_hash = recipe_hash_for(&lenient, &file, 240).await;
+        assert!(
+            lenient
+                .produce(&file, 240, Instant::now() + Duration::from_secs(120))
+                .await
+                .expect("produce")
+                .is_some(),
+            "the unqualified identity keeps what it made"
+        );
+        assert!(lenient_cache
+            .path()
+            .join(&lenient_hash[..2])
+            .join(&lenient_hash)
+            .exists());
+    }
+
+    /// A measured decoder name reaches the plan only under the qualified
+    /// identity, and it reaches it as the *implementation*, not the family.
+    ///
+    /// Both halves matter. Naming a decoder changes an artifact's name, so
+    /// doing it unconditionally would rotate every deployed node's cache for a
+    /// value nothing there enforces. Not doing it under the qualified identity
+    /// would be worse: a diagnostic contract is qualified against a named
+    /// decoder, so a plan that names none can never be matched to one, and an
+    /// attempt nothing can classify can never be certified — the qualified
+    /// namespace would be a key space in which nothing is ever qualified.
+    #[tokio::test]
+    async fn a_measured_decoder_names_the_plan_only_where_it_is_enforced() {
+        use plurx_core::store::SqliteStore;
+        use plurx_core::transcode::decoder_inventory::MeasuredDecoders;
+        use plurx_core::transcode::ArtifactQualification;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let file = store.get_file(file_id).await.expect("get").expect("file");
+
+        // The case the inventory exists for, stated as a fixture: the family
+        // is one name and the decoder that runs is another.
+        let measured = MeasuredDecoders::from_measured(&[(
+            "hevc",
+            plurx_core::transcode::DecodeBackend::Software,
+            "hevc_special",
+        )]);
+        let build = |qualification| {
+            let (mgr, work, cache) = cached_manager(&store);
+            let mgr = mgr.with_measured_decoders(measured.clone());
+            mgr.test_publish_artifact_qualification(qualification);
+            (mgr, work, cache)
+        };
+
+        let (unqualified, _w1, _c1) = build(ArtifactQualification::Unqualified);
+        let (qualified, _w2, _c2) = build(ArtifactQualification::HealthQualified);
+        let opts = unqualified.options_for_tone_map(
+            Encoder::Software,
+            &file,
+            720,
+            0.0,
+            None,
+            None,
+            None,
+            ToneMap::Zscale,
+            OutputGrade::Sdr,
+        );
+
+        let plain = unqualified
+            .resolve_movie_plan(&file, &opts, Encoder::Software)
+            .await
+            .expect("unqualified plan");
+        assert_eq!(
+            plain.decode().software_decoder(),
+            None,
+            "an unqualified plan must name no decoder, so no deployed cache moves"
+        );
+
+        let named = qualified
+            .resolve_movie_plan(&file, &opts, Encoder::Software)
+            .await
+            .expect("qualified plan");
+        assert_eq!(
+            named.decode().software_decoder(),
+            Some("hevc_special"),
+            "a qualified plan names the decoder that will actually run"
+        );
+
+        // And the name is what moved the artifact, not merely the identity
+        // the two plans were resolved under: a third plan, qualified with no
+        // measurement, names nothing and lands somewhere else again.
+        let (unmeasured, _w3, _c3) = {
+            let (mgr, work, cache) = cached_manager(&store);
+            mgr.test_publish_artifact_qualification(ArtifactQualification::HealthQualified);
+            (mgr, work, cache)
+        };
+        let anonymous = unmeasured
+            .resolve_movie_plan(&file, &opts, Encoder::Software)
+            .await
+            .expect("qualified plan with nothing measured");
+        assert_eq!(anonymous.decode().software_decoder(), None);
+        assert_ne!(
+            anonymous.plan_digest(),
+            named.plan_digest(),
+            "the measured decoder is what names the artifact, not the identity alone"
+        );
+        assert_ne!(plain.plan_digest(), named.plan_digest());
+    }
+
+    #[tokio::test]
+    async fn an_unmeasured_codec_leaves_even_a_qualified_plan_unnamed() {
+        use plurx_core::store::SqliteStore;
+        use plurx_core::transcode::decoder_inventory::MeasuredDecoders;
+        use plurx_core::transcode::ArtifactQualification;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let file = store.get_file(file_id).await.expect("get").expect("file");
+        let (mgr, _work, _cache) = cached_manager(&store);
+        // Measured, but for a different codec than this file's.
+        let mgr = mgr.with_measured_decoders(MeasuredDecoders::from_measured(&[(
+            "av1",
+            plurx_core::transcode::DecodeBackend::Software,
+            "libdav1d",
+        )]));
+        mgr.test_publish_artifact_qualification(ArtifactQualification::HealthQualified);
+        let opts = mgr.options_for_tone_map(
+            Encoder::Software,
+            &file,
+            720,
+            0.0,
+            None,
+            None,
+            None,
+            ToneMap::Zscale,
+            OutputGrade::Sdr,
+        );
+        let plan = mgr
+            .resolve_movie_plan(&file, &opts, Encoder::Software)
+            .await
+            .expect("qualified plan");
+        assert_eq!(
+            plan.decode().software_decoder(),
+            None,
+            "an unmeasured codec must stay unnamed rather than fall back to its family"
+        );
+    }
+
+    /// A manifest is published off the queue too, once the identity enforces a
+    /// receipt — and only then.
+    ///
+    /// Without it, speculative warming and offline preparation settle a
+    /// perfectly clean receipt and then have the generation refused for having
+    /// written it nowhere, because the retention rule reads the manifest. With
+    /// it under the *unqualified* identity, every deployed speculative and
+    /// offline row would newly gain a digest, and with it shared-cluster
+    /// fanout, cluster placement offers, integrity scrubbing, and offline
+    /// segment serving that fails hard where it used to degrade. Four
+    /// behaviour changes to live rows in exchange for a receipt nothing there
+    /// reads.
+    #[tokio::test]
+    async fn a_manifest_is_written_off_the_queue_only_where_a_receipt_is_enforced() {
+        super::require_ffmpeg();
+        use plurx_core::store::SqliteStore;
+        use plurx_core::transcode::ArtifactQualification;
+
+        for (qualification, wants_manifest) in [
+            (ArtifactQualification::Unqualified, false),
+            (ArtifactQualification::HealthQualified, true),
+        ] {
+            let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+            let media = crate::test_tempdir().expect("media");
+            let source = media.path().join("Manifested.mkv");
+            write_real_video(&source, 2);
+            let file_id = seed_real_file(&store, &source).await;
+            let (mgr, _work, cache) = cached_manager(&store);
+            mgr.test_publish_artifact_qualification(qualification);
+            let mgr = Arc::new(mgr);
+            let file = store.get_file(file_id).await.expect("get").expect("file");
+            let hash = recipe_hash_for(&mgr, &file, 240).await;
+
+            let produced = mgr
+                .produce(&file, 240, Instant::now() + Duration::from_secs(120))
+                .await
+                .expect("produce");
+
+            if wants_manifest {
+                // A manifest *was* written, and the counter is the only thing
+                // that can say so: the refusal below quarantines the
+                // generation, taking the manifest with it, so every on-disk
+                // observation afterwards is identical to the one a build
+                // without this milestone would leave. Delete
+                // `|| plan.enforces_receipt()` from the publication condition
+                // and this assertion is what fails.
+                assert_eq!(
+                    mgr.test_manifests_published(),
+                    1,
+                    "the qualified identity publishes a manifest off the queue"
+                );
+                // And it is still refused, for the reason a deployed node will
+                // give: no diagnostic contract covers this host's build, so
+                // nothing FFmpeg printed is evidence and the receipt does not
+                // permit reuse. Which branch of `generation_permits_reuse`
+                // refuses has changed — from manifest-absent to
+                // receipt-refuses, a branch that off the queue was previously
+                // unreachable — and the outcome cannot show that, so the
+                // counter above carries the change and this carries the
+                // invariant it must not break.
+                assert!(produced.is_none(), "an unqualified receipt is not kept");
+                assert!(!cache.path().join(&hash[..2]).join(&hash).exists());
+            } else {
+                assert_eq!(
+                    mgr.test_manifests_published(),
+                    0,
+                    "the unqualified identity publishes none off the queue"
+                );
+                let produced = produced.expect("the unqualified identity keeps its work");
+                let dir = cache
+                    .path()
+                    .join(&produced.recipe[..2])
+                    .join(&produced.recipe);
+                assert!(dir.exists(), "the generation is on disk");
+                assert!(
+                    !dir.join(plurx_core::transcode::manifest::MANIFEST_FILE)
+                        .exists(),
+                    "and carries no manifest, so no deployed row gains one"
+                );
+                let row = store
+                    .cache_hit(&produced.recipe, NODE)
+                    .await
+                    .expect("cache lookup")
+                    .expect("a completed row");
+                assert_eq!(
+                    row.manifest_digest, None,
+                    "an unqualified row records no digest, so nothing that keys on one changes"
+                );
+            }
+        }
+    }
+
+    /// A request is not a switch: the node intersects it with what it
+    /// measured about itself.
+    ///
+    /// Honouring a request this node cannot serve is not a degraded mode. The
+    /// identity names a content-addressed key space, so the node would rotate
+    /// its whole transcode cache to keys whose every generation is then
+    /// refused — re-encoding each title once per request, forever, while every
+    /// counter reads healthy. Each of the three prerequisites is checked here
+    /// on its own, because a refusal an operator cannot act on is the same as
+    /// no refusal at all.
+    #[test]
+    fn a_request_is_enabled_while_coverage_remains_advisory() {
+        use plurx_core::transcode::decoder_inventory::MeasuredDecoders;
+        use plurx_core::transcode::ArtifactQualification;
+
+        let contract =
+            |input_codec: &str, decoder: &str| crate::decoder_health::DiagnosticContract {
+                id: format!("fixture-{input_codec}-{decoder}"),
+                host: "workstation".to_owned(),
+                ffmpeg_version: "ffmpeg version 9.0.1".to_owned(),
+                binary_sha256: "b".repeat(64),
+                buildconf_sha256: "c".repeat(64),
+                stderr_mode: crate::decoder_health::QUALIFIED_STDERR_MODE.to_owned(),
+                input_codec: input_codec.to_owned(),
+                decoder: decoder.to_owned(),
+                decode_backend: plurx_core::transcode::DecodeBackend::Software
+                    .name()
+                    .to_owned(),
+                require_context_addresses: true,
+                primary_message: "Decoding error:".to_owned(),
+                subordinate_message: None,
+                attributes_every_failure: false,
+                error_detail: "corrupt input packet".to_owned(),
+                fixture: "f".to_owned(),
+                fixture_sha256: "d".repeat(64),
+                scope: "workstation".to_owned(),
+                backend_fault_detail: None,
+            };
+        let build = || crate::decoder_health::MeasuredBuild {
+            ffmpeg_version: "ffmpeg version 9.0.1".to_owned(),
+            binary_sha256: "b".repeat(64),
+            buildconf_sha256: "c".repeat(64),
+        };
+        let covered = crate::decoder_health::DiagnosticPolicy::new(
+            Some(build()),
+            vec![contract("h264", "h264")],
+        );
+        let measured = MeasuredDecoders::from_measured(&[
+            (
+                "h264",
+                plurx_core::transcode::DecodeBackend::Software,
+                "h264",
+            ),
+            (
+                "hevc",
+                plurx_core::transcode::DecodeBackend::Software,
+                "hevc",
+            ),
+        ]);
+        let selectable = vec![
+            (
+                "h264".to_owned(),
+                plurx_core::transcode::DecodeBackend::Software,
+            ),
+            (
+                "hevc".to_owned(),
+                plurx_core::transcode::DecodeBackend::Software,
+            ),
+        ];
+
+        // Nobody asked. Every deployed node, and the reason it is a separate
+        // refusal rather than an absent one: the surface says so out loud.
+        let idle = artifact_qualification_readiness(false, &covered, &measured, &selectable);
+        assert_eq!(idle.effective, ArtifactQualification::Unqualified);
+        assert_eq!(idle.refusal, Some(QualificationRefusal::NotRequested));
+        assert!(
+            idle.eligible(),
+            "a node that could honour a request reports so before one is made, \
+             so an operator can see the answer before paying for it"
+        );
+
+        // Asked, and enabled. Only the covered pair is listed: hevc was
+        // measured and is not covered, so the surface must call the node
+        // partially covered rather than imply every plan is verified.
+        let asked = artifact_qualification_readiness(true, &covered, &measured, &selectable);
+        assert_eq!(asked.effective, ArtifactQualification::Unqualified);
+        assert_eq!(
+            asked.refusal,
+            Some(QualificationRefusal::IncompleteCoverage)
+        );
+        assert_eq!(
+            asked.covered_decoders,
+            vec![(
+                "h264".to_owned(),
+                plurx_core::transcode::DecodeBackend::Software,
+                "h264".to_owned(),
+            )]
+        );
+        assert_eq!(asked.measured_decoders.len(), 2);
+
+        // No build measured: nothing this node prints can be matched to a
+        // contract, so nothing it prints is evidence.
+        let unmeasured =
+            crate::decoder_health::DiagnosticPolicy::new(None, vec![contract("h264", "h264")]);
+        let readiness = artifact_qualification_readiness(true, &unmeasured, &measured, &selectable);
+        assert_eq!(
+            readiness.effective,
+            ArtifactQualification::Unqualified,
+            "the legacy whole-node projection stays conservative without disabling the request"
+        );
+        assert_eq!(
+            readiness.refusal,
+            Some(QualificationRefusal::BuildUnmeasured)
+        );
+        assert!(
+            !readiness.eligible() && readiness.covered_decoders.is_empty(),
+            "coverage is about a build, so a node that identified none has none"
+        );
+
+        // No decoder named. A contract is qualified against a *named* decoder,
+        // so a plan that names none can never be matched to one.
+        let readiness = artifact_qualification_readiness(
+            true,
+            &covered,
+            &MeasuredDecoders::default(),
+            &selectable,
+        );
+        assert_eq!(readiness.effective, ArtifactQualification::Unqualified);
+        assert_eq!(
+            readiness.refusal,
+            Some(QualificationRefusal::NoDecoderMeasured)
+        );
+
+        // Build measured, decoders named, and no contract covers it. This is
+        // the fleet's state today and the only refusal that takes real work to
+        // leave: it needs a capture from this build.
+        let uncovered = crate::decoder_health::DiagnosticPolicy::new(Some(build()), Vec::new());
+        let readiness = artifact_qualification_readiness(true, &uncovered, &measured, &selectable);
+        assert_eq!(readiness.effective, ArtifactQualification::Unqualified);
+        assert_eq!(
+            readiness.refusal,
+            Some(QualificationRefusal::NoContractCoversThisBuild)
+        );
+        assert!(!readiness.eligible());
+        assert_eq!(
+            readiness.measured_decoders.len(),
+            2,
+            "what it did measure is still reported; a refusal that hides the \
+             evidence leaves an operator with nothing to fix"
+        );
+
+        // A contract for a decoder this build does not select covers nothing.
+        // The measurement is what the plan will name, so a contract qualified
+        // against `libdav1d` says nothing about a node whose probe named
+        // `av1` — and the family name is exactly the substitution M3d exists
+        // to refuse.
+        let wrong_decoder = crate::decoder_health::DiagnosticPolicy::new(
+            Some(build()),
+            vec![contract("av1", "libdav1d")],
+        );
+        let readiness = artifact_qualification_readiness(
+            true,
+            &wrong_decoder,
+            &MeasuredDecoders::from_measured(&[(
+                "av1",
+                plurx_core::transcode::DecodeBackend::Software,
+                "av1",
+            )]),
+            &[(
+                "av1".to_owned(),
+                plurx_core::transcode::DecodeBackend::Software,
+            )],
+        );
+        assert_eq!(
+            readiness.refusal,
+            Some(QualificationRefusal::NoContractCoversThisBuild)
+        );
+    }
+
+    #[test]
+    fn readiness_matches_each_measurement_on_its_own_backend() {
+        use plurx_core::transcode::decoder_inventory::MeasuredDecoders;
+        use plurx_core::transcode::DecodeBackend;
+
+        let contract = decode_contract_fixture(DecodeBackend::VideoToolbox);
+        let policy = crate::decoder_health::DiagnosticPolicy::new(
+            Some(crate::decoder_health::MeasuredBuild {
+                ffmpeg_version: contract.ffmpeg_version.clone(),
+                binary_sha256: contract.binary_sha256.clone(),
+                buildconf_sha256: contract.buildconf_sha256.clone(),
+            }),
+            vec![contract],
+        );
+        let measured = MeasuredDecoders::from_measured(&[
+            ("h264", DecodeBackend::Software, "h264"),
+            ("h264", DecodeBackend::VideoToolbox, "h264"),
+        ]);
+
+        let readiness = artifact_qualification_readiness(
+            true,
+            &policy,
+            &measured,
+            &[
+                ("h264".to_owned(), DecodeBackend::Software),
+                ("h264".to_owned(), DecodeBackend::VideoToolbox),
+            ],
+        );
+        assert_eq!(
+            readiness.covered_decoders,
+            vec![(
+                "h264".to_owned(),
+                DecodeBackend::VideoToolbox,
+                "h264".to_owned(),
+            )],
+            "the identical software decoder name does not inherit the hardware contract"
+        );
+        assert_eq!(readiness.measured_decoders.len(), 2);
+        assert_eq!(
+            readiness.refusal,
+            Some(QualificationRefusal::IncompleteCoverage)
+        );
+    }
+
+    #[tokio::test]
+    async fn an_enabled_partial_policy_qualifies_only_its_exact_decode_path() {
+        use plurx_core::store::keys::DECODER_HEALTH_QUALIFIED_ARTIFACTS;
+        use plurx_core::store::SqliteStore;
+        use plurx_core::transcode::decoder_inventory::MeasuredDecoders;
+        use plurx_core::transcode::DecodeBackend;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let file = store.get_file(file_id).await.expect("get").expect("file");
+        let mut contract = decode_contract_fixture(DecodeBackend::VideoToolbox);
+        contract.input_codec = "hevc".to_owned();
+        contract.decoder = "hevc".to_owned();
+        let policy = crate::decoder_health::DiagnosticPolicy::new(
+            Some(crate::decoder_health::MeasuredBuild {
+                ffmpeg_version: contract.ffmpeg_version.clone(),
+                binary_sha256: contract.binary_sha256.clone(),
+                buildconf_sha256: contract.buildconf_sha256.clone(),
+            }),
+            vec![contract],
+        );
+        let measured = MeasuredDecoders::from_measured(&[
+            ("hevc", DecodeBackend::Software, "hevc"),
+            ("hevc", DecodeBackend::VideoToolbox, "hevc"),
+        ]);
+        let (mgr, _work, _cache) = cached_manager(&store);
+        let mgr = mgr
+            .with_measured_decoders(measured)
+            .with_diagnostic_policy(Arc::new(policy));
+        store
+            .put_setting(DECODER_HEALTH_QUALIFIED_ARTIFACTS, "1")
+            .await
+            .expect("enable requested policy");
+        let published = mgr.publish_artifact_qualification().await;
+        assert_eq!(
+            published.refusal,
+            Some(QualificationRefusal::IncompleteCoverage),
+            "hardware-only coverage is visible as unsafe for automatic recovery"
+        );
+
+        let hardware_options = mgr.options_for_tone_map(
+            Encoder::Software,
+            &file,
+            720,
+            0.0,
+            None,
+            None,
+            None,
+            ToneMap::Zscale,
+            OutputGrade::Sdr,
+        );
+        let hardware = mgr
+            .resolve_movie_plan(&file, &hardware_options, Encoder::VideoToolbox)
+            .await
+            .expect("hardware plan");
+        assert_eq!(hardware.decode().backend(), DecodeBackend::VideoToolbox);
+        assert!(hardware.enforces_receipt());
+
+        let software_options = mgr.options_for_tone_map(
+            Encoder::Software,
+            &file,
+            720,
+            0.0,
+            None,
+            None,
+            None,
+            ToneMap::Zscale,
+            OutputGrade::Sdr,
+        );
+        let software = mgr
+            .resolve_movie_plan(&file, &software_options, Encoder::Software)
+            .await
+            .expect("software plan");
+        assert_eq!(software.decode().backend(), DecodeBackend::Software);
+        assert!(
+            !software.enforces_receipt(),
+            "one hardware contract must not rotate an uncovered software path into a namespace it cannot certify"
+        );
+    }
+
+    /// A successful probe is evidence about that path, not evidence that an
+    /// advertised path which failed to produce a probe no longer exists.
+    #[tokio::test]
+    async fn legacy_whole_node_state_includes_plan_capable_unmeasured_codecs() {
+        use plurx_core::domain::{ItemKind, NewItem, ProbeResult};
+        use plurx_core::store::keys::DECODER_HEALTH_QUALIFIED_ARTIFACTS;
+        use plurx_core::store::SqliteStore;
+        use plurx_core::transcode::decoder_inventory::MeasuredDecoders;
+        use plurx_core::transcode::{ArtifactQualification, DecodeBackend};
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let h264_id = seed_file_with_probe_at(
+            &store,
+            "/media/H264.mkv",
+            ProbeResult {
+                duration_ms: Some(60_000),
+                container: Some("mkv".into()),
+                video_codec: Some("h264".into()),
+                width: Some(1920),
+                height: Some(1080),
+                ..Default::default()
+            },
+        )
+        .await;
+        let library_id = store
+            .list_libraries()
+            .await
+            .expect("libraries")
+            .into_iter()
+            .next()
+            .expect("seed library")
+            .id;
+        let hevc_item = store
+            .insert_item(&NewItem {
+                library_id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "HEVC".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("hevc item");
+        let hevc_id = store
+            .upsert_file(
+                hevc_item,
+                "/media/HEVC.mkv",
+                1,
+                1,
+                &ProbeResult {
+                    duration_ms: Some(60_000),
+                    container: Some("mkv".into()),
+                    video_codec: Some("hevc".into()),
+                    width: Some(3840),
+                    height: Some(2160),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("hevc file");
+        let h264 = store.get_file(h264_id).await.expect("get").expect("h264");
+        let hevc = store.get_file(hevc_id).await.expect("get").expect("hevc");
+        let contract = decode_contract_fixture(DecodeBackend::Software);
+        let policy = crate::decoder_health::DiagnosticPolicy::new(
+            Some(crate::decoder_health::MeasuredBuild {
+                ffmpeg_version: contract.ffmpeg_version.clone(),
+                binary_sha256: contract.binary_sha256.clone(),
+                buildconf_sha256: contract.buildconf_sha256.clone(),
+            }),
+            vec![contract],
+        );
+        let (mgr, _work, _cache) = cached_manager(&store);
+        let mgr = mgr
+            .with_decoders(vec!["h264".to_owned(), "hevc".to_owned()])
+            .with_measured_decoders(MeasuredDecoders::from_measured(&[(
+                "h264",
+                DecodeBackend::Software,
+                "h264",
+            )]))
+            .with_diagnostic_policy(Arc::new(policy));
+        store
+            .put_setting(DECODER_HEALTH_QUALIFIED_ARTIFACTS, "1")
+            .await
+            .expect("enable request");
+        let published = mgr.publish_artifact_qualification().await;
+        assert!(published.requested, "prerequisites do not gate the setting");
+        assert_eq!(
+            published.refusal,
+            Some(QualificationRefusal::IncompleteCoverage)
+        );
+        assert_eq!(
+            published.effective,
+            ArtifactQualification::Unqualified,
+            "legacy whole-node state cannot ignore the advertised unmeasured codec"
+        );
+        let explanation = published
+            .refusal
+            .expect("selectable HEVC is not measured")
+            .explanation();
+        assert!(
+            explanation.contains("selectable decode paths"),
+            "the guidance must name the completeness denominator: {explanation}"
+        );
+        assert!(
+            explanation.contains("missing measurements or contracts"),
+            "the guidance must distinguish an unmeasured selectable path from a missing contract: {explanation}"
+        );
+        assert!(
+            !explanation.contains("Only some measured decode paths"),
+            "every measured path in this case is covered: {explanation}"
+        );
+
+        let options = |file: &plurx_core::domain::MediaFile| {
+            mgr.options_for_tone_map(
+                Encoder::Software,
+                file,
+                720,
+                0.0,
+                None,
+                None,
+                None,
+                ToneMap::Zscale,
+                OutputGrade::Sdr,
+            )
+        };
+        let h264_plan = mgr
+            .resolve_movie_plan(&h264, &options(&h264), Encoder::Software)
+            .await
+            .expect("h264 plan");
+        let hevc_plan = mgr
+            .resolve_movie_plan(&hevc, &options(&hevc), Encoder::Software)
+            .await
+            .expect("hevc plan");
+        assert!(
+            h264_plan.enforces_receipt(),
+            "the covered exact path still qualifies"
+        );
+        assert!(
+            !hevc_plan.enforces_receipt(),
+            "the plan-capable but unmeasured codec keeps its stable identity"
+        );
+    }
+
+    /// The publisher writes the requested policy, and a covered path's
+    /// identity moves its cache key.
+    ///
+    /// The free-function test above proves the rule. This proves the two
+    /// things only the manager can: that the published value is what planning
+    /// actually reads, and that it is part of the recipe hash. Without the
+    /// second, every claim in this milestone about renaming a node's cache is
+    /// an assertion about code nobody ran.
+    #[tokio::test]
+    async fn the_published_identity_is_the_request_this_node_can_honour_and_moves_its_cache_keys() {
+        use plurx_core::store::keys::DECODER_HEALTH_QUALIFIED_ARTIFACTS;
+        use plurx_core::store::SqliteStore;
+        use plurx_core::transcode::decoder_inventory::MeasuredDecoders;
+        use plurx_core::transcode::ArtifactQualification;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let (mgr, _work, _cache) = cached_manager(&store);
+        // A contract covering exactly what this manager measured, on the build
+        // it was told it is running. Nothing else can produce a qualified
+        // node, which is why the policy is handed to the manager rather than
+        // reached for.
+        let contract = crate::decoder_health::DiagnosticContract {
+            id: "fixture-hevc".to_owned(),
+            host: "workstation".to_owned(),
+            ffmpeg_version: "ffmpeg version 9.0.1".to_owned(),
+            binary_sha256: "b".repeat(64),
+            buildconf_sha256: "c".repeat(64),
+            stderr_mode: crate::decoder_health::QUALIFIED_STDERR_MODE.to_owned(),
+            input_codec: "hevc".to_owned(),
+            decoder: "hevc".to_owned(),
+            decode_backend: plurx_core::transcode::DecodeBackend::Software
+                .name()
+                .to_owned(),
+            require_context_addresses: true,
+            primary_message: "Decoding error:".to_owned(),
+            subordinate_message: None,
+            attributes_every_failure: false,
+            error_detail: "corrupt input packet".to_owned(),
+            fixture: "f".to_owned(),
+            fixture_sha256: "d".repeat(64),
+            scope: "workstation".to_owned(),
+            backend_fault_detail: None,
+        };
+        let mgr = mgr
+            .with_decoders(vec!["hevc".to_owned()])
+            .with_measured_decoders(MeasuredDecoders::from_measured(&[(
+                "hevc",
+                plurx_core::transcode::DecodeBackend::Software,
+                "hevc",
+            )]))
+            .with_diagnostic_policy(Arc::new(crate::decoder_health::DiagnosticPolicy::new(
+                Some(crate::decoder_health::MeasuredBuild {
+                    ffmpeg_version: "ffmpeg version 9.0.1".to_owned(),
+                    binary_sha256: "b".repeat(64),
+                    buildconf_sha256: "c".repeat(64),
+                }),
+                vec![contract],
+            )));
+        let file = store.get_file(file_id).await.expect("get").expect("file");
+
+        // Nothing asked, so nothing moves — and the published answer says so
+        // rather than being an absence.
+        let published = mgr.publish_artifact_qualification().await;
+        assert_eq!(published.effective, ArtifactQualification::Unqualified);
+        assert_eq!(published.refusal, Some(QualificationRefusal::NotRequested));
+        assert!(published.eligible(), "this node could honour a request");
+        assert_eq!(
+            mgr.artifact_qualification(),
+            ArtifactQualification::Unqualified,
+            "planning reads the published value"
+        );
+        let unqualified_hash = recipe_hash_for(&mgr, &file, 1080).await;
+
+        // Asked, and honoured.
+        store
+            .put_setting(DECODER_HEALTH_QUALIFIED_ARTIFACTS, "1")
+            .await
+            .expect("request");
+        let published = mgr.publish_artifact_qualification().await;
+        assert_eq!(published.effective, ArtifactQualification::HealthQualified);
+        assert_eq!(published.refusal, None);
+        assert!(published.requested);
+        assert_eq!(
+            mgr.artifact_qualification(),
+            ArtifactQualification::HealthQualified
+        );
+        assert_eq!(
+            mgr.published_artifact_qualification(),
+            published,
+            "the surface reports what was published, not a recomputation"
+        );
+        let qualified_hash = recipe_hash_for(&mgr, &file, 1080).await;
+        assert_ne!(
+            unqualified_hash, qualified_hash,
+            "the identity is part of the cache key: turning this on renames \
+             every transcode the node caches, which is the cost the settings \
+             card states and the reason this is not applied to a live node"
+        );
+
+        // And back. The rename is paid a second time, which is worth knowing
+        // before turning it off as casually as it was turned on.
+        store
+            .put_setting(DECODER_HEALTH_QUALIFIED_ARTIFACTS, "0")
+            .await
+            .expect("withdraw");
+        let published = mgr.publish_artifact_qualification().await;
+        assert_eq!(published.effective, ArtifactQualification::Unqualified);
+        assert_eq!(published.refusal, Some(QualificationRefusal::NotRequested));
+        assert_eq!(
+            recipe_hash_for(&mgr, &file, 1080).await,
+            unqualified_hash,
+            "withdrawing the request returns the node to its own earlier keys"
+        );
+    }
+
+    /// Two contracts covering one build is a different problem from none, and
+    /// the fix for one makes the other worse.
+    ///
+    /// `contract_for` refuses ambiguity by returning no contract at all, so
+    /// without this it reads downstream as "capture one" to an operator who
+    /// has captured two.
+    #[test]
+    fn ambiguous_coverage_is_not_reported_as_missing_coverage() {
+        use plurx_core::transcode::decoder_inventory::MeasuredDecoders;
+
+        let contract = |id: &str, codec: &str| crate::decoder_health::DiagnosticContract {
+            id: id.to_owned(),
+            host: "workstation".to_owned(),
+            ffmpeg_version: "ffmpeg version 9.0.1".to_owned(),
+            binary_sha256: "b".repeat(64),
+            buildconf_sha256: "c".repeat(64),
+            stderr_mode: crate::decoder_health::QUALIFIED_STDERR_MODE.to_owned(),
+            input_codec: codec.to_owned(),
+            decoder: codec.to_owned(),
+            decode_backend: plurx_core::transcode::DecodeBackend::Software
+                .name()
+                .to_owned(),
+            require_context_addresses: true,
+            primary_message: "Decoding error:".to_owned(),
+            subordinate_message: None,
+            attributes_every_failure: false,
+            error_detail: "corrupt input packet".to_owned(),
+            fixture: "f".to_owned(),
+            fixture_sha256: "d".repeat(64),
+            scope: "workstation".to_owned(),
+            backend_fault_detail: None,
+        };
+        let policy = crate::decoder_health::DiagnosticPolicy::new(
+            Some(crate::decoder_health::MeasuredBuild {
+                ffmpeg_version: "ffmpeg version 9.0.1".to_owned(),
+                binary_sha256: "b".repeat(64),
+                buildconf_sha256: "c".repeat(64),
+            }),
+            vec![
+                contract("unique", "h264"),
+                contract("first", "hevc"),
+                contract("second", "hevc"),
+            ],
+        );
+        let readiness = artifact_qualification_readiness(
+            true,
+            &policy,
+            &MeasuredDecoders::from_measured(&[
+                (
+                    "h264",
+                    plurx_core::transcode::DecodeBackend::Software,
+                    "h264",
+                ),
+                (
+                    "hevc",
+                    plurx_core::transcode::DecodeBackend::Software,
+                    "hevc",
+                ),
+            ]),
+            &[
+                (
+                    "h264".to_owned(),
+                    plurx_core::transcode::DecodeBackend::Software,
+                ),
+                (
+                    "hevc".to_owned(),
+                    plurx_core::transcode::DecodeBackend::Software,
+                ),
+            ],
+        );
+        assert_eq!(
+            readiness.refusal,
+            Some(QualificationRefusal::AmbiguousContract)
+        );
+        assert_eq!(readiness.covered_decoders.len(), 1);
+        assert_eq!(
+            readiness.covered_decoders[0].0, "h264",
+            "the unique path remains visible while the mixed ambiguous path is called out"
+        );
+        assert!(
+            readiness.eligible(),
+            "the unique path remains usable; ambiguity on another path remains an advisory"
+        );
+        assert!(
+            readiness
+                .refusal
+                .expect("refusal")
+                .explanation()
+                .contains("Remove the duplicate"),
+            "the instruction must not be the one that makes it worse"
+        );
+    }
+
+    /// Every refusal has a distinct name and a sentence someone can act on.
+    ///
+    /// A control whose only feedback is "still off" tells the person who
+    /// turned it on nothing, and this one is off by default on every node.
+    #[test]
+    fn every_qualification_refusal_says_what_to_do_about_it() {
+        let all = [
+            QualificationRefusal::NotRequested,
+            QualificationRefusal::BuildUnmeasured,
+            QualificationRefusal::NoDecoderMeasured,
+            QualificationRefusal::NoContractCoversThisBuild,
+            QualificationRefusal::IncompleteCoverage,
+            QualificationRefusal::AmbiguousContract,
+            QualificationRefusal::SettingUnreadable,
+        ];
+        let names = all.map(QualificationRefusal::name);
+        let mut unique = names.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), all.len(), "each refusal is distinguishable");
+        for refusal in all {
+            let explanation = refusal.explanation();
+            assert!(explanation.ends_with('.'), "{}", refusal.name());
+            assert!(
+                explanation.len() > 24,
+                "{} explains nothing",
+                refusal.name()
+            );
+            assert!(
+                !refusal.name().contains(' ') && refusal.name() == refusal.name().to_lowercase(),
+                "a machine-readable name"
+            );
+        }
+    }
+
+    /// The generation id off the queue is stable across the resume passes of
+    /// one production.
+    ///
+    /// It is the digest checkpoint's key. A value that changed per pass would
+    /// throw away the checkpoint every time and rehash the whole film, which
+    /// on a long title is the difference between finishing and never
+    /// finishing.
+    #[test]
+    fn the_generation_identity_is_the_final_directory_and_survives_a_fence() {
+        // The three shapes `produce_normalized` builds, spelled the way it
+        // spells them, so a change to that formatting fails here.
+        let hash = "a".repeat(64);
+        let unfenced = format!("{}/{hash}", &hash[..2]);
+        let publication_fenced = format!("{}/{hash}-f7", &hash[..2]);
+        let queue_owned = format!("{}/{hash}-j3-f9", &hash[..2]);
+        assert_eq!(identity_for(&unfenced).expect("identity"), hash);
+        assert_eq!(
+            identity_for(&publication_fenced).expect("identity"),
+            format!("{hash}-f7"),
+            "a publication fence renames the staging tree with it, so the \
+             checkpoint a fence bump orphans is one this pass cannot see"
+        );
+        assert_eq!(
+            identity_for(&queue_owned).expect("identity"),
+            format!("{hash}-j3-f9")
+        );
+        // Every shape is one `publish_controlled_directory` will accept.
+        // Deriving a name it rejects would fail the production as a retryable
+        // error, so the title would retry on a backoff forever and be reported
+        // as an encoder fault.
+        for relative in [&unfenced, &publication_fenced, &queue_owned] {
+            assert!(plurx_core::transcode::manifest::is_safe_generation_id(
+                identity_for(relative).expect("identity")
+            ));
+        }
+        assert!(identity_for("").is_err(), "no shard prefix");
+        assert!(identity_for("abcdef").is_err(), "no shard prefix");
+        assert!(identity_for("ab/").is_err(), "no identity");
+        assert!(identity_for("/abcdef").is_err(), "no shard");
+        assert!(
+            identity_for("ab/what a name").is_err(),
+            "a name publication would reject is rejected where it is derived"
+        );
+        assert!(
+            identity_for(&format!("ab/{}", "z".repeat(257))).is_err(),
+            "and so is one publication would reject for length"
+        );
     }
 }

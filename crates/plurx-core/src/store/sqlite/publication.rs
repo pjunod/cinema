@@ -330,19 +330,26 @@ impl FencedPublicationStore for SqliteStore {
         node_id: &str,
         relative_dir: &str,
         bytes: i64,
+        manifest_digest: Option<&str>,
         lease: &Lease,
         replacement: &Lease,
     ) -> Result<(), StoreError> {
         let hash = recipe_hash.to_owned();
         let node = node_id.to_owned();
         let relative_dir = relative_dir.to_owned();
+        let digest = manifest_digest.map(str::to_owned);
         self.with_fenced_conn(lease, replacement, move |conn| {
+            // `COALESCE` for the same reason as the unfenced twin: `None` says
+            // this publication carries no digest, never that an existing one
+            // should be cleared.
             conn.execute(
                 "UPDATE transcode_cache_locations
                  SET relative_dir = ?3, complete = 1, bytes = ?4,
+                     manifest_digest = COALESCE(?5, manifest_digest),
+                     publication_generation = publication_generation + 1,
                      last_used_at = unixepoch(), last_seen_at = unixepoch()
                  WHERE recipe_hash = ?1 AND node_id = ?2 AND storage_class = 'local'",
-                params![hash, node, relative_dir, bytes],
+                params![hash, node, relative_dir, bytes, digest],
             )?;
             Ok(())
         })

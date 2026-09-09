@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["35f0069f"]
+points = ["offline.viewing", "playback.pipeline"]
+checks = ["rust-gate", "rust-gate-ci", "cluster-auth"]
+reason = "The Store contract now proves that one replicated disable transaction fences active claims on every node, prevents new claims while disabled, and rejects stale cache and Ready publication on SQLite and real three-voter Hiqlite. A migrated-schema regression executes legacy claim, requeue, failure, Ready, cache completion, and complete-row rewrite SQL and requires the lifecycle and publication-generation triggers to reject each unsafe shape."

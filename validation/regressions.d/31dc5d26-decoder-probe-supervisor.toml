@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["31dc5d26"]
+points = ["playback.pipeline", "validation.framework"]
+checks = ["rust-gate", "catalog-contract"]
+reason = "The Rust gate exercises the production one-shot seccomp notification supervisor, immutable sealed parser FD, path/direct/proc-memfd and FD-reuse denial, process-session escape denial, pidfd-before-reap cleanup, injected pidfd failure ownership, and neutral legacy routing when isolation is unavailable. The catalog contract freezes the added thread, process, and timing ownership while the decoder recovery status contract preserves exact validation and prerequisite evidence."
