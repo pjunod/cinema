@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["e7af922d", "fb408d0a"]
+commits = ["e7af922d", "fb408d0a", "a598e40b"]
 points = ["web.experience", "live-tv.integration"]
 checks = ["web-layout"]
 reason = "The retained Live TV browser acceptance enters fullscreen, clicks the visible Stop Live TV control inside the fullscreen host, and requires fullscreen exit, host concealment, and tuner-capability release. The shipped-function regression keeps teardown behind the browser's asynchronous fullscreen-exit promise and moves the host out of full mode first, so Chromium's later fullscreenchange event cannot reveal a stopped host again. Removing the overlay Stop control, restoring the global VOD/Live TV locator, detaching before presentation exit completes, or leaving the stopped host in full mode makes the web gate fail before the lease is released."

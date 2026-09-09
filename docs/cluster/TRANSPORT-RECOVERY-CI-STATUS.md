@@ -1,6 +1,6 @@
 # Transport recovery CI — implementation status and evidence
 
-**Status:** M6 web fullscreen race fixed; exact browser verification active · **Owner:** Codex · **Updated:** 2026-09-09
+**Status:** M6 fixed candidate browser-verified; replacement qualification next · **Owner:** Codex · **Updated:** 2026-09-09
 
 Companion to
 [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md) (how this effort reaches
@@ -171,12 +171,23 @@ Android lanes, and both package architectures. Its web lane matched all 7,650
 golden facts across 78 captures with no console or page errors, then reproduced
 a loaded-browser race in the separate Live TV acceptance: Stop hid the
 fullscreen host while Chromium's asynchronous fullscreen-exit request was
-still unsettled. `stopLiveTv` now awaits presentation exit before detaching
-media or hiding the host, and the retained shipped-function test holds that
-promise open to prove teardown cannot overtake it. The failed candidate was
-cancelled before either 20-cycle recovery role started. Focused Live TV and
-web-contract tests pass; exact browser verification is active before the
-replacement qualification push.
+still unsettled. The first correction awaited that promise before teardown;
+an exact-browser diagnostic then proved the subtler ordering: fullscreen was
+gone and the tuner was released, but Chromium dispatched `fullscreenchange`
+after the promise continuation and the ordinary Exit handler revealed the
+stopped host. Stop now moves the host out of `full` mode before requesting
+exit, so that late event cannot reinterpret teardown as an ordinary Exit. The
+retained shipped-function test holds the exit promise open and proves the mode
+transition happens before teardown, and the browser acceptance reports the
+fullscreen, visibility, mode, lease, and page-error state if it ever regresses.
+The failed candidate was cancelled before either 20-cycle recovery role
+started. Focused Live TV and web-contract tests pass. The exact committed
+candidate also passes the real generated-HLS browser acceptance on the same
+runner: decoded H.264/AAC frames, pause/resume, fullscreen stop, channel
+switch, docking, typed failures, late-start cleanup, owner loss, producer
+failure, expiry, paused timeout, visibility cleanup, and reload quarantine all
+completed with bounded tuner ownership. It is ready for the replacement full
+qualification push.
 
 ## Milestones — evidence closes the checkbox
 
