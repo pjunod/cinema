@@ -2922,7 +2922,7 @@ mod tests {
                     Param::Integer(4),
                     Param::Integer(5),
                     Param::Integer(9_000),
-                    // v50's drain deadline. No legacy source has the column,
+                    // v51's drain deadline. No legacy source has the column,
                     // and null is what "not draining" means on every row it
                     // migrates onto, so the import projects it rather than
                     // inventing a deadline in 1970.

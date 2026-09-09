@@ -1268,6 +1268,7 @@ mod tests {
                  DROP TRIGGER IF EXISTS media_playback_pointers_desired_fence_au;
                  ALTER TABLE media_playback_pointers DROP COLUMN desired_revision;
                  DROP INDEX dv_conversions_recovery_guard;
+                 DROP INDEX IF EXISTS analysis_requests_terminal_identity;
                  DROP TABLE dv_recovery_guards;
                  DROP TABLE IF EXISTS fragment_index_outcomes;
                  DROP TABLE IF EXISTS media_playback_desired;
@@ -1351,7 +1352,7 @@ mod tests {
     /// change never touched.
     ///
     /// Each entry names whatever that migration added, which is not always a
-    /// table: v49 and v50 add a column and a trigger, and a column has to be
+    /// table: v49 and v51 add a column and a trigger, and a column has to be
     /// dropped after the triggers that read it or SQLite refuses.
     ///
     /// So the count is asserted rather than the drops derived. Deriving them
@@ -1363,12 +1364,13 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 6] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 7] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
             "media_playback_desired",
             "desired_revision",
+            "analysis_requests_terminal_identity",
             "drain_deadline_ms",
         ];
 

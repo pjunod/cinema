@@ -990,7 +990,12 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     // nothing fenced a process that was already running when the schema moved,
     // because compatibility is checked at open and never again.
     crate::store::MEDIA_PLAYBACK_POINTER_DESIRED_FENCE_SCHEMA,
-    // v50: when a predecessor that is being drained on purpose stops being
+    // v50: the terminal analysis-history retention trigger runs inside the
+    // durable writer transaction. Once the retained window fills, its
+    // correlated newer-generation lookup must be an indexed identity search
+    // rather than a scan for every terminal candidate.
+    crate::store::fragment_index_cluster::ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA,
+    // v51: when a predecessor that is being drained on purpose stops being
     // kept. Null on every row that exists, which is what makes this additive:
     // a binary from before the column neither writes nor reads it, and its
     // sessions behave exactly as they do today.
@@ -1298,7 +1303,7 @@ impl SqliteStore {
         Ok(count == 1)
     }
 
-    /// Whether v50's drain deadline column is already installed.
+    /// Whether v51's drain deadline column is already installed.
     fn drain_deadline_column_exists(conn: &Connection) -> Result<bool, StoreError> {
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM pragma_table_info('media_sessions')
@@ -1370,7 +1375,7 @@ impl SqliteStore {
                 || (version == 45 && Self::fragment_index_outcomes_table_exists(conn)?)
                 || (version == 46 && Self::attempt_errors_column_exists(conn)?)
                 || (version == 47 && Self::video_identity_column_exists(conn)?)
-                || (version == 50 && Self::drain_deadline_column_exists(conn)?)
+                || (version == 51 && Self::drain_deadline_column_exists(conn)?)
             {
                 Ok(())
             } else {
@@ -2399,7 +2404,7 @@ mod tests {
             .expect("version");
         assert_eq!(version, MIGRATIONS.len() as i64);
         assert_eq!(
-            version, 50,
+            version, 51,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );
@@ -3130,7 +3135,7 @@ mod tests {
             // 5 since v49 added `desired_revision`, the ask a pointer write
             // was decided against.
             ("media_playback_pointers", 5),
-            // 20 since v50 added `drain_deadline_ms`, when a predecessor kept
+            // 20 since v51 added `drain_deadline_ms`, when a predecessor kept
             // alive on purpose stops being kept.
             ("media_sessions", 20),
         ] {
@@ -3705,31 +3710,31 @@ mod tests {
     /// and v47 each carry this guard for the same reason; a step that adds a
     /// column and does not is one power cut away from that.
     #[test]
-    fn v50_adds_a_drain_deadline_to_a_real_v49_shape_and_survives_a_stale_marker() {
+    fn v51_adds_a_drain_deadline_to_a_real_v50_shape_and_survives_a_stale_marker() {
         let dir = tempfile::tempdir().expect("tempdir");
         let db = dir.path().join("plurx.db");
         {
             let conn = Connection::open(&db).expect("raw open");
-            for (index, sql) in MIGRATIONS.iter().enumerate().take(49) {
+            for (index, sql) in MIGRATIONS.iter().enumerate().take(50) {
                 conn.execute_batch(&format!("BEGIN;\n{sql}\nCOMMIT;"))
                     .unwrap_or_else(|error| panic!("v{}: {error}", index + 1));
             }
-            conn.pragma_update(None, "user_version", 49)
-                .expect("v49 marker");
+            conn.pragma_update(None, "user_version", 50)
+                .expect("v50 marker");
             conn.execute(
                 "INSERT INTO media_sessions (
                      incarnation_id, session_id, user_id, playback_id,
                      request_fingerprint, owner_node_id, owner_epoch,
                      lease_expires_at_ms, state, recipe_json, response_json,
                      updated_at_ms)
-                 VALUES ('inc-v49', 'sess-v49', 7, 'playback-v49', 'fingerprint',
+                 VALUES ('inc-v50', 'sess-v50', 7, 'playback-v50', 'fingerprint',
                          'node-a', 1, 5000, 'active', '{}', '{}', 4000)",
                 [],
             )
-            .expect("seed a v49 session");
+            .expect("seed a v50 session");
         }
 
-        SqliteStore::open(&db).expect("migrate v49 to current");
+        SqliteStore::open(&db).expect("migrate v50 to current");
         {
             let conn = Connection::open(&db).expect("raw reopen");
             assert_eq!(
@@ -3740,22 +3745,22 @@ mod tests {
             let (state, deadline) = conn
                 .query_row(
                     "SELECT state, drain_deadline_ms FROM media_sessions
-                      WHERE incarnation_id = 'inc-v49'",
+                      WHERE incarnation_id = 'inc-v50'",
                     [],
                     |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?)),
                 )
-                .expect("the v49 session survives");
+                .expect("the v50 session survives");
             assert_eq!(state, "active", "the migration is additive");
             assert_eq!(
                 deadline, None,
                 "a session that existed before the column is not draining, and \
                  null is how this schema says so"
             );
-            conn.pragma_update(None, "user_version", 49)
-                .expect("simulate interruption after the v50 schema commit");
+            conn.pragma_update(None, "user_version", 50)
+                .expect("simulate interruption after the v51 schema commit");
         }
 
-        SqliteStore::open(&db).expect("settle the committed v50 migration");
+        SqliteStore::open(&db).expect("settle the committed v51 migration");
         let conn = Connection::open(&db).expect("raw reopen");
         assert_eq!(
             conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
@@ -3798,7 +3803,7 @@ mod tests {
         )
         .expect("seed a draining session");
 
-        // The pre-v50 takeover CAS, verbatim in the shape that matters: it
+        // The pre-v51 takeover CAS, verbatim in the shape that matters: it
         // names the owner and epoch it expects and says nothing about a drain.
         let moved = conn
             .execute(
@@ -3952,5 +3957,38 @@ mod tests {
         assert!(columns
             .iter()
             .any(|column| column == "publication_ready_at_ms"));
+    }
+
+    #[test]
+    fn v49_adds_the_terminal_analysis_identity_index() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("plurx.db");
+        {
+            let conn = Connection::open(&db).expect("raw open");
+            for (index, sql) in MIGRATIONS.iter().enumerate().take(49) {
+                conn.execute_batch(&format!("BEGIN;\n{sql}\nCOMMIT;"))
+                    .unwrap_or_else(|error| panic!("v{}: {error}", index + 1));
+            }
+            conn.pragma_update(None, "user_version", 49)
+                .expect("v49 marker");
+        }
+
+        SqliteStore::open(&db).expect("migrate v49 to current");
+        let conn = Connection::open(&db).expect("raw reopen");
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .expect("version"),
+            SQLITE_SCHEMA_VERSION
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                  WHERE type = 'index' AND name = 'analysis_requests_terminal_identity'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("terminal identity index"),
+            1
+        );
     }
 }

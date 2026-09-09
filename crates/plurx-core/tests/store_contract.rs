@@ -14163,7 +14163,7 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
     connection
         .execute_batch(
             "PRAGMA foreign_keys = OFF;
-             -- v50's drain deadline first, and its trigger ahead of its
+             -- v51's drain deadline first, and its trigger ahead of its
              -- column: SQLite refuses to drop a column a trigger reads.
              DROP TRIGGER IF EXISTS media_sessions_drain_ownership_fence_au;
              ALTER TABLE media_sessions DROP COLUMN drain_deadline_ms;
@@ -14191,6 +14191,7 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
              DROP TRIGGER IF EXISTS analysis_requests_supersede_source;
              DROP TRIGGER IF EXISTS analysis_requests_cancel_source;
              DROP TRIGGER IF EXISTS cluster_fragment_indexes_cancel_source;
+             DROP INDEX IF EXISTS analysis_requests_terminal_identity;
              DROP TABLE IF EXISTS analysis_attempts;
              DROP TABLE IF EXISTS cluster_fragment_index_heads;
              DROP TABLE IF EXISTS analysis_lifecycle_counters;

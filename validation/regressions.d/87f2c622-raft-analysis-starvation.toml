@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["87f2c622"]
+points = ["core.media", "cluster.auth", "persistence.upgrades"]
+checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "database-upgrades"]
+reason = "Terminal analysis-history retention now uses the durable terminal-identity index on SQLite and replicated stores. Unit contracts inspect the production query plans, prove bounded retention uses that index, and require the SQLite and replicated migration chains to install the same object before current schema activation; reverting the fix restores a table scan inside the Raft writer transaction."

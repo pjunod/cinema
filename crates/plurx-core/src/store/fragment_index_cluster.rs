@@ -156,6 +156,18 @@ CREATE INDEX IF NOT EXISTS cluster_fragment_index_jobs_status_history
     ON cluster_fragment_index_jobs(state, updated_at_ms DESC, cache_key);
 "#;
 
+/// Keeps the terminal-history retention trigger from searching every request
+/// for each candidate after the retained window fills. The predicate exactly
+/// matches the trigger's `newer` subquery so SQLite can prove that this partial
+/// index is eligible.
+pub const ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA: &str = r#"
+CREATE INDEX IF NOT EXISTS analysis_requests_terminal_identity
+    ON analysis_requests(file_id, source_size, source_mtime, component,
+                         pipeline_version, requested_generation, target_node_id,
+                         updated_at_ms, request_id)
+    WHERE state IN ('ready', 'failed', 'cancelled') AND force_rebuild = 0;
+"#;
+
 /// v41/v22 widens the already-durable request identity to the replicated
 /// semantic component. A table rebuild is required because SQLite cannot
 /// alter a CHECK constraint in place.
@@ -783,6 +795,7 @@ pub(super) const ANALYSIS_CANONICAL_CTE: &str = r#"WITH request_ranked AS (
    WHERE NOT EXISTS (
      SELECT 1 FROM analysis_requests request
       WHERE request.result_cache_key = job.cache_key
+        AND request.result_cache_key <> ''
         AND request.target_node_id = job.target_node_id)
 ), classified_base AS (
   SELECT canonical.*,
@@ -879,6 +892,7 @@ pub(super) const ANALYSIS_SUMMARY_CTE: &str = r#"WITH request_ranked AS (
    WHERE NOT EXISTS (
      SELECT 1 FROM analysis_requests request
       WHERE request.result_cache_key = job.cache_key
+        AND request.result_cache_key <> ''
         AND request.target_node_id = job.target_node_id)
 ), summary_classified AS (
   SELECT summary_canonical.*,
