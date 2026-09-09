@@ -3,7 +3,7 @@
 **Status:** M0–M7 code complete · effort promoted and post-merge repairs
 merged · final activation and M6 reserve-and-prime follow-up in draft PR #203 ·
 broader fleet qualification remains post-merge evidence · **Updated:** 2026-09-09 ·
-**Current main base:** `18ddffc1` · **Active branch:**
+**Current main base:** `ef8644a8` · **Active branch:**
 `codex/m6-server-prime`
 
 **Live checkpoint:** [Forgejo #203](http://192.168.4.7:3000/noirr/plurx/pulls/203)
@@ -67,7 +67,7 @@ evidence work; neither blocks prepared handoff or automatic decoder recovery.
 | Task base | Effort head `990bf334` was the historical promotion candidate; it is not the current follow-up base |
 | Current follow-up base | Forgejo `main` at `18ddffc1` |
 | Task branch | `codex/m6-server-prime` in the agent-owned clone at `/private/tmp/codex-plurx-decoder.RRcx8j/repo` |
-| Task PR | Draft [Forgejo #203](http://192.168.4.7:3000/noirr/plurx/pulls/203); implementation lineage begins at rebased M6 head `c683e337`, while Forgejo records the current activation-fix head |
+| Task PR | Draft [Forgejo #203](http://192.168.4.7:3000/noirr/plurx/pulls/203); current rebased M6 implementation begins at `e3cbb42a`, while Forgejo records the current activation-fix head |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
 | Audit scope | Prepared-successor durability, VOD worker attachment, media-only staged authority, commit publication, worker cleanup, lease renewal, and direct Developer enablement for both prepared handoff and decoder recovery |
 | Current finding | The old prepared path staged metadata only and double-counted the VOD resume as an origin; the old recovery surface also had no switch and made a hardware contract an activation gate. The branch now primes real work, preserves the origin, serves only exact staged media, and gives recovery an immediate checkbox whose best-effort diagnostic mode cannot certify cache artifacts |

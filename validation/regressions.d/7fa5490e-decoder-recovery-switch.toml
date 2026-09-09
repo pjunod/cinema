@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["7fa5490e"]
+points = ["playback.pipeline", "server.api", "web.experience"]
+checks = ["rust-gate", "rust-gate-ci", "web-static", "history-regressions"]
+reason = "The direct Developer switch is retained by daemon settings tests that prove its fail-off default, persistence, and immediate application; transcode regressions prove missing hardware/software qualification no longer removes the software-decode alternate; and diagnostic-health tests prove the operator-authorized selected-stream matcher can drive one bounded recovery without ever qualifying an artifact for reuse. The web contract and UI baseline require a real checkbox whose readiness rows remain advisory."
