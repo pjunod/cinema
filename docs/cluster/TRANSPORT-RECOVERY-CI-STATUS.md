@@ -1,6 +1,6 @@
 # Transport recovery CI — implementation status and evidence
 
-**Status:** building M1 · **Owner:** Codex · **Updated:** 2026-09-08
+**Status:** building M2 · **Owner:** Codex · **Updated:** 2026-09-08
 
 Companion to
 [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md) (how this effort reaches
@@ -10,7 +10,7 @@ Companion to
 been built, reviewed, and proved. It is updated with each milestone so a green
 checkbox means retained evidence, not intent.
 
-## Current position — M0 is complete and the old campaign is paused
+## Current position — M1 is complete and the old campaign is paused
 
 The effort begins at remote `main`
 `9fcd151c98485707d2dc28195adf9c0c1e4a6d4c`, the same source reviewed by the
@@ -39,8 +39,9 @@ frozen.
 - [x] **M0 — establish the base.** Rust 1.97.1 was invoked explicitly because
   Homebrew shadows the repository pin with 1.98.0. `cargo fmt --all --check`,
   package check, and package Clippy with denied warnings passed before edits.
-- [ ] **M1 — independent role reports.** Typed plan, strict CLI, shared
-  validation, compatible aliases, and canonical assembly.
+- [x] **M1 — independent role reports.** Typed plan, strict CLI, shared
+  validation, compatible aliases, and canonical assembly pass focused tests
+  and one real Linux warmup-plus-one smoke for each role.
 - [ ] **M2 — durable diagnostics.** Checkpoints, timings, failure classes,
   cancellation, and owned-child cleanup evidence.
 - [ ] **M3 — split CI.** Independent voter and learner jobs, retained aggregate
@@ -65,6 +66,38 @@ frozen.
 | `validation/` | Same-run, first-attempt, exact-candidate receipts |
 | `tests/operations/` and `tests/validation/` | Static scheduling, schema, receipt, and stale-candidate regressions |
 | Maintained docs | Commands, output interpretation, budgets, and freeze procedure |
+
+## M1 evidence — both roles now finish independently
+
+Commit `b9547a2b03bc5bd5a499a5437b51575ef1c5f359` was archived without
+repository metadata or credentials and built in the Rust 1.97.1 Linux image
+on `nynuc`. One shared execution ID, `m1-linux-b9547a2b`, produced two closed
+smoke reports:
+
+| Role | Warmup | Measured cycles | Recovery | Envelope | Report SHA-256 |
+|---|---:|---:|---:|---|---|
+| Voter | 1 | 1 | 258,310 ms | Recorded, not asserted | `70653f81105b001c0a4d35960cce5270e7df8f792c25e15cdc89c7beeda92d3b` |
+| Learner | 1 | 1 | 241,880 ms | Recorded, not asserted | `d03bf574e40b4aedbcf9eb7d6b752a21911855f43670333353fa474633ba78a3` |
+
+Both roles used separate persistent source clusters, replaced node 4, moved
+acknowledged writes through the existing external TLS writer, validated the
+exact installed snapshot, shut down their children, passed the closed role
+schema and shared semantic validator, and published atomically. The learner
+completed admission before its warmup and measured cycle. These are M1 smoke
+results only; neither can assemble or stand in for 20-cycle qualification.
+
+The first acceptance attempt exposed two harness-boundary defects. Whole-
+millisecond event ages sampled in separate processes could invert causal order
+by one millisecond, and the continuous writer could advance the current
+snapshot after the purge boundary had already been satisfied. The correction
+allows only two milliseconds of cross-process timestamp quantization and
+records the specific snapshot boundary whose purge was awaited; exact
+transferred snapshot identity, bytes, digest, and transport completion remain
+separate mandatory evidence. Focused package tests now contain 51 cases.
+
+The node's 31 GiB `/tmp` tmpfs filled during the initial cold link. The exact
+source-only rerun used `/var/tmp`, which had 108 GiB available. This is runner
+capacity evidence, not a product or campaign failure.
 
 ## Guardrails — this effort changes observability, not production transport
 

@@ -7,6 +7,7 @@
 
 use std::collections::BTreeSet;
 use std::fs::File;
+use std::future::Future;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -33,15 +34,18 @@ use super::{
 /// artifact was ever produced: the per-cycle contract never completed a
 /// campaign.
 pub const TRANSPORT_RECOVERY_ARTIFACT_SCHEMA_VERSION: u32 = 2;
+pub const TRANSPORT_RECOVERY_ROLE_REPORT_SCHEMA_VERSION: u32 = 1;
 pub const TRANSPORT_RECOVERY_CYCLES_PER_ROLE: u32 = 20;
 pub const TRANSPORT_RECOVERY_SMALL_IMAGE_BYTES: u64 = 88_559_616;
 pub const TRANSPORT_RECOVERY_LARGE_IMAGE_BYTES: u64 = 177_119_232;
 pub const TRANSPORT_RECOVERY_DEFAULT_VOTER_SMOKE_CYCLES: u32 = 4;
+pub const TRANSPORT_RECOVERY_DEFAULT_LEARNER_SMOKE_CYCLES: u32 = 4;
 /// Low enough for qualification, while leaving room for image setup before a
 /// cycle begins. This value is not reachable from plurxd configuration.
 pub const TRANSPORT_RECOVERY_SNAPSHOT_LOGS_SINCE_LAST: u64 = 256;
 
 const EVIDENCE_SCOPE: &str = "linux_separate_process_recovery";
+const ROLE_REPORT_KIND: &str = "transport_recovery_role";
 const TARGET_NODE: u64 = 4;
 const IMAGE_PADDING_BYTES: u64 = 8 * 1024 * 1024;
 const IMAGE_ROW_BYTES: u64 = 4 * 1024 * 1024;
@@ -55,6 +59,10 @@ const RECOVERY_DEADLINE: Duration = Duration::from_secs(1_500);
 const RESOURCE_CLEANUP_HORIZON: Duration = Duration::from_secs(60);
 const RESOURCE_SAMPLE_INTERVAL: Duration = Duration::from_secs(3);
 const RESOURCE_STABLE_SAMPLES: usize = 2;
+// Transport event ages are sampled independently in the source and target
+// processes and rounded to whole milliseconds before the parent compares
+// them. Preserve causal ordering while allowing only that quantization edge.
+const CROSS_PROCESS_TIMESTAMP_TOLERANCE_MILLIS: i64 = 2;
 const RESOURCE_BASELINE_WARMUP_CYCLES: u32 = 1;
 /// How far a node's resource *envelope* may rise between the opening and the
 /// closing half of a campaign before it is a leak.
@@ -108,44 +116,103 @@ pub enum RecoveryRole {
 }
 
 impl RecoveryRole {
-    fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Self::Learner => "learner",
             Self::Voter => "voter",
         }
     }
+
+    fn minimum_sqlite_bytes(self) -> u64 {
+        match self {
+            Self::Learner => TRANSPORT_RECOVERY_SMALL_IMAGE_BYTES,
+            Self::Voter => TRANSPORT_RECOVERY_LARGE_IMAGE_BYTES,
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "learner" => Ok(Self::Learner),
+            "voter" => Ok(Self::Voter),
+            _ => bail!("transport-recovery role must be voter or learner"),
+        }
+    }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct RecoverySmokePlan {
-    pub(crate) role: RecoveryRole,
-    pub(crate) minimum_sqlite_bytes: u64,
-    pub(crate) cycles_required: u32,
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoveryRolePlan {
+    pub role: RecoveryRole,
+    pub cycles_required: u32,
+    pub execution_id: String,
+    pub output: PathBuf,
+    pub diagnostics_dir: PathBuf,
+    pub max_runtime_seconds: Option<u64>,
 }
 
-pub(crate) fn voter_smoke_plan(arguments: &[String]) -> Result<RecoverySmokePlan> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoveryAssemblePlan {
+    pub execution_id: String,
+    pub voter: PathBuf,
+    pub learner: PathBuf,
+    pub output: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryRoleReportScope {
+    Smoke,
+    QualificationRole,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransportRecoveryRoleReport {
+    pub schema_version: u32,
+    pub kind: String,
+    pub execution_id: String,
+    pub build_sha: String,
+    pub platform: String,
+    pub build_profile: String,
+    pub started_at_unix_ms: i64,
+    pub finished_at_unix_ms: i64,
+    pub scope: RecoveryRoleReportScope,
+    pub resource_envelope_asserted: bool,
+    pub snapshot_policy: RecoverySnapshotPolicy,
+    pub transport: RecoveryTransportContract,
+    pub resource_thread_envelope_allowance: u64,
+    pub resource_socket_envelope_allowance: u64,
+    pub resource_owned_async_task_envelope_allowance: u64,
+    pub resource_cleanup_horizon_millis: u64,
+    pub resource_stable_samples: usize,
+    pub campaign: RecoveryRoleCampaign,
+}
+
+pub(crate) fn smoke_cycles(arguments: &[String], role: RecoveryRole) -> Result<u32> {
     if arguments.len() > 1 {
-        bail!("transport-recovery-voter-smoke accepts at most one cycle count");
+        bail!(
+            "transport-recovery-{}-smoke accepts at most one cycle count",
+            role.label()
+        );
     }
     let cycles_required = arguments
         .first()
         .map(|value| {
             value
                 .parse::<u32>()
-                .context("parse voter smoke cycle count")
+                .with_context(|| format!("parse {} smoke cycle count", role.label()))
         })
         .transpose()?
-        .unwrap_or(TRANSPORT_RECOVERY_DEFAULT_VOTER_SMOKE_CYCLES);
+        .unwrap_or(match role {
+            RecoveryRole::Learner => TRANSPORT_RECOVERY_DEFAULT_LEARNER_SMOKE_CYCLES,
+            RecoveryRole::Voter => TRANSPORT_RECOVERY_DEFAULT_VOTER_SMOKE_CYCLES,
+        });
     if !(1..=TRANSPORT_RECOVERY_CYCLES_PER_ROLE).contains(&cycles_required) {
         bail!(
-            "transport-recovery voter smoke requires 1..={TRANSPORT_RECOVERY_CYCLES_PER_ROLE} cycles"
+            "transport-recovery {} smoke requires 1..={TRANSPORT_RECOVERY_CYCLES_PER_ROLE} cycles",
+            role.label()
         );
     }
-    Ok(RecoverySmokePlan {
-        role: RecoveryRole::Voter,
-        minimum_sqlite_bytes: TRANSPORT_RECOVERY_LARGE_IMAGE_BYTES,
-        cycles_required,
-    })
+    Ok(cycles_required)
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -446,114 +513,424 @@ impl From<&mut Row<'_>> for RecoveryWriteRow {
     }
 }
 
-pub async fn run_transport_recovery_campaign(output: &Path) -> Result<()> {
-    if std::env::consts::OS != "linux" {
-        bail!("transport-recovery qualification requires Linux /proc evidence");
+pub(crate) fn parse_recovery_role_plan(arguments: &[String]) -> Result<RecoveryRolePlan> {
+    let mut role = None;
+    let mut cycles_required = None;
+    let mut execution_id = None;
+    let mut output = None;
+    let mut diagnostics_dir = None;
+    let mut max_runtime_seconds = None;
+    let mut seen = BTreeSet::new();
+    let mut index = 0;
+    while index < arguments.len() {
+        let flag = arguments[index].as_str();
+        if !matches!(
+            flag,
+            "--role"
+                | "--cycles"
+                | "--execution-id"
+                | "--output"
+                | "--diagnostics-dir"
+                | "--max-runtime-seconds"
+        ) {
+            bail!("unknown transport-recovery-role flag {flag:?}");
+        }
+        if !seen.insert(flag.to_owned()) {
+            bail!("duplicate transport-recovery-role flag {flag}");
+        }
+        let value = arguments
+            .get(index + 1)
+            .with_context(|| format!("transport-recovery-role {flag} requires a value"))?;
+        match flag {
+            "--role" => role = Some(RecoveryRole::parse(value)?),
+            "--cycles" => {
+                let cycles = value
+                    .parse::<u32>()
+                    .context("parse transport-recovery role cycle count")?;
+                if !(1..=TRANSPORT_RECOVERY_CYCLES_PER_ROLE).contains(&cycles) {
+                    bail!(
+                        "transport-recovery role requires 1..={TRANSPORT_RECOVERY_CYCLES_PER_ROLE} cycles"
+                    );
+                }
+                cycles_required = Some(cycles);
+            }
+            "--execution-id" => {
+                validate_execution_id(value)?;
+                execution_id = Some(value.clone());
+            }
+            "--output" => output = Some(PathBuf::from(value)),
+            "--diagnostics-dir" => diagnostics_dir = Some(PathBuf::from(value)),
+            "--max-runtime-seconds" => {
+                let seconds = value
+                    .parse::<u64>()
+                    .context("parse transport-recovery role maximum runtime")?;
+                if seconds == 0 {
+                    bail!("transport-recovery role maximum runtime must be positive");
+                }
+                max_runtime_seconds = Some(seconds);
+            }
+            _ => unreachable!("known transport-recovery-role flag"),
+        }
+        index += 2;
     }
-    // Resolve the exact source identity before creating a cluster or entering
-    // the 40-cycle campaign. Source-only archives have no `.git`; their caller
-    // must bind PLURX_BUILD_SHA while compiling/running this command.
-    let build_sha = resolve_build_sha()
-        .context("resolve transport-recovery candidate SHA before campaign start")?;
-    prepare_artifact_output(output)?;
-    let executable = harness_executable()?;
-    let root = tempfile::tempdir().context("transport-recovery campaign root")?;
-    let started_at_unix_ms = unix_ms()?;
-
-    println!("cluster-check: 20-cycle voter snapshot recovery campaign");
-    let voter = run_role_campaign(
-        &executable,
-        root.path(),
-        RecoveryRole::Voter,
-        TRANSPORT_RECOVERY_LARGE_IMAGE_BYTES,
-        TRANSPORT_RECOVERY_CYCLES_PER_ROLE,
-    )
-    .await?;
-    println!("cluster-check: 20-cycle learner snapshot recovery campaign");
-    let learner = run_role_campaign(
-        &executable,
-        root.path(),
-        RecoveryRole::Learner,
-        TRANSPORT_RECOVERY_SMALL_IMAGE_BYTES,
-        TRANSPORT_RECOVERY_CYCLES_PER_ROLE,
-    )
-    .await?;
-
-    let artifact = ClusterTransportRecoveryArtifact {
-        schema_version: TRANSPORT_RECOVERY_ARTIFACT_SCHEMA_VERSION,
-        evidence_scope: EVIDENCE_SCOPE.to_owned(),
-        build_sha,
-        platform: "linux".to_owned(),
-        started_at_unix_ms,
-        finished_at_unix_ms: unix_ms()?,
-        snapshot_policy: RecoverySnapshotPolicy {
-            validation_only: true,
-            logs_since_last: TRANSPORT_RECOVERY_SNAPSHOT_LOGS_SINCE_LAST,
-            production_default_unchanged: true,
-        },
-        transport: RecoveryTransportContract {
-            raft_transport: "hiqlite_production_tls_chunked_snapshot".to_owned(),
-            api_writer_transport: "hiqlite_production_tls_websocket".to_owned(),
-            tls_enabled: true,
-            tls_certificate_verification_disabled_for_self_signed_harness: true,
-            separate_node_processes: true,
-            separate_writer_process: true,
-        },
-        resource_thread_envelope_allowance: THREAD_ENVELOPE_ALLOWANCE,
-        resource_socket_envelope_allowance: SOCKET_ENVELOPE_ALLOWANCE,
-        resource_owned_async_task_envelope_allowance: OWNED_ASYNC_TASK_ENVELOPE_ALLOWANCE,
-        resource_cleanup_horizon_millis: duration_millis(RESOURCE_CLEANUP_HORIZON),
-        resource_stable_samples: RESOURCE_STABLE_SAMPLES,
-        learner,
-        voter,
+    let plan = RecoveryRolePlan {
+        role: role.context("transport-recovery-role requires --role")?,
+        cycles_required: cycles_required.context("transport-recovery-role requires --cycles")?,
+        execution_id: execution_id.context("transport-recovery-role requires --execution-id")?,
+        output: output.context("transport-recovery-role requires --output")?,
+        diagnostics_dir: diagnostics_dir
+            .context("transport-recovery-role requires --diagnostics-dir")?,
+        max_runtime_seconds,
     };
-    validate_transport_recovery_artifact(&artifact)?;
-    let mut bytes = serde_json::to_vec_pretty(&artifact)?;
-    bytes.push(b'\n');
-    publish_artifact_atomically(output, &bytes)?;
+    validate_role_plan_paths(&plan)?;
+    Ok(plan)
+}
+
+pub(crate) fn parse_recovery_assemble_plan(arguments: &[String]) -> Result<RecoveryAssemblePlan> {
+    let mut execution_id = None;
+    let mut voter = None;
+    let mut learner = None;
+    let mut output = None;
+    let mut seen = BTreeSet::new();
+    let mut index = 0;
+    while index < arguments.len() {
+        let flag = arguments[index].as_str();
+        if !matches!(
+            flag,
+            "--execution-id" | "--voter" | "--learner" | "--output"
+        ) {
+            bail!("unknown transport-recovery-assemble flag {flag:?}");
+        }
+        if !seen.insert(flag.to_owned()) {
+            bail!("duplicate transport-recovery-assemble flag {flag}");
+        }
+        let value = arguments
+            .get(index + 1)
+            .with_context(|| format!("transport-recovery-assemble {flag} requires a value"))?;
+        match flag {
+            "--execution-id" => {
+                validate_execution_id(value)?;
+                execution_id = Some(value.clone());
+            }
+            "--voter" => voter = Some(PathBuf::from(value)),
+            "--learner" => learner = Some(PathBuf::from(value)),
+            "--output" => output = Some(PathBuf::from(value)),
+            _ => unreachable!("known transport-recovery-assemble flag"),
+        }
+        index += 2;
+    }
+    let plan = RecoveryAssemblePlan {
+        execution_id: execution_id
+            .context("transport-recovery-assemble requires --execution-id")?,
+        voter: voter.context("transport-recovery-assemble requires --voter")?,
+        learner: learner.context("transport-recovery-assemble requires --learner")?,
+        output: output.context("transport-recovery-assemble requires --output")?,
+    };
+    validate_assemble_plan_paths(&plan)?;
+    Ok(plan)
+}
+
+fn validate_execution_id(value: &str) -> Result<()> {
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+    {
+        bail!(
+            "transport-recovery execution ID must contain 1..=128 ASCII letters, digits, dots, underscores, or hyphens"
+        );
+    }
+    Ok(())
+}
+
+fn lexical_absolute(path: &Path) -> Result<PathBuf> {
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .context("resolve current directory for transport-recovery path")?
+            .join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    Ok(normalized)
+}
+
+fn paths_collide(first: &Path, second: &Path) -> Result<bool> {
+    let first = lexical_absolute(first)?;
+    let second = lexical_absolute(second)?;
+    Ok(first == second || first.starts_with(&second) || second.starts_with(&first))
+}
+
+fn validate_role_plan_paths(plan: &RecoveryRolePlan) -> Result<()> {
+    if paths_collide(&plan.output, &plan.diagnostics_dir)? {
+        bail!("transport-recovery role output and diagnostics paths collide");
+    }
+    Ok(())
+}
+
+fn validate_assemble_plan_paths(plan: &RecoveryAssemblePlan) -> Result<()> {
+    if paths_collide(&plan.voter, &plan.learner)?
+        || paths_collide(&plan.output, &plan.voter)?
+        || paths_collide(&plan.output, &plan.learner)?
+    {
+        bail!("transport-recovery assembly input and output paths collide");
+    }
+    Ok(())
+}
+
+fn fixed_snapshot_policy() -> RecoverySnapshotPolicy {
+    RecoverySnapshotPolicy {
+        validation_only: true,
+        logs_since_last: TRANSPORT_RECOVERY_SNAPSHOT_LOGS_SINCE_LAST,
+        production_default_unchanged: true,
+    }
+}
+
+fn fixed_transport_contract() -> RecoveryTransportContract {
+    RecoveryTransportContract {
+        raft_transport: "hiqlite_production_tls_chunked_snapshot".to_owned(),
+        api_writer_transport: "hiqlite_production_tls_websocket".to_owned(),
+        tls_enabled: true,
+        tls_certificate_verification_disabled_for_self_signed_harness: true,
+        separate_node_processes: true,
+        separate_writer_process: true,
+    }
+}
+
+fn build_profile_descriptor() -> String {
+    if cfg!(debug_assertions) {
+        "debug_assertions_on".to_owned()
+    } else {
+        "debug_assertions_off".to_owned()
+    }
+}
+
+fn local_execution_id() -> Result<String> {
+    Ok(format!("local-{}-{}", unix_ms()?, std::process::id()))
+}
+
+pub async fn run_transport_recovery_campaign(output: &Path) -> Result<()> {
+    prepare_artifact_output(output)?;
+    let execution_id = local_execution_id()?;
+    let role_root = artifact_parent(output)
+        .join("transport-recovery-roles")
+        .join(&execution_id);
+    let voter_plan = RecoveryRolePlan {
+        role: RecoveryRole::Voter,
+        cycles_required: TRANSPORT_RECOVERY_CYCLES_PER_ROLE,
+        execution_id: execution_id.clone(),
+        output: role_root.join("voter-role.json"),
+        diagnostics_dir: role_root.join("voter-diagnostics"),
+        max_runtime_seconds: None,
+    };
+    let learner_plan = RecoveryRolePlan {
+        role: RecoveryRole::Learner,
+        cycles_required: TRANSPORT_RECOVERY_CYCLES_PER_ROLE,
+        execution_id: execution_id.clone(),
+        output: role_root.join("learner-role.json"),
+        diagnostics_dir: role_root.join("learner-diagnostics"),
+        max_runtime_seconds: None,
+    };
+    print_role_paths(&voter_plan)?;
+    print_role_paths(&learner_plan)?;
+    let results = run_independent_roles(voter_plan.clone(), learner_plan.clone()).await;
+    match require_independent_roles(results) {
+        Ok((_voter, _learner)) => assemble_transport_recovery_reports(RecoveryAssemblePlan {
+            execution_id,
+            voter: voter_plan.output,
+            learner: learner_plan.output,
+            output: output.to_path_buf(),
+        }),
+        Err(error) => Err(error),
+    }
+}
+
+async fn run_independent_roles(
+    voter: RecoveryRolePlan,
+    learner: RecoveryRolePlan,
+) -> (
+    Result<TransportRecoveryRoleReport>,
+    Result<TransportRecoveryRoleReport>,
+) {
+    run_role_sequence(voter, learner, run_transport_recovery_role).await
+}
+
+async fn run_role_sequence<F, Fut>(
+    voter: RecoveryRolePlan,
+    learner: RecoveryRolePlan,
+    mut runner: F,
+) -> (
+    Result<TransportRecoveryRoleReport>,
+    Result<TransportRecoveryRoleReport>,
+)
+where
+    F: FnMut(RecoveryRolePlan) -> Fut,
+    Fut: Future<Output = Result<TransportRecoveryRoleReport>>,
+{
+    let voter = runner(voter).await;
+    let learner = runner(learner).await;
+    (voter, learner)
+}
+
+fn require_independent_roles(
+    results: (
+        Result<TransportRecoveryRoleReport>,
+        Result<TransportRecoveryRoleReport>,
+    ),
+) -> Result<(TransportRecoveryRoleReport, TransportRecoveryRoleReport)> {
+    match results {
+        (Ok(voter), Ok(learner)) => Ok((voter, learner)),
+        (Err(voter), Ok(_)) => Err(voter).context("voter transport-recovery role failed"),
+        (Ok(_), Err(learner)) => Err(learner).context("learner transport-recovery role failed"),
+        (Err(voter), Err(learner)) => bail!(
+            "voter transport-recovery role failed: {voter:#}; learner transport-recovery role failed: {learner:#}"
+        ),
+    }
+}
+
+pub(crate) async fn run_transport_recovery_smoke_alias(
+    role: RecoveryRole,
+    cycles_required: u32,
+) -> Result<()> {
+    let execution_id = local_execution_id()?;
+    let root = PathBuf::from("target/validation/transport-recovery-smoke").join(&execution_id);
+    let plan = RecoveryRolePlan {
+        role,
+        cycles_required,
+        execution_id,
+        output: root.join(format!("{}-role.json", role.label())),
+        diagnostics_dir: root.join(format!("{}-diagnostics", role.label())),
+        max_runtime_seconds: None,
+    };
+    print_role_paths(&plan)?;
+    run_transport_recovery_role(plan).await.map(|_| ())
+}
+
+fn print_role_paths(plan: &RecoveryRolePlan) -> Result<()> {
     println!(
-        "cluster-check: transport-recovery artifact {}",
-        output.display()
+        "cluster-check: transport-recovery execution ID {}",
+        plan.execution_id
+    );
+    println!(
+        "cluster-check: {} role report {}",
+        plan.role.label(),
+        lexical_absolute(&plan.output)?.display()
+    );
+    println!(
+        "cluster-check: {} diagnostics {}",
+        plan.role.label(),
+        lexical_absolute(&plan.diagnostics_dir)?.display()
     );
     Ok(())
 }
 
-pub(crate) async fn run_transport_recovery_voter_smoke(plan: RecoverySmokePlan) -> Result<()> {
+pub async fn run_transport_recovery_role(
+    plan: RecoveryRolePlan,
+) -> Result<TransportRecoveryRoleReport> {
+    validate_execution_id(&plan.execution_id)?;
+    if !(1..=TRANSPORT_RECOVERY_CYCLES_PER_ROLE).contains(&plan.cycles_required) {
+        bail!("transport-recovery role requires 1..={TRANSPORT_RECOVERY_CYCLES_PER_ROLE} cycles");
+    }
+    validate_role_plan_paths(&plan)?;
+    prepare_role_destinations(&plan)?;
     if std::env::consts::OS != "linux" {
-        bail!("transport-recovery voter smoke requires Linux /proc evidence");
+        bail!("transport-recovery role requires Linux /proc evidence");
     }
-    let RecoverySmokePlan {
-        role,
-        minimum_sqlite_bytes,
-        cycles_required,
-    } = plan;
     let build_sha = resolve_build_sha()
-        .context("resolve transport-recovery candidate SHA before voter smoke")?;
-    let executable = harness_executable()?;
-    let root = tempfile::tempdir().context("transport-recovery voter smoke root")?;
-    println!("cluster-check: {cycles_required}-cycle voter snapshot recovery smoke");
-    let voter = run_role_campaign(
-        &executable,
-        root.path(),
-        role,
-        minimum_sqlite_bytes,
-        cycles_required,
-    )
-    .await?;
-    if voter.role != role
-        || voter.cycles_required != cycles_required
-        || voter.cycles.len() != cycles_required as usize
-        || voter
-            .cycles
-            .iter()
-            .enumerate()
-            .any(|(position, cycle)| cycle.cycle != position as u32 + 1)
-    {
-        bail!("transport-recovery voter smoke returned incomplete evidence");
+        .context("resolve transport-recovery candidate SHA before role start")?;
+    let started_at_unix_ms = unix_ms()?;
+    let role = plan.role;
+    let cycles_required = plan.cycles_required;
+    let output = plan.output.clone();
+    let run = async {
+        let executable = harness_executable()?;
+        let root = tempfile::tempdir().context("transport-recovery role cluster root")?;
+        println!(
+            "cluster-check: {cycles_required}-cycle {} snapshot recovery role",
+            role.label()
+        );
+        let campaign = run_role_campaign(
+            &executable,
+            root.path(),
+            role,
+            role.minimum_sqlite_bytes(),
+            cycles_required,
+        )
+        .await?;
+        let report = TransportRecoveryRoleReport {
+            schema_version: TRANSPORT_RECOVERY_ROLE_REPORT_SCHEMA_VERSION,
+            kind: ROLE_REPORT_KIND.to_owned(),
+            execution_id: plan.execution_id.clone(),
+            build_sha,
+            platform: "linux".to_owned(),
+            build_profile: build_profile_descriptor(),
+            started_at_unix_ms,
+            finished_at_unix_ms: unix_ms()?,
+            scope: role_report_scope(cycles_required),
+            resource_envelope_asserted: envelope_is_asserted(&campaign.resource_envelopes),
+            snapshot_policy: fixed_snapshot_policy(),
+            transport: fixed_transport_contract(),
+            resource_thread_envelope_allowance: THREAD_ENVELOPE_ALLOWANCE,
+            resource_socket_envelope_allowance: SOCKET_ENVELOPE_ALLOWANCE,
+            resource_owned_async_task_envelope_allowance: OWNED_ASYNC_TASK_ENVELOPE_ALLOWANCE,
+            resource_cleanup_horizon_millis: duration_millis(RESOURCE_CLEANUP_HORIZON),
+            resource_stable_samples: RESOURCE_STABLE_SAMPLES,
+            campaign,
+        };
+        validate_transport_recovery_role_report(&report)?;
+        let mut bytes = serde_json::to_vec_pretty(&report)?;
+        bytes.push(b'\n');
+        publish_artifact_atomically(&output, &bytes)?;
+        println!(
+            "cluster-check: {cycles_required}/{cycles_required} {} recoveries passed for {}",
+            role.label(),
+            report.build_sha
+        );
+        Ok::<_, anyhow::Error>(report)
+    };
+    match plan.max_runtime_seconds {
+        Some(seconds) => tokio::time::timeout(Duration::from_secs(seconds), run)
+            .await
+            .with_context(|| {
+                format!(
+                    "{} transport-recovery role exceeded its {seconds}-second orchestration limit",
+                    role.label()
+                )
+            })?,
+        None => run.await,
     }
-    println!(
-        "cluster-check: {cycles_required}/{cycles_required} voter recoveries passed for {build_sha}"
-    );
+}
+
+fn role_report_scope(cycles_required: u32) -> RecoveryRoleReportScope {
+    if cycles_required == TRANSPORT_RECOVERY_CYCLES_PER_ROLE {
+        RecoveryRoleReportScope::QualificationRole
+    } else {
+        RecoveryRoleReportScope::Smoke
+    }
+}
+
+fn prepare_role_destinations(plan: &RecoveryRolePlan) -> Result<()> {
+    prepare_artifact_output(&plan.output)?;
+    let diagnostics_parent = artifact_parent(&plan.diagnostics_dir);
+    std::fs::create_dir_all(diagnostics_parent).with_context(|| {
+        format!("create transport-recovery diagnostics parent {diagnostics_parent:?}")
+    })?;
+    std::fs::create_dir(&plan.diagnostics_dir).with_context(|| {
+        format!(
+            "create new transport-recovery diagnostics directory {:?}",
+            plan.diagnostics_dir
+        )
+    })?;
     Ok(())
 }
 
@@ -867,15 +1244,11 @@ async fn exercise_role_campaign(
             cluster.kill(TARGET_NODE).await?;
             delete_disposable_target(cluster_root, TARGET_NODE)?;
             let leader = cluster.leader_among(&[1, 2, 3]).await?;
-            let source_status =
+            let purge_evidence =
                 trigger_and_wait_for_snapshot(cluster, leader, role, cycle, recovery_deadline)
                     .await?;
-            let snapshot_index = source_status
-                .snapshot_index
-                .context("source did not publish a snapshot index")?;
-            let purged_index = source_status
-                .purged_index
-                .context("source did not publish a purged index")?;
+            let snapshot_index = purge_evidence.snapshot_index;
+            let purged_index = purge_evidence.purged_index;
             let source_snapshot = snapshot_file(cluster_root, leader)?;
             if source_snapshot.bytes < minimum_sqlite_bytes {
                 bail!(
@@ -1100,13 +1473,19 @@ async fn exercise_role_campaign(
     })
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SnapshotPurgeEvidence {
+    snapshot_index: u64,
+    purged_index: u64,
+}
+
 async fn trigger_and_wait_for_snapshot(
     cluster: &mut ClusterProcesses,
     leader: u64,
     role: RecoveryRole,
     cycle: u32,
     deadline: Instant,
-) -> Result<RecoveryRuntimeStatus> {
+) -> Result<SnapshotPurgeEvidence> {
     let previous = request_status(cluster, leader).await?.snapshot_index;
     let mut observed = None;
     for ordinal in 0..TRANSPORT_RECOVERY_SNAPSHOT_LOGS_SINCE_LAST.saturating_mul(3) {
@@ -1144,7 +1523,29 @@ async fn trigger_and_wait_for_snapshot(
         tokio::time::sleep(Duration::from_millis(50)).await;
         status = request_status(cluster, leader).await?;
     }
-    Ok(status)
+    snapshot_purge_evidence(
+        // Pin the snapshot whose purge boundary this function actually
+        // awaited. The external writer can publish a newer current snapshot
+        // between observations; substituting that later index here would
+        // falsely claim the later boundary was also awaited.
+        snapshot,
+        status
+            .purged_index
+            .context("source purged index disappeared")?,
+    )
+}
+
+fn snapshot_purge_evidence(
+    snapshot_index: u64,
+    purged_index: u64,
+) -> Result<SnapshotPurgeEvidence> {
+    if purged_index < snapshot_index {
+        bail!("snapshot {snapshot_index} was not purged before recovery continued");
+    }
+    Ok(SnapshotPurgeEvidence {
+        snapshot_index,
+        purged_index,
+    })
 }
 
 async fn wait_for_installed_snapshot(
@@ -2769,13 +3170,33 @@ pub fn validate_transport_recovery_artifact(
         &artifact.learner,
         RecoveryRole::Learner,
         TRANSPORT_RECOVERY_SMALL_IMAGE_BYTES,
-        artifact,
+        RoleValidationContext {
+            cycles_required: TRANSPORT_RECOVERY_CYCLES_PER_ROLE,
+            started_at_unix_ms: artifact.started_at_unix_ms,
+            finished_at_unix_ms: artifact.finished_at_unix_ms,
+            allowances: ResourceEnvelopeAllowances {
+                threads: artifact.resource_thread_envelope_allowance,
+                sockets: artifact.resource_socket_envelope_allowance,
+                owned_async_tasks: artifact.resource_owned_async_task_envelope_allowance,
+            },
+            resource_envelope_asserted: true,
+        },
     )?;
     validate_role_campaign(
         &artifact.voter,
         RecoveryRole::Voter,
         TRANSPORT_RECOVERY_LARGE_IMAGE_BYTES,
-        artifact,
+        RoleValidationContext {
+            cycles_required: TRANSPORT_RECOVERY_CYCLES_PER_ROLE,
+            started_at_unix_ms: artifact.started_at_unix_ms,
+            finished_at_unix_ms: artifact.finished_at_unix_ms,
+            allowances: ResourceEnvelopeAllowances {
+                threads: artifact.resource_thread_envelope_allowance,
+                sockets: artifact.resource_socket_envelope_allowance,
+                owned_async_tasks: artifact.resource_owned_async_task_envelope_allowance,
+            },
+            resource_envelope_asserted: true,
+        },
     )?;
     Ok(())
 }
@@ -2786,21 +3207,160 @@ pub fn validate_transport_recovery_bytes(bytes: &[u8]) -> Result<()> {
     validate_transport_recovery_artifact(&artifact)
 }
 
+pub fn validate_transport_recovery_role_report(report: &TransportRecoveryRoleReport) -> Result<()> {
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../benchmarks/cluster-transport-recovery-role.schema.json"
+    ))?;
+    let validator = jsonschema::draft202012::new(&schema)
+        .context("compile transport-recovery role-report schema")?;
+    if !validator.is_valid(&serde_json::to_value(report)?) {
+        bail!("transport-recovery role report does not satisfy its closed schema");
+    }
+    validate_execution_id(&report.execution_id)?;
+    let cycles_required = report.campaign.cycles_required;
+    if !(1..=TRANSPORT_RECOVERY_CYCLES_PER_ROLE).contains(&cycles_required) {
+        bail!("transport-recovery role report cycle count is outside the supported range");
+    }
+    let recomputed_envelopes = resource_envelopes(&report.campaign.cycles)?;
+    let expected_assertion = envelope_is_asserted(&recomputed_envelopes);
+    if report.schema_version != TRANSPORT_RECOVERY_ROLE_REPORT_SCHEMA_VERSION
+        || report.kind != ROLE_REPORT_KIND
+        || report.platform != "linux"
+        || !is_git_sha(&report.build_sha)
+        || report.build_profile != build_profile_descriptor()
+        || report.started_at_unix_ms > report.finished_at_unix_ms
+        || report.scope != role_report_scope(cycles_required)
+        || report.resource_envelope_asserted != expected_assertion
+        || report.snapshot_policy != fixed_snapshot_policy()
+        || report.transport != fixed_transport_contract()
+        || report.resource_thread_envelope_allowance != THREAD_ENVELOPE_ALLOWANCE
+        || report.resource_socket_envelope_allowance != SOCKET_ENVELOPE_ALLOWANCE
+        || report.resource_owned_async_task_envelope_allowance
+            != OWNED_ASYNC_TASK_ENVELOPE_ALLOWANCE
+        || report.resource_cleanup_horizon_millis != duration_millis(RESOURCE_CLEANUP_HORIZON)
+        || report.resource_stable_samples != RESOURCE_STABLE_SAMPLES
+    {
+        bail!("transport-recovery role report identity or execution contract drifted");
+    }
+    validate_role_campaign(
+        &report.campaign,
+        report.campaign.role,
+        report.campaign.role.minimum_sqlite_bytes(),
+        RoleValidationContext {
+            cycles_required,
+            started_at_unix_ms: report.started_at_unix_ms,
+            finished_at_unix_ms: report.finished_at_unix_ms,
+            allowances: ResourceEnvelopeAllowances {
+                threads: report.resource_thread_envelope_allowance,
+                sockets: report.resource_socket_envelope_allowance,
+                owned_async_tasks: report.resource_owned_async_task_envelope_allowance,
+            },
+            resource_envelope_asserted: expected_assertion,
+        },
+    )
+}
+
+pub fn validate_transport_recovery_role_bytes(bytes: &[u8]) -> Result<()> {
+    let report: TransportRecoveryRoleReport =
+        serde_json::from_slice(bytes).context("decode transport-recovery role report")?;
+    validate_transport_recovery_role_report(&report)
+}
+
+pub fn assemble_transport_recovery_reports(plan: RecoveryAssemblePlan) -> Result<()> {
+    validate_execution_id(&plan.execution_id)?;
+    validate_assemble_plan_paths(&plan)?;
+    prepare_artifact_output(&plan.output)?;
+    let voter_bytes = std::fs::read(&plan.voter)
+        .with_context(|| format!("read voter transport-recovery role report {:?}", plan.voter))?;
+    let learner_bytes = std::fs::read(&plan.learner).with_context(|| {
+        format!(
+            "read learner transport-recovery role report {:?}",
+            plan.learner
+        )
+    })?;
+    let voter: TransportRecoveryRoleReport = serde_json::from_slice(&voter_bytes)
+        .context("decode voter transport-recovery role report")?;
+    let learner: TransportRecoveryRoleReport = serde_json::from_slice(&learner_bytes)
+        .context("decode learner transport-recovery role report")?;
+    validate_transport_recovery_role_report(&voter)?;
+    validate_transport_recovery_role_report(&learner)?;
+    let build_sha =
+        resolve_build_sha().context("resolve transport-recovery candidate SHA before assembly")?;
+    if voter.campaign.role != RecoveryRole::Voter
+        || learner.campaign.role != RecoveryRole::Learner
+        || voter.execution_id != plan.execution_id
+        || learner.execution_id != plan.execution_id
+        || voter.build_sha != build_sha
+        || learner.build_sha != build_sha
+        || voter.build_profile != learner.build_profile
+        || voter.scope != RecoveryRoleReportScope::QualificationRole
+        || learner.scope != RecoveryRoleReportScope::QualificationRole
+        || voter.campaign.cycles_required != TRANSPORT_RECOVERY_CYCLES_PER_ROLE
+        || learner.campaign.cycles_required != TRANSPORT_RECOVERY_CYCLES_PER_ROLE
+        || voter.snapshot_policy != learner.snapshot_policy
+        || voter.transport != learner.transport
+        || voter.resource_thread_envelope_allowance != learner.resource_thread_envelope_allowance
+        || voter.resource_socket_envelope_allowance != learner.resource_socket_envelope_allowance
+        || voter.resource_owned_async_task_envelope_allowance
+            != learner.resource_owned_async_task_envelope_allowance
+        || voter.resource_cleanup_horizon_millis != learner.resource_cleanup_horizon_millis
+        || voter.resource_stable_samples != learner.resource_stable_samples
+    {
+        bail!("transport-recovery role reports do not form one qualified execution");
+    }
+    let artifact = ClusterTransportRecoveryArtifact {
+        schema_version: TRANSPORT_RECOVERY_ARTIFACT_SCHEMA_VERSION,
+        evidence_scope: EVIDENCE_SCOPE.to_owned(),
+        build_sha,
+        platform: "linux".to_owned(),
+        started_at_unix_ms: voter.started_at_unix_ms.min(learner.started_at_unix_ms),
+        finished_at_unix_ms: voter.finished_at_unix_ms.max(learner.finished_at_unix_ms),
+        snapshot_policy: voter.snapshot_policy,
+        transport: voter.transport,
+        resource_thread_envelope_allowance: voter.resource_thread_envelope_allowance,
+        resource_socket_envelope_allowance: voter.resource_socket_envelope_allowance,
+        resource_owned_async_task_envelope_allowance: voter
+            .resource_owned_async_task_envelope_allowance,
+        resource_cleanup_horizon_millis: voter.resource_cleanup_horizon_millis,
+        resource_stable_samples: voter.resource_stable_samples,
+        learner: learner.campaign,
+        voter: voter.campaign,
+    };
+    validate_transport_recovery_artifact(&artifact)?;
+    let mut bytes = serde_json::to_vec_pretty(&artifact)?;
+    bytes.push(b'\n');
+    publish_artifact_atomically(&plan.output, &bytes)?;
+    println!(
+        "cluster-check: transport-recovery artifact {}",
+        lexical_absolute(&plan.output)?.display()
+    );
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct RoleValidationContext {
+    cycles_required: u32,
+    started_at_unix_ms: i64,
+    finished_at_unix_ms: i64,
+    allowances: ResourceEnvelopeAllowances,
+    resource_envelope_asserted: bool,
+}
+
 fn validate_role_campaign(
     campaign: &RecoveryRoleCampaign,
     role: RecoveryRole,
     minimum: u64,
-    artifact: &ClusterTransportRecoveryArtifact,
+    context: RoleValidationContext,
 ) -> Result<()> {
     if campaign.role != role
-        || campaign.cycles_required != TRANSPORT_RECOVERY_CYCLES_PER_ROLE
+        || campaign.cycles_required != context.cycles_required
         || campaign.minimum_sqlite_bytes != minimum
-        || campaign.cycles.len() != TRANSPORT_RECOVERY_CYCLES_PER_ROLE as usize
+        || campaign.cycles.len() != context.cycles_required as usize
         || campaign.worst_durations != worst_durations(&campaign.cycles)
     {
         bail!("{} recovery campaign shape drifted", role.label());
     }
-    validate_campaign_resource_envelopes(campaign, role, artifact)?;
+    validate_campaign_resource_envelopes(campaign, role, context)?;
     let mut snapshot_ids = BTreeSet::new();
     let mut established_resource_baselines = None;
     for (position, cycle) in campaign.cycles.iter().enumerate() {
@@ -2838,8 +3398,8 @@ fn validate_role_campaign(
         if cycle.role != role
             || cycle.cycle != expected_cycle
             || cycle.recovery_started_at_unix_ms >= cycle.recovery_finished_at_unix_ms
-            || cycle.recovery_started_at_unix_ms < artifact.started_at_unix_ms
-            || cycle.recovery_finished_at_unix_ms > artifact.finished_at_unix_ms
+            || cycle.recovery_started_at_unix_ms < context.started_at_unix_ms
+            || cycle.recovery_finished_at_unix_ms > context.finished_at_unix_ms
             || cycle.purged_index < cycle.snapshot_index
             || cycle.applied_index < cycle.snapshot_index
             || cycle.source_snapshot != cycle.installed_snapshot
@@ -2860,8 +3420,8 @@ fn validate_role_campaign(
             || cycle.acknowledged_writes.iter().any(|write| {
                 write.key.is_empty()
                     || !is_sha256(&write.value_sha256)
-                    || write.acknowledged_at_unix_ms < artifact.started_at_unix_ms
-                    || write.acknowledged_at_unix_ms > artifact.finished_at_unix_ms
+                    || write.acknowledged_at_unix_ms < context.started_at_unix_ms
+                    || write.acknowledged_at_unix_ms > context.finished_at_unix_ms
             })
         {
             bail!(
@@ -2908,10 +3468,19 @@ fn validate_cycle_transport(cycle: &RecoveryCycleEvidence) -> Result<()> {
         || target.observing_node_id != TARGET_NODE
         || target.source_node_id != source.observing_node_id
         || target.attempt_id == 0
-        || target.receive_started_at_unix_ms < source.attempt_started_at_unix_ms
+        || timestamp_precedes_beyond_tolerance(
+            target.receive_started_at_unix_ms,
+            source.attempt_started_at_unix_ms,
+        )
         || target.last_local_receive_at_unix_ms < target.install_completed_at_unix_ms
-        || target.last_local_receive_at_unix_ms > source.completed_at_unix_ms
-        || target.install_completed_at_unix_ms > source.completed_at_unix_ms
+        || timestamp_follows_beyond_tolerance(
+            target.last_local_receive_at_unix_ms,
+            source.completed_at_unix_ms,
+        )
+        || timestamp_follows_beyond_tolerance(
+            target.install_completed_at_unix_ms,
+            source.completed_at_unix_ms,
+        )
         || target.received_bytes != cycle.source_snapshot.bytes
         || target.total_bytes != cycle.source_snapshot.bytes
         || target.transfer_millis != target_transfer
@@ -2920,6 +3489,14 @@ fn validate_cycle_transport(cycle: &RecoveryCycleEvidence) -> Result<()> {
         bail!("recovery cycle transport evidence is incomplete or inconsistent");
     }
     Ok(())
+}
+
+fn timestamp_precedes_beyond_tolerance(value: i64, floor: i64) -> bool {
+    value < floor.saturating_sub(CROSS_PROCESS_TIMESTAMP_TOLERANCE_MILLIS)
+}
+
+fn timestamp_follows_beyond_tolerance(value: i64, ceiling: i64) -> bool {
+    value > ceiling.saturating_add(CROSS_PROCESS_TIMESTAMP_TOLERANCE_MILLIS)
 }
 
 /// The campaign's leak question, asked again offline from the recorded cycles.
@@ -2936,35 +3513,30 @@ fn validate_cycle_transport(cycle: &RecoveryCycleEvidence) -> Result<()> {
 fn validate_campaign_resource_envelopes(
     campaign: &RecoveryRoleCampaign,
     role: RecoveryRole,
-    artifact: &ClusterTransportRecoveryArtifact,
+    context: RoleValidationContext,
 ) -> Result<()> {
     let recomputed = resource_envelopes(&campaign.cycles)
         .with_context(|| format!("{} recovery campaign resource records", role.label()))?;
     if campaign.resource_envelopes != recomputed
         || recomputed.nodes.len() != TARGET_NODE as usize
         || recomputed.opening_window_last_cycle
-            != opening_window_last_cycle(TRANSPORT_RECOVERY_CYCLES_PER_ROLE as usize + 1)
-        || !envelope_is_asserted(&recomputed)
+            != opening_window_last_cycle(context.cycles_required as usize + 1)
+        || envelope_is_asserted(&recomputed) != context.resource_envelope_asserted
     {
         bail!(
             "{} recovery campaign resource envelopes do not match its cycles",
             role.label()
         );
     }
-    let rose = resource_envelopes_over_allowance(
-        &recomputed,
-        ResourceEnvelopeAllowances {
-            threads: artifact.resource_thread_envelope_allowance,
-            sockets: artifact.resource_socket_envelope_allowance,
-            owned_async_tasks: artifact.resource_owned_async_task_envelope_allowance,
-        },
-    );
-    if !rose.is_empty() {
-        bail!(
-            "{} recovery campaign leaked resources: {}",
-            role.label(),
-            rose.join("; ")
-        );
+    if context.resource_envelope_asserted {
+        let rose = resource_envelopes_over_allowance(&recomputed, context.allowances);
+        if !rose.is_empty() {
+            bail!(
+                "{} recovery campaign leaked resources: {}",
+                role.label(),
+                rose.join("; ")
+            );
+        }
     }
     Ok(())
 }
@@ -3016,9 +3588,13 @@ mod tests {
         }
     }
 
-    fn role_campaign(role: RecoveryRole, minimum: u64) -> RecoveryRoleCampaign {
+    fn role_campaign_with_cycles(
+        role: RecoveryRole,
+        minimum: u64,
+        cycles_required: u32,
+    ) -> RecoveryRoleCampaign {
         let marker = format!("transport-recovery-{}-image-v1", role.label());
-        let cycles = (1..=TRANSPORT_RECOVERY_CYCLES_PER_ROLE)
+        let cycles = (1..=cycles_required)
             .map(|cycle| {
                 let writes = vec![
                     write(cycle.saturating_mul(3), 1_500),
@@ -3104,12 +3680,16 @@ mod tests {
             .collect::<Vec<_>>();
         RecoveryRoleCampaign {
             role,
-            cycles_required: TRANSPORT_RECOVERY_CYCLES_PER_ROLE,
+            cycles_required,
             minimum_sqlite_bytes: minimum,
             worst_durations: worst_durations(&cycles),
             resource_envelopes: resource_envelopes(&cycles).expect("fixture envelopes"),
             cycles,
         }
+    }
+
+    fn role_campaign(role: RecoveryRole, minimum: u64) -> RecoveryRoleCampaign {
+        role_campaign_with_cycles(role, minimum, TRANSPORT_RECOVERY_CYCLES_PER_ROLE)
     }
 
     /// Rewrite one node's post-quiescence series across a campaign and
@@ -3166,37 +3746,346 @@ mod tests {
         }
     }
 
+    fn role_report(role: RecoveryRole, cycles_required: u32) -> TransportRecoveryRoleReport {
+        let campaign =
+            role_campaign_with_cycles(role, role.minimum_sqlite_bytes(), cycles_required);
+        TransportRecoveryRoleReport {
+            schema_version: TRANSPORT_RECOVERY_ROLE_REPORT_SCHEMA_VERSION,
+            kind: ROLE_REPORT_KIND.to_owned(),
+            execution_id: "test-execution-1".to_owned(),
+            build_sha: "d".repeat(40),
+            platform: "linux".to_owned(),
+            build_profile: build_profile_descriptor(),
+            started_at_unix_ms: 1_000,
+            finished_at_unix_ms: 10_000,
+            scope: role_report_scope(cycles_required),
+            resource_envelope_asserted: envelope_is_asserted(&campaign.resource_envelopes),
+            snapshot_policy: fixed_snapshot_policy(),
+            transport: fixed_transport_contract(),
+            resource_thread_envelope_allowance: THREAD_ENVELOPE_ALLOWANCE,
+            resource_socket_envelope_allowance: SOCKET_ENVELOPE_ALLOWANCE,
+            resource_owned_async_task_envelope_allowance: OWNED_ASYNC_TASK_ENVELOPE_ALLOWANCE,
+            resource_cleanup_horizon_millis: duration_millis(RESOURCE_CLEANUP_HORIZON),
+            resource_stable_samples: RESOURCE_STABLE_SAMPLES,
+            campaign,
+        }
+    }
+
+    fn role_plan(role: RecoveryRole, root: &Path) -> RecoveryRolePlan {
+        RecoveryRolePlan {
+            role,
+            cycles_required: 3,
+            execution_id: "test-execution-1".to_owned(),
+            output: root.join(format!("{}-role.json", role.label())),
+            diagnostics_dir: root.join(format!("{}-diagnostics", role.label())),
+            max_runtime_seconds: None,
+        }
+    }
+
     #[test]
     fn complete_twenty_plus_twenty_artifact_is_accepted() {
         validate_transport_recovery_artifact(&artifact()).expect("valid recovery artifact");
     }
 
     #[test]
-    fn voter_smoke_plan_is_bounded_and_cannot_claim_full_qualification() {
-        let default = voter_smoke_plan(&[]).expect("default voter smoke plan");
-        assert_eq!(default.role, RecoveryRole::Voter);
+    fn role_cli_requires_every_explicit_input_and_rejects_ambiguous_paths() {
+        let valid = vec![
+            "--role".to_owned(),
+            "learner".to_owned(),
+            "--cycles".to_owned(),
+            "3".to_owned(),
+            "--execution-id".to_owned(),
+            "run_1.ok".to_owned(),
+            "--output".to_owned(),
+            "target/role.json".to_owned(),
+            "--diagnostics-dir".to_owned(),
+            "target/diagnostics".to_owned(),
+            "--max-runtime-seconds".to_owned(),
+            "30".to_owned(),
+        ];
+        let plan = parse_recovery_role_plan(&valid).expect("valid role plan");
+        assert_eq!(plan.role, RecoveryRole::Learner);
+        assert_eq!(plan.cycles_required, 3);
+        assert_eq!(plan.max_runtime_seconds, Some(30));
+
+        for invalid in [
+            vec![],
+            vec!["--unknown".to_owned(), "x".to_owned()],
+            vec!["--role".to_owned()],
+            [valid.clone(), vec!["--role".to_owned(), "voter".to_owned()]].concat(),
+        ] {
+            assert!(parse_recovery_role_plan(&invalid).is_err(), "{invalid:?}");
+        }
+        for (position, replacement) in [(1, "unsupported"), (3, "0"), (5, "bad/path"), (11, "0")] {
+            let mut invalid = valid.clone();
+            invalid[position] = replacement.to_owned();
+            assert!(parse_recovery_role_plan(&invalid).is_err(), "{invalid:?}");
+        }
+        let mut colliding = valid;
+        colliding[9] = "target/role.json/diagnostics".to_owned();
+        assert!(parse_recovery_role_plan(&colliding).is_err());
+    }
+
+    #[test]
+    fn assembly_cli_is_strict_and_refuses_path_collisions() {
+        let valid = vec![
+            "--execution-id".to_owned(),
+            "paired-1".to_owned(),
+            "--voter".to_owned(),
+            "voter.json".to_owned(),
+            "--learner".to_owned(),
+            "learner.json".to_owned(),
+            "--output".to_owned(),
+            "combined.json".to_owned(),
+        ];
+        assert!(parse_recovery_assemble_plan(&valid).is_ok());
+        for invalid in [
+            vec![],
+            vec!["--unexpected".to_owned(), "x".to_owned()],
+            [
+                valid.clone(),
+                vec!["--voter".to_owned(), "another.json".to_owned()],
+            ]
+            .concat(),
+        ] {
+            assert!(parse_recovery_assemble_plan(&invalid).is_err());
+        }
+        let mut colliding = valid;
+        colliding[7] = "voter.json".to_owned();
+        assert!(parse_recovery_assemble_plan(&colliding).is_err());
+    }
+
+    #[test]
+    fn bounded_role_reports_derive_scope_and_resource_assertion() {
+        for (cycles, scope, asserted) in [
+            (1, RecoveryRoleReportScope::Smoke, false),
+            (18, RecoveryRoleReportScope::Smoke, false),
+            (19, RecoveryRoleReportScope::Smoke, true),
+            (20, RecoveryRoleReportScope::QualificationRole, true),
+        ] {
+            let report = role_report(RecoveryRole::Voter, cycles);
+            assert_eq!(report.scope, scope);
+            assert_eq!(report.resource_envelope_asserted, asserted);
+            validate_transport_recovery_role_report(&report)
+                .unwrap_or_else(|error| panic!("{cycles}-cycle report failed: {error:#}"));
+        }
+    }
+
+    #[test]
+    fn purge_evidence_pins_the_boundary_that_was_awaited() {
+        let evidence = snapshot_purge_evidence(1_278, 1_278).expect("awaited purge boundary");
+        assert_eq!(evidence.snapshot_index, 1_278);
+        assert_eq!(evidence.purged_index, 1_278);
+        assert!(snapshot_purge_evidence(1_279, 1_278).is_err());
+    }
+
+    #[test]
+    fn cross_process_timestamp_tolerance_is_bounded() {
+        assert!(!timestamp_precedes_beyond_tolerance(998, 1_000));
+        assert!(timestamp_precedes_beyond_tolerance(997, 1_000));
+        assert!(!timestamp_follows_beyond_tolerance(1_002, 1_000));
+        assert!(timestamp_follows_beyond_tolerance(1_003, 1_000));
+    }
+
+    #[test]
+    fn role_report_refuses_identity_contract_and_cycle_drift() {
+        let valid = role_report(RecoveryRole::Voter, 3);
+        for mutate in [
+            |value: &mut TransportRecoveryRoleReport| value.execution_id = "bad/id".to_owned(),
+            |value: &mut TransportRecoveryRoleReport| value.build_sha = "x".repeat(40),
+            |value: &mut TransportRecoveryRoleReport| value.build_profile.clear(),
+            |value: &mut TransportRecoveryRoleReport| {
+                value.scope = RecoveryRoleReportScope::QualificationRole
+            },
+            |value: &mut TransportRecoveryRoleReport| value.resource_envelope_asserted = true,
+            |value: &mut TransportRecoveryRoleReport| {
+                value.transport.separate_writer_process = false
+            },
+            |value: &mut TransportRecoveryRoleReport| value.campaign.cycles[0].cycle = 2,
+        ] {
+            let mut value = valid.clone();
+            mutate(&mut value);
+            assert!(validate_transport_recovery_role_report(&value).is_err());
+        }
+    }
+
+    #[test]
+    fn role_report_bytes_reject_unknown_top_level_and_campaign_fields() {
+        for path in ["unexpected", "campaign.unexpected"] {
+            let mut value = serde_json::to_value(role_report(RecoveryRole::Learner, 3))
+                .expect("serialize role report");
+            if path == "unexpected" {
+                value["unexpected"] = serde_json::json!(true);
+            } else {
+                value["campaign"]["unexpected"] = serde_json::json!(true);
+            }
+            let bytes = serde_json::to_vec(&value).expect("encode mutated role report");
+            assert!(validate_transport_recovery_role_bytes(&bytes).is_err());
+        }
+    }
+
+    #[test]
+    fn assembler_requires_two_qualified_reports_from_one_execution() {
+        let root = tempfile::tempdir().expect("assembly root");
+        let voter_path = root.path().join("voter.json");
+        let learner_path = root.path().join("learner.json");
+        let output = root.path().join("combined.json");
+        let build_sha = resolve_build_sha().expect("test checkout SHA");
+        let mut voter = role_report(RecoveryRole::Voter, 20);
+        voter.build_sha.clone_from(&build_sha);
+        let mut learner = role_report(RecoveryRole::Learner, 20);
+        learner.build_sha.clone_from(&build_sha);
+        std::fs::write(
+            &voter_path,
+            serde_json::to_vec(&voter).expect("encode voter"),
+        )
+        .expect("write voter");
+        std::fs::write(
+            &learner_path,
+            serde_json::to_vec(&learner).expect("encode learner"),
+        )
+        .expect("write learner");
+        assemble_transport_recovery_reports(RecoveryAssemblePlan {
+            execution_id: "test-execution-1".to_owned(),
+            voter: voter_path.clone(),
+            learner: learner_path.clone(),
+            output: output.clone(),
+        })
+        .expect("assemble qualified reports");
+        validate_transport_recovery_bytes(&std::fs::read(&output).expect("read artifact"))
+            .expect("validate assembled canonical artifact");
+
+        voter = role_report(RecoveryRole::Voter, 3);
+        voter.build_sha = build_sha;
+        std::fs::write(
+            &voter_path,
+            serde_json::to_vec(&voter).expect("encode smoke voter"),
+        )
+        .expect("write smoke voter");
+        std::fs::write(&output, b"stale success").expect("seed stale output");
+        assert!(assemble_transport_recovery_reports(RecoveryAssemblePlan {
+            execution_id: "test-execution-1".to_owned(),
+            voter: voter_path,
+            learner: learner_path,
+            output: output.clone(),
+        })
+        .is_err());
+        assert!(!output.exists(), "failed assembly retained stale success");
+    }
+
+    #[test]
+    fn assembler_refuses_valid_reports_from_another_role_run_or_source() {
+        let root = tempfile::tempdir().expect("assembly mismatch root");
+        let voter_path = root.path().join("voter.json");
+        let learner_path = root.path().join("learner.json");
+        let output = root.path().join("combined.json");
+        let build_sha = resolve_build_sha().expect("test checkout SHA");
+        let mut voter = role_report(RecoveryRole::Voter, 20);
+        voter.build_sha.clone_from(&build_sha);
+        let mut learner = role_report(RecoveryRole::Learner, 20);
+        learner.build_sha.clone_from(&build_sha);
+
+        let mut wrong_execution = voter.clone();
+        wrong_execution.execution_id = "other-execution".to_owned();
+        let mut wrong_sha = voter.clone();
+        wrong_sha.build_sha = "e".repeat(40);
+        let mut wrong_role = role_report(RecoveryRole::Learner, 20);
+        wrong_role.build_sha.clone_from(&build_sha);
+        for (case, candidate) in [
+            ("wrong execution", wrong_execution),
+            ("wrong source", wrong_sha),
+            ("wrong role", wrong_role),
+        ] {
+            std::fs::write(
+                &voter_path,
+                serde_json::to_vec(&candidate).expect("encode invalid pair member"),
+            )
+            .expect("write invalid pair member");
+            std::fs::write(
+                &learner_path,
+                serde_json::to_vec(&learner).expect("encode learner"),
+            )
+            .expect("write learner");
+            std::fs::write(&output, b"stale success").expect("seed stale output");
+            let error = assemble_transport_recovery_reports(RecoveryAssemblePlan {
+                execution_id: "test-execution-1".to_owned(),
+                voter: voter_path.clone(),
+                learner: learner_path.clone(),
+                output: output.clone(),
+            })
+            .expect_err("mismatched role reports must not assemble");
+            assert!(!output.exists(), "{case} retained stale output: {error:#}");
+        }
+    }
+
+    #[test]
+    fn independent_role_errors_remain_attributed() {
+        let voter = role_report(RecoveryRole::Voter, 3);
+        let learner = role_report(RecoveryRole::Learner, 3);
+        for (results, expected) in [
+            (
+                (Err(anyhow::anyhow!("voter cause")), Ok(learner.clone())),
+                "voter transport-recovery role failed",
+            ),
+            (
+                (Ok(voter.clone()), Err(anyhow::anyhow!("learner cause"))),
+                "learner transport-recovery role failed",
+            ),
+        ] {
+            let error = require_independent_roles(results).expect_err("one role failed");
+            assert!(format!("{error:#}").contains(expected));
+        }
+    }
+
+    #[tokio::test]
+    async fn voter_failure_does_not_skip_the_independent_learner_attempt() {
+        let root = tempfile::tempdir().expect("sequence root");
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = calls.clone();
+        let results = run_role_sequence(
+            role_plan(RecoveryRole::Voter, root.path()),
+            role_plan(RecoveryRole::Learner, root.path()),
+            move |plan| {
+                let observed = observed.clone();
+                async move {
+                    observed.lock().expect("record role call").push(plan.role);
+                    bail!("{} injected failure", plan.role.label())
+                }
+            },
+        )
+        .await;
         assert_eq!(
-            default.minimum_sqlite_bytes,
-            TRANSPORT_RECOVERY_LARGE_IMAGE_BYTES
+            *calls.lock().expect("read role calls"),
+            vec![RecoveryRole::Voter, RecoveryRole::Learner]
         );
-        assert_eq!(
-            default.cycles_required,
-            TRANSPORT_RECOVERY_DEFAULT_VOTER_SMOKE_CYCLES
-        );
+        let error = require_independent_roles(results).expect_err("both roles failed");
+        let message = format!("{error:#}");
+        assert!(message.contains("voter") && message.contains("learner"));
+    }
+
+    #[test]
+    fn smoke_aliases_are_bounded_and_cannot_claim_full_qualification() {
+        let default = smoke_cycles(&[], RecoveryRole::Voter).expect("default voter smoke");
+        assert_eq!(default, TRANSPORT_RECOVERY_DEFAULT_VOTER_SMOKE_CYCLES);
         assert_ne!(
-            default.cycles_required, TRANSPORT_RECOVERY_CYCLES_PER_ROLE,
+            default, TRANSPORT_RECOVERY_CYCLES_PER_ROLE,
             "smoke success must remain distinct from full qualification"
         );
+        assert_eq!(
+            smoke_cycles(&[], RecoveryRole::Learner).expect("default learner smoke"),
+            TRANSPORT_RECOVERY_DEFAULT_LEARNER_SMOKE_CYCLES
+        );
 
-        let requested = voter_smoke_plan(&["3".to_owned()]).expect("requested smoke plan");
-        assert_eq!(requested.cycles_required, 3);
+        let requested =
+            smoke_cycles(&["3".to_owned()], RecoveryRole::Voter).expect("requested smoke count");
+        assert_eq!(requested, 3);
         for arguments in [
             vec!["0".to_owned()],
             vec![(TRANSPORT_RECOVERY_CYCLES_PER_ROLE + 1).to_string()],
             vec!["not-a-count".to_owned()],
             vec!["3".to_owned(), "extra".to_owned()],
         ] {
-            assert!(voter_smoke_plan(&arguments).is_err());
+            assert!(smoke_cycles(&arguments, RecoveryRole::Voter).is_err());
         }
     }
 
@@ -4134,5 +5023,21 @@ mod tests {
             .expect("artifact object")
             .insert("invented".to_owned(), serde_json::json!(true));
         assert!(!validator.is_valid(&value));
+
+        let role_schema: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../benchmarks/cluster-transport-recovery-role.schema.json"
+        ))
+        .expect("parse recovery role schema");
+        jsonschema::draft202012::meta::validate(&role_schema)
+            .expect("valid recovery role meta-schema");
+        let role_validator =
+            jsonschema::draft202012::new(&role_schema).expect("compile recovery role schema");
+        let mut role_value = serde_json::to_value(role_report(RecoveryRole::Voter, 3))
+            .expect("serialize recovery role fixture");
+        role_value
+            .as_object_mut()
+            .expect("role report object")
+            .insert("invented".to_owned(), serde_json::json!(true));
+        assert!(!role_validator.is_valid(&role_value));
     }
 }
