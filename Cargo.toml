@@ -124,6 +124,17 @@ opt-level = 3
 [profile.test]
 debug = 0
 
+# The real-process recovery harness spends minutes in SQLite image generation
+# and verification. Optimize that executable without changing production or
+# ordinary development profiles, while retaining assertions and line tables
+# for failure diagnosis.
+[profile.transport-recovery]
+inherits = "dev"
+opt-level = 2
+debug = 1
+debug-assertions = true
+overflow-checks = true
+
 [profile.release]
 lto = "thin"
 strip = "symbols"

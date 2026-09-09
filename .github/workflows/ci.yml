@@ -483,7 +483,7 @@ jobs:
       - name: Build the exact voter role runner
         env:
           PLURX_BUILD_SHA: ${{ github.sha }}
-        run: cargo build --locked -p plurx-cluster-check
+        run: cargo build --locked --profile transport-recovery -p plurx-cluster-check
       - name: Run 20 voter snapshot recovery cycles
         id: voter_recovery
         continue-on-error: true
@@ -504,7 +504,8 @@ jobs:
             RECOVERY_EXECUTION_ID="ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
             RECOVERY_OUTPUT_DIR=target/validation/transport-recovery-voter \
             RECOVERY_MAX_RUN_SECONDS="$role_budget" \
-            RECOVERY_BINARY="${{ steps.cargo-cache.outputs.target-dir }}/debug/plurx-cluster-check" \
+            RECOVERY_CARGO_PROFILE=transport-recovery \
+            RECOVERY_BINARY="${{ steps.cargo-cache.outputs.target-dir }}/transport-recovery/plurx-cluster-check" \
             2>&1 | tee target/validation/cluster-transport-recovery-voter.log
       - name: Retain voter report, diagnostics, and log
         if: always()
@@ -548,7 +549,7 @@ jobs:
       - name: Build the exact learner role runner
         env:
           PLURX_BUILD_SHA: ${{ github.sha }}
-        run: cargo build --locked -p plurx-cluster-check
+        run: cargo build --locked --profile transport-recovery -p plurx-cluster-check
       - name: Run 20 learner snapshot recovery cycles
         id: learner_recovery
         continue-on-error: true
@@ -569,7 +570,8 @@ jobs:
             RECOVERY_EXECUTION_ID="ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
             RECOVERY_OUTPUT_DIR=target/validation/transport-recovery-learner \
             RECOVERY_MAX_RUN_SECONDS="$role_budget" \
-            RECOVERY_BINARY="${{ steps.cargo-cache.outputs.target-dir }}/debug/plurx-cluster-check" \
+            RECOVERY_CARGO_PROFILE=transport-recovery \
+            RECOVERY_BINARY="${{ steps.cargo-cache.outputs.target-dir }}/transport-recovery/plurx-cluster-check" \
             2>&1 | tee target/validation/cluster-transport-recovery-learner.log
       - name: Retain learner report, diagnostics, and log
         if: always()
@@ -618,7 +620,7 @@ jobs:
         continue-on-error: true
         env:
           PLURX_BUILD_SHA: ${{ github.sha }}
-        run: cargo build --locked -p plurx-cluster-check
+        run: cargo build --locked --profile transport-recovery -p plurx-cluster-check
       - name: Download this run's voter evidence
         id: download_voter_recovery
         continue-on-error: true
@@ -649,7 +651,7 @@ jobs:
         run: |
           set -eo pipefail
           mkdir -p target/validation
-          validator="${{ steps.cargo-cache.outputs.target-dir }}/debug/plurx-cluster-check"
+          validator="${{ steps.cargo-cache.outputs.target-dir }}/transport-recovery/plurx-cluster-check"
           {
             test "$CONTRACTS_RESULT" = success
             test "$VOTER_RESULT" = success
@@ -669,7 +671,7 @@ jobs:
         if: always()
         env:
           LANE_RESULT: ${{ steps.transport_recovery.outcome }}
-          EVIDENCE_VALIDATOR: ${{ steps.cargo-cache.outputs.target-dir }}/debug/plurx-cluster-check
+          EVIDENCE_VALIDATOR: ${{ steps.cargo-cache.outputs.target-dir }}/transport-recovery/plurx-cluster-check
         run: >-
           python3 -m validation.ci_lane_receipt
           --output target/validation/cluster-transport-recovery-receipt.json
