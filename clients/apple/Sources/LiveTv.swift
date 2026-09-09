@@ -318,10 +318,21 @@ protocol LiveTvBarrierStore {
 
 /// Atomic one-byte marker, no token, capability, profile or device information.
 /// A fresh app process waits a full monotonic grace period if it finds it.
-private struct LiveTvFileBarrierStore: LiveTvBarrierStore {
+struct LiveTvFileBarrierStore: LiveTvBarrierStore {
     private func url() throws -> URL {
+#if os(tvOS)
+        // tvOS does not guarantee an Application Support directory in an
+        // app's local container. The restart fence lives for only 90 seconds,
+        // contains no capability or user data, and must be writable before a
+        // tuner request leaves the device, so keep it in the platform's
+        // supported local cache area instead.
+        return try FileManager.default.url(for: .cachesDirectory, in: .userDomainMask,
+                                           appropriateFor: nil, create: true)
+            .appendingPathComponent("live-tv-start.pending")
+#else
         try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
                                     appropriateFor: nil, create: true).appendingPathComponent("live-tv-start.pending")
+#endif
     }
     func pending() throws -> Bool { FileManager.default.fileExists(atPath: try url().path) }
     func setPending(_ value: Bool) throws {

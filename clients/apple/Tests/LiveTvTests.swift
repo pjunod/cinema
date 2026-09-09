@@ -5,6 +5,18 @@ import XCTest
 
 @MainActor
 final class LiveTvTests: XCTestCase {
+    func testPlatformRestartMarkerStoreCanRoundTrip() throws {
+        let store = LiveTvFileBarrierStore()
+        try store.setPending(false)
+        defer { try? store.setPending(false) }
+
+        XCTAssertFalse(try store.pending())
+        try store.setPending(true)
+        XCTAssertTrue(try store.pending())
+        try store.setPending(false)
+        XCTAssertFalse(try store.pending())
+    }
+
     private let channel = LiveTvChannel(id: "7.1", guideNumber: "7.1", guideName: "Local",
                                         favorite: false, drm: false, support: "ready",
                                         hd: nil, videoCodec: nil, audioCodec: nil)

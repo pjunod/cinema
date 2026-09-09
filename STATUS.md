@@ -1,8 +1,32 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-09-08 · Kept current by the working agent in the same
+**Updated:** 2026-09-09 · Kept current by the working agent in the same
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
+
+## Fresh Dolby Vision recovery converts, and tvOS can arm Live TV starts
+
+**Built for issue #215; focused Rust regressions pass, while the local Xcode
+build service is wedged before Swift compilation.** A Profile 7 decision
+correctly requested Profile 8.1, but the growing-HLS copy immediately passed
+that request through `served_copy_options`, which exists for the legacy muxer
+and deliberately narrows unsupported conversion to HDR10. The GOP-aware copy
+segmenter now keeps the request, runs the existing post-mux RPU converter
+before any segment measurement or publication, writes the matching Profile 8
+record into `init.mp4`, and has no legacy retry that could change the frozen
+presentation. An end-to-end fixture reads the emitted init and segment back:
+the record is Profile 8 with no enhancement layer and a second conversion
+refuses because the RPUs already say 8.
+
+Apple TV build 126 failed earlier than its tuner request. Its installed app
+container had `Library/Caches` but no `Library/Application Support`; the
+restart-safety store's first directory lookup failed and permanently latched
+`live_tv_storage_unavailable` for that process. On tvOS the token-free,
+90-second marker now uses the supported cache directory, still written before
+dispatch and removed only when ownership is known or cleanup succeeds. A real
+store round-trip XCTest covers the platform path. Two unrelated web starts
+did reach the server during diagnosis and timed out as 503 after 10.4 seconds;
+that tuner/reception outcome remains separate from the Apple client refusal.
 
 ## The transport-recovery campaign asserted a property the system does not have
 
