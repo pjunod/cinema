@@ -1030,3 +1030,15 @@ source = "clients/android/app/build.gradle.kts"
 source_anchor = "versionCode = 78"
 test = "tests/validation/test_mobile_versions.py"
 test_anchor = "test_each_changed_app_requires_only_its_own_build_counter"
+
+[[fixes]]
+# tvOS 26 rendered default tinted actions as empty red capsules, stretched
+# default toggles across the room, and focused List search before the viewer
+# requested it. The Live TV surface now owns readable focus contrast and opens
+# search explicitly.
+id = "apple.live-tv-readable-ten-foot-controls"
+commits = ["ae392853"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = "private struct LiveTvChannelButtonStyle: ButtonStyle"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testTheTenFootSurfaceKeepsSomethingFocusableWhileTheOverlayIsHidden"

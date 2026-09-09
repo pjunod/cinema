@@ -397,10 +397,12 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
 /// - **`el_present` becomes false**, because `filter_units=remove_types=63`
 ///   dropped the enhancement layer and a record still declaring one tells a
 ///   decoder to expect a layer that is not in the stream;
-/// - **the level and the compatibility id are the source's**, unchanged. The
-///   level bounds resolution and frame rate, neither of which the conversion
-///   touches; the compatibility id says what a non-Dolby-Vision client sees of
-///   the base layer, and the base layer is copied byte for byte.
+/// - **the level is the source's**, unchanged. It bounds resolution and frame
+///   rate, neither of which the conversion touches;
+/// - **the compatibility id becomes 1**. `ConversionMode::To81` rewrites the
+///   RPUs to Profile 8.1, whose base-layer signal is HDR10. Keeping a Profile
+///   7 source's compatibility id (Outbreak carried 6) made the init contradict
+///   the playlist's `db1p` declaration and Safari rejected the first fragment.
 pub(crate) fn converted_dolby_vision_record(
     file: &MediaFile,
 ) -> Result<plurx_core::fmp4::DolbyVisionRecord, String> {
@@ -409,12 +411,9 @@ pub(crate) fn converted_dolby_vision_record(
         .level
         .and_then(|level| u8::try_from(level).ok())
         .ok_or("the source has no stored Dolby Vision level")?;
-    let compat = file
-        .dolby_vision
-        .bl_compat_id
-        .and_then(|id| u8::try_from(id).ok())
-        .ok_or("the source has no stored base-layer compatibility id")?;
-    plurx_core::fmp4::DolbyVisionRecord::new(8, level, false, true, true, compat)
+    // Profile 8.1 is defined by its HDR10-compatible base. This describes the
+    // converted output, not the Profile 7 container record ffmpeg copied.
+    plurx_core::fmp4::DolbyVisionRecord::new(8, level, false, true, true, 1)
         .map_err(|error| error.to_string())
 }
 
@@ -986,9 +985,9 @@ mod tests {
              conversion touches"
         );
         assert_eq!(
-            record.bl_signal_compatibility_id, 6,
-            "the base layer is copied byte for byte, so what a non-DV client \
-             sees of it is unchanged"
+            record.bl_signal_compatibility_id, 1,
+            "the output is Profile 8.1 even when the Profile 7 source record \
+             carried another compatibility id"
         );
 
         // A row that cannot describe one refuses rather than inventing values.

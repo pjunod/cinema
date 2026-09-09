@@ -1121,6 +1121,22 @@ async fn encoded_vod_two_hour_audio_restart_budget() {
         .object_version()
         .to_owned();
     refresh_encoded_plan(&file, mutable);
+    let target = 3594.0 * 2.002;
+    let args = encoding.args(&file, target, 7200.0);
+    let inputs = args
+        .iter()
+        .enumerate()
+        .filter_map(|(index, argument)| (argument == "-i").then_some(index))
+        .collect::<Vec<_>>();
+    let audio_input = *inputs.get(1).expect("separate audio input");
+    assert_eq!(args[audio_input - 2], "-ss");
+    let audio_seek = args[audio_input - 1]
+        .parse::<f64>()
+        .expect("numeric audio seek");
+    assert!(
+        audio_seek > target - 5.0,
+        "the audio input must seek near the requested film position, not decode from zero: {audio_seek}"
+    );
     #[cfg(unix)]
     let cpu_before = child_cpu_seconds();
     let started = std::time::Instant::now();
@@ -1133,7 +1149,7 @@ async fn encoded_vod_two_hour_audio_restart_budget() {
     );
     let decoded = decoded_audio(&base.path().join("long-get.mp4"), &init, &media, &[]).await;
     assert!(!decoded.is_empty());
-    eprintln!("two-hour / 5.1 AAC / local warm file / seek {:.3}s / {} source bytes / first two GETs + reap {:?}", 3594.0 * 2.002, file.size, elapsed);
+    eprintln!("two-hour / 5.1 AAC / local warm file / seek {target:.3}s / {} source bytes / first two GETs + reap {:?}", file.size, elapsed);
     assert!(
         elapsed < Duration::from_secs(25),
         "preparation needs headroom under the 30-second materialization deadline: {elapsed:?}"

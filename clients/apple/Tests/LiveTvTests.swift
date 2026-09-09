@@ -545,6 +545,14 @@ final class LiveTvTests: XCTestCase {
         XCTAssertTrue(source.contains("if !visible { focusedControl = .reveal }"))
         // And the television is fullscreen without anyone pressing a button.
         XCTAssertTrue(source.contains(".onChange(of: live.playing) { _, playing in if playing { fullscreen = true } }"))
+        // Search must be explicit on a television. Applying `.searchable` to
+        // its List focused the field at entry and covered half the page with a
+        // keyboard before the viewer asked for one.
+        XCTAssertTrue(source.contains(".sheet(isPresented: $showingSearch)"))
+        // tvOS 26's default tint can make a label and its capsule the same
+        // accent colour. Page actions and rows own their focus contrast.
+        XCTAssertTrue(source.contains(".buttonStyle(TVReadableButtonStyle(prominent: favoritesOnly))"))
+        XCTAssertTrue(source.contains(".buttonStyle(LiveTvChannelButtonStyle())"))
     }
 
     func testTuningFromTheOverlayDoesNotDismissTheSurfaceMidStart() throws {
