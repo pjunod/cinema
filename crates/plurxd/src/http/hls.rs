@@ -39,7 +39,7 @@ use crate::media_sessions::{
     unix_ms, worker_session_request_is_valid, DurableRouteResolution, RelayHeaders, RelayRequest,
     RelayResource, ReleaseAdmission, ReleaseSettlement, RemoteAbortRequest, RemoteStartRequest,
     RemoteStartResponse, ACTIVATION_STORE_DEADLINE, LEASE_TTL_MS, MAX_ADMITTED_MEDIA_BODY_LIFETIME,
-    MEDIA_BODY_NO_PROGRESS_TIMEOUT, OWNER_ASSIGNMENT_DEADLINE,
+    MEDIA_BODY_NO_PROGRESS_TIMEOUT, OWNER_ASSIGNMENT_DEADLINE, PREPARED_SUCCESSOR_PLAN_NOTE,
     REMOTE_ACTIVATION_CONFIRMATION_WINDOW, START_DEADLINE, TERMINAL_PROJECTION_SAFETY_WINDOW,
 };
 use crate::state::AppState;
@@ -3540,18 +3540,41 @@ async fn relay_if_remote(
     headers: RelayHeaders,
     request_deadline: Instant,
 ) -> Result<Option<Response>, ApiError> {
-    let mut route = match state
-        .media_sessions
-        .route_resolution_before(session_id, &state.node_id, request_deadline)
-        .await?
-    {
+    let media_resource = !matches!(resource, RelayResource::Status | RelayResource::Delete);
+    let resolution = if media_resource {
+        state
+            .media_sessions
+            .media_route_resolution_before(session_id, &state.node_id, request_deadline)
+            .await?
+    } else {
+        state
+            .media_sessions
+            .route_resolution_before(session_id, &state.node_id, request_deadline)
+            .await?
+    };
+    let mut route = match resolution {
         DurableRouteResolution::Absent | DurableRouteResolution::ActiveLocal(_) => return Ok(None),
         DurableRouteResolution::OwnerTransition(_) | DurableRouteResolution::Terminal(_) => {
-            match state
-                .media_sessions
-                .authoritative_route_resolution_before(session_id, &state.node_id, request_deadline)
-                .await?
-            {
+            let resolution = if media_resource {
+                state
+                    .media_sessions
+                    .authoritative_media_route_resolution_before(
+                        session_id,
+                        &state.node_id,
+                        request_deadline,
+                    )
+                    .await?
+            } else {
+                state
+                    .media_sessions
+                    .authoritative_route_resolution_before(
+                        session_id,
+                        &state.node_id,
+                        request_deadline,
+                    )
+                    .await?
+            };
+            match resolution {
                 DurableRouteResolution::Absent => return Err(ApiError::NotFound("hls session")),
                 DurableRouteResolution::ActiveLocal(_) => return Ok(None),
                 DurableRouteResolution::ActiveRemote(route) => route,
@@ -3588,10 +3611,21 @@ async fn relay_if_remote(
         if !relay_status_requires_reclassification(peer_status) {
             return Ok(Some(response));
         }
-        let resolution = state
-            .media_sessions
-            .authoritative_route_resolution_before(session_id, &state.node_id, request_deadline)
-            .await?;
+        let resolution = if media_resource {
+            state
+                .media_sessions
+                .authoritative_media_route_resolution_before(
+                    session_id,
+                    &state.node_id,
+                    request_deadline,
+                )
+                .await?
+        } else {
+            state
+                .media_sessions
+                .authoritative_route_resolution_before(session_id, &state.node_id, request_deadline)
+                .await?
+        };
         match resolution {
             DurableRouteResolution::Absent if peer_status == StatusCode::NOT_FOUND => {
                 return Ok(Some(response));
@@ -4739,7 +4773,9 @@ async fn settle_preparation_control(
         if tokio::time::Instant::now() >= deadline {
             break;
         }
-        let settled = match &outcome.preparation_directive {
+        let settled: Result<PreparationSettlement, StoreError> = match &outcome
+            .preparation_directive
+        {
             crate::playback_control::PreparationDirective::Commit { .. } => {
                 #[cfg(test)]
                 if consume_preparation_settlement_fault(&route.incarnation_id) {
@@ -4751,7 +4787,7 @@ async fn settle_preparation_control(
                     continue;
                 }
                 if let Some(acknowledgement) = commit_acknowledgement.clone() {
-                    executor
+                    match executor
                         .commit(
                             staged_incarnation_id,
                             unix_ms(),
@@ -4759,56 +4795,88 @@ async fn settle_preparation_control(
                             Some(acknowledgement),
                         )
                         .await
-                        .map(|commit| match commit {
-                            crate::playback_control::PreparationCommitOutcome::Committed(commit)
-                            | crate::playback_control::PreparationCommitOutcome::Replayed(commit) => {
-                                commit
-                                    .control_receipt
-                                    .filter(|receipt| {
-                                        commit_acknowledgement.as_ref().is_some_and(|expected| {
-                                            terminal_ack_matches(receipt, expected)
-                                        })
+                    {
+                        Ok(crate::playback_control::PreparationCommitOutcome::Committed(
+                            commit,
+                        ))
+                        | Ok(crate::playback_control::PreparationCommitOutcome::Replayed(commit)) =>
+                        {
+                            settle_committed_preparation(state, &commit).await;
+                            Ok(commit
+                                .control_receipt
+                                .filter(|receipt| {
+                                    commit_acknowledgement.as_ref().is_some_and(|expected| {
+                                        terminal_ack_matches(receipt, expected)
                                     })
-                                    .and_then(|receipt| {
-                                        serde_json::from_str::<RetainedTerminalResponse>(
-                                            &receipt.response_json,
-                                        )
-                                        .ok()
-                                    })
-                                    .map(|retained| {
-                                        PreparationSettlement::Committed(Box::new(
-                                            retained.response,
-                                        ))
-                                    })
-                                    .unwrap_or(PreparationSettlement::Unavailable)
-                            }
-                            crate::playback_control::PreparationCommitOutcome::Refused => {
-                                PreparationSettlement::Rejected
-                            }
-                        })
+                                })
+                                .and_then(|receipt| {
+                                    serde_json::from_str::<RetainedTerminalResponse>(
+                                        &receipt.response_json,
+                                    )
+                                    .ok()
+                                })
+                                .map(|retained| {
+                                    PreparationSettlement::Committed(Box::new(retained.response))
+                                })
+                                .unwrap_or(PreparationSettlement::Unavailable))
+                        }
+                        Ok(crate::playback_control::PreparationCommitOutcome::Refused) => {
+                            retire_prepared_incarnation(
+                                state,
+                                staged_incarnation_id,
+                                "prepared successor commit refused",
+                            )
+                            .await;
+                            Ok(PreparationSettlement::Rejected)
+                        }
+                        Err(error) => Err(error),
+                    }
                 } else {
                     // A status snapshot is needed only to construct the exact
                     // successful response. If it disappeared after actor
                     // acceptance, convert the reserved commit to an abort and
                     // durably clean it up instead of leaving Committing stuck.
-                    executor
+                    match executor
                         .reject_commit(staged_incarnation_id, unix_ms())
                         .await
-                        .map(|_| PreparationSettlement::Unavailable)
+                    {
+                        Ok(rejected) => {
+                            if rejected {
+                                retire_prepared_incarnation(
+                                    state,
+                                    staged_incarnation_id,
+                                    "prepared successor commit response unavailable",
+                                )
+                                .await;
+                            }
+                            Ok(PreparationSettlement::Unavailable)
+                        }
+                        Err(error) => Err(error),
+                    }
                 }
             }
-            crate::playback_control::PreparationDirective::Abort { .. } => executor
-                .abort(staged_incarnation_id, unix_ms())
-                .await
-                .map(|settled| {
-                    if !settled {
-                        PreparationSettlement::Unavailable
-                    } else if acknowledgement_rejected {
-                        PreparationSettlement::Rejected
-                    } else {
-                        PreparationSettlement::Aborted
+            crate::playback_control::PreparationDirective::Abort { .. } => {
+                match executor.abort(staged_incarnation_id, unix_ms()).await {
+                    Ok(aborted) => {
+                        if aborted {
+                            retire_prepared_incarnation(
+                                state,
+                                staged_incarnation_id,
+                                "prepared successor aborted",
+                            )
+                            .await;
+                        }
+                        Ok(if !aborted {
+                            PreparationSettlement::Unavailable
+                        } else if acknowledgement_rejected {
+                            PreparationSettlement::Rejected
+                        } else {
+                            PreparationSettlement::Aborted
+                        })
                     }
-                }),
+                    Err(error) => Err(error),
+                }
+            }
         };
         match settled {
             Ok(result) => return result,
@@ -4824,12 +4892,154 @@ async fn settle_preparation_control(
     if matches!(
         &outcome.preparation_directive,
         crate::playback_control::PreparationDirective::Commit { .. }
-    ) {
-        let _ = executor
-            .reject_commit(staged_incarnation_id, unix_ms())
-            .await;
+    ) && executor
+        .reject_commit(staged_incarnation_id, unix_ms())
+        .await
+        .is_ok_and(|rejected| rejected)
+    {
+        retire_prepared_incarnation(
+            state,
+            staged_incarnation_id,
+            "prepared successor commit settlement expired",
+        )
+        .await;
     }
     PreparationSettlement::Unavailable
+}
+
+async fn retire_prepared_incarnation(
+    state: &AppState,
+    staged_incarnation_id: &str,
+    reason: &'static str,
+) {
+    let session_id = tokio::time::timeout(
+        PREPARATION_STORE_BUDGET,
+        state
+            .store
+            .media_session_route_by_incarnation(staged_incarnation_id),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .flatten()
+    .filter(|route| {
+        route.owner_node_id == state.node_id
+            && route.state == "ended"
+            && route.terminal_reason.as_deref() == Some("replaced")
+    })
+    .map(|route| route.session_id);
+    if let Some(session_id) = session_id {
+        retire_prepared_worker(state, &session_id, reason).await;
+    }
+}
+
+/// Project the exact predecessor once its intentional drain retires it, then
+/// clear a committed successor's control publication fence. If the fast proof
+/// cannot be obtained, arm the existing full response-lifetime safety
+/// boundary; the lease reconciler also resumes that durable state after a
+/// crash.
+async fn settle_committed_preparation(
+    state: &AppState,
+    commit: &plurx_core::domain::MediaSessionPreparationCommit,
+) {
+    let successor = commit.route.clone();
+    state.media_sessions.cache_route(successor.clone()).await;
+    if successor.owner_node_id == state.node_id {
+        state.media_sessions.seed_owned_lease(&successor).await;
+    }
+    if successor.publication_ready_at_ms == 0 {
+        return;
+    }
+    let authority = state.serving.authority();
+    let Some(admitted_generation) = authority.admit() else {
+        return;
+    };
+    let predecessor = commit
+        .predecessor
+        .as_ref()
+        .map(|route| route.incarnation_id.clone());
+    let state = state.clone();
+    tokio::spawn(async move {
+        publish_committed_preparation(
+            state,
+            successor,
+            predecessor,
+            authority,
+            admitted_generation,
+        )
+        .await;
+    });
+}
+
+/// Continue publication independently of the four-second control exchange.
+/// The commit is already durable and replayable; making its response wait for
+/// a draining predecessor would turn success into a false 503. Prepared media
+/// remains authorized by its durable response marker and current pointer while
+/// this task proves the control-plane publication boundary.
+async fn publish_committed_preparation(
+    state: AppState,
+    successor: MediaSessionRoute,
+    predecessor: Option<String>,
+    authority: crate::serving_fence::ServingAuthority,
+    admitted_generation: u64,
+) {
+    if let Some(predecessor_incarnation) = predecessor.as_ref() {
+        let deadline = tokio::time::Instant::now() + PREDECESSOR_PROJECTION_FAST_WINDOW;
+        if project_activation_predecessor_until(&state, predecessor_incarnation, deadline).await
+            && matches!(
+                complete_activation_handoff_until(
+                    &state,
+                    &successor,
+                    MediaSessionProjectionCompletion::PredecessorAcknowledged,
+                    &authority,
+                    admitted_generation,
+                    deadline,
+                )
+                .await,
+                ActivationHandoffVerdict::Ready | ActivationHandoffVerdict::SuccessorGone
+            )
+        {
+            return;
+        }
+    }
+
+    let now_ms = unix_ms();
+    let not_before_ms = now_ms.saturating_add(
+        i64::try_from(TERMINAL_PROJECTION_SAFETY_WINDOW.as_millis()).unwrap_or(i64::MAX),
+    );
+    let arm_deadline = tokio::time::Instant::now() + ACTIVATION_STORE_DEADLINE;
+    let Some(_guard) = authority
+        .commit_guard_before(admitted_generation, arm_deadline.into_std())
+        .await
+    else {
+        return;
+    };
+    let armed = tokio::time::timeout_at(
+        arm_deadline,
+        state.store.arm_media_session_handoff(
+            &successor.incarnation_id,
+            &successor.owner_node_id,
+            successor.owner_epoch,
+            not_before_ms,
+            now_ms,
+        ),
+    )
+    .await;
+    let Ok(Ok(Some(armed))) = armed else {
+        return;
+    };
+    drop(_guard);
+    state.media_sessions.cache_route(armed.clone()).await;
+    if let Some(predecessor_incarnation) = predecessor {
+        let _ = settle_armed_activation_handoff(
+            &state,
+            predecessor_incarnation,
+            armed,
+            authority,
+            admitted_generation,
+        )
+        .await;
+    }
 }
 
 struct DurableTerminalCommitter {
@@ -6713,6 +6923,20 @@ async fn process_preparation_candidate(state: AppState, exchange: PreparationCan
         return;
     }
     let _in_flight = InFlight;
+    let enabled = match state
+        .store
+        .get_setting(plurx_core::store::keys::PREPARED_QUALITY_HANDOFF)
+        .await
+    {
+        Ok(value) => plurx_core::store::stored_switch(value.as_deref(), true),
+        Err(error) => {
+            tracing::warn!(%error, "prepared-handoff setting could not be read");
+            return;
+        }
+    };
+    if !enabled {
+        return;
+    }
     let Ok(source) = state.store.get_file(recipe.request.file_id).await else {
         // Detached failure is fail-safe: no candidate is staged, and the
         // already-completed exchange remains valid.
@@ -6801,6 +7025,24 @@ async fn process_preparation_candidate(state: AppState, exchange: PreparationCan
         ),
     );
     if let crate::playback_control::PreparationDecision::Prepare { .. } = decision {
+        #[cfg(not(test))]
+        stage_and_prime_prepared_successor(
+            &state,
+            &session_id,
+            &route,
+            &recipe,
+            &candidate,
+            source.as_ref(),
+            AcceptedAsk {
+                film_time_ms: accepted_film_time_ms,
+                desired_digest: Some(selection.desired().digest()),
+            },
+        )
+        .await;
+        // These decision-boundary tests use synthetic media rows and exercise
+        // durable preparation semantics without launching ffmpeg. Production
+        // always takes the reserve-and-prime call above.
+        #[cfg(test)]
         stage_prepared_successor(
             &state,
             &session_id,
@@ -6849,13 +7091,14 @@ async fn process_preparation_candidate(state: AppState, exchange: PreparationCan
 /// bound", and building on that belief is how a reader concludes the durable
 /// side is unprotected.
 const PREPARATION_DEADLINE_MS: i64 = crate::playback_control::VOD_LEASE_TIMEOUT_MS as i64 + 30_000;
+const PREPARATION_STORE_BUDGET: Duration = Duration::from_secs(5);
+const PREPARATION_PRIME_BUDGET: Duration = Duration::from_secs(45);
 
 /// M6 §3.4 — stage the successor the decision just admitted.
 ///
-/// **Stage only.** This is the second of §5.1's eight phases — propose ·
-/// stage · reserve and prime · prepare · commit · commit durability · retire ·
-/// abort — and it is: a durable row and the
-/// actor's one successor slot, nothing produced yet. The pointer is untouched
+/// This joins stage with reserve-and-prime: the durable row is written first,
+/// the VOD worker attaches behind its unpublished capability, and only then
+/// may the actor expose its one successor slot. The pointer remains untouched
 /// by construction — `prepare_media_session` is the entry point that neither
 /// runs the supersession reap nor advances `media_playback_pointers`, which is
 /// why a preparation cannot be built on `activate_media_session`.
@@ -6883,6 +7126,7 @@ struct AcceptedAsk {
     desired_digest: Option<String>,
 }
 
+#[cfg(test)]
 async fn stage_prepared_successor(
     state: &AppState,
     session_id: &str,
@@ -6891,6 +7135,53 @@ async fn stage_prepared_successor(
     candidate: &crate::transcode::SessionRequest,
     source: Option<&plurx_core::domain::MediaFile>,
     accepted: AcceptedAsk,
+) {
+    stage_prepared_successor_with_prime(
+        state,
+        session_id,
+        route,
+        predecessor,
+        candidate,
+        source,
+        accepted,
+        false,
+    )
+    .await;
+}
+
+#[cfg(not(test))]
+async fn stage_and_prime_prepared_successor(
+    state: &AppState,
+    session_id: &str,
+    route: &MediaSessionRoute,
+    predecessor: &RemoteStartRequest,
+    candidate: &crate::transcode::SessionRequest,
+    source: Option<&plurx_core::domain::MediaFile>,
+    accepted: AcceptedAsk,
+) {
+    stage_prepared_successor_with_prime(
+        state,
+        session_id,
+        route,
+        predecessor,
+        candidate,
+        source,
+        accepted,
+        true,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn stage_prepared_successor_with_prime(
+    state: &AppState,
+    session_id: &str,
+    route: &MediaSessionRoute,
+    predecessor: &RemoteStartRequest,
+    candidate: &crate::transcode::SessionRequest,
+    source: Option<&plurx_core::domain::MediaFile>,
+    accepted: AcceptedAsk,
+    prime_worker: bool,
 ) {
     let AcceptedAsk {
         film_time_ms: accepted_film_time_ms,
@@ -6972,12 +7263,15 @@ async fn stage_prepared_successor(
         playlist_url: format!("/api/v1/hls/{staged_session_id}/index.m3u8"),
         duration_ms: source.duration_ms,
         start_seconds: resume_ms as f64 / 1_000.0,
-        media_origin_ms: Some(resume_ms),
+        // VOD playlists retain the film's absolute zero origin. The resume
+        // belongs in `start_seconds`; copying it into the origin would make
+        // owner-loss and client alignment add the same offset twice.
+        media_origin_ms: Some(0),
         height: match staged_request.kind {
             crate::transcode::SessionKind::Transcode { height } => height,
             crate::transcode::SessionKind::Copy { .. } => source.height.unwrap_or_default(),
         },
-        encoder: "staged".to_owned(),
+        encoder: "vod".to_owned(),
         vod: staged_request.presentation == crate::transcode::Presentation::Vod,
         ladder: Vec::new(),
         prior_kbps: None,
@@ -6989,7 +7283,7 @@ async fn stage_prepared_successor(
             1,
             crate::playback_control::VOD_LEASE_TIMEOUT_MS,
         ),
-        plan_notes: Vec::new(),
+        plan_notes: vec![PREPARED_SUCCESSOR_PLAN_NOTE.to_owned()],
     }) else {
         return;
     };
@@ -7022,7 +7316,7 @@ async fn stage_prepared_successor(
         owner_node_id: state.node_id.clone(),
         recipe_json,
         response_json,
-        media_origin_ms: resume_ms,
+        media_origin_ms: 0,
         now_ms,
         // Read here rather than carried from the exchange that triggered this,
         // and re-compared inside the admission transaction. The awaits between
@@ -7039,17 +7333,86 @@ async fn stage_prepared_successor(
             .map(|desired| desired.revision),
         deadline_ms: now_ms.saturating_add(PREPARATION_DEADLINE_MS),
     };
-    match executor.stage(&preparation).await {
-        Ok(true) => {
+    let staged = if prime_worker {
+        let reserved =
+            tokio::time::timeout(PREPARATION_STORE_BUDGET, executor.reserve(&preparation)).await;
+        if !matches!(reserved, Ok(Ok(true))) {
+            crate::playback_control::record_preparation_staged(false);
+            return;
+        }
+        let prime_deadline = Instant::now() + PREPARATION_PRIME_BUDGET;
+        let primed = match state
+            .transcode
+            .session_adoption_token(&preparation.session_id)
+        {
+            Some(adoption) => {
+                state
+                    .transcode
+                    .vod_resurrect_before(
+                        &preparation.recipe_json,
+                        &preparation.session_id,
+                        preparation.user_id,
+                        adoption,
+                        prime_deadline,
+                    )
+                    .await
+            }
+            None => false,
+        };
+        if !primed {
+            let _ = tokio::time::timeout(
+                PREPARATION_STORE_BUDGET,
+                executor.discard_reserved(&preparation.incarnation_id, unix_ms()),
+            )
+            .await;
+            retire_prepared_worker(
+                state,
+                &preparation.session_id,
+                "prepared successor prime failed",
+            )
+            .await;
+            crate::playback_control::record_preparation_staged(false);
+            return;
+        }
+        tokio::time::timeout(
+            PREPARATION_STORE_BUDGET,
+            executor.activate_reserved(&preparation),
+        )
+        .await
+    } else {
+        tokio::time::timeout(PREPARATION_STORE_BUDGET, executor.stage(&preparation)).await
+    };
+    match staged {
+        Ok(Ok(true)) => {
             crate::playback_control::record_preparation_staged(true);
             arm_preparation_deadline(
+                state.clone(),
                 executor,
                 preparation.incarnation_id,
-                PREPARATION_DEADLINE_MS,
+                preparation.session_id,
+                preparation.deadline_ms.saturating_sub(unix_ms()),
             );
         }
-        Ok(false) | Err(_) => crate::playback_control::record_preparation_staged(false),
+        Ok(Ok(false)) | Ok(Err(_)) | Err(_) => {
+            if prime_worker {
+                retire_prepared_worker(
+                    state,
+                    &preparation.session_id,
+                    "prepared successor actor refused",
+                )
+                .await;
+            }
+            crate::playback_control::record_preparation_staged(false);
+        }
     }
+}
+
+async fn retire_prepared_worker(state: &AppState, session_id: &str, reason: &'static str) {
+    state
+        .transcode
+        .begin_session_terminal(session_id, crate::vodserve::Terminal::Replaced, reason)
+        .await;
+    state.transcode.complete_session_release(session_id);
 }
 
 /// Free the slot and the row when nobody claims the successor.
@@ -7075,22 +7438,27 @@ async fn stage_prepared_successor(
 /// `ControlState`, so there is nothing left to free. `abort_inherited_preparation`
 /// handles the durable remnant on takeover.
 ///
-/// It stops being survivable the day *reserve and prime* exists, because then
-/// a staged successor owns a worker and an ffmpeg, and a lost timer leaks them
-/// until the idle sweep. `M6-SERVER-PRIME-HANDOFF.md` §6 step 1 is that move —
-/// fold the deadline into the actor's `next_deadline()` — and it is
-/// deliberately ordered before the thing that needs it. Do not read it as
-/// fixing a live leak: **there is no worker here today.**
+/// Reserve-and-prime gives this timer a second responsibility: after the
+/// durable abort wins it projects the successor's terminal release and frees
+/// the real reader/producer. A process restart loses the timer and the entire
+/// process-local worker together; store maintenance still retires the durable
+/// row on `deadline_ms`, while a live process gets prompt cleanup here.
 fn arm_preparation_deadline(
+    state: AppState,
     executor: crate::playback_control::PreparationExecutor,
     staged_incarnation_id: String,
+    staged_session_id: String,
     deadline_ms: i64,
 ) {
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(deadline_ms.max(0) as u64)).await;
-        let _ = executor
+        if executor
             .abort(&staged_incarnation_id, crate::media_sessions::unix_ms())
-            .await;
+            .await
+            .is_ok_and(|aborted| aborted)
+        {
+            retire_prepared_worker(&state, &staged_session_id, "prepared successor expired").await;
+        }
     });
 }
 
@@ -15749,19 +16117,11 @@ mod tests {
         );
     }
 
-    /// The Developer readiness row `server_preparation_is_real` reports
-    /// `unmet`, and this is the other end of that sentence.
-    ///
-    /// That row is a claim about this build — "a prepared successor publishes
-    /// `encoder: staged` with no candidate worker behind its playlist" — and a
-    /// claim about a build goes stale silently: §4 ships a real worker, and the
-    /// Developer tab keeps telling operators the capability is metadata only,
-    /// with every test still green. So the claim is pinned here, where the
-    /// staging happens. When a candidate worker exists this test fails, and
-    /// whoever makes it pass is holding the reason the readiness row has to
-    /// change with it.
+    /// A surviving prepared route describes the real engine behind it. The
+    /// production path attaches that VOD worker before actor publication; the
+    /// metadata-only test helper exercises the payload construction itself.
     #[tokio::test]
-    async fn a_prepared_successor_still_publishes_a_staged_encoder() {
+    async fn a_prepared_successor_publishes_the_vod_engine_identity() {
         let dir = crate::test_tempdir().expect("state dir");
         let (fixture, session_id, route) = staging_fixture(dir.path()).await;
 
@@ -15797,10 +16157,8 @@ mod tests {
             serde_json::from_str(&published.response_json).expect("the published start response");
 
         assert_eq!(
-            response["encoder"], "staged",
-            "the Developer readiness row `server_preparation_is_real` tells operators this build \
-             stages metadata only. If a candidate worker now names itself here, that row is \
-             lying, and it lives in crates/plurxd/src/http/developer.rs"
+            response["encoder"], "vod",
+            "a successor that survived reserve-and-prime must not identify itself as metadata"
         );
     }
 
@@ -16694,6 +17052,32 @@ mod tests {
             .expect("current route")
             .expect("the successor is current");
         assert_eq!(current.incarnation_id, staged_incarnation_id);
+        assert!(matches!(
+            fixture
+                .state
+                .media_sessions
+                .authoritative_route_resolution_before(
+                    &current.session_id,
+                    &fixture.state.node_id,
+                    Instant::now() + Duration::from_secs(1),
+                )
+                .await
+                .expect("control-plane route while draining"),
+            DurableRouteResolution::OwnerTransition(_)
+        ));
+        assert!(matches!(
+            fixture
+                .state
+                .media_sessions
+                .authoritative_media_route_resolution_before(
+                    &current.session_id,
+                    &fixture.state.node_id,
+                    Instant::now() + Duration::from_secs(1),
+                )
+                .await
+                .expect("prepared media route while draining"),
+            DurableRouteResolution::ActiveLocal(_)
+        ));
         let predecessor = fixture
             .state
             .store
@@ -17978,22 +18362,19 @@ mod tests {
     const RESUME_FETCH_FRONTIER_MS: i64 = RESUME_ORIGIN_MS + RESUME_FETCHED_THROUGH_MS;
     const RESUME_DOUBLE_COUNTED_ORIGIN_MS: i64 = RESUME_ORIGIN_MS + RESUME_ACCEPTED_PLAYHEAD_MS;
 
-    /// Every place a staged successor's resume is written, in absolute film
-    /// time: the route's `media_origin_ms`, the recipe's `start_seconds`, and
-    /// the bootstrap response's `start_seconds`.
+    /// Every place a staged successor's timeline is written: the VOD route's
+    /// zero `media_origin_ms`, the recipe's absolute `start_seconds`, and the
+    /// bootstrap response's start and zero origin.
     ///
-    /// All three are returned because `stage_prepared_successor` writes them
-    /// from `resume_ms` in three separate statements, and a partial correction
-    /// would leave a successor whose row, whose recipe and whose bootstrap
-    /// disagree about where the film starts. The response's `start_seconds` in
-    /// particular is what the client is told when it reads the staged route,
-    /// and it had no assertion anywhere in the suite before this. Staging is
-    /// what establishes them; a commit needs a separately accepted client
+    /// VOD media time already starts at film zero, so the resume point belongs
+    /// only in the request/bootstrap start. A nonzero origin would be added to
+    /// an already-absolute fetched frontier after owner loss. Staging is what
+    /// establishes these values; commit needs a separately accepted client
     /// acknowledgement these tests deliberately do not supply.
     async fn staged_resume_ms(
         fixture: &HlsDeliveryFixture,
         route: &MediaSessionRoute,
-    ) -> (i64, f64, f64) {
+    ) -> (i64, f64, f64, i64) {
         let staged = fixture
             .state
             .store
@@ -18016,6 +18397,7 @@ mod tests {
             successor.media_origin_ms,
             recipe.request.start_seconds,
             bootstrap.start_seconds,
+            bootstrap.media_origin_ms.unwrap_or_default(),
         )
     }
 
@@ -18052,7 +18434,7 @@ mod tests {
         )
         .await;
 
-        let (origin_ms, start_seconds, bootstrap_start_seconds) =
+        let (origin_ms, start_seconds, bootstrap_start_seconds, bootstrap_origin_ms) =
             staged_resume_ms(&fixture, &route).await;
         assert_ne!(
             origin_ms, RESUME_FETCH_FRONTIER_MS,
@@ -18063,8 +18445,12 @@ mod tests {
             "the accepted playhead is already absolute — the origin is in it once"
         );
         assert_eq!(
-            origin_ms, RESUME_ACCEPTED_PLAYHEAD_MS,
-            "the successor begins at the film time the viewer is actually at"
+            origin_ms, 0,
+            "a VOD successor keeps film zero as its origin"
+        );
+        assert_eq!(
+            bootstrap_origin_ms, 0,
+            "the bootstrap must expose the same VOD origin as the durable route"
         );
         assert!(
             (start_seconds - RESUME_ACCEPTED_PLAYHEAD_MS as f64 / 1_000.0).abs() < 0.001,
@@ -18128,12 +18514,13 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         await_preparation_candidate(&route).await;
 
-        let (origin_ms, start_seconds, bootstrap_start_seconds) =
+        let (origin_ms, start_seconds, bootstrap_start_seconds, bootstrap_origin_ms) =
             staged_resume_ms(&fixture, &route).await;
         assert_eq!(
-            origin_ms, RESUME_ACCEPTED_PLAYHEAD_MS,
-            "the exchange's own accepted position is what reaches the ledger"
+            origin_ms, 0,
+            "the exchange cannot turn an absolute resume point into a second VOD origin"
         );
+        assert_eq!(bootstrap_origin_ms, 0);
         let expected_seconds = RESUME_ACCEPTED_PLAYHEAD_MS as f64 / 1_000.0;
         assert!((start_seconds - expected_seconds).abs() < 0.001);
         assert!((bootstrap_start_seconds - expected_seconds).abs() < 0.001);
@@ -18192,12 +18579,13 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         await_preparation_candidate(&route).await;
 
-        let (origin_ms, start_seconds, bootstrap_start_seconds) =
+        let (origin_ms, start_seconds, bootstrap_start_seconds, bootstrap_origin_ms) =
             staged_resume_ms(&fixture, &route).await;
         assert_eq!(
-            origin_ms, SEEK_TARGET_MS,
-            "a backward seek resumes where the viewer is going, not where they left"
+            origin_ms, 0,
+            "a backward seek changes the requested start, not the VOD timeline origin"
         );
+        assert_eq!(bootstrap_origin_ms, 0);
         let expected_seconds = SEEK_TARGET_MS as f64 / 1_000.0;
         assert!((start_seconds - expected_seconds).abs() < 0.001);
         assert!((bootstrap_start_seconds - expected_seconds).abs() < 0.001);
@@ -18257,12 +18645,13 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         await_preparation_candidate(&route).await;
 
-        let (origin_ms, start_seconds, bootstrap_start_seconds) =
+        let (origin_ms, start_seconds, bootstrap_start_seconds, bootstrap_origin_ms) =
             staged_resume_ms(&fixture, &route).await;
         assert_eq!(
-            origin_ms, FIXTURE_DURATION_MS,
-            "a successor may begin at the end of the film, never past it"
+            origin_ms, 0,
+            "bounding the requested start must not move the VOD timeline origin"
         );
+        assert_eq!(bootstrap_origin_ms, 0);
         let expected_seconds = FIXTURE_DURATION_MS as f64 / 1_000.0;
         assert!((start_seconds - expected_seconds).abs() < 0.001);
         assert!((bootstrap_start_seconds - expected_seconds).abs() < 0.001);

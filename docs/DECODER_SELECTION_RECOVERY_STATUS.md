@@ -1,26 +1,33 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M0–M5 complete · M6 server/client implementation landed · M7
-complete · frozen promotion candidate integrated with current `main` ·
-broader fleet qualification continues after merge · final adversarial review
-repaired · promoted to `main` as `374e97ed` · post-merge Apple repair in
-progress · **Updated:** 2026-09-09 · **Promoted effort head:** `3e5fe843` ·
-**Active follow-up branch:** `codex/apple-postmerge-recovery`
+**Status:** M0–M5 and M7 complete · effort promoted and post-merge repairs
+merged · M6 reserve-and-prime implementation in final validation · broader
+fleet qualification remains post-merge evidence · **Updated:** 2026-09-09 ·
+**Current main base:** `18ddffc1` · **Active branch:**
+`codex/m6-server-prime`
 
-**Live post-merge checkpoint:** [Forgejo #189](http://192.168.4.7:3000/noirr/plurx/pulls/189)
-merged at `374e97ed`. Run 1268 has ten green jobs. The fast Rust, cluster-daemon,
-and web jobs stopped before tests because `gha-nuc4-general-01` had 24 GiB free
-against the repository's 25 GiB floor. The Apple job exposed a real teardown
-defect: its three-second finalization window used the ordinary five-second
-transport retry cadence, so an owed commit could expire without one retry. The
-follow-up uses the protocol's 250 ms minimum cadence only during finalization;
-the exact regression and all 56 reporter tests pass locally on Xcode 26.6.
+**Live checkpoint:** [Forgejo #189](http://192.168.4.7:3000/noirr/plurx/pulls/189)
+and its post-merge repairs are complete on `main`. The remaining M6 server gap
+is implemented on `codex/m6-server-prime`: a successor is durably reserved,
+its real VOD worker is attached before the actor announces it, staged media is
+authorized without granting staged control authority, committed media remains
+readable through predecessor drain by durable marker plus current-pointer
+proof, keeps the VOD origin at zero while the requested start carries the
+accepted playhead, and abort/refusal/expiry tear down the worker. Settings → Developer
+now has one direct, default-on checkbox. Readiness remains visible and
+advisory; it is not consulted by the enable path.
 
 The effort was created from Forgejo `main` at
 `4a6a0268bd314ad5587cb3037f12ebd992c0074e`. The original M0 research baseline was `main` at
 `3d847b58b081dcb15a8d2e566d8d0ac1700882fd`. It remains useful as historical
 content evidence, but no command or review performed on that tree is presented
 as exact-tree evidence for the current Forgejo base.
+
+The frozen effort's promotion receipt remains: M0–M5 complete · M6
+server/client implementation landed · M7 complete · frozen promotion
+candidate integrated with current `main` · broader fleet qualification
+continues after merge. That receipt describes promotion PR #189; the active
+follow-up completes M6's previously documented server prime gap.
 
 This is the live execution ledger for
 [DECODER_SELECTION_AND_RECOVERY_PLAN.md](streaming/DECODER_SELECTION_AND_RECOVERY_PLAN.md).
@@ -32,37 +39,37 @@ An unchecked item is not implied by a nearby passing check.
 | Stage | State | What remains |
 |---|---|---|
 | M0–M5 · selection, observation, receipts, admission and bounded prepublication recovery | Done on the effort branch | No planned build work |
-| M6 · prepared replacement contract and clients | Code landed | Apple is the only client currently reaching a viewer; the cross-client fleet receipt remains M8 evidence |
+| M6 · prepared replacement contract, clients, and server prime | Implementation complete on `codex/m6-server-prime`; PR/fast lane pending | Physical first-frame smoke on the devices of interest and the cross-client fleet receipt remain evidence, not code gates |
 | M7a · advisory Developer settings | Done | Keep the prerequisites accurate as hardware contracts land; the controls advise and never gate enablement |
 | M7b · hardware diagnostic path | Merged | [Forgejo #174](http://192.168.4.7:3000/noirr/plurx/pulls/174) merged approved head `0a685526` into the effort at `0c831b88` after the complete Effort development gate. Backend-aware measurement, path-scoped qualification, same-codec recovery pairing, compatible v2 reporting, and advisory Developer readiness are implemented. A real hardware contract is separate M8 fleet evidence |
 | M7 remainder · offline durability and handoff enforcement | Merged | [Forgejo #179](http://192.168.4.7:3000/noirr/plurx/pulls/179) fast-forwarded approved head `990bf334` into the effort after its adversarial findings were fixed and the Effort development gate passed; the repair includes one replicated cluster-wide kill-switch transaction |
-| Promotion to `main` | Merged | #189 merged as `374e97ed`; post-merge run 1268 is being watched and its one code failure is repaired on `codex/apple-postmerge-recovery` |
+| Promotion to `main` | Merged | #189 and the post-merge repairs are present in current `main` at `18ddffc1` |
 | M8 · broader fleet qualification | Post-merge continuation | Hardware diagnostic capture · workload matrix · false-positive classification · startup/concurrency/recovered-latency evidence · three-client replacement runs; any code failure gets a new PR |
 
-**Shortest reading:** M7, the one final effort-PR review, and promotion are done.
-The remaining work is to merge the Apple finalization follow-up, rerun the
-failed post-merge lanes after runner disk is restored, and continue broader
-fleet/client qualification against `main`. Until a real node supplies the first
-hardware contract, automatic decode recovery remains deliberately unreachable
-on that path rather than falsely certified.
+**Shortest reading:** the original effort, its one final review, promotion, and
+post-merge repairs are done. This follow-up closes M6's last code gap. What is
+left on this branch is the fast lane, draft PR promotion, merge, and post-merge
+suite monitoring. Hardware decoder contracts and physical client qualification
+remain evidence work; neither blocks the new prepared-handoff checkbox.
 
-## Current checkpoint — post-merge recovery
+## Current checkpoint — M6 server prime
 
 | Field | Current value |
 |---|---|
-| Milestone | Repair and qualify post-merge Apple finalization |
-| Task base | Effort head `990bf334` was the final milestone base; the active follow-up starts from promoted `main` `374e97ed` |
-| Task branch | `codex/apple-postmerge-recovery` in the agent-owned clone at `/private/tmp/codex-plurx-decoder.RRcx8j/repo` |
-| Task PR | #189 is merged; the Apple follow-up PR is the only code repair opened from post-merge run 1268 |
+| Milestone | Close M6 phase 3: reserve, prime, staged-media serving, commit publication, and cleanup |
+| Task base | Effort head `990bf334` was the historical promotion candidate; it is not the current follow-up base |
+| Current follow-up base | Forgejo `main` at `18ddffc1` |
+| Task branch | `codex/m6-server-prime` in the agent-owned clone at `/private/tmp/codex-plurx-decoder.RRcx8j/repo` |
+| Task PR | Pending until the implementation commit is pushed; it remains draft through the fast lane |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
-| Audit scope | Apple playback-control teardown ordering, retry bound, and async XCTest scheduling; post-merge infrastructure failures are tracked separately from code failures |
-| Current finding | A commit colliding with player teardown had three seconds to finish but a transport failure deferred its retry for five seconds. Finalization now retries at the 250 ms protocol floor while ordinary reporting retains the server-advertised cadence. Async test observations no longer block the actor executor or crash the test host after a failed wait |
+| Audit scope | Prepared-successor durability, VOD worker attachment, media-only staged authority, commit publication, worker cleanup, lease renewal, and direct Developer enablement |
+| Current finding | The old path staged metadata only and double-counted the VOD resume as an origin. The branch now reserves first, primes the VOD worker, announces only after attachment, serves staged media under the exact ledger capability, keeps VOD origin zero, and after commit requires both the prepared marker and current pointer while control/status remain fenced through predecessor drain |
 | Adversarial review | Complete. Einstein found three promotion blockers: immutable VOD bypassed the resolved decoder plan, the v50 Hiqlite import projected `drain_deadline_ms` one version too early, and the cache-location projection test stopped at v53 despite v54's publication generation. VOD now retains one descriptor-bound plan and uses it for arguments, identity, and mixed admission; real v50/v51 import fixtures and v25/v53/v54 cache projections pin the schema boundaries. Per owner direction, there is no additional task-review loop |
-| Focused evidence | Exact finalization regression passes; the complete `PlaybackControlReporterTests` class passes 56/56 on iPhone 17 Pro simulator with Xcode 26.6 |
-| Fast lane | Post-merge policy preflight, Android JVM/device, replicated WAL, and amd64/arm64 package smoke passed. Fast Rust, cluster-daemon, and web were rejected by the runner disk floor before their test commands; they need an infrastructure rerun, not a code patch |
+| Focused evidence | Pinned Rust 1.97.1 all-target compile and strict Clippy pass; 37 preparation regressions, exact staged-media authority, four VOD origin/resume boundary tests, settings persistence, committed-renewal Store contract, 19 Developer settings tests, passive web control, and docs-index validation pass |
+| Fast lane | Not run yet on the committed head |
 | Validation order | Task PRs into the effort do not run the full unit suite. After M7: functionality smoke evidence and a green fast lane before promotion; after they pass, merge and continue watching the remaining promotion and broader suites. The owner explicitly approved watching the remaining promotion jobs on `main`; a code failure gets a new PR |
-| Next | Commit and open the Apple follow-up PR · merge after its focused lane passes · rerun disk-blocked jobs on a healthy runner · continue M8 fleet evidence |
-| External blocker | None for M7 or promotion. A qualifying hardware host is still required for post-merge M8 fleet evidence; absence remains visible and advisory rather than an enable gate |
+| Next | Finish focused regressions and docs · commit · open draft PR · run fast lane · mark ready and merge · watch remaining suites on `main` |
+| External blocker | None. Physical hardware is useful for smoke/qualification after merge but does not gate enabling or merging this implementation |
 
 ## Milestones
 
@@ -74,7 +81,7 @@ on that path rather than falsely certified.
 | M3 · owned observation and health receipts | Complete — M3a–M3f and M3c5 merged | M3a's grammar ([#79](http://192.168.4.7:3000/noirr/plurx/pulls/79)), M3b1's owned readers ([#83](http://192.168.4.7:3000/noirr/plurx/pulls/83)) and M3b2's health barrier ([#84](http://192.168.4.7:3000/noirr/plurx/pulls/84)) are in. M3c1 ([#85](http://192.168.4.7:3000/noirr/plurx/pulls/85), head `bf75c62c`) makes the generation manifest carry and authenticate the joined producer receipt. M3c2 ([#86](http://192.168.4.7:3000/noirr/plurx/pulls/86), head `ff10c2db`) makes a part carry its own receipt across a resume, without which no long film could ever be certified. M3c3 ([#87](http://192.168.4.7:3000/noirr/plurx/pulls/87), head `b602b9f2`) gives qualified production its own artifact identity. M3c4 ([#88](http://192.168.4.7:3000/noirr/plurx/pulls/88), head `86647b37`) enforces the receipt contract under that identity. M3d ([#89](http://192.168.4.7:3000/noirr/plurx/pulls/89), head `a8403e10`) measures which decoder the running build actually selects, without which no attempt could ever be classified. M3e ([#90](http://192.168.4.7:3000/noirr/plurx/pulls/90), head `c54fb052`) makes the diagnostic wording a contract field, because FFmpeg 9 does not print FFmpeg 8's. M3c5 ([#92](http://192.168.4.7:3000/noirr/plurx/pulls/92), head `5e0f7f1f`) gives the two non-queue publication paths a manifest, so a qualified generation they produce can actually be kept. M3f ([#99](http://192.168.4.7:3000/noirr/plurx/pulls/99), head `02831892`) originally added an operator request and node-level effective-mode intersection. M7b replaces the latter with a path-scoped policy: the setting remains enabled, prerequisite state is advisory, and only an exactly measured path with one contract uses the qualified artifact identity |
 | M4 · mixed resource admission | Merged | [Forgejo #81](http://192.168.4.7:3000/noirr/plurx/pulls/81) fast-forwarded `f0f7aec8` into the effort after one whole-PR adversarial review, its three blockers repaired, and the Forgejo effort gate |
 | M5 · durable budget and prepublication recovery | Complete | The M5a census landed at `b2dcf458`; `media_session_producer_recovery` exists on both backends, a server-owned `recovery_epoch` follows one playback across continuations, and the producer reserves, settles and refuses a second recovery. M5c1–M5c3 are merged through [#156](http://192.168.4.7:3000/noirr/plurx/pulls/156) |
-| M6 · postpublication replacement and client intent | Server and three client implementations landed; fleet acceptance open | The server half predated this effort. Apple, Android and web client halves are on `main`; only Apple currently reaches a viewer because Android's `dual_player_preparation` remains deliberately false. The three-client measured receipt belongs to M8 |
+| M6 · postpublication replacement and client intent | Code complete on the active follow-up branch; fleet acceptance open | Server reserve-and-prime, media-only staged authority, commit publication and cleanup now join the already-shipped Apple, Android and web adapters. The Developer server checkbox is default-on and independent of advisory readiness. The three-client measured receipt belongs to M8 |
 | M7 · offline, shared cache, and handoff enforcement | Complete | M7a and M7b are merged through `0c831b88`; M7 remainder [#179](http://192.168.4.7:3000/noirr/plurx/pulls/179) closes durable offline one-shot recovery/result identity, exact-claim and cache publication, crash-before-install rehome, software-survivor binding, replicated disable, and legacy-worker fencing at `990bf334` |
 | M8 · fleet qualification and promotion | Promotion freeze active | Current `main` is integrated and the final review is repaired; smoke/fast lane, merge, and post-merge monitoring remain |
 

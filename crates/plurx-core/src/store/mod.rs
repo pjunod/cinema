@@ -1553,6 +1553,9 @@ pub mod keys {
     /// reporter and prepared-switch adapter; explicit `0` remains an operator
     /// override.
     pub const PLAYBACK_CONTROL_PROTOCOL_V1: &str = "playback.control_protocol_v1";
+    /// Start and prime prepared quality successors. Absent/on enables the
+    /// shipped transaction; explicit `0` is the live operator override.
+    pub const PREPARED_QUALITY_HANDOFF: &str = "playback.prepared_quality_handoff";
     /// Ask this node to plan into the health-qualified artifact identity, so a
     /// transcode may only be reused when its producer's own receipt says the
     /// decode was clean.

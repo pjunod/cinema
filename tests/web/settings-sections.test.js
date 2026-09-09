@@ -216,7 +216,7 @@ test("Playback saves per card, and each card writes only its own fields", () => 
   // no longer writes them: a card that saves a field it does not show can turn
   // something back on that an operator deliberately turned off.
   const streaming = ["prr", "pabr", "phr", "phb", "pha", "pvod", "pvlr", "pvws", "pvmb", "pvbg", "serr"];
-  const developer = ["pcpv1", "dverr"];
+  const developer = ["pcpv1", "pqh", "dverr"];
   // `vdcard` is read too: this handler replaces its own card rather than
   // re-rendering the panel, because the four cards beside it stage unsaved
   // edits. The handler's own catch would swallow a missing-id assertion, so
@@ -237,7 +237,7 @@ test("Playback saves per card, and each card writes only its own fields", () => 
       "vod_live_recovery", "vod_materialize_budget_secs", "vod_presentation",
       "vod_working_set_bytes",
     ]);
-    assert.deepEqual(Object.keys(writes.saveDeveloper.body).sort(), ["playback_control_protocol_v1"]);
+    assert.deepEqual(Object.keys(writes.saveDeveloper.body).sort(), ["playback_control_protocol_v1", "prepared_quality_handoff"]);
     // Its own card, its own field. The verified-decode request renames cached
     // transcodes on covered paths, so it must never ride along with a save an
     // operator made for something else.
@@ -279,49 +279,48 @@ test("Developer is where the switches that cost something live", () => {
   const readiness = { items: [{
     id: "prepared_quality_handoff",
     requirements: [
-      { id: "server_preparation_is_real", status: "unmet", evidence: "This build still stages metadata without a running worker." },
+      { id: "server_preparation_is_real", status: "met", evidence: "This build attaches a running worker before announcing it." },
       { id: "client_two_player_handoff", status: "unobservable", evidence: "This node cannot prove a physical first-frame qualification." },
       { id: "fleet_receipt", status: "unobservable", evidence: "The fleet receipt is not visible to this daemon." },
     ],
   }] };
   const html = panel({
     playback_control_protocol_v1: true,
+    prepared_quality_handoff: true,
     hls_typeless_sliding: false,
     live_tv_guide_source: "hdhomerun",
     live_tv_guide_hours: 24,
   }, readiness);
-  for (const id of ["pcpv1", "phs", "dhqa"]) {
+  for (const id of ["pcpv1", "pqh", "pdp", "phs", "dhqa"]) {
     assert.match(html, new RegExp(`TOG:${id}\\|`), `Developer is missing the ${id} switch`);
   }
   assert.match(html, /FOOT:saveDeveloper/);
   assert.match(html, /FOOT:saveExperimental/);
   assert.match(html, /Enable prepared quality handoff/);
-  assert.match(html, /encoder: staged/);
+  assert.match(html, /This checkbox is the enable path/);
   assert.match(html, /twenty consecutive commits/);
   assert.match(html, /Apple, Android, and web contain the adapter/);
-  assert.match(html, /no separate hidden server flag/);
   // The prepared card says what has to be true *and whether it is*, because
   // a requirement an operator cannot check is a requirement they will skip.
   // None of it gates the toggle: the switch is in the card above and this one
   // has no input at all.
   assert.match(html, /What must be true first, and whether it is/);
   assert.match(html, /The server primes the successor it stages/);
-  assert.match(html, /503 media_owner_transition/);
-  assert.match(html, /no row on this card gates the enabled default/);
-  assert.match(html, /Enabled by default; the checks remain advisory/);
+  assert.match(html, /no qualification gate or restart step/);
   // The card is advisory AND it carries the switch. Those are not in tension:
   // the list says what enabling costs and whether each part is true, and
   // nothing in it disables the control. A page that refuses to let an operator
   // turn something on tells them less than one that says what will happen.
   const preparedCard = html
-    .slice(html.indexOf("Enable prepared quality handoff"))
+    .slice(html.indexOf("Prepared quality handoff"))
     .split("Experimental delivery")[0];
+  assert.match(preparedCard, /TOG:pqh\|/, "the prepared card carries the server enable switch");
   assert.match(preparedCard, /TOG:pdp\|/, "the prepared card carries the enable switch");
-  assert.doesNotMatch(preparedCard, /FOOT:/,
-    "…and no save: the switch is this browser's, not a server setting");
+  assert.match(preparedCard, /FOOT:saveDeveloper/,
+    "the server switch saves through Developer settings");
   assert.doesNotMatch(preparedCard, /disabled/,
     "nothing in the readiness list disables it");
-  const off = panel({ playback_control_protocol_v1: false, hls_typeless_sliding: false }, readiness);
+  const off = panel({ playback_control_protocol_v1: false, prepared_quality_handoff: false, hls_typeless_sliding: false }, readiness);
   assert.match(html, /The control endpoint is advertised<small>[\s\S]*?<span class="pill" style="color:var\(--good\)/);
   assert.match(off, /The control endpoint is advertised<small>[\s\S]*?<span class="pill warn">not met<\/span>/);
   assert.match(html, /Enable cluster transport recovery/);
@@ -342,14 +341,16 @@ test("Developer is where the switches that cost something live", () => {
   assert.match(html, /dual_player_preparation/,
     "…and says which field it sets, because that is the whole of Gate A");
   assert.match(html, /Nothing above blocks this switch/);
+  assert.match(html, /TOG:pqh\|[^|]*\|[^|]*\|checked=true/,
+    "the server prepared-handoff switch reflects persisted settings");
   // Readiness pills, counted rather than matched, because "not met" contains
   // "met": an assertion that only looks for the word cannot tell a met row from
   // an unmet one, and would pass with the two renderings swapped.
   const pills = html.match(/>(met|not met|not observable)<\/span>/g) || [];
   const counted = (word) => pills.filter((pill) => pill === `>${word}</span>`).length;
-  assert.ok(counted("not met") >= 1,
-    "the unmet requirements say so beside the switch — the staged route has no worker");
-  assert.ok(counted("met") >= 2, "…and the ones this page checked and found true say that");
+  assert.ok(counted("not observable") >= 2,
+    "physical client and fleet qualification remain explicitly advisory and unobserved");
+  assert.ok(counted("met") >= 3, "the server-prime and runtime facts this page checked say so");
   // Automatic decode recovery. The section exists because the effort that
   // built the recovery was required to say what safe enablement depends on,
   // and the honest answer today starts with "it cannot fire yet".
@@ -364,7 +365,7 @@ test("Developer is where the switches that cost something live", () => {
   assert.match(html, /qualify diagnostic contracts against this node's measured hardware decoders/);
   assert.ok(counted("not observable") >= 2,
     "…and a fleet fact the daemon cannot inspect is not rounded either way");
-  assert.match(html, /This build still stages metadata without a running worker/,
+  assert.match(html, /This build attaches a running worker before announcing it/,
     "the page paints the daemon's live evidence, not just a source-hardcoded label");
   assert.match(html, /HDHomeRun Live TV/);
   assert.match(html, /Save the configuration, check readiness, then enable/);

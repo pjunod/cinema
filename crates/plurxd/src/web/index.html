@@ -15517,8 +15517,9 @@ function developerPanel(settings,readiness){
       :`<span class="pill warn">not met</span>`;
     return `<div class="tog"><span>${label}<small>${note}</small></span>${pill}</div>`;
   };
-  const prepared=setCard(`${cardHead("Enable prepared quality handoff","The server announces, acknowledges, commits and aborts a staged successor, and every client contains the prepared-switch adapter. It does not yet start or prime that successor's encoder.",`<span class="pill warn">enabled · qualification open</span>`)}
-      <div class="hint"><b>Enabled by default; the checks remain advisory.</b> The staged route still reports <code>encoder: staged</code> and has no worker behind its playlist: a client that opens the successor's playlist before commit is answered <code>503 media_owner_transition</code> on every request, then settles the attempt and falls back to the ordinary reopen. Final physical qualification remains open and does not override this switch.</div>
+  const prepared=setCard(`${cardHead("Prepared quality handoff","Build and warm a second VOD player before replacing the one currently on screen.",settings.prepared_quality_handoff?`<span class="pill" style="color:var(--good);border-color:var(--good)">enabled</span>`:`<span class="pill">disabled</span>`)}
+      ${togRow("pqh",`Enable prepared quality handoff <span class="pill warn">experimental</span>`,`On by default. This directly enables server reserve-and-prime work for the next eligible quality change; it applies immediately and no readiness result can override it.`,settings.prepared_quality_handoff)}
+      <div class="hint"><b>This checkbox is the enable path.</b> There is no qualification gate or restart step. The readings below are advisory so you can judge the cost while still choosing to try it.</div>
       <h2 class="section">What must be true first, and whether it is</h2>
       ${advisory}
       ${req(settings.playback_control_protocol_v1?"met":"unmet","The control endpoint is advertised","New sessions carry the control block only while <b>Advertise playback control protocol v1</b> above is on. Nothing is staged for a session that never had one.")}
@@ -15527,7 +15528,9 @@ function developerPanel(settings,readiness){
       ${req("met","A prepared handoff can fire on the sessions you actually serve","The throughput floor needs both the client's observed rate and the server's delivered rate. Both are reported now, on VOD as well as live: the clients fill <code>observed_download_bps</code> and the VOD serving boundary measures <code>delivered_bps</code>. A window that has not closed yet still refuses, which is the honest reading rather than a missing input.")}
       ${devReq(readiness,"prepared_quality_handoff","fleet_receipt","The fleet receipt is complete","Requires twenty consecutive commits on the corrected realistic-runway instrument with stable memory, plus a measured fallback interruption on physical clients.")}
       ${togRow("pdp",`Tell the server this browser can prepare a second player <span class="pill warn">qualification open</span>`,"On by default. Sets <code>dual_player_preparation</code> on this browser's control exchanges, which is the only thing that lets the server stage a successor for it. Nothing above blocks this switch — the list is what tells you the cost. It reaches the server on the next control exchange, and a playback whose successor was never playable stops offering for the rest of that playback.",preparedHandoffEnabled(),'onchange="setPreparedHandoff(this.checked)"')}
-      <div class="hint"><b>Safe-use requirements:</b> keep the protocol advertised and complete the open server-priming and physical qualification rows before treating handoff as qualified. There is no separate hidden server flag, no row on this card gates the enabled default, and a client that is offered a successor it cannot prime settles it and falls back to the ordinary in-place change.</div>`);
+      <div class="hint"><b>Safe-use guidance:</b> keep the protocol advertised and validate first-frame alignment on the devices you care about before treating handoff as production-qualified. These are recommendations, not gates; a failed preparation is torn down and the client falls back to the ordinary reopen.</div>
+      <div class="err" id="pqherr"></div>
+      ${setCardFoot("saveDeveloper")}`);
   const experimental=setCard(`${cardHead("Experimental delivery","Changes the shape of the stream itself. Applies to new sessions only.")}
       ${togRow("phs",`Typeless sliding HLS <span class="pill warn">experimental</span>`,"Only for the iPad control comparison.",settings.hls_typeless_sliding)}
       <div class="err" id="dxerr"></div>
@@ -17318,7 +17321,8 @@ async function saveDeveloper(btn){
   if(btn) btn.disabled=true;
   try{
     cacheSettings(await api("/settings",{method:"PUT",body:{
-      playback_control_protocol_v1:document.getElementById("pcpv1").checked}}));
+      playback_control_protocol_v1:document.getElementById("pcpv1").checked,
+      prepared_quality_handoff:document.getElementById("pqh").checked}}));
     toast("Developer settings saved"); if(btn) setCardSaved(btn);
   }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
 }

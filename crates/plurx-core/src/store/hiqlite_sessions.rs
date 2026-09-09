@@ -3488,7 +3488,11 @@ impl MediaSessionStore for HiqliteAuthStore {
                     AND expires_at_ms = (SELECT lease_expires_at_ms FROM media_sessions
                       WHERE incarnation_id = $7 AND owner_node_id = $4 AND owner_epoch = $5
                         AND state = 'active' AND lease_expires_at_ms > $2
-                        AND publication_ready_at_ms != $8
+                        AND (publication_ready_at_ms != $8 OR EXISTS (
+                          SELECT 1 FROM media_playback_pointers pointer
+                           WHERE pointer.user_id = media_sessions.user_id
+                             AND pointer.playback_id = media_sessions.playback_id
+                             AND pointer.current_incarnation_id = media_sessions.incarnation_id))
                         -- A staged successor's deadline is its whole life; see
                         -- the SQLite backend's renewal for why renewing it is
                         -- the one thing that can make that deadline never
@@ -3500,7 +3504,6 @@ impl MediaSessionStore for HiqliteAuthStore {
                           WHERE request.user_id = media_sessions.user_id
                             AND request.incarnation_id = media_sessions.incarnation_id
                             AND request.state = 'starting'
-                            AND media_sessions.publication_ready_at_ms = 0
                             AND request.claim_expires_at_ms <= media_sessions.lease_expires_at_ms))",
                 params!(
                     lease_expires_at_ms,
@@ -3524,12 +3527,15 @@ impl MediaSessionStore for HiqliteAuthStore {
                         media_sequence = MAX(media_sequence, $5)
                       WHERE incarnation_id = $6 AND owner_node_id = $7 AND owner_epoch = $8
                         AND state = 'active' AND lease_expires_at_ms > $2
-                        AND publication_ready_at_ms != $9
+                        AND (publication_ready_at_ms != $9 OR EXISTS (
+                          SELECT 1 FROM media_playback_pointers pointer
+                           WHERE pointer.user_id = media_sessions.user_id
+                             AND pointer.playback_id = media_sessions.playback_id
+                             AND pointer.current_incarnation_id = media_sessions.incarnation_id))
                         AND NOT EXISTS (SELECT 1 FROM media_session_requests request
                           WHERE request.user_id = media_sessions.user_id
                             AND request.incarnation_id = media_sessions.incarnation_id
                             AND request.state = 'starting'
-                            AND media_sessions.publication_ready_at_ms = 0
                             AND request.claim_expires_at_ms <= media_sessions.lease_expires_at_ms)
                         AND EXISTS (SELECT 1 FROM job_leases
                           WHERE resource = $10 AND owner_node_id = $7 AND fence = $8
@@ -3567,12 +3573,15 @@ impl MediaSessionStore for HiqliteAuthStore {
                            AND session.owner_epoch = $3
                            AND session.state = 'active'
                            AND session.lease_expires_at_ms = $1
-                           AND session.publication_ready_at_ms != $6
+                           AND (session.publication_ready_at_ms != $6 OR EXISTS (
+                             SELECT 1 FROM media_playback_pointers pointer
+                              WHERE pointer.user_id = session.user_id
+                                AND pointer.playback_id = session.playback_id
+                                AND pointer.current_incarnation_id = session.incarnation_id))
                            AND NOT EXISTS (SELECT 1 FROM media_session_requests request
                              WHERE request.user_id = session.user_id
                                AND request.incarnation_id = session.incarnation_id
                                AND request.state = 'starting'
-                               AND session.publication_ready_at_ms = 0
                                AND request.claim_expires_at_ms <= session.lease_expires_at_ms))",
                 params!(
                     lease_expires_at_ms,
@@ -4284,12 +4293,17 @@ impl MediaSessionStore for HiqliteAuthStore {
                    FROM media_sessions
                   WHERE owner_node_id = $1 AND state = 'active'
                     AND lease_expires_at_ms > $2
-                    AND publication_ready_at_ms != $3
+                    AND (publication_ready_at_ms != $3 OR EXISTS (
+                      SELECT 1 FROM media_playback_pointers pointer
+                       WHERE pointer.user_id = media_sessions.user_id
+                         AND pointer.playback_id = media_sessions.playback_id
+                         AND pointer.current_incarnation_id = media_sessions.incarnation_id))
+                    AND NOT EXISTS (SELECT 1 FROM media_session_preparations staged
+                      WHERE staged.staged_incarnation_id = media_sessions.incarnation_id)
                     AND NOT EXISTS (SELECT 1 FROM media_session_requests request
                       WHERE request.user_id = media_sessions.user_id
                         AND request.incarnation_id = media_sessions.incarnation_id
                         AND request.state = 'starting'
-                        AND media_sessions.publication_ready_at_ms = 0
                         AND request.claim_expires_at_ms <= media_sessions.lease_expires_at_ms)
                   ORDER BY updated_at_ms, incarnation_id LIMIT $4",
                 params!(

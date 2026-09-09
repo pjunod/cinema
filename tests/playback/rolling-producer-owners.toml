@@ -596,12 +596,15 @@ pattern = "DurableRouteResolution"
 # 81 -> 82 with the live-lease correction: the restored guard test drives
 # `classify_durable_route` itself, so the publication fence is proved to be
 # the classification under test rather than assumed to be. Test-only.
-expected_occurrences = 82
+# 82 -> 101 with M6 server prime: the media-only prepared classifier, its
+# authoritative/local callers, and exact regressions all name the durable
+# verdict they consume. Control classification remains the original authority.
+expected_occurrences = 101
 
 [[module_symbols]]
 id = "m4-authoritative-route-reclassification"
 pattern = "authoritative_route_resolution_before"
-expected_occurrences = 9
+expected_occurrences = 11
 
 [[module_symbols]]
 id = "m4-owner-bound-vod-facade"
@@ -648,7 +651,7 @@ pattern = "ServingAuthority"
 # +3 HDHomeRun M2: LiveTvManager's ServingAuthority field and constructor,
 # plus one always-ready test fixture. This projects existing quorum authority;
 # it does not introduce an independent serving lease.
-expected_occurrences = 17
+expected_occurrences = 18
 
 [[module_symbols]]
 id = "m4-serving-authority-commit-guard"
@@ -656,7 +659,7 @@ pattern = "commit_guard_before"
 # 13 -> 14 with M6's acknowledgement settlement. The new guard bounds the
 # exact commit-or-abort Store mutation authorized by the actor; it is held only
 # across the bounded executor call and never across worker teardown.
-expected_occurrences = 14
+expected_occurrences = 15
 
 [[module_symbols]]
 id = "m4-serving-authority-admission-token"
@@ -722,7 +725,7 @@ pattern = "media_session_route_for_playback"
 # 20 -> 21 with the ordinary-activation ask compare: one more test-only read,
 # asserting a create whose ask moved underneath it left the playback pointing
 # nowhere. The shipped read count is unchanged.
-expected_occurrences = 21
+expected_occurrences = 22
 
 [[module_symbols]]
 id = "m4-exact-owner-epoch-end"
@@ -750,17 +753,19 @@ pattern = "arm_media_session_handoff"
 # test names this as the thing that would publish a committed successor,
 # because "the pointer advanced" and "the viewer has a stream" were being
 # conflated. No new caller; the arming path is untouched.
-expected_occurrences = 2
+# 2 -> 3: the server-prime publisher now calls the existing arm transaction
+# after fast predecessor projection cannot be proved.
+expected_occurrences = 3
 
 [[module_symbols]]
 id = "m4-durable-projection-completion-proof"
 pattern = "MediaSessionProjectionCompletion"
-expected_occurrences = 18
+expected_occurrences = 19
 
 [[module_symbols]]
 id = "m4-activation-handoff-proof"
 pattern = "(?:ActivationHandoffVerdict|complete_activation_handoff_until|project_activation_predecessor_until)"
-expected_occurrences = 22
+expected_occurrences = 26
 
 [[module_symbols]]
 id = "m4-durable-release-proof"
@@ -821,7 +826,7 @@ pattern = "publication_ready_at_ms"
 # 79 -> 80 with the drain-release test: one test-only activation, built the
 # way every other fixture in that file builds one, so the predecessor it
 # drains is a published row rather than a hand-written one.
-expected_occurrences = 81
+expected_occurrences = 85
 
 [[module_symbols]]
 id = "m4-durable-projection-safety-window"
@@ -851,12 +856,12 @@ pattern = "MEDIA_SESSION_PUBLICATION_BLOCKED"
 # 24 -> 25 with M6 §3.4c's staged-row reader, for the same read-only validation
 # described in `m4-activation-publication-handoff-fence` above. The actor slot
 # remains the sole authority that decides whether the row may be announced.
-expected_occurrences = 25
+expected_occurrences = 26
 
 [[module_symbols]]
 id = "m4-terminal-projection-safety-window"
 pattern = "TERMINAL_PROJECTION_SAFETY_WINDOW"
-expected_occurrences = 9
+expected_occurrences = 10
 
 [[module_symbols]]
 id = "m4-cluster-make-before-break"
@@ -926,7 +931,7 @@ expected_occurrences = 2
 [[module_symbols]]
 id = "m4-terminal-capability-projection"
 pattern = "begin_session_terminal"
-expected_occurrences = 14
+expected_occurrences = 15
 
 [[module_symbols]]
 id = "m4-release-shared-settlement"
@@ -969,7 +974,7 @@ pattern = "terminal_reason"
 # 22 -> 23 with the drain-release test, which asserts the predecessor ends
 # with cause `superseded` rather than merely ending. Test-only: the cause is
 # written by the release that already existed on this branch.
-expected_occurrences = 24
+expected_occurrences = 25
 
 [[module_symbols]]
 id = "m4-release-terminal-cause"
@@ -1381,7 +1386,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # lineup precisely so it can never be a reason to talk to the device. It also
 # refuses to run off the configured owner node and while serving authority is
 # not admitted, so a fenced node's loop does nothing but sleep.
-expected_occurrences = 470
+expected_occurrences = 471
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -1696,7 +1701,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # between refreshes, not a deadline over any work. The guide's actual request
 # deadlines are the `timeout` parameter of `fetch_bounded`, which is the
 # existing lineup fetch's bound made a parameter rather than a new constructor.
-expected_occurrences = 702
+expected_occurrences = 710
 
 [[module_structures]]
 id = "bare-time-constructor"

@@ -117,6 +117,12 @@ pub(crate) async fn readiness(
             .map(String::as_str),
         true,
     );
+    let prepared_handoff_on = plurx_core::store::stored_switch(
+        settings
+            .get(plurx_core::store::keys::PREPARED_QUALITY_HANDOFF)
+            .map(String::as_str),
+        true,
+    );
 
     // Parsed exactly the way the engine parses it. That was the point when all
     // three sites compared the raw value — a row that trimmed on its own would
@@ -151,7 +157,7 @@ pub(crate) async fn readiness(
         items: vec![
             cluster_transport_recovery(&state).await,
             playback_control_protocol(control_advertised),
-            prepared_quality_handoff(),
+            prepared_quality_handoff(prepared_handoff_on),
             live_hls_recovery(live_recovery_on),
             pgs_overlay(overlay_on),
             dolby_vision_convert(convert_on),
@@ -652,24 +658,20 @@ fn playback_control_protocol(advertised: bool) -> DeveloperEnableItem {
     }
 }
 
-fn prepared_quality_handoff() -> DeveloperEnableItem {
+fn prepared_quality_handoff(enabled: bool) -> DeveloperEnableItem {
     let staged = crate::playback_control::preparation_staged_snapshot();
     let prepare_capable = crate::playback_control::prepare_capable_snapshot();
     let declared = prepare_capable.iter().sum::<u64>();
 
     let mut requirements = Vec::with_capacity(3);
 
-    // A statement about this build, not this deployment. It is pinned from the
-    // other side by `a_prepared_successor_still_publishes_a_staged_encoder` in
-    // `http::hls` — when a candidate worker exists, that test fails, and
-    // whoever makes it pass is holding the reason this row has to change.
     requirements.push(DeveloperRequirement {
         id: "server_preparation_is_real",
         title: "Server preparation is real",
-        status: RequirementStatus::Unmet,
-        evidence: "This build stages metadata only: a prepared successor publishes \
-                   `encoder: staged` with no candidate worker behind its playlist, and no \
-                   capacity is reserved for it."
+        status: RequirementStatus::Met,
+        evidence: "This build durably reserves a successor, attaches its VOD worker before the \
+                   actor may announce it, serves only that staged generation's media capability, \
+                   and tears the worker down on abort or expiry."
             .to_owned(),
     });
 
@@ -720,8 +722,8 @@ fn prepared_quality_handoff() -> DeveloperEnableItem {
     DeveloperEnableItem {
         id: "prepared_quality_handoff",
         title: "Enable prepared quality handoff",
-        enabled: None,
-        setting: None,
+        enabled: Some(enabled),
+        setting: Some("prepared_quality_handoff"),
         requirements,
     }
 }

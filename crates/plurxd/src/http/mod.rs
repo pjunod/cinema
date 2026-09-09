@@ -3591,7 +3591,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn playback_control_is_default_on_and_persists_explicit_changes() {
+    async fn playback_control_and_prepared_handoff_are_default_on_and_persist_changes() {
         use plurx_core::store::keys;
 
         let (app, state) = test_app_with_state();
@@ -3599,6 +3599,7 @@ mod tests {
         let (status, initial) = call(&app, get("/api/v1/settings", Some(&admin))).await;
         assert_eq!(status, StatusCode::OK, "{initial}");
         assert_eq!(initial["playback_control_protocol_v1"], json!(true));
+        assert_eq!(initial["prepared_quality_handoff"], json!(true));
         assert_eq!(
             state
                 .store
@@ -3607,6 +3608,15 @@ mod tests {
                 .expect("setting"),
             None,
             "the default-on value remains implicit until an operator changes it"
+        );
+        assert_eq!(
+            state
+                .store
+                .get_setting(keys::PREPARED_QUALITY_HANDOFF)
+                .await
+                .expect("setting"),
+            None,
+            "the prepared-handoff default remains implicit until it is changed"
         );
 
         for enabled in [false, true] {
@@ -3625,6 +3635,28 @@ mod tests {
                 state
                     .store
                     .get_setting(keys::PLAYBACK_CONTROL_PROTOCOL_V1)
+                    .await
+                    .expect("setting")
+                    .as_deref(),
+                Some(if enabled { "1" } else { "0" })
+            );
+        }
+        for enabled in [false, true] {
+            let (status, body) = call(
+                &app,
+                put(
+                    "/api/v1/settings",
+                    Some(&admin),
+                    json!({ "prepared_quality_handoff": enabled }),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["prepared_quality_handoff"], json!(enabled));
+            assert_eq!(
+                state
+                    .store
+                    .get_setting(keys::PREPARED_QUALITY_HANDOFF)
                     .await
                     .expect("setting")
                     .as_deref(),
@@ -4832,20 +4864,14 @@ mod tests {
             }
         }
 
-        // Nothing on a single-node install may report `met`. Asserted as a set
-        // rather than row by row so a row added later cannot quietly arrive
-        // green: the first draft had two roster rows and this test pinned only
-        // one of them, which is how the fail-open `met` survived review.
+        // The server-prime row describes this build and is now the one fact a
+        // single node can prove without a deployment receipt.
         let green = seen
             .iter()
             .filter(|(_, status)| status.as_str() == "met")
             .map(|(id, _)| id.as_str())
             .collect::<Vec<_>>();
-        assert!(
-            green.is_empty(),
-            "a node with no roster, no fleet receipt and no candidate worker read nothing that \
-             could be met, yet reported: {green:?}"
-        );
+        assert_eq!(green, vec!["server_preparation_is_real"]);
         // Order-independent because no row reachable here has a `met` branch a
         // sibling test could reach: the retained engine's two rows refuse
         // `met` by construction, and everything else is a roster or artifact
@@ -4869,9 +4895,14 @@ mod tests {
         // Statements about this build, true whatever the deployment looks
         // like. They flip when a candidate worker and a shipped two-player
         // client exist, not when an operator changes a setting.
-        for id in ["server_preparation_is_real", "client_two_player_handoff"] {
-            assert_eq!(seen.get(id).map(String::as_str), Some("unmet"));
-        }
+        assert_eq!(
+            seen.get("server_preparation_is_real").map(String::as_str),
+            Some("met")
+        );
+        assert_eq!(
+            seen.get("client_two_player_handoff").map(String::as_str),
+            Some("unmet")
+        );
         // The retained engine has served nothing in this process, so neither
         // of its rows has read anything. "Nothing bypassed the switch" is
         // vacuously true here and must not render as satisfied — that is the
