@@ -65,6 +65,10 @@ exit 0
 # static answer cannot express the shape where a demand is met on the runner
 # volume and dropped on the Docker one.
 DF = """#!/bin/sh
+if [ "${FIXTURE_DF_REQUIRES_PATH:-false}" = true ]; then
+  for path do :; done
+  [ -e "$path" ] || exit 1
+fi
 fs=$FIXTURE_FS_KB
 avail=$FIXTURE_AVAIL_KB
 case "$*" in
@@ -157,6 +161,7 @@ class JanitorContractCase(unittest.TestCase):
                 "FIXTURE_FS_KB": str(78 * 1024 * 1024),
                 "FIXTURE_AVAIL_KB": str(40 * 1024 * 1024),
                 "FIXTURE_USED_KB": str(4 * 1024 * 1024),
+                "FIXTURE_DF_REQUIRES_PATH": "false",
             }
         )
 
@@ -225,6 +230,18 @@ class JanitorContractCase(unittest.TestCase):
         self.assertTrue((self.work / "checkout").is_file())
         self.assertEqual(self.last_run()["reset"], 1)
         self.assertEqual(self.last_run()["reclaimed_gb"], 41)
+
+    def test_post_reset_disk_probe_survives_until_runner_recreates_cache_dir(self):
+        """A real `df` rejects cache.dir during the restart creation race."""
+        self.environment["FIXTURE_USED_KB"] = str(41 * 1024 * 1024)
+        self.environment["FIXTURE_DF_REQUIRES_PATH"] = "true"
+
+        result = self.run_janitor()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.cache.exists())
+        self.assertEqual(self.systemctl_calls(), ["stop", UNIT, "start", UNIT])
+        self.assertEqual(self.last_run()["reset"], 1)
 
     def test_a_runner_that_is_working_keeps_its_cache(self):
         self.environment["FIXTURE_USED_KB"] = str(41 * 1024 * 1024)
