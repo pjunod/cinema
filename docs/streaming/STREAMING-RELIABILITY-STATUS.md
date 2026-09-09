@@ -1,21 +1,30 @@
 # Streaming reliability — review, repair, and promotion status
 
 **Status:** the streaming-reliability continuation reached `main` as
-`1f6d6645` through [#178](http://192.168.4.7:3000/noirr/plurx/pulls/178).
-It includes §4's server protocol, all three prepared-switch clients, and
-immutable film-addressed encoded VOD. The final adversarial review at
-`9249ddaa` found four P1s: Android could DELETE before commit → end settled,
-Apple and web could retain finalization retry state forever, and web treated
-`timeupdate` as proof that video reached the screen. All four were corrected
-with bounded finalizers and ordering/evidence regressions; per maintainer
-direction, that was the final review pass. Apple build 122 and Android build 76
-preserve release ordering over the Live TV build already on `main`.
-Post-merge CI is running on the merge commit; any source failure receives a
-new corrective pull request. The follow-up candidate defaults the server and
-all three clients on while preserving explicit opt-outs and the complete
-Developer requirements list. Physical two-player evidence remains advisory and
-does not gate or override the enabled default · **Updated:**
-2026-09-08 · **Effort:** `effort/streaming-reliability` (merged) · **Started:** 2026-09-04 ·
+`1f6d6645` through [#178](http://192.168.4.7:3000/noirr/plurx/pulls/178), and
+the default-on activation followed as `7bb7cf6c` through
+[#193](http://192.168.4.7:3000/noirr/plurx/pulls/193). The server, web, Apple,
+and Android implementations are enabled when the setting is absent while
+retaining an explicit opt-out. Settings → Developer keeps the standard safety
+requirements with live met / not met / not observable readings; those readings
+are advisory and never disable the control. Apple build 123 and Android build
+77 carry that activation. Physical two-player evidence remains deliberately
+open and does not gate or override the enabled default.
+
+The superseding `main` run
+[#1253](http://192.168.4.7:3000/noirr/plurx/actions/runs/1253) found one Apple
+teardown race and one decoder-effort Store-fixture integration failure. The
+Apple correction joins bounded finalization before an injected transport is
+invalidated and uses a 500 ms transport retry inside the three-second final
+window; its complete local qualification passed 472 iOS and 458 tvOS tests and
+it claims Apple build 124. The Store correction reconstructs exact pre-v28 migration
+fixtures instead of leaving current v28–v34 objects under old schema markers,
+and advances the shared-cache fixture's publication generation. Both fixes are
+being prepared on `codex/prepared-handoff-postmerge`; no additional review pass
+is planned. Three other failed jobs stopped before testing when the same runner
+reported 24 GB free against a 25 GB floor; its installed janitor restored 34 GB
+without manual deletion · **Updated:** 2026-09-09 · **Effort:**
+`effort/streaming-reliability` (merged) · **Started:** 2026-09-04 ·
 **Effort fork:** `48615baf` · **Continuation merged to main:** `1f6d6645` via
 [#178](http://192.168.4.7:3000/noirr/plurx/pulls/178) on 2026-09-08 ·
 **Earlier slice:** `bbe0bae9` via [#53](http://192.168.4.7:3000/noirr/plurx/pulls/53) on 2026-09-06 ·
@@ -151,6 +160,7 @@ or call a green unit suite physical playback evidence.
 
 | At (America/New_York) | State change |
 |---|---|
+| 2026-09-09 — default-on merged; post-merge failures under correction | [#193](http://192.168.4.7:3000/noirr/plurx/pulls/193) merged as `7bb7cf6c`, defaulting prepared handoff on across the server and all three clients while keeping explicit opt-outs and a non-gating Developer requirements card. Superseding main run [#1253](http://192.168.4.7:3000/noirr/plurx/actions/runs/1253) then exposed two source problems: Apple tests could invalidate an injected `URLSession` while a detached final report was still beginning, and decoder-effort migration tests stamped old replicated schema markers without removing the newly integrated v28–v34 objects. The Apple join/retry correction passes 472 iOS and 458 tvOS tests and claims build 124. The exact Store downgrades and publication-generation fixture correction are under focused three-voter validation before the single full Store rerun. Fast Rust, cluster daemon, and web did not execute: all three landed on `gha-nuc4-general-01` at 24 GB free and stopped at the 25 GB preflight floor; the hourly janitor has since restored 34 GB and reports the runner idle. |
 | 2026-09-08 — fast Rust restart failures corrected before merge | The final fast Rust lane passed pinned formatting and strict Clippy, then its complete workspace unit command found one stale Store method count and five encoded-VOD restart regressions. The Store inventory now records the prepared-successor census as method 302. All five VOD failures shared one cause: `-start_at_zero` erased a seeked input's film timestamp before the `fps`/`trim` graph asked for the destination time, so a restart encoded the opening frame and merely relabeled its timestamps. Encoded generations now retain film time under `-copyts`; bitmap sidecars retain the same clock without a synthetic `-isync` offset. The Store inventory and real-media NTSC, VFR, bitmap-burn, and manual-audio restart cases pass locally. Forgejo's pinned FFmpeg 6 rerun remains the authority for the text-burn case because the local FFmpeg build rejects that existing subtitles-filter descriptor syntax before producing media. No merge occurs until the four fast lanes are green. |
 | 2026-09-08 — build 121 integrated before the newer build 122 candidate | `main` advanced first to `34152712`, adding the Raft analysis-query starvation fix. Both branches had independently claimed the next schema numbers, so the effort preserves main's terminal-identity index as replicated v30 / SQLite v50 and appends the predecessor drain as replicated v31 / SQLite v51. Pinned all-target compilation and focused contiguous-chain, stale-marker, index, and downgrade-fixture tests pass. Forgejo's old PR run had one real failure hidden among its canceled jobs: Apple inputs changed at build 120 without a bump. Live TV fix [#181](http://192.168.4.7:3000/noirr/plurx/pulls/181) claimed build 121 and merged first as `b336e19d`. This newer streaming candidate now integrates that exact tree and carries Apple build 122; the Live TV release-note fragment remains historically bound to build 121. Its first exact-head fast run then correctly required the changed Android client to advance above main's versionCode 75 and found the merged ownership inventory two task-spawn shapes short. Android is now versionCode 76, and the inventory retains both the bounded extractor owners and main's guide loop at the measured count. The corrected mobile and focused ownership gates pass locally. The corrective commit, push, green fast lanes, ready transition, and merge remain. |
 | 2026-09-08 — final adversarial review corrected; promotion next | Draft [#178](http://192.168.4.7:3000/noirr/plurx/pulls/178) is open from the isolated effort clone. Its first exact-candidate adversarial pass found seven P1s; all seven and two verification gaps were corrected at `9249ddaa`. The final requested review of that candidate found four remaining P1s. Android now owns a bounded immutable commit → end finalization and issues DELETE only afterward. Apple and web stop permanent-outage finalizers at three seconds and clear retained retry state. Web video reports prepared capability only when it has real presented-frame evidence, and `timeupdate` remains the separate audio-only proof. Regressions cover ordering, exact retry, permanent outage, and video-without-frame-callback rollback. Android's complete JVM/lint lane, both Apple device-SDK test builds, complete web checks, the focused operations contract, and diff hygiene pass on the corrections. No further review will be requested. The tracked effort commit, push, green promotion fast lanes, ready transition, and merge remain; longer jobs are watched after merge and any source correction gets a new PR. |
