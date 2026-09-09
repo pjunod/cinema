@@ -16,10 +16,10 @@ checkbox means retained evidence, not intent.
 |---|---|
 | Product implementation | PR [#191](http://192.168.4.7:3000/noirr/plurx/pulls/191) merged as `c14ddba6`; M0–M5 are active in `main` with no product feature gate. |
 | Review | The requested single adversarial review is complete and all nine findings were implemented before merge. No second review was run. |
-| Main verification | Run [#1384](http://192.168.4.7:3000/noirr/plurx/actions/runs/1384) is the current post-merge run for `18ddffc1`. Rust, Store, WAL, daemon, web, Android, packaging, coverage, and transport contracts passed. The 20-cycle voter role is running; the independent learner role follows on the topology runner. |
+| Main verification | Run [#1384](http://192.168.4.7:3000/noirr/plurx/actions/runs/1384) tested `18ddffc1`. Rust, Store, WAL, daemon, web, Android, packaging, coverage, and transport contracts passed, and the independent voter role passed 20/20 cycles. Merge `cfe9f67f` from unrelated PR #202 then superseded the main run during learner cycle 1, so no learner or aggregate pass is claimed from it. |
 | Infrastructure repair | The VOD test never started because its runner had 42 GB free against the lane's 45 GB floor. The repository janitor is now installed there and one inactive 4.9 GB generated Cargo target was removed, restoring 50 GB free. |
 | Apple repair | The iPhone leg passed all 472 tests; the fresh iPad destination then stalled before XCTest and exhausted the job deadline. Fix-forward commit `4c93b342` removes only stale workflow-owned simulators and explicitly boots each isolated destination to runtime readiness before testing. |
-| Remaining merge work | Finish both role reports and their aggregate, publish this status/mapping repair through one draft PR, run the complete PR suite once, then merge only if every required job passes. |
+| Remaining merge work | The repair branch contains current `main` `cfe9f67f`. Publish it through one draft PR, run the complete PR suite once, then merge only if every required job—including both 20-cycle roles and their aggregate—passes. |
 
 ## Current position — the one M6 adversarial review is complete
 
