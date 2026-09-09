@@ -39,13 +39,21 @@ const MAX_DOCUMENT_BYTES: usize = 1024 * 1024;
 const MAX_CHANNELS: usize = 512;
 const MAX_GUIDE_NUMBER_BYTES: usize = 32;
 const MAX_GUIDE_NAME_BYTES: usize = 256;
+const MAX_CHANNEL_FORMAT_BYTES: usize = 32;
 const MAX_DEVICE_FIELD_BYTES: usize = 256;
+const MAX_TUNER_STATUS_BYTES: usize = 64 * 1024;
 const SNAPSHOT_TTL: Duration = Duration::from_secs(30);
 const STALE_TTL: Duration = Duration::from_secs(5 * 60);
 const GRAPH_PROBE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 const GRAPH_PROBE_MIN_INTERVAL: Duration = Duration::from_secs(60);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const DOCUMENT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Signal is a live diagnostic, not a condition for keeping playback alive.
+/// Cache it briefly so concurrent client polls do not become a request burst
+/// against the tuner, and bound an optional/unsupported endpoint tightly.
+const TUNER_STATUS_TTL: Duration = Duration::from_secs(4);
+const TUNER_STATUS_UNAVAILABLE_TTL: Duration = Duration::from_secs(15);
+const TUNER_STATUS_TIMEOUT: Duration = Duration::from_secs(2);
 /// Forced refreshes are expensive, signed owner operations. One caller does
 /// the work while a small bounded set of followers may wait for its result;
 /// additional callers fail promptly instead of building an unbounded queue.
@@ -473,6 +481,12 @@ pub(crate) struct LiveTvChannel {
     pub(crate) favorite: bool,
     pub(crate) drm: bool,
     pub(crate) support: LiveTvChannelSupport,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) hd: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) video_codec: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) audio_codec: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -707,7 +721,19 @@ pub(crate) struct LiveTvSessionStatus {
     pub(crate) age_seconds: u64,
     pub(crate) idle_seconds: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) signal: Option<LiveTvSignalStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) error: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct LiveTvSignalStatus {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) strength_percent: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) quality_percent: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) symbol_quality_percent: Option<u8>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -767,6 +793,7 @@ struct LiveTvSession {
     request: LiveTvStartRequest,
     channel: LiveTvChannel,
     output: LiveTvOutput,
+    device_ipv4: Option<Ipv4Addr>,
     owner_serving_generation: u64,
     started: tokio::time::Instant,
     directory: PathBuf,
@@ -780,6 +807,7 @@ struct LiveTvSession {
     /// the startup decision can tell a slow channel from an absent one.
     tuner_bytes: Arc<AtomicU64>,
     resource_admission: Arc<tokio::sync::Semaphore>,
+    signal_cache: tokio::sync::Mutex<Option<(tokio::time::Instant, Option<LiveTvSignalStatus>)>>,
     state: StdMutex<LiveTvSessionState>,
 }
 
@@ -806,6 +834,7 @@ impl LiveTvSession {
             media_sequence: state.media_sequence,
             age_seconds: now.duration_since(self.started).as_secs(),
             idle_seconds: now.duration_since(state.last_touch).as_secs(),
+            signal: None,
             error: state.error.clone(),
         }
     }
@@ -1587,6 +1616,7 @@ impl LiveTvManager {
             request: request.clone(),
             channel,
             output,
+            device_ipv4: Some(address),
             owner_serving_generation: serving_generation,
             started,
             directory,
@@ -1598,6 +1628,7 @@ impl LiveTvManager {
             decoder_unavailable: Arc::new(AtomicBool::new(false)),
             tuner_bytes: Arc::new(AtomicU64::new(0)),
             resource_admission: Arc::new(tokio::sync::Semaphore::new(LOCAL_RESOURCE_CONCURRENCY)),
+            signal_cache: tokio::sync::Mutex::new(None),
             state: StdMutex::new(LiveTvSessionState {
                 phase: LiveTvSessionPhase::Starting,
                 startup: None,
@@ -1842,7 +1873,9 @@ impl LiveTvManager {
                     .map_err(|error| LiveTvError::StreamFailed(error.to_string()))
             }
             LiveTvResourceRequest::Status { .. } => {
-                let body = serde_json::to_vec(&session.status(&self.node_id))
+                let mut status = session.status(&self.node_id);
+                status.signal = self.session_signal(&session).await;
+                let body = serde_json::to_vec(&status)
                     .map_err(|error| LiveTvError::StreamFailed(error.to_string()))?;
                 Response::builder()
                     .status(StatusCode::OK)
@@ -1856,6 +1889,34 @@ impl LiveTvManager {
                 .body(Body::empty())
                 .map_err(|error| LiveTvError::StreamFailed(error.to_string())),
         }
+    }
+
+    async fn session_signal(&self, session: &LiveTvSession) -> Option<LiveTvSignalStatus> {
+        let mut cache = session.signal_cache.lock().await;
+        let now = tokio::time::Instant::now();
+        if let Some((observed, signal)) = cache.as_ref() {
+            let ttl = if signal.is_some() {
+                TUNER_STATUS_TTL
+            } else {
+                TUNER_STATUS_UNAVAILABLE_TTL
+            };
+            if now.duration_since(*observed) <= ttl {
+                return signal.clone();
+            }
+        }
+        let signal = async {
+            let address = session.device_ipv4?;
+            let client = self.client.as_ref().ok()?;
+            let url = pinned_url(address, 80, "/status.json").ok()?;
+            let body = fetch_bounded(client, url, MAX_TUNER_STATUS_BYTES, TUNER_STATUS_TIMEOUT)
+                .await
+                .ok()?;
+            let rows = serde_json::from_slice::<Vec<serde_json::Value>>(&body).ok()?;
+            tuner_signal_for_channel(rows, &session.channel.guide_number)
+        }
+        .await;
+        *cache = Some((now, signal.clone()));
+        signal
     }
 
     pub(crate) async fn stop_local(&self, capability: &str) -> Result<(), LiveTvError> {
@@ -4058,6 +4119,20 @@ struct LineupDocument {
     tags: Option<String>,
     #[serde(rename = "URL")]
     url: Option<String>,
+    video_codec: Option<String>,
+    audio_codec: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct TunerStatusDocument {
+    resource: Option<String>,
+    vct_number: Option<String>,
+    #[serde(rename = "TargetIP")]
+    target_ip: Option<String>,
+    signal_strength_percent: Option<u16>,
+    signal_quality_percent: Option<u16>,
+    symbol_quality_percent: Option<u16>,
 }
 
 fn top_level_lineup_marker(value: Option<&serde_json::Value>, fail_closed: bool) -> bool {
@@ -4073,6 +4148,23 @@ fn top_level_lineup_marker(value: Option<&serde_json::Value>, fail_closed: bool)
     }
 }
 
+fn optional_lineup_marker(value: Option<&serde_json::Value>) -> Option<bool> {
+    match value {
+        Some(serde_json::Value::Bool(value)) => Some(*value),
+        Some(serde_json::Value::Number(value)) if value.as_u64() == Some(0) => Some(false),
+        Some(serde_json::Value::Number(value)) if value.as_u64() == Some(1) => Some(true),
+        _ => None,
+    }
+}
+
+fn channel_format(value: Option<&str>) -> Option<String> {
+    let value = value?.trim();
+    (!value.is_empty()
+        && value.len() <= MAX_CHANNEL_FORMAT_BYTES
+        && !value.chars().any(char::is_control))
+    .then(|| value.to_owned())
+}
+
 fn validate_lineup(rows: Vec<serde_json::Value>) -> Result<Vec<LiveTvChannel>, LiveTvError> {
     if rows.len() > MAX_CHANNELS {
         return Err(LiveTvError::InvalidResponse(format!(
@@ -4084,6 +4176,7 @@ fn validate_lineup(rows: Vec<serde_json::Value>) -> Result<Vec<LiveTvChannel>, L
     for raw_row in rows {
         let top_level_drm = top_level_lineup_marker(raw_row.get("DRM"), true);
         let top_level_favorite = top_level_lineup_marker(raw_row.get("Favorite"), false);
+        let hd = optional_lineup_marker(raw_row.get("HD"));
         let Ok(row) = serde_json::from_value::<LineupDocument>(raw_row) else {
             continue;
         };
@@ -4136,10 +4229,47 @@ fn validate_lineup(rows: Vec<serde_json::Value>) -> Result<Vec<LiveTvChannel>, L
             } else {
                 LiveTvChannelSupport::Ready
             },
+            hd,
+            video_codec: channel_format(row.video_codec.as_deref()),
+            audio_codec: channel_format(row.audio_codec.as_deref()),
         });
     }
     channels.sort_by(|left, right| guide_order(&left.guide_number, &right.guide_number));
     Ok(channels)
+}
+
+fn tuner_signal_for_channel(
+    rows: Vec<serde_json::Value>,
+    guide_number: &str,
+) -> Option<LiveTvSignalStatus> {
+    let percent = |value: Option<u16>| value.filter(|value| *value <= 100).map(|value| value as u8);
+    rows.into_iter()
+        .filter_map(|row| serde_json::from_value::<TunerStatusDocument>(row).ok())
+        .find_map(|row| {
+            let busy = row
+                .target_ip
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty());
+            let channel_matches = row.vct_number.as_deref() == Some(guide_number);
+            // Resource is not displayed, but requiring its short documented
+            // tuner identity rejects a malformed row before any readings are
+            // accepted into the public capability response.
+            let resource_valid = row.resource.as_deref().is_some_and(|value| {
+                !value.is_empty() && value.len() <= 32 && !value.chars().any(char::is_control)
+            });
+            if !busy || !channel_matches || !resource_valid {
+                return None;
+            }
+            let signal = LiveTvSignalStatus {
+                strength_percent: percent(row.signal_strength_percent),
+                quality_percent: percent(row.signal_quality_percent),
+                symbol_quality_percent: percent(row.symbol_quality_percent),
+            };
+            (signal.strength_percent.is_some()
+                || signal.quality_percent.is_some()
+                || signal.symbol_quality_percent.is_some())
+            .then_some(signal)
+        })
 }
 
 fn guide_order(left: &str, right: &str) -> std::cmp::Ordering {
@@ -4472,6 +4602,9 @@ mod tests {
                 favorite: false,
                 drm: false,
                 support: LiveTvChannelSupport::Ready,
+                hd: None,
+                video_codec: None,
+                audio_codec: None,
             },
             output: LiveTvOutput {
                 container: "hls".into(),
@@ -4479,6 +4612,7 @@ mod tests {
                 audio: "aac".into(),
                 height: 720,
             },
+            device_ipv4: None,
             owner_serving_generation: 0,
             started: now,
             directory,
@@ -4504,6 +4638,7 @@ mod tests {
                 terminal_error: None,
                 cleanup: None,
             }),
+            signal_cache: tokio::sync::Mutex::new(None),
         })
     }
 
@@ -5181,7 +5316,8 @@ exec /bin/cat >/dev/null
     fn lineup_drops_bad_rows_and_fails_closed_on_duplicates_and_urls() {
         let rows = serde_json::from_str::<Vec<serde_json::Value>>(
             r#"[
-              {"GuideNumber":"7.1","GuideName":"WABC","Tags":"favorite"},
+              {"GuideNumber":"7.1","GuideName":"WABC","Tags":"favorite","HD":1,
+               "VideoCodec":"HEVC","AudioCodec":"AC4"},
               {"GuideNumber":"oops/../","GuideName":"bad"},
               {"GuideNumber":"8.1","GuideName":42},
               "not-an-object",
@@ -5193,6 +5329,9 @@ exec /bin/cat >/dev/null
         assert_eq!(channels.len(), 2);
         assert_eq!(channels[0].guide_number, "7.1");
         assert!(channels[0].favorite);
+        assert_eq!(channels[0].hd, Some(true));
+        assert_eq!(channels[0].video_codec.as_deref(), Some("HEVC"));
+        assert_eq!(channels[0].audio_codec.as_deref(), Some("AC4"));
         assert_eq!(channels[1].support, LiveTvChannelSupport::DrmUnsupported);
 
         let duplicate = serde_json::from_str::<Vec<serde_json::Value>>(
@@ -5209,6 +5348,36 @@ exec /bin/cat >/dev/null
         )
         .expect("hostile");
         assert!(validate_lineup(hostile).is_err());
+    }
+
+    #[test]
+    fn tuner_status_reports_only_the_busy_matching_channels_bounded_signal() {
+        let rows = serde_json::from_str::<Vec<serde_json::Value>>(
+            r#"[
+              {"Resource":"tuner0","VctNumber":"7.1","TargetIP":"",
+               "SignalStrengthPercent":99,"SignalQualityPercent":99,"SymbolQualityPercent":99},
+              {"Resource":"tuner1","VctNumber":"9.1","TargetIP":"192.168.4.2",
+               "SignalStrengthPercent":100,"SignalQualityPercent":100,"SymbolQualityPercent":100},
+              {"Resource":"tuner2","VctNumber":"7.1","TargetIP":"172.18.0.2",
+               "SignalStrengthPercent":96,"SignalQualityPercent":89,"SymbolQualityPercent":100}
+            ]"#,
+        )
+        .expect("status rows");
+        assert_eq!(
+            tuner_signal_for_channel(rows, "7.1"),
+            Some(LiveTvSignalStatus {
+                strength_percent: Some(96),
+                quality_percent: Some(89),
+                symbol_quality_percent: Some(100),
+            })
+        );
+
+        let invalid = serde_json::from_str::<Vec<serde_json::Value>>(
+            r#"[{"Resource":"tuner0","VctNumber":"7.1","TargetIP":"192.168.4.2",
+                  "SignalStrengthPercent":101,"SignalQualityPercent":999}]"#,
+        )
+        .expect("invalid percentages");
+        assert_eq!(tuner_signal_for_channel(invalid, "7.1"), None);
     }
 
     /// A 10-bit broadcast has to reach the encoder as 8-bit.
@@ -5969,6 +6138,9 @@ exec /bin/cat >/dev/null
                 favorite: false,
                 drm: false,
                 support: LiveTvChannelSupport::Ready,
+                hd: None,
+                video_codec: None,
+                audio_codec: None,
             },
             LiveTvChannel {
                 id: "4.1".into(),
@@ -5977,6 +6149,9 @@ exec /bin/cat >/dev/null
                 favorite: false,
                 drm: false,
                 support: LiveTvChannelSupport::Ready,
+                hd: None,
+                video_codec: None,
+                audio_codec: None,
             },
         ]
     }

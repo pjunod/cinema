@@ -44,6 +44,8 @@ async function main() {
     assert.match(stage, /lt-stage\$\{wide\?" wide":""\}/);
     assert.match(now, /Larger/);
     assert.match(now, /Smaller/);
+    assert.match(grid, /liveTvFormatBadges/);
+    assert.match(now, /liveTvTechnicalDetails/);
     for(const control of ["pauseLiveTv", "muteLiveTv", "toggleLiveTvPip", "fullscreenLiveTv", "stopLiveTv"])
       assert.match(now, new RegExp(control));
     assert.match(shell, /\.lt-list\{[^}]*overflow:auto[^}]*height:var\(--live-tv-slot-height,64vh\)/s);
@@ -87,6 +89,25 @@ async function main() {
       label: "Available",
       tone: "ready",
     });
+  });
+
+  await test("lineup format facts become compact badges without guessing", () => {
+    assert.deepEqual(liveTv.channelBadges({ hd: true, video_codec: "hevc", audio_codec: "ac4" }),
+      ["HD", "HEVC", "AC4"]);
+    assert.deepEqual(liveTv.channelBadges({ hd: false, video_codec: " h264 ", audio_codec: "H264" }),
+      ["SD", "H264"]);
+    assert.deepEqual(liveTv.channelBadges({}), []);
+
+    const details = new Function("PlurxLiveTv", "esc",
+      `${shipped("liveTvTechnicalDetails")} return liveTvTechnicalDetails;`)(liveTv, String);
+    const markup = details(
+      { hd: true, video_codec: "HEVC", audio_codec: "AC4" },
+      { encoder: "vaapi", output_height: 720,
+        signal: { strength_percent: 96, quality_percent: 89, symbol_quality_percent: 100 } },
+    );
+    assert.match(markup, /Source[\s\S]*HD · HEVC · AC4/);
+    assert.match(markup, /Delivery[\s\S]*H\.264 · 720p · AAC · VAAPI encoder/);
+    assert.match(markup, /Strength[\s\S]*96%[\s\S]*Quality[\s\S]*89%[\s\S]*Symbol[\s\S]*100%/);
   });
 
   await test("typed terminal failures produce specific recovery", () => {

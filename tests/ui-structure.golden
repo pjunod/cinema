@@ -1494,7 +1494,7 @@ catalog|live-tv-grid@1280x860|dom|div.lt-gcells > button.airing.lt-cell[type=but
 catalog|live-tv-grid@1280x860|dom|div.lt-gcells > button.lt-cell[type=button text]|2
 catalog|live-tv-grid@1280x860|dom|div.lt-gcells > div.ends.lt-cell[text]|2
 catalog|live-tv-grid@1280x860|dom|div.lt-gname > span.lt-chip[text]|3
-catalog|live-tv-grid@1280x860|dom|div.lt-gname > span[text]|3
+catalog|live-tv-grid@1280x860|dom|div.lt-gname > span.lt-gmeta|3
 catalog|live-tv-grid@1280x860|dom|div.lt-grid > div.lt-grow|3
 catalog|live-tv-grid@1280x860|dom|div.lt-grid > div.lt-now|1
 catalog|live-tv-grid@1280x860|dom|div.lt-grid > div.lt-times|1
@@ -1541,6 +1541,7 @@ catalog|live-tv-grid@1280x860|dom|nav.px-nav[aria-label=*] > a|3
 catalog|live-tv-grid@1280x860|dom|nav.px-tabs[aria-label=*] > a.px-tab|2
 catalog|live-tv-grid@1280x860|dom|nav.px-tabs[aria-label=*] > button.px-tab[aria-expanded=false aria-controls=* type=button]|1
 catalog|live-tv-grid@1280x860|dom|nav.px-tabs[aria-label=*] > button.px-tab[type=button]|1
+catalog|live-tv-grid@1280x860|dom|span.lt-gmeta > span[text]|3
 catalog|live-tv-grid@1280x860|dom|span[text] > span.lt-star[text]|1
 catalog|live-tv-grid@1280x860|dom|svg.px-ico[aria-hidden=true] > circle|2
 catalog|live-tv-grid@1280x860|dom|svg.px-ico[aria-hidden=true] > path|7
@@ -1606,7 +1607,7 @@ catalog|live-tv-grid@390x780|dom|div.lt-gcells > button.airing.lt-cell[type=butt
 catalog|live-tv-grid@390x780|dom|div.lt-gcells > button.lt-cell[type=button text]|2
 catalog|live-tv-grid@390x780|dom|div.lt-gcells > div.ends.lt-cell[text]|2
 catalog|live-tv-grid@390x780|dom|div.lt-gname > span.lt-chip[text]|3
-catalog|live-tv-grid@390x780|dom|div.lt-gname > span[text]|3
+catalog|live-tv-grid@390x780|dom|div.lt-gname > span.lt-gmeta|3
 catalog|live-tv-grid@390x780|dom|div.lt-grid > div.lt-grow|3
 catalog|live-tv-grid@390x780|dom|div.lt-grid > div.lt-now|1
 catalog|live-tv-grid@390x780|dom|div.lt-grid > div.lt-times|1
@@ -1653,6 +1654,7 @@ catalog|live-tv-grid@390x780|dom|nav.px-nav[aria-label=*] > a|3
 catalog|live-tv-grid@390x780|dom|nav.px-tabs[aria-label=*] > a.px-tab|2
 catalog|live-tv-grid@390x780|dom|nav.px-tabs[aria-label=*] > button.px-tab[aria-expanded=false aria-controls=* type=button]|1
 catalog|live-tv-grid@390x780|dom|nav.px-tabs[aria-label=*] > button.px-tab[type=button]|1
+catalog|live-tv-grid@390x780|dom|span.lt-gmeta > span[text]|3
 catalog|live-tv-grid@390x780|dom|span[text] > span.lt-star[text]|1
 catalog|live-tv-grid@390x780|dom|svg.px-ico[aria-hidden=true] > circle|2
 catalog|live-tv-grid@390x780|dom|svg.px-ico[aria-hidden=true] > path|7
@@ -4081,7 +4083,7 @@ classic|live-tv-grid@1280x860|dom|div.lt-gcells > button.airing.lt-cell[type=but
 classic|live-tv-grid@1280x860|dom|div.lt-gcells > button.lt-cell[type=button text]|2
 classic|live-tv-grid@1280x860|dom|div.lt-gcells > div.ends.lt-cell[text]|2
 classic|live-tv-grid@1280x860|dom|div.lt-gname > span.lt-chip[text]|3
-classic|live-tv-grid@1280x860|dom|div.lt-gname > span[text]|3
+classic|live-tv-grid@1280x860|dom|div.lt-gname > span.lt-gmeta|3
 classic|live-tv-grid@1280x860|dom|div.lt-grid > div.lt-grow|3
 classic|live-tv-grid@1280x860|dom|div.lt-grid > div.lt-now|1
 classic|live-tv-grid@1280x860|dom|div.lt-grid > div.lt-times|1
@@ -4121,6 +4123,7 @@ classic|live-tv-grid@1280x860|dom|main#main > p#live-tv-message[role=status aria
 classic|live-tv-grid@1280x860|dom|main#main > p.sub[text]|1
 classic|live-tv-grid@1280x860|dom|nav > a.active[text]|1
 classic|live-tv-grid@1280x860|dom|nav > a[text]|3
+classic|live-tv-grid@1280x860|dom|span.lt-gmeta > span[text]|3
 classic|live-tv-grid@1280x860|dom|span[text] > span.lt-star[text]|1
 classic|live-tv-grid@1280x860|focus|000|a.logo "cinema"
 classic|live-tv-grid@1280x860|focus|001|a "home"
@@ -4168,7 +4171,7 @@ classic|live-tv-grid@390x780|dom|div.lt-gcells > button.airing.lt-cell[type=butt
 classic|live-tv-grid@390x780|dom|div.lt-gcells > button.lt-cell[type=button text]|2
 classic|live-tv-grid@390x780|dom|div.lt-gcells > div.ends.lt-cell[text]|2
 classic|live-tv-grid@390x780|dom|div.lt-gname > span.lt-chip[text]|3
-classic|live-tv-grid@390x780|dom|div.lt-gname > span[text]|3
+classic|live-tv-grid@390x780|dom|div.lt-gname > span.lt-gmeta|3
 classic|live-tv-grid@390x780|dom|div.lt-grid > div.lt-grow|3
 classic|live-tv-grid@390x780|dom|div.lt-grid > div.lt-now|1
 classic|live-tv-grid@390x780|dom|div.lt-grid > div.lt-times|1
@@ -4208,6 +4211,7 @@ classic|live-tv-grid@390x780|dom|main#main > p#live-tv-message[role=status aria-
 classic|live-tv-grid@390x780|dom|main#main > p.sub[text]|1
 classic|live-tv-grid@390x780|dom|nav > a.active[text]|1
 classic|live-tv-grid@390x780|dom|nav > a[text]|3
+classic|live-tv-grid@390x780|dom|span.lt-gmeta > span[text]|3
 classic|live-tv-grid@390x780|dom|span[text] > span.lt-star[text]|1
 classic|live-tv-grid@390x780|focus|000|a.logo "cinema"
 classic|live-tv-grid@390x780|focus|001|a "home"
@@ -6432,7 +6436,7 @@ theater|live-tv-grid@1280x860|dom|div.lt-gcells > button.airing.lt-cell[type=but
 theater|live-tv-grid@1280x860|dom|div.lt-gcells > button.lt-cell[type=button text]|2
 theater|live-tv-grid@1280x860|dom|div.lt-gcells > div.ends.lt-cell[text]|2
 theater|live-tv-grid@1280x860|dom|div.lt-gname > span.lt-chip[text]|3
-theater|live-tv-grid@1280x860|dom|div.lt-gname > span[text]|3
+theater|live-tv-grid@1280x860|dom|div.lt-gname > span.lt-gmeta|3
 theater|live-tv-grid@1280x860|dom|div.lt-grid > div.lt-grow|3
 theater|live-tv-grid@1280x860|dom|div.lt-grid > div.lt-now|1
 theater|live-tv-grid@1280x860|dom|div.lt-grid > div.lt-times|1
@@ -6477,6 +6481,7 @@ theater|live-tv-grid@1280x860|dom|nav.th-nav[aria-label=*] > a.on[aria-current=p
 theater|live-tv-grid@1280x860|dom|nav.th-nav[aria-label=*] > a[text]|3
 theater|live-tv-grid@1280x860|dom|nav.th-pills[aria-label=*] > a.on[aria-current=page text]|1
 theater|live-tv-grid@1280x860|dom|nav.th-pills[aria-label=*] > a[text]|3
+theater|live-tv-grid@1280x860|dom|span.lt-gmeta > span[text]|3
 theater|live-tv-grid@1280x860|dom|span[text] > span.lt-star[text]|1
 theater|live-tv-grid@1280x860|focus|000|a.logo "cinema"
 theater|live-tv-grid@1280x860|focus|001|a "Home"
@@ -6521,7 +6526,7 @@ theater|live-tv-grid@390x780|dom|div.lt-gcells > button.airing.lt-cell[type=butt
 theater|live-tv-grid@390x780|dom|div.lt-gcells > button.lt-cell[type=button text]|2
 theater|live-tv-grid@390x780|dom|div.lt-gcells > div.ends.lt-cell[text]|2
 theater|live-tv-grid@390x780|dom|div.lt-gname > span.lt-chip[text]|3
-theater|live-tv-grid@390x780|dom|div.lt-gname > span[text]|3
+theater|live-tv-grid@390x780|dom|div.lt-gname > span.lt-gmeta|3
 theater|live-tv-grid@390x780|dom|div.lt-grid > div.lt-grow|3
 theater|live-tv-grid@390x780|dom|div.lt-grid > div.lt-now|1
 theater|live-tv-grid@390x780|dom|div.lt-grid > div.lt-times|1
@@ -6566,6 +6571,7 @@ theater|live-tv-grid@390x780|dom|nav.th-nav[aria-label=*] > a.on[aria-current=pa
 theater|live-tv-grid@390x780|dom|nav.th-nav[aria-label=*] > a[text]|3
 theater|live-tv-grid@390x780|dom|nav.th-pills[aria-label=*] > a.on[aria-current=page text]|1
 theater|live-tv-grid@390x780|dom|nav.th-pills[aria-label=*] > a[text]|3
+theater|live-tv-grid@390x780|dom|span.lt-gmeta > span[text]|3
 theater|live-tv-grid@390x780|dom|span[text] > span.lt-star[text]|1
 theater|live-tv-grid@390x780|focus|000|a.logo "cinema"
 theater|live-tv-grid@390x780|focus|001|input#q.search "Search cinema"

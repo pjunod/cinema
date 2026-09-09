@@ -51,6 +51,21 @@
     };
   }
 
+  // Facts the tuner put in lineup.json. Missing fields stay missing: absence
+  // of `HD` is not evidence that a channel is SD, and codec names are labels,
+  // not guesses from the channel number or ATSC generation.
+  function channelBadges(channel) {
+    if (!channel) return [];
+    const badges = [];
+    if (channel.hd === true) badges.push("HD");
+    else if (channel.hd === false) badges.push("SD");
+    for (const raw of [channel.video_codec, channel.audio_codec]) {
+      const badge = typeof raw === "string" ? raw.trim().toUpperCase() : "";
+      if (badge && !badges.includes(badge)) badges.push(badge);
+    }
+    return badges;
+  }
+
   function capability(info) {
     return info && typeof info.session_id === "string" && info.session_id ? info.session_id : null;
   }
@@ -345,6 +360,7 @@
     Lease,
     StartBarrier,
     channelView,
+    channelBadges,
     errorView,
     programmeAt,
     gridLayout,

@@ -6,7 +6,8 @@ import XCTest
 @MainActor
 final class LiveTvTests: XCTestCase {
     private let channel = LiveTvChannel(id: "7.1", guideNumber: "7.1", guideName: "Local",
-                                        favorite: false, drm: false, support: "ready")
+                                        favorite: false, drm: false, support: "ready",
+                                        hd: nil, videoCodec: nil, audioCodec: nil)
 
     private func started(_ capability: String = "one") -> LiveTvStarted {
         LiveTvStarted(sessionId: capability, channel: channel, live: true)
@@ -14,10 +15,32 @@ final class LiveTvTests: XCTestCase {
 
     func testProtectedChannelsStayVisibleAndUnwatchable() {
         let protected = LiveTvChannel(id: "107.1", guideNumber: "107.1", guideName: "Protected",
-                                      favorite: false, drm: true, support: "drm_unsupported")
+                                      favorite: false, drm: true, support: "drm_unsupported",
+                                      hd: nil, videoCodec: nil, audioCodec: nil)
         XCTAssertFalse(protected.watchable)
         XCTAssertEqual(protected.title, "107.1 · Protected")
         XCTAssertTrue(channel.watchable)
+    }
+
+    func testLineupFormatsAndLiveSignalDecodeWithoutGuessing() throws {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let formatted = try decoder.decode(LiveTvChannel.self, from: Data(#"""
+        {"id":"7.1","guide_number":"7.1","guide_name":"Fixture News",
+         "favorite":false,"drm":false,"support":"ready","hd":true,
+         "video_codec":"HEVC","audio_codec":"AC4"}
+        """#.utf8))
+        XCTAssertEqual(formatted.formatBadges, ["HD", "HEVC", "AC4"])
+        XCTAssertEqual(formatted.sourceFormatDescription, "HD source · HEVC video · AC4 audio")
+        XCTAssertTrue(channel.formatBadges.isEmpty)
+
+        let status = try decoder.decode(LiveTvStatus.self, from: Data(#"""
+        {"state":"active","owner_node_id":"owner","encoder":"vaapi","output_height":720,
+         "signal":{"strength_percent":96,"quality_percent":89,"symbol_quality_percent":100}}
+        """#.utf8))
+        XCTAssertEqual(status.signal?.strengthPercent, 96)
+        XCTAssertEqual(status.signal?.qualityPercent, 89)
+        XCTAssertEqual(status.signal?.symbolQualityPercent, 100)
     }
 
     func testSwitchConfirmsReleaseBeforeStartingAnotherChannel() async throws {
@@ -564,7 +587,8 @@ private final class LiveTvCountingRequests: LiveTvRequests, @unchecked Sendable 
         return LiveTvStarted(
             sessionId: "cap-\(starts)",
             channel: LiveTvChannel(id: channel, guideNumber: channel, guideName: "Test",
-                                   favorite: false, drm: false, support: "ready"),
+                                   favorite: false, drm: false, support: "ready",
+                                   hd: nil, videoCodec: nil, audioCodec: nil),
             live: true)
     }
     func release(_ capability: String) async throws {}

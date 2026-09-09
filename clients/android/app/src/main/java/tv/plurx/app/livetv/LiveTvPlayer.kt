@@ -35,6 +35,7 @@ data class LiveTvPlayerState(
      */
     val guide: LiveTvGuide? = null,
     val watching: LiveTvChannel? = null,
+    val status: LiveTvStatus? = null,
 )
 
 /** Dedicated live player: no VOD controller, watch progress, queue or timeline. */
@@ -96,7 +97,7 @@ class LiveTvPlayer private constructor(context: Context) {
         val mine = ++serial
         detach()
         mutableState.value = mutableState.value.copy(busy = true, playing = false, title = channel.title,
-            watching = channel, message = "Starting ${channel.title}…")
+            watching = channel, status = null, message = "Starting ${channel.title}…")
         scope.launch {
             try {
                 val started = lease.start(channel.id).await() ?: return@launch
@@ -146,7 +147,11 @@ class LiveTvPlayer private constructor(context: Context) {
                                 lease.heartbeatMarker()
                                 api.keepalive(started.session_id)
                                 if (mine != serial) break
-                                if (api.status(started.session_id).state != "active") throw LiveTvFailure("stream_failed")
+                                val status = api.status(started.session_id)
+                                if (status.state != "active") throw LiveTvFailure("stream_failed")
+                                if (mine == serial) {
+                                    mutableState.value = mutableState.value.copy(status = status)
+                                }
                             } else if (watchdog.expired) {
                                 stopWithMessage("Live TV stopped after the 30-second no-progress budget. Select a channel to resume.")
                             }
@@ -186,6 +191,7 @@ class LiveTvPlayer private constructor(context: Context) {
             // left the list row labelled and the grid cell highlighted for a
             // session that no longer exists.
             watching = null,
+            status = null,
             channels = if (clearProfile) emptyList() else mutableState.value.channels,
             // And a guide belongs to the profile whose lineup it was matched
             // against: keeping it across a sign-out rendered one account's

@@ -34,7 +34,6 @@ import tv.plurx.app.ui.components.TvButton as Button
 import tv.plurx.app.ui.components.TvTextButton as TextButton
 import tv.plurx.app.ui.components.RequestInitialFocus
 import tv.plurx.app.ui.components.tvFocusRing
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.foundation.clickable
@@ -289,6 +288,7 @@ fun LiveTvScreen(origin: String, onBack: () -> Unit) {
                     LiveTvOverlay(
                         channel = state.watching,
                         airing = state.watching?.let { controller.airing(it, now) } ?: LiveTvAiring(),
+                        status = state.status,
                         neighbours = visible,
                         onSelect = { controller.requestChannel(it) },
                         onExit = { fullscreen = false },
@@ -299,6 +299,7 @@ fun LiveTvScreen(origin: String, onBack: () -> Unit) {
                 LiveTvNowBar(
                     channel = state.watching,
                     airing = state.watching?.let { controller.airing(it, now) } ?: LiveTvAiring(),
+                    status = state.status,
                     paused = state.paused,
                     muted = state.muted,
                     fullscreen = fullscreen,
@@ -403,6 +404,7 @@ fun LiveTvScreen(origin: String, onBack: () -> Unit) {
 private fun LiveTvNowBar(
     channel: LiveTvChannel?,
     airing: LiveTvAiring,
+    status: LiveTvStatus?,
     paused: Boolean,
     muted: Boolean,
     fullscreen: Boolean,
@@ -433,6 +435,7 @@ private fun LiveTvNowBar(
                 overflow = TextOverflow.Ellipsis,
             )
         }
+        channel?.let { LiveTvTechnicalDetails(it, status) }
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = onTogglePause) { Text(if (paused) "Play live" else "Pause") }
             TextButton(onClick = onToggleMute) { Text(if (muted) "Unmute" else "Mute") }
@@ -454,6 +457,7 @@ private fun LiveTvNowBar(
 private fun LiveTvOverlay(
     channel: LiveTvChannel?,
     airing: LiveTvAiring,
+    status: LiveTvStatus?,
     neighbours: List<LiveTvChannel>,
     onSelect: (LiveTvChannel) -> Unit,
     onExit: () -> Unit,
@@ -472,6 +476,16 @@ private fun LiveTvOverlay(
                 color = Color.White,
             )
             Text(channel?.title.orEmpty(), style = MaterialTheme.typography.labelMedium, color = Color.White)
+            channel?.let {
+                val summary = liveTvTechnicalSummary(it, status)
+                if (summary.isNotEmpty()) {
+                    Text(
+                        summary,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color.White.copy(alpha = 0.78f),
+                    )
+                }
+            }
             airing.now?.let {
                 Text(
                     "${liveTvTime(it.start)}–${liveTvTime(it.end)}" +
@@ -499,6 +513,78 @@ private fun LiveTvOverlay(
             TextButton(onClick = onExit) { Text("Exit", color = Color.White) }
         }
     }
+}
+
+@Composable
+private fun LiveTvTechnicalDetails(channel: LiveTvChannel, status: LiveTvStatus?) {
+    Column(
+        Modifier.fillMaxWidth().padding(vertical = 6.dp),
+        verticalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        channel.sourceFormatDescription?.let { LiveTvTechnicalRow("Source", it) }
+        status?.let {
+            val delivery = buildList {
+                add("H.264")
+                it.output_height?.let { height -> add("${height}p") }
+                add("AAC")
+                it.encoder?.takeUnless { encoder -> encoder == "pending" }
+                    ?.let { encoder -> add("${encoder.uppercase()} encoder") }
+            }.joinToString(" · ")
+            LiveTvTechnicalRow("Delivery", delivery)
+        }
+        val meters = status?.signal?.let { signal ->
+            listOfNotNull(
+                signal.strength_percent?.let { "Strength" to it },
+                signal.quality_percent?.let { "Quality" to it },
+                signal.symbol_quality_percent?.let { "Symbol" to it },
+            )
+        }.orEmpty()
+        if (meters.isNotEmpty()) {
+            Text(
+                "SIGNAL",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                meters.forEach { (label, value) ->
+                    Column(Modifier.weight(1f)) {
+                        Text("$label $value%", style = MaterialTheme.typography.labelSmall)
+                        LinearProgressIndicator(
+                            progress = { value / 100f },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LiveTvTechnicalRow(label: String, value: String) {
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(
+            label.uppercase(),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            value,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+private fun liveTvTechnicalSummary(channel: LiveTvChannel, status: LiveTvStatus?): String {
+    val signal = status?.signal
+    val reception = listOfNotNull(
+        signal?.strength_percent?.let { "strength $it%" },
+        signal?.quality_percent?.let { "quality $it%" },
+        signal?.symbol_quality_percent?.let { "symbol $it%" },
+    ).joinToString(" · ")
+    return listOfNotNull(channel.sourceFormatDescription, reception.takeIf { it.isNotEmpty() })
+        .joinToString(" · ")
 }
 
 @Composable

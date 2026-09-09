@@ -3,6 +3,7 @@
 package tv.plurx.app.livetv
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -63,6 +64,29 @@ private val liveTvClock = SimpleDateFormat("h:mm a", Locale.getDefault())
 
 fun liveTvTime(unixSeconds: Long): String = liveTvClock.format(Date(unixSeconds * 1000))
 
+/** Small lineup facts that fit both a list row and the grid's channel column. */
+@Composable
+fun LiveTvFormatBadges(channel: LiveTvChannel) {
+    if (channel.formatBadges.isEmpty()) return
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        modifier = Modifier.semantics {
+            contentDescription = "Source format: ${channel.formatBadges.joinToString(", ")}"
+        },
+    ) {
+        channel.formatBadges.forEach { badge ->
+            Text(
+                badge,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier
+                    .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(12.dp))
+                    .padding(horizontal = 5.dp, vertical = 1.dp),
+            )
+        }
+    }
+}
+
 /**
  * One channel row: chip, number and callsign, what is on with a bar to its
  * end, and what is next. A protected channel is dimmed, never hidden.
@@ -86,7 +110,10 @@ fun LiveTvChannelRow(
                 }
             },
     ) {
-        Text(channel.title, style = MaterialTheme.typography.titleSmall)
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(channel.title, style = MaterialTheme.typography.titleSmall)
+            LiveTvFormatBadges(channel)
+        }
         when {
             !channel.watchable -> Text(
                 "Protected channel · not playable",
@@ -163,6 +190,7 @@ fun LiveTvGuideGrid(
                     Column(Modifier.width(LiveTvGridMetrics.channelColumnWidth)) {
                         Text(row.channel.guide_number, style = MaterialTheme.typography.labelMedium)
                         Text(row.channel.guide_name, style = MaterialTheme.typography.labelSmall)
+                        LiveTvFormatBadges(row.channel)
                     }
                     Box(Modifier.horizontalScroll(scroll)) {
                         // An empty row is a channel the guide has no data for,

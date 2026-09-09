@@ -359,6 +359,7 @@
     background:rgba(255,255,255,.14);font-size:11px;font-weight:700;letter-spacing:.04em}
   .lth-title{font-size:19px;font-weight:600;line-height:1.2;text-shadow:0 1px 5px rgba(0,0,0,.85)}
   .lth-sub{font-size:12.5px;opacity:.86;margin-top:3px;text-shadow:0 1px 5px rgba(0,0,0,.85)}
+  .lth-tech{display:block;font-size:11px;opacity:.78;margin-top:5px;text-shadow:0 1px 5px rgba(0,0,0,.85)}
   .lth-live{display:inline-flex;align-items:center;gap:5px;font-size:10.5px;font-weight:700;
     letter-spacing:.09em;padding:2px 7px;border-radius:999px;background:#c0392b;color:#fff;margin-left:8px}
   .lth-acts{display:flex;gap:8px;flex:none}
@@ -424,6 +425,9 @@
   .lt-mini{height:3px;border-radius:2px;background:var(--line);margin:6px 0 2px;overflow:hidden}
   .lt-mini i{display:block;height:100%;background:var(--accent)}
   .lt-star{color:var(--accent);font-size:13px}
+  .lt-badges{display:inline-flex;gap:4px;flex-wrap:wrap;vertical-align:middle;margin-left:7px}
+  .lt-fbadge{display:inline-flex;align-items:center;border:1px solid var(--line);border-radius:999px;
+    padding:1px 5px;color:var(--muted);font-size:9px;font-weight:700;line-height:1.35;letter-spacing:.04em}
 
   .lt-stage{border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;background:var(--panel)}
   .lt-stage-top{display:grid;grid-template-columns:minmax(0,2fr) minmax(240px,1fr);align-items:stretch;aspect-ratio:8/3;min-height:0}
@@ -436,9 +440,19 @@
   .lt-showinfo .meta{color:var(--muted);font-size:12px;line-height:1.5}
   .lt-showinfo .synopsis{margin:14px 0 0;color:var(--prose);font-size:13px;line-height:1.55}
   .lt-showinfo .nextup{margin-top:18px;padding-top:12px;border-top:1px solid var(--line);font-size:12.5px;color:var(--muted)}
+  .lt-tech{margin-top:16px;padding-top:12px;border-top:1px solid var(--line);display:grid;gap:8px}
+  .lt-tech-row{display:grid;grid-template-columns:58px minmax(0,1fr);gap:8px;align-items:center;
+    color:var(--muted);font-size:11.5px;line-height:1.35}
+  .lt-tech-row b{color:var(--text);font-size:10px;text-transform:uppercase;letter-spacing:.06em}
+  .lt-signal{display:grid;grid-template-columns:repeat(3,minmax(58px,1fr));gap:6px}
+  .lt-signal span{display:grid;grid-template-columns:auto 1fr auto;gap:4px;align-items:center;font-size:10px}
+  .lt-signal meter{width:100%;height:6px;accent-color:var(--accent)}
   .lt-nowbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 14px;
     border-top:1px solid var(--line);font-size:13px}
   .lt-nowbar .grow{flex:1;min-width:120px}
+  .lt-nowtech{display:none;flex:1 0 100%}
+  .lt-stage.wide .lt-nowtech{display:block}
+  .lt-nowtech .lt-tech{margin-top:2px;padding-top:10px}
   .lt-nowbar button{background:var(--panel2);border:1px solid var(--line);border-radius:6px;
     color:var(--text);cursor:pointer;padding:5px 9px;font-size:12.5px;font-family:inherit}
   .lt-nowbar button:hover{border-color:var(--accent)}
@@ -460,6 +474,9 @@
   .lt-grow{display:flex;align-items:stretch;border-bottom:1px solid var(--line);height:52px}
   .lt-gname{position:sticky;left:0;z-index:2;width:180px;flex:none;background:var(--panel);
     border-right:1px solid var(--line);display:flex;align-items:center;gap:8px;padding:0 10px;font-size:12.5px}
+  .lt-gmeta{min-width:0;display:flex;flex-direction:column;gap:3px}
+  .lt-gmeta .lt-badges{margin-left:0;flex-wrap:nowrap;overflow:hidden}
+  .lt-gmeta .lt-fbadge{font-size:8px;padding:0 4px}
   .lt-gcells{position:relative;flex:none}
   .lt-cell{position:absolute;top:5px;bottom:5px;border:1px solid var(--line);border-radius:5px;
     background:var(--panel);color:var(--text);font-size:12px;padding:5px 8px;text-align:left;
@@ -481,6 +498,7 @@
     .lt-slot{height:auto;aspect-ratio:16/9}
     .lt-showinfo{border-left:0;border-top:1px solid var(--line)}
     .lt-stage.wide .lt-showinfo{display:block}
+    .lt-nowtech{display:block}
   }
   @media(prefers-reduced-motion:reduce){.lth-overlay{transition:none}}
   .modal{position:fixed;inset:0;background:#000;z-index:50;display:none;place-items:center;padding:0}
@@ -14549,7 +14567,7 @@ function playbackPanel(settings){
 }
 // Live TV owns its own media element and capability. It never enters PLAYER,
 // file progress, playback-control, watched state, autoskip, or Trakt.
-const LIVE_TV={channels:[],serial:0,hls:null,timer:null,polling:false,lastChannel:null,cleanupMarker:null,unplayedSince:null,lastPosition:0,starting:null};
+const LIVE_TV={channels:[],serial:0,hls:null,timer:null,polling:false,lastChannel:null,cleanupMarker:null,unplayedSince:null,lastPosition:0,starting:null,status:null};
 function liveTvNow(){
   return performance.now();
 }
@@ -14766,6 +14784,43 @@ async function toggleLiveTvPip(){
 function liveTvProgramme(channelId){
   return PlurxLiveTv.programmeAt(LIVE_TV.guide,channelId,liveTvNowSeconds());
 }
+function liveTvFormatBadges(channel){
+  const badges=PlurxLiveTv.channelBadges(channel);
+  return badges.length?`<span class="lt-badges" aria-label="Source format: ${esc(badges.join(", "))}">${badges.map(label=>`<span class="lt-fbadge">${esc(label)}</span>`).join("")}</span>`:"";
+}
+function liveTvTechnicalDetails(channel,status){
+  if(!channel) return "";
+  const badges=PlurxLiveTv.channelBadges(channel);
+  const rows=[];
+  if(badges.length) rows.push(`<div class="lt-tech-row"><b>Source</b><span>${esc(badges.join(" · "))}</span></div>`);
+  if(status){
+    const delivery=["H.264",status.output_height?`${status.output_height}p`:null,"AAC"].filter(Boolean).join(" · ");
+    const encoder=status.encoder&&status.encoder!=="pending"?` · ${String(status.encoder).toUpperCase()} encoder`:"";
+    rows.push(`<div class="lt-tech-row"><b>Delivery</b><span>${esc(delivery+encoder)}</span></div>`);
+    const signal=status.signal;
+    if(signal){
+      const metric=(label,value)=>Number.isFinite(value)
+        ?`<span><i>${esc(label)}</i><meter min="0" max="100" value="${value}">${value}%</meter><strong>${value}%</strong></span>`:"";
+      const meters=[metric("Strength",signal.strength_percent),metric("Quality",signal.quality_percent),metric("Symbol",signal.symbol_quality_percent)].join("");
+      if(meters) rows.push(`<div class="lt-tech-row"><b>Signal</b><span class="lt-signal">${meters}</span></div>`);
+    }
+  }
+  return rows.length?`<div class="lt-tech" aria-label="Live stream details">${rows.join("")}</div>`:"";
+}
+function liveTvRefreshTechnicalDetails(){
+  const channel=liveTvChannelById(LIVE_TV.selected);
+  document.querySelectorAll("[data-live-tv-technical]").forEach(node=>{
+    node.innerHTML=liveTvTechnicalDetails(channel,LIVE_TV.status);
+  });
+}
+function liveTvOverlayTechnical(channel,status){
+  if(!channel) return "";
+  const source=PlurxLiveTv.channelBadges(channel).join(" · ");
+  const signal=status&&status.signal;
+  const rf=signal?[signal.strength_percent,signal.quality_percent,signal.symbol_quality_percent]
+    .map((value,index)=>Number.isFinite(value)?`${["strength","quality","symbol"][index]} ${value}%`:null).filter(Boolean).join(" · "):"";
+  return [source,rf].filter(Boolean).join(" · ");
+}
 function liveTvRowMarkup(channel,selectedId){
   const view=PlurxLiveTv.channelView(channel);
   const at=liveTvProgramme(channel.id);
@@ -14781,7 +14836,7 @@ function liveTvRowMarkup(channel,selectedId){
   return `<button type="button" class="${classes.join(" ")}" role="option" aria-selected="${channel.id===selectedId}"
       data-channel="${esc(channel.id)}" onclick="liveTvSelect('${esc(channel.id)}')"${view.disabled?' disabled':''}>
     <span class="lt-chip">${esc(channel.guide_name.slice(0,5))}</span>
-    <span><b>${esc(channel.guide_number)} · ${esc(channel.guide_name)}</b>${line}</span>
+    <span><b>${esc(channel.guide_number)} · ${esc(channel.guide_name)}</b>${liveTvFormatBadges(channel)}${line}</span>
     <span>${channel.favorite?'<span class="lt-star" title="Favorite">★</span>':""}${view.disabled?" 🔒":""}</span>
   </button>`;
 }
@@ -14826,6 +14881,7 @@ function liveTvNowBar(channel){
     ${liveTvPipSupported()?'<button type="button" onclick="toggleLiveTvPip()" title="Picture-in-picture (P)" aria-label="Picture-in-picture">⧉</button>':""}
     <button type="button" onclick="fullscreenLiveTv()" title="Fullscreen (F)" aria-label="Fullscreen">⛶</button>
     <button type="button" onclick="stopLiveTv().catch(liveTvFailure)" title="Stop" aria-label="Stop">■</button>
+    <div class="lt-nowtech" data-live-tv-technical>${liveTvTechnicalDetails(channel,LIVE_TV.status)}</div>
   </div>`;
 }
 function liveTvShowInfo(channel){
@@ -14839,6 +14895,7 @@ function liveTvShowInfo(channel){
     <h2>${row?esc(row.title):esc(channel.guide_name)}</h2>
     <div class="meta">${esc(channel.guide_number)} · ${esc(channel.guide_name)} · ${time}${episode?"<br>"+esc(episode):""}</div>
     <p class="synopsis">${row&&row.synopsis?esc(row.synopsis):"No programme description is available."}</p>
+    <div data-live-tv-technical>${liveTvTechnicalDetails(channel,LIVE_TV.status)}</div>
     ${next}
   </aside>`;
 }
@@ -14902,7 +14959,7 @@ function liveTvGridMarkup(visible,selected){
     const marker=ends===null?"":`<div class="lt-cell ends" style="left:${((ends-window.start)/slot)*px}px;width:150px">Guide data ends ${esc(liveTvClock(ends))}</div>`;
     return `<div class="lt-grow">
       <div class="lt-gname"><span class="lt-chip">${esc(row.channel.guide_name.slice(0,5))}</span>
-        <span>${esc(row.channel.guide_number)}${row.channel.favorite?' <span class="lt-star">★</span>':""}</span></div>
+        <span class="lt-gmeta"><span>${esc(row.channel.guide_number)}${row.channel.favorite?' <span class="lt-star">★</span>':""}</span>${liveTvFormatBadges(row.channel)}</span></div>
       <div class="lt-gcells" style="width:${layout.totalWidth}px">${cells}${marker}</div>
     </div>`;
   }).join("");
@@ -15025,7 +15082,7 @@ function liveTvPaint(){
       <div class="lth-now">
         <span class="lth-chip">${esc(channel?channel.guide_name.slice(0,5):"")}</span>
         <span><span class="lth-title">${at.now?esc(at.now.title):esc(channel?channel.guide_name:"Live TV")}<span class="lth-live">● LIVE</span></span>
-          <span class="lth-sub">${esc(channel?channel.guide_number+" · "+channel.guide_name:"")}${at.now?" · "+esc(liveTvClock(at.now.start))+"–"+esc(liveTvClock(at.now.end)):""}${at.next?" · Next: "+esc(at.next.title):""}</span></span>
+          <span class="lth-sub">${esc(channel?channel.guide_number+" · "+channel.guide_name:"")}${at.now?" · "+esc(liveTvClock(at.now.start))+"–"+esc(liveTvClock(at.now.end)):""}${at.next?" · Next: "+esc(at.next.title):""}<span class="lth-tech">${esc(liveTvOverlayTechnical(channel,LIVE_TV.status))}</span></span></span>
       </div>
       <div class="lth-acts">
         <button type="button" data-live-tv-mute onclick="muteLiveTv()" title="${muteLabel}" aria-label="${muteLabel}">${muted?"🔊":"🔇"}</button>
@@ -15245,6 +15302,7 @@ async function loadLiveTvGuide(generation,route){
 }
 function detachLiveTvMedia(){
   clearInterval(LIVE_TV.timer); LIVE_TV.timer=null;
+  LIVE_TV.status=null;
   if(LIVE_TV.hls){ LIVE_TV.hls.destroy(); LIVE_TV.hls=null; }
   const video=document.getElementById("live-tv-video");
   if(video){ video.onerror=null; video.onended=null; video.pause(); video.removeAttribute("src"); video.load(); }
@@ -15344,6 +15402,11 @@ async function watchLiveTv(index){
         if(document.visibilityState!=="hidden"||liveTvInPip()) await LIVE_TV_LEASE.keepalive();
         const status=await LIVE_TV_LEASE.status();
         if(status&&status.state!=="active") await failed({code:"stream_failed"});
+        else if(status){
+          LIVE_TV.status=status;
+          if(typeof liveTvRefreshTechnicalDetails==="function") liveTvRefreshTechnicalDetails();
+          if(typeof liveTvPaint==="function") liveTvPaint();
+        }
       }catch(e){ await failed(e); }
       finally{ LIVE_TV.polling=false; }
     },10000);

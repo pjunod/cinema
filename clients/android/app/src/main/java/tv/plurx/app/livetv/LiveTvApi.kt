@@ -28,9 +28,24 @@ data class LiveTvChannel(
     val favorite: Boolean = false,
     val drm: Boolean = false,
     val support: String = "ready",
+    val hd: Boolean? = null,
+    val video_codec: String? = null,
+    val audio_codec: String? = null,
 ) {
     val title: String get() = "$guide_number · $guide_name"
     val watchable: Boolean get() = !drm && support == "ready"
+    val formatBadges: List<String> get() = buildList {
+        hd?.let { add(if (it) "HD" else "SD") }
+        listOfNotNull(video_codec, audio_codec).forEach { raw ->
+            val badge = raw.trim().uppercase()
+            if (badge.isNotEmpty() && badge !in this) add(badge)
+        }
+    }
+    val sourceFormatDescription: String? get() = buildList {
+        hd?.let { add(if (it) "HD source" else "SD source") }
+        video_codec?.trim()?.takeIf { it.isNotEmpty() }?.let { add("${it.uppercase()} video") }
+        audio_codec?.trim()?.takeIf { it.isNotEmpty() }?.let { add("${it.uppercase()} audio") }
+    }.takeIf { it.isNotEmpty() }?.joinToString(" · ")
 }
 
 @Serializable
@@ -40,7 +55,20 @@ data class LiveTvLineup(val channels: List<LiveTvChannel>, val freshness: String
 data class LiveTvStarted(val session_id: String, val channel: LiveTvChannel, val live: Boolean = false)
 
 @Serializable
-data class LiveTvStatus(val state: String)
+data class LiveTvSignal(
+    val strength_percent: Int? = null,
+    val quality_percent: Int? = null,
+    val symbol_quality_percent: Int? = null,
+)
+
+@Serializable
+data class LiveTvStatus(
+    val state: String,
+    val owner_node_id: String? = null,
+    val encoder: String? = null,
+    val output_height: Int? = null,
+    val signal: LiveTvSignal? = null,
+)
 
 @Serializable
 data class LiveTvSettings(
