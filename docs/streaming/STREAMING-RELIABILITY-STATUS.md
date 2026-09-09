@@ -70,10 +70,12 @@ stopped before testing on the 45 GB disk floor; verified-idle cleanup restored
 that exact runner to 58 GB. Fast Rust exposed one remaining fixture defect:
 the real HEVC argv regression synchronously launched unrestricted libx265 with
 no deadline and occupied the rest of the 30-minute job. Current `main` at
-`ef8644a8` adds Apple-CI recovery without changing this Rust path. The narrow
-correction in draft [#207](http://192.168.4.7:3000/noirr/plurx/pulls/207)
-integrates that tree and gives the subprocess a 30-second kill-on-drop deadline
-and one worker; no production behavior changes · **Updated:**
+`3ce2ea0d` includes M6 prepared-successor priming and the newer Live TV signal
+quality/mobile-version work.
+The narrow correction in draft
+[#207](http://192.168.4.7:3000/noirr/plurx/pulls/207) integrates that tree and
+gives the subprocess a 30-second kill-on-drop deadline and one worker; no
+production behavior changes · **Updated:**
 2026-09-09 · **Effort:**
 `effort/streaming-reliability` (merged) · **Started:** 2026-09-04 ·
 **Effort fork:** `48615baf` · **Continuation merged to main:** `1f6d6645` via

@@ -1705,7 +1705,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # between refreshes, not a deadline over any work. The guide's actual request
 # deadlines are the `timeout` parameter of `fetch_bounded`, which is the
 # existing lineup fetch's bound made a parameter rather than a new constructor.
-expected_occurrences = 710
+# 710 -> 711 with the HEVC argv fixture correction: one test-only 30-second
+# deadline owns the tiny libx265 subprocess and fails the regression instead of
+# allowing a contended fixture encode to consume the fast-Rust job deadline.
+expected_occurrences = 711
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -2088,7 +2091,9 @@ pattern = "kill_on_drop\\s*\\("
 # +3 after the immutable-input review: the piped-output owner and both finite
 # media fixture commands use kill-on-drop as cancellation protection. Their
 # normal paths still await output or confirmed child reap.
-expected_occurrences = 66
+# 66 -> 67 with the HEVC argv fixture correction: the same awaited test-only
+# subprocess is killed if its owning deadline or test future is dropped.
+expected_occurrences = 67
 
 [[module_structures]]
 id = "rolling-supervisor-construction"
