@@ -1677,20 +1677,27 @@ impl DiagnosticObservation {
     fn for_plan(
         plan: &ResolvedTranscode,
         measured: &plurx_core::transcode::decoder_inventory::MeasuredDecoders,
+        automatic_recovery_enabled: bool,
     ) -> Self {
-        Self::for_plan_against(crate::decoder_health::diagnostic_policy(), plan, measured)
+        Self::for_plan_against(
+            crate::decoder_health::diagnostic_policy(),
+            plan,
+            measured,
+            automatic_recovery_enabled,
+        )
     }
 
     fn for_plan_against(
         policy: &crate::decoder_health::DiagnosticPolicy,
         plan: &ResolvedTranscode,
         measured: &plurx_core::transcode::decoder_inventory::MeasuredDecoders,
+        automatic_recovery_enabled: bool,
     ) -> Self {
         // The inventory is measured on every boot so the settings surface can
         // advise before an operator opts in. Reading it must not make an
         // unqualified plan start asking for diagnostic flags: that would
         // change the shipping command merely because the daemon upgraded.
-        let named_decoder = if plan.enforces_receipt() {
+        let named_decoder = if plan.enforces_receipt() || automatic_recovery_enabled {
             plan.decode()
                 .input_codec()
                 .and_then(|codec| measured.implementation(codec, plan.decode().backend()))
@@ -1704,6 +1711,7 @@ impl DiagnosticObservation {
             plan.decode().backend(),
             named_decoder,
             plan.decode().input_video_stream(),
+            automatic_recovery_enabled,
         )
     }
 
@@ -1717,6 +1725,7 @@ impl DiagnosticObservation {
         backend: plurx_core::transcode::DecodeBackend,
         named_decoder: Option<&str>,
         input_video_stream: u32,
+        automatic_recovery_enabled: bool,
     ) -> Self {
         let unqualified = Self {
             plan_digest: plan_digest.clone(),
@@ -1725,7 +1734,7 @@ impl DiagnosticObservation {
         let Some(codec) = codec else {
             return unqualified;
         };
-        // Only a plan that *names* its decoder may be matched to a contract.
+        // Only a measured decoder may be matched to a retained contract.
         //
         // Guessing the family name here was a real defect: a hardware backend
         // substitutes `<codec>_qsv` and prints that in `[dec:…]`, and a
@@ -1747,28 +1756,41 @@ impl DiagnosticObservation {
         // `h264` cannot answer for a VideoToolbox `h264`, which prints the
         // identical `[dec:h264 @ …]` context. Naming the backend is what makes
         // the two distinguishable; refusing one of them made them moot.
-        let Some(decoder) = named_decoder else {
-            return unqualified;
-        };
-        let Some(contract) = policy.contract_for(
-            codec,
-            decoder,
-            backend.name(),
-            crate::decoder_health::QUALIFIED_STDERR_MODE,
-        ) else {
-            return unqualified;
-        };
-        Self {
-            plan_digest,
-            contract_id: Some(contract.id.clone()),
-            // Input file 0: every movie command builds the video input first,
-            // and a subtitle input that follows it is a later index.
-            grammar: Some(crate::decoder_health::DiagnosticGrammar::new(
-                contract.clone(),
-                0,
-                input_video_stream,
-            )),
+        if let Some(contract) = named_decoder.and_then(|decoder| {
+            policy.contract_for(
+                codec,
+                decoder,
+                backend.name(),
+                crate::decoder_health::QUALIFIED_STDERR_MODE,
+            )
+        }) {
+            return Self {
+                plan_digest,
+                contract_id: Some(contract.id.clone()),
+                // Input file 0: every movie command builds the video input first,
+                // and a subtitle input that follows it is a later index.
+                grammar: Some(
+                    crate::decoder_health::DiagnosticGrammar::new(
+                        contract.clone(),
+                        0,
+                        input_video_stream,
+                    )
+                    .with_automatic_action(automatic_recovery_enabled),
+                ),
+            };
         }
+        if automatic_recovery_enabled {
+            return Self {
+                plan_digest,
+                contract_id: None,
+                grammar: Some(crate::decoder_health::DiagnosticGrammar::advisory(
+                    codec,
+                    0,
+                    input_video_stream,
+                )),
+            };
+        }
+        unqualified
     }
 
     /// Whether this attempt may ask its child for the qualified log flags.
@@ -2289,9 +2311,6 @@ fn decode_restricted_options(
     if alternate.plan_digest() == delivered.plan_digest() {
         return Ok(None);
     }
-    if !delivered.enforces_receipt() || !alternate.enforces_receipt() {
-        return Ok(None);
-    }
     let mut retry_opts = opts.clone();
     retry_opts.pipeline = alternate.options().pipeline;
     if retry_opts.pipeline.output_grade() != opts.pipeline.output_grade() {
@@ -2444,6 +2463,7 @@ impl PrepublicationTranscodeRetry {
         software_budget: usize,
         runtime_cache: PathBuf,
         measured_decoders: &plurx_core::transcode::decoder_inventory::MeasuredDecoders,
+        automatic_recovery_enabled: bool,
         // What this recipe is for, in the operator-facing identity. `build` is
         // shared by the colour-safe retry and the software-decode alternate,
         // and the identity is `pub` on a serialized type — so labelling both
@@ -2471,7 +2491,8 @@ impl PrepublicationTranscodeRetry {
         {
             return Err("one-step retry plan disagrees with its prepared encode route".to_owned());
         }
-        let observation = DiagnosticObservation::for_plan(plan, measured_decoders);
+        let observation =
+            DiagnosticObservation::for_plan(plan, measured_decoders, automatic_recovery_enabled);
         let execution =
             TranscodeExecution::from_options(file, &retry_opts, pacing, &dir.to_string_lossy())
                 .map_err(|error| error.to_string())?
@@ -11114,6 +11135,10 @@ pub struct TranscodeManager {
     /// on the strength of a boot probe would rotate an unqualified fleet's
     /// cache for a value nothing yet enforces.
     measured_decoders: plurx_core::transcode::decoder_inventory::MeasuredDecoders,
+    /// Live operator authorization for the one-shot decoder fallback. Unlike
+    /// artifact qualification this changes no cache identity, so the Settings
+    /// checkbox can apply immediately to attempts created after the write.
+    automatic_decoder_recovery: AtomicBool,
     /// How many generation manifests this manager has published.
     ///
     /// The only durable trace a manifest leaves on a refused generation is the
@@ -11504,6 +11529,7 @@ impl TranscodeManager {
             ),
             measured_decoders: plurx_core::transcode::decoder_inventory::MeasuredDecoders::default(
             ),
+            automatic_decoder_recovery: AtomicBool::new(false),
             #[cfg(test)]
             manifests_published: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
@@ -14577,12 +14603,13 @@ impl TranscodeManager {
                 )
                 .await?;
             if matches!(outcome, OfflineProduceOutcome::HealthRefused) {
-                // Software is already the terminal safe route, and an
-                // unqualified plan has no receipt authority to recover from.
-                // Neither case may mint a consumed budget that a later node
-                // could mistake for a failed hardware-primary attempt.
+                // Software is already the terminal safe route. The direct
+                // Developer switch, not artifact qualification, authorizes a
+                // new automatic recovery; neither refusal may mint a consumed
+                // budget that a later node could mistake for a failed
+                // hardware-primary attempt.
                 if plan.decode().backend() == plurx_core::transcode::DecodeBackend::Software
-                    || !plan.enforces_receipt()
+                    || !self.automatic_decoder_recovery_enabled()
                 {
                     return Ok(OfflineProduceOutcome::HealthRefused);
                 }
@@ -14657,7 +14684,6 @@ impl TranscodeManager {
                     && package.alternate_recipe_hash.as_deref() == Some(primary_hash.as_str()));
             let alternate = if survivor_local_software
                 && plan.decode().backend() == plurx_core::transcode::DecodeBackend::Software
-                && plan.enforces_receipt()
             {
                 Some((opts.clone(), plan.clone(), primary_hash.clone()))
             } else {
@@ -15813,7 +15839,11 @@ impl TranscodeManager {
                 &output_directory,
             )
             .map_err(|error| error.to_string())?;
-            let observation = DiagnosticObservation::for_plan(plan, &self.measured_decoders);
+            let observation = DiagnosticObservation::for_plan(
+                plan,
+                &self.measured_decoders,
+                self.automatic_decoder_recovery_enabled(),
+            );
             let execution = execution.observing_qualified_grammar(observation.qualified_logging());
             let args = transcode::hls_args(plan, &execution);
             tracing::info!(
@@ -17505,6 +17535,36 @@ impl TranscodeManager {
             .clone()
     }
 
+    /// Whether newly created producer attempts may use the one-shot
+    /// hardware-to-software decoder fallback.
+    pub fn automatic_decoder_recovery_enabled(&self) -> bool {
+        self.automatic_decoder_recovery.load(Acquire)
+    }
+
+    /// Apply the Developer switch immediately. It changes only whether a new
+    /// attempt may act on diagnostics; it does not rotate cache identities or
+    /// mutate work already in flight.
+    pub fn set_automatic_decoder_recovery(&self, enabled: bool) {
+        self.automatic_decoder_recovery.store(enabled, Release);
+    }
+
+    /// Publish the persisted switch before the listener accepts sessions.
+    pub async fn publish_automatic_decoder_recovery(&self) {
+        let enabled = match self
+            .store
+            .get_setting(plurx_core::store::keys::AUTOMATIC_DECODER_RECOVERY)
+            .await
+        {
+            Ok(value) => plurx_core::store::stored_switch(value.as_deref(), false),
+            Err(error) => {
+                tracing::warn!(%error, "could not read automatic decoder recovery setting; keeping it off");
+                false
+            }
+        };
+        self.set_automatic_decoder_recovery(enabled);
+        tracing::info!(enabled, "published automatic decoder recovery setting");
+    }
+
     /// What this node measured, and what it may therefore honour.
     ///
     /// Reads no setting: it answers "could this node do it", which the
@@ -18698,7 +18758,12 @@ impl TranscodeManager {
         let typeless_sliding = self
             .stable_playlist_shape(replacement_deadline.is_some(), takeover.is_some())
             .await;
-        let observation = DiagnosticObservation::for_plan(&plan, &self.measured_decoders);
+        let automatic_decoder_recovery = self.automatic_decoder_recovery_enabled();
+        let observation = DiagnosticObservation::for_plan(
+            &plan,
+            &self.measured_decoders,
+            automatic_decoder_recovery,
+        );
         let execution =
             TranscodeExecution::from_options(&file, &opts, pacing, &dir.to_string_lossy())
                 .map_err(|error| error.to_string())?
@@ -18782,6 +18847,7 @@ impl TranscodeManager {
                         software_budget,
                         self.runtime_cache.clone(),
                         &self.measured_decoders,
+                        automatic_decoder_recovery,
                         "one-step-color-safe",
                     ),
                     Err(error) => Err(error),
@@ -18834,6 +18900,7 @@ impl TranscodeManager {
                                             software_budget,
                                             self.runtime_cache.clone(),
                                             &self.measured_decoders,
+                                            automatic_decoder_recovery,
                                             "software-decode",
                                         )
                                     })
@@ -27932,6 +27999,7 @@ pub(crate) mod tests {
         let (mut mgr, _work, _cache) = cached_manager(&store);
         mgr.caps.videotoolbox = true;
         mgr.test_publish_artifact_qualification(ArtifactQualification::HealthQualified);
+        mgr.set_automatic_decoder_recovery(true);
         mgr.test_script_offline_production([
             OfflineProduceOutcome::HealthRefused,
             OfflineProduceOutcome::Yielded,
@@ -34853,6 +34921,7 @@ pub(crate) mod tests {
             mgr.software_budget().await,
             mgr.runtime_cache.clone(),
             &mgr.measured_decoders,
+            false,
             "software-decode",
         )
         .expect("the alternate is a legal retry for this encode route");
@@ -34867,16 +34936,11 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A qualified fault may install only a successor that can produce the
-    /// same class of evidence.
-    ///
-    /// The operator request remains enabled under partial coverage; this is
-    /// the recovery boundary, not a settings gate. Hardware-only coverage is
-    /// enough to classify the failed producer, but not enough to call an
-    /// unqualified software producer a verified recovery. Once the same-codec
-    /// pair is covered, the exact same construction becomes attachable.
+    /// Recovery construction follows the direct switch rather than artifact
+    /// qualification. Coverage can strengthen both plans without deciding
+    /// whether the software-decode alternate exists.
     #[tokio::test]
-    async fn automatic_decode_recovery_requires_a_qualified_same_codec_pair() {
+    async fn automatic_decode_recovery_does_not_require_a_qualified_pair() {
         use plurx_core::store::keys::DECODER_HEALTH_QUALIFIED_ARTIFACTS;
         use plurx_core::store::SqliteStore;
         use plurx_core::transcode::decoder_inventory::MeasuredDecoders;
@@ -34960,9 +35024,9 @@ pub(crate) mod tests {
                 &opts,
                 Encoder::VideoToolbox,
             )
-            .expect("the unqualified successor is a safe refusal")
-            .is_none(),
-            "hardware-only coverage must attach no automatic decode alternate"
+            .expect("the unqualified successor remains structurally safe")
+            .is_some(),
+            "missing software-path qualification must not gate the enabled recovery"
         );
 
         let (mut paired, _paired_work, _paired_cache) = cached_manager(&store);
@@ -35019,6 +35083,7 @@ pub(crate) mod tests {
             paired.software_budget().await,
             paired.runtime_cache.clone(),
             &paired.measured_decoders,
+            false,
             "software-decode",
         )
         .expect("qualified alternate recipe");
@@ -35124,6 +35189,7 @@ pub(crate) mod tests {
             mgr.software_budget().await,
             mgr.runtime_cache.clone(),
             &mgr.measured_decoders,
+            false,
             "software-decode",
         )
         .expect("alternate recipe");
@@ -37933,6 +37999,7 @@ pub(crate) mod tests {
             mgr.software_budget().await,
             mgr.runtime_cache.clone(),
             &mgr.measured_decoders,
+            false,
             "one-step-color-safe",
         )
     }
@@ -38064,6 +38131,7 @@ pub(crate) mod tests {
             mgr.software_budget().await,
             mgr.runtime_cache.clone(),
             &mgr.measured_decoders,
+            false,
             "one-step-color-safe",
         );
         assert!(
@@ -41279,6 +41347,7 @@ pub(crate) mod tests {
                 backend,
                 decoder,
                 0,
+                false,
             )
         };
 
@@ -41321,6 +41390,38 @@ pub(crate) mod tests {
             assert!(observation.contract_id.is_none(), "{label}");
             assert_eq!(observation.plan_digest, "digest", "{label}");
         }
+    }
+
+    /// Retained contracts report confidence; the direct Developer switch is
+    /// what authorizes recovery. An uncovered path therefore receives an
+    /// advisory grammar only while that switch is on.
+    #[test]
+    fn automatic_recovery_switch_admits_an_advisory_grammar_without_a_contract() {
+        use plurx_core::transcode::DecodeBackend;
+
+        let policy = crate::decoder_health::DiagnosticPolicy::default();
+        let resolve = |enabled| {
+            DiagnosticObservation::resolve(
+                &policy,
+                "digest".to_owned(),
+                Some("h264"),
+                DecodeBackend::VideoToolbox,
+                None,
+                0,
+                enabled,
+            )
+        };
+        let off = resolve(false);
+        assert!(off.grammar.is_none());
+        assert!(!off.qualified_logging());
+
+        let on = resolve(true);
+        assert!(on.grammar.is_some());
+        assert!(on.qualified_logging());
+        assert_eq!(
+            on.contract_id, None,
+            "advisory action is never a receipt contract"
+        );
     }
 
     /// One contract, on the backend asked for. `h264` on both, because that is
@@ -41464,6 +41565,7 @@ pub(crate) mod tests {
             DecodeBackend::VideoToolbox,
             Some("h264"),
             0,
+            true,
         );
         assert!(observation.grammar.is_some());
         assert!(observation.qualified_logging());
@@ -41479,6 +41581,7 @@ pub(crate) mod tests {
                 DecodeBackend::VideoToolbox,
                 None,
                 0,
+                false,
             )
             .grammar
             .is_none(),
@@ -41533,14 +41636,14 @@ pub(crate) mod tests {
             }),
             vec![contract],
         );
-        let observation = DiagnosticObservation::for_plan_against(&policy, &plan, &measured);
+        let observation = DiagnosticObservation::for_plan_against(&policy, &plan, &measured, true);
         assert!(observation.grammar.is_some());
         assert_eq!(observation.contract_id.as_deref(), Some("fixture"));
 
         let only_software =
             MeasuredDecoders::from_measured(&[("hevc", DecodeBackend::Software, "hevc")]);
         assert!(
-            DiagnosticObservation::for_plan_against(&policy, &plan, &only_software)
+            DiagnosticObservation::for_plan_against(&policy, &plan, &only_software, false)
                 .grammar
                 .is_none(),
             "a software measurement with the same name says nothing about VideoToolbox"

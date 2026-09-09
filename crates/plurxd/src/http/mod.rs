@@ -3591,7 +3591,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn playback_control_and_prepared_handoff_are_default_on_and_persist_changes() {
+    async fn developer_playback_switches_persist_and_apply_their_documented_defaults() {
         use plurx_core::store::keys;
 
         let (app, state) = test_app_with_state();
@@ -3600,6 +3600,8 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{initial}");
         assert_eq!(initial["playback_control_protocol_v1"], json!(true));
         assert_eq!(initial["prepared_quality_handoff"], json!(true));
+        assert_eq!(initial["automatic_decoder_recovery"], json!(false));
+        assert!(!state.transcode.automatic_decoder_recovery_enabled());
         assert_eq!(
             state
                 .store
@@ -3657,6 +3659,32 @@ mod tests {
                 state
                     .store
                     .get_setting(keys::PREPARED_QUALITY_HANDOFF)
+                    .await
+                    .expect("setting")
+                    .as_deref(),
+                Some(if enabled { "1" } else { "0" })
+            );
+        }
+        for enabled in [true, false] {
+            let (status, body) = call(
+                &app,
+                put(
+                    "/api/v1/settings",
+                    Some(&admin),
+                    json!({ "automatic_decoder_recovery": enabled }),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["automatic_decoder_recovery"], json!(enabled));
+            assert_eq!(
+                state.transcode.automatic_decoder_recovery_enabled(),
+                enabled
+            );
+            assert_eq!(
+                state
+                    .store
+                    .get_setting(keys::AUTOMATIC_DECODER_RECOVERY)
                     .await
                     .expect("setting")
                     .as_deref(),

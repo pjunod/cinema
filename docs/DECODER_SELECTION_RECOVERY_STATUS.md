@@ -1,8 +1,8 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M0–M5 and M7 complete · effort promoted and post-merge repairs
-merged · M6 reserve-and-prime implementation in draft PR #203 · broader
-fleet qualification remains post-merge evidence · **Updated:** 2026-09-09 ·
+**Status:** M0–M7 code complete · effort promoted and post-merge repairs
+merged · final activation and M6 reserve-and-prime follow-up in draft PR #203 ·
+broader fleet qualification remains post-merge evidence · **Updated:** 2026-09-09 ·
 **Current main base:** `18ddffc1` · **Active branch:**
 `codex/m6-server-prime`
 
@@ -16,8 +16,12 @@ authorized without granting staged control authority, committed media remains
 readable through predecessor drain by durable marker plus current-pointer
 proof, keeps the VOD origin at zero while the requested start carries the
 accepted playhead, and abort/refusal/expiry tear down the worker. Settings → Developer
-now has one direct, default-on checkbox. Readiness remains visible and
-advisory; it is not consulted by the enable path.
+now has a direct, default-on prepared-handoff checkbox and a separate direct
+automatic-decoder-recovery checkbox. Recovery applies immediately to new
+attempts when enabled. Missing measurements or retained hardware contracts are
+reported as advisory facts and do not override that choice; best-effort
+observations can drive the one-shot recovery but can never qualify an artifact
+for cache reuse.
 
 The effort was created from Forgejo `main` at
 `4a6a0268bd314ad5587cb3037f12ebd992c0074e`. The original M0 research baseline was `main` at
@@ -42,7 +46,7 @@ An unchecked item is not implied by a nearby passing check.
 |---|---|---|
 | M0–M5 · selection, observation, receipts, admission and bounded prepublication recovery | Done on the effort branch | No planned build work |
 | M6 · prepared replacement contract, clients, and server prime | Implementation complete in draft [PR #203](http://192.168.4.7:3000/noirr/plurx/pulls/203); fast lane running | Physical first-frame smoke on the devices of interest and the cross-client fleet receipt remain evidence, not code gates |
-| M7a · advisory Developer settings | Done | Keep the prerequisites accurate as hardware contracts land; the controls advise and never gate enablement |
+| M7a · advisory Developer settings | Final activation correction in draft #203 | Automatic decoder recovery now has its own immediate checkbox; retained contract coverage remains advisory and cannot override it |
 | M7b · hardware diagnostic path | Merged | [Forgejo #174](http://192.168.4.7:3000/noirr/plurx/pulls/174) merged approved head `0a685526` into the effort at `0c831b88` after the complete Effort development gate. Backend-aware measurement, path-scoped qualification, same-codec recovery pairing, compatible v2 reporting, and advisory Developer readiness are implemented. A real hardware contract is separate M8 fleet evidence |
 | M7 remainder · offline durability and handoff enforcement | Merged | [Forgejo #179](http://192.168.4.7:3000/noirr/plurx/pulls/179) fast-forwarded approved head `990bf334` into the effort after its adversarial findings were fixed and the Effort development gate passed; the repair includes one replicated cluster-wide kill-switch transaction |
 | Promotion to `main` | Merged | #189 and the post-merge repairs are present in current `main` at `18ddffc1` |
@@ -50,9 +54,10 @@ An unchecked item is not implied by a nearby passing check.
 
 **Shortest reading:** the original effort, its one final review, promotion, and
 post-merge repairs are done. This follow-up closes M6's last code gap. What is
-left on this branch is the fast lane, draft PR promotion, merge, and post-merge
-suite monitoring. Hardware decoder contracts and physical client qualification
-remain evidence work; neither blocks the new prepared-handoff checkbox.
+left on this branch is focused validation of the final activation correction,
+the restarted fast lane, draft PR promotion, merge, and post-merge suite
+monitoring. Hardware decoder contracts and physical client qualification remain
+evidence work; neither blocks prepared handoff or automatic decoder recovery.
 
 ## Current checkpoint — M6 server prime
 
@@ -62,15 +67,15 @@ remain evidence work; neither blocks the new prepared-handoff checkbox.
 | Task base | Effort head `990bf334` was the historical promotion candidate; it is not the current follow-up base |
 | Current follow-up base | Forgejo `main` at `18ddffc1` |
 | Task branch | `codex/m6-server-prime` in the agent-owned clone at `/private/tmp/codex-plurx-decoder.RRcx8j/repo` |
-| Task PR | Draft [Forgejo #203](http://192.168.4.7:3000/noirr/plurx/pulls/203) at rebased head `c683e337` |
+| Task PR | Draft [Forgejo #203](http://192.168.4.7:3000/noirr/plurx/pulls/203); implementation lineage begins at rebased M6 head `c683e337`, while Forgejo records the current activation-fix head |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
-| Audit scope | Prepared-successor durability, VOD worker attachment, media-only staged authority, commit publication, worker cleanup, lease renewal, and direct Developer enablement |
-| Current finding | The old path staged metadata only and double-counted the VOD resume as an origin. The branch now reserves first, primes the VOD worker, announces only after attachment, serves staged media under the exact ledger capability, keeps VOD origin zero, and after commit requires both the prepared marker and current pointer while control/status remain fenced through predecessor drain |
+| Audit scope | Prepared-successor durability, VOD worker attachment, media-only staged authority, commit publication, worker cleanup, lease renewal, and direct Developer enablement for both prepared handoff and decoder recovery |
+| Current finding | The old prepared path staged metadata only and double-counted the VOD resume as an origin; the old recovery surface also had no switch and made a hardware contract an activation gate. The branch now primes real work, preserves the origin, serves only exact staged media, and gives recovery an immediate checkbox whose best-effort diagnostic mode cannot certify cache artifacts |
 | Adversarial review | Complete. Einstein found three promotion blockers: immutable VOD bypassed the resolved decoder plan, the v50 Hiqlite import projected `drain_deadline_ms` one version too early, and the cache-location projection test stopped at v53 despite v54's publication generation. VOD now retains one descriptor-bound plan and uses it for arguments, identity, and mixed admission; real v50/v51 import fixtures and v25/v53/v54 cache projections pin the schema boundaries. Per owner direction, there is no additional task-review loop |
-| Focused evidence | Pinned Rust 1.97.1 all-target compile and strict Clippy pass; 37 preparation regressions, exact staged-media authority, four VOD origin/resume boundary tests, settings persistence, 19 Developer settings tests, passive web control, and docs-index validation pass. The broad tracked commit profile exposed an unpublished-activation inventory regression; the repair's ordinary-activation exclusion and committed-successor renewal contracts both pass on SQLite and three-node Hiqlite after rebasing |
-| Fast lane | Running for draft PR #203. Checks already completed by the tracked commit profile are accepted as exact implementation evidence; only unique fast-lane checks block merge, per owner direction |
+| Focused evidence | Pinned Rust 1.97.1 all-target compile and strict Clippy pass; 43 diagnostic-health tests; exact direct-switch, unqualified-alternate, offline-fallback, staged-media, and VOD origin/resume regressions; 19 Developer settings tests; 78-view UI baseline with no page or console errors; passive web controls; and docs-index/status validation pass. The earlier broad tracked commit profile exposed an unpublished-activation inventory regression; the repair's ordinary-activation exclusion and committed-successor renewal contracts both pass on SQLite and three-node Hiqlite after rebasing |
+| Fast lane | Restarts when the corrected head is pushed. Checks already completed locally are exact implementation evidence; only unique fast-lane checks block merge, per owner direction |
 | Validation order | Task PRs into the effort do not run the full unit suite. After M7: functionality smoke evidence and a green fast lane before promotion; after they pass, merge and continue watching the remaining promotion and broader suites. The owner explicitly approved watching the remaining promotion jobs on `main`; a code failure gets a new PR |
-| Next | Finish unique fast-lane checks · mark PR #203 ready and merge · watch duplicate and broader suites on `main` |
+| Next | Finish focused activation checks · push the repaired head · pass the unique fast-lane checks · mark PR #203 ready and merge · watch duplicate and broader suites on `main` |
 | External blocker | None. Physical hardware is useful for smoke/qualification after merge but does not gate enabling or merging this implementation |
 
 ## Milestones
@@ -84,7 +89,7 @@ remain evidence work; neither blocks the new prepared-handoff checkbox.
 | M4 · mixed resource admission | Merged | [Forgejo #81](http://192.168.4.7:3000/noirr/plurx/pulls/81) fast-forwarded `f0f7aec8` into the effort after one whole-PR adversarial review, its three blockers repaired, and the Forgejo effort gate |
 | M5 · durable budget and prepublication recovery | Complete | The M5a census landed at `b2dcf458`; `media_session_producer_recovery` exists on both backends, a server-owned `recovery_epoch` follows one playback across continuations, and the producer reserves, settles and refuses a second recovery. M5c1–M5c3 are merged through [#156](http://192.168.4.7:3000/noirr/plurx/pulls/156) |
 | M6 · postpublication replacement and client intent | Code complete on the active follow-up branch; fleet acceptance open | Server reserve-and-prime, media-only staged authority, commit publication and cleanup now join the already-shipped Apple, Android and web adapters. The Developer server checkbox is default-on and independent of advisory readiness. The three-client measured receipt belongs to M8 |
-| M7 · offline, shared cache, and handoff enforcement | Complete | M7a and M7b are merged through `0c831b88`; M7 remainder [#179](http://192.168.4.7:3000/noirr/plurx/pulls/179) closes durable offline one-shot recovery/result identity, exact-claim and cache publication, crash-before-install rehome, software-survivor binding, replicated disable, and legacy-worker fencing at `990bf334` |
+| M7 · offline, shared cache, handoff enforcement, and direct activation | Code complete on the active follow-up branch | M7a and M7b are merged through `0c831b88`; M7 remainder [#179](http://192.168.4.7:3000/noirr/plurx/pulls/179) closes durable offline one-shot recovery/result identity, exact-claim and cache publication, crash-before-install rehome, software-survivor binding, replicated disable, and legacy-worker fencing at `990bf334`. Draft #203 makes automatic recovery an immediate operator switch instead of a contract-qualified action gate |
 | M8 · fleet qualification and promotion | Promotion freeze active | Current `main` is integrated and the final review is repaired; smoke/fast lane, merge, and post-merge monitoring remain |
 
 ## M2 working tree — one plan names and builds the attempt
@@ -2843,7 +2848,9 @@ only a software-decode plan named its decoder, so only a software-decode plan
 could latch a qualified fault, and only a *hardware*-decode plan had an
 alternate to be given. M7b slice 2 now measures a name per `(codec, backend)`
 and makes the exact hardware path available to diagnostic matching. A real
-hardware contract is still required before recovery becomes reachable.
+hardware contract is still required for contract-qualified diagnostics and
+artifact reuse; the direct recovery switch can use advisory selected-stream
+diagnostics without it.
 
 ### What was measured
 
@@ -2959,68 +2966,46 @@ pair and the Settings card keeps saying so — and the tripwire assertion in
 - **Do not treat a clean exit as proof of acceleration.** A successful silent
   fallback lacks the other two required signals and remains unmeasured.
 
-## M7a — the enable section, and the prerequisite that is not met
+## M7a — direct recovery enablement with advisory readiness
 
-The effort was required to add an enable section to **Settings → Developer**
-explaining what safe enablement depends on. Writing it forced the question
-"what actually has to be true for this recovery to fire", and the answer is
-that on this build nothing makes it fire. Two code sites make the two halves
-mutually exclusive:
+The first M7a surface exposed recovery readiness but did not expose recovery
+control. In practice it made a retained hardware diagnostic contract the
+enable path: no matching contract meant no grammar, no fault sink, and no
+automatic recovery. That contradicted the effort requirement that readiness
+must advise rather than gate an operator's choice.
 
-- `DiagnosticObservation::resolve` refuses a grammar to any plan whose
-  `DecodeBackend` is not `Software`. Without a grammar there is no fault sink,
-  so a hardware decode can never latch a `ProducerDecodeFault`, and
-  `action_qualified` is never set. This is not an oversight: a contract is
-  qualified against a *named* decoder, a hardware backend substitutes
-  `<codec>_qsv` or its equivalent, and M3a's review established that guessing
-  the name yields a grammar matching nothing — which certifies every stream as
-  clean. The refusal is right; it is its consequence that was not followed
-  through.
-- `PrepublicationTranscodeRetry::prepare_decode_restricted` answers `Ok(None)`
-  when the alternate's plan digest equals the delivered one, which is exactly
-  when the delivered plan already decodes in software. A software-decode plan
-  has no software-decode alternate, because it would be the same command.
+Draft #203 corrects the separation:
 
-So a hardware decode can never produce the evidence, and a software decode has
-nothing to be given. There is no plan in between, and the recovery M5c2 built
-is unreachable on every node. Nothing built for it is wrong — the bounded
-vocabulary, the two frozen recipes, the durable budget, the client contract,
-and the tests all hold, and all of them are exercised. What is missing is the
-one input none of them can manufacture.
-
-**What closes it.** A diagnostic contract qualified against the hardware
-decoder names, and an inventory that measures them, the way M3d measured the
-software ones. `DiagnosticObservation::resolve` then admits a plan whose
-hardware decoder is named and covered, on the same terms it admits a software
-one: the same binary, the same decoder, the same qualified log flags. That is
-new measurement work against real hardware on the qualifying hosts, not a
-change of rule — which is why it is named here as remaining evidence rather
-than attempted as a code change on this branch.
-
-**Why it is recorded rather than worked around.** The temptation is to relax
-the backend test so a hardware plan gets *some* grammar. That is the exact
-substitution M3a rejected, one layer down: a grammar built from a guessed
-decoder name matches nothing, and a grammar that matches nothing reports every
-stream as clean — which would make the recovery fire never while reporting
-that it could, and would also certify unhealthy artifacts as healthy under the
-qualified identity. The unreachable path is the safe failure.
+- `playback.automatic_decoder_recovery` is a direct Settings → Developer
+  checkbox. It is off by default, persists in the Store, applies immediately,
+  and controls new producer attempts without changing any artifact identity.
+- A uniquely matching retained contract still supplies the exact grammar and
+  provenance it supplied before. The checkbox decides whether a recognized
+  fault may drive an action; the contract no longer decides whether the
+  checkbox is honoured.
+- When the checkbox is on and no exact contract covers the path, the producer
+  requests uncompressed levelled diagnostics and uses a bounded advisory
+  matcher. It accepts only the selected input/video-stream forms emitted by
+  supported FFmpeg generations, retains the existing five-record/two-second
+  threshold, and consumes the same one-shot durable recovery budget.
+- Advisory observation never sets `grammar_available`, never carries a
+  diagnostic-contract id, and therefore never qualifies an artifact for cache
+  reuse. Verified artifact identity remains the separate
+  `playback.decoder_health_qualified_artifacts` policy with its stricter
+  contract rules.
 
 ### The card
 
-`decodeRecoveryCard` sits in Settings → Developer between the verified-decode
-card and the prepared-handoff card. It states, in this order: that there is no
-switch and none is coming, because a decoder feature behind a code gate is a
-decoder feature nobody runs; the four things that must be true, of which two
-are read from what this node measured, one is the hardware-decoder contract
-above and is shown failing, and one is whether the session carries a durable
-budget at all; what the recovery costs when it fires — one per playback, never
-refunded, with the two fail-closed paths named; and the enable path, which
-ends at the hardware contract rather than at a control.
+`decodeRecoveryCard` now carries the checkbox, current enabled state, and its
+own Save action. The measured build, covered software paths, matched
+hardware/software path pairs, durable budget, and resource cost remain visible
+under **Safety evidence and current state**. Missing evidence is stated as
+missing evidence; it never disables the control or turns it back off.
 
-The sentence "Not true on any node today" is asserted by
-`tests/web/settings-sections.test.js`. That is deliberate: when the hardware
-contract lands, the card becomes wrong, and the assertion is what says so
-rather than leaving a stale claim in an operator-facing surface.
+The contract tests pin both halves: the web test requires the direct checkbox
+and advisory wording, while the Rust diagnostic test proves an advisory fault
+can authorize recovery but a clean advisory stream cannot certify reusable
+output.
 
 ## M4 working tree — a hardware encoder is not evidence of an idle CPU
 
@@ -3950,9 +3935,10 @@ promotion. Remaining promotion, fleet, and client suites continue against
 - Qualified FFmpeg diagnostic output from each supported build/backend class.
 - A diagnostic contract qualified against this fleet's *hardware* decoder
   names. The backend-aware inventory now measures those names only when FFmpeg
-  emits positive selection evidence, but no retained fleet contract covers a
-  real hardware path yet, so automatic decode recovery remains unreachable.
-  Recorded in full under "M7a" and "M7b".
+  emits positive selection evidence. No retained fleet contract covers a real
+  hardware path yet, so enabled recovery uses advisory selected-stream
+  diagnostics and cannot claim artifact qualification. This is confidence and
+  release evidence, not an activation gate. Recorded under "M7a" and "M7b".
 - Pixel, metadata, startup, concurrency, and recovery-latency evidence for the
   fleet workload matrix.
 - Web, Apple, and Android prepare/readiness/commit/retirement runs with one

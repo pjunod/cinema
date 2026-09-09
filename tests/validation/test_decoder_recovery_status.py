@@ -1299,15 +1299,16 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         # saying that, not merely for existing.
         self.assertIn("function decodeRecoveryCard(", web)
         self.assertIn("decodeRecoveryCard(settings)", web)
-        self.assertIn("There is no switch here", web)
-        self.assertIn("Not true on any node today", web)
+        self.assertIn("Enable automatic decoder recovery", web)
+        self.assertIn("This checkbox is the enable path", web)
+        self.assertIn("missing measurements or retained contracts never turn it back off", web)
         self.assertIn("One recovery per playback, and it is never given back", web)
-        self.assertIn("hardware decoders", web)
+        self.assertIn("hardware and software paths", web)
         # Saving replaces its own card, like the one above it.
         self.assertIn("drcard", web)
         # And the status document carries the finding rather than only the card.
         self.assertIn(
-            "M7a — the enable section, and the prerequisite that is not met",
+            "M7a — direct recovery enablement with advisory readiness",
             self.status,
         )
         # M7b is the milestone that closes M7a's finding, and the one claim in
@@ -1363,19 +1364,14 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             "const policyEnabled=q.policy_enabled===undefined?!!q.enforcing:!!q.policy_enabled;",
             web,
         )
-        self.assertIn(
-            "const ready=policyReady&&!!q.measured_build&&recoverable.length>0;",
-            web,
-        )
-        self.assertIn("const requested=!!s.decoder_health_qualified_artifacts;", web)
-        self.assertIn("const policyReady=policyEnabled;", web)
-        self.assertIn("checks advise and never gate that setting", web)
-        self.assertIn("must restart before the published policy enables", web)
-        self.assertIn("will turn off at that restart", web)
-        self.assertIn("ready for eligible sessions", web)
+        self.assertIn("const enabled=!!s.automatic_decoder_recovery;", web)
+        self.assertIn("saveAutomaticDecoderRecovery", web)
+        self.assertIn("automatic_decoder_recovery:document.getElementById", web)
+        self.assertIn("The checks below are advisory only", web)
+        self.assertIn("Recovery remains available when explicitly enabled", web)
         self.assertIn("Only some selectable decode paths", daemon)
         self.assertIn("missing measurements or contracts", daemon)
-        self.assertIn(
+        self.assertNotIn(
             "!delivered.enforces_receipt() || !alternate.enforces_receipt()",
             daemon,
         )
@@ -1388,6 +1384,10 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         self.assertIn(
             "Verified decode states its cost, its prerequisites, and what this "
             "node measured",
+            WEB_SETTINGS_TEST.read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            "Automatic recovery is directly enabled and coverage remains advisory",
             WEB_SETTINGS_TEST.read_text(encoding="utf-8"),
         )
 

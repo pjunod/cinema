@@ -15539,12 +15539,9 @@ function developerPanel(settings,readiness){
 }
 // Automatic decode recovery.
 //
-// The one card in this panel that describes something an operator cannot turn
-// on. That is deliberate: a decoder feature behind a code gate is a decoder
-// feature nobody runs, so this one is not gated. What the card can do is say
-// what has to be true before the recovery is reachable at all — and one of
-// those things is not true on any node today, which belongs at the top of the
-// card rather than in a footnote.
+// Direct opt-in with advisory evidence. The retained diagnostic-contract
+// coverage still tells an operator how much confidence to place in the
+// decision, but it never disables or overrides the switch.
 function decodeRecoveryCard(s){
   const q=s.decoder_health_qualification||{};
   // FFmpeg's strings again — a build banner and decoder names.
@@ -15557,33 +15554,24 @@ function decodeRecoveryCard(s){
   const software=paths.filter(path=>path.backend==="software");
   const hardware=paths.filter(path=>path.backend!=="software");
   const recoverable=hardware.filter(path=>software.some(peer=>peer.codec===path.codec));
-  const requested=!!s.decoder_health_qualified_artifacts;
-  const policyEnabled=q.policy_enabled===undefined?!!q.enforcing:!!q.policy_enabled;
-  const policyReady=policyEnabled;
-  const ready=policyReady&&!!q.measured_build&&recoverable.length>0;
+  const enabled=!!s.automatic_decoder_recovery;
   const ok=b=>b?"✓":"✗";
-  const policyNote=q.pending_restart
-    ? (requested
-        ? "The setting is saved on, but this node must restart before the published policy enables. Recovery stays unavailable until that restart."
-        : "The setting is saved off, but the receipt-qualified decode policy remains applied until restart. Recovery is ready now for eligible sessions and will turn off at that restart.")
-    : (policyEnabled
-        ? "The receipt-qualified decode policy is applied on this node."
-        : "The receipt-qualified decode policy is off on this node. Turn on Require a producer health receipt and restart this node; these checks advise and never gate that setting.");
-  const readiness=ready
-    ? `<span class="pill" style="color:var(--good);border-color:var(--good)">ready for eligible sessions</span>`
-    : `<span class="pill warn">prerequisites unmet</span>`;
-  return setCard(`${cardHead("Automatic decode recovery","A producer that says out loud it could not decode the source is answered once — by a successor that decodes in software behind the same hardware encoder — instead of being answered with the command that just failed. Every timing verdict tells a client to try again, so without this a file that cannot be decoded is a reopen loop.",readiness)}
-      <div class="hint"><b>There is no switch here.</b> This recovery is not behind a build flag or a setting; it fires when the conditions below hold and does nothing when they do not. The list is what has to become true, not what you have to click.</div>
-      <h2 class="section">What must be true first</h2>
-      <div class="tog"><span>${ok(policyReady)} The receipt-qualified decode policy is applied<small>${policyNote}</small></span></div>
-      <div class="tog"><span>${ok(!!q.measured_build)} This node measured its own FFmpeg<small>${q.measured_build?`<code>${esc(q.measured_build)}</code>`:"Not measured. Nothing this build prints can be matched to a contract, so nothing it prints is evidence, and a decode failure is indistinguishable from a stall."}</small></span></div>
-      <div class="tog"><span>${ok(software.length>0)} A retained contract covers this build's software decoders<small>${list(software.map(path=>path.value))}<br>The successor decodes in software, so the same codec's software decode has to be measured and covered — otherwise the recovery installs a producer nobody can certify.</small></span></div>
-      <div class="tog"><span>${ok(recoverable.length>0)} The same codec has covered hardware and software paths<small>${list(recoverable.map(path=>path.value))}<br>${recoverable.length?"Each listed hardware path has a covered software alternate for the same codec. The startup probe required successful hardware-frame output as well as FFmpeg's selection statement.":"<b>Not true on any node today, and it is what blocks the path.</b> A hardware contract and a software contract for different codecs do not form a recovery. No matched pair is retained yet, so a hardware decode cannot produce certified evidence and then install a certifiable software alternate."}</small></span></div>
+  const state=enabled
+    ? `<span class="pill" style="color:var(--good);border-color:var(--good)">enabled</span>`
+    : `<span class="pill">disabled</span>`;
+  return setCard(`${cardHead("Automatic decode recovery","A producer that says out loud it could not decode the source is answered once — by a successor that decodes in software behind the same hardware encoder — instead of being answered with the command that just failed. Every timing verdict tells a client to try again, so without this a file that cannot be decoded is a reopen loop.",state)}
+      ${togRow("adr",`Enable automatic decoder recovery <span class="pill warn">experimental</span>`,`Applies immediately to new producer attempts. This checkbox is authoritative: missing measurements or retained contracts never turn it back off.`,enabled)}
+      <div class="hint"><b>This checkbox is the enable path.</b> The checks below are advisory only. With incomplete coverage, the server uses its bounded selected-stream diagnostic matcher and never treats that best-effort observation as permission to reuse an artifact.</div>
+      <h2 class="section">Safety evidence and current state</h2>
+      <div class="tog"><span>${ok(!!q.measured_build)} This node measured its own FFmpeg<small>${q.measured_build?`<code>${esc(q.measured_build)}</code>`:"Not measured. Recovery can still be enabled; diagnostics use the selected input and stream without claiming build-qualified evidence."}</small></span></div>
+      <div class="tog"><span>${ok(software.length>0)} A retained contract covers this build's software decoders<small>${list(software.map(path=>path.value))}<br>A covered software path increases confidence in the successor; absence is advisory and does not block the switch.</small></span></div>
+      <div class="tog"><span>${ok(recoverable.length>0)} The same codec has covered hardware and software paths<small>${list(recoverable.map(path=>path.value))}<br>${recoverable.length?"Each listed hardware path has a covered software alternate for the same codec.":"No matched retained pair exists yet. Recovery remains available when explicitly enabled, using best-effort selected-stream diagnostics; this row records the missing fleet evidence."}</small></span></div>
       <div class="tog"><span>The session carries a durable recovery budget<small>Cluster sessions do. A legacy process-local start, a relayed worker start, and any session predating the recovery epoch keep the older in-process limit — one recovery per <i>session</i> rather than one per playback, which a reopen resets.</small></span></div>
       <h2 class="section">What it costs when it does fire</h2>
       <div class="hint"><b>One recovery per playback, and it is never given back.</b> The budget is durable and keyed by the playback, so a reopen, a seek or a track change does not buy another. A playback that has spent it is told its source did not decode — a permanent answer the client shows once, rather than an impermanent one it will follow forever. Two paths give a budget up without using it, both on purpose: an executor cancelled mid-install, and a node that cannot read the budget. Each costs that playback its automatic recovery and nothing else.</div>
       <div class="hint">The successor keeps the hardware encoder and its slot; what grows is the CPU the pipeline spends decoding. That difference has to be available on the node at the moment of the recovery, and a recovery that cannot get it fails rather than waiting on a viewer's behalf indefinitely.</div>
-      <div class="hint"><b>Enable path:</b> qualify diagnostic contracts against this node's measured hardware decoders and their software alternates, then turn on <b>Require a producer health receipt</b> above, so that what each producer reports about its own decode is treated as evidence. There is no separate switch for the recovery itself, and none is coming.</div>`,{id:"drcard"});
+      <div class="err" id="adrerr"></div>
+      ${setCardFoot("saveAutomaticDecoderRecovery")}`,{id:"drcard"});
 }
 // Verified decode artifacts.
 //
@@ -17342,6 +17330,18 @@ async function saveVerifiedDecode(btn){
     // TV card next door stages a whole configuration before its own Save.
     const card=document.getElementById("vdcard");
     if(card) card.outerHTML=verifiedDecodeCard(saved);
+  }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
+}
+async function saveAutomaticDecoderRecovery(btn){
+  const err=document.getElementById("adrerr"); err.textContent="";
+  if(btn) btn.disabled=true;
+  try{
+    const saved=await api("/settings",{method:"PUT",body:{
+      automatic_decoder_recovery:document.getElementById("adr").checked}});
+    cacheSettings(saved);
+    toast("Automatic decoder recovery setting saved"); if(btn) setCardSaved(btn);
+    const card=document.getElementById("drcard");
+    if(card) card.outerHTML=decodeRecoveryCard(saved);
   }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
 }
 async function saveExperimental(btn){

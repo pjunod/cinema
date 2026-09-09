@@ -535,6 +535,14 @@ pub struct DiagnosticGrammar {
     /// attribute another file's failures to this picture.
     selected_input: u32,
     selected_stream: u32,
+    /// An operator explicitly enabled automatic recovery without a retained
+    /// build contract. The grammar remains unable to qualify artifact reuse;
+    /// it exists only to recognize an attributed failure for the one-shot
+    /// recovery action.
+    advisory_action: bool,
+    /// Whether a fault recognized by this grammar may drive recovery. Exact
+    /// contracts still observe and qualify artifacts when this is false.
+    automatic_action_enabled: bool,
 }
 
 impl DiagnosticGrammar {
@@ -543,7 +551,59 @@ impl DiagnosticGrammar {
             contract,
             selected_input,
             selected_stream,
+            advisory_action: false,
+            automatic_action_enabled: true,
         }
+    }
+
+    /// Best-effort grammar selected by the explicit Developer switch.
+    ///
+    /// It deliberately does not carry a diagnostic-contract id and cannot
+    /// qualify an artifact for reuse. It recognizes only FFmpeg's attributed
+    /// selected-video decode records (plus the legacy selected-stream form),
+    /// which keeps the opt-in action narrower than arbitrary stderr text while
+    /// making retained fleet contracts advisory rather than an enable gate.
+    pub fn advisory(input_codec: &str, selected_input: u32, selected_stream: u32) -> Self {
+        Self {
+            contract: DiagnosticContract {
+                id: "operator-enabled-advisory".to_owned(),
+                host: "operator".to_owned(),
+                ffmpeg_version: "unqualified".to_owned(),
+                binary_sha256: "unqualified".to_owned(),
+                buildconf_sha256: "unqualified".to_owned(),
+                stderr_mode: QUALIFIED_STDERR_MODE.to_owned(),
+                input_codec: input_codec.to_owned(),
+                decoder: String::new(),
+                decode_backend: "unqualified".to_owned(),
+                require_context_addresses: false,
+                primary_message: "Decoding error:".to_owned(),
+                subordinate_message: Some("No frame decoded?".to_owned()),
+                attributes_every_failure: true,
+                error_detail: "Invalid data found when processing input".to_owned(),
+                fixture: String::new(),
+                fixture_sha256: String::new(),
+                scope: "operator-enabled recovery; never artifact qualification".to_owned(),
+                backend_fault_detail: None,
+            },
+            selected_input,
+            selected_stream,
+            advisory_action: true,
+            automatic_action_enabled: true,
+        }
+    }
+
+    pub fn with_automatic_action(mut self, enabled: bool) -> Self {
+        self.automatic_action_enabled = enabled;
+        self
+    }
+
+    fn qualifies_artifact_reuse(&self) -> bool {
+        !self.advisory_action
+    }
+
+    fn automatic_action_qualified(&self) -> bool {
+        self.automatic_action_enabled
+            && (self.advisory_action || self.contract.attributes_every_failure)
     }
 
     pub fn contract(&self) -> &DiagnosticContract {
@@ -581,6 +641,12 @@ impl DiagnosticGrammar {
             return DiagnosticRecord::SubordinateDetail;
         }
 
+        if self.advisory_action {
+            if let Some(record) = self.classify_legacy_selected_stream(trimmed) {
+                return record;
+            }
+        }
+
         let Some(attributed) = parse_attributed(trimmed) else {
             return DiagnosticRecord::Unrelated;
         };
@@ -595,10 +661,16 @@ impl DiagnosticGrammar {
             }
         }
 
-        let Some(detail) = attributed
-            .message
-            .strip_prefix(self.contract.primary_message.as_str())
-        else {
+        let detail = if self.advisory_action {
+            ["Decoding error:", "Error submitting packet to decoder:"]
+                .into_iter()
+                .find_map(|prefix| attributed.message.strip_prefix(prefix))
+        } else {
+            attributed
+                .message
+                .strip_prefix(self.contract.primary_message.as_str())
+        };
+        let Some(detail) = detail else {
             return DiagnosticRecord::Unrelated;
         };
         if !self.is_selected(&attributed) {
@@ -609,6 +681,18 @@ impl DiagnosticGrammar {
                 && detail.trim() == self.contract.error_detail
                 && self.matches_contract_identity(&attributed),
         }
+    }
+
+    fn classify_legacy_selected_stream(&self, line: &str) -> Option<DiagnosticRecord> {
+        let line = line.strip_prefix("[error] ").unwrap_or(line);
+        let prefix = format!(
+            "Error while decoding stream #{}:{}:",
+            self.selected_input, self.selected_stream
+        );
+        let detail = line.strip_prefix(&prefix)?;
+        Some(DiagnosticRecord::PrimarySelectedVideoError {
+            contract_qualified: detail.trim() == self.contract.error_detail,
+        })
     }
 
     fn is_selected(&self, attributed: &AttributedLine<'_>) -> bool {
@@ -625,7 +709,7 @@ impl DiagnosticGrammar {
 
     fn matches_contract_identity(&self, attributed: &AttributedLine<'_>) -> bool {
         attributed.codec.trim() == self.contract.input_codec
-            && attributed.decoder.trim() == self.contract.decoder
+            && (self.advisory_action || attributed.decoder.trim() == self.contract.decoder)
             && (!self.contract.require_context_addresses
                 || (attributed.stream_address && attributed.decoder_address))
     }
@@ -790,6 +874,14 @@ impl HealthAccumulator {
         Self {
             grammar_available: true,
             windowed_action_qualified,
+            ..Self::new()
+        }
+    }
+
+    fn with_advisory_action() -> Self {
+        Self {
+            grammar_available: false,
+            windowed_action_qualified: true,
             ..Self::new()
         }
     }
@@ -1612,13 +1704,17 @@ where
     use tokio::io::AsyncReadExt;
 
     // Decided once, before anything is read, and by the same value that
-    // decides whether any line is classified: without a contract this attempt
-    // has no grammar, so nothing it prints is evidence and its output cannot
-    // become a durable artifact however clean it looks.
+    // decides whether any line is classified. An operator-enabled advisory
+    // grammar can drive the one-shot recovery action, but it deliberately
+    // leaves `grammar_available` false so it can never qualify artifact reuse.
     let mut accumulator = match grammar.as_ref() {
-        Some(grammar) => {
-            HealthAccumulator::with_qualified_grammar(grammar.attributes_every_failure())
+        Some(grammar) if grammar.qualifies_artifact_reuse() => {
+            HealthAccumulator::with_qualified_grammar(grammar.automatic_action_qualified())
         }
+        Some(grammar) if grammar.automatic_action_qualified() => {
+            HealthAccumulator::with_advisory_action()
+        }
+        Some(_) => HealthAccumulator::new(),
         None => HealthAccumulator::new(),
     };
     let mut reader = BoundedDiagnosticReader::new();
@@ -2733,6 +2829,59 @@ mod tests {
         assert_eq!(receipt.video_decode_error_records, 5);
         assert_eq!(receipt.contract_qualified_error_records, 5);
         assert_eq!(receipt.plan_digest, "plan-digest");
+    }
+
+    /// The Developer switch authorizes the action without laundering the
+    /// best-effort observation into an artifact-reuse receipt.
+    #[tokio::test]
+    async fn advisory_recovery_can_act_but_cannot_qualify_artifact_reuse() {
+        let grammar = DiagnosticGrammar::advisory("h264", 0, 0);
+        let (mut writer, reader) = tokio::io::duplex(4096);
+        let actions = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = std::sync::Arc::clone(&actions);
+        let handle = tokio::spawn(crate::decoder_health::read_diagnostics_reporting(
+            reader,
+            Some(grammar),
+            |_| {},
+            |_| false,
+            move |fault, records, allowed| {
+                observed
+                    .lock()
+                    .expect("actions")
+                    .push((fault, records, allowed));
+            },
+        ));
+        let line = "[vist#0:0/h264 @ 0x1] [dec:h264 @ 0x2] [error] Decoding error: Invalid data found when processing input\n";
+        for _ in 0..VIDEO_DECODE_ERROR_LIMIT {
+            use tokio::io::AsyncWriteExt;
+            writer
+                .write_all(line.as_bytes())
+                .await
+                .expect("write advisory record");
+        }
+        drop(writer);
+        let receipt = ObservedDiagnostics::new("plan-digest".to_owned(), None, Some(handle), None)
+            .settle(DIAGNOSTIC_DRAIN_BUDGET, ExitDisposition::CleanEnd)
+            .await;
+        assert_eq!(
+            *actions.lock().expect("actions"),
+            vec![(DecodeFaultKind::VideoDecodeFailure, 5, true)]
+        );
+        assert_eq!(receipt.qualification, Qualification::Rejected);
+        assert!(!receipt.permits_reuse());
+        assert_eq!(receipt.diagnostic_contract, None);
+
+        let clean = read_diagnostics(
+            tokio::io::empty(),
+            Some(DiagnosticGrammar::advisory("h264", 0, 0)),
+            |_| {},
+            |_| false,
+        )
+        .await;
+        assert!(
+            !clean.qualifies_reuse(),
+            "advisory mode never certifies a clean artifact"
+        );
     }
 
     /// A clean stream from a qualified build is the one case that may become a
