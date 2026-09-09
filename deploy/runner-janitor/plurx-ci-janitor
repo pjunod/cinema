@@ -312,7 +312,12 @@ while IFS= read -r unit; do
   # forever, which reads as a host to re-provision and is the opposite
   # conclusion.
   if [ "$dry_run" != true ] && [ "$reset_count" -gt "$reset_before" ]; then
-    available_kb=$(available_kb_for "$dir")
+    # The runner recreates cache.dir asynchronously after it restarts. The
+    # directory can therefore be absent at this exact point even though its
+    # filesystem and runner root are healthy. Probe the surviving parent: it
+    # is necessarily the same filesystem because the validated cache path is
+    # an immediate child of that runner root.
+    available_kb=$(available_kb_for "$(dirname -- "$dir")")
     if [ "$available_kb" -lt "$floor_kb" ]; then
       say "$unit: still $((available_kb / 1024 / 1024))G free against a $((floor_kb / 1024 / 1024))G reserve after resetting what it may — this host cannot reach it by pruning" >&2
       short_after=$((short_after + 1))

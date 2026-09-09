@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["02bf8fa7"]
+points = ["operations.packaging", "validation.framework"]
+checks = ["operations-contract"]
+reason = "The Linux janitor contract makes its fake df reject a missing path, then resets a cache server and requires the pass to finish with the runner restarted and a complete receipt. The production janitor now measures the surviving runner root after deletion because Forgejo recreates cache.dir asynchronously; this prevents a pressure pass from aborting before it checks sibling runners and Docker."

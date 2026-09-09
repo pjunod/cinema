@@ -237,8 +237,36 @@ def main(argv: list[str]) -> int:
             # be inside the fullscreen tree or there is no channel strip.
             page.locator("#live-tv-body").get_by_label("Fullscreen", exact=True).click()
             page.wait_for_function("document.fullscreenElement?.id === 'live-tv-host'")
+            page.evaluate("""() => {
+                const detach = detachLiveTvMedia;
+                detachLiveTvMedia = () => {
+                    try { return detach(); }
+                    catch (error) { window.__liveTvDetachError = String(error?.stack || error); throw error; }
+                };
+            }""")
             stop()
-            page.wait_for_function("!document.fullscreenElement && document.querySelector('#live-tv-host').hidden")
+            try:
+                page.wait_for_function("!document.fullscreenElement && document.querySelector('#live-tv-host').hidden")
+            except Exception:
+                state = page.evaluate("""() => ({
+                    fullscreen: document.fullscreenElement?.id || null,
+                    webkitFullscreen: document.webkitFullscreenElement?.id || null,
+                    pictureInPicture: document.pictureInPictureElement?.id || null,
+                    webkitDisplayingFullscreen: document.querySelector('#live-tv-video')?.webkitDisplayingFullscreen || false,
+                    webkitPresentationMode: document.querySelector('#live-tv-video')?.webkitPresentationMode || null,
+                    hidden: document.querySelector('#live-tv-host')?.hidden,
+                    active: document.querySelector('#live-tv-host')?.dataset.mode || null,
+                    serial: LIVE_TV.serial,
+                    stopSource: stopLiveTv.toString(),
+                    exitSource: exitLiveTvPresentation.toString(),
+                    detachError: window.__liveTvDetachError || null,
+                    message: document.querySelector('#live-tv-message')?.textContent || null,
+                })""")
+                print(
+                    f"live-tv-browser: fullscreen stop state: {state!r}; sessions={active()!r}",
+                    file=sys.stderr,
+                )
+                raise
             until(lambda: not active(), "fullscreen stop did not release")
 
             watch()
