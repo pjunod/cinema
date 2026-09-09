@@ -76,12 +76,14 @@ lane passed 2,145 tests before exposing a second contention-sensitive fact
 probe and an offline recovery fixture that had not enabled the behavior it
 tests. [#209](http://192.168.4.7:3000/noirr/plurx/pulls/209) and
 [#210](http://192.168.4.7:3000/noirr/plurx/pulls/210) repair that offline
-fixture and Docker packaging on current `main` at `aff2dc12`. Draft follow-up
-[#211](http://192.168.4.7:3000/noirr/plurx/pulls/211) gives the remaining fact
-probe its production budget, separates the compile-only fast Rust verdict from
-the continuing unit/SQLite job, and refreshes the intentional Developer-tab
-structural golden exposed by the post-merge web lane. No production behavior
-changes · **Updated:**
+fixture and Docker packaging as `aff2dc12`; [#212](http://192.168.4.7:3000/noirr/plurx/pulls/212)
+then normalizes that Docker evidence on current `main` at `d9e8d7d4`. Draft
+follow-up [#211](http://192.168.4.7:3000/noirr/plurx/pulls/211) gives the
+remaining fact probe its production budget and separates the compile-only fast
+Rust verdict from the continuing unit/SQLite job. Its exact current-main app
+passes the whole-workspace compile command and a 78-capture Developer-layout
+sweep matches the existing 7,698-fact structural golden with no console or page
+errors. No production behavior changes · **Updated:**
 2026-09-09 · **Effort:**
 `effort/streaming-reliability` (merged) · **Started:** 2026-09-04 ·
 **Effort fork:** `48615baf` · **Continuation merged to main:** `1f6d6645` via
