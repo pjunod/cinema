@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["e7af922d"]
+points = ["web.experience", "live-tv.integration"]
+checks = ["web-layout"]
+reason = "The retained Live TV browser acceptance enters fullscreen, clicks the visible Stop Live TV control inside the fullscreen host, and requires fullscreen exit, host concealment, and tuner-capability release. Removing the overlay Stop control or restoring the global VOD/Live TV locator makes the browser gate fail before the lease is released."

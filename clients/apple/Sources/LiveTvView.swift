@@ -9,9 +9,15 @@ final class LiveTvPlayerController: ObservableObject {
 
     /// A controller wired to stub requests, for tests that need to count what
     /// actually reached the server rather than assert a constant.
-    static func testing(requests: LiveTvRequests) -> LiveTvPlayerController {
+    static func testing(
+        requests: LiveTvRequests,
+        activateAudioSession: @escaping () -> Void = {},
+        deactivateAudioSession: @escaping () -> Void = {}
+    ) -> LiveTvPlayerController {
         let controller = LiveTvPlayerController()
         controller.lease = LiveTvLease(requests: requests)
+        controller.activateAudioSession = activateAudioSession
+        controller.deactivateAudioSession = deactivateAudioSession
         // A real client only so `watch` gets past its own guard; it is never
         // asked for the network, because the stub lease answers first.
         controller.api = LiveTvAPI(origin: "http://127.0.0.1:1", token: nil)
@@ -39,6 +45,21 @@ final class LiveTvPlayerController: ObservableObject {
     private var heartbeat: Task<Void, Never>?
     private var guideRefresh: Task<Void, Never>?
     private var channelChange: Task<Void, Never>?
+    private var ownsAudioSession = false
+    private var activateAudioSession: () -> Void = {
+#if os(iOS)
+        try? AVAudioSession.sharedInstance().setCategory(.playback)
+        try? AVAudioSession.sharedInstance().setActive(true)
+#endif
+    }
+    private var deactivateAudioSession: () -> Void = {
+#if os(iOS)
+        try? AVAudioSession.sharedInstance().setActive(
+            false,
+            options: .notifyOthersOnDeactivation
+        )
+#endif
+    }
 
     func load(origin: String, token: String?) async {
         let loading = UUID()
@@ -85,6 +106,11 @@ final class LiveTvPlayerController: ObservableObject {
             let item = AVPlayerItem(url: try api.playlistURL(info.sessionId))
             item.preferredForwardBufferDuration = 12
             player.replaceCurrentItem(with: item)
+            // Live TV owns a separate AVPlayer from finite-media playback, so
+            // it must establish the same playback audio session itself. The
+            // default category follows the iPhone silent switch: video moves,
+            // but the AAC track is inaudible.
+            beginAudioSession()
             title = channel.title
             watching = channel
             playing = true
@@ -126,6 +152,7 @@ final class LiveTvPlayerController: ObservableObject {
             // A URL/attachment failure after acquiring a capability must also
             // release it. The lease retains ownership if cleanup cannot finish.
             do { try await lease.stop() } catch { message += " Cleanup is unconfirmed; use Stop to retry." }
+            endAudioSession()
         }
         if serial == expected { busy = false }
     }
@@ -204,7 +231,20 @@ final class LiveTvPlayerController: ObservableObject {
         serial += 1
         detach()
         busy = false
+        endAudioSession()
         try await lease?.stop()
+    }
+
+    private func beginAudioSession() {
+        guard !ownsAudioSession else { return }
+        activateAudioSession()
+        ownsAudioSession = true
+    }
+
+    private func endAudioSession() {
+        guard ownsAudioSession else { return }
+        ownsAudioSession = false
+        deactivateAudioSession()
     }
 
     private func detach() {
