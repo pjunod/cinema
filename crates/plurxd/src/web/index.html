@@ -15255,10 +15255,12 @@ async function stopLiveTv(){
   // fullscreen element before the browser clears fullscreenElement can strand
   // Chromium in fullscreen indefinitely. Keep those operations concurrent,
   // then dismantle the media tree only after presentation state settles.
-  const exiting=exitLiveTvPresentation(), stopping=LIVE_TV_LEASE.stop();
+  const exiting=exitLiveTvPresentation();
+  const stopping=LIVE_TV_LEASE.stop().then(value=>({ok:true,value}),error=>({ok:false,error}));
   await exiting; detachLiveTvMedia();
   const host=document.getElementById("live-tv-host"); if(host) host.hidden=true;
-  return stopping;
+  const stopped=await stopping; if(!stopped.ok) throw stopped.error;
+  return stopped.value;
 }
 async function watchLiveTv(index){
   const channel=LIVE_TV.channels[index];

@@ -587,6 +587,28 @@ async function main() {
     assert.equal(events.at(-1), "iphone-enter");
   });
 
+  await test("Live TV retains an early release failure until presentation teardown", async () => {
+    const exited = deferred(), panel = { hidden: false, contains: () => false };
+    const listeners = new Map(), document = {
+      getElementById: id => id === "live-tv-host" ? panel : {},
+      addEventListener: (name, listener) => listeners.set(name, listener),
+      removeEventListener: (name, listener) => { if (listeners.get(name) === listener) listeners.delete(name); },
+      fullscreenElement: panel,
+      exitFullscreen: () => exited.promise.then(() => {
+        document.fullscreenElement = null; listeners.get("fullscreenchange")?.();
+      }),
+    };
+    const control = new Function("document", "LIVE_TV", "LIVE_TV_LEASE", "detachLiveTvMedia",
+      `${shipped("exitLiveTvPresentation")}${shipped("stopLiveTv")} return stopLiveTv;`)(
+      document, { serial: 0 }, { stop: async () => { throw new Error("release failed"); } }, () => {});
+    const closing = control();
+    await Promise.resolve();
+    assert.equal(panel.hidden, false);
+    exited.resolve();
+    await assert.rejects(closing, /release failed/);
+    assert.equal(panel.hidden, true, "a release refusal must not leave the stopped presentation visible");
+  });
+
   await test("theater viewers can discover Live TV without administrator access", () => {
     const nav = new Function("ME", "location", `${shipped("theaterNavItems")} return theaterNavItems;`)(
       { is_admin: false }, { hash: "#/live-tv" });
