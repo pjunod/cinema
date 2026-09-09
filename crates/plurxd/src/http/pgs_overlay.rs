@@ -15,7 +15,26 @@ use crate::pgs_overlay::{self, OverlayError, PrepareState};
 use crate::state::AppState;
 
 async fn file_and_track(state: &AppState, id: i64, index: i64) -> Result<MediaFile, ApiError> {
-    if !state.pgs_overlay_enabled {
+    if !state.pgs_overlay_enabled().await? {
+        // Counted only once the request is one the overlay would really have
+        // answered. Counting here, before the track exists and before its
+        // codec is checked, would let any authenticated `GET /files/999/subs/0`
+        // read as "a client here wants this capability" — and the readiness
+        // row says exactly that, so it has to be true. The switch is read
+        // first because it is the cheaper question.
+        let refusable = state
+            .store
+            .get_file(id)
+            .await?
+            .and_then(|file| {
+                file.subtitle_streams
+                    .get(usize::try_from(index).ok()?)
+                    .map(|stream| is_pgs_subtitle(&stream.codec))
+            })
+            .unwrap_or(false);
+        if refusable {
+            OVERLAY_REFUSED_OFF.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         return Err(ApiError::NotFound("PGS overlay"));
     }
     if index < 0 {
@@ -38,6 +57,28 @@ async fn file_and_track(state: &AppState, id: i64, index: i64) -> Result<MediaFi
     Ok(file)
 }
 
+/// Overlay manifests served since this process started, and refusals because
+/// the switch is off.
+///
+/// The Developer readiness row for this switch has to answer "does anything in
+/// this fleet actually render pgs-v1", and the only honest evidence a daemon
+/// holds is whether a client ever asked for a manifest. Process-local, so a
+/// restart returns it to zero — the row says so rather than presenting a fresh
+/// process's silence as a fleet fact.
+pub(crate) static OVERLAY_MANIFESTS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub(crate) static OVERLAY_REFUSED_OFF: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// What this process has seen of the overlay, for the readiness route.
+pub(crate) fn overlay_demand_snapshot() -> (u64, u64) {
+    use std::sync::atomic::Ordering;
+    (
+        OVERLAY_MANIFESTS.load(Ordering::Relaxed),
+        OVERLAY_REFUSED_OFF.load(Ordering::Relaxed),
+    )
+}
+
 pub async fn manifest(
     _user: AuthUser,
     State(state): State<AppState>,
@@ -48,8 +89,13 @@ pub async fn manifest(
         .await
         .map_err(map_overlay_error)?
     {
+        // A 202 is not a serving. The client polls this every second while a
+        // cold prepare runs, so counting here would record sixty servings and
+        // zero manifests for one minute of waiting, and the readiness row
+        // below claims manifests were served.
         PrepareState::Preparing => Ok(preparing_response()),
         PrepareState::Ready(path) => {
+            OVERLAY_MANIFESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if let Some(generation_dir) = path.parent() {
                 pgs_overlay::record_access(generation_dir).await;
             }

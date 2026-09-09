@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["ce37585e"]
+reason = "This commit only records the retained fullscreen Live TV stop evidence in a regressions.d fragment."
+ignore = true

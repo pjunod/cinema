@@ -151,7 +151,13 @@ runs:
           echo "::error::Cannot derive the pinned Rust toolchain"
           exit 1
         }
-        mapfile -t cache_paths < <(
+        # macOS still ships Bash 3.2, which has arrays and process
+        # substitution but not `mapfile`. Keep this action runnable on every
+        # self-hosted runner rather than making the cache lane Linux-only.
+        cache_paths=()
+        while IFS= read -r cache_path; do
+          cache_paths[${#cache_paths[@]}]=$cache_path
+        done < <(
           "$GITHUB_WORKSPACE/scripts/ci-cargo-cache-prepare" \
             "$RUNNER_TOOL_CACHE" "$runner_name" "$toolchain" "$CACHE_LANE"
         )

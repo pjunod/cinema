@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["88abf00e"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "The focused regressions from the first integration run exercise every changed boundary: bounded_output_kills_and_reaps_at_the_physical_disk_cap proves the daemon-owned writer reaches its physical ceiling without a shell grandchild retaining the pipes; live_tv_real_video_only_source_cannot_publish_the_aac_profile and live_tv_decoder_diagnostic_capture_is_bounded_and_specific recognize FFmpeg 9's empty required-stream map while leaving unrelated errors unclassified; every_vod_ineligibility_reaches_the_wire_as_a_typed_refusal pins the public source-rescan and engine-attestation statuses; the ladder, legacy start, HDR burn, retained-recovery, and four-method HTTP tests use exact real-media scan identity and assert current immutable encoded VOD behavior; and every_delivery_method_is_listed_under_its_own_name plus vod_session_participates_in_the_bounded_peer_inventory prove encoded sessions remain transcode deliveries in both ordinary and clustered operator views. Pinned all-target check, strict Clippy, formatting, and the seven rolling-producer ownership contracts pass on the corrected tree."

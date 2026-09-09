@@ -1124,7 +1124,7 @@ class CiCacheContractCase(unittest.TestCase):
             # and rogg16 five, and two sharing a Cargo root would prune each
             # other's target directories mid-build.
             self.assertIn("forgejo-runner-03", outputs["cache_root"])
-            self.assertTrue(outputs["cache_root"].startswith(str(tool_cache)))
+            self.assertTrue(outputs["cache_root"].startswith(str(tool_cache.resolve())))
             self.assertTrue(Path(outputs["target_dir"]).is_dir())
             written = (fixture / "env").read_text()
             self.assertIn(f"CARGO_HOME={outputs['cache_root']}/cargo-home", written)

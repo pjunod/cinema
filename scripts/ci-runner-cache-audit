@@ -42,7 +42,14 @@ blobs="$cache_root/cache"
 used_kb=$(du -sk "$cache_root" 2>/dev/null | awk '{ print $1 }') || exit 0
 [[ "$used_kb" =~ ^[0-9]+$ ]] || exit 0
 entries=$(find "$blobs" -type f ! -name '*.tmp' 2>/dev/null | wc -l | tr -d ' ')
-oldest=$(find "$blobs" -type f -printf '%TF\n' 2>/dev/null | sort | head -1)
+oldest=
+if find "$blobs" -type f -printf '' >/dev/null 2>&1; then
+  oldest=$(find "$blobs" -type f ! -name '*.tmp' -printf '%TF\n' 2>/dev/null | sort | head -1) || true
+elif stat -f '%Sm' -t '%Y-%m-%d' "$blobs" >/dev/null 2>&1; then
+  # BSD find has no `-printf`; BSD stat supplies the same date without making
+  # this advisory report fatal on macOS runners.
+  oldest=$(find "$blobs" -type f ! -name '*.tmp' -exec stat -f '%Sm' -t '%Y-%m-%d' {} \; 2>/dev/null | sort | head -1) || true
+fi
 used_gb=$((used_kb / 1024 / 1024))
 runner="${RUNNER_NAME:-$(hostname)}"
 

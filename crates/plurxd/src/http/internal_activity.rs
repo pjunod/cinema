@@ -488,7 +488,7 @@ async fn local_snapshot(state: &AppState) -> ActivitySnapshot {
             }
             ActivityCandidate::Vod(session) => {
                 deliveries.push(ActivityDelivery {
-                    method: "hls-copy".to_owned(),
+                    method: session.method.as_str().to_owned(),
                     presentation: Some("vod".to_owned()),
                     user: bounded_text(session.user_name, MAX_USER_BYTES),
                     file_id: session.file_id,
@@ -957,6 +957,7 @@ mod tests {
             delivered_bps: Some(12_000_000),
             delivered_idle_ms: 250,
             id: "vod-session".to_owned(),
+            method: crate::delivery::Method::Transcode,
             file_id: 7,
             item_id: 9,
             item_title: "VOD title".to_owned(),
@@ -976,7 +977,10 @@ mod tests {
             1,
         );
 
-        assert!(matches!(selected.as_slice(), [ActivityCandidate::Vod(_)]));
+        assert!(matches!(
+            selected.as_slice(),
+            [ActivityCandidate::Vod(info)] if info.method == crate::delivery::Method::Transcode
+        ));
     }
 
     #[tokio::test]

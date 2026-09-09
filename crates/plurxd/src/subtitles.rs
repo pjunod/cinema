@@ -878,6 +878,106 @@ pub async fn ensure_vtt_file(
     .map_err(|error| format!("subtitle sidecar open worker failed: {error}"))?
 }
 
+/// Preserve bitmap display state and ASS styling in a small subtitle-only
+/// Matroska. Restarting video must not discard a cue that began before its
+/// seek landing. The existing cache owns one bounded extraction per identity,
+/// including cancellation, negative memo, atomic publication, and pruning.
+pub(crate) async fn ensure_burn_file(
+    dir: &Path,
+    file: &MediaFile,
+    index: i64,
+    expected_object_version: Option<&str>,
+) -> Result<std::fs::File, String> {
+    const MAX_BURN_BYTES: u64 = 64 * 1024 * 1024;
+    use sha2::{Digest, Sha256};
+    let source = Arc::new(
+        crate::fragment_index_cluster::open_source_fence(file, expected_object_version).await?,
+    );
+    let version = hex::encode(Sha256::digest(source.object_version().as_bytes()));
+    let cached = dir.join(format!("f{}-s{index}-{version}-burn-v2.mks", file.id));
+    let limits = ExtractionLimits {
+        max_sidecar_bytes: MAX_BURN_BYTES,
+        ..Default::default()
+    };
+    let extractor_source = Arc::clone(&source);
+    let path = ensure_vtt_at(
+        cached,
+        dir,
+        file,
+        index,
+        limits,
+        move |tmp, file, index| async move {
+            let source = extractor_source;
+            let mut command = tokio::process::Command::new(ffmpeg_bin());
+            crate::ffmpeg::inherit_file_descriptors(&mut command, &[(&source.handle, 3)]);
+            let input = if cfg!(unix) {
+                Path::new("/dev/fd/3")
+            } else {
+                file.path.as_path()
+            };
+            command
+                .args([
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-copyts",
+                    "-start_at_zero",
+                    "-i",
+                ])
+                .arg(input)
+                .args([
+                    "-map",
+                    &format!("0:s:{index}"),
+                    "-map",
+                    "0:t?",
+                    "-c",
+                    "copy",
+                    "-avoid_negative_ts",
+                    "disabled",
+                    "-f",
+                    "matroska",
+                    "-fs",
+                    &(MAX_BURN_BYTES + 1).to_string(),
+                ])
+                .arg("pipe:1")
+                .stdin(std::process::Stdio::null());
+            let (status, diagnostics) =
+                crate::ffmpeg::BoundedDiagnosticChild::spawn_piped_output(&mut command)
+                    .map_err(|error| format!("starting burn-track extraction: {error}"))?
+                    .output_to_bounded_file(&tmp, MAX_BURN_BYTES)
+                    .await
+                    .map_err(|error| format!("waiting for burn-track extraction: {error}"))?;
+            if !status.success() {
+                return Err(format!(
+                    "burn-track extraction failed: {}",
+                    diagnostics.trim()
+                ));
+            }
+            if !source.unchanged() {
+                return Err("source changed during burn-track extraction".into());
+            }
+            Ok(())
+        },
+    )
+    .await?;
+    if !source.unchanged() {
+        return Err("source changed before burn sidecar attachment".into());
+    }
+    tokio::task::spawn_blocking(move || {
+        let file = plurx_core::fs_secure::open_read_nofollow_blocking(&path)
+            .map_err(|error| format!("opening burn sidecar: {error}"))?;
+        let metadata = file
+            .metadata()
+            .map_err(|error| format!("reading burn sidecar metadata: {error}"))?;
+        if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_BURN_BYTES {
+            return Err("burn sidecar is not a bounded regular file".into());
+        }
+        Ok(file)
+    })
+    .await
+    .map_err(|error| format!("burn sidecar open worker failed: {error}"))?
+}
+
 /// Start materialising a sidecar without holding the caller open.
 ///
 /// Native HLS uses this before returning an empty cold-cache segment. AVPlayer
