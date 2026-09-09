@@ -1,7 +1,0 @@
-version = 1
-
-[[coverage]]
-commits = ["ce37585e"]
-points = ["validation.framework"]
-checks = ["history-regressions"]
-reason = "The corrective-history audit classifies the metadata commit that attached the fullscreen Live TV stop regression to its runnable web checks. This mapping keeps that validation-only commit explicitly governed without claiming another runtime behavior change."
