@@ -91,6 +91,12 @@ pub enum Error {
     WAL(String),
     #[error("WebSocket: {0}")]
     WebSocket(String),
+    /// The stream manager retained ownership of the request and proved that
+    /// it never reached the socket. Retrying this exact request is therefore
+    /// safe; unlike a generic connection failure, its application outcome is
+    /// known rather than ambiguous.
+    #[error("RequestNotDispatched: {0}")]
+    RequestNotDispatched(Cow<'static, str>),
 }
 
 impl Error {
@@ -167,6 +173,7 @@ impl IntoResponse for Error {
             Error::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             Error::WAL(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Error::WebSocket(_) => StatusCode::BAD_REQUEST,
+            Error::RequestNotDispatched(_) => StatusCode::SERVICE_UNAVAILABLE,
         };
 
         (status, Json(self)).into_response()

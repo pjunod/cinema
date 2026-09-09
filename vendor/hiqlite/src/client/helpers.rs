@@ -97,6 +97,9 @@ impl Client {
         Fut: Future<Output = Result<T, Error>>,
     {
         retry_request_after_leader_change(request, |error| async move {
+            if matches!(&error, Error::RequestNotDispatched(_)) {
+                return (error, true);
+            }
             let recovered = self
                 .was_leader_update_error(&error, &self.inner.leader_db)
                 .await;
@@ -556,6 +559,37 @@ mod tests {
         assert_eq!(value, 42);
         assert_eq!(attempts.load(Ordering::Relaxed), 3);
         assert_eq!(recoveries.load(Ordering::Relaxed), 2);
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn retained_undispatched_request_retries_without_leader_discovery() {
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recoveries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut results = VecDeque::from([
+            Err(Error::RequestNotDispatched(
+                "writer stopped before dispatch".into(),
+            )),
+            Ok(42_u8),
+        ]);
+
+        let value = retry_request_after_leader_change(
+            || {
+                attempts.fetch_add(1, Ordering::Relaxed);
+                future::ready(results.pop_front().expect("bounded request attempt"))
+            },
+            |error| {
+                recoveries.fetch_add(1, Ordering::Relaxed);
+                let retryable = matches!(&error, Error::RequestNotDispatched(_));
+                future::ready((error, retryable))
+            },
+        )
+        .await
+        .expect("the retained request is safe to retry on the replacement stream");
+
+        assert_eq!(value, 42);
+        assert_eq!(attempts.load(Ordering::Relaxed), 2);
+        assert_eq!(recoveries.load(Ordering::Relaxed), 1);
     }
 
     #[cfg(feature = "sqlite")]
