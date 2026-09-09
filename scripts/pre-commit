@@ -1,20 +1,13 @@
 #!/bin/sh
-# plurx pre-commit hook — validates the behavior affected by the staged diff.
+# plurx pre-commit hook — lint and syntax checks only.
 # Install with `make hooks`. Bypass a single commit with `git commit --no-verify`.
 #
-# The normal path runs the full commit profile. An effort-task commit can opt
-# into policy plus compile-only Rust evidence; its pull request supplies the
-# affected Apple, Android, and web checks, and final qualification supplies the
-# complete release suite.
+# Focused tests and the functionality-point validator remain explicit developer
+# and CI steps; keeping them out of this hook makes ordinary commits cheap.
 set -e
 
 ROOT=$(git rev-parse --show-toplevel)
 cd "$ROOT"
 
-if [ "${PLURX_EFFORT_COMMIT:-}" = "1" ]; then
-    echo "pre-commit: effort task — policy plus compile-only Rust gate…"
-    make history-check validation-lint operations-check effort-rust-check
-else
-    echo "pre-commit: validating functionality points selected by the staged diff…"
-    scripts/validate run --profile commit --staged
-fi
+echo "pre-commit: running lint and syntax checks…"
+make precommit-check

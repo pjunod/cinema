@@ -383,8 +383,8 @@ Three layers, and the middle one is the only one allowed to think.
   (that is the platform's engine) but not *whether* a press seeks.
 
 The rule that keeps the moles from coming back: **no key code outside the
-adapter.** `scripts/player-input-fence` runs from the pre-commit hook and
-from `make validate-staged` on any diff that touches a client or the web —
+adapter.** `scripts/player-input-fence` runs from `make validate-staged` on
+any diff that touches a client or the web —
 it hangs off `apple.client`, `android.client`, `playback.pipeline` and
 `web.experience` — and it fails on `KEYCODE_`, `onMoveCommand`,
 `onExitCommand`, `onPlayPauseCommand`, `onKeyEvent`/`onPreviewKeyEvent`, a

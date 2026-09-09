@@ -63,7 +63,7 @@ git switch -c effort/<project>          # one temporary branch for the project
 git push -u origin effort/<project>     # make it available as a PR base
 
 gh pr create --base effort/<project>    # task branches target the effort
-PLURX_EFFORT_COMMIT=1 git commit        # compile-only pre-commit mode
+git commit                              # lint/syntax hook; no tests or effort compile
 ```
 
 The [`effort-ci.yml`](../.github/workflows/effort-ci.yml) gate runs only:
@@ -93,11 +93,11 @@ keeps the regression mapping honest, and final qualification executes the
 retained suite. This is a working convention rather than a GitHub-enforced
 rule while the private repository has no branch-protection feature.
 
-Run `make hooks` once after adopting this pipeline so the installed hook has
-the effort mode. The environment flag is intentionally explicit: ordinary
-changes still use the full commit profile, while effort tasks replace that
-local suite with policy, formatting, operations contracts, and compile-only
-Rust evidence. Do not set it for a change that will target `main` directly.
+Run `make hooks` once after adopting this pipeline. The same hook runs on every
+branch and stops after catalog lint, Rust formatting and Clippy, and embedded
+JavaScript syntax. It does not replace the focused regression or compile checks
+required before an effort push, and ordinary changes still need their affected
+validation before a pull request.
 
 ## 4. Compile before CI: send source to the compiler, never credentials
 
