@@ -38,6 +38,10 @@ deliberate integration proof, not release evidence. The final `effort/**` to
 `main` PR runs the full CI fan-out and writes an exact-tree qualification
 record. A conflict-resolution branch named `integration/*-into-main` uses the
 same qualification lane so resolving the merge does not discard that evidence.
+Forgejo keeps final `effort/**` and `integration/*-into-main` qualification
+runs alive when a newer event arrives, while ordinary pull requests and main
+pushes continue to supersede obsolete work. This is an explicit workflow-level
+policy; a child job cannot rescue a cancelled parent workflow.
 
 ## CI control plane — Forgejo is authoritative
 
@@ -435,13 +439,16 @@ final qualification, merge `main` **into** the shared effort branch. Never
 rebase that branch: rewriting every integrated task commit creates avoidable
 review and recovery work.
 
-`Main promotion gate` tests GitHub's merge tree at the base current when the
-run starts and records that exact tree. If `main` moves before merge, the
-operator merges it into the effort and qualifies again. This is presently the
-"pretty please" rule: Paul controls every merge and does not merge a pending,
-red, or stale candidate. If strict branch protection becomes available, the
-same aggregate becomes the one required status check without changing the
-workflow contract.
+`Main promotion gate` tests the Forgejo candidate tree at the base current when
+the run starts and records that exact tree. Immediately before it writes a
+qualification receipt, it fetches the live head and base refs and compares
+both with the event-time SHAs. If either moved, the finished run remains useful
+diagnostic evidence but cannot issue a current-candidate success receipt. The
+operator merges current `main` into the effort and qualifies again. This is
+presently the "pretty please" rule: Paul controls every merge and does not
+merge a pending, red, or stale candidate. If strict branch protection becomes
+available, the same aggregate becomes the one required status check without
+changing the workflow contract.
 
 ## Load-sensitive cluster checks — a timeout is not a verdict
 

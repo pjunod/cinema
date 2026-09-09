@@ -72,6 +72,8 @@ git push -u origin effort/<project>         # task PRs use this as their base
 gh pr create --base effort/<project>        # compile-only Effort development gate
 PLURX_EFFORT_COMMIT=1 git commit             # compile-only local hook for an effort task
 gh pr create --base main                    # from effort/**: complete qualification
+# Promotion runs are retained; a moved effort head or main base cannot issue a receipt.
+# Freeze both refs, then inspect the exact receipt before merging.
 ```
 
 ## 3. When something's off (quick triage)

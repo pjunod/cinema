@@ -2620,6 +2620,63 @@ assert.equal(context.ACT_TIMER, null);
         for point in ("cluster.auth", "cluster.membership", "cluster.operations"):
             self.assertIn("cluster-transport-recovery", points[point]["checks"])
 
+    def test_workflow_cancellation_preserves_only_frozen_qualification(self):
+        workflow = read(".github/workflows/ci.yml")
+        effort_workflow = read(".github/workflows/effort-ci.yml")
+
+        for contract in (
+            "github.event.pull_request.base.ref == 'main'",
+            "startsWith(github.event.pull_request.head.ref, 'effort/')",
+            "startsWith(github.event.pull_request.head.ref, 'integration/')",
+            "endsWith(github.event.pull_request.head.ref, '-into-main')",
+            "github.event.pull_request.head.ref != 'integration/-into-main'",
+            "github.event_name == 'push' && github.ref == 'refs/heads/main'",
+        ):
+            self.assertIn(contract, workflow)
+        self.assertIn(
+            "group: ci-${{ github.event.pull_request.number || github.ref }}",
+            workflow,
+        )
+        self.assertIn("cancel-in-progress: true", effort_workflow)
+
+        def cancels(
+            event: str, *, ref: str = "", head: str = "", base: str = ""
+        ) -> bool:
+            promotion = base == "main" and (
+                head.startswith("effort/")
+                or (
+                    head.startswith("integration/")
+                    and head.endswith("-into-main")
+                    and head != "integration/-into-main"
+                )
+            )
+            return (event == "pull_request" and not promotion) or (
+                event == "push" and ref == "refs/heads/main"
+            )
+
+        event_table = (
+            ("effort task PR", "pull_request", "codex/task", "effort/project", "", True),
+            ("ordinary main PR", "pull_request", "codex/task", "main", "", True),
+            ("effort promotion", "pull_request", "effort/project", "main", "", False),
+            ("integration promotion", "pull_request", "integration/project-into-main", "main", "", False),
+            ("main push", "push", "", "", "refs/heads/main", True),
+            ("release tag", "push", "", "", "refs/tags/v1.2.3", False),
+        )
+        for name, event, head, base, ref, expected in event_table:
+            with self.subTest(name=name):
+                self.assertEqual(
+                    cancels(event, ref=ref, head=head, base=base), expected
+                )
+
+        pr_gate = workflow_job_blocks(".github/workflows/ci.yml")["pr_gate"]
+        resolve_refs = workflow_step_blocks(pr_gate)[
+            "Resolve the current qualification refs"
+        ]
+        self.assertIn("refs/plurx/current-head", resolve_refs)
+        self.assertIn("refs/plurx/current-base", resolve_refs)
+        self.assertIn("PLURX_CURRENT_HEAD_SHA", resolve_refs)
+        self.assertIn("PLURX_CURRENT_BASE_SHA", resolve_refs)
+
         # Hosted smoke keeps scoped GHA state; an eligible self-hosted smoke
         # uses the one named host builder and enforces its postcondition.
         package = workflow_job_blocks(".github/workflows/ci.yml")["package_smoke"]
