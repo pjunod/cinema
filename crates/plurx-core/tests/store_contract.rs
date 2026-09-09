@@ -10336,11 +10336,7 @@ async fn api_key_activity_refresh_is_bounded_and_disabled_keys_do_not_touch() {
 }
 
 #[cfg(feature = "hiqlite-contract-tests")]
-async fn remove_hiqlite_schema_after_v27(client: &Client) {
-    // These fixtures begin from the current install schema, then wind it back
-    // to the literal version each test names. Keep the shared tail removal in
-    // one reverse-chronological list: otherwise every schema addition makes a
-    // dozen older fixtures current-shaped under an old marker.
+async fn remove_hiqlite_schema_after_v31(client: &Client) {
     let results = client
         .txn([
             (
@@ -10379,6 +10375,24 @@ async fn remove_hiqlite_schema_after_v27(client: &Client) {
                 "DROP TABLE IF EXISTS media_session_producer_recovery",
                 hiqlite::params!(),
             ),
+        ])
+        .await
+        .expect("remove schema tail newer than v31");
+    results
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("commit schema-tail removal");
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn remove_hiqlite_schema_after_v27(client: &Client) {
+    // These fixtures begin from the current install schema, then wind it back
+    // to the literal version each test names. Keep the shared tail removal in
+    // reverse chronological order: otherwise every schema addition makes a
+    // dozen older fixtures current-shaped under an old marker.
+    remove_hiqlite_schema_after_v31(client).await;
+    let results = client
+        .txn([
             (
                 "DROP TRIGGER IF EXISTS media_sessions_drain_ownership_fence_au",
                 hiqlite::params!(),
@@ -10409,7 +10423,7 @@ async fn remove_hiqlite_schema_after_v27(client: &Client) {
             ),
         ])
         .await
-        .expect("remove schema tail newer than v27");
+        .expect("remove v28 through v31 schema tail");
     results
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
@@ -10913,7 +10927,7 @@ async fn replicated_v27_store_migrates_the_request_identity_on_daemon_open() {
     );
 }
 
-/// A v27 cluster gains the producer-recovery ledger on the next daemon open.
+/// A v31 cluster gains the producer-recovery ledger on the next daemon open.
 ///
 /// Every schema bump before this one has such a test, and the reason is that
 /// nothing else executes the migration arm at all: the contract harness
@@ -10930,7 +10944,7 @@ async fn replicated_v27_store_migrates_the_request_identity_on_daemon_open() {
 /// never open.
 #[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn replicated_v28_store_migrates_the_producer_recovery_ledger_on_daemon_open() {
+async fn replicated_v32_store_migrates_the_producer_recovery_ledger_on_daemon_open() {
     let _case = HIQLITE_CASE.lock().await;
     let cluster = ContractCluster::start().await;
     let client = Client::remote(
@@ -10942,22 +10956,22 @@ async fn replicated_v28_store_migrates_the_producer_recovery_ledger_on_daemon_op
         None,
     )
     .await
-    .expect("connect v28 producer-recovery migration client");
+    .expect("connect v32 producer-recovery migration client");
     let telemetry = cluster
         ._root
         .path()
-        .join("schema-v28-producer-recovery-migration-telemetry.db");
+        .join("schema-v32-producer-recovery-migration-telemetry.db");
     let current = HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
         .await
         .expect("bootstrap current producer-recovery schema");
     current
-        .put_setting("migration.v28.proof", "survives")
+        .put_setting("migration.v32.proof", "survives")
         .await
         .expect("seed unrelated replicated row");
     drop(current);
-    remove_hiqlite_schema_after_v27(&client).await;
+    remove_hiqlite_schema_after_v31(&client).await;
 
-    // Rewind to v27: no ledger, marker pinned to the literal it is named for.
+    // Rewind to v31: no ledger, marker pinned to the literal it is named for.
     client
         .txn([
             (
@@ -10966,23 +10980,23 @@ async fn replicated_v28_store_migrates_the_producer_recovery_ledger_on_daemon_op
             ),
             (
                 "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
-                hiqlite::params!(V27_SCHEMA_VERSION),
+                hiqlite::params!(V31_SCHEMA_VERSION),
             ),
         ])
         .await
-        .expect("construct v27 fixture")
+        .expect("construct v31 fixture")
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
-        .expect("commit v27 fixture");
+        .expect("commit v31 fixture");
 
     let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
-        .expect("daemon v27 through v28 producer-recovery migration");
+        .expect("daemon v31 through v32 producer-recovery migration");
     assert_eq!(
         migrated
-            .get_setting("migration.v28.proof")
+            .get_setting("migration.v32.proof")
             .await
-            .expect("read v27 migration proof")
+            .expect("read v31 migration proof")
             .as_deref(),
         Some("survives"),
         "a migration that loses unrelated rows is not a migration"
@@ -11028,7 +11042,7 @@ async fn replicated_v28_store_migrates_the_producer_recovery_ledger_on_daemon_op
     // run at all.
     HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
-        .expect("re-opening an already migrated v28 store");
+        .expect("re-opening an already migrated v32 store");
 
     // The table present with the marker behind is the case `ADD COLUMN` has to
     // refuse and this one must not: `CREATE TABLE IF NOT EXISTS` is idempotent,
@@ -11037,7 +11051,7 @@ async fn replicated_v28_store_migrates_the_producer_recovery_ledger_on_daemon_op
     client
         .execute(
             "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
-            hiqlite::params!(V27_SCHEMA_VERSION),
+            hiqlite::params!(V31_SCHEMA_VERSION),
         )
         .await
         .expect("rewind the marker under an already-migrated shape");
@@ -11220,6 +11234,8 @@ const V25_SCHEMA_VERSION: i64 = 25;
 const V26_SCHEMA_VERSION: i64 = 26;
 #[cfg(feature = "hiqlite-contract-tests")]
 const V27_SCHEMA_VERSION: i64 = 27;
+#[cfg(feature = "hiqlite-contract-tests")]
+const V31_SCHEMA_VERSION: i64 = 31;
 
 #[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
