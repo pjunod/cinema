@@ -1007,6 +1007,53 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     // allowance. Empty means a session that predates the column, which had no
     // epoch and therefore no budget.
     super::MEDIA_SESSION_RECOVERY_EPOCH_SCHEMA,
+    // v52: an offline producer claim is a real incarnation fence, and its
+    // one automatic decoder recovery is consumed before fallible alternate
+    // planning. The trigger keeps already-running older workers from
+    // replenishing or replacing a consumed alternate during a rolling
+    // upgrade; new workers additionally fence every write by generation.
+    "ALTER TABLE offline_packages ADD COLUMN claim_generation INTEGER NOT NULL DEFAULT 0
+        CHECK (claim_generation >= 0);
+     ALTER TABLE offline_packages ADD COLUMN decoder_recovery_state TEXT NOT NULL DEFAULT 'primary'
+        CHECK (decoder_recovery_state IN
+            ('primary', 'recovery_pending', 'rehome_pending', 'alternate'));
+     ALTER TABLE offline_packages ADD COLUMN alternate_recipe_hash TEXT;
+     CREATE TRIGGER offline_recovery_guard
+        BEFORE UPDATE OF recipe_hash, decoder_recovery_state, alternate_recipe_hash
+        ON offline_packages
+        WHEN (OLD.decoder_recovery_state = 'primary'
+                AND NEW.decoder_recovery_state NOT IN ('primary', 'recovery_pending'))
+          OR (OLD.decoder_recovery_state = 'recovery_pending'
+                AND NEW.decoder_recovery_state NOT IN
+                    ('recovery_pending', 'rehome_pending', 'alternate'))
+          OR (OLD.decoder_recovery_state = 'alternate'
+                AND NEW.decoder_recovery_state NOT IN ('alternate', 'rehome_pending'))
+          OR (OLD.decoder_recovery_state = 'rehome_pending'
+                AND NEW.decoder_recovery_state NOT IN ('rehome_pending', 'alternate'))
+          OR (OLD.decoder_recovery_state IN ('recovery_pending', 'alternate')
+                AND NEW.decoder_recovery_state = 'rehome_pending'
+                AND (NEW.node_id = OLD.node_id OR NEW.state != 'queued'
+                     OR NEW.recipe_hash IS NOT NULL
+                     OR NEW.alternate_recipe_hash IS NOT NULL))
+          OR (OLD.alternate_recipe_hash IS NOT NULL
+                AND NEW.alternate_recipe_hash IS NOT OLD.alternate_recipe_hash
+                AND NOT (OLD.decoder_recovery_state = 'alternate'
+                         AND NEW.decoder_recovery_state = 'rehome_pending'
+                         AND NEW.node_id != OLD.node_id
+                         AND NEW.state = 'queued'
+                         AND NEW.recipe_hash IS NULL
+                         AND NEW.alternate_recipe_hash IS NULL))
+          OR (NEW.decoder_recovery_state = 'primary'
+                AND NEW.alternate_recipe_hash IS NOT NULL)
+          OR (NEW.decoder_recovery_state IN ('recovery_pending', 'rehome_pending')
+                AND (NEW.recipe_hash IS NOT NULL OR NEW.alternate_recipe_hash IS NOT NULL))
+          OR (NEW.decoder_recovery_state = 'alternate'
+                AND (NEW.alternate_recipe_hash IS NULL
+                     OR (NEW.recipe_hash IS NOT NULL
+                         AND NEW.recipe_hash != NEW.alternate_recipe_hash)))
+        BEGIN
+            SELECT RAISE(ABORT, 'invalid offline decoder recovery transition');
+        END;",
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.

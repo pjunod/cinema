@@ -6981,9 +6981,32 @@ mod tests {
             .complete_cache_entry("test-recipe", &state.node_id, 24, None)
             .await
             .expect("complete cache");
+        let claimed = state
+            .store
+            .claim_next_offline_package(&state.node_id)
+            .await
+            .expect("claim package")
+            .expect("queued package");
         assert!(state
             .store
-            .mark_offline_package_ready(&package_id, &state.node_id, "test-recipe", 15, 90_000)
+            .set_offline_package_recipe(
+                &package_id,
+                &state.node_id,
+                claimed.claim_generation,
+                "test-recipe",
+            )
+            .await
+            .expect("bind recipe"));
+        assert!(state
+            .store
+            .mark_offline_package_ready(
+                &package_id,
+                &state.node_id,
+                claimed.claim_generation,
+                "test-recipe",
+                15,
+                90_000,
+            )
             .await
             .expect("mark ready"));
         let (status_code, lease) = call(

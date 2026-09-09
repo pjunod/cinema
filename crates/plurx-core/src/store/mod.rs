@@ -172,6 +172,59 @@ pub(crate) const MEDIA_SESSION_PREPARATIONS_SCHEMA: &str =
 pub(crate) const MEDIA_SESSION_RECOVERY_EPOCH_SCHEMA: &str = "ALTER TABLE media_sessions
         ADD COLUMN recovery_epoch TEXT NOT NULL DEFAULT '';";
 
+/// Claim fencing and crash-durable one-shot recovery for offline packages.
+///
+/// `claim_generation` is incremented by the queue claim itself. Recovery is a
+/// monotone budget: the terminal primary fault first commits
+/// `recovery_pending`, then the current owner freezes its alternate. Re-homing
+/// either consumed state moves to `rehome_pending` and clears both node-local
+/// recipe references, but can never return the budget to `primary`.
+pub(crate) const OFFLINE_CLAIM_GENERATION_SCHEMA: &str = "ALTER TABLE offline_packages
+        ADD COLUMN claim_generation INTEGER NOT NULL DEFAULT 0
+        CHECK (claim_generation >= 0)";
+pub(crate) const OFFLINE_RECOVERY_STATE_SCHEMA: &str = "ALTER TABLE offline_packages
+        ADD COLUMN decoder_recovery_state TEXT NOT NULL DEFAULT 'primary'
+        CHECK (decoder_recovery_state IN
+            ('primary', 'recovery_pending', 'rehome_pending', 'alternate'))";
+pub(crate) const OFFLINE_ALTERNATE_RECIPE_SCHEMA: &str = "ALTER TABLE offline_packages
+        ADD COLUMN alternate_recipe_hash TEXT";
+pub(crate) const OFFLINE_RECOVERY_GUARD_SCHEMA: &str = "CREATE TRIGGER offline_recovery_guard
+    BEFORE UPDATE OF recipe_hash, decoder_recovery_state, alternate_recipe_hash
+    ON offline_packages
+    WHEN (OLD.decoder_recovery_state = 'primary'
+            AND NEW.decoder_recovery_state NOT IN ('primary', 'recovery_pending'))
+      OR (OLD.decoder_recovery_state = 'recovery_pending'
+            AND NEW.decoder_recovery_state NOT IN
+                ('recovery_pending', 'rehome_pending', 'alternate'))
+      OR (OLD.decoder_recovery_state = 'alternate'
+            AND NEW.decoder_recovery_state NOT IN ('alternate', 'rehome_pending'))
+      OR (OLD.decoder_recovery_state = 'rehome_pending'
+            AND NEW.decoder_recovery_state NOT IN ('rehome_pending', 'alternate'))
+      OR (OLD.decoder_recovery_state IN ('recovery_pending', 'alternate')
+            AND NEW.decoder_recovery_state = 'rehome_pending'
+            AND (NEW.node_id = OLD.node_id OR NEW.state != 'queued'
+                 OR NEW.recipe_hash IS NOT NULL
+                 OR NEW.alternate_recipe_hash IS NOT NULL))
+      OR (OLD.alternate_recipe_hash IS NOT NULL
+            AND NEW.alternate_recipe_hash IS NOT OLD.alternate_recipe_hash
+            AND NOT (OLD.decoder_recovery_state = 'alternate'
+                     AND NEW.decoder_recovery_state = 'rehome_pending'
+                     AND NEW.node_id != OLD.node_id
+                     AND NEW.state = 'queued'
+                     AND NEW.recipe_hash IS NULL
+                     AND NEW.alternate_recipe_hash IS NULL))
+      OR (NEW.decoder_recovery_state = 'primary'
+            AND NEW.alternate_recipe_hash IS NOT NULL)
+      OR (NEW.decoder_recovery_state IN ('recovery_pending', 'rehome_pending')
+            AND (NEW.recipe_hash IS NOT NULL OR NEW.alternate_recipe_hash IS NOT NULL))
+      OR (NEW.decoder_recovery_state = 'alternate'
+            AND (NEW.alternate_recipe_hash IS NULL
+                 OR (NEW.recipe_hash IS NOT NULL
+                     AND NEW.recipe_hash != NEW.alternate_recipe_hash)))
+    BEGIN
+        SELECT RAISE(ABORT, 'invalid offline decoder recovery transition');
+    END";
+
 /// The decoder-recovery budget and decision ledger, shared verbatim by both
 /// backends.
 ///
@@ -2832,14 +2885,14 @@ pub trait OfflinePackageStore: Send + Sync + 'static {
         node_id: &str,
     ) -> Result<Option<OfflinePackage>, StoreError>;
 
-    /// `node_id` fences the yield back to the queue to the current owner, for
-    /// the same reason [`Self::fail_offline_package`] is fenced: a re-homed
-    /// package the survivor has already claimed must not be knocked back to
-    /// `queued` by the departing node's producer finishing its last part.
+    /// Node and claim generation fence the yield to the exact current worker.
+    /// A re-homed package, or one reclaimed by the same node, must not be
+    /// knocked back to `queued` by an earlier producer finishing its last part.
     async fn requeue_offline_package(
         &self,
         package_id: &str,
         node_id: &str,
+        claim_generation: i64,
     ) -> Result<bool, StoreError>;
 
     /// Bind the content-addressed recipe as soon as production starts. The
@@ -2848,43 +2901,73 @@ pub trait OfflinePackageStore: Send + Sync + 'static {
     async fn set_offline_package_recipe(
         &self,
         package_id: &str,
+        node_id: &str,
+        claim_generation: i64,
         recipe_hash: &str,
     ) -> Result<bool, StoreError>;
 
-    /// Consume the package's one automatic decoder recovery and make the
-    /// alternate recipe its durable result reference in the same write.
-    ///
-    /// The exact old hash is the one-shot budget: after this compare-and-set
-    /// succeeds, a worker restart observes `alternate_recipe_hash` and resumes
-    /// that recipe instead of buying another recovery. `node_id` also fences a
-    /// late producer after package ownership moves to another node.
-    async fn advance_offline_package_recipe(
+    /// Spend recovery before any fallible alternate planning. A committed
+    /// pending state can be resumed, but can never return to the primary.
+    async fn begin_offline_decode_recovery(
         &self,
         package_id: &str,
         node_id: &str,
+        claim_generation: i64,
         failed_recipe_hash: &str,
+    ) -> Result<bool, StoreError>;
+
+    /// Freeze the sole alternate after a pending recovery has been planned.
+    async fn install_offline_decode_alternate(
+        &self,
+        package_id: &str,
+        node_id: &str,
+        claim_generation: i64,
         alternate_recipe_hash: &str,
     ) -> Result<bool, StoreError>;
 
-    /// `node_id` fences progress to the current owner so a doomed producer on
-    /// a departing node cannot flap the phase and percentage a survivor is
+    /// Consistent claim check for a cache hit. Fresh cache publication uses
+    /// [`Self::complete_offline_cache_entry`] so the same predicate and cache
+    /// completion are one database mutation.
+    async fn offline_package_claim_is_current(
+        &self,
+        package_id: &str,
+        node_id: &str,
+        claim_generation: i64,
+        recipe_hash: &str,
+    ) -> Result<bool, StoreError>;
+
+    /// Publish a new local cache generation only while the exact offline
+    /// package claim and bound recipe still own it.
+    async fn complete_offline_cache_entry(
+        &self,
+        package_id: &str,
+        node_id: &str,
+        claim_generation: i64,
+        recipe_hash: &str,
+        bytes: i64,
+        manifest_digest: Option<&str>,
+    ) -> Result<bool, StoreError>;
+
+    /// Node and claim generation fence progress to the current worker so a
+    /// doomed producer cannot flap the phase and percentage a later claim is
     /// reporting for the same package.
     async fn update_offline_progress(
         &self,
         package_id: &str,
         node_id: &str,
+        claim_generation: i64,
         phase: &str,
         progress_millis: i64,
     ) -> Result<bool, StoreError>;
 
-    /// `node_id` fences the write to the current owner. Re-homing a package
-    /// during node removal changes its owner while the old node's producer may
-    /// still be running; without this guard that doomed producer's late
-    /// failure would terminate work a survivor has already taken over.
+    /// Node and claim generation fence the write to the current worker.
+    /// Without both, a departed owner or an earlier same-node claim could
+    /// terminate work a later producer has already taken over.
     async fn fail_offline_package(
         &self,
         package_id: &str,
         node_id: &str,
+        claim_generation: i64,
         phase: &str,
         code: &str,
         message: &str,
@@ -2919,14 +3002,14 @@ pub trait OfflinePackageStore: Send + Sync + 'static {
         renewed_expires_at: i64,
     ) -> Result<Option<OfflinePackage>, StoreError>;
 
-    /// `node_id` fences publication to the current owner for the same reason
-    /// [`OfflinePackageStore::fail_offline_package`] does. A package re-homed
-    /// mid-production must not be advertised ready by bytes that live on the
-    /// node that just left.
+    /// Node, claim generation, and recipe fence publication for the same
+    /// reason [`OfflinePackageStore::fail_offline_package`] is fenced. A stale
+    /// producer must not advertise bytes from a departed or superseded claim.
     async fn mark_offline_package_ready(
         &self,
         package_id: &str,
         node_id: &str,
+        claim_generation: i64,
         recipe_hash: &str,
         actual_bytes: i64,
         duration_ms: i64,

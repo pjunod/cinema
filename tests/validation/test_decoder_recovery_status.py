@@ -369,9 +369,9 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
                 self.assertEqual(source.count(surface.get("m2_anchor", "")), 1)
 
         self.assertIn(
-            "M0–M5 complete · M6 server/client implementation landed, fleet "
-            "acceptance open · M7 remainder implemented and focused-validated · "
-            "adversarial review, M8, and promotion remain",
+            "M0–M5 complete · M6 server/client implementation landed · M7 "
+            "remainder under adversarial repair · promotion follows M7 smoke "
+            "evidence · broader fleet qualification continues after merge",
             self.flat_status,
         )
         self.assertIn("decoder-plan-v1-unqualified", self.status)
@@ -380,15 +380,15 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             "introduced by M2.",
             self.flat_status,
         )
-        # Task PRs use the effort lane; the expensive complete suite runs once
-        # after all reviewed tasks are merged into the frozen effort candidate.
+        # Task PRs use the effort lane. Promotion remains subject to the
+        # repository's exact-tree gate; broader qualification continues after
+        # merge rather than delaying M7 task integration.
         self.assertIn(
-            "Per Paul's 2026-09-08 clarification, task PRs into the effort do not "
-            "run the full unit suite",
+            "Task PRs into the effort do not run the full unit suite",
             self.flat_status,
         )
         self.assertIn(
-            "Run it once on the frozen, fully reviewed effort branch after all fixes",
+            "functionality smoke evidence and a green fast lane before promotion",
             self.flat_status,
         )
 
@@ -1148,7 +1148,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         # What the repair does not claim.
         self.assertIn("That is a practice, not a gate", self.status)
         self.assertIn(
-            "Run the full `cargo test --workspace` coverage in the effort's promotion",
+            "Run the full `cargo test --workspace` coverage after promotion",
             self.status,
         )
         self.assertIn(

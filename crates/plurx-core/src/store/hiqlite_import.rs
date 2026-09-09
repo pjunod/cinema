@@ -1082,6 +1082,9 @@ const TABLES: &[TablePlan] = &[
             "source_size",
             "source_mtime",
             "recipe_hash",
+            "claim_generation",
+            "decoder_recovery_state",
+            "alternate_recipe_hash",
             "effective_rate_control",
             "target_height",
             "output_width",
@@ -2267,6 +2270,18 @@ fn value_projection(table: TablePlan, schema_version: i64, qualify: bool) -> Str
                 && schema_version < 18
             {
                 "'vbr'".to_owned()
+            } else if table.name == "offline_packages"
+                && matches!(
+                    *column,
+                    "claim_generation" | "decoder_recovery_state" | "alternate_recipe_hash"
+                )
+                && schema_version < 52
+            {
+                match *column {
+                    "claim_generation" => "0".to_owned(),
+                    "decoder_recovery_state" => "'primary'".to_owned(),
+                    _ => "NULL".to_owned(),
+                }
             } else if table.name == "transcode_cache_locations"
                 && *column == "manifest_digest"
                 && schema_version < 24
@@ -2519,8 +2534,27 @@ mod tests {
             .expect("offline package plan");
         let v17 = value_projection(table, 17, false);
         let current = value_projection(table, SQLITE_SCHEMA_VERSION, false);
-        assert!(v17.contains("recipe_hash, 'vbr', target_height"));
-        assert!(current.contains("recipe_hash, effective_rate_control, target_height"));
+        assert!(v17.contains("recipe_hash, 0, 'primary', NULL, 'vbr', target_height"));
+        assert!(current.contains(
+            "recipe_hash, claim_generation, decoder_recovery_state, alternate_recipe_hash, effective_rate_control, target_height"
+        ));
+    }
+
+    #[test]
+    fn pre_v52_offline_projection_supplies_unspent_recovery_claim() {
+        let table = TABLES
+            .iter()
+            .find(|table| table.name == "offline_packages")
+            .copied()
+            .expect("offline package plan");
+        let v51 = value_projection(table, 51, false);
+        let current = value_projection(table, SQLITE_SCHEMA_VERSION, false);
+        assert!(
+            v51.contains("recipe_hash, 0, 'primary', NULL, effective_rate_control, target_height")
+        );
+        assert!(current.contains(
+            "recipe_hash, claim_generation, decoder_recovery_state, alternate_recipe_hash, effective_rate_control, target_height"
+        ));
     }
 
     #[test]

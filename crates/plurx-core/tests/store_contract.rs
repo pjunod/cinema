@@ -25608,10 +25608,25 @@ async fn offline_lifecycles_pin_shared_generations_through_dyn_store() {
                 .unwrap_or_else(|error| panic!("{backend}: create shared package: {error}")),
             OfflineCreateOutcome::Created(_)
         ));
+        let package_claim = store
+            .claim_next_offline_package(&package.node_id)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim shared package: {error}"))
+            .expect("shared package claim");
+        assert!(store
+            .set_offline_package_recipe(
+                &package.id,
+                &package.node_id,
+                package_claim.claim_generation,
+                &package_recipe,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: bind shared package: {error}")));
         assert!(store
             .mark_offline_package_ready(
                 &package.id,
                 &package.node_id,
+                package_claim.claim_generation,
                 &package_recipe,
                 1_024,
                 60_000,
@@ -25650,10 +25665,25 @@ async fn offline_lifecycles_pin_shared_generations_through_dyn_store() {
                 .unwrap_or_else(|error| panic!("{backend}: create download package: {error}")),
             OfflineCreateOutcome::Created(_)
         ));
+        let download_claim = store
+            .claim_next_offline_package(&download.node_id)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim download package: {error}"))
+            .expect("download package claim");
+        assert!(store
+            .set_offline_package_recipe(
+                &download.id,
+                &download.node_id,
+                download_claim.claim_generation,
+                &download_recipe,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: bind download package: {error}")));
         assert!(store
             .mark_offline_package_ready(
                 &download.id,
                 &download.node_id,
+                download_claim.claim_generation,
                 &download_recipe,
                 2_048,
                 60_000,
@@ -25900,22 +25930,27 @@ async fn offline_package_contract_runs_through_dyn_store() {
                 .state,
             "queued"
         );
-        store
+        let reclaimed = store
             .claim_next_offline_package("offline-node")
             .await
             .expect("claim after reset")
             .expect("package after reset");
         assert!(store
-            .requeue_offline_package(&first.id, "offline-node")
+            .requeue_offline_package(&first.id, "offline-node", reclaimed.claim_generation,)
             .await
             .expect("requeue"));
-        store
+        let primary_claim = store
             .claim_next_offline_package("offline-node")
             .await
             .expect("claim")
             .expect("package");
         assert!(store
-            .set_offline_package_recipe(&first.id, "offline-recipe")
+            .set_offline_package_recipe(
+                &first.id,
+                "offline-node",
+                primary_claim.claim_generation,
+                "offline-recipe",
+            )
             .await
             .expect("set recipe"));
         assert_eq!(
@@ -25928,13 +25963,121 @@ async fn offline_package_contract_runs_through_dyn_store() {
                 .as_deref(),
             Some("offline-recipe")
         );
+        assert!(store
+            .offline_package_claim_is_current(
+                &first.id,
+                "offline-node",
+                primary_claim.claim_generation,
+                "offline-recipe",
+            )
+            .await
+            .expect("current offline claim"));
+        assert!(store
+            .claim_cache_entry(
+                "offline-recipe",
+                file_id,
+                1,
+                "offline-node",
+                "of/offline-recipe",
+            )
+            .await
+            .expect("claim incomplete offline cache entry"));
+
+        // The kill switch linearizes by returning the exact claim to the
+        // queue before signalling the producer. Neither a cache-hit return,
+        // fresh cache completion, nor final Ready publication from the old
+        // worker may cross that durable fence.
+        let fenced_generation = primary_claim.claim_generation;
+        assert!(store
+            .requeue_offline_package(&first.id, "offline-node", primary_claim.claim_generation,)
+            .await
+            .expect("durably fence first claim"));
+        assert!(!store
+            .offline_package_claim_is_current(
+                &first.id,
+                "offline-node",
+                primary_claim.claim_generation,
+                "offline-recipe",
+            )
+            .await
+            .expect("reject stale cache hit"));
+        assert!(!store
+            .complete_offline_cache_entry(
+                &first.id,
+                "offline-node",
+                primary_claim.claim_generation,
+                "offline-recipe",
+                4_096,
+                Some("stale-manifest"),
+            )
+            .await
+            .expect("reject stale fresh publication"));
+        assert!(
+            store
+                .cache_hit("offline-recipe", "offline-node")
+                .await
+                .expect("incomplete cache lookup")
+                .is_none(),
+            "a cancelled producer cannot make its incomplete cache entry serveable"
+        );
+        assert!(!store
+            .mark_offline_package_ready(
+                &first.id,
+                "offline-node",
+                primary_claim.claim_generation,
+                "offline-recipe",
+                4_096,
+                7_200_000,
+            )
+            .await
+            .expect("reject stale Ready publication"));
+        let primary_claim = store
+            .claim_next_offline_package("offline-node")
+            .await
+            .expect("reclaim after durable cancellation")
+            .expect("reclaimed package");
+        assert_eq!(primary_claim.recipe_hash.as_deref(), Some("offline-recipe"));
+        assert!(primary_claim.claim_generation > fenced_generation);
+        assert!(!store
+            .complete_offline_cache_entry(
+                &first.id,
+                "offline-node",
+                primary_claim.claim_generation,
+                "wrong-offline-recipe",
+                4_096,
+                Some("wrong-recipe-manifest"),
+            )
+            .await
+            .expect("reject wrong-recipe cache publication"));
+        assert!(store
+            .complete_offline_cache_entry(
+                &first.id,
+                "offline-node",
+                primary_claim.claim_generation,
+                "offline-recipe",
+                4_096,
+                Some("current-manifest"),
+            )
+            .await
+            .expect("publish current offline cache generation"));
+        let current_cache = store
+            .cache_hit("offline-recipe", "offline-node")
+            .await
+            .expect("current offline cache lookup")
+            .expect("current exact claim must make the cache serveable");
+        assert!(current_cache.complete);
+        assert_eq!(current_cache.bytes, 4_096);
+        assert_eq!(
+            current_cache.manifest_digest.as_deref(),
+            Some("current-manifest")
+        );
         assert!(
             !store
-                .advance_offline_package_recipe(
+                .begin_offline_decode_recovery(
                     &first.id,
                     "not-the-owner",
+                    primary_claim.claim_generation,
                     "offline-recipe",
-                    "offline-recipe-alternate",
                 )
                 .await
                 .expect("reject stale offline recovery owner"),
@@ -25942,37 +26085,55 @@ async fn offline_package_contract_runs_through_dyn_store() {
         );
         assert!(
             !store
-                .advance_offline_package_recipe(
+                .begin_offline_decode_recovery(
                     &first.id,
                     "offline-node",
-                    "offline-recipe",
+                    primary_claim.claim_generation - 1,
                     "offline-recipe",
                 )
                 .await
-                .expect("reject identical offline recovery recipe"),
-            "a no-op recipe transition must not count as a recovery"
+                .expect("reject stale offline recovery claim"),
+            "a stale claim must not consume the package's recovery budget"
         );
         assert!(store
-            .advance_offline_package_recipe(
+            .begin_offline_decode_recovery(
                 &first.id,
                 "offline-node",
+                primary_claim.claim_generation,
                 "offline-recipe",
-                "offline-recipe-alternate",
             )
             .await
             .expect("consume offline recovery"));
         assert!(
             !store
-                .advance_offline_package_recipe(
+                .begin_offline_decode_recovery(
                     &first.id,
                     "offline-node",
+                    primary_claim.claim_generation,
                     "offline-recipe",
-                    "offline-recipe-second-alternate",
                 )
                 .await
                 .expect("reject second offline recovery"),
-            "the old recipe cannot buy a second recovery"
+            "pending recovery cannot buy a second recovery"
         );
+        assert!(store
+            .install_offline_decode_alternate(
+                &first.id,
+                "offline-node",
+                primary_claim.claim_generation,
+                "offline-recipe-alternate",
+            )
+            .await
+            .expect("install offline alternate"));
+        assert!(!store
+            .install_offline_decode_alternate(
+                &first.id,
+                "offline-node",
+                primary_claim.claim_generation,
+                "offline-recipe-second-alternate",
+            )
+            .await
+            .expect("reject second offline alternate"));
         assert_eq!(
             store
                 .reset_interrupted_offline_packages("offline-node")
@@ -25990,8 +26151,19 @@ async fn offline_package_contract_runs_through_dyn_store() {
             Some("offline-recipe-alternate"),
             "a worker restart must preserve both the spent budget and alternate result reference"
         );
+        assert_eq!(recovered.decoder_recovery_state, "alternate");
+        assert_eq!(
+            recovered.alternate_recipe_hash.as_deref(),
+            Some("offline-recipe-alternate")
+        );
         assert!(store
-            .update_offline_progress(&first.id, "offline-node", "video", 500)
+            .update_offline_progress(
+                &first.id,
+                "offline-node",
+                recovered.claim_generation,
+                "video",
+                500,
+            )
             .await
             .expect("progress"));
         let progressing = store
@@ -26001,10 +26173,22 @@ async fn offline_package_contract_runs_through_dyn_store() {
             .expect("progress package");
         assert_eq!(progressing.phase, "video");
         assert_eq!(progressing.progress_millis, 500);
+        assert!(!store
+            .mark_offline_package_ready(
+                &first.id,
+                "offline-node",
+                recovered.claim_generation,
+                "offline-recipe",
+                4_000,
+                7_200_000,
+            )
+            .await
+            .expect("reject wrong ready recipe"));
         assert!(store
             .mark_offline_package_ready(
                 &first.id,
                 "offline-node",
+                recovered.claim_generation,
                 "offline-recipe-alternate",
                 4_000,
                 7_200_000
@@ -26064,15 +26248,107 @@ async fn offline_package_contract_runs_through_dyn_store() {
             .expect("failed lease lookup")
             .is_none());
 
+        // Crash exactly after the terminal primary fault commits the budget,
+        // before alternate planning or installation. Recovery must keep that
+        // pending state across reset, reject the stale install CAS, and allow
+        // only the reclaimed generation to freeze the alternate.
+        let pending = offline_request("package-pending", "request-pending", user_id, file_id);
+        store
+            .create_offline_package(&pending, 10, 100_000, 100_000)
+            .await
+            .expect("create pending recovery fixture");
+        let pending_claim = store
+            .claim_next_offline_package("offline-node")
+            .await
+            .expect("claim pending fixture")
+            .expect("pending fixture claim");
+        assert!(store
+            .set_offline_package_recipe(
+                &pending.id,
+                "offline-node",
+                pending_claim.claim_generation,
+                "crash-primary",
+            )
+            .await
+            .expect("bind pending primary"));
+        assert!(store
+            .begin_offline_decode_recovery(
+                &pending.id,
+                "offline-node",
+                pending_claim.claim_generation,
+                "crash-primary",
+            )
+            .await
+            .expect("commit budget before crash"));
+        assert_eq!(
+            store
+                .reset_interrupted_offline_packages("offline-node")
+                .await
+                .expect("reset pending recovery"),
+            1
+        );
+        let pending_reclaimed = store
+            .claim_next_offline_package("offline-node")
+            .await
+            .expect("reclaim pending recovery")
+            .expect("pending recovery package");
+        assert_eq!(pending_reclaimed.decoder_recovery_state, "recovery_pending");
+        assert_eq!(pending_reclaimed.recipe_hash, None);
+        assert_eq!(pending_reclaimed.alternate_recipe_hash, None);
+        assert!(!store
+            .install_offline_decode_alternate(
+                &pending.id,
+                "offline-node",
+                pending_claim.claim_generation,
+                "crash-alternate",
+            )
+            .await
+            .expect("reject pre-crash alternate installation"));
+        assert!(!store
+            .set_offline_package_recipe(
+                &pending.id,
+                "offline-node",
+                pending_reclaimed.claim_generation,
+                "crash-primary",
+            )
+            .await
+            .expect("reject primary replay while pending"));
+        assert!(store
+            .install_offline_decode_alternate(
+                &pending.id,
+                "offline-node",
+                pending_reclaimed.claim_generation,
+                "crash-alternate",
+            )
+            .await
+            .expect("install alternate after restart"));
+        assert!(store
+            .fail_offline_package(
+                &pending.id,
+                "offline-node",
+                pending_reclaimed.claim_generation,
+                "video",
+                "decode_unhealthy",
+                "alternate remained unhealthy",
+            )
+            .await
+            .expect("settle pending fixture"));
+
         let failed = offline_request("package-2", "request-2", user_id, file_id);
         store
             .create_offline_package(&failed, 10, 100_000, 100_000)
             .await
             .expect("create failed fixture");
+        let failed_claim = store
+            .claim_next_offline_package("offline-node")
+            .await
+            .expect("claim failed package")
+            .expect("failed package claim");
         assert!(store
             .fail_offline_package(
                 &failed.id,
                 "offline-node",
+                failed_claim.claim_generation,
                 "video",
                 "encoder",
                 "contract failure"

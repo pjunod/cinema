@@ -4420,9 +4420,15 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         Response::OfflinePackageSummary {
             state,
             node_id,
+            decoder_recovery_state,
+            alternate_recipe_hash,
             error_code,
             ..
-        } if state == "queued" && *node_id != target_node && error_code.is_none() => {}
+        } if state == "queued"
+            && *node_id != target_node
+            && decoder_recovery_state == "rehome_pending"
+            && alternate_recipe_hash.is_none()
+            && error_code.is_none() => {}
         response => bail!("a verified package was not requeued on a survivor: {response:?}"),
     }
     let Response::OfflinePackageSummary {
@@ -4486,7 +4492,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         .context("requeued package landed on a node outside the cluster")?;
     // The package requested mid-removal can share this queue, so claim until
     // the one under test comes out instead of assuming it is first.
-    let mut claimed_movable = false;
+    let mut movable_claim_generation = None;
     for _ in 0..2 {
         match cluster
             .request(
@@ -4499,27 +4505,30 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         {
             Response::ClaimedOfflinePackage {
                 package_id: Some(package_id),
+                claim_generation: Some(claim_generation),
             } if package_id == movable_package => {
-                claimed_movable = true;
+                movable_claim_generation = Some(claim_generation);
                 break;
             }
             Response::ClaimedOfflinePackage {
                 package_id: Some(package_id),
+                ..
             } if package_id == late_package => {}
             response => {
                 bail!("the requeued package was not claimable on its new owner: {response:?}")
             }
         }
     }
-    if !claimed_movable {
+    let Some(movable_claim_generation) = movable_claim_generation else {
         bail!("the requeued package never became claimable on its new owner");
-    }
+    };
     match cluster
         .request(
             observer,
             Request::PublishOfflinePackage {
                 package_id: movable_package.clone(),
                 node_id: target_node.clone(),
+                claim_generation: movable_claim_generation,
             },
         )
         .await?
@@ -4533,6 +4542,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
             Request::PublishOfflinePackage {
                 package_id: movable_package,
                 node_id: new_owner,
+                claim_generation: movable_claim_generation,
             },
         )
         .await?
@@ -7666,6 +7676,7 @@ pub enum Request {
     PublishOfflinePackage {
         package_id: String,
         node_id: String,
+        claim_generation: i64,
     },
     ResetContractState,
     RecordLocalTelemetry {
@@ -7774,12 +7785,15 @@ pub enum Response {
     OfflinePackageSummary {
         state: String,
         node_id: String,
+        decoder_recovery_state: String,
+        alternate_recipe_hash: Option<String>,
         error_code: Option<String>,
         reserved_bytes: i64,
         actual_bytes: Option<i64>,
     },
     ClaimedOfflinePackage {
         package_id: Option<String>,
+        claim_generation: Option<i64>,
     },
     TelemetryCount {
         count: usize,
@@ -10516,23 +10530,64 @@ async fn handle_request(
             Ok(Response::OfflinePackageSummary {
                 state: package.state,
                 node_id: package.node_id,
+                decoder_recovery_state: package.decoder_recovery_state,
+                alternate_recipe_hash: package.alternate_recipe_hash,
                 error_code: package.error_code,
                 reserved_bytes: package.reserved_bytes,
                 actual_bytes: package.actual_bytes,
             })
         }
-        Request::ClaimNextOfflinePackage { node_id } => Ok(Response::ClaimedOfflinePackage {
-            package_id: store_ref(store)?
+        Request::ClaimNextOfflinePackage { node_id } => {
+            let package = store_ref(store)?
                 .claim_next_offline_package(&node_id)
-                .await?
-                .map(|package| package.id),
-        }),
+                .await?;
+            if let Some(package) = &package {
+                let rebound = match package.decoder_recovery_state.as_str() {
+                    "recovery_pending" | "rehome_pending" => {
+                        store_ref(store)?
+                            .install_offline_decode_alternate(
+                                &package.id,
+                                &node_id,
+                                package.claim_generation,
+                                "rehomed-recipe",
+                            )
+                            .await?
+                    }
+                    "alternate" => {
+                        store_ref(store)?
+                            .set_offline_package_recipe(
+                                &package.id,
+                                &node_id,
+                                package.claim_generation,
+                                "rehomed-recipe",
+                            )
+                            .await?
+                    }
+                    _ => true,
+                };
+                if !rebound {
+                    bail!("claimed offline recovery could not bind its survivor-local alternate");
+                }
+            }
+            Ok(Response::ClaimedOfflinePackage {
+                package_id: package.as_ref().map(|package| package.id.clone()),
+                claim_generation: package.map(|package| package.claim_generation),
+            })
+        }
         Request::PublishOfflinePackage {
             package_id,
             node_id,
+            claim_generation,
         } => Ok(Response::Flag {
             value: store_ref(store)?
-                .mark_offline_package_ready(&package_id, &node_id, "rehomed-recipe", 900, 90_000)
+                .mark_offline_package_ready(
+                    &package_id,
+                    &node_id,
+                    claim_generation,
+                    "rehomed-recipe",
+                    900,
+                    90_000,
+                )
                 .await?,
         }),
         Request::ResetContractState => {
@@ -11364,16 +11419,48 @@ async fn seed_offline_removal_work(
         if target_state == "queued" {
             continue;
         }
-        if store
-            .claim_next_offline_package(node_id)
-            .await?
-            .is_none_or(|claimed| claimed.id != package.id)
-        {
+        let Some(claimed) = store.claim_next_offline_package(node_id).await? else {
             bail!("membership offline fixture {package_id} did not claim in order");
+        };
+        if claimed.id != package.id {
+            bail!("membership offline fixture {package_id} did not claim in order");
+        }
+        if package_id == MOVABLE_PACKAGE {
+            if !store
+                .set_offline_package_recipe(
+                    &package.id,
+                    node_id,
+                    claimed.claim_generation,
+                    "movable-primary-recipe",
+                )
+                .await?
+                || !store
+                    .begin_offline_decode_recovery(
+                        &package.id,
+                        node_id,
+                        claimed.claim_generation,
+                        "movable-primary-recipe",
+                    )
+                    .await?
+            {
+                bail!("membership offline fixture did not stop at consumed pending recovery");
+            }
+        } else if !store
+            .set_offline_package_recipe(&package.id, node_id, claimed.claim_generation, package_id)
+            .await?
+        {
+            bail!("membership offline fixture {package_id} did not bind its recipe");
         }
         if target_state == "ready"
             && !store
-                .mark_offline_package_ready(&package.id, node_id, package_id, 900, 90_000)
+                .mark_offline_package_ready(
+                    &package.id,
+                    node_id,
+                    claimed.claim_generation,
+                    package_id,
+                    900,
+                    90_000,
+                )
                 .await?
         {
             bail!("membership offline fixture {package_id} did not publish");
@@ -12191,15 +12278,26 @@ async fn exercise(store: &HiqliteAuthStore, ordinal: u64) -> Result<()> {
     {
         bail!("replicated offline owner predicates exposed another user's package");
     }
-    if store
-        .claim_next_offline_package(&node_id)
-        .await?
-        .is_none_or(|package| package.id != offline.id)
+    let Some(offline_claim) = store.claim_next_offline_package(&node_id).await? else {
+        bail!("replicated offline preparation did not claim");
+    };
+    if offline_claim.id != offline.id
         || !store
-            .set_offline_package_recipe(&offline.id, &recipe_hash)
+            .set_offline_package_recipe(
+                &offline.id,
+                &node_id,
+                offline_claim.claim_generation,
+                &recipe_hash,
+            )
             .await?
         || !store
-            .update_offline_progress(&offline.id, &node_id, "video", 500)
+            .update_offline_progress(
+                &offline.id,
+                &node_id,
+                offline_claim.claim_generation,
+                "video",
+                500,
+            )
             .await?
     {
         bail!("replicated offline preparation state machine failed");
@@ -12210,10 +12308,16 @@ async fn exercise(store: &HiqliteAuthStore, ordinal: u64) -> Result<()> {
     // be running, and an unfenced yield would knock the survivor's claimed
     // work back to `queued` while its progress flapped.
     if store
-        .requeue_offline_package(&offline.id, &wrong_node)
+        .requeue_offline_package(&offline.id, &wrong_node, offline_claim.claim_generation)
         .await?
         || store
-            .update_offline_progress(&offline.id, &wrong_node, "stolen", 999)
+            .update_offline_progress(
+                &offline.id,
+                &wrong_node,
+                offline_claim.claim_generation,
+                "stolen",
+                999,
+            )
             .await?
         || store
             .offline_package_for_user(&offline.id, user.id)
@@ -12223,23 +12327,57 @@ async fn exercise(store: &HiqliteAuthStore, ordinal: u64) -> Result<()> {
         bail!("replicated offline producer writes were not fenced to the owning node");
     }
     if !store
-        .mark_offline_package_ready(&offline.id, &node_id, &recipe_hash, 800, 120_000)
+        .mark_offline_package_ready(
+            &offline.id,
+            &node_id,
+            offline_claim.claim_generation,
+            &recipe_hash,
+            800,
+            120_000,
+        )
         .await?
     {
         bail!("replicated offline preparation state machine failed");
     }
     if store
-        .mark_offline_package_ready(&offline.id, &node_id, &recipe_hash, 801, 120_001)
+        .mark_offline_package_ready(
+            &offline.id,
+            &node_id,
+            offline_claim.claim_generation,
+            &recipe_hash,
+            801,
+            120_001,
+        )
         .await?
-        || store.requeue_offline_package(&offline.id, &node_id).await?
         || store
-            .set_offline_package_recipe(&offline.id, "wrong-recipe")
+            .requeue_offline_package(&offline.id, &node_id, offline_claim.claim_generation)
             .await?
         || store
-            .update_offline_progress(&offline.id, &node_id, "wrong-state", 999)
+            .set_offline_package_recipe(
+                &offline.id,
+                &node_id,
+                offline_claim.claim_generation,
+                "wrong-recipe",
+            )
             .await?
         || store
-            .fail_offline_package(&offline.id, &node_id, "wrong-state", "wrong", "wrong")
+            .update_offline_progress(
+                &offline.id,
+                &node_id,
+                offline_claim.claim_generation,
+                "wrong-state",
+                999,
+            )
+            .await?
+        || store
+            .fail_offline_package(
+                &offline.id,
+                &node_id,
+                offline_claim.claim_generation,
+                "wrong-state",
+                "wrong",
+                "wrong",
+            )
             .await?
     {
         bail!("replicated offline terminal-state guards accepted a late mutation");
@@ -12321,22 +12459,35 @@ async fn exercise(store: &HiqliteAuthStore, ordinal: u64) -> Result<()> {
     store
         .create_offline_package(&work, 10, 100_000, 1_000_000)
         .await?;
-    if store
-        .claim_next_offline_package(&node_id)
-        .await?
-        .is_none_or(|package| package.id != work.id)
+    let first_work_claim = store.claim_next_offline_package(&node_id).await?;
+    if first_work_claim.is_none_or(|package| package.id != work.id)
         || store.reset_interrupted_offline_packages(&node_id).await? != 1
-        || store
-            .claim_next_offline_package(&node_id)
-            .await?
-            .is_none_or(|package| package.id != work.id)
-        || !store.requeue_offline_package(&work.id, &node_id).await?
-        || store
-            .claim_next_offline_package(&node_id)
-            .await?
-            .is_none_or(|package| package.id != work.id)
+    {
+        bail!("replicated offline recovery/failure/delete contract failed");
+    }
+    let Some(second_work_claim) = store.claim_next_offline_package(&node_id).await? else {
+        bail!("replicated offline recovery/failure/delete contract failed");
+    };
+    if second_work_claim.id != work.id
         || !store
-            .fail_offline_package(&work.id, &node_id, "video", "proof", "expected")
+            .requeue_offline_package(&work.id, &node_id, second_work_claim.claim_generation)
+            .await?
+    {
+        bail!("replicated offline recovery/failure/delete contract failed");
+    }
+    let Some(third_work_claim) = store.claim_next_offline_package(&node_id).await? else {
+        bail!("replicated offline recovery/failure/delete contract failed");
+    };
+    if third_work_claim.id != work.id
+        || !store
+            .fail_offline_package(
+                &work.id,
+                &node_id,
+                third_work_claim.claim_generation,
+                "video",
+                "proof",
+                "expected",
+            )
             .await?
         || !store.delete_offline_package(&work.id, user.id).await?
     {

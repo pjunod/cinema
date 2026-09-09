@@ -16,7 +16,7 @@ use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use plurx_core::domain::{
-    CacheConsumerKind, CacheConsumerPin, PlaybackEvent, PretranscodeJob,
+    CacheConsumerKind, CacheConsumerPin, OfflinePackage, PlaybackEvent, PretranscodeJob,
     PretranscodeWorkerCapabilities,
 };
 use plurx_core::error::StoreError;
@@ -2224,25 +2224,22 @@ fn decode_restricted_options(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum OfflineCandidateChoice {
+enum OfflineRecoveryState {
     Primary,
+    Pending,
+    RehomePending,
     Alternate,
 }
 
-fn offline_candidate_choice(
-    durable_recipe_hash: Option<&str>,
-    primary_recipe_hash: &str,
-    alternate_recipe_hash: Option<&str>,
-) -> Result<OfflineCandidateChoice, String> {
-    match durable_recipe_hash {
-        None => Ok(OfflineCandidateChoice::Primary),
-        Some(stored) if stored == primary_recipe_hash => Ok(OfflineCandidateChoice::Primary),
-        Some(stored) if alternate_recipe_hash == Some(stored) => {
-            Ok(OfflineCandidateChoice::Alternate)
+impl OfflineRecoveryState {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "primary" => Ok(Self::Primary),
+            "recovery_pending" => Ok(Self::Pending),
+            "rehome_pending" => Ok(Self::RehomePending),
+            "alternate" => Ok(Self::Alternate),
+            value => Err(format!("unknown offline decoder recovery state {value}")),
         }
-        Some(stored) => Err(format!(
-            "offline package recipe {stored} is not the current primary or its software-decode alternate"
-        )),
     }
 }
 
@@ -9931,6 +9928,7 @@ struct PortableProduction<'a> {
     yield_to_offline: bool,
     cancelled: Option<&'a tokio_util::sync::CancellationToken>,
     offline_package_id: Option<&'a str>,
+    offline_claim_generation: Option<i64>,
     publication_fence: Option<PublicationFence>,
     pretranscode_fence: Option<PretranscodeFence>,
     expected_policy_generation: Option<String>,
@@ -11100,6 +11098,9 @@ pub struct TranscodeManager {
     offline_produce_script: std::sync::Mutex<std::collections::VecDeque<OfflineProduceOutcome>>,
     #[cfg(test)]
     offline_produced_recipes: std::sync::Mutex<Vec<String>>,
+    /// Inject the authority-write failure at the exact primary-fault boundary.
+    #[cfg(test)]
+    fail_next_offline_recovery_begin: std::sync::atomic::AtomicBool,
     /// Descriptor-bound per-source decode facts, scoped to the configured
     /// FFprobe build rather than to a mutable pathname.
     decode_facts: crate::decode_facts::DecodeFactCache,
@@ -11475,6 +11476,8 @@ impl TranscodeManager {
             offline_produce_script: std::sync::Mutex::new(std::collections::VecDeque::new()),
             #[cfg(test)]
             offline_produced_recipes: std::sync::Mutex::new(Vec::new()),
+            #[cfg(test)]
+            fail_next_offline_recovery_begin: std::sync::atomic::AtomicBool::new(false),
             decode_facts: crate::decode_facts::DecodeFactCache::new(),
             decode_probe_identity: None,
             #[cfg(test)]
@@ -14338,6 +14341,7 @@ impl TranscodeManager {
                         yield_to_offline: true,
                         cancelled: Some(cancelled),
                         offline_package_id: None,
+                        offline_claim_generation: None,
                         publication_fence,
                         pretranscode_fence,
                         expected_policy_generation: queue_owned
@@ -14420,8 +14424,7 @@ impl TranscodeManager {
     /// accepts explicit tracks, and forces SDR even on a passthrough node.
     pub async fn ensure_offline(
         &self,
-        package_id: &str,
-        durable_recipe_hash: Option<&str>,
+        package: &OfflinePackage,
         file: &plurx_core::domain::MediaFile,
         spec: &OfflineSpec,
         deadline: Instant,
@@ -14463,96 +14466,202 @@ impl TranscodeManager {
         let plan = self.resolve_movie_plan(file, &opts, encoder).await?;
         let digest = self.digest().ok_or("no cache digest")?;
         let primary_hash = self.effective_recipe(&digest, &plan, false).hash();
-        // The normal path pays no extra planning read. Reconstruct the
-        // alternate only when a durable row says recovery was already spent,
-        // or after this primary actually receives a terminal health refusal.
-        let mut alternate = if durable_recipe_hash.is_some_and(|stored| stored != primary_hash) {
-            self.offline_decode_alternate(package_id, file, &opts, &plan, encoder, &digest)
+        let mut recovery_state = OfflineRecoveryState::parse(&package.decoder_recovery_state)?;
+        let mut recovery_began_now = false;
+        let mut outcome = OfflineProduceOutcome::HealthRefused;
+        if recovery_state == OfflineRecoveryState::Primary {
+            if package.alternate_recipe_hash.is_some()
+                || package
+                    .recipe_hash
+                    .as_deref()
+                    .is_some_and(|stored| stored != primary_hash)
+            {
+                return Err("primary offline recovery state carries a mismatched recipe".to_owned());
+            }
+            if !self
+                .store
+                .set_offline_package_recipe(
+                    &package.id,
+                    &package.node_id,
+                    package.claim_generation,
+                    &primary_hash,
+                )
                 .await
-        } else {
-            None
-        };
-        let choice = offline_candidate_choice(
-            durable_recipe_hash,
-            &primary_hash,
-            alternate.as_ref().map(|(_, _, hash)| hash.as_str()),
-        )?;
-        let resumed_alternate = choice == OfflineCandidateChoice::Alternate;
-        let (selected_opts, selected_plan, selected_hash) = match choice {
-            OfflineCandidateChoice::Primary => (&opts, &plan, &primary_hash),
-            OfflineCandidateChoice::Alternate => {
-                let (alternate_opts, alternate_plan, alternate_hash) =
-                    alternate.as_ref().expect("matched alternate above");
-                (alternate_opts, alternate_plan, alternate_hash)
+                .map_err(|error| error.to_string())?
+            {
+                return Ok(OfflineProduceOutcome::Yielded);
             }
-        };
-        if !self
-            .store
-            .set_offline_package_recipe(package_id, selected_hash)
-            .await
-            .map_err(|error| error.to_string())?
-        {
-            return if cancelled.is_cancelled() {
-                Ok(OfflineProduceOutcome::Yielded)
-            } else {
-                Err("offline package is no longer preparing".to_owned())
-            };
-        }
-        let mut outcome = self
-            .produce_offline_candidate(
-                package_id,
-                file,
-                selected_opts,
-                selected_plan,
-                selected_hash,
-                deadline,
-                cancelled,
-            )
-            .await?;
-        if matches!(outcome, OfflineProduceOutcome::HealthRefused) && !resumed_alternate {
-            if alternate.is_none() {
-                alternate = self
-                    .offline_decode_alternate(package_id, file, &opts, &plan, encoder, &digest)
-                    .await;
-            }
-            if let Some((alternate_opts, alternate_plan, alternate_hash)) = alternate.as_ref() {
-                let advanced = match self
-                    .store
-                    .advance_offline_package_recipe(
-                        package_id,
-                        self.offline_owner(),
-                        &primary_hash,
-                        alternate_hash,
-                    )
-                    .await
+            outcome = self
+                .produce_offline_candidate(
+                    package,
+                    file,
+                    &opts,
+                    &plan,
+                    &primary_hash,
+                    deadline,
+                    cancelled,
+                )
+                .await?;
+            if matches!(outcome, OfflineProduceOutcome::HealthRefused) {
+                // Software is already the terminal safe route, and an
+                // unqualified plan has no receipt authority to recover from.
+                // Neither case may mint a consumed budget that a later node
+                // could mistake for a failed hardware-primary attempt.
+                if plan.decode().backend() == plurx_core::transcode::DecodeBackend::Software
+                    || !plan.enforces_receipt()
                 {
-                    Ok(advanced) => advanced,
+                    return Ok(OfflineProduceOutcome::HealthRefused);
+                }
+                // The terminal fault consumes the budget *before* alternate
+                // planning. A crash, cancellation, or store outage from this
+                // point can only resume pending recovery; it cannot run the
+                // failed primary again.
+                #[cfg(test)]
+                let recovery_begin = if self
+                    .fail_next_offline_recovery_begin
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    Err(plurx_core::error::StoreError::Database(
+                        "injected offline recovery-begin failure".to_owned(),
+                    ))
+                } else {
+                    self.store
+                        .begin_offline_decode_recovery(
+                            &package.id,
+                            &package.node_id,
+                            package.claim_generation,
+                            &primary_hash,
+                        )
+                        .await
+                };
+                #[cfg(not(test))]
+                let recovery_begin = self
+                    .store
+                    .begin_offline_decode_recovery(
+                        &package.id,
+                        &package.node_id,
+                        package.claim_generation,
+                        &primary_hash,
+                    )
+                    .await;
+                let consumed = match recovery_begin {
+                    Ok(consumed) => consumed,
                     Err(error) => {
-                        tracing::warn!(package = package_id, %error, "offline recovery budget could not be persisted");
-                        return Ok(OfflineProduceOutcome::StoreUnavailable);
+                        tracing::warn!(package = %package.id, %error, "offline recovery budget could not be consumed");
+                        // Retrying primary without authoritative proof that
+                        // the one-shot budget was consumed is unsafe. Settle
+                        // this attempt as terminal; the package coordinator
+                        // records decode_unhealthy instead of requeueing the
+                        // failed decoder.
+                        return Ok(OfflineProduceOutcome::HealthRefused);
                     }
                 };
-                if !advanced || cancelled.is_cancelled() {
+                if !consumed || cancelled.is_cancelled() {
                     return Ok(OfflineProduceOutcome::Yielded);
                 }
+                recovery_state = OfflineRecoveryState::Pending;
+                recovery_began_now = true;
                 tracing::warn!(
-                    package = package_id,
+                    package = %package.id,
                     failed_recipe = primary_hash,
-                    alternate_recipe = alternate_hash,
                     "offline decode fault consumed the durable recovery budget"
                 );
-                outcome = self
-                    .produce_offline_candidate(
-                        package_id,
-                        file,
-                        alternate_opts,
-                        alternate_plan,
-                        alternate_hash,
-                        deadline,
-                        cancelled,
-                    )
-                    .await?;
             }
+        }
+        if recovery_state != OfflineRecoveryState::Primary {
+            // A consumed job re-homed from a hardware owner may land on a
+            // software-only survivor. On that node the ordinary plan is
+            // already the safe route, so restricting it to software produces
+            // the same digest and the ordinary alternate helper correctly
+            // answers None. `rehome_pending` is the durable proof that this is
+            // not a same-owner retry of a failed software primary: the old
+            // owner had already consumed the budget before removal, and the
+            // removal transaction cleared any owner-local identity without
+            // restoring the budget to primary.
+            let survivor_local_software = recovery_state == OfflineRecoveryState::RehomePending
+                || (recovery_state == OfflineRecoveryState::Alternate
+                    && package.alternate_recipe_hash.as_deref() == Some(primary_hash.as_str()));
+            let alternate = if survivor_local_software
+                && plan.decode().backend() == plurx_core::transcode::DecodeBackend::Software
+                && plan.enforces_receipt()
+            {
+                Some((opts.clone(), plan.clone(), primary_hash.clone()))
+            } else {
+                self.offline_decode_alternate(&package.id, file, &opts, &plan, encoder, &digest)
+                    .await
+            };
+            let Some((alternate_opts, alternate_plan, alternate_hash)) = alternate else {
+                return Ok(OfflineProduceOutcome::HealthRefused);
+            };
+            match recovery_state {
+                OfflineRecoveryState::Primary => unreachable!("handled above"),
+                OfflineRecoveryState::Pending | OfflineRecoveryState::RehomePending => {
+                    if !recovery_began_now
+                        && (package.recipe_hash.is_some()
+                            || package.alternate_recipe_hash.is_some())
+                    {
+                        return Err(
+                            "pending offline recovery already carries an alternate recipe"
+                                .to_owned(),
+                        );
+                    }
+                    let installed = match self
+                        .store
+                        .install_offline_decode_alternate(
+                            &package.id,
+                            &package.node_id,
+                            package.claim_generation,
+                            &alternate_hash,
+                        )
+                        .await
+                    {
+                        Ok(installed) => installed,
+                        Err(error) => {
+                            tracing::warn!(package = %package.id, %error, "offline recovery alternate could not be installed");
+                            return Ok(OfflineProduceOutcome::StoreUnavailable);
+                        }
+                    };
+                    if !installed || cancelled.is_cancelled() {
+                        return Ok(OfflineProduceOutcome::Yielded);
+                    }
+                }
+                OfflineRecoveryState::Alternate => {
+                    if package.alternate_recipe_hash.as_deref() != Some(alternate_hash.as_str())
+                        || package
+                            .recipe_hash
+                            .as_deref()
+                            .is_some_and(|stored| stored != alternate_hash)
+                    {
+                        return Err(
+                            "stored offline alternate does not match the frozen plan".to_owned()
+                        );
+                    }
+                    if !self
+                        .store
+                        .set_offline_package_recipe(
+                            &package.id,
+                            &package.node_id,
+                            package.claim_generation,
+                            &alternate_hash,
+                        )
+                        .await
+                        .map_err(|error| error.to_string())?
+                    {
+                        return Ok(OfflineProduceOutcome::Yielded);
+                    }
+                }
+            }
+            outcome = self
+                .produce_offline_candidate(
+                    package,
+                    file,
+                    &alternate_opts,
+                    &alternate_plan,
+                    &alternate_hash,
+                    deadline,
+                    cancelled,
+                )
+                .await?;
         }
         if matches!(
             outcome,
@@ -14562,8 +14671,9 @@ impl TranscodeManager {
                 let _ = self
                     .store
                     .update_offline_progress(
-                        package_id,
-                        self.offline_owner(),
+                        &package.id,
+                        &package.node_id,
+                        package.claim_generation,
                         "extracting_subtitles",
                         999,
                     )
@@ -14577,7 +14687,7 @@ impl TranscodeManager {
     #[allow(clippy::too_many_arguments)]
     async fn produce_offline_candidate(
         &self,
-        package_id: &str,
+        package: &OfflinePackage,
         file: &plurx_core::domain::MediaFile,
         opts: &TranscodeOptions,
         plan: &ResolvedTranscode,
@@ -14608,7 +14718,8 @@ impl TranscodeManager {
                 deadline,
                 yield_to_offline: false,
                 cancelled: Some(cancelled),
-                offline_package_id: Some(package_id),
+                offline_package_id: Some(&package.id),
+                offline_claim_generation: Some(package.claim_generation),
                 publication_fence: None,
                 pretranscode_fence: None,
                 expected_policy_generation: None,
@@ -14636,6 +14747,7 @@ impl TranscodeManager {
             yield_to_offline: _,
             cancelled,
             offline_package_id,
+            offline_claim_generation,
             publication_fence,
             pretranscode_fence,
             expected_policy_generation,
@@ -14644,6 +14756,7 @@ impl TranscodeManager {
         } = &request;
         let cancelled = *cancelled;
         let offline_package_id = *offline_package_id;
+        let offline_claim_generation = *offline_claim_generation;
         let pretranscode_fence = pretranscode_fence.clone();
         let cache = self.cache.as_ref().ok_or("no cache configured")?;
         let queue_job = if let Some(fence) = &pretranscode_fence {
@@ -14775,9 +14888,17 @@ impl TranscodeManager {
             };
             let mut settled_bytes = cached.bytes;
             if let Some(package_id) = offline_package_id {
+                let claim_generation = offline_claim_generation
+                    .ok_or("offline package production lost its claim generation")?;
                 let _ = self
                     .store
-                    .update_offline_progress(package_id, &cache.node_id, "transcoding", 999)
+                    .update_offline_progress(
+                        package_id,
+                        &cache.node_id,
+                        claim_generation,
+                        "transcoding",
+                        999,
+                    )
                     .await;
             }
             if let Some(fence) = &pretranscode_fence {
@@ -14871,6 +14992,29 @@ impl TranscodeManager {
                     }
                 };
                 if !completed {
+                    return Ok(OfflineProduceOutcome::Yielded);
+                }
+            }
+            if let Some(package_id) = offline_package_id {
+                let claim_generation = offline_claim_generation
+                    .ok_or("offline package production lost its claim generation")?;
+                let current = match self
+                    .store
+                    .offline_package_claim_is_current(
+                        package_id,
+                        &cache.node_id,
+                        claim_generation,
+                        &hash,
+                    )
+                    .await
+                {
+                    Ok(current) => current,
+                    Err(error) => {
+                        tracing::warn!(package = package_id, %error, "offline cache-hit claim check unavailable");
+                        return Ok(OfflineProduceOutcome::StoreUnavailable);
+                    }
+                };
+                if !current {
                     return Ok(OfflineProduceOutcome::Yielded);
                 }
             }
@@ -15302,7 +15446,32 @@ impl TranscodeManager {
                         .map(|manifest| manifest.manifest_digest.as_str())
                 })
                 .flatten();
-            if let Some(fence) = publication_fence {
+            if let Some(package_id) = offline_package_id {
+                let claim_generation = offline_claim_generation
+                    .ok_or("offline package production lost its claim generation")?;
+                let completed = match self
+                    .store
+                    .complete_offline_cache_entry(
+                        package_id,
+                        &cache.node_id,
+                        claim_generation,
+                        &hash,
+                        published.bytes,
+                        digest,
+                    )
+                    .await
+                {
+                    Ok(completed) => completed,
+                    Err(error) => {
+                        tracing::warn!(package = package_id, recipe = %hash, %error, "offline cache completion unavailable");
+                        return Ok(OfflineProduceOutcome::StoreUnavailable);
+                    }
+                };
+                if !completed {
+                    let _ = quarantine_remove_cache_tree(&final_dir, 1).await;
+                    return Ok(OfflineProduceOutcome::Yielded);
+                }
+            } else if let Some(fence) = publication_fence {
                 PublicationStore::fenced(self.store.as_ref(), fence.clone())
                     .complete_cache_entry(&hash, &cache.node_id, &relative, published.bytes, digest)
                     .await
@@ -15393,6 +15562,7 @@ impl TranscodeManager {
             yield_to_offline,
             cancelled,
             offline_package_id,
+            offline_claim_generation,
             publication_fence: _,
             pretranscode_fence: _,
             expected_policy_generation: _,
@@ -15656,6 +15826,8 @@ impl TranscodeManager {
                     offline_package_id,
                     file.duration_ms.filter(|duration| *duration > 0),
                 ) {
+                    let claim_generation = offline_claim_generation
+                        .expect("offline package progress requires its claim generation");
                     let completed_ms = crate::produce::resume_at_ms(&parts);
                     let progress = completed_ms
                         .saturating_mul(1000)
@@ -15666,6 +15838,7 @@ impl TranscodeManager {
                         .update_offline_progress(
                             package_id,
                             self.offline_owner(),
+                            claim_generation,
                             "transcoding",
                             progress,
                         )
@@ -17138,7 +17311,7 @@ impl TranscodeManager {
     /// Replace real offline production with deterministic outcomes and retain
     /// the exact recipe reference each attempt received.
     #[cfg(test)]
-    fn test_script_offline_production(
+    pub(crate) fn test_script_offline_production(
         &self,
         outcomes: impl IntoIterator<Item = OfflineProduceOutcome>,
     ) {
@@ -17149,11 +17322,17 @@ impl TranscodeManager {
     }
 
     #[cfg(test)]
-    fn test_offline_produced_recipes(&self) -> Vec<String> {
+    pub(crate) fn test_offline_produced_recipes(&self) -> Vec<String> {
         self.offline_produced_recipes
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_fail_next_offline_recovery_begin(&self) {
+        self.fail_next_offline_recovery_begin
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// How many generation manifests this manager has published.
@@ -24658,6 +24837,7 @@ pub(crate) mod tests {
                     yield_to_offline: false,
                     cancelled: None,
                     offline_package_id: None,
+                    offline_claim_generation: None,
                     publication_fence: None,
                     pretranscode_fence: None,
                     expected_policy_generation: None,
@@ -24755,6 +24935,7 @@ pub(crate) mod tests {
                     yield_to_offline: false,
                     cancelled: None,
                     offline_package_id: None,
+                    offline_claim_generation: None,
                     publication_fence: None,
                     pretranscode_fence: None,
                     expected_policy_generation: None,
@@ -27294,7 +27475,7 @@ pub(crate) mod tests {
                 .expect("create package"),
             OfflineCreateOutcome::Created(_)
         ));
-        store
+        let claimed = store
             .claim_next_offline_package(NODE)
             .await
             .expect("claim")
@@ -27318,8 +27499,7 @@ pub(crate) mod tests {
         set_quality(21);
         assert!(matches!(
             mgr.ensure_offline(
-                package_id,
-                None,
+                &claimed,
                 &file,
                 &spec,
                 Instant::now(),
@@ -27338,10 +27518,10 @@ pub(crate) mod tests {
             .expect("pinned recipe");
 
         assert!(store
-            .requeue_offline_package(package_id, NODE)
+            .requeue_offline_package(package_id, NODE, claimed.claim_generation)
             .await
             .expect("requeue"));
-        store
+        let resumed = store
             .claim_next_offline_package(NODE)
             .await
             .expect("claim again")
@@ -27349,8 +27529,7 @@ pub(crate) mod tests {
         set_quality(29);
         assert!(matches!(
             mgr.ensure_offline(
-                package_id,
-                Some(&first_hash),
+                &resumed,
                 &file,
                 &spec,
                 Instant::now(),
@@ -27426,7 +27605,7 @@ pub(crate) mod tests {
                 .expect("create package"),
             OfflineCreateOutcome::Created(_)
         ));
-        store
+        let claimed = store
             .claim_next_offline_package(NODE)
             .await
             .expect("claim")
@@ -27440,8 +27619,7 @@ pub(crate) mod tests {
 
         assert!(matches!(
             mgr.ensure_offline(
-                package_id,
-                None,
+                &claimed,
                 &file,
                 &spec,
                 Instant::now(),
@@ -27485,8 +27663,7 @@ pub(crate) mod tests {
         );
         assert!(matches!(
             mgr.ensure_offline(
-                package_id,
-                Some(&alternate_hash),
+                &resumed,
                 &file,
                 &spec,
                 Instant::now(),
@@ -27498,7 +27675,11 @@ pub(crate) mod tests {
         ));
         assert_eq!(
             mgr.test_offline_produced_recipes(),
-            vec![primary_hash, alternate_hash.clone(), alternate_hash.clone()],
+            vec![
+                primary_hash.clone(),
+                alternate_hash.clone(),
+                alternate_hash.clone()
+            ],
             "restart must retry the consumed alternate once and must not mint another recovery"
         );
         assert_eq!(
@@ -27512,32 +27693,349 @@ pub(crate) mod tests {
             Some(alternate_hash.as_str()),
             "a failed alternate cannot move the durable result reference again"
         );
+        assert!(store
+            .fail_offline_package(
+                package_id,
+                NODE,
+                resumed.claim_generation,
+                "transcoding",
+                "decode_unhealthy",
+                "settle the first fixture",
+            )
+            .await
+            .expect("settle first fixture"));
+
+        // A store outage at the fault boundary cannot authorize either a
+        // primary retry or an alternate. The coordinator receives a terminal
+        // refusal and will settle the package as decode_unhealthy.
+        let begin_error_id = "offline-recovery-begin-store-error";
+        let mut begin_error_request = requested.clone();
+        begin_error_request.id = begin_error_id.to_owned();
+        begin_error_request.request_id = "offline-recovery-begin-store-error-request".to_owned();
+        assert!(matches!(
+            store
+                .create_offline_package(&begin_error_request, 10, 10_000_000, 20_000_000)
+                .await
+                .expect("create begin-error fixture"),
+            OfflineCreateOutcome::Created(_)
+        ));
+        let begin_error_claim = store
+            .claim_next_offline_package(NODE)
+            .await
+            .expect("claim begin-error fixture")
+            .expect("begin-error fixture");
+        mgr.test_script_offline_production([OfflineProduceOutcome::HealthRefused]);
+        mgr.test_fail_next_offline_recovery_begin();
+        assert!(matches!(
+            mgr.ensure_offline(
+                &begin_error_claim,
+                &file,
+                &spec,
+                Instant::now(),
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("recovery-begin store failure"),
+            OfflineProduceOutcome::HealthRefused
+        ));
+        let begin_error_stored = store
+            .offline_package_for_user(begin_error_id, user.id)
+            .await
+            .expect("read begin-error package")
+            .expect("begin-error package");
+        assert_eq!(begin_error_stored.decoder_recovery_state, "primary");
+        assert_eq!(begin_error_stored.alternate_recipe_hash, None);
+        assert!(store
+            .fail_offline_package(
+                begin_error_id,
+                NODE,
+                begin_error_claim.claim_generation,
+                "transcoding",
+                "decode_unhealthy",
+                "settle recovery-begin store error fixture",
+            )
+            .await
+            .expect("settle begin-error fixture"));
+
+        let pending_id = "offline-recovery-pending-crash";
+        let mut pending_request = requested.clone();
+        pending_request.id = pending_id.to_owned();
+        pending_request.request_id = "offline-recovery-pending-crash-request".to_owned();
+        assert!(matches!(
+            store
+                .create_offline_package(&pending_request, 10, 10_000_000, 20_000_000)
+                .await
+                .expect("create pending fixture"),
+            OfflineCreateOutcome::Created(_)
+        ));
+        let pending_claim = store
+            .claim_next_offline_package(NODE)
+            .await
+            .expect("claim pending fixture")
+            .expect("pending fixture");
+        assert!(store
+            .set_offline_package_recipe(
+                pending_id,
+                NODE,
+                pending_claim.claim_generation,
+                &primary_hash,
+            )
+            .await
+            .expect("bind primary before terminal fault"));
+        assert!(store
+            .begin_offline_decode_recovery(
+                pending_id,
+                NODE,
+                pending_claim.claim_generation,
+                &primary_hash,
+            )
+            .await
+            .expect("consume recovery before simulated crash"));
+        assert_eq!(
+            store
+                .reset_interrupted_offline_packages(NODE)
+                .await
+                .expect("restart pending fixture"),
+            1
+        );
+        let pending_resumed = store
+            .claim_next_offline_package(NODE)
+            .await
+            .expect("reclaim pending fixture")
+            .expect("pending fixture after restart");
+        assert_eq!(pending_resumed.decoder_recovery_state, "recovery_pending");
+        assert_eq!(pending_resumed.recipe_hash, None);
+        mgr.test_script_offline_production([OfflineProduceOutcome::Yielded]);
+        assert!(matches!(
+            mgr.ensure_offline(
+                &pending_resumed,
+                &file,
+                &spec,
+                Instant::now(),
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("resume from pending recovery"),
+            OfflineProduceOutcome::Yielded
+        ));
+        assert_eq!(
+            mgr.test_offline_produced_recipes().last(),
+            Some(&alternate_hash),
+            "restart at the fault-before-planning boundary must run only the frozen alternate"
+        );
+        let pending_installed = store
+            .offline_package_for_user(pending_id, user.id)
+            .await
+            .expect("read pending recovery")
+            .expect("pending recovery package");
+        assert_eq!(pending_installed.decoder_recovery_state, "alternate");
+        assert_eq!(
+            pending_installed.alternate_recipe_hash.as_deref(),
+            Some(alternate_hash.as_str())
+        );
+
+        // The real three-voter membership harness proves the durable
+        // alternate -> rehome_pending transition. Exercise the other half
+        // here with the production coordinator: the new owner has no hardware
+        // decoder, so its ordinary qualified plan is already software and the
+        // generic restricted-plan comparison would otherwise return None.
+        assert!(store
+            .fail_offline_package(
+                pending_id,
+                NODE,
+                pending_resumed.claim_generation,
+                "transcoding",
+                "fixture_complete",
+                "settle the pending-crash fixture",
+            )
+            .await
+            .expect("settle pending-crash fixture"));
+        let survivor_node = "software-survivor";
+        let rehome_id = "offline-recovery-software-survivor";
+        let mut rehome_request = requested.clone();
+        rehome_request.id = rehome_id.to_owned();
+        rehome_request.request_id = "offline-recovery-software-survivor-request".to_owned();
+        rehome_request.node_id = survivor_node.to_owned();
+        assert!(matches!(
+            store
+                .create_offline_package(&rehome_request, 10, 10_000_000, 20_000_000)
+                .await
+                .expect("create survivor fixture"),
+            OfflineCreateOutcome::Created(_)
+        ));
+        let survivor_claim = store
+            .claim_next_offline_package(survivor_node)
+            .await
+            .expect("claim survivor fixture")
+            .expect("survivor fixture");
+        assert!(store
+            .set_offline_package_recipe(
+                rehome_id,
+                survivor_node,
+                survivor_claim.claim_generation,
+                &primary_hash,
+            )
+            .await
+            .expect("bind departed owner's primary identity"));
+        assert!(store
+            .begin_offline_decode_recovery(
+                rehome_id,
+                survivor_node,
+                survivor_claim.claim_generation,
+                &primary_hash,
+            )
+            .await
+            .expect("preserve consumed origin budget"));
+        let mut rehomed = store
+            .offline_package_for_user(rehome_id, user.id)
+            .await
+            .expect("read rehomed package")
+            .expect("rehomed package");
+        rehomed.decoder_recovery_state = "rehome_pending".to_owned();
+
+        let survivor_work = crate::test_tempdir().expect("survivor work");
+        let survivor_cache = crate::test_tempdir().expect("survivor cache");
+        let survivor = TranscodeManager::new(
+            Arc::clone(&store),
+            survivor_work.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        )
+        .with_cache(
+            survivor_cache.path().to_path_buf(),
+            "ffmpeg version software-survivor".into(),
+            survivor_node.into(),
+        );
+        survivor.test_publish_artifact_qualification(ArtifactQualification::HealthQualified);
+        survivor.test_script_offline_production([
+            OfflineProduceOutcome::Yielded,
+            OfflineProduceOutcome::HealthRefused,
+            OfflineProduceOutcome::HealthRefused,
+        ]);
+        assert!(matches!(
+            survivor
+                .ensure_offline(
+                    &rehomed,
+                    &file,
+                    &spec,
+                    Instant::now(),
+                    &tokio_util::sync::CancellationToken::new(),
+                )
+                .await
+                .expect("software survivor recovery"),
+            OfflineProduceOutcome::Yielded
+        ));
+        let survivor_attempts = survivor.test_offline_produced_recipes();
+        assert_eq!(survivor_attempts.len(), 1);
+        assert_ne!(survivor_attempts[0], primary_hash);
+        assert_ne!(survivor_attempts[0], alternate_hash);
+        assert_eq!(
+            store
+                .reset_interrupted_offline_packages(survivor_node)
+                .await
+                .expect("restart survivor"),
+            1
+        );
+        let survivor_resumed = store
+            .claim_next_offline_package(survivor_node)
+            .await
+            .expect("reclaim survivor package")
+            .expect("survivor package after restart");
+        assert_eq!(survivor_resumed.decoder_recovery_state, "alternate");
+        assert!(matches!(
+            survivor
+                .ensure_offline(
+                    &survivor_resumed,
+                    &file,
+                    &spec,
+                    Instant::now(),
+                    &tokio_util::sync::CancellationToken::new(),
+                )
+                .await
+                .expect("resume survivor alternate"),
+            OfflineProduceOutcome::HealthRefused
+        ));
+        assert_eq!(
+            survivor.test_offline_produced_recipes(),
+            vec![survivor_attempts[0].clone(), survivor_attempts[0].clone()],
+            "the survivor must retry only its one bound software alternate"
+        );
+        assert!(store
+            .fail_offline_package(
+                rehome_id,
+                survivor_node,
+                survivor_resumed.claim_generation,
+                "transcoding",
+                "fixture_complete",
+                "settle survivor fixture",
+            )
+            .await
+            .expect("settle survivor fixture"));
+
+        // A genuinely fresh software-primary package has no failed hardware
+        // attempt to recover from. Its terminal refusal must therefore remain
+        // primary rather than minting a budget that rehome could reinterpret.
+        let software_primary_id = "offline-recovery-software-primary";
+        let mut software_primary_request = requested.clone();
+        software_primary_request.id = software_primary_id.to_owned();
+        software_primary_request.request_id =
+            "offline-recovery-software-primary-request".to_owned();
+        software_primary_request.node_id = survivor_node.to_owned();
+        assert!(matches!(
+            store
+                .create_offline_package(&software_primary_request, 10, 10_000_000, 20_000_000,)
+                .await
+                .expect("create software primary fixture"),
+            OfflineCreateOutcome::Created(_)
+        ));
+        let software_primary = store
+            .claim_next_offline_package(survivor_node)
+            .await
+            .expect("claim software primary fixture")
+            .expect("software primary fixture");
+        assert!(matches!(
+            survivor
+                .ensure_offline(
+                    &software_primary,
+                    &file,
+                    &spec,
+                    Instant::now(),
+                    &tokio_util::sync::CancellationToken::new(),
+                )
+                .await
+                .expect("run software primary fixture"),
+            OfflineProduceOutcome::HealthRefused
+        ));
+        let stored_software_primary = store
+            .offline_package_for_user(software_primary_id, user.id)
+            .await
+            .expect("read software primary fixture")
+            .expect("software primary package");
+        assert_eq!(stored_software_primary.decoder_recovery_state, "primary");
+        assert_eq!(stored_software_primary.alternate_recipe_hash, None);
     }
 
     #[test]
-    fn an_offline_recipe_reference_is_also_its_one_shot_recovery_state() {
+    fn offline_recovery_state_parsing_is_closed_and_monotone() {
         assert_eq!(
-            offline_candidate_choice(None, "primary", Some("alternate")).expect("new package"),
-            OfflineCandidateChoice::Primary
+            OfflineRecoveryState::parse("primary").expect("primary"),
+            OfflineRecoveryState::Primary
         );
         assert_eq!(
-            offline_candidate_choice(Some("primary"), "primary", Some("alternate"))
-                .expect("primary resume"),
-            OfflineCandidateChoice::Primary
+            OfflineRecoveryState::parse("recovery_pending").expect("pending"),
+            OfflineRecoveryState::Pending
         );
         assert_eq!(
-            offline_candidate_choice(Some("alternate"), "primary", Some("alternate"))
-                .expect("recovered resume"),
-            OfflineCandidateChoice::Alternate,
-            "a restart must resume the already-consumed alternate rather than minting a new recovery"
+            OfflineRecoveryState::parse("rehome_pending").expect("rehome pending"),
+            OfflineRecoveryState::RehomePending
+        );
+        assert_eq!(
+            OfflineRecoveryState::parse("alternate").expect("alternate"),
+            OfflineRecoveryState::Alternate
         );
         assert!(
-            offline_candidate_choice(Some("unknown"), "primary", Some("alternate")).is_err(),
-            "a stale or foreign result reference must fail closed"
-        );
-        assert!(
-            offline_candidate_choice(Some("alternate"), "primary", None).is_err(),
-            "a build that cannot reconstruct the alternate must not guess at the stored result"
+            OfflineRecoveryState::parse("unknown").is_err(),
+            "unknown durable state must fail closed"
         );
     }
 
@@ -38385,15 +38883,12 @@ pub(crate) mod tests {
                 .expect("create package"),
             OfflineCreateOutcome::Created(_)
         ));
-        assert_eq!(
-            store
-                .claim_next_offline_package(NODE)
-                .await
-                .expect("claim package")
-                .expect("queued package")
-                .id,
-            package_id
-        );
+        let claimed = store
+            .claim_next_offline_package(NODE)
+            .await
+            .expect("claim package")
+            .expect("queued package");
+        assert_eq!(claimed.id, package_id);
 
         let (mgr, _work, cache) = cached_manager(&store);
         let mgr = Arc::new(mgr.with_producer_tuning(ProducerTuning {
@@ -38416,8 +38911,7 @@ pub(crate) mod tests {
 
         let outcome = mgr
             .ensure_offline(
-                package_id,
-                None,
+                &claimed,
                 &file,
                 &OfflineSpec {
                     target_height: 240,

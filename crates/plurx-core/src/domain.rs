@@ -1362,6 +1362,18 @@ pub struct OfflinePackage {
     pub source_size: i64,
     pub source_mtime: i64,
     pub recipe_hash: Option<String>,
+    /// Monotone token minted every time a queued package is claimed. Every
+    /// worker mutation is fenced by this value so a prior daemon incarnation
+    /// cannot publish after a reset, requeue, or owner handoff.
+    pub claim_generation: i64,
+    /// Owner-independent one-shot decoder recovery state. Unlike
+    /// `recipe_hash`, this survives moving the package to another node.
+    pub decoder_recovery_state: String,
+    /// Current owner's frozen alternate identity once recovery planning
+    /// succeeds. A recovery- or rehome-pending state deliberately has no hash:
+    /// the budget is already spent, but a restart or re-homed owner may still
+    /// finish planning its one permitted alternate.
+    pub alternate_recipe_hash: Option<String>,
     /// Effective encoder rate control captured when the request was created.
     /// A queued package may yield and resume after the global setting changes,
     /// so its recipe must never be rebuilt from mutable policy.

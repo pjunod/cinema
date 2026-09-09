@@ -3088,12 +3088,14 @@ pub async fn update_settings(
             .await?;
     }
     if let Some(on) = req.offline_enabled {
-        state
-            .store
-            .put_setting(keys::OFFLINE_ENABLED, if on { "1" } else { "0" })
-            .await?;
-        if !on {
-            state.offline.cancel_all().await;
+        if on {
+            state.store.put_setting(keys::OFFLINE_ENABLED, "1").await?;
+        } else {
+            // The manager serializes this write with claim registration and
+            // refuses the settings update if any active claim cannot first be
+            // durably fenced. A disabled response therefore cannot leave a
+            // producer able to publish under its old generation.
+            state.offline.disable().await?;
         }
     }
     if let Some(on) = req.scan_on_startup {

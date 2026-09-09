@@ -1915,13 +1915,19 @@ mod tests {
         subtitle_index: Option<i64>,
     ) -> OfflinePackage {
         new_package(fixture, id, subtitle_mode, subtitle_index, fixture.file.id).await;
-        fixture
+        let claimed = fixture
             .state
             .store
             .claim_next_offline_package("test-node")
             .await
             .expect("claim")
             .expect("package");
+        assert!(fixture
+            .state
+            .store
+            .set_offline_package_recipe(id, "test-node", claimed.claim_generation, id)
+            .await
+            .expect("bind recipe"));
         let relative = format!("ready/{id}");
         let dir = fixture.state.cache_dir.join(&relative);
         tokio::fs::create_dir_all(&dir).await.expect("cache dir");
@@ -1949,7 +1955,7 @@ mod tests {
         assert!(fixture
             .state
             .store
-            .mark_offline_package_ready(id, "test-node", id, 100, 90_000)
+            .mark_offline_package_ready(id, "test-node", claimed.claim_generation, id, 100, 90_000,)
             .await
             .expect("mark ready"));
         fixture
@@ -2087,17 +2093,37 @@ mod tests {
     }
 
     async fn ready_subtitle_lease(fixture: &Fixture, package_id: &str) -> String {
-        fixture
+        let claimed = fixture
             .state
             .store
             .claim_next_offline_package("test-node")
             .await
             .expect("claim")
             .expect("package");
+        assert!(
+            fixture
+                .state
+                .store
+                .set_offline_package_recipe(
+                    package_id,
+                    "test-node",
+                    claimed.claim_generation,
+                    "unused",
+                )
+                .await
+                .expect("bind recipe")
+        );
         assert!(fixture
             .state
             .store
-            .mark_offline_package_ready(package_id, "test-node", "unused", 10, 90_000)
+            .mark_offline_package_ready(
+                package_id,
+                "test-node",
+                claimed.claim_generation,
+                "unused",
+                10,
+                90_000,
+            )
             .await
             .expect("mark ready"));
         let token = "1".repeat(64);
@@ -2428,7 +2454,7 @@ mod tests {
         assert_eq!(first["state"], "queued");
         assert_eq!(first["progress"], Value::Null);
         let package_id = first["id"].as_str().expect("package id");
-        fixture
+        let claimed = fixture
             .state
             .store
             .claim_next_offline_package("test-node")
@@ -2438,7 +2464,25 @@ mod tests {
         assert!(fixture
             .state
             .store
-            .mark_offline_package_ready(package_id, "test-node", "ready-recipe", 456, 90_000)
+            .set_offline_package_recipe(
+                package_id,
+                "test-node",
+                claimed.claim_generation,
+                "ready-recipe",
+            )
+            .await
+            .expect("bind recipe"));
+        assert!(fixture
+            .state
+            .store
+            .mark_offline_package_ready(
+                package_id,
+                "test-node",
+                claimed.claim_generation,
+                "ready-recipe",
+                456,
+                90_000,
+            )
             .await
             .expect("ready"));
 

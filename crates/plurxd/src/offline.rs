@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use std::{collections::HashMap, time::SystemTime};
 
 use plurx_core::domain::OfflinePackage;
+use plurx_core::error::StoreError;
 use plurx_core::store::{keys, Store};
 
 use crate::transcode::{
@@ -345,9 +346,18 @@ pub struct OfflineManager {
     store: Arc<dyn Store>,
     transcode: Arc<TranscodeManager>,
     node_id: String,
-    active: tokio::sync::Mutex<HashMap<String, tokio_util::sync::CancellationToken>>,
+    activation: tokio::sync::Mutex<()>,
+    active: tokio::sync::Mutex<HashMap<String, ActivePreparation>>,
     serving: crate::serving_fence::ServingFence,
     metrics: Arc<OfflineMetrics>,
+    #[cfg(test)]
+    fail_next_cancel_requeue: std::sync::atomic::AtomicBool,
+}
+
+#[derive(Clone)]
+struct ActivePreparation {
+    claim_generation: i64,
+    cancelled: tokio_util::sync::CancellationToken,
 }
 
 impl OfflineManager {
@@ -361,9 +371,12 @@ impl OfflineManager {
             store,
             transcode,
             node_id,
+            activation: tokio::sync::Mutex::new(()),
             active: tokio::sync::Mutex::new(HashMap::new()),
             serving,
             metrics: Arc::new(OfflineMetrics::new()),
+            #[cfg(test)]
+            fail_next_cancel_requeue: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -453,7 +466,13 @@ impl OfflineManager {
                 }
                 next_expiry_sweep = Instant::now() + Duration::from_secs(60);
             }
+            // Disabling takes this same lock while it fences every registered
+            // claim and commits the setting. A worker therefore cannot slip a
+            // newly claimed producer between the disable snapshot and the
+            // durable off switch.
+            let activation = self.activation.lock().await;
             if !self.enabled().await {
+                drop(activation);
                 tokio::time::sleep(IDLE_POLL).await;
                 continue;
             }
@@ -461,10 +480,12 @@ impl OfflineManager {
                 // Not a duplicate-work concern: claiming binds cluster-wide
                 // work to this node, and a node with no vote has no way to
                 // hand it back.
+                drop(activation);
                 tokio::time::sleep(IDLE_POLL).await;
                 continue;
             }
             let Some(restart_admission) = self.serving.try_restart_admission().await else {
+                drop(activation);
                 tokio::time::sleep(IDLE_POLL).await;
                 continue;
             };
@@ -472,21 +493,27 @@ impl OfflineManager {
                 Ok(Some(package)) => package,
                 Ok(None) => {
                     drop(restart_admission);
+                    drop(activation);
                     tokio::time::sleep(IDLE_POLL).await;
                     continue;
                 }
                 Err(error) => {
                     drop(restart_admission);
+                    drop(activation);
                     tracing::warn!(%error, "offline queue lookup failed");
                     tokio::time::sleep(IDLE_POLL).await;
                     continue;
                 }
             };
             let cancelled = tokio_util::sync::CancellationToken::new();
-            self.active
-                .lock()
-                .await
-                .insert(package.id.clone(), cancelled.clone());
+            self.active.lock().await.insert(
+                package.id.clone(),
+                ActivePreparation {
+                    claim_generation: package.claim_generation,
+                    cancelled: cancelled.clone(),
+                },
+            );
+            drop(activation);
             // Registration now owns the lifetime sampled by restart status.
             // Drop the admission only after that handoff is visible.
             drop(restart_admission);
@@ -496,17 +523,74 @@ impl OfflineManager {
     }
 
     pub async fn cancel(&self, package_id: &str) {
-        if let Some(cancelled) = self.active.lock().await.get(package_id).cloned() {
-            cancelled.cancel();
+        if let Some(active) = self.active.lock().await.get(package_id).cloned() {
+            active.cancelled.cancel();
         }
     }
 
-    /// Stop every producer promptly when the operator flips the kill switch.
-    /// Durable rows remain queued and can resume if the feature is re-enabled.
-    pub async fn cancel_all(&self) {
-        for cancelled in self.active.lock().await.values() {
-            cancelled.cancel();
+    async fn fence_and_cancel_all(&self) -> Result<(), StoreError> {
+        let active = self
+            .active
+            .lock()
+            .await
+            .iter()
+            .map(|(id, active)| (id.clone(), active.clone()))
+            .collect::<Vec<_>>();
+        let mut first_error = None;
+        for (package_id, active) in active {
+            #[cfg(test)]
+            let requeued = if self
+                .fail_next_cancel_requeue
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                Err(StoreError::Database(
+                    "injected offline cancellation requeue failure".to_owned(),
+                ))
+            } else {
+                self.store
+                    .requeue_offline_package(&package_id, &self.node_id, active.claim_generation)
+                    .await
+            };
+            #[cfg(not(test))]
+            let requeued = self
+                .store
+                .requeue_offline_package(&package_id, &self.node_id, active.claim_generation)
+                .await;
+
+            match requeued {
+                Ok(_) => active.cancelled.cancel(),
+                Err(error) => {
+                    tracing::warn!(package = package_id, %error, "could not durably fence disabled offline preparation");
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
         }
+        first_error.map_or(Ok(()), Err)
+    }
+
+    /// Stop every producer only after its exact claim is durably stale.
+    /// Rows remain queued and can resume if the feature is re-enabled. A store
+    /// error leaves the affected producer running and is returned to the
+    /// caller; cancellation must never outrun its publication fence.
+    #[cfg(test)]
+    pub async fn cancel_all(&self) -> Result<(), StoreError> {
+        let _activation = self.activation.lock().await;
+        self.fence_and_cancel_all().await
+    }
+
+    /// Linearize the offline kill switch with claim registration.
+    pub async fn disable(&self) -> Result<(), StoreError> {
+        let _activation = self.activation.lock().await;
+        self.fence_and_cancel_all().await?;
+        self.store.put_setting(keys::OFFLINE_ENABLED, "0").await
+    }
+
+    #[cfg(test)]
+    fn test_fail_next_cancel_requeue(&self) {
+        self.fail_next_cancel_requeue
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     async fn enabled(&self) -> bool {
@@ -592,13 +676,18 @@ impl OfflineManager {
         };
         let _ = self
             .store
-            .update_offline_progress(&package.id, &self.node_id, "transcoding", 1)
+            .update_offline_progress(
+                &package.id,
+                &self.node_id,
+                package.claim_generation,
+                "transcoding",
+                1,
+            )
             .await;
         let outcome = self
             .transcode
             .ensure_offline(
-                &package.id,
-                package.recipe_hash.as_deref(),
+                &package,
                 &file,
                 &spec,
                 Instant::now() + PRODUCE_PASS,
@@ -721,6 +810,7 @@ impl OfflineManager {
             .mark_offline_package_ready(
                 &package.id,
                 &self.node_id,
+                package.claim_generation,
                 &produced.recipe,
                 actual_bytes,
                 produced.duration_ms,
@@ -752,7 +842,7 @@ impl OfflineManager {
     async fn requeue(&self, package: &OfflinePackage, work_started: Instant) {
         match self
             .store
-            .requeue_offline_package(&package.id, &self.node_id)
+            .requeue_offline_package(&package.id, &self.node_id, package.claim_generation)
             .await
         {
             Ok(true) => self
@@ -776,7 +866,14 @@ impl OfflineManager {
     ) {
         match self
             .store
-            .fail_offline_package(&package.id, &self.node_id, phase, code, message)
+            .fail_offline_package(
+                &package.id,
+                &self.node_id,
+                package.claim_generation,
+                phase,
+                code,
+                message,
+            )
             .await
         {
             Ok(true) => self
@@ -846,7 +943,9 @@ mod tests {
         ProbeResult, SubtitleStream,
     };
     use plurx_core::store::SqliteStore;
-    use plurx_core::transcode::{EffectiveRateControl, EncoderCaps, Pipeline};
+    use plurx_core::transcode::{
+        ArtifactQualification, EffectiveRateControl, EncoderCaps, Pipeline,
+    };
 
     struct Fixture {
         manager: Arc<OfflineManager>,
@@ -904,7 +1003,6 @@ mod tests {
                         language: Some("eng".into()),
                         ..Default::default()
                     }],
-                    raw_json: Some("{}".into()),
                     ..Default::default()
                 },
             )
@@ -937,6 +1035,43 @@ mod tests {
             user_id: user.id,
             _root: root,
         }
+    }
+
+    async fn seeded_recovery_fixture() -> Fixture {
+        let mut fixture = seeded_fixture().await;
+        fixture
+            .store
+            .put_setting(plurx_core::store::keys::HWACCEL, "videotoolbox")
+            .await
+            .expect("select hardware decode path");
+        let caps = EncoderCaps {
+            videotoolbox: true,
+            ..Default::default()
+        };
+        let transcode = Arc::new(
+            TranscodeManager::new(
+                Arc::clone(&fixture.store),
+                fixture._root.path().join("recovery-transcode"),
+                caps,
+                Pipeline::Cpu,
+            )
+            .with_cache(
+                fixture._root.path().join("recovery-cache"),
+                "ffmpeg version 6.1.1-offline-manager-test".into(),
+                "test-node".into(),
+            ),
+        );
+        transcode.test_publish_artifact_qualification(ArtifactQualification::HealthQualified);
+        fixture.manager = OfflineManager::new(
+            Arc::clone(&fixture.store),
+            transcode,
+            "test-node".into(),
+            crate::serving_fence::ServingFence::new(
+                plurx_core::cluster::migration::status::ReplicationMonitor::sqlite()
+                    .metrics_handle(),
+            ),
+        );
+        fixture
     }
 
     async fn claimed_package(
@@ -1027,6 +1162,9 @@ mod tests {
             source_size: 3,
             source_mtime: 4,
             recipe_hash: None,
+            claim_generation: 1,
+            decoder_recovery_state: "primary".into(),
+            alternate_recipe_hash: None,
             effective_rate_control: "vbr".into(),
             target_height: 720,
             output_width: Some(1280),
@@ -1137,26 +1275,56 @@ mod tests {
         let fixture = seeded_fixture().await;
         let first = tokio_util::sync::CancellationToken::new();
         let second = tokio_util::sync::CancellationToken::new();
-        fixture
-            .manager
-            .active
-            .lock()
-            .await
-            .insert("first".into(), first.clone());
-        fixture
-            .manager
-            .active
-            .lock()
-            .await
-            .insert("second".into(), second.clone());
+        fixture.manager.active.lock().await.insert(
+            "first".into(),
+            ActivePreparation {
+                claim_generation: 1,
+                cancelled: first.clone(),
+            },
+        );
+        fixture.manager.active.lock().await.insert(
+            "second".into(),
+            ActivePreparation {
+                claim_generation: 1,
+                cancelled: second.clone(),
+            },
+        );
 
         fixture.manager.cancel("first").await;
         assert!(first.is_cancelled());
         assert!(!second.is_cancelled());
         fixture.manager.cancel("missing").await;
 
-        fixture.manager.cancel_all().await;
+        fixture.manager.cancel_all().await.expect("cancel all");
         assert!(second.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn disable_refuses_to_cancel_or_commit_off_without_a_durable_fence() {
+        let fixture = seeded_fixture().await;
+        let package = claimed_package(&fixture, "disable-fence", "none", None).await;
+        let cancelled = tokio_util::sync::CancellationToken::new();
+        fixture.manager.active.lock().await.insert(
+            package.id.clone(),
+            ActivePreparation {
+                claim_generation: package.claim_generation,
+                cancelled: cancelled.clone(),
+            },
+        );
+
+        fixture.manager.test_fail_next_cancel_requeue();
+        assert!(fixture.manager.disable().await.is_err());
+        assert!(!cancelled.is_cancelled());
+        assert_eq!(
+            stored_package(&fixture, &package.id).await.state,
+            "preparing"
+        );
+        assert!(fixture.manager.enabled().await);
+
+        fixture.manager.disable().await.expect("retry disable");
+        assert!(cancelled.is_cancelled());
+        assert_eq!(stored_package(&fixture, &package.id).await.state, "queued");
+        assert!(!fixture.manager.enabled().await);
     }
 
     /// A node with no vote expires the cluster's packages but claims none of
@@ -1173,7 +1341,7 @@ mod tests {
         let queued = claimed_package(&fixture, "gated", "none", None).await;
         assert!(fixture
             .store
-            .requeue_offline_package(&queued.id, "test-node")
+            .requeue_offline_package(&queued.id, "test-node", queued.claim_generation)
             .await
             .expect("return it to the queue"));
         assert_eq!(stored_package(&fixture, "gated").await.state, "queued");
@@ -1285,7 +1453,7 @@ mod tests {
         let mut package = claimed_package(&fixture, "changed-source", "none", None).await;
         assert!(fixture
             .store
-            .requeue_offline_package(&package.id, "test-node")
+            .requeue_offline_package(&package.id, "test-node", package.claim_generation)
             .await
             .expect("requeue"));
         package.source_mtime += 1;
@@ -1348,6 +1516,52 @@ mod tests {
         let queued = stored_package(&fixture, "yielded").await;
         assert_eq!(queued.state, "queued");
         assert_eq!(queued.phase, "waiting_for_encoder");
+    }
+
+    #[tokio::test]
+    async fn decoder_recovery_survives_offline_manager_requeue_and_terminal_handoff() {
+        let fixture = seeded_recovery_fixture().await;
+        fixture.manager.transcode.test_script_offline_production([
+            OfflineProduceOutcome::HealthRefused,
+            OfflineProduceOutcome::Yielded,
+            OfflineProduceOutcome::HealthRefused,
+        ]);
+        let package = claimed_package(&fixture, "manager-recovery", "none", None).await;
+
+        fixture
+            .manager
+            .prepare(package, &tokio_util::sync::CancellationToken::new())
+            .await;
+        let queued = stored_package(&fixture, "manager-recovery").await;
+        assert_eq!(queued.state, "queued", "{queued:?}");
+        assert_eq!(queued.decoder_recovery_state, "alternate");
+        let alternate = queued
+            .alternate_recipe_hash
+            .clone()
+            .expect("durable alternate recipe");
+        let first_attempts = fixture.manager.transcode.test_offline_produced_recipes();
+        assert_eq!(first_attempts.len(), 2);
+        assert_ne!(first_attempts[0], alternate);
+        assert_eq!(first_attempts[1], alternate);
+
+        let resumed = fixture
+            .store
+            .claim_next_offline_package("test-node")
+            .await
+            .expect("reclaim recovered package")
+            .expect("recovered package");
+        fixture
+            .manager
+            .prepare(resumed, &tokio_util::sync::CancellationToken::new())
+            .await;
+        let failed = stored_package(&fixture, "manager-recovery").await;
+        assert_eq!(failed.state, "failed");
+        assert_eq!(failed.error_code.as_deref(), Some("decode_unhealthy"));
+        assert_eq!(
+            fixture.manager.transcode.test_offline_produced_recipes(),
+            vec![first_attempts[0].clone(), alternate.clone(), alternate],
+            "the shipping coordinator must hand the consumed alternate back to the worker without retrying primary"
+        );
     }
 
     #[tokio::test]

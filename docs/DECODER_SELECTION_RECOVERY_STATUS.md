@@ -1,8 +1,8 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M0–M5 complete · M6 server/client implementation landed, fleet
-acceptance open · M7 remainder implemented and focused-validated · adversarial
-review, M8, and promotion remain · **Updated:** 2026-09-08 · **Integration branch:**
+**Status:** M0–M5 complete · M6 server/client implementation landed · M7
+remainder under adversarial repair · promotion follows M7 smoke evidence ·
+broader fleet qualification continues after merge · **Updated:** 2026-09-08 · **Integration branch:**
 `effort/decoder-selection-recovery` at `0c831b88` · **Active task:**
 `codex/decoder-m7-remainder-audit`
 
@@ -25,14 +25,16 @@ An unchecked item is not implied by a nearby passing check.
 | M6 · prepared replacement contract and clients | Code landed | Apple is the only client currently reaching a viewer; the cross-client fleet receipt remains M8 evidence |
 | M7a · advisory Developer settings | Done | Keep the prerequisites accurate as hardware contracts land; the controls advise and never gate enablement |
 | M7b · hardware diagnostic path | Merged | [Forgejo #174](http://192.168.4.7:3000/noirr/plurx/pulls/174) merged approved head `0a685526` into the effort at `0c831b88` after the complete Effort development gate. Backend-aware measurement, path-scoped qualification, same-codec recovery pairing, compatible v2 reporting, and advisory Developer readiness are implemented. A real hardware contract is separate M8 fleet evidence |
-| M7 remainder · offline durability and handoff enforcement | Implementation committed; PR preparation active | Open the WIP task PR, run adversarial review, apply findings, pass the Effort development gate, and merge it into the effort. Runtime commit `4554b1aa` adds the one real missing path; the audit confirmed the other obligations were already present and re-exercised them on the current tree |
-| M8 · fleet qualification | Not started | Hardware diagnostic capture · workload matrix · false-positive classification · startup/concurrency/recovered-latency evidence · three-client replacement runs |
-| Promotion to `main` | Not started | Freeze effort merges · merge fresh `main` · requalify the exact tree · pass Main promotion gate · merge |
+| M7 remainder · offline durability and handoff enforcement | WIP PR open; adversarial repairs focused-validated | [Forgejo #179](http://192.168.4.7:3000/noirr/plurx/pulls/179) remains WIP. The repair uses explicit `primary -> recovery_pending -> alternate` state, `rehome_pending` for either consumed handoff boundary, per-claim generations, exact-recipe settlement, and a linearized kill-switch fence. SQLite and real three-voter Hiqlite contracts, the shipping `OfflineManager` handoff, crash/rehome/software-survivor recovery, injected store failure, and denied-warning Clippy pass locally; exact-head re-review and the Effort development gate remain |
+| Promotion to `main` | Follows M7 | Freeze effort merges · merge fresh `main` · run targeted functionality smoke tests · require the fast lane to pass · merge · watch every remaining promotion job post-merge |
+| M8 · broader fleet qualification | Post-merge continuation | Hardware diagnostic capture · workload matrix · false-positive classification · startup/concurrency/recovered-latency evidence · three-client replacement runs; any code failure gets a new PR |
 
-**Shortest reading:** one M7 task review/gate/merge, the hardware/fleet
-qualification, then exact-tree promotion. The first hardware
-contract is the critical path: until a real node supplies it, automatic decode
-recovery remains deliberately unreachable rather than falsely certified.
+**Shortest reading:** finish one M7 task review/gate/merge, run functionality
+smoke evidence and the fast lane, then merge. The owner explicitly approved
+watching the remaining promotion jobs and broader fleet/client qualification
+against `main`; any code failure opens a follow-up PR. Until a real node supplies the first
+hardware contract, automatic decode recovery remains deliberately unreachable
+on that path rather than falsely certified.
 
 ## Current checkpoint — `codex/decoder-m7-remainder-audit`
 
@@ -41,16 +43,16 @@ recovery remains deliberately unreachable rather than falsely certified.
 | Milestone | M7 completion audit — offline, shared-cache, worker-capability, owner-handoff, and shipping-path enforcement |
 | Task base | Effort head `0c831b88`, the merge of approved M7b PR #174 |
 | Task branch | `codex/decoder-m7-remainder-audit` in the same agent-owned clone at `/private/tmp/codex-plurx-decoder.RRcx8j/repo` |
-| Task PR | Not opened. Runtime commit `4554b1aa` is ready to push; the PR will target `effort/decoder-selection-recovery`, remain `WIP:` through adversarial review, and use the Effort development gate rather than a task-level full suite |
+| Task PR | [Forgejo #179](http://192.168.4.7:3000/noirr/plurx/pulls/179), targeting `effort/decoder-selection-recovery`; it remains `WIP:` through repair and re-review and uses the Effort development gate rather than a task-level full suite |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
 | Audit scope | Job-scoped budget persistence · alternate result references · part and final-assembly receipt verification · versioned worker capabilities · owner-handoff inheritance · default and no-live-recovery shipping-path exercise without introducing a code gate |
-| Current finding | Audit complete. Part/final receipt enforcement, capability protocol versioning, and recovery-epoch owner inheritance were already shipping. The missing path was an offline job's durable one-shot decode alternate. Commit `4554b1aa` atomically advances the package recipe from the failed primary to its receipt-qualified software-decode alternate, so the write simultaneously consumes the budget and becomes the restart/result reference |
-| Adversarial review | M7b exact runtime/UI head `bd00c204` and docs successor `0a685526` were approved with no actionable findings. M7 remainder exact-head review is next and has not been claimed early |
-| Focused evidence | Exact `4554b1aa`: offline recovery coordinator 1/1; SQLite and real three-voter Hiqlite offline, worker-capability, and recovery-epoch contracts 3/3 on each backend; distinct-alternate and receipt-enforcement regressions 2/2; default/no-live offline identity and one-shot recovery 2/2; pinned `plurxd --tests` compile and all-target denied-warning Clippy pass |
+| Current finding | Exact-head review showed `recipe_hash` cannot safely serve as both node-local result reference and owner-independent recovery ledger. The repaired tree adds explicit `primary -> recovery_pending -> alternate` state, preserves either consumed boundary through rehome, refuses software-primary budget creation, and gives every claim and worker mutation a monotonically increasing generation |
+| Adversarial review | Einstein reviewed exact head `7db5bdd5` and requested five changes, then challenged the repair on crash-before-install rehome, software-only survivors, recovery-ledger write failure, disable-store failure, and positive cache publication. All findings now have code and focused regression coverage. One exact-head re-review remains after the repair commit |
+| Focused evidence | Repaired working tree: pinned all-feature core and all-target daemon compilation pass; denied-warning Clippy passes for core, daemon, and cluster harness; SQLite and real three-voter Hiqlite offline contract passes with positive exact-claim cache completion plus wrong-recipe and stale-generation negatives; direct recovery covers fault-before-install crash, rehome onto a software-only survivor, restart of its bound alternate, fresh software-primary refusal, and injected recovery-ledger failure; shipping `OfflineManager` recovery and injected disable-fence failure pass; the real membership harness rehomes `recovery_pending`; import projection and schema-chain tests pass. Exact commit evidence replaces this row after the repair commit |
 | Fast lane | Local task evidence passes on `4554b1aa`. Forgejo Effort development gate is pending the WIP push; no task-level full suite is run |
-| Full validation | Per Paul's 2026-09-08 clarification, task PRs into the effort do not run the full unit suite. Run it once on the frozen, fully reviewed effort branch after all fixes and immediately before promotion to `main`; requalify if that tree moves |
-| Next | Commit this exact status receipt · push · open the WIP task PR · adversarially review the whole diff · repair findings · pass the Effort development gate · merge into the effort |
-| External blocker | None for the M7 code audit. A qualifying hardware host is still required for M8's first real hardware decoder contract and fleet evidence |
+| Validation order | Task PRs into the effort do not run the full unit suite. After M7: targeted functionality smoke tests and the fast lane run on the frozen exact tree; after they pass, merge and continue watching the remaining promotion and broader suites. A code failure gets a new PR |
+| Next | Commit and re-review the repaired exact head · pass the Effort development gate · merge #179 into the effort · run functionality smoke tests · freeze/sync the effort · pass the fast lane · merge and monitor the remainder |
+| External blocker | None for M7 or promotion. A qualifying hardware host is still required for post-merge M8 fleet evidence; absence remains visible and advisory rather than an enable gate |
 
 ## Milestones
 
@@ -3669,38 +3671,53 @@ full-base diff. The exact head then passed the full PR suite recorded below.
 |---|---|
 | The historical mapping named `catalog-contract` without a test that read the mapped status page | The page is now catalog-governed and a validation contract cross-checks its frozen artifacts, safety boundaries, review repairs, and invalid-run labels |
 
-## M7 remainder — one durable offline recovery, not a second ledger
+## M7 remainder — one durable offline recovery with exact claim fencing
 
 The source audit found one missing runtime obligation. Offline production
 already refused to publish a generation whose health receipt failed, but that
 terminal answer had no job-scoped alternate. Retrying the same durable package
 would therefore select the same failed decoder or fail permanently.
 
-Commit `4554b1aa` uses `offline_packages.recipe_hash` as the one-shot state it
-already nearly was. The preparing owner performs one atomic compare-and-set
-from the failed primary hash to the receipt-qualified software-decode hash.
-Success both consumes the recovery budget and changes the durable result
-reference. A crash or worker restart sees that alternate hash and reconstructs
-the same alternate; the old primary can never buy a second transition. The
-alternate's distinct plan digest gives it a distinct cache/staging prefix, so
-failed primary parts cannot be assembled into recovered output. No schema,
-hidden runtime switch, or decoder feature gate was added.
+The first implementation at `4554b1aa` tried to use
+`offline_packages.recipe_hash` as both the node-local result reference and the
+owner-independent recovery budget. Adversarial review rejected that shape:
+rehome deliberately clears the node-local reference, so it also replenished
+the budget; alternate planning occurred before the compare-and-set; and a node
+name did not distinguish two claims by the same worker after requeue.
+
+The repaired design adds an explicit monotone spent budget represented by
+`primary -> recovery_pending -> alternate`, a current-owner alternate recipe,
+and a claim generation incremented on every dequeue. The terminal primary
+fault commits `recovery_pending` before alternate planning. A crash at that
+boundary resumes pending recovery and cannot execute primary again; only the
+current claim may install the one alternate. Rehome moves either consumed
+state to `rehome_pending` and clears both node-local recipe references, but it
+never restores `primary`; the new owner must bind its own safe alternate. A
+software-only survivor may bind its ordinary receipt-enforcing software plan
+only from that consumed rehome state, while a genuinely fresh software-primary
+refusal remains terminal and cannot mint recovery. Every producer mutation
+carries node and claim generation, and Ready also requires
+the exact bound recipe. The alternate's distinct plan digest still gives it a
+distinct cache/staging prefix, so failed primary parts cannot be assembled
+into recovered output. This is a schema migration, but it adds no hidden
+runtime switch, compile-time feature gate, or advisory prerequisite gate.
 
 | M7 exit obligation | Current-tree result |
 |---|---|
-| Job-scoped budget persistence and alternate result reference | Implemented by the owner-fenced primary-to-alternate recipe compare-and-set; SQLite and three-voter Hiqlite contracts reject stale owner, no-op, and second transitions and preserve the alternate across reset/reclaim |
-| Offline producer integration | A deterministic coordinator regression observes `primary → alternate → alternate` across worker restart, proves the identities differ, and proves a failed resumed alternate cannot move the durable reference again |
+| Job-scoped budget persistence and alternate result reference | SQLite and real three-voter Hiqlite contracts drive `primary -> recovery_pending`, crash/reset before installation, reject the stale installation CAS and primary replay, then freeze exactly one alternate. Same-owner restart preserves that result reference; rehome converts either consumed boundary to `rehome_pending` and requires a survivor-local alternate identity |
+| Offline producer integration | Direct and shipping `OfflineManager` regressions observe `primary -> alternate -> alternate` across worker requeue, prove the identities differ, and prove a failed resumed alternate cannot move the durable reference again. The direct coordinator additionally covers fault-before-install rehome, software-only survivor restart, fresh software-primary refusal, and a recovery-ledger write error that terminates instead of retrying primary |
 | Part and final-assembly receipt verification | Already implemented by M3c2/M3f. Current-tree receipt enforcement re-pass confirms missing/refused receipts still cannot authorize qualified retention; the recovery alternate uses the same production and publication tail |
 | Versioned worker capabilities | Already versioned and validated by the distributed pretranscode contract. A new mixed-version case proves a worker advertising a newer unsupported protocol receives a typed store refusal rather than claiming the job |
-| Owner handoff coverage | Existing recovery-epoch contract re-passed on SQLite and three-voter Hiqlite: activation writes the server epoch once and a successor inherits it; takeover remains an update that cannot replenish it |
+| Owner handoff coverage | The real membership-removal harness stops the movable package at `recovery_pending` to model a crash before alternate installation, removes its owner, requires `rehome_pending` with cleared owner-local identities, installs the survivor-local alternate, rejects the removed node's publication, and accepts only the new exact claim. Backend-neutral contracts separately reject stale same-node generations |
+| Disable/cancellation boundary | One activation lock serializes claim registration with disabling. Disable first durably requeues each exact claim, signals only successfully fenced tokens, and commits `offline.enabled = 0` while still holding that lock. An injected requeue error leaves the setting enabled, the affected token live, and the claim preparing; retry then queues and cancels it. Cache-hit validation, fresh cache completion, progress, failure and Ready remain claim-fenced |
 | Default and no-live-recovery shipping paths | Default pinned compile/Clippy pass. The no-live-recovery daemon compiles, and its actual offline entry path passes both durable-identity and one-shot-recovery exercises. The only compile repair was adding the intended `cfg` to a pre-existing live-only retry executor; offline recovery itself is always compiled |
 
 The normal offline path does not pay for speculative alternate planning. It
-resolves the alternate only after a receipt refusal or when a persisted
-alternate must be reconstructed after restart. Store unavailability cannot
-produce an unfenced alternate, and cancellation after the compare-and-set
-leaves the durable alternate selected for a later owner rather than publishing
-late output.
+resolves the alternate only after the budget is durably pending or when a
+persisted alternate must be reconstructed after restart. Store unavailability
+cannot produce an unfenced alternate. Disable and cancellation make the claim
+stale before signalling the producer, so neither a cache hit, fresh cache
+completion nor final Ready can publish after that durable boundary.
 
 ## Decisions and deviations
 
@@ -3723,20 +3740,23 @@ late output.
 | 2026-09-06 | Accept two declared full-suite skips on this Darwin builder | Android device validation requires unavailable `adb`; the two-node Live TV drill is Linux-only. Both remain explicit M8 fleet/client prerequisites rather than passing claims |
 | 2026-09-06 | Reuse warmed cluster targets for the final exact-head suite | The first diagnostic run spent its 1,800-second bound compiling vendor targets. Warm targets change no source or test semantics and let the complete three-node workload run inside the same fixed bound |
 | 2026-09-06 | Require a sealed, self-contained Linux FFprobe artifact plus kernel isolation for enforced fact collection | Hashing a script, dynamic launcher, or mutable tempfile does not bind the parser that actually runs. The supported path requires memfd seals, `execveat`, Landlock, seccomp-BPF with user notification, `close_range`, pidfds, and a supervised native thread on x86-64 or arm64 Linux; failure is a neutral M1 observation and keeps legacy routing. Other production Unix targets refuse until they have an equivalent dependency-closure guarantee. The later Developer settings UI must name these prerequisites rather than hide them behind a code feature gate |
-| 2026-09-07, reaffirmed 2026-09-08 | Qualify task PRs with the `Effort development gate` and defer the full suite to the `Main promotion gate` | `AGENTS.md`, `effort-ci.yml`, and the operator's clarification agree: a task PR into an effort branch runs focused evidence and the development gate; the effort's single full qualification happens after all reviews and fixes on the frozen promotion candidate. One full suite per task would spend roughly fifty minutes of three-node cluster work on intermediate trees that later task merges invalidate. The effort still owes exactly one `make validate-full` on the exact promotion head |
+| 2026-09-07, superseded 2026-09-08 | Qualify task PRs with the `Effort development gate` and defer the full suite | A task PR into an effort branch runs focused evidence and the development gate; one full suite per task would spend roughly fifty minutes of three-node cluster work on intermediate trees that later task merges invalidate. The owner subsequently moved the remaining full fan-out after the effort-to-main merge |
 | 2026-09-07 | No M0 contract names a fatal decode family | The only fatal in the retained evidence is `Decode error rate 1 exceeds maximum`, which is FFmpeg abandoning a corrupt input rather than a backend becoming unavailable. Labelling it `DecodeBackendUnavailable` would ask M3b to swap decoders for a fault a decoder swap cannot repair, so the family is contract-driven and absent until one is qualified against its own fixture |
-| 2026-09-08 | Reuse the offline package recipe reference as its job-scoped one-shot recovery state | The exact old hash is a natural compare-and-set fence and the alternate hash is already the result/cache identity a restart needs. A second ledger or schema migration would create two sources of truth without adding authority |
+| 2026-09-08 | Replace the reviewed `recipe_hash`-only recovery with an explicit monotone budget and per-claim generations | `recipe_hash` is node-local and rehome clears it, so it cannot also be the owner-independent budget. Explicit pending state commits before fallible planning; rehome can clear and rebind an alternate without returning to primary; a generation distinguishes successive claims by the same node and fences every late mutation |
+| 2026-09-08 | Promote after M7 smoke and fast-lane evidence, then continue remaining tests on `main` | Paul explicitly resolved the documented policy conflict in favor of merging after the fast lane. M8, the remaining Main promotion jobs, and broader fleet/client evidence run post-merge; every code-related failure opens a new PR |
 
 ## Validation ledger
 
 No passing run is recorded until its command finishes on the named tree. Each
 task PR gets adversarial agent review, findings are fixed, then the focused
 tests and Effort development gate qualify it for merge into the effort. The
-complete suite runs once on the frozen, fully reviewed effort branch before
-promotion to `main`.
+frozen effort gets functionality smoke evidence and a green fast lane before
+promotion. Remaining promotion, fleet, and client suites continue against
+`main`; a code failure is repaired through a new PR.
 
 | Commit/tree | Command | Result |
 |---|---|---|
+| Repaired working tree after adversarial review of `7db5bdd5` | `cargo check -p plurxd --all-targets`; denied-warning Clippy for `plurx-core`, `plurxd`, and `plurx-cluster-check`; exact direct recovery, shipping recovery, and injected-disable regressions; SQLite plus real Hiqlite offline store contract; real three-voter membership harness; v32 schema-chain and pre-v52 import projection | Pass · compilation and Clippy clean; exact daemon regressions 3/3; backend contract 1/1 across both implementations; schema/import 2/2; membership harness completed successfully. Commit hash and exact-head re-review replace this working-tree row before task merge |
 | `4554b1aa` | Pinned Rust 1.97.1 affected compile and all-target denied-warning Clippy; exact offline coordinator, alternate-shape, receipt, identity, worker-version, and recovery-epoch tests; SQLite plus real three-voter Hiqlite store contracts; no-live-recovery compile and offline exercises | Pass · one-shot coordinator 1/1; two direct plan/receipt cases; three contracts on each backend; no-live identity and recovery 2/2; compile, formatting, diff check, and Clippy clean. This is focused task evidence, not the deferred promotion suite |
 | Pre-rebase `a9cb879b` | `python3 -m unittest tests/operations/test_decoder_diagnostic_qualification.py` | Pass · 6 tests |
 | Pre-rebase `a9cb879b` | `make operations-check` | Pass · 192 tests; rerun outside restricted socket sandbox |
@@ -3885,11 +3905,10 @@ promotion to `main`.
   `COALESCE` default and the cross-node serde default — before M5c chooses a
   policy for `''`. Today a dropped budget is indistinguishable from a session
   that never had one.
-- Run the full `cargo test --workspace` coverage in the effort's promotion
-  gate after every task is merged and the exact effort tree is frozen. The
-  five failures this repair closes were invisible to the lightweight task
-  gate and were found only by the complete suite; that evidence belongs on the
-  final tree whose promotion it protects.
+- Run the full `cargo test --workspace` coverage after promotion and watch it
+  to completion. The five failures this repair closes were invisible to the
+  lightweight task gate and were found only by the complete suite; any new
+  code failure is repaired through a follow-up PR.
 - Give `populated_v14_import_fixture` in `tests/store_contract.rs` arithmetic
   of its own, the way `DROPPED_BY_THE_FIXTURE` guards the v43 fixture. Today
   it is protected by being named in another test's failure message, which
@@ -3906,5 +3925,5 @@ promotion to `main`.
   fleet workload matrix.
 - Web, Apple, and Android prepare/readiness/commit/retirement runs with one
   replacement, preserved position/pause/tracks/grade, and no reopen loop.
-- Exact-tree Main promotion qualification after current `main` is merged into
-  the frozen effort branch.
+- Fast-lane evidence after current `main` is merged into the frozen effort
+  branch, followed by the remaining qualification jobs on post-merge `main`.

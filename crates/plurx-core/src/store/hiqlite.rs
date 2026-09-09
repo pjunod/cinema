@@ -51,8 +51,9 @@ use crate::error::StoreError;
 // analysis queue; v23 adds the staged-generation ledger, which is what lets a
 // successor session exist without being current; v24 adds the permanent
 // Profile 7 conversion ledger; v25 adds its non-cascading, attempt-identified
-// permanent recovery guard. Every additive
-// step is applied through Raft before the daemon opens the store. v5 remains a
+// permanent recovery guard; v32 adds an incarnation fence and monotone
+// decoder-recovery state to offline package claims. Every additive step is
+// applied through Raft before the daemon opens the store. v5 remains a
 // supported direct-upgrade source so an offline node is
 // not forced to install every intermediate Cinema release; older or future
 // schemas still fail closed. Version-step targets are named independently of
@@ -78,7 +79,8 @@ const DESIRED_SELECTION_SCHEMA_VERSION: i64 = 28;
 const POINTER_DESIRED_FENCE_SCHEMA_VERSION: i64 = 29;
 const PRODUCER_RECOVERY_SCHEMA_VERSION: i64 = 30;
 const RECOVERY_EPOCH_SCHEMA_VERSION: i64 = 31;
-pub const AUTH_SCHEMA_VERSION: i64 = RECOVERY_EPOCH_SCHEMA_VERSION;
+const OFFLINE_RECOVERY_CLAIM_SCHEMA_VERSION: i64 = 32;
+pub const AUTH_SCHEMA_VERSION: i64 = OFFLINE_RECOVERY_CLAIM_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -111,6 +113,7 @@ const POINTER_DESIRED_FENCE_SCHEMA_MIGRATION_SOURCE: i64 = DESIRED_SELECTION_SCH
 // positional, so a source is whichever version now precedes the step.
 const PRODUCER_RECOVERY_SCHEMA_MIGRATION_SOURCE: i64 = POINTER_DESIRED_FENCE_SCHEMA_VERSION;
 const RECOVERY_EPOCH_SCHEMA_MIGRATION_SOURCE: i64 = PRODUCER_RECOVERY_SCHEMA_VERSION;
+const OFFLINE_RECOVERY_CLAIM_SCHEMA_MIGRATION_SOURCE: i64 = RECOVERY_EPOCH_SCHEMA_VERSION;
 // Session routing and shared-cache identity are additive durable state and use
 // the existing Hiqlite transport contract. Protocol 4 stays supported so a
 // healthy v9/v10 cluster can authorize the daemon that advances its schema.
@@ -2244,6 +2247,35 @@ impl HiqliteAuthStore {
                     self.settle_migration_attempt(RECOVERY_EPOCH_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
                 }
+                SchemaMigrationAction::MigrateFrom(
+                    OFFLINE_RECOVERY_CLAIM_SCHEMA_MIGRATION_SOURCE,
+                ) => {
+                    let now = self.now()?;
+                    let attempt = self
+                        .client()
+                        .txn([
+                            (super::OFFLINE_CLAIM_GENERATION_SCHEMA.to_owned(), params!()),
+                            (super::OFFLINE_RECOVERY_STATE_SCHEMA.to_owned(), params!()),
+                            (super::OFFLINE_ALTERNATE_RECIPE_SCHEMA.to_owned(), params!()),
+                            (super::OFFLINE_RECOVERY_GUARD_SCHEMA.to_owned(), params!()),
+                            (
+                                "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                                 WHERE singleton = 1 AND schema_version = $3"
+                                    .to_owned(),
+                                params!(
+                                    OFFLINE_RECOVERY_CLAIM_SCHEMA_VERSION,
+                                    now,
+                                    OFFLINE_RECOVERY_CLAIM_SCHEMA_MIGRATION_SOURCE
+                                ),
+                            ),
+                        ])
+                        .await;
+                    self.settle_migration_attempt(
+                        OFFLINE_RECOVERY_CLAIM_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
                         "cluster schema {version} has no migration implementation"
@@ -3962,7 +3994,8 @@ fn schema_migration_action(
         | DESIRED_SELECTION_SCHEMA_MIGRATION_SOURCE
         | POINTER_DESIRED_FENCE_SCHEMA_MIGRATION_SOURCE
         | PRODUCER_RECOVERY_SCHEMA_MIGRATION_SOURCE
-        | RECOVERY_EPOCH_SCHEMA_MIGRATION_SOURCE => {
+        | RECOVERY_EPOCH_SCHEMA_MIGRATION_SOURCE
+        | OFFLINE_RECOVERY_CLAIM_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -5786,9 +5819,18 @@ mod tests {
             "v30 must advance exactly one step to the recovery-epoch schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 26,
+            OFFLINE_RECOVERY_CLAIM_SCHEMA_MIGRATION_SOURCE, RECOVERY_EPOCH_SCHEMA_VERSION,
+            "the offline recovery-claim migration must start from the exact v31 shape"
+        );
+        assert_eq!(
+            OFFLINE_RECOVERY_CLAIM_SCHEMA_MIGRATION_SOURCE + 1,
+            OFFLINE_RECOVERY_CLAIM_SCHEMA_VERSION,
+            "v31 must advance exactly one step to the offline recovery-claim schema"
+        );
+        assert_eq!(
+            AUTH_SCHEMA_MIGRATION_SOURCE + 27,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v31 step"
+            "this implementation contains every additive v5→v32 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,

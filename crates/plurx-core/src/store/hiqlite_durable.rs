@@ -90,6 +90,11 @@ CREATE TABLE IF NOT EXISTS offline_packages (
     source_size       INTEGER NOT NULL,
     source_mtime      INTEGER NOT NULL,
     recipe_hash       TEXT,
+    claim_generation  INTEGER NOT NULL DEFAULT 0 CHECK (claim_generation >= 0),
+    decoder_recovery_state TEXT NOT NULL DEFAULT 'primary'
+        CHECK (decoder_recovery_state IN
+            ('primary', 'recovery_pending', 'rehome_pending', 'alternate')),
+    alternate_recipe_hash TEXT,
     effective_rate_control TEXT NOT NULL DEFAULT 'vbr'
         CHECK (effective_rate_control = 'vbr'
                OR (effective_rate_control GLOB 'qvbr:[0-9]*'
@@ -127,6 +132,42 @@ CREATE INDEX IF NOT EXISTS offline_packages_recipe
     ON offline_packages(node_id, recipe_hash, state);
 CREATE INDEX IF NOT EXISTS offline_packages_user_state
     ON offline_packages(user_id, state, updated_at);
+CREATE TRIGGER IF NOT EXISTS offline_recovery_guard
+    BEFORE UPDATE OF recipe_hash, decoder_recovery_state, alternate_recipe_hash
+    ON offline_packages
+    WHEN (OLD.decoder_recovery_state = 'primary'
+            AND NEW.decoder_recovery_state NOT IN ('primary', 'recovery_pending'))
+      OR (OLD.decoder_recovery_state = 'recovery_pending'
+            AND NEW.decoder_recovery_state NOT IN
+                ('recovery_pending', 'rehome_pending', 'alternate'))
+      OR (OLD.decoder_recovery_state = 'alternate'
+            AND NEW.decoder_recovery_state NOT IN ('alternate', 'rehome_pending'))
+      OR (OLD.decoder_recovery_state = 'rehome_pending'
+            AND NEW.decoder_recovery_state NOT IN ('rehome_pending', 'alternate'))
+      OR (OLD.decoder_recovery_state IN ('recovery_pending', 'alternate')
+            AND NEW.decoder_recovery_state = 'rehome_pending'
+            AND (NEW.node_id = OLD.node_id OR NEW.state != 'queued'
+                 OR NEW.recipe_hash IS NOT NULL
+                 OR NEW.alternate_recipe_hash IS NOT NULL))
+      OR (OLD.alternate_recipe_hash IS NOT NULL
+            AND NEW.alternate_recipe_hash IS NOT OLD.alternate_recipe_hash
+            AND NOT (OLD.decoder_recovery_state = 'alternate'
+                     AND NEW.decoder_recovery_state = 'rehome_pending'
+                     AND NEW.node_id != OLD.node_id
+                     AND NEW.state = 'queued'
+                     AND NEW.recipe_hash IS NULL
+                     AND NEW.alternate_recipe_hash IS NULL))
+      OR (NEW.decoder_recovery_state = 'primary'
+            AND NEW.alternate_recipe_hash IS NOT NULL)
+      OR (NEW.decoder_recovery_state IN ('recovery_pending', 'rehome_pending')
+            AND (NEW.recipe_hash IS NOT NULL OR NEW.alternate_recipe_hash IS NOT NULL))
+      OR (NEW.decoder_recovery_state = 'alternate'
+            AND (NEW.alternate_recipe_hash IS NULL
+                 OR (NEW.recipe_hash IS NOT NULL
+                     AND NEW.recipe_hash != NEW.alternate_recipe_hash)))
+    BEGIN
+        SELECT RAISE(ABORT, 'invalid offline decoder recovery transition');
+    END;
 
 CREATE TABLE IF NOT EXISTS offline_package_leases (
     token_hash     TEXT PRIMARY KEY,
@@ -274,7 +315,8 @@ pub(super) async fn local_durable_digest(client: &TimedClient) -> Result<String,
         offline_packages: rows(
             client,
             "SELECT json_array(id, request_id, user_id, file_id, node_id, source_path, \
-                    source_size, source_mtime, recipe_hash, effective_rate_control, \
+                    source_size, source_mtime, recipe_hash, claim_generation, \
+                    decoder_recovery_state, alternate_recipe_hash, effective_rate_control, \
                     target_height, output_width, \
                     output_height, audio_index, audio_offset_ms, subtitle_index, \
                     subtitle_language, subtitle_mode, state, phase, progress_millis, \
@@ -1296,6 +1338,9 @@ struct OfflinePackageRow {
     source_size: i64,
     source_mtime: i64,
     recipe_hash: Option<String>,
+    claim_generation: i64,
+    decoder_recovery_state: String,
+    alternate_recipe_hash: Option<String>,
     effective_rate_control: String,
     target_height: i64,
     audio_index: Option<i64>,
@@ -1332,6 +1377,9 @@ impl From<&mut Row<'_>> for OfflinePackageRow {
             source_size: row.get("source_size"),
             source_mtime: row.get("source_mtime"),
             recipe_hash: row.get("recipe_hash"),
+            claim_generation: row.get("claim_generation"),
+            decoder_recovery_state: row.get("decoder_recovery_state"),
+            alternate_recipe_hash: row.get("alternate_recipe_hash"),
             effective_rate_control: row.get("effective_rate_control"),
             target_height: row.get("target_height"),
             audio_index: row.get("audio_index"),
@@ -1370,6 +1418,9 @@ impl From<OfflinePackageRow> for OfflinePackage {
             source_size: row.source_size,
             source_mtime: row.source_mtime,
             recipe_hash: row.recipe_hash,
+            claim_generation: row.claim_generation,
+            decoder_recovery_state: row.decoder_recovery_state,
+            alternate_recipe_hash: row.alternate_recipe_hash,
             effective_rate_control: row.effective_rate_control,
             target_height: row.target_height,
             audio_index: row.audio_index,
@@ -1397,7 +1448,8 @@ impl From<OfflinePackageRow> for OfflinePackage {
 }
 
 const PACKAGE_COLS: &str = "id, request_id, user_id, file_id, node_id, source_path, \
-    source_size, source_mtime, recipe_hash, effective_rate_control, target_height, audio_index, audio_offset_ms, \
+    source_size, source_mtime, recipe_hash, claim_generation, decoder_recovery_state, alternate_recipe_hash, \
+    effective_rate_control, target_height, audio_index, audio_offset_ms, \
     output_width, output_height, subtitle_index, subtitle_language, subtitle_mode, state, \
     phase, progress_millis, estimated_bytes, reserved_bytes, actual_bytes, duration_ms, \
     error_code, error_message, created_at, updated_at, last_access_at, expires_at";
@@ -1609,7 +1661,8 @@ impl OfflinePackageStore for HiqliteAuthStore {
                        AND state IN ('queued', 'preparing', 'ready')) <= $24 - $19 \
                    {tombstone_clause} \
                  RETURNING id, request_id, user_id, file_id, node_id, source_path, \
-                    source_size, source_mtime, recipe_hash, effective_rate_control, \
+                    source_size, source_mtime, recipe_hash, claim_generation, \
+                    decoder_recovery_state, alternate_recipe_hash, effective_rate_control, \
                     target_height, audio_index, \
                     audio_offset_ms, output_width, output_height, subtitle_index, \
                     subtitle_language, subtitle_mode, state, phase, progress_millis, \
@@ -1924,7 +1977,8 @@ impl OfflinePackageStore for HiqliteAuthStore {
     ) -> Result<Option<OfflinePackage>, StoreError> {
         let now = self.now()?;
         let sql = "UPDATE offline_packages SET state = 'preparing', \
-                     phase = 'waiting_for_encoder', updated_at = $1 \
+                     phase = 'waiting_for_encoder', claim_generation = claim_generation + 1, \
+                     updated_at = $1 \
                  WHERE id = (SELECT candidate.id FROM offline_packages candidate \
                      WHERE candidate.node_id = $2 AND candidate.state = 'queued' \
                      ORDER BY (SELECT COUNT(*) FROM offline_packages served \
@@ -1934,7 +1988,8 @@ impl OfflinePackageStore for HiqliteAuthStore {
                               candidate.created_at, candidate.id LIMIT 1) \
                    AND state = 'queued' \
                  RETURNING id, request_id, user_id, file_id, node_id, source_path, \
-                    source_size, source_mtime, recipe_hash, effective_rate_control, \
+                    source_size, source_mtime, recipe_hash, claim_generation, \
+                    decoder_recovery_state, alternate_recipe_hash, effective_rate_control, \
                     target_height, audio_index, \
                     audio_offset_ms, output_width, output_height, subtitle_index, \
                     subtitle_language, subtitle_mode, state, phase, progress_millis, \
@@ -1956,13 +2011,15 @@ impl OfflinePackageStore for HiqliteAuthStore {
         &self,
         package_id: &str,
         node_id: &str,
+        claim_generation: i64,
     ) -> Result<bool, StoreError> {
         let now = self.now()?;
         Ok(self
             .execute(
                 "UPDATE offline_packages SET state = 'queued', phase = 'waiting_for_encoder', \
-                 updated_at = $1 WHERE id = $2 AND node_id = $3 AND state = 'preparing'",
-                params!(now, package_id, node_id),
+                 updated_at = $1 WHERE id = $2 AND node_id = $3 \
+                   AND claim_generation = $4 AND state = 'preparing'",
+                params!(now, package_id, node_id, claim_generation),
             )
             .await?
             > 0)
@@ -1971,39 +2028,132 @@ impl OfflinePackageStore for HiqliteAuthStore {
     async fn set_offline_package_recipe(
         &self,
         package_id: &str,
+        node_id: &str,
+        claim_generation: i64,
         recipe_hash: &str,
     ) -> Result<bool, StoreError> {
         let now = self.now()?;
         Ok(self
             .execute(
                 "UPDATE offline_packages SET recipe_hash = $1, updated_at = $2 \
-                 WHERE id = $3 AND state = 'preparing' \
-                   AND (recipe_hash IS NULL OR recipe_hash = $1)",
-                params!(recipe_hash, now, package_id),
+                 WHERE id = $3 AND node_id = $4 AND claim_generation = $5 \
+                   AND state = 'preparing' \
+                   AND (recipe_hash IS NULL OR recipe_hash = $1) \
+                   AND ((decoder_recovery_state = 'primary' \
+                         AND alternate_recipe_hash IS NULL) \
+                        OR (decoder_recovery_state = 'alternate' \
+                            AND alternate_recipe_hash = $1))",
+                params!(recipe_hash, now, package_id, node_id, claim_generation),
             )
             .await?
             > 0)
     }
 
-    async fn advance_offline_package_recipe(
+    async fn begin_offline_decode_recovery(
         &self,
         package_id: &str,
         node_id: &str,
+        claim_generation: i64,
         failed_recipe_hash: &str,
+    ) -> Result<bool, StoreError> {
+        let now = self.now()?;
+        Ok(self
+            .execute(
+                "UPDATE offline_packages SET decoder_recovery_state = 'recovery_pending', \
+                    recipe_hash = NULL, updated_at = $1 \
+                 WHERE id = $2 AND node_id = $3 AND claim_generation = $4 \
+                   AND state = 'preparing' AND decoder_recovery_state = 'primary' \
+                   AND recipe_hash = $5",
+                params!(
+                    now,
+                    package_id,
+                    node_id,
+                    claim_generation,
+                    failed_recipe_hash
+                ),
+            )
+            .await?
+            > 0)
+    }
+
+    async fn install_offline_decode_alternate(
+        &self,
+        package_id: &str,
+        node_id: &str,
+        claim_generation: i64,
         alternate_recipe_hash: &str,
     ) -> Result<bool, StoreError> {
         let now = self.now()?;
         Ok(self
             .execute(
-                "UPDATE offline_packages SET recipe_hash = $1, updated_at = $2 \
-                 WHERE id = $3 AND node_id = $4 AND state = 'preparing' \
-                   AND recipe_hash = $5 AND $5 != $1",
+                "UPDATE offline_packages SET decoder_recovery_state = 'alternate', \
+                    alternate_recipe_hash = $1, recipe_hash = $1, updated_at = $2 \
+                 WHERE id = $3 AND node_id = $4 AND claim_generation = $5 \
+                   AND state = 'preparing' \
+                   AND decoder_recovery_state IN ('recovery_pending', 'rehome_pending') \
+                   AND recipe_hash IS NULL AND alternate_recipe_hash IS NULL",
                 params!(
                     alternate_recipe_hash,
                     now,
                     package_id,
                     node_id,
-                    failed_recipe_hash
+                    claim_generation
+                ),
+            )
+            .await?
+            > 0)
+    }
+
+    async fn offline_package_claim_is_current(
+        &self,
+        package_id: &str,
+        node_id: &str,
+        claim_generation: i64,
+        recipe_hash: &str,
+    ) -> Result<bool, StoreError> {
+        Ok(self
+            .client()
+            .query_consistent_map::<ScalarRow, _>(
+                "SELECT EXISTS(SELECT 1 FROM offline_packages \
+                 WHERE id = $1 AND node_id = $2 AND claim_generation = $3 \
+                   AND state = 'preparing' AND recipe_hash = $4) AS value",
+                params!(package_id, node_id, claim_generation, recipe_hash),
+            )
+            .await
+            .map_err(database_error)?
+            .first()
+            .is_some_and(|row| row.value != 0))
+    }
+
+    async fn complete_offline_cache_entry(
+        &self,
+        package_id: &str,
+        node_id: &str,
+        claim_generation: i64,
+        recipe_hash: &str,
+        bytes: i64,
+        manifest_digest: Option<&str>,
+    ) -> Result<bool, StoreError> {
+        let now = self.now()?;
+        Ok(self
+            .execute(
+                "UPDATE transcode_cache_locations SET complete = 1, bytes = $1, \
+                    manifest_digest = COALESCE($2, manifest_digest), \
+                    last_used_at = MAX(last_used_at, $3), \
+                    last_seen_at = MAX(last_seen_at, $3) \
+                 WHERE recipe_hash = $4 AND node_id = $5 \
+                   AND storage_class = 'local' \
+                   AND EXISTS (SELECT 1 FROM offline_packages \
+                     WHERE id = $6 AND node_id = $5 AND claim_generation = $7 \
+                       AND state = 'preparing' AND recipe_hash = $4)",
+                params!(
+                    bytes,
+                    manifest_digest.map(str::to_owned),
+                    now,
+                    recipe_hash,
+                    node_id,
+                    package_id,
+                    claim_generation
                 ),
             )
             .await?
@@ -2014,6 +2164,7 @@ impl OfflinePackageStore for HiqliteAuthStore {
         &self,
         package_id: &str,
         node_id: &str,
+        claim_generation: i64,
         phase: &str,
         progress_millis: i64,
     ) -> Result<bool, StoreError> {
@@ -2022,13 +2173,15 @@ impl OfflinePackageStore for HiqliteAuthStore {
             .execute(
                 "UPDATE offline_packages SET phase = $1, \
                  progress_millis = MAX(progress_millis, $2), updated_at = $3 \
-                 WHERE id = $4 AND node_id = $5 AND state = 'preparing'",
+                 WHERE id = $4 AND node_id = $5 AND claim_generation = $6 \
+                   AND state = 'preparing'",
                 params!(
                     phase,
                     progress_millis.clamp(0, 999),
                     now,
                     package_id,
-                    node_id
+                    node_id,
+                    claim_generation
                 ),
             )
             .await?
@@ -2039,6 +2192,7 @@ impl OfflinePackageStore for HiqliteAuthStore {
         &self,
         package_id: &str,
         node_id: &str,
+        claim_generation: i64,
         phase: &str,
         code: &str,
         message: &str,
@@ -2048,8 +2202,17 @@ impl OfflinePackageStore for HiqliteAuthStore {
             .execute(
                 "UPDATE offline_packages SET state = 'failed', phase = $1, error_code = $2, \
                  error_message = $3, updated_at = $4 \
-                 WHERE id = $5 AND node_id = $6 AND state IN ('queued', 'preparing')",
-                params!(phase, code, message, now, package_id, node_id),
+                 WHERE id = $5 AND node_id = $6 AND claim_generation = $7 \
+                   AND state = 'preparing'",
+                params!(
+                    phase,
+                    code,
+                    message,
+                    now,
+                    package_id,
+                    node_id,
+                    claim_generation
+                ),
             )
             .await?
             > 0)
@@ -2314,6 +2477,7 @@ impl OfflinePackageStore for HiqliteAuthStore {
         &self,
         package_id: &str,
         node_id: &str,
+        claim_generation: i64,
         recipe_hash: &str,
         actual_bytes: i64,
         duration_ms: i64,
@@ -2325,7 +2489,8 @@ impl OfflinePackageStore for HiqliteAuthStore {
                  progress_millis = 1000, recipe_hash = $1, actual_bytes = $2, \
                  duration_ms = $3, error_code = NULL, error_message = NULL, \
                  updated_at = $4, last_access_at = $4 \
-                 WHERE id = $5 AND node_id = $6 AND state IN ('queued', 'preparing')"
+                 WHERE id = $5 AND node_id = $6 AND claim_generation = $7 \
+                   AND state = 'preparing' AND recipe_hash = $1"
                     .to_owned(),
                 params!(
                     recipe_hash,
@@ -2333,7 +2498,8 @@ impl OfflinePackageStore for HiqliteAuthStore {
                     duration_ms,
                     now,
                     package_id,
-                    node_id
+                    node_id,
+                    claim_generation
                 ),
             ),
             (
@@ -2632,7 +2798,14 @@ impl OfflinePackageStore for HiqliteAuthStore {
                 // re-checks the source before spending an encoder on it.
                 Some(target) => statements.push((
                     "UPDATE offline_packages SET node_id = $1, state = 'queued', \
-                     phase = 'waiting_for_encoder', recipe_hash = NULL, progress_millis = 0, \
+                     phase = 'waiting_for_encoder', recipe_hash = NULL, \
+                     decoder_recovery_state = CASE \
+                         WHEN decoder_recovery_state IN ('recovery_pending', 'alternate') \
+                         THEN 'rehome_pending' ELSE decoder_recovery_state END, \
+                     alternate_recipe_hash = CASE \
+                         WHEN decoder_recovery_state IN ('recovery_pending', 'alternate') \
+                         THEN NULL ELSE alternate_recipe_hash END, \
+                     progress_millis = 0, \
                      error_code = NULL, error_message = NULL, updated_at = $2 \
                      WHERE id = $3 AND node_id = $4 \
                        AND state IN ('queued', 'preparing')",

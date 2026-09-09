@@ -864,8 +864,24 @@ mod tests {
             .create_offline_package(&package, 10, 2_000, 3_000)
             .await
             .expect("package");
+        let claimed = store
+            .claim_next_offline_package(NODE)
+            .await
+            .expect("claim")
+            .expect("package");
+        assert!(store
+            .set_offline_package_recipe(&claimed.id, NODE, claimed.claim_generation, "flight",)
+            .await
+            .expect("bind recipe"));
         store
-            .mark_offline_package_ready("package", NODE, "flight", 900, 1_000)
+            .mark_offline_package_ready(
+                "package",
+                NODE,
+                claimed.claim_generation,
+                "flight",
+                900,
+                1_000,
+            )
             .await
             .expect("ready");
         assert_eq!(store.cache_bytes(NODE).await.expect("bytes"), 0);
