@@ -77,12 +77,17 @@ probe and an offline recovery fixture that had not enabled the behavior it
 tests. [#209](http://192.168.4.7:3000/noirr/plurx/pulls/209) and
 [#210](http://192.168.4.7:3000/noirr/plurx/pulls/210) repair that offline
 fixture and Docker packaging as `aff2dc12`; [#212](http://192.168.4.7:3000/noirr/plurx/pulls/212)
-then normalizes that Docker evidence on current `main` at `d9e8d7d4`. Draft
-follow-up [#211](http://192.168.4.7:3000/noirr/plurx/pulls/211) gives the
-remaining fact probe its production budget and separates the compile-only fast
-Rust verdict from the continuing unit/SQLite job. Its exact current-main app
-passes the whole-workspace compile command and a 78-capture Developer-layout
-sweep matches the existing 7,698-fact structural golden with no console or page
+then normalizes that Docker evidence as `d9e8d7d4`. [#208](http://192.168.4.7:3000/noirr/plurx/pulls/208)
+removes the duplicate offline-fixture line and records its Developer golden as
+`633a32ad`; [#213](http://192.168.4.7:3000/noirr/plurx/pulls/213) then closes
+the decoder status document as `894fd3da`. [#216](http://192.168.4.7:3000/noirr/plurx/pulls/216)
+lands Dolby Vision recovery and tvOS Live TV starts on current `main` at
+`b36397cf`. Draft follow-up
+[#211](http://192.168.4.7:3000/noirr/plurx/pulls/211) gives the remaining fact
+probe its production budget and separates the compile-only fast Rust verdict
+from the continuing unit/SQLite job. Its exact current-main app passes the
+whole-workspace compile command; its preceding `d9e8d7d4` tree also completed a
+78-capture sweep matching all 7,698 structural facts with no console or page
 errors. No production behavior changes · **Updated:**
 2026-09-09 · **Effort:**
 `effort/streaming-reliability` (merged) · **Started:** 2026-09-04 ·

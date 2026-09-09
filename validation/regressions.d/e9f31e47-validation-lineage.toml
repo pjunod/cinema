@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["e9f31e47"]
+reason = "This commit only renamed validation-ledger entries after rebasing the already-tested repair series onto the newer main commit and updated the live status document; it changed no runtime, test, or workflow behavior."
+ignore = true
