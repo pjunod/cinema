@@ -121,6 +121,19 @@ pub fn vod_pipe_args(
     let target = execution.start_seconds.max(0.0);
     let audio_anchor = vod_audio_anchor(target) as f64 / f64::from(VOD_AUDIO_RATE);
     let audio_target = audio_anchor - media.audio_offset_ms as f64 / 1_000.0;
+    let audio_target_samples = (audio_target * f64::from(VOD_AUDIO_RATE)).round() as i64;
+    // A second input opened at film zero made every seek decode the whole
+    // preceding soundtrack before ffmpeg could emit its init. On slower
+    // hosts a resume twenty minutes into a feature therefore exhausted the
+    // materialization deadline without producing one byte. Seek close to the
+    // wanted AAC anchor, on the film-global AAC lattice, while retaining two
+    // seconds for demux, resample, and encoder preroll.
+    let audio_seek_samples = audio_target_samples
+        .saturating_sub(i64::from(VOD_AUDIO_RATE) * 2)
+        .max(0) as u64
+        / VOD_AAC_FRAME_SAMPLES
+        * VOD_AAC_FRAME_SAMPLES;
+    let audio_seek = audio_seek_samples as f64 / f64::from(VOD_AUDIO_RATE);
     let mut input = execution.clone();
     // Decode a short preroll. Positive correction needs earlier audio;
     // negative correction is an absolute trim, not repeated per-seek silence.
@@ -143,12 +156,15 @@ pub fn vod_pipe_args(
             .iter()
             .position(|arg| arg == "-map")
             .expect("video map");
-        // A seeked packet's rounded container PTS cannot recover its exact
-        // decoded-sample ordinal. Decode audio from its one film origin, then
-        // trim on the sample clock. Video retains its independent fast seek.
+        // The demux seek may land on either side of its requested timestamp.
+        // Rebase the decoded PTS to the exact requested AAC lattice below,
+        // then trim on a sample count; this keeps every generation on one
+        // global phase without decoding the soundtrack from film zero.
         args.splice(
             before_map..before_map,
             [
+                "-ss".into(),
+                format!("{audio_seek:.9}"),
                 "-i".into(),
                 execution.source_path.to_string_lossy().into_owned(),
             ],
@@ -223,12 +239,13 @@ pub fn vod_pipe_args(
         args[index + 1] = format!("{graph}{last}{BURNED_VIDEO_LABEL}");
     }
     if has_audio {
-        let audio_target_samples = (audio_target * f64::from(VOD_AUDIO_RATE)).round() as i64;
+        let relative_audio_target_samples =
+            audio_target_samples - i64::try_from(audio_seek_samples).unwrap_or(i64::MAX);
         args.extend([
             "-af".to_owned(),
             format!(
-                "aresample=48000:async=1:first_pts=0,atrim=start_sample={},asetpts=PTS-({audio_target_samples}),aresample=48000:async=1:first_pts=0,apad",
-                audio_target_samples.max(0)
+                "asetpts=PTS-{audio_seek:.9}/TB,aresample=48000:async=1:first_pts=0,atrim=start_sample={},asetpts=PTS-({relative_audio_target_samples}),aresample=48000:async=1:first_pts=0,apad",
+                relative_audio_target_samples.max(0)
             ),
         ]);
     }

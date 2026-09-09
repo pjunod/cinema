@@ -405,11 +405,29 @@ struct LiveTvChannelRow: View {
     let airing: LiveTvAiring
     let selected: Bool
 
+    private var stationName: String {
+        #if os(tvOS)
+        channel.guideName
+        #else
+        String(channel.guideName.prefix(5))
+        #endif
+    }
+
+    private var stationWidth: CGFloat {
+        #if os(tvOS)
+        116
+        #else
+        52
+        #endif
+    }
+
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
-            Text(String(channel.guideName.prefix(5)))
+            Text(stationName)
                 .font(.caption2.weight(.semibold))
-                .frame(width: 52, height: 30)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+                .frame(width: stationWidth, height: 30)
                 .background(Palette.surfaceHi)
                 .clipShape(RoundedRectangle(cornerRadius: 4))
             VStack(alignment: .leading, spacing: 3) {
@@ -444,6 +462,40 @@ struct LiveTvChannelRow: View {
         .accessibilityAddTraits(selected ? [.isSelected] : [])
     }
 }
+
+#if os(tvOS)
+/// A television list row owns its focus contrast. The platform's default
+/// white plate hid the channel text and stretched across the full List while
+/// the accent tint turned the page actions into blank red capsules.
+private struct LiveTvChannelButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> Body {
+        Body(configuration: configuration)
+    }
+
+    fileprivate struct Body: View {
+        let configuration: ButtonStyle.Configuration
+        @Environment(\.isFocused) private var isFocused
+
+        var body: some View {
+            configuration.label
+                .foregroundStyle(Palette.onBg)
+                .padding(.horizontal, 18)
+                .padding(.vertical, 9)
+                .background(
+                    Palette.surface.opacity(isFocused ? 1 : 0.45),
+                    in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(isFocused ? Palette.accent : Palette.outline,
+                                lineWidth: isFocused ? 3 : 1)
+                }
+                .scaleEffect(isFocused ? 1.012 : (configuration.isPressed ? 0.99 : 1))
+                .animation(.easeOut(duration: 0.12), value: isFocused)
+        }
+    }
+}
+#endif
 
 /// The half-hour grid. One horizontal offset shared by every row, so the
 /// channel column and the times cannot drift apart from the cells.
@@ -534,6 +586,7 @@ struct LiveTvView: View {
     @State private var browse = LiveTvBrowseView.persisted()
     @State private var favoritesOnly = false
     @State private var hideProtected = false
+    @State private var showingSearch = false
     @State private var detail: LiveTvProgramme?
     @State private var detailChannel: LiveTvChannel?
     @State private var overlayVisible = true
@@ -590,12 +643,8 @@ struct LiveTvView: View {
                     nowBar
                 }
             }
-            Text(live.message).font(.callout).foregroundStyle(Palette.muted)
-                .accessibilityIdentifier("live-tv-status")
-            HStack {
-                Button("Refresh channels") { Task { await live.load(origin: model.origin, token: Session.shared.token) } }
-                Button("Stop / retry cleanup") { Task { await live.stop() } }
-            }
+            statusMessage
+            actionBar
             filterBar
             browseRegion
         }
@@ -619,6 +668,19 @@ struct LiveTvView: View {
         .sheet(item: $detail) { programme in
             programmeDetail(programme)
         }
+        #if os(tvOS)
+        .sheet(isPresented: $showingSearch) {
+            VStack(alignment: .leading, spacing: 28) {
+                Text("Find a channel").font(.title2.weight(.semibold))
+                TextField("Number, name, or what is on", text: $query)
+                Button("Done") { showingSearch = false }
+                    .buttonStyle(TVReadableButtonStyle(prominent: true))
+                    .focusEffectDisabled()
+            }
+            .padding(70)
+            .background(Palette.bg)
+        }
+        #endif
         .onChange(of: scenePhase) { _, phase in
             // Narrowed, not removed: entering PiP backgrounds the app, and the
             // old rule would have killed the exact case PiP exists for. Only
@@ -658,6 +720,46 @@ struct LiveTvView: View {
         #endif
     }
 
+    private var statusMessage: some View {
+        Text(live.message)
+            .font(.callout)
+            .foregroundStyle(Palette.muted)
+            .multilineTextAlignment(.center)
+            .lineLimit(3)
+            .frame(maxWidth: 1050)
+            #if os(tvOS)
+            .padding(.horizontal, 24)
+            .padding(.vertical, 12)
+            .background(Palette.surface.opacity(0.72),
+                        in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            #endif
+            .accessibilityIdentifier("live-tv-status")
+    }
+
+    private var actionBar: some View {
+        HStack(spacing: 16) {
+            Button {
+                Task { await live.load(origin: model.origin, token: Session.shared.token) }
+            } label: {
+                Label("Refresh channels", systemImage: "arrow.clockwise")
+            }
+            #if os(tvOS)
+            .buttonStyle(TVReadableButtonStyle(prominent: false))
+            .focusEffectDisabled()
+            #endif
+
+            Button {
+                Task { await live.stop() }
+            } label: {
+                Label("Retry cleanup", systemImage: "stop.circle")
+            }
+            #if os(tvOS)
+            .buttonStyle(TVReadableButtonStyle(prominent: false))
+            .focusEffectDisabled()
+            #endif
+        }
+    }
+
     private var filterBar: some View {
         VStack(spacing: 8) {
             #if os(iOS)
@@ -667,16 +769,28 @@ struct LiveTvView: View {
             .pickerStyle(.segmented)
             .onChange(of: browse) { _, view in view.persist() }
             #endif
-            HStack {
-                // `ButtonToggleStyle` has no tvOS availability, and this
-                // file is compiled for both targets — the plain switch style
-                // is correct on the ten-foot surface anyway.
+            HStack(spacing: 16) {
                 #if os(iOS)
                 Toggle("Favorites", isOn: $favoritesOnly).toggleStyle(.button)
                 Toggle("Hide protected", isOn: $hideProtected).toggleStyle(.button)
                 #else
-                Toggle("Favorites", isOn: $favoritesOnly)
-                Toggle("Hide protected", isOn: $hideProtected)
+                Button { favoritesOnly.toggle() } label: {
+                    Label(favoritesOnly ? "Favorites only" : "All channels",
+                          systemImage: favoritesOnly ? "star.fill" : "star")
+                }
+                .buttonStyle(TVReadableButtonStyle(prominent: favoritesOnly))
+                .focusEffectDisabled()
+                Button { hideProtected.toggle() } label: {
+                    Label(hideProtected ? "Playable only" : "Show protected",
+                          systemImage: hideProtected ? "lock.slash" : "lock.open")
+                }
+                .buttonStyle(TVReadableButtonStyle(prominent: hideProtected))
+                .focusEffectDisabled()
+                Button { showingSearch = true } label: {
+                    Label(query.isEmpty ? "Search" : "Search: \(query)", systemImage: "magnifyingglass")
+                }
+                .buttonStyle(TVReadableButtonStyle(prominent: !query.isEmpty))
+                .focusEffectDisabled()
                 #endif
                 Spacer()
                 if let guide = live.guide, guide.freshness != "fresh" {
@@ -705,8 +819,15 @@ struct LiveTvView: View {
                                      selected: live.watching?.id == channel.id)
                 }
                 .disabled(!channel.watchable || live.busy)
+                #if os(tvOS)
+                .buttonStyle(LiveTvChannelButtonStyle())
+                .focusEffectDisabled()
+                .listRowBackground(Color.clear)
+                #endif
             }
+            #if os(iOS)
             .searchable(text: $query, prompt: "Number, name, or what is on")
+            #endif
         case .guide:
             LiveTvGuideGrid(
                 layout: LiveTvGuideReducer.gridLayout(
