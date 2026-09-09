@@ -696,6 +696,9 @@ actor PlaybackControlReporter {
 
     /// Teardown is best-effort after this bound; the server owns durable reap.
     static let finalizationDeadlineMs = 3_000
+    /// Leave room for several settlement attempts without turning teardown
+    /// into a tight retry loop during a persistent outage.
+    static let finalizationRetryMs = 500
 
     /// Why the reporter is waiting. Pacing waits are the exchange cadence and
     /// the retry backoff; the deadline wait races one in-flight exchange. They
@@ -835,7 +838,7 @@ actor PlaybackControlReporter {
     /// this path deliberately does not reconcile through `capture`. A commit
     /// colliding with end is retried byte-for-byte until accepted, then the
     /// reporter derives the acknowledgement-free end from the same capture.
-    func finish(_ final: PlaybackControlCapture?) {
+    func finish(_ final: PlaybackControlCapture?) async {
         guard let final, final.owner == owner, final.snapshot.isValid else {
             stop()
             return
@@ -849,6 +852,11 @@ actor PlaybackControlReporter {
             pump?.cancel()
             pump = Task { [weak self] in await self?.run() }
         }
+        // This is the completion boundary its caller needs, not just an enqueue.
+        // In particular, an injected URLSession cannot be invalidated until the
+        // final exchange (and any bounded settlement retry before it) is done.
+        let finishingPump = pump
+        await finishingPump?.value
     }
 
     /// A terminal stops only the captured intent. MainActor may publish B
@@ -1132,7 +1140,13 @@ actor PlaybackControlReporter {
             return
         }
         retryRequest = pendingRequest
-        let fallback = retryableControl ? 500 : bootstrap.nextExchangeMs
+        let ordinaryFallback = retryableControl ? 500 : bootstrap.nextExchangeMs
+        // Finalization has its own short, hard deadline. Reusing an ordinary
+        // five-to-sixty-second cadence here can consume that whole deadline
+        // before the first retry, silently losing a committed settlement.
+        let fallback = finishing
+            ? min(ordinaryFallback, Self.finalizationRetryMs)
+            : ordinaryFallback
         nextAllowedAt = now() + retryDelay(transport, fallback)
     }
 

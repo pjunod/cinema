@@ -111,6 +111,11 @@ struct PlaybackControlTransport {
 @MainActor
 final class PlaybackControlSession {
     private var reporter: PlaybackControlReporter?
+    /// Final exchanges from successive attachments are serialized so teardown
+    /// can expose one completion boundary without making synchronous owners
+    /// wait. Tests and other injected-session owners use that boundary before
+    /// invalidating the transport they supplied.
+    private var pendingFinish: Task<Void, Never>?
     private var observe: (() -> PlayerControlObservation?)?
     private var activeGeneration: Int?
     /// How a value the reporter's actor produced reaches `@MainActor`.
@@ -454,7 +459,8 @@ final class PlaybackControlSession {
         latest.store(nil)
     }
 
-    func end() {
+    @discardableResult
+    func end() -> Task<Void, Never>? {
         // Capture before revoking publication. `PlayerController.stop` has
         // already mapped this player to end and queued any prepared settlement.
         // The reporter owns the two-exchange committed-then-end sequence even
@@ -478,9 +484,15 @@ final class PlaybackControlSession {
         answers.begin(generation: generation)
         latest.store(nil)
         observe = nil
-        guard let reporter else { return }
+        guard let reporter else { return pendingFinish }
         self.reporter = nil
-        Task { await reporter.finish(final) }
+        let precedingFinish = pendingFinish
+        let finishing = Task {
+            await precedingFinish?.value
+            await reporter.finish(final)
+        }
+        pendingFinish = finishing
+        return finishing
     }
 
     /// Read the player once, on the actor that owns it, and publish what the
