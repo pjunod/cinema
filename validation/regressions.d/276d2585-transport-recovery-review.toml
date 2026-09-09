@@ -1,0 +1,18 @@
+version = 1
+
+[[coverage]]
+commits = ["276d2585"]
+points = [
+  "cluster.auth",
+  "operations.packaging",
+  "validation.framework",
+]
+checks = [
+  "rust-gate",
+  "rust-gate-ci",
+  "cluster-transport-recovery",
+  "operations-contract",
+  "catalog-contract",
+  "history-regressions",
+]
+reason = "The retained transport-recovery unit tests inject cancellation during evidence publication and between roles, summary and report I/O failures, a first cleanup-journal failure with two real children, nested phase failures, multibyte truncation boundaries, recursively unknown schema fields, and short role reports. Operations and validation regressions freeze one Make execution ID, force Cargo freshness for repository-owned binaries, require embedded qualification provenance, and route role-schema-only changes into the full recovery lane. The pinned Rust gate, closed schemas, operations contracts, history audit, and final 20-plus-20 exact-candidate qualification exercise the corrected boundaries."
