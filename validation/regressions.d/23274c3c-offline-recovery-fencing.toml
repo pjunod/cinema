@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["23274c3c"]
+points = ["offline.viewing", "playback.pipeline"]
+checks = ["rust-gate", "rust-gate-ci", "cluster-auth"]
+reason = "The current daemon regressions inject failure at recovery-budget persistence and kill-switch requeue, prove neither failure retries a refused primary or cancels an unfenced producer, cover crash-before-install rehome onto a software-only survivor and fresh software-primary refusal, and require exact-claim cache completion. The backend-neutral Store contract runs on SQLite and real Hiqlite, while the three-voter membership harness moves recovery_pending through rehome_pending before binding the survivor-local alternate."
