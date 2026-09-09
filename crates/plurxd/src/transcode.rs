@@ -31439,7 +31439,7 @@ pub(crate) mod tests {
         super::require_ffmpeg();
         let media = crate::test_tempdir().expect("media dir");
         let src = media.path().join("profile7.mp4");
-        write_real_hevc_video(&src, 4);
+        write_real_hevc_video(&src, 4).await;
 
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let file_id = seed_file_with_probe_at(
@@ -33891,35 +33891,43 @@ pub(crate) mod tests {
     /// exists to read — and a probe row that merely *claims* `hevc` over
     /// H.264 bytes produces an ffmpeg that fails for the wrong reason. 10-bit,
     /// because every Dolby Vision base layer is.
-    fn write_real_hevc_video(path: &std::path::Path, seconds: u32) {
-        let status = std::process::Command::new(
+    async fn write_real_hevc_video(path: &std::path::Path, seconds: u32) {
+        let mut command = tokio::process::Command::new(
             std::env::var("PLURX_FFMPEG").unwrap_or_else(|_| "ffmpeg".into()),
-        )
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-f",
-            "lavfi",
-            "-i",
-            &format!("testsrc=size=160x120:rate=15:duration={seconds}"),
-            "-pix_fmt",
-            "yuv420p10le",
-            "-c:v",
-            "libx265",
-            "-preset",
-            "ultrafast",
-            "-x265-params",
-            "log-level=none:keyint=15:min-keyint=15",
-            "-tag:v",
-            "hvc1",
-            "-y",
-        ])
-        .arg(path)
-        .status();
+        );
+        command
+            .kill_on_drop(true)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                &format!("testsrc=size=160x120:rate=15:duration={seconds}"),
+                "-pix_fmt",
+                "yuv420p10le",
+                "-c:v",
+                "libx265",
+                "-threads",
+                "1",
+                "-preset",
+                "ultrafast",
+                "-x265-params",
+                "log-level=none:keyint=15:min-keyint=15:pools=none:frame-threads=1",
+                "-tag:v",
+                "hvc1",
+                "-y",
+            ])
+            .arg(path);
+        let output = tokio::time::timeout(std::time::Duration::from_secs(30), command.output())
+            .await
+            .expect("HEVC fixture encode exceeded its 30-second deadline")
+            .expect("failed to start HEVC fixture encode");
         assert!(
-            status.map(|s| s.success()).unwrap_or(false),
-            "HEVC fixture encode failed — this test needs an ffmpeg with libx265"
+            output.status.success(),
+            "HEVC fixture encode failed — this test needs an ffmpeg with libx265: {}",
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 

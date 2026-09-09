@@ -1045,6 +1045,7 @@ mod tests {
                 "test-node".into(),
             ),
         );
+        transcode.set_automatic_decoder_recovery(true);
         transcode.test_publish_artifact_qualification(ArtifactQualification::HealthQualified);
         // This fixture proves the operator-enabled recovery path. Recovery is
         // now controlled by the direct Developer switch, so qualification

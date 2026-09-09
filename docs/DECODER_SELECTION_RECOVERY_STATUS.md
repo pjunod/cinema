@@ -1,16 +1,16 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M0–M7 code complete · effort promoted and post-merge repairs
-merged · final activation and M6 reserve-and-prime follow-up in draft PR #203 ·
-broader fleet qualification remains post-merge evidence · **Updated:** 2026-09-09 ·
-**Current main base:** `ef8644a8` · **Active branch:**
-`codex/m6-server-prime`
+**Status:** M0–M7 code complete · effort and M6 reserve-and-prime follow-up
+merged · one post-merge unit-fixture repair in progress · broader fleet
+qualification remains post-merge evidence · **Updated:** 2026-09-09 ·
+**Repair base:** `9258f36b` · **Repair branch:**
+`codex/decoder-effort-postmerge`
 
 **Live checkpoint:** [Forgejo #203](http://192.168.4.7:3000/noirr/plurx/pulls/203)
-is the draft M6 server-prime follow-up. Promotion
-[PR #189](http://192.168.4.7:3000/noirr/plurx/pulls/189) and its post-merge
-repairs are complete on `main`. The remaining M6 server gap is implemented on
-`codex/m6-server-prime`: a successor is durably reserved,
+merged at `9a765bff`. Promotion
+[PR #189](http://192.168.4.7:3000/noirr/plurx/pulls/189), its post-merge
+repairs, and the remaining M6 server work are complete on `main`: a successor
+is durably reserved,
 its real VOD worker is attached before the actor announces it, staged media is
 authorized without granting staged control authority, committed media remains
 readable through predecessor drain by durable marker plus current-pointer
@@ -21,7 +21,10 @@ automatic-decoder-recovery checkbox. Recovery applies immediately to new
 attempts when enabled. Missing measurements or retained hardware contracts are
 reported as advisory facts and do not override that choice; best-effort
 observations can drive the one-shot recovery but can never qualify an artifact
-for cache reuse.
+for cache reuse. The post-merge fast Rust gate found one test fixture that
+still assumed recovery was on by default. The repair opts that recovery-only
+fixture into the switch; it does not change production behavior. The repair is
+tracked by [Forgejo #209](http://192.168.4.7:3000/noirr/plurx/pulls/209).
 
 The effort was created from Forgejo `main` at
 `4a6a0268bd314ad5587cb3037f12ebd992c0074e`. The original M0 research baseline was `main` at
@@ -32,8 +35,8 @@ as exact-tree evidence for the current Forgejo base.
 The frozen effort's promotion receipt remains: M0–M5 complete · M6
 server/client implementation landed · M7 complete · frozen promotion
 candidate integrated with current `main` · broader fleet qualification
-continues after merge. That receipt describes promotion PR #189; the active
-follow-up completes M6's previously documented server prime gap.
+continues after merge. That receipt describes promotion PR #189; merged PR
+#203 completes M6's previously documented server-prime gap.
 
 This is the live execution ledger for
 [DECODER_SELECTION_AND_RECOVERY_PLAN.md](streaming/DECODER_SELECTION_AND_RECOVERY_PLAN.md).
@@ -45,37 +48,38 @@ An unchecked item is not implied by a nearby passing check.
 | Stage | State | What remains |
 |---|---|---|
 | M0–M5 · selection, observation, receipts, admission and bounded prepublication recovery | Done on the effort branch | No planned build work |
-| M6 · prepared replacement contract, clients, and server prime | Implementation complete in draft [PR #203](http://192.168.4.7:3000/noirr/plurx/pulls/203); fast lane running | Physical first-frame smoke on the devices of interest and the cross-client fleet receipt remain evidence, not code gates |
-| M7a · advisory Developer settings | Final activation correction in draft #203 | Automatic decoder recovery now has its own immediate checkbox; retained contract coverage remains advisory and cannot override it |
+| M6 · prepared replacement contract, clients, and server prime | Merged in [PR #203](http://192.168.4.7:3000/noirr/plurx/pulls/203) | Physical first-frame smoke on the devices of interest and the cross-client fleet receipt remain evidence, not code gates |
+| M7a · advisory Developer settings | Merged in #203 | Automatic decoder recovery has its own immediate checkbox; retained contract coverage remains advisory and cannot override it |
 | M7b · hardware diagnostic path | Merged | [Forgejo #174](http://192.168.4.7:3000/noirr/plurx/pulls/174) merged approved head `0a685526` into the effort at `0c831b88` after the complete Effort development gate. Backend-aware measurement, path-scoped qualification, same-codec recovery pairing, compatible v2 reporting, and advisory Developer readiness are implemented. A real hardware contract is separate M8 fleet evidence |
 | M7 remainder · offline durability and handoff enforcement | Merged | [Forgejo #179](http://192.168.4.7:3000/noirr/plurx/pulls/179) fast-forwarded approved head `990bf334` into the effort after its adversarial findings were fixed and the Effort development gate passed; the repair includes one replicated cluster-wide kill-switch transaction |
-| Promotion to `main` | Merged | #189 and the post-merge repairs are present in current `main` at `18ddffc1` |
+| Promotion to `main` | Merged | #189, the post-merge repairs, and #203 are present in `main`; #203 merged as `9a765bff` |
+| Post-merge CI | Focused repair passes | One recovery-specific fixture now opts into the new default-off switch; all other completed lanes are green |
 | M8 · broader fleet qualification | Post-merge continuation | Hardware diagnostic capture · workload matrix · false-positive classification · startup/concurrency/recovered-latency evidence · three-client replacement runs; any code failure gets a new PR |
 
-**Shortest reading:** the original effort, its one final review, promotion, and
-post-merge repairs are done. This follow-up closes M6's last code gap. What is
-left on this branch is focused validation of the final activation correction,
-the restarted fast lane, draft PR promotion, merge, and post-merge suite
-monitoring. Hardware decoder contracts and physical client qualification remain
-evidence work; neither blocks prepared handoff or automatic decoder recovery.
+**Shortest reading:** the original effort, its one final review, promotion,
+post-merge repairs, direct switches, and M6 server prime are done. One unit
+fixture must explicitly enable the now-default-off recovery switch, then its
+follow-up can take the fast lane and merge. Hardware decoder contracts and
+physical client qualification remain evidence work; neither blocks prepared
+handoff or automatic decoder recovery.
 
-## Current checkpoint — M6 server prime
+## Current checkpoint — post-merge unit repair
 
 | Field | Current value |
 |---|---|
-| Milestone | Close M6 phase 3: reserve, prime, staged-media serving, commit publication, and cleanup |
-| Task base | Effort head `990bf334` was the historical promotion candidate; it is not the current follow-up base |
-| Current follow-up base | Forgejo `main` at `18ddffc1` |
-| Task branch | `codex/m6-server-prime` in the agent-owned clone at `/private/tmp/codex-plurx-decoder.RRcx8j/repo` |
-| Task PR | Draft [Forgejo #203](http://192.168.4.7:3000/noirr/plurx/pulls/203); current rebased M6 implementation begins at `e3cbb42a`, while Forgejo records the current activation-fix head |
+| Milestone | Restore the one recovery-specific offline manager test after the automatic-recovery switch became default-off |
+| Task base | Effort head `990bf334` was the historical promotion candidate; it is not the post-merge repair base |
+| Repair base | Forgejo `main` at `9258f36b`, which contains #203 at `9a765bff` |
+| Task branch | `codex/decoder-effort-postmerge` in the agent-owned clone at `/private/tmp/codex-plurx-decoder.RRcx8j/repo` |
+| Task PR | Draft [Forgejo #209](http://192.168.4.7:3000/noirr/plurx/pulls/209) |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
-| Audit scope | Prepared-successor durability, VOD worker attachment, media-only staged authority, commit publication, worker cleanup, lease renewal, and direct Developer enablement for both prepared handoff and decoder recovery |
-| Current finding | The old prepared path staged metadata only and double-counted the VOD resume as an origin; the old recovery surface also had no switch and made a hardware contract an activation gate. The branch now primes real work, preserves the origin, serves only exact staged media, and gives recovery an immediate checkbox whose best-effort diagnostic mode cannot certify cache artifacts |
+| Audit scope | The failing offline manager test, its switch setup, and the exact focused regression |
+| Current finding | The production default is intentionally off, but `seeded_recovery_fixture` did not opt in before expecting an automatic alternate. The fixture must enable the switch; changing the expected terminal failure would erase the recovery contract the test exists to retain |
 | Adversarial review | Complete. Einstein found three promotion blockers: immutable VOD bypassed the resolved decoder plan, the v50 Hiqlite import projected `drain_deadline_ms` one version too early, and the cache-location projection test stopped at v53 despite v54's publication generation. VOD now retains one descriptor-bound plan and uses it for arguments, identity, and mixed admission; real v50/v51 import fixtures and v25/v53/v54 cache projections pin the schema boundaries. Per owner direction, there is no additional task-review loop |
-| Focused evidence | Pinned Rust 1.97.1 all-target compile and strict Clippy pass; 43 diagnostic-health tests; exact direct-switch, unqualified-alternate, offline-fallback, staged-media, and VOD origin/resume regressions; 19 Developer settings tests; 78-view UI baseline with no page or console errors; passive web controls; and docs-index/status validation pass. The earlier broad tracked commit profile exposed an unpublished-activation inventory regression; the repair's ordinary-activation exclusion and committed-successor renewal contracts both pass on SQLite and three-node Hiqlite after rebasing |
-| Fast lane | Restarts when the corrected head is pushed. Checks already completed locally are exact implementation evidence; only unique fast-lane checks block merge, per owner direction |
+| Focused evidence | The exact test first reproduced the failure on pinned Rust 1.97.1: expected `queued`, found terminal `decode_unhealthy`. After the fixture opted in, the same exact test passed 1/1; the status and docs-index contracts passed 25/25 |
+| Fast lane | The focused regression passes locally; the follow-up merges as soon as its fast lane passes, while broader jobs continue on `main` |
 | Validation order | Task PRs into the effort do not run the full unit suite. After M7: functionality smoke evidence and a green fast lane before promotion; after they pass, merge and continue watching the remaining promotion and broader suites. The owner explicitly approved watching the remaining promotion jobs on `main`; a code failure gets a new PR |
-| Next | Finish focused activation checks · push the repaired head · pass the unique fast-lane checks · mark PR #203 ready and merge · watch duplicate and broader suites on `main` |
+| Next | Open the draft follow-up · pass its fast lane · mark it ready and merge · continue watching broader suites on `main` |
 | External blocker | None. Physical hardware is useful for smoke/qualification after merge but does not gate enabling or merging this implementation |
 
 ## Milestones
@@ -88,9 +92,9 @@ evidence work; neither blocks prepared handoff or automatic decoder recovery.
 | M3 · owned observation and health receipts | Complete — M3a–M3f and M3c5 merged | M3a's grammar ([#79](http://192.168.4.7:3000/noirr/plurx/pulls/79)), M3b1's owned readers ([#83](http://192.168.4.7:3000/noirr/plurx/pulls/83)) and M3b2's health barrier ([#84](http://192.168.4.7:3000/noirr/plurx/pulls/84)) are in. M3c1 ([#85](http://192.168.4.7:3000/noirr/plurx/pulls/85), head `bf75c62c`) makes the generation manifest carry and authenticate the joined producer receipt. M3c2 ([#86](http://192.168.4.7:3000/noirr/plurx/pulls/86), head `ff10c2db`) makes a part carry its own receipt across a resume, without which no long film could ever be certified. M3c3 ([#87](http://192.168.4.7:3000/noirr/plurx/pulls/87), head `b602b9f2`) gives qualified production its own artifact identity. M3c4 ([#88](http://192.168.4.7:3000/noirr/plurx/pulls/88), head `86647b37`) enforces the receipt contract under that identity. M3d ([#89](http://192.168.4.7:3000/noirr/plurx/pulls/89), head `a8403e10`) measures which decoder the running build actually selects, without which no attempt could ever be classified. M3e ([#90](http://192.168.4.7:3000/noirr/plurx/pulls/90), head `c54fb052`) makes the diagnostic wording a contract field, because FFmpeg 9 does not print FFmpeg 8's. M3c5 ([#92](http://192.168.4.7:3000/noirr/plurx/pulls/92), head `5e0f7f1f`) gives the two non-queue publication paths a manifest, so a qualified generation they produce can actually be kept. M3f ([#99](http://192.168.4.7:3000/noirr/plurx/pulls/99), head `02831892`) originally added an operator request and node-level effective-mode intersection. M7b replaces the latter with a path-scoped policy: the setting remains enabled, prerequisite state is advisory, and only an exactly measured path with one contract uses the qualified artifact identity |
 | M4 · mixed resource admission | Merged | [Forgejo #81](http://192.168.4.7:3000/noirr/plurx/pulls/81) fast-forwarded `f0f7aec8` into the effort after one whole-PR adversarial review, its three blockers repaired, and the Forgejo effort gate |
 | M5 · durable budget and prepublication recovery | Complete | The M5a census landed at `b2dcf458`; `media_session_producer_recovery` exists on both backends, a server-owned `recovery_epoch` follows one playback across continuations, and the producer reserves, settles and refuses a second recovery. M5c1–M5c3 are merged through [#156](http://192.168.4.7:3000/noirr/plurx/pulls/156) |
-| M6 · postpublication replacement and client intent | Code complete on the active follow-up branch; fleet acceptance open | Server reserve-and-prime, media-only staged authority, commit publication and cleanup now join the already-shipped Apple, Android and web adapters. The Developer server checkbox is default-on and independent of advisory readiness. The three-client measured receipt belongs to M8 |
-| M7 · offline, shared cache, handoff enforcement, and direct activation | Code complete on the active follow-up branch | M7a and M7b are merged through `0c831b88`; M7 remainder [#179](http://192.168.4.7:3000/noirr/plurx/pulls/179) closes durable offline one-shot recovery/result identity, exact-claim and cache publication, crash-before-install rehome, software-survivor binding, replicated disable, and legacy-worker fencing at `990bf334`. Draft #203 makes automatic recovery an immediate operator switch instead of a contract-qualified action gate |
-| M8 · fleet qualification and promotion | Promotion freeze active | Current `main` is integrated and the final review is repaired; smoke/fast lane, merge, and post-merge monitoring remain |
+| M6 · postpublication replacement and client intent | Merged in #203; fleet acceptance open | Server reserve-and-prime, media-only staged authority, commit publication and cleanup now join the already-shipped Apple, Android and web adapters. The Developer server checkbox is default-on and independent of advisory readiness. The three-client measured receipt belongs to M8 |
+| M7 · offline, shared cache, handoff enforcement, and direct activation | Merged through #203 | M7a and M7b are merged through `0c831b88`; M7 remainder [#179](http://192.168.4.7:3000/noirr/plurx/pulls/179) closes durable offline one-shot recovery/result identity, exact-claim and cache publication, crash-before-install rehome, software-survivor binding, replicated disable, and legacy-worker fencing at `990bf334`. PR #203 makes automatic recovery an immediate operator switch instead of a contract-qualified action gate |
+| M8 · fleet qualification and promotion | Promotion complete; evidence continues | Post-merge CI is under watch. Physical hardware capture and the three-client measured replacement receipt remain evidence work |
 
 ## M2 working tree — one plan names and builds the attempt
 
@@ -2974,7 +2978,7 @@ enable path: no matching contract meant no grammar, no fault sink, and no
 automatic recovery. That contradicted the effort requirement that readiness
 must advise rather than gate an operator's choice.
 
-Draft #203 corrects the separation:
+PR #203 corrected the separation:
 
 - `playback.automatic_decoder_recovery` is a direct Settings → Developer
   checkbox. It is off by default, persists in the Store, applies immediately,

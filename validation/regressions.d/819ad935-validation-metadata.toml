@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["819ad935"]
+reason = "This commit only rebases the bounded HEVC fixture evidence onto current main, records the pull request on the streaming status page, and maps the preceding runtime correction; it does not change runtime or test behavior."
+ignore = true
