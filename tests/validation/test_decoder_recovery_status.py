@@ -55,7 +55,7 @@ M5C1_MERGED_HEAD = "67216de972c1e39f1ef6aefb2541cf542619cb0c"
 # a reader acts on, and a stale one sends a task branch at a tree that no
 # longer exists.
 MAIN_MERGED_HEAD = "08086371180ae9ae89063ec0946e42bb355a8d60"
-M7_REMAINDER_TASK_BASE = "0c831b88"
+PROMOTION_TASK_BASE = "990bf334"
 CORE_INVENTORY = ROOT / "crates/plurx-core/src/transcode/decoder_inventory.rs"
 CORE_STORE = ROOT / "crates/plurx-core/src/store/mod.rs"
 SQLITE_CACHE = ROOT / "crates/plurx-core/src/store/sqlite/cache.rs"
@@ -232,7 +232,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
     def test_current_base_and_receipt_state_cannot_be_confused_with_history(self) -> None:
         self.assertIn(FORGEJO_MAIN_LINEAGE, self.status)
         self.assertIn(
-            f"Task base | Effort head `{M7_REMAINDER_TASK_BASE}`", self.flat_status
+            f"Task base | Effort head `{PROMOTION_TASK_BASE}`", self.flat_status
         )
         # Each merged head is named, not only the pull request that carried it.
         self.assertIn(M3C1_MERGED_HEAD[:8], self.status)
@@ -370,8 +370,8 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
 
         self.assertIn(
             "M0–M5 complete · M6 server/client implementation landed · M7 "
-            "remainder review fixes focused-validated · promotion follows M7 smoke "
-            "evidence · broader fleet qualification continues after merge",
+            "complete · frozen promotion candidate integrated with current `main` · "
+            "broader fleet qualification continues after merge",
             self.flat_status,
         )
         self.assertIn("decoder-plan-v1-unqualified", self.status)
