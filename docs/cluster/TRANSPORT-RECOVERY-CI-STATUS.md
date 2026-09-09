@@ -1,6 +1,6 @@
 # Transport recovery CI — implementation status and evidence
 
-**Status:** qualifying M2 · **Owner:** Codex · **Updated:** 2026-09-08
+**Status:** building M3 · **Owner:** Codex · **Updated:** 2026-09-08
 
 Companion to
 [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md) (how this effort reaches
@@ -10,7 +10,7 @@ Companion to
 been built, reviewed, and proved. It is updated with each milestone so a green
 checkbox means retained evidence, not intent.
 
-## Current position — M1 is complete and the old campaign is paused
+## Current position — M2 is complete and the old campaign is paused
 
 The effort begins at remote `main`
 `9fcd151c98485707d2dc28195adf9c0c1e4a6d4c`, the same source reviewed by the
@@ -42,7 +42,7 @@ frozen.
 - [x] **M1 — independent role reports.** Typed plan, strict CLI, shared
   validation, compatible aliases, and canonical assembly pass focused tests
   and one real Linux warmup-plus-one smoke for each role.
-- [ ] **M2 — durable diagnostics.** Checkpoints, timings, failure classes,
+- [x] **M2 — durable diagnostics.** Checkpoints, timings, failure classes,
   cancellation, and owned-child cleanup evidence.
 - [ ] **M3 — split CI.** Independent voter and learner jobs, retained aggregate
   job ID, current-run artifacts, and exact receipt integration.
@@ -99,9 +99,13 @@ The node's 31 GiB `/tmp` tmpfs filled during the initial cold link. The exact
 source-only rerun used `/var/tmp`, which had 108 GiB available. This is runner
 capacity evidence, not a product or campaign failure.
 
-## M2 implementation — local checks complete, Linux acceptance running
+## M2 evidence — success and failure remain observable
 
-The common role runner now writes create-new `events.jsonl` and
+Commits `0d163adff4b50a40651c08d2813cfc7d81f11f83` and
+`df8b324fc07cf5b91103435c20544fb6c4b7b34f` were archived without repository
+metadata or credentials and built in a local Linux ARM64 container with the
+repository-pinned Rust 1.97.1 toolchain. The common role runner now writes
+create-new `events.jsonl` and
 `cycles.jsonl` journals plus an atomic terminal `summary.json` outside the
 temporary cluster root. Records include named phase and learner-admission
 subphase timings, every resource-sampling attempt, source and replacement
@@ -114,9 +118,28 @@ role, drop its in-flight protocol exchange, and enter a 30-second cleanup path
 that targets only registered PID/start-time identities. External cancellation
 suppresses the second role in the compatible paired wrapper; an ordinary role
 failure still does not. The pinned package check, formatting, Clippy with
-warnings denied, and 58 focused transport-recovery tests pass locally. M2
-remains open until both three-cycle Linux smokes and the deliberate bounded
-failure produce the retained evidence listed above.
+warnings denied, and 58 focused transport-recovery tests pass on macOS. The
+Linux suite contains one additional real-process SIGTERM regression and all 59
+tests pass.
+
+One shared execution ID, `m2-local-df8b324f`, completed a warmup and three
+measured cycles for both roles on the same 16-vCPU local Docker runner. Both
+role reports passed the offline schema and semantic validators:
+
+| Role | Total wall | Dominant phase median / max | Role SHA-256 | Summary SHA-256 |
+|---|---:|---|---|---|
+| Voter | 537,896 ms | snapshot purge 98,595 / 108,835 ms | `1ebc9dd51d1a76412a3b7e77fcba878b347d57dcebf6380c2d5dd2ad9f6b94dd` | `046eae8e7617d98c50eb60724a3579eecfb8f0c7ff62520c38958b9c23370b36` |
+| Learner | 753,120 ms | snapshot purge 150,621 / 169,163 ms | `431a3860a45e56a179e3d44a874370b5c6f79c6d631a4bd6ad67b449db54718d` | `cca687adb5199f1d8bda875535fef38d3434b9cc3133befc7d094b2fc110738e` |
+
+The learner summary also contains every named admission subphase. A separate
+one-second bounded run failed during `cluster_start` as
+`orchestration_timeout`, recorded cycle zero and zero completed cycles, and
+reaped all four registered processes within the 30-second budget with no
+survivors. Its terminal summary SHA-256 is
+`4c97661cd4aff2d59be3f4b56106536e75e9ee363db5fa01b61290f212e040e1`;
+no passing role report was published. That deliberate failure exposed an
+early-return path which initially skipped teardown; `df8b324f` fixes it and the
+evidence above comes from an exact-source rerun after the correction.
 
 ## Guardrails — this effort changes observability, not production transport
 
