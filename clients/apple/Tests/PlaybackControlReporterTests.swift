@@ -803,7 +803,7 @@ final class PlaybackControlReporterTests: XCTestCase {
         // the end exchange is allowed to follow.
         harness.enqueue([.failure(ControlTransportError(status: nil, code: nil))])
         let reporter = try XCTUnwrap(makeReporter(harness))
-        await reporter.finish(PlaybackControlCapture(
+        await reporter.finishAndWait(PlaybackControlCapture(
             snapshot: ending,
             intentGeneration: 0,
             owner: PlaybackControlCaptureOwner(
@@ -811,16 +811,24 @@ final class PlaybackControlReporterTests: XCTestCase {
             ),
             sourceRevision: 1
         ))
-        XCTAssertTrue(harness.awaitExchanges(3))
-        XCTAssertEqual(harness.requests[0].demand, .active)
+        let requests = harness.requests
+        let finalStatus = await reporter.status()
         XCTAssertGreaterThanOrEqual(
-            harness.requests[0].playbackRate,
+            requests.count,
+            3,
+            "finalization produced \(requests.count) request(s): \(requests.map(\.demand)); "
+                + "status: \(finalStatus); pacing: \(harness.pacingSleeps)"
+        )
+        guard requests.count >= 3 else { return }
+        XCTAssertEqual(requests[0].demand, .active)
+        XCTAssertGreaterThanOrEqual(
+            requests[0].playbackRate,
             PlaybackControlMapping.minimumActiveRate
         )
-        XCTAssertEqual(harness.requests[0].acknowledgement, committed)
-        XCTAssertEqual(harness.requests[1], harness.requests[0], "a dropped commit retries exactly")
-        XCTAssertEqual(harness.requests[2].demand, .end)
-        XCTAssertNil(harness.requests[2].acknowledgement)
+        XCTAssertEqual(requests[0].acknowledgement, committed)
+        XCTAssertEqual(requests[1], requests[0], "a dropped commit retries exactly")
+        XCTAssertEqual(requests[2].demand, .end)
+        XCTAssertNil(requests[2].acknowledgement)
         // An abort may end the session in the same breath.
         let harness2 = Harness()
         var aborting = snapshot(demand: .end)

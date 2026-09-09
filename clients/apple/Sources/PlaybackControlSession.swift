@@ -111,6 +111,13 @@ struct PlaybackControlTransport {
 @MainActor
 final class PlaybackControlSession {
     private var reporter: PlaybackControlReporter?
+    /// Detached reporters still completing their bounded final exchange.
+    ///
+    /// The player does not wait for them, but an owner of an injected
+    /// transport can call `endAndWait()` before invalidating that transport.
+    /// Entries remove themselves so ordinary reopen cycles do not retain a
+    /// history of completed tasks.
+    private var finalizations: [UUID: Task<Void, Never>] = [:]
     private var observe: (() -> PlayerControlObservation?)?
     private var activeGeneration: Int?
     /// How a value the reporter's actor produced reaches `@MainActor`.
@@ -480,7 +487,22 @@ final class PlaybackControlSession {
         observe = nil
         guard let reporter else { return }
         self.reporter = nil
-        Task { await reporter.finish(final) }
+        let id = UUID()
+        finalizations[id] = Task { [weak self] in
+            await reporter.finishAndWait(final)
+            self?.finalizations[id] = nil
+        }
+    }
+
+    /// End this session and join every reporter detached by this player.
+    ///
+    /// Normal player teardown uses `end()` and remains non-blocking. This is
+    /// the ownership boundary for injected transports whose lifetime is
+    /// shorter than the process-wide production session.
+    func endAndWait() async {
+        end()
+        let pending = Array(finalizations.values)
+        for task in pending { await task.value }
     }
 
     /// Read the player once, on the actor that owns it, and publish what the
