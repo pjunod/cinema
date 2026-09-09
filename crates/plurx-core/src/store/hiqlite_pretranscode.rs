@@ -905,8 +905,9 @@ impl PretranscodeJobStore for HiqliteAuthStore {
             (
                 "INSERT INTO transcode_cache_locations
                         (recipe_hash, node_id, storage_class, relative_dir, bytes, complete,
-                         manifest_digest, scrub_object_index, last_used_at, last_seen_at)
-                     SELECT $1, $2, 'local', $3, $4, 1, $5, 0, $6, $6 WHERE EXISTS (
+                         manifest_digest, scrub_object_index, publication_generation,
+                         last_used_at, last_seen_at)
+                     SELECT $1, $2, 'local', $3, $4, 1, $5, 0, 1, $6, $6 WHERE EXISTS (
                        SELECT 1 FROM pretranscode_jobs job
                        JOIN files file ON file.id = job.file_id
                         WHERE job.id = $7 AND job.state = 'running'
@@ -916,6 +917,7 @@ impl PretranscodeJobStore for HiqliteAuthStore {
                      ON CONFLICT(recipe_hash, node_id, storage_class) DO UPDATE SET
                         relative_dir = excluded.relative_dir, bytes = excluded.bytes,
                         complete = 1, manifest_digest = excluded.manifest_digest,
+                        publication_generation = transcode_cache_locations.publication_generation + 1,
                         scrub_object_index = 0,
                         last_seen_at = MAX(transcode_cache_locations.last_seen_at,
                                            excluded.last_seen_at)

@@ -136,6 +136,7 @@ impl TranscodeCacheStore for SqliteStore {
                 "UPDATE transcode_cache_locations
                  SET complete = 1, bytes = ?3,
                      manifest_digest = COALESCE(?4, manifest_digest),
+                     publication_generation = publication_generation + 1,
                      last_used_at = unixepoch(), last_seen_at = unixepoch()
                  WHERE recipe_hash = ?1 AND node_id = ?2 AND storage_class = 'local'",
                 params![hash, node, bytes, digest],

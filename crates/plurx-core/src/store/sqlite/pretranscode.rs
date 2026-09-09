@@ -645,12 +645,14 @@ impl PretranscodeJobStore for SqliteStore {
             let location_changed = tx.execute(
                 "INSERT INTO transcode_cache_locations
                     (recipe_hash, node_id, storage_class, relative_dir, bytes, complete,
-                     manifest_digest, scrub_object_index, last_used_at, last_seen_at)
-                 VALUES (?1, ?2, 'local', ?3, ?4, 1, ?6, 0, ?5, ?5)
+                     manifest_digest, scrub_object_index, publication_generation,
+                     last_used_at, last_seen_at)
+                 VALUES (?1, ?2, 'local', ?3, ?4, 1, ?6, 0, 1, ?5, ?5)
                  ON CONFLICT(recipe_hash, node_id, storage_class) DO UPDATE SET
                     relative_dir = excluded.relative_dir,
                     bytes = excluded.bytes,
                     complete = 1,
+                    publication_generation = transcode_cache_locations.publication_generation + 1,
                     manifest_digest = excluded.manifest_digest,
                     scrub_object_index = 0,
                     last_seen_at = excluded.last_seen_at

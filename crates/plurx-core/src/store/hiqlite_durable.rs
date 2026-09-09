@@ -73,12 +73,27 @@ CREATE TABLE IF NOT EXISTS transcode_cache_locations (
     complete      INTEGER NOT NULL,
     manifest_digest TEXT,
     scrub_object_index INTEGER NOT NULL DEFAULT 0,
+    publication_generation INTEGER NOT NULL DEFAULT 0 CHECK (publication_generation >= 0),
     last_used_at  INTEGER NOT NULL,
     last_seen_at  INTEGER NOT NULL,
     PRIMARY KEY (recipe_hash, node_id, storage_class)
 ) STRICT;
 CREATE INDEX IF NOT EXISTS transcode_cache_lru
     ON transcode_cache_locations(node_id, complete, last_used_at);
+CREATE TRIGGER IF NOT EXISTS cache_publication_generation_guard
+    BEFORE UPDATE OF complete, bytes, manifest_digest, relative_dir, storage_id,
+                     generation_id, publication_generation
+    ON transcode_cache_locations
+    WHEN NEW.complete = 1
+         AND (OLD.complete != 1 OR NEW.bytes != OLD.bytes
+              OR NEW.manifest_digest IS NOT OLD.manifest_digest
+              OR NEW.relative_dir != OLD.relative_dir
+              OR NEW.storage_id != OLD.storage_id
+              OR NEW.generation_id != OLD.generation_id)
+         AND NEW.publication_generation != OLD.publication_generation + 1
+    BEGIN
+        SELECT RAISE(ABORT, 'cache publication requires a current-generation writer');
+    END;
 
 CREATE TABLE IF NOT EXISTS offline_packages (
     id                TEXT PRIMARY KEY,
@@ -167,6 +182,21 @@ CREATE TRIGGER IF NOT EXISTS offline_recovery_guard
                      AND NEW.recipe_hash != NEW.alternate_recipe_hash)))
     BEGIN
         SELECT RAISE(ABORT, 'invalid offline decoder recovery transition');
+    END;
+CREATE TRIGGER IF NOT EXISTS offline_claim_lifecycle_guard
+    BEFORE UPDATE OF state, claim_generation ON offline_packages
+    WHEN (OLD.state = 'queued' AND NEW.state = 'preparing'
+            AND (NEW.claim_generation != OLD.claim_generation + 1
+                 OR COALESCE((SELECT value FROM settings
+                              WHERE key = 'offline.enabled'), '1')
+                    IN ('0', 'false', 'off', 'no')))
+      OR (OLD.state = 'queued' AND NEW.state = 'ready')
+      OR (OLD.state = 'preparing' AND NEW.state IN ('queued', 'ready', 'failed')
+            AND NEW.claim_generation != OLD.claim_generation + 1)
+      OR (OLD.state IN ('queued', 'preparing') AND NEW.node_id != OLD.node_id
+            AND NEW.claim_generation != OLD.claim_generation + 1)
+    BEGIN
+        SELECT RAISE(ABORT, 'invalid offline claim lifecycle transition');
     END;
 
 CREATE TABLE IF NOT EXISTS offline_package_leases (
@@ -911,6 +941,7 @@ impl TranscodeCacheStore for HiqliteAuthStore {
         self.execute(
             "UPDATE transcode_cache_locations SET complete = 1, bytes = $1, \
                  manifest_digest = COALESCE($2, manifest_digest), \
+                 publication_generation = publication_generation + 1, \
                  last_used_at = MAX(last_used_at, $3), last_seen_at = MAX(last_seen_at, $3) \
              WHERE recipe_hash = $4 AND node_id = $5 AND storage_class = 'local'",
             params!(
@@ -1965,10 +1996,41 @@ impl OfflinePackageStore for HiqliteAuthStore {
         Ok(self
             .execute(
                 "UPDATE offline_packages SET state = 'queued', phase = 'waiting_for_encoder', \
+                 claim_generation = claim_generation + 1, \
                  updated_at = $1 WHERE node_id = $2 AND state = 'preparing'",
                 params!(now, node_id),
             )
             .await? as u64)
+    }
+
+    async fn disable_offline_packages(&self) -> Result<u64, StoreError> {
+        let now = self.now()?;
+        let statements = [
+            (
+                "INSERT INTO settings (key, value, updated_at)
+                 VALUES ('offline.enabled', '0', $1)
+                 ON CONFLICT(key) DO UPDATE SET value = '0', updated_at = $1"
+                    .to_owned(),
+                params!(now),
+            ),
+            (
+                "UPDATE offline_packages SET state = 'queued',
+                    phase = 'waiting_for_encoder', progress_millis = 0,
+                    claim_generation = claim_generation + 1, updated_at = $1
+                 WHERE state = 'preparing'"
+                    .to_owned(),
+                params!(now),
+            ),
+        ];
+        let results = self
+            .client()
+            .txn(statements)
+            .await
+            .map_err(database_error)?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        Ok(results.get(1).copied().unwrap_or(0) as u64)
     }
 
     async fn claim_next_offline_package(
@@ -1981,6 +2043,9 @@ impl OfflinePackageStore for HiqliteAuthStore {
                      updated_at = $1 \
                  WHERE id = (SELECT candidate.id FROM offline_packages candidate \
                      WHERE candidate.node_id = $2 AND candidate.state = 'queued' \
+                       AND COALESCE((SELECT value FROM settings \
+                                     WHERE key = 'offline.enabled'), '1') \
+                           NOT IN ('0', 'false', 'off', 'no') \
                      ORDER BY (SELECT COUNT(*) FROM offline_packages served \
                                WHERE served.node_id = candidate.node_id \
                                  AND served.user_id = candidate.user_id \
@@ -2017,6 +2082,7 @@ impl OfflinePackageStore for HiqliteAuthStore {
         Ok(self
             .execute(
                 "UPDATE offline_packages SET state = 'queued', phase = 'waiting_for_encoder', \
+                 claim_generation = claim_generation + 1, \
                  updated_at = $1 WHERE id = $2 AND node_id = $3 \
                    AND claim_generation = $4 AND state = 'preparing'",
                 params!(now, package_id, node_id, claim_generation),
@@ -2139,6 +2205,7 @@ impl OfflinePackageStore for HiqliteAuthStore {
             .execute(
                 "UPDATE transcode_cache_locations SET complete = 1, bytes = $1, \
                     manifest_digest = COALESCE($2, manifest_digest), \
+                    publication_generation = publication_generation + 1, \
                     last_used_at = MAX(last_used_at, $3), \
                     last_seen_at = MAX(last_seen_at, $3) \
                  WHERE recipe_hash = $4 AND node_id = $5 \
@@ -2201,7 +2268,7 @@ impl OfflinePackageStore for HiqliteAuthStore {
         Ok(self
             .execute(
                 "UPDATE offline_packages SET state = 'failed', phase = $1, error_code = $2, \
-                 error_message = $3, updated_at = $4 \
+                 error_message = $3, claim_generation = claim_generation + 1, updated_at = $4 \
                  WHERE id = $5 AND node_id = $6 AND claim_generation = $7 \
                    AND state = 'preparing'",
                 params!(
@@ -2488,6 +2555,7 @@ impl OfflinePackageStore for HiqliteAuthStore {
                 "UPDATE offline_packages SET state = 'ready', phase = 'ready', \
                  progress_millis = 1000, recipe_hash = $1, actual_bytes = $2, \
                  duration_ms = $3, error_code = NULL, error_message = NULL, \
+                 claim_generation = claim_generation + 1, \
                  updated_at = $4, last_access_at = $4 \
                  WHERE id = $5 AND node_id = $6 AND claim_generation = $7 \
                    AND state = 'preparing' AND recipe_hash = $1"
@@ -2799,6 +2867,7 @@ impl OfflinePackageStore for HiqliteAuthStore {
                 Some(target) => statements.push((
                     "UPDATE offline_packages SET node_id = $1, state = 'queued', \
                      phase = 'waiting_for_encoder', recipe_hash = NULL, \
+                     claim_generation = claim_generation + 1, \
                      decoder_recovery_state = CASE \
                          WHEN decoder_recovery_state IN ('recovery_pending', 'alternate') \
                          THEN 'rehome_pending' ELSE decoder_recovery_state END, \
@@ -2819,7 +2888,8 @@ impl OfflinePackageStore for HiqliteAuthStore {
                 None => statements.push((
                     "UPDATE offline_packages SET state = 'failed', phase = 'node_removed', \
                      error_code = $1, error_message = $2, reserved_bytes = 0, \
-                     actual_bytes = NULL, updated_at = $3 \
+                     actual_bytes = NULL, claim_generation = claim_generation + 1, \
+                     updated_at = $3 \
                      WHERE id = $4 AND node_id = $5 \
                        AND state IN ('queued', 'preparing', 'ready')",
                     params!(

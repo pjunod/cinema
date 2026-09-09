@@ -1018,6 +1018,38 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         CHECK (decoder_recovery_state IN
             ('primary', 'recovery_pending', 'rehome_pending', 'alternate'));
      ALTER TABLE offline_packages ADD COLUMN alternate_recipe_hash TEXT;
+     ALTER TABLE transcode_cache_locations
+        ADD COLUMN publication_generation INTEGER NOT NULL DEFAULT 0
+        CHECK (publication_generation >= 0);
+     CREATE TRIGGER cache_publication_generation_guard
+        BEFORE UPDATE OF complete, bytes, manifest_digest, relative_dir, storage_id,
+                         generation_id, publication_generation
+        ON transcode_cache_locations
+        WHEN NEW.complete = 1
+             AND (OLD.complete != 1 OR NEW.bytes != OLD.bytes
+                  OR NEW.manifest_digest IS NOT OLD.manifest_digest
+                  OR NEW.relative_dir != OLD.relative_dir
+                  OR NEW.storage_id != OLD.storage_id
+                  OR NEW.generation_id != OLD.generation_id)
+             AND NEW.publication_generation != OLD.publication_generation + 1
+        BEGIN
+            SELECT RAISE(ABORT, 'cache publication requires a current-generation writer');
+        END;
+     CREATE TRIGGER offline_claim_lifecycle_guard
+        BEFORE UPDATE OF state, claim_generation ON offline_packages
+        WHEN (OLD.state = 'queued' AND NEW.state = 'preparing'
+                AND (NEW.claim_generation != OLD.claim_generation + 1
+                     OR COALESCE((SELECT value FROM settings
+                                  WHERE key = 'offline.enabled'), '1')
+                        IN ('0', 'false', 'off', 'no')))
+          OR (OLD.state = 'queued' AND NEW.state = 'ready')
+          OR (OLD.state = 'preparing' AND NEW.state IN ('queued', 'ready', 'failed')
+                AND NEW.claim_generation != OLD.claim_generation + 1)
+          OR (OLD.state IN ('queued', 'preparing') AND NEW.node_id != OLD.node_id
+                AND NEW.claim_generation != OLD.claim_generation + 1)
+        BEGIN
+            SELECT RAISE(ABORT, 'invalid offline claim lifecycle transition');
+        END;
      CREATE TRIGGER offline_recovery_guard
         BEFORE UPDATE OF recipe_hash, decoder_recovery_state, alternate_recipe_hash
         ON offline_packages
@@ -3507,6 +3539,121 @@ mod tests {
             )
             .expect("lease indexes");
         assert!(package_id_unique > 0, "one stable lease per package");
+    }
+
+    #[test]
+    fn v52_migration_rejects_legacy_offline_claim_and_publication_sql() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("plurx.db");
+        {
+            let conn = Connection::open(&db).expect("raw v51 open");
+            for (index, sql) in MIGRATIONS.iter().enumerate().take(51) {
+                conn.execute_batch(&format!("BEGIN;\n{sql}\nCOMMIT;"))
+                    .unwrap_or_else(|error| panic!("v{}: {error}", index + 1));
+            }
+            conn.pragma_update(None, "user_version", 51)
+                .expect("v51 marker");
+            conn.execute(
+                "INSERT INTO users (id, username, password_hash, is_admin)
+                 VALUES (1, 'legacy-offline', 'hash', 1)",
+                [],
+            )
+            .expect("seed user");
+            conn.execute_batch(
+                "INSERT INTO libraries (id, name, kind, paths, anime)
+                    VALUES (1, 'Legacy offline', 'movies', '[]', 0);
+                 INSERT INTO items (id, library_id, kind, title, sort_title)
+                    VALUES (42, 1, 'movie', 'Legacy offline', 'legacy offline');
+                 INSERT INTO files (id, item_id, path, size, mtime)
+                    VALUES (42, 42, '/media/legacy.mkv', 100, 1);",
+            )
+            .expect("seed cache recipe parents");
+            conn.execute(
+                "INSERT INTO offline_packages
+                    (id, request_id, user_id, file_id, node_id, source_path,
+                     source_size, source_mtime, target_height, subtitle_mode,
+                     state, phase, estimated_bytes, reserved_bytes, expires_at)
+                 VALUES ('legacy-package', 'legacy-request', 1, 42, 'legacy-node',
+                         '/media/legacy.mkv', 100, 1, 720, 'none', 'queued',
+                         'waiting_for_encoder', 50, 50, 999999)",
+                [],
+            )
+            .expect("seed v51 package");
+            conn.execute(
+                "INSERT INTO transcode_cache_recipes (recipe_hash, file_id, recipe_version)
+                 VALUES ('legacy-recipe', 42, 1)",
+                [],
+            )
+            .expect("seed recipe");
+            conn.execute(
+                "INSERT INTO transcode_cache_locations
+                    (recipe_hash, node_id, storage_class, relative_dir, bytes, complete)
+                 VALUES ('legacy-recipe', 'legacy-node', 'local', 'legacy-recipe', 0, 0)",
+                [],
+            )
+            .expect("seed incomplete cache location");
+        }
+
+        SqliteStore::open(&db).expect("migrate v51 through offline fences");
+        let conn = Connection::open(&db).expect("raw current reopen");
+        assert!(conn
+            .execute(
+                "UPDATE offline_packages SET state = 'preparing'
+                 WHERE id = 'legacy-package' AND state = 'queued'",
+                [],
+            )
+            .is_err());
+        conn.execute(
+            "UPDATE offline_packages
+             SET state = 'preparing', claim_generation = claim_generation + 1
+             WHERE id = 'legacy-package' AND state = 'queued'",
+            [],
+        )
+        .expect("current claim shape");
+        assert!(conn
+            .execute(
+                "UPDATE offline_packages SET state = 'queued'
+                 WHERE id = 'legacy-package' AND state = 'preparing'",
+                [],
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "UPDATE offline_packages SET state = 'ready', recipe_hash = 'legacy-recipe'
+                 WHERE id = 'legacy-package'",
+                [],
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "UPDATE offline_packages SET state = 'failed'
+                 WHERE id = 'legacy-package'",
+                [],
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "UPDATE transcode_cache_locations
+                 SET complete = 1, bytes = 100
+                 WHERE recipe_hash = 'legacy-recipe' AND node_id = 'legacy-node'",
+                [],
+            )
+            .is_err());
+        conn.execute(
+            "UPDATE transcode_cache_locations
+             SET complete = 1, bytes = 100,
+                 publication_generation = publication_generation + 1
+             WHERE recipe_hash = 'legacy-recipe' AND node_id = 'legacy-node'",
+            [],
+        )
+        .expect("current cache publication shape");
+        assert!(conn
+            .execute(
+                "UPDATE transcode_cache_locations SET bytes = 101
+                 WHERE recipe_hash = 'legacy-recipe' AND node_id = 'legacy-node'",
+                [],
+            )
+            .is_err());
     }
 
     #[tokio::test]

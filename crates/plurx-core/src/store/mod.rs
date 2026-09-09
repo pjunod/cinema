@@ -188,6 +188,40 @@ pub(crate) const OFFLINE_RECOVERY_STATE_SCHEMA: &str = "ALTER TABLE offline_pack
             ('primary', 'recovery_pending', 'rehome_pending', 'alternate'))";
 pub(crate) const OFFLINE_ALTERNATE_RECIPE_SCHEMA: &str = "ALTER TABLE offline_packages
         ADD COLUMN alternate_recipe_hash TEXT";
+pub(crate) const CACHE_PUBLICATION_GENERATION_SCHEMA: &str = "ALTER TABLE transcode_cache_locations
+        ADD COLUMN publication_generation INTEGER NOT NULL DEFAULT 0
+        CHECK (publication_generation >= 0)";
+pub(crate) const CACHE_PUBLICATION_GENERATION_GUARD_SCHEMA: &str =
+    "CREATE TRIGGER cache_publication_generation_guard
+    BEFORE UPDATE OF complete, bytes, manifest_digest, relative_dir, storage_id,
+                     generation_id, publication_generation
+    ON transcode_cache_locations
+    WHEN NEW.complete = 1
+         AND (OLD.complete != 1 OR NEW.bytes != OLD.bytes
+              OR NEW.manifest_digest IS NOT OLD.manifest_digest
+              OR NEW.relative_dir != OLD.relative_dir
+              OR NEW.storage_id != OLD.storage_id
+              OR NEW.generation_id != OLD.generation_id)
+         AND NEW.publication_generation != OLD.publication_generation + 1
+    BEGIN
+        SELECT RAISE(ABORT, 'cache publication requires a current-generation writer');
+    END";
+pub(crate) const OFFLINE_CLAIM_LIFECYCLE_GUARD_SCHEMA: &str =
+    "CREATE TRIGGER offline_claim_lifecycle_guard
+    BEFORE UPDATE OF state, claim_generation ON offline_packages
+    WHEN (OLD.state = 'queued' AND NEW.state = 'preparing'
+            AND (NEW.claim_generation != OLD.claim_generation + 1
+                 OR COALESCE((SELECT value FROM settings
+                              WHERE key = 'offline.enabled'), '1')
+                    IN ('0', 'false', 'off', 'no')))
+      OR (OLD.state = 'queued' AND NEW.state = 'ready')
+      OR (OLD.state = 'preparing' AND NEW.state IN ('queued', 'ready', 'failed')
+            AND NEW.claim_generation != OLD.claim_generation + 1)
+      OR (OLD.state IN ('queued', 'preparing') AND NEW.node_id != OLD.node_id
+            AND NEW.claim_generation != OLD.claim_generation + 1)
+    BEGIN
+        SELECT RAISE(ABORT, 'invalid offline claim lifecycle transition');
+    END";
 pub(crate) const OFFLINE_RECOVERY_GUARD_SCHEMA: &str = "CREATE TRIGGER offline_recovery_guard
     BEFORE UPDATE OF recipe_hash, decoder_recovery_state, alternate_recipe_hash
     ON offline_packages
@@ -2879,6 +2913,11 @@ pub trait OfflinePackageStore: Send + Sync + 'static {
     ) -> Result<OfflinePackageStats, StoreError>;
 
     async fn reset_interrupted_offline_packages(&self, node_id: &str) -> Result<u64, StoreError>;
+
+    /// Atomically turn offline production off and stale every cluster-wide
+    /// preparation claim. Once this returns, no old generation may publish
+    /// and no node may claim another package until the setting is enabled.
+    async fn disable_offline_packages(&self) -> Result<u64, StoreError>;
 
     async fn claim_next_offline_package(
         &self,

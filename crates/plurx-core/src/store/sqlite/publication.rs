@@ -346,6 +346,7 @@ impl FencedPublicationStore for SqliteStore {
                 "UPDATE transcode_cache_locations
                  SET relative_dir = ?3, complete = 1, bytes = ?4,
                      manifest_digest = COALESCE(?5, manifest_digest),
+                     publication_generation = publication_generation + 1,
                      last_used_at = unixepoch(), last_seen_at = unixepoch()
                  WHERE recipe_hash = ?1 AND node_id = ?2 AND storage_class = 'local'",
                 params![hash, node, relative_dir, bytes, digest],

@@ -356,7 +356,6 @@ pub struct OfflineManager {
 
 #[derive(Clone)]
 struct ActivePreparation {
-    claim_generation: i64,
     cancelled: tokio_util::sync::CancellationToken,
 }
 
@@ -509,7 +508,6 @@ impl OfflineManager {
             self.active.lock().await.insert(
                 package.id.clone(),
                 ActivePreparation {
-                    claim_generation: package.claim_generation,
                     cancelled: cancelled.clone(),
                 },
             );
@@ -529,6 +527,18 @@ impl OfflineManager {
     }
 
     async fn fence_and_cancel_all(&self) -> Result<(), StoreError> {
+        #[cfg(test)]
+        if self
+            .fail_next_cancel_requeue
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(StoreError::Database(
+                "injected offline cancellation fence failure".to_owned(),
+            ));
+        }
+        // This replicated transaction is the linearization point for every
+        // voter, not merely this process's active-worker map.
+        self.store.disable_offline_packages().await?;
         let active = self
             .active
             .lock()
@@ -536,38 +546,10 @@ impl OfflineManager {
             .iter()
             .map(|(id, active)| (id.clone(), active.clone()))
             .collect::<Vec<_>>();
-        let mut first_error = None;
-        for (package_id, active) in active {
-            #[cfg(test)]
-            let requeued = if self
-                .fail_next_cancel_requeue
-                .swap(false, std::sync::atomic::Ordering::SeqCst)
-            {
-                Err(StoreError::Database(
-                    "injected offline cancellation requeue failure".to_owned(),
-                ))
-            } else {
-                self.store
-                    .requeue_offline_package(&package_id, &self.node_id, active.claim_generation)
-                    .await
-            };
-            #[cfg(not(test))]
-            let requeued = self
-                .store
-                .requeue_offline_package(&package_id, &self.node_id, active.claim_generation)
-                .await;
-
-            match requeued {
-                Ok(_) => active.cancelled.cancel(),
-                Err(error) => {
-                    tracing::warn!(package = package_id, %error, "could not durably fence disabled offline preparation");
-                    if first_error.is_none() {
-                        first_error = Some(error);
-                    }
-                }
-            }
+        for (_package_id, active) in active {
+            active.cancelled.cancel();
         }
-        first_error.map_or(Ok(()), Err)
+        Ok(())
     }
 
     /// Stop every producer only after its exact claim is durably stale.
@@ -583,8 +565,7 @@ impl OfflineManager {
     /// Linearize the offline kill switch with claim registration.
     pub async fn disable(&self) -> Result<(), StoreError> {
         let _activation = self.activation.lock().await;
-        self.fence_and_cancel_all().await?;
-        self.store.put_setting(keys::OFFLINE_ENABLED, "0").await
+        self.fence_and_cancel_all().await
     }
 
     #[cfg(test)]
@@ -1278,14 +1259,12 @@ mod tests {
         fixture.manager.active.lock().await.insert(
             "first".into(),
             ActivePreparation {
-                claim_generation: 1,
                 cancelled: first.clone(),
             },
         );
         fixture.manager.active.lock().await.insert(
             "second".into(),
             ActivePreparation {
-                claim_generation: 1,
                 cancelled: second.clone(),
             },
         );
@@ -1307,7 +1286,6 @@ mod tests {
         fixture.manager.active.lock().await.insert(
             package.id.clone(),
             ActivePreparation {
-                claim_generation: package.claim_generation,
                 cancelled: cancelled.clone(),
             },
         );

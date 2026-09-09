@@ -1239,6 +1239,7 @@ impl FencedPublicationStore for HiqliteAuthStore {
                 "UPDATE transcode_cache_locations
                  SET relative_dir = $1, complete = 1, bytes = $2,
                      manifest_digest = COALESCE($3, manifest_digest),
+                     publication_generation = publication_generation + 1,
                      last_used_at = MAX(last_used_at, $4),
                      last_seen_at = MAX(last_seen_at, $4)
                  WHERE recipe_hash = $5 AND node_id = $6 AND storage_class = 'local'

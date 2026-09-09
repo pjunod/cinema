@@ -11005,9 +11005,13 @@ async fn replicated_v26_store_migrates_attempt_errors_on_daemon_open() {
 /// v24 test constructing a v25 one, each then failing on the migration it was
 /// supposed to be proving.
 const V23_SCHEMA_VERSION: i64 = 23;
+#[cfg(feature = "hiqlite-contract-tests")]
 const V24_SCHEMA_VERSION: i64 = 24;
+#[cfg(feature = "hiqlite-contract-tests")]
 const V25_SCHEMA_VERSION: i64 = 25;
+#[cfg(feature = "hiqlite-contract-tests")]
 const V26_SCHEMA_VERSION: i64 = 26;
+#[cfg(feature = "hiqlite-contract-tests")]
 const V27_SCHEMA_VERSION: i64 = 27;
 
 #[cfg(feature = "hiqlite-contract-tests")]
@@ -26381,6 +26385,116 @@ async fn offline_package_contract_runs_through_dyn_store() {
                 .expect("delete"),
             "backend {backend}"
         );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn offline_disable_is_a_cluster_wide_claim_and_publication_fence() {
+    for_each_backend(|store, backend| async move {
+        let (user_id, file_id) = seed_file(&store, "offline-disable-contract").await;
+        store
+            .put_setting("offline.enabled", "1")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enable offline work: {error}"));
+
+        let mut node_a = offline_request("disable-a", "disable-request-a", user_id, file_id);
+        node_a.node_id = "disable-node-a".into();
+        let mut node_b = offline_request("disable-b", "disable-request-b", user_id, file_id);
+        node_b.node_id = "disable-node-b".into();
+        for package in [&node_a, &node_b] {
+            assert!(matches!(
+                store
+                    .create_offline_package(package, 10, 100_000, 100_000)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: create disable fixture: {error}")),
+                OfflineCreateOutcome::Created(_)
+            ));
+        }
+
+        let claim_a = store
+            .claim_next_offline_package("disable-node-a")
+            .await
+            .expect("claim node A")
+            .expect("node A package");
+        let claim_b = store
+            .claim_next_offline_package("disable-node-b")
+            .await
+            .expect("claim node B")
+            .expect("node B package");
+        for (package, claim, recipe) in [
+            (&node_a, &claim_a, "disable-recipe-a"),
+            (&node_b, &claim_b, "disable-recipe-b"),
+        ] {
+            assert!(store
+                .set_offline_package_recipe(
+                    &package.id,
+                    &package.node_id,
+                    claim.claim_generation,
+                    recipe,
+                )
+                .await
+                .expect("bind disable fixture recipe"));
+            assert!(store
+                .claim_cache_entry(recipe, file_id, 1, &package.node_id, recipe)
+                .await
+                .expect("claim disable fixture cache"));
+        }
+
+        assert_eq!(
+            store
+                .disable_offline_packages()
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: disable transaction: {error}")),
+            2,
+            "{backend}: every node's active claim must be fenced"
+        );
+        assert_eq!(
+            store
+                .get_setting("offline.enabled")
+                .await
+                .expect("read disabled setting")
+                .as_deref(),
+            Some("0")
+        );
+        assert!(store
+            .claim_next_offline_package("disable-node-b")
+            .await
+            .expect("disabled claim lookup")
+            .is_none());
+        assert!(!store
+            .complete_offline_cache_entry(
+                &node_b.id,
+                &node_b.node_id,
+                claim_b.claim_generation,
+                "disable-recipe-b",
+                99,
+                Some("stale-disable-manifest"),
+            )
+            .await
+            .expect("reject remote stale cache publication"));
+        assert!(!store
+            .mark_offline_package_ready(
+                &node_b.id,
+                &node_b.node_id,
+                claim_b.claim_generation,
+                "disable-recipe-b",
+                99,
+                1_000,
+            )
+            .await
+            .expect("reject remote stale Ready"));
+
+        store
+            .put_setting("offline.enabled", "1")
+            .await
+            .expect("re-enable offline work");
+        let reclaimed_b = store
+            .claim_next_offline_package("disable-node-b")
+            .await
+            .expect("reclaim node B")
+            .expect("node B package after enable");
+        assert!(reclaimed_b.claim_generation > claim_b.claim_generation);
     })
     .await;
 }

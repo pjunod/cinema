@@ -1031,6 +1031,7 @@ const TABLES: &[TablePlan] = &[
             "last_seen_at",
             "storage_id",
             "generation_id",
+            "publication_generation",
         ],
         order_by: "recipe_hash, node_id, storage_class",
         minimum_schema: 11,
@@ -2310,6 +2311,11 @@ fn value_projection(table: TablePlan, schema_version: i64, qualify: bool) -> Str
                 } else {
                     "relative_dir".to_owned()
                 }
+            } else if table.name == "transcode_cache_locations"
+                && *column == "publication_generation"
+                && schema_version < 52
+            {
+                "0".to_owned()
             } else if qualify {
                 format!("source.{column}")
             } else {

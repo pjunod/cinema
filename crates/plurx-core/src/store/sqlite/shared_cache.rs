@@ -252,6 +252,7 @@ impl SharedCacheStore for SqliteStore {
             let changed = tx.execute(
                 "UPDATE transcode_cache_locations
                     SET complete = 1, bytes = ?4, manifest_digest = ?5,
+                        publication_generation = publication_generation + 1,
                         last_seen_at = ?6
                   WHERE recipe_hash = ?1 AND storage_id = ?2
                     AND generation_id = ?3 AND storage_class = 'shared'

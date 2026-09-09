@@ -370,7 +370,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
 
         self.assertIn(
             "M0–M5 complete · M6 server/client implementation landed · M7 "
-            "remainder under adversarial repair · promotion follows M7 smoke "
+            "remainder review fixes focused-validated · promotion follows M7 smoke "
             "evidence · broader fleet qualification continues after merge",
             self.flat_status,
         )

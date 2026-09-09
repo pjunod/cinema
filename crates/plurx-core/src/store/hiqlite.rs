@@ -2257,6 +2257,18 @@ impl HiqliteAuthStore {
                             (super::OFFLINE_CLAIM_GENERATION_SCHEMA.to_owned(), params!()),
                             (super::OFFLINE_RECOVERY_STATE_SCHEMA.to_owned(), params!()),
                             (super::OFFLINE_ALTERNATE_RECIPE_SCHEMA.to_owned(), params!()),
+                            (
+                                super::CACHE_PUBLICATION_GENERATION_SCHEMA.to_owned(),
+                                params!(),
+                            ),
+                            (
+                                super::CACHE_PUBLICATION_GENERATION_GUARD_SCHEMA.to_owned(),
+                                params!(),
+                            ),
+                            (
+                                super::OFFLINE_CLAIM_LIFECYCLE_GUARD_SCHEMA.to_owned(),
+                                params!(),
+                            ),
                             (super::OFFLINE_RECOVERY_GUARD_SCHEMA.to_owned(), params!()),
                             (
                                 "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \

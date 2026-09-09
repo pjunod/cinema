@@ -428,10 +428,33 @@ impl OfflinePackageStore for SqliteStore {
         self.with_conn(move |conn| {
             Ok(conn.execute(
                 "UPDATE offline_packages SET state = 'queued', \
-                 phase = 'waiting_for_encoder', updated_at = unixepoch() \
+                 phase = 'waiting_for_encoder', claim_generation = claim_generation + 1, \
+                 updated_at = unixepoch() \
                  WHERE node_id = ?1 AND state = 'preparing'",
                 [node],
             )? as u64)
+        })
+        .await
+    }
+
+    async fn disable_offline_packages(&self) -> Result<u64, StoreError> {
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
+                "INSERT INTO settings (key, value, updated_at)
+                 VALUES ('offline.enabled', '0', unixepoch())
+                 ON CONFLICT(key) DO UPDATE SET value = '0', updated_at = unixepoch()",
+                [],
+            )?;
+            let fenced = tx.execute(
+                "UPDATE offline_packages SET state = 'queued',
+                    phase = 'waiting_for_encoder', progress_millis = 0,
+                    claim_generation = claim_generation + 1, updated_at = unixepoch()
+                 WHERE state = 'preparing'",
+                [],
+            )? as u64;
+            tx.commit()?;
+            Ok(fenced)
         })
         .await
     }
@@ -447,6 +470,9 @@ impl OfflinePackageStore for SqliteStore {
                 .query_row(
                     "SELECT candidate.id FROM offline_packages candidate \
                      WHERE candidate.node_id = ?1 AND candidate.state = 'queued' \
+                       AND COALESCE((SELECT value FROM settings \
+                                     WHERE key = 'offline.enabled'), '1') \
+                           NOT IN ('0', 'false', 'off', 'no') \
                      ORDER BY (SELECT COUNT(*) FROM offline_packages served \
                                WHERE served.node_id = candidate.node_id \
                                  AND served.user_id = candidate.user_id \
@@ -488,7 +514,8 @@ impl OfflinePackageStore for SqliteStore {
         self.with_conn(move |conn| {
             Ok(conn.execute(
                 "UPDATE offline_packages SET state = 'queued', \
-                 phase = 'waiting_for_encoder', updated_at = unixepoch() \
+                 phase = 'waiting_for_encoder', claim_generation = claim_generation + 1, \
+                 updated_at = unixepoch() \
                  WHERE id = ?1 AND node_id = ?2 AND claim_generation = ?3 \
                    AND state = 'preparing'",
                 params![id, node, claim_generation],
@@ -621,6 +648,7 @@ impl OfflinePackageStore for SqliteStore {
                 "UPDATE transcode_cache_locations \
                  SET complete = 1, bytes = ?5, \
                      manifest_digest = COALESCE(?6, manifest_digest), \
+                     publication_generation = publication_generation + 1, \
                      last_used_at = unixepoch(), last_seen_at = unixepoch() \
                  WHERE recipe_hash = ?4 AND node_id = ?2 \
                    AND storage_class = 'local' \
@@ -680,7 +708,8 @@ impl OfflinePackageStore for SqliteStore {
         self.with_conn(move |conn| {
             Ok(conn.execute(
                 "UPDATE offline_packages SET state = 'failed', phase = ?3, \
-                 error_code = ?4, error_message = ?5, updated_at = unixepoch() \
+                 error_code = ?4, error_message = ?5, \
+                 claim_generation = claim_generation + 1, updated_at = unixepoch() \
                  WHERE id = ?1 AND node_id = ?2 AND claim_generation = ?6 \
                    AND state = 'preparing'",
                 params![id, node, phase, code, message, claim_generation],
@@ -895,6 +924,7 @@ impl OfflinePackageStore for SqliteStore {
                 "UPDATE offline_packages SET state = 'ready', phase = 'ready', \
                  progress_millis = 1000, recipe_hash = ?3, actual_bytes = ?4, \
                  duration_ms = ?5, error_code = NULL, error_message = NULL, \
+                 claim_generation = claim_generation + 1, \
                  updated_at = unixepoch(), last_access_at = unixepoch() \
                  WHERE id = ?1 AND node_id = ?2 AND claim_generation = ?6 \
                    AND state = 'preparing' AND recipe_hash = ?3",
@@ -1418,12 +1448,22 @@ mod tests {
                 .expect("claim")
                 .expect("queued package");
             owners.push(package.user_id);
+            let recipe = format!("recipe-{turn}");
+            assert!(store
+                .set_offline_package_recipe(
+                    &package.id,
+                    "node-a",
+                    package.claim_generation,
+                    &recipe,
+                )
+                .await
+                .expect("bind recipe"));
             assert!(store
                 .mark_offline_package_ready(
                     &package.id,
                     "node-a",
                     package.claim_generation,
-                    &format!("recipe-{turn}"),
+                    &recipe,
                     400,
                     90_000,
                 )

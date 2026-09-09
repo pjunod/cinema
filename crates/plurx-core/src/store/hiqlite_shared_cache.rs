@@ -315,7 +315,9 @@ impl SharedCacheStore for HiqliteAuthStore {
         let statements = vec![
             (
                 "UPDATE transcode_cache_locations
-                    SET complete = 1, bytes = $1, manifest_digest = $2, last_seen_at = $3
+                    SET complete = 1, bytes = $1, manifest_digest = $2,
+                        publication_generation = publication_generation + 1,
+                        last_seen_at = $3
                   WHERE recipe_hash = $4 AND storage_id = $5 AND generation_id = $6
                     AND storage_class = 'shared' AND complete = 0"
                     .to_owned(),
