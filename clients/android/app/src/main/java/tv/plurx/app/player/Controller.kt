@@ -1043,6 +1043,7 @@ class Controller(
         // Every read below this line is against a player that is about to be
         // released, so the observation is closed first.
         controlObservationIsClosed = true
+        preparedRollbackReopen = null
         collectRetiredPlayer()
         if (settling != null) {
             playbackControl.endAfterFinalExchange(vm.viewModelScope, settling)
@@ -2191,19 +2192,40 @@ class Controller(
      */
     private var awaitingCommitFrameSinceMs: Long? = null
 
+    /** Everything overwritten when a prepared successor becomes incumbent. */
+    private data class PreparedPredecessor(
+        val player: ExoPlayer,
+        val filmPositionMs: Long,
+        val progressiveMediaOrigin: ProgressiveMediaOrigin,
+        val baseMs: Long,
+        val sessionId: String?,
+        val activeMediaPath: String?,
+        val deliveredRange: String?,
+        val deliveredDolbyVisionProfile: Int?,
+        val encoder: String?,
+        val sessionStatus: PlaybackSessionStatus?,
+        val establishedPlayback: Boolean,
+    )
+
+    /** Retained until a real successor frame makes rollback unnecessary. */
+    private var preparedPredecessor: PreparedPredecessor? = null
+
+    /** Ordinary reopen to begin only after the surface has returned to A. */
+    private var preparedRollbackReopen: Pair<Long, String>? = null
+
     /**
-     * The predecessor, after a commit and before the surface has moved off it.
-     * Collected by [collectRetiredPlayer] the moment the view has re-pointed,
-     * or by [release], whichever comes first.
+     * The player the surface has moved off. During prepared handoff this is the
+     * predecessor and remains retained until first-frame proof. During rollback
+     * it becomes the frame-less successor and is collected once the surface is
+     * visibly back on the predecessor.
      */
     private var retiredPlayer: ExoPlayer? = null
 
     /**
      * When it was parked, so the watchdog can collect one the composition never
-     * came back for. A paused ExoPlayer still holds its renderers — only
-     * `release` frees them — so a predecessor left parked while the frame clock
-     * is stopped is a second live decoder on a device class measured as failing
-     * at two. The fast path stays the composition's; this is the backstop.
+     * came back for after commit or rollback. While first-frame proof is still
+     * outstanding, [collectRetiredPlayer] deliberately refuses: that bounded
+     * five-second window is the rollback authority, not a leaked decoder.
      */
     private var retiredParkedAtMs = 0L
 
@@ -2218,9 +2240,18 @@ class Controller(
      */
     fun collectRetiredPlayer() {
         val retired = retiredPlayer ?: return
+        if (awaitingCommitFrameSinceMs != null && preparedPredecessor?.player === retired) {
+            // The surface moved, but the successor has not proved a frame. A
+            // timeout must still be able to put this exact pipeline back.
+            return
+        }
         retiredPlayer = null
         retiredParkedAtMs = 0L
+        if (preparedPredecessor?.player === retired) preparedPredecessor = null
         retired.release()
+        val reopen = preparedRollbackReopen ?: return
+        preparedRollbackReopen = null
+        restartAt(reopen.first, reopen.second)
     }
 
     /**
@@ -2325,7 +2356,12 @@ class Controller(
         }
         awaitingCommitFrameSinceMs?.let { since ->
             if (monotonicNowMs() - since > PREPARED_COMMIT_FRAME_BOUND_MS) {
-                settleCommitOnFirstFrame(System.currentTimeMillis())
+                val restored = rollbackSwitchedReplacement()
+                failSwitchedReplacement()
+                if (!restored) {
+                    restartAt(realPosition(), "prepared successor rendered no frame")
+                }
+                return
             }
         }
         val successor = preparedPlayer ?: return
@@ -2347,7 +2383,8 @@ class Controller(
     }
 
     /**
-     * The successor takes the surface and the volume; the predecessor is gone.
+     * The successor takes the surface and the volume; the predecessor stays
+     * paused and recoverable until the successor proves a frame.
      *
      * The client decides when to switch — there is no `commit_replacement`
      * action and the server's answer on the settling exchange is `none`. What
@@ -2372,6 +2409,19 @@ class Controller(
         awaitingCommitFrameSinceMs = monotonicNowMs()
         val previous = player
         val previousVolume = previous.volume
+        val predecessor = PreparedPredecessor(
+            player = previous,
+            filmPositionMs = realPosition(),
+            progressiveMediaOrigin = progressiveMediaOrigin,
+            baseMs = baseMs,
+            sessionId = sessionId,
+            activeMediaPath = activeMediaPath,
+            deliveredRange = deliveredRange,
+            deliveredDolbyVisionProfile = deliveredDolbyVisionProfile,
+            encoder = encoder,
+            sessionStatus = sessionStatus,
+            establishedPlayback = establishedPlayback,
+        )
 
         successor.volume = previousVolume
         preparedOrigin?.let { progressiveMediaOrigin = it }
@@ -2440,15 +2490,15 @@ class Controller(
         previous.playWhenReady = false
         retiredParkedAtMs = monotonicNowMs()
         retiredPlayer = previous
+        preparedPredecessor = predecessor
         // The commit is owed a `first_frame_unix_ms`, and the honest source is
         // the successor's own first render — which cannot have happened yet,
         // because a prepared successor has no surface and a surfaceless player
         // renders nothing. So the acknowledgement waits for
         // `onRenderedFirstFrame` on the pipeline that is now the incumbent;
-        // [pollPreparedReplacement] sends it with the wall clock anyway if no
-        // frame arrives within [PREPARED_COMMIT_FRAME_BOUND_MS], because by
-        // then the switch has demonstrably happened and a late commit is worth
-        // more than a precise one.
+        // [pollPreparedReplacement] fails and takes the ordinary reopen if no
+        // frame arrives within [PREPARED_COMMIT_FRAME_BOUND_MS]. Only this
+        // callback may claim that a successor actually rendered.
     }
 
     /**
@@ -2459,6 +2509,57 @@ class Controller(
         if (awaitingCommitFrameSinceMs == null) return
         awaitingCommitFrameSinceMs = null
         publishAcknowledgement(preparedLedger.committed(firstFrameUnixMs))
+        // A rendered successor is now the last known-good picture, so the
+        // predecessor is no longer rollback authority and may release.
+        preparedPredecessor = null
+        collectRetiredPlayer()
+    }
+
+    /**
+     * Put the last proven player back before publishing failure.
+     *
+     * The ordinary reopen is deferred until [collectRetiredPlayer] observes
+     * the surface move. Starting it here would replace the predecessor's item
+     * while the view was still attached to the black successor, losing the
+     * exact frame this rollback exists to preserve.
+     */
+    private fun rollbackSwitchedReplacement(): Boolean {
+        val predecessor = preparedPredecessor ?: return false
+        if (retiredPlayer !== predecessor.player) return false
+        val failedSuccessor = player
+        val reopenAt = predecessor.filmPositionMs
+
+        failedSuccessor.removeListener(this.listener)
+        externalListeners.forEach { failedSuccessor.removeListener(it) }
+        predecessor.player.addListener(this.listener)
+        externalListeners.forEach { predecessor.player.addListener(it) }
+
+        progressiveMediaOrigin = predecessor.progressiveMediaOrigin
+        baseMs = predecessor.baseMs
+        sessionId = predecessor.sessionId
+        activeMediaPath = predecessor.activeMediaPath
+        deliveredRange = predecessor.deliveredRange
+        deliveredDolbyVisionProfile = predecessor.deliveredDolbyVisionProfile
+        encoder = predecessor.encoder
+        establishedPlayback = predecessor.establishedPlayback
+        predecessor.sessionId?.let(::startStatusPolling) ?: clearStatusPolling()
+        sessionStatus = predecessor.sessionStatus
+        predecessor.player.playWhenReady = playbackIntent.playbackRequested
+
+        preparedPredecessor = null
+        preparedRollbackReopen = reopenAt to "prepared successor rendered no frame"
+        retiredPlayer = failedSuccessor
+        retiredParkedAtMs = monotonicNowMs()
+        player = predecessor.player
+        mediaSession.setPlayer(predecessor.player)
+        return true
+    }
+
+    /** Settle a switched-but-black successor without inventing a frame. */
+    private fun failSwitchedReplacement() {
+        if (awaitingCommitFrameSinceMs == null) return
+        awaitingCommitFrameSinceMs = null
+        publishAcknowledgement(preparedLedger.failedAfterSwitch())
     }
 
     /**
@@ -2485,11 +2586,11 @@ class Controller(
      * where they are tested; this is the residue that genuinely needs a player.
      */
     private fun abandonPreparedReplacement(failed: Boolean) {
-        // A switched preparation cannot be abandoned — the viewer is watching
-        // it. Settle the commit it is still owed instead, with the best clock
-        // available, and leave the ledger terminal.
+        // A switched preparation cannot be aborted, but neither may an exit
+        // fabricate a rendered frame. Settle it as failed; the caller's normal
+        // reopen/end path replaces the black successor immediately afterward.
         if (preparedLedger.isSwitched) {
-            settleCommitOnFirstFrame(System.currentTimeMillis())
+            failSwitchedReplacement()
             return
         }
         val owed = if (failed) preparedLedger.failed() else preparedLedger.aborted()

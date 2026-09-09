@@ -475,6 +475,7 @@ const FRAGMENT_INDEX_METHODS: &[&str] = &[
 const RENDITION_PLAN_METHODS: &[&str] = &[
     "put_rendition_plan",
     "rendition_plan",
+    "forget_rendition_plan",
     "forget_rendition_plans",
 ];
 const TIMELINE_ANNOTATION_METHODS: &[&str] = &[
@@ -16254,6 +16255,32 @@ async fn rendition_plan_contract_runs_through_dyn_store() {
             .put_rendition_plan("rk-other", 43, &plan, &identity)
             .await
             .unwrap_or_else(|error| panic!("{backend}: store another file's: {error}"));
+        assert!(
+            store
+                .forget_rendition_plan("rk-720")
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: forget one plan: {error}")),
+            "backend {backend}: the exact plan existed"
+        );
+        assert!(
+            store
+                .rendition_plan("rk", &identity)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: preserve sibling plan: {error}"))
+                .is_some(),
+            "backend {backend}: exact deletion must preserve a sibling plan for the file"
+        );
+        assert!(
+            !store
+                .forget_rendition_plan("rk-720")
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: forget one plan twice: {error}")),
+            "backend {backend}: exact deletion is idempotent"
+        );
+        store
+            .put_rendition_plan("rk-720", 42, &plan, &identity)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: restore the second rendition: {error}"));
         assert_eq!(
             store
                 .forget_rendition_plans(42)

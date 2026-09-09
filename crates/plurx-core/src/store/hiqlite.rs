@@ -2880,6 +2880,12 @@ impl crate::store::RenditionPlanStore for HiqliteAuthStore {
             .await
     }
 
+    async fn forget_rendition_plan(&self, rendition_key: &str) -> Result<bool, StoreError> {
+        self.telemetry
+            .forget_rendition_plan(rendition_key.to_owned())
+            .await
+    }
+
     async fn forget_rendition_plans(&self, file_id: i64) -> Result<usize, StoreError> {
         self.telemetry.forget_rendition_plans(file_id).await
     }

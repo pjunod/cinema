@@ -283,6 +283,15 @@ pub(crate) fn forget_file(conn: &Connection, file_id: i64) -> Result<usize, Stor
     Ok(affected)
 }
 
+/// Drop one obsolete immutable rendition generation without disturbing any
+/// other plan for the same media file.
+pub(crate) fn forget_key(conn: &Connection, rendition_key: &str) -> Result<bool, StoreError> {
+    Ok(conn.execute(
+        "DELETE FROM rendition_plans WHERE rendition_key = ?1",
+        params![rendition_key],
+    )? > 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -462,5 +471,19 @@ mod tests {
         assert_eq!(forget_file(&conn, 7).expect("forget"), 2);
         assert!(get(&conn, "rk-1080", &identity()).expect("get").is_none());
         assert!(get(&conn, "rk-other", &identity()).expect("get").is_some());
+    }
+
+    #[test]
+    fn forgetting_one_key_preserves_other_plans_for_the_file() {
+        let conn = conn();
+        put_if_absent(&conn, "rk-stale", 7, &plan(), &identity(), 1_000).expect("put stale");
+        put_if_absent(&conn, "rk-current", 7, &plan(), &identity(), 1_000).expect("put current");
+
+        assert!(forget_key(&conn, "rk-stale").expect("forget stale"));
+        assert!(!forget_key(&conn, "rk-stale").expect("idempotent forget"));
+        assert!(get(&conn, "rk-stale", &identity()).expect("get").is_none());
+        assert!(get(&conn, "rk-current", &identity())
+            .expect("get")
+            .is_some());
     }
 }

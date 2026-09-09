@@ -376,8 +376,6 @@ static HDR10_PASSTHROUGH: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::c
 static HDR10_PASSTHROUGH_QSV: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
 static FRAGMENT_INDEX_ENGINE: tokio::sync::OnceCell<FragmentIndexEngine> =
     tokio::sync::OnceCell::const_new();
-static FONT_RENDER_ENGINE: tokio::sync::OnceCell<FragmentIndexEngine> =
-    tokio::sync::OnceCell::const_new();
 static ENCODED_PROCESS_IDENTITY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 const ENGINE_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -411,7 +409,9 @@ struct FragmentIndexEngine {
 #[derive(Debug, Clone)]
 pub(crate) struct EncodedEngine {
     pub digest: String,
+    process_identity: String,
     objects: Vec<(std::path::PathBuf, String)>,
+    font_digest: Option<String>,
 }
 
 impl EncodedEngine {
@@ -422,34 +422,54 @@ impl EncodedEngine {
         if !media.usable || !engine_objects_are_current(&media.objects) {
             return Err("the encoder dependency closure could not be attested".to_owned());
         }
-        let process = ENCODED_PROCESS_IDENTITY.get_or_init(|| uuid::Uuid::new_v4().to_string());
+        let process = encoded_process_identity();
         let mut digest = Sha256::new();
         digest.update(b"plurx/encoded-vod/engine-v1\0");
         digest.update(media.digest.as_bytes());
         digest.update(process.as_bytes());
         let mut objects = media.objects.clone();
+        let mut font_digest = None;
         if text_burn {
-            let fonts = FONT_RENDER_ENGINE
-                .get_or_init(font_render_engine_inner)
-                .await;
+            // Fontconfig's closure is live configuration, unlike the process's
+            // loaded media libraries. Probe it for every recipe capture so a
+            // newly installed font or rule cannot reuse the old URI identity.
+            let fonts = font_render_engine_inner().await;
             if !fonts.usable || !engine_objects_are_current(&fonts.objects) {
                 return Err(
                     "Fontconfig rules and resolved font files could not be attested".to_owned(),
                 );
             }
             digest.update(fonts.digest.as_bytes());
+            font_digest = Some(fonts.digest.clone());
             objects.extend(fonts.objects.clone());
         }
         objects.sort_by(|left, right| left.0.cmp(&right.0));
         objects.dedup_by(|left, right| left.0 == right.0 && left.1 == right.1);
         Ok(Self {
             digest: hex::encode(digest.finalize()),
+            process_identity: process.to_owned(),
             objects,
+            font_digest,
         })
     }
 
-    pub fn is_current(&self) -> bool {
-        engine_objects_are_current(&self.objects)
+    /// Re-attest every input which can change the bytes emitted under this
+    /// recipe. Fontconfig must be enumerated again: checking only the files
+    /// captured earlier detects replacements and removals, but not additions
+    /// which change font resolution.
+    pub async fn is_current(&self) -> bool {
+        if !engine_objects_are_current(&self.objects) {
+            return false;
+        }
+        let Some(expected_font_digest) = self.font_digest.as_deref() else {
+            return true;
+        };
+        let current_fonts = font_render_engine_inner().await;
+        font_closure_is_current(expected_font_digest, &current_fonts)
+    }
+
+    pub fn process_identity(&self) -> &str {
+        &self.process_identity
     }
 
     #[cfg(test)]
@@ -468,9 +488,27 @@ impl EncodedEngine {
         }
         Ok(Self {
             digest: hex::encode(digest.finalize()),
+            process_identity: process.to_owned(),
             objects,
+            font_digest: None,
         })
     }
+}
+
+/// A process generation is intentionally part of every encoded rendition key.
+/// VOD serving also persists this value beside encoded media so startup can
+/// distinguish obsolete generations from copy renditions without guessing
+/// from directory names.
+pub(crate) fn encoded_process_identity() -> &'static str {
+    ENCODED_PROCESS_IDENTITY
+        .get_or_init(|| uuid::Uuid::new_v4().to_string())
+        .as_str()
+}
+
+fn font_closure_is_current(expected_digest: &str, current: &FragmentIndexEngine) -> bool {
+    current.usable
+        && engine_objects_are_current(&current.objects)
+        && current.digest == expected_digest
 }
 
 /// Digest the executable bytes and its complete self/dependency reports once
@@ -1632,14 +1670,31 @@ mod tests {
                 .await
                 .expect("other process");
         assert_ne!(first.digest, other_process.digest);
-        assert!(first.is_current());
+        assert!(first.is_current().await);
 
         let replacement = base.path().join("replacement");
         tokio::fs::write(&replacement, b"codec-b")
             .await
             .expect("replacement dependency");
         std::fs::rename(replacement, dependency).expect("replace dependency");
-        assert!(!first.is_current());
+        assert!(!first.is_current().await);
+    }
+
+    #[test]
+    fn a_changed_fontconfig_closure_invalidates_the_retained_recipe() {
+        let captured = FragmentIndexEngine {
+            digest: "font-closure-a".to_owned(),
+            objects: Vec::new(),
+            usable: true,
+        };
+        let added_font = FragmentIndexEngine {
+            digest: "font-closure-b".to_owned(),
+            objects: Vec::new(),
+            usable: true,
+        };
+
+        assert!(font_closure_is_current("font-closure-a", &captured));
+        assert!(!font_closure_is_current("font-closure-a", &added_font));
     }
 
     #[tokio::test]
@@ -1648,7 +1703,7 @@ mod tests {
         let engine = EncodedEngine::capture(true)
             .await
             .expect("text renderer attestation");
-        assert!(engine.is_current());
+        assert!(engine.is_current().await);
     }
 
     #[test]

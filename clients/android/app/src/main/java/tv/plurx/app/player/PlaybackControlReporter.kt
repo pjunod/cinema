@@ -1047,29 +1047,30 @@ class PlaybackControlReporter private constructor(
         val newest = if (settled) pending else newestCapture(pending)
         pending = null
         if (newest == null || !newest.snapshot.isValid) return null
+        val snapshot = settlingSnapshot(newest.snapshot)
         sequence += 1
         // Capabilities are static for the life of a player. Repeating them on
         // every exchange is bytes the server already has; the first request of
         // a generation must carry them, and a change must resend them.
-        val repeats = sequence != 1L && newest.snapshot.capabilities == acceptedCapabilities
+        val repeats = sequence != 1L && snapshot.capabilities == acceptedCapabilities
         val request = ControlRequest(
             protocol = PlaybackControl.PROTOCOL,
             generation = bootstrap.generation,
             controlEpoch = bootstrap.controlEpoch,
             clientInstanceId = clientInstanceId,
             sequence = sequence,
-            demand = newest.snapshot.demand,
-            positionMs = newest.snapshot.positionMs,
-            bufferedFromMs = newest.snapshot.bufferedFromMs,
-            bufferedThroughMs = newest.snapshot.bufferedThroughMs,
-            playbackRate = newest.snapshot.playbackRate,
-            renderState = newest.snapshot.renderState,
-            seekTargetMs = newest.snapshot.seekTargetMs,
-            observedDownloadBps = newest.snapshot.observedDownloadBps,
-            selection = newest.snapshot.selection,
-            capabilities = if (repeats) null else newest.snapshot.capabilities,
-            observation = newest.snapshot.observation?.bounded(),
-            acknowledgement = newest.snapshot.sendableAcknowledgement,
+            demand = snapshot.demand,
+            positionMs = snapshot.positionMs,
+            bufferedFromMs = snapshot.bufferedFromMs,
+            bufferedThroughMs = snapshot.bufferedThroughMs,
+            playbackRate = snapshot.playbackRate,
+            renderState = snapshot.renderState,
+            seekTargetMs = snapshot.seekTargetMs,
+            observedDownloadBps = snapshot.observedDownloadBps,
+            selection = snapshot.selection,
+            capabilities = if (repeats) null else snapshot.capabilities,
+            observation = snapshot.observation?.bounded(),
+            acknowledgement = snapshot.sendableAcknowledgement,
             supportedActions = PlaybackControl.SUPPORTED_ACTIONS,
         )
         return PendingRequest(request, newest)

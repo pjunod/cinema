@@ -3687,6 +3687,11 @@ pub trait RenditionPlanStore: Send + Sync + 'static {
         source: &crate::segplan::SourceIdentity,
     ) -> Result<Option<crate::segplan::SegmentPlan>, StoreError>;
 
+    /// Drop exactly one rendition plan by its immutable rendition key.
+    /// Answers whether a row existed. Process-generation cache reconciliation
+    /// uses this instead of deleting every valid copy/current plan for a file.
+    async fn forget_rendition_plan(&self, rendition_key: &str) -> Result<bool, StoreError>;
+
     /// Drop every rendition plan for a file. Answers how many went.
     async fn forget_rendition_plans(&self, file_id: i64) -> Result<usize, StoreError>;
 }

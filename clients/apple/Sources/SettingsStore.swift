@@ -33,6 +33,7 @@ struct SettingsStore {
         static let posterSize = "plurx.posterSize"
         static let offlineQuality = "plurx.offlineQuality"
         static let offlineNetwork = "plurx.offlineNetwork"
+        static let preparedHandoff = "plurx.preparedHandoff"
     }
 
     /// Read-only on purpose. Every write goes through `setServer`, which is
@@ -160,6 +161,12 @@ struct SettingsStore {
                 ?? .wifiOnly
         }
         nonmutating set { defaults.set(newValue.rawValue, forKey: Key.offlineNetwork) }
+    }
+    /// Operator opt-in for the measured two-player handoff. Readiness shown in
+    /// Developer settings is advisory: none of it disables this preference.
+    var preparedHandoffEnabled: Bool {
+        get { defaults.object(forKey: Key.preparedHandoff) as? Bool ?? false }
+        nonmutating set { defaults.set(newValue, forKey: Key.preparedHandoff) }
     }
 
     /// Drop the token (sign out) but keep the origin so login stays pre-filled.

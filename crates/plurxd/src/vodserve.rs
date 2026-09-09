@@ -27,7 +27,7 @@
 //! serves. The playlist bytes derived from it are immutable for the life of
 //! the rendition; a resurrected rendition serves the identical bytes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{
@@ -135,8 +135,107 @@ const DEFAULT_GLOBAL_WAIT_CAP: usize = 64;
 
 /// The rendition's persisted init identity, beside its `init.mp4`.
 const IDENTITY_NAME: &str = "identity.json";
+/// Process-generation metadata written only for encoded renditions. Copy
+/// renditions deliberately have no marker, which lets startup reconcile the
+/// non-reusable encoded keyspace without guessing from hashes or touching the
+/// durable copy cache.
+const ENCODED_PROCESS_NAME: &str = "encoded-process";
+/// Bound exact Store deletes and recursive directory removals per maintenance
+/// tick. Startup discovers the first batch; later ticks converge over the rest.
+const ENCODED_RECONCILE_BATCH: usize = 128;
 /// Sentinel in the per-entry watchdog map for the rendition init object.
 const INIT_DEMAND_INDEX: u32 = u32::MAX;
+
+#[derive(Clone)]
+struct ObsoleteEncodedGeneration {
+    key: String,
+    path: PathBuf,
+}
+
+struct EncodedGenerationScanner {
+    base: PathBuf,
+    entries: Option<std::fs::ReadDir>,
+}
+
+impl EncodedGenerationScanner {
+    fn new(base: PathBuf) -> Self {
+        Self {
+            base,
+            entries: None,
+        }
+    }
+
+    fn discover(
+        &mut self,
+        current_process: &str,
+        scan_limit: usize,
+        candidate_limit: usize,
+        excluded: &HashSet<String>,
+    ) -> Vec<ObsoleteEncodedGeneration> {
+        if scan_limit == 0 || candidate_limit == 0 {
+            return Vec::new();
+        }
+        if self.entries.is_none() {
+            self.entries = match std::fs::read_dir(&self.base) {
+                Ok(entries) => Some(entries),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Vec::new(),
+                Err(error) => {
+                    tracing::warn!(path = %self.base.display(), %error, "cannot discover obsolete encoded VOD generations");
+                    return Vec::new();
+                }
+            };
+        }
+
+        let mut examined = 0;
+        let mut candidates = Vec::new();
+        while examined < scan_limit && candidates.len() < candidate_limit {
+            let next = self.entries.as_mut().and_then(Iterator::next);
+            let entry = match next {
+                Some(Ok(entry)) => entry,
+                Some(Err(error)) => {
+                    examined += 1;
+                    tracing::warn!(%error, "cannot inspect a VOD rendition directory entry");
+                    continue;
+                }
+                None => {
+                    // The following tick starts a fresh pass, which discovers
+                    // encoded directories created after this iterator opened.
+                    self.entries = None;
+                    break;
+                }
+            };
+            examined += 1;
+            if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            let marker = entry.path().join(ENCODED_PROCESS_NAME);
+            let Ok(owner) = std::fs::read_to_string(&marker) else {
+                // No marker means copy rendition (or unrelated directory). It
+                // is never safe to infer encoded ownership from a hashed name.
+                continue;
+            };
+            if owner.trim() == current_process {
+                continue;
+            }
+            let key = entry.file_name().to_string_lossy().into_owned();
+            if excluded.contains(&key) {
+                continue;
+            }
+            candidates.push(ObsoleteEncodedGeneration {
+                key,
+                path: entry.path(),
+            });
+        }
+        candidates
+    }
+}
+
+async fn publish_encoded_process_marker(path: &Path, process: &str) -> io::Result<()> {
+    let marker = path.join(ENCODED_PROCESS_NAME);
+    let temporary = path.join(format!("{ENCODED_PROCESS_NAME}.tmp"));
+    tokio::fs::write(&temporary, format!("{process}\n")).await?;
+    tokio::fs::rename(temporary, marker).await
+}
 
 /// Settings snapshot the manager reads per-create.
 #[derive(Debug, Clone)]
@@ -1968,6 +2067,13 @@ where
 struct Shared {
     base: PathBuf,
     store: Arc<dyn Store>,
+    /// Startup-discovered obsolete encoded generations. The directory remains
+    /// present until its exact plan row is deleted, so cancellation or Store
+    /// failure remains rediscoverable after either a later tick or restart.
+    obsolete_encoded_generations: Mutex<VecDeque<ObsoleteEncodedGeneration>>,
+    /// A live directory iterator makes discovery itself bounded, not merely
+    /// deletion. It advances across ticks and begins a fresh pass at EOF.
+    encoded_generation_scanner: Arc<StdMutex<EncodedGenerationScanner>>,
     cluster_node_id: Option<String>,
     cluster_index_root: Option<PathBuf>,
     cluster_membership: Option<plurx_core::cluster::membership::MembershipManager>,
@@ -2263,10 +2369,21 @@ impl VodServe {
         cluster_index_root: Option<PathBuf>,
         cluster_membership: Option<plurx_core::cluster::membership::MembershipManager>,
     ) -> Arc<VodServe> {
+        let mut encoded_generation_scanner = EncodedGenerationScanner::new(base.clone());
+        let obsolete_encoded_generations = encoded_generation_scanner.discover(
+            crate::ffmpeg::encoded_process_identity(),
+            ENCODED_RECONCILE_BATCH,
+            ENCODED_RECONCILE_BATCH,
+            &HashSet::new(),
+        );
         Arc::new(VodServe {
             shared: Arc::new(Shared {
                 base,
                 store,
+                obsolete_encoded_generations: Mutex::new(VecDeque::from(
+                    obsolete_encoded_generations,
+                )),
+                encoded_generation_scanner: Arc::new(StdMutex::new(encoded_generation_scanner)),
                 cluster_node_id,
                 cluster_index_root,
                 cluster_membership,
@@ -4416,6 +4533,12 @@ impl VodServe {
     /// owns: dormant-session reap (sliding TTL), dormant-rendition purge
     /// after TTL (un-admitted only), driver kicks.
     pub async fn maintain(&self) {
+        // Startup seeds the first bounded batch; every live maintenance tick
+        // discovers the next one. Plan deletion precedes directory deletion,
+        // so a crash cannot erase the only durable key needed to collect the
+        // node-local database row.
+        self.shared.reconcile_obsolete_encoded_generations().await;
+
         let terminal_cleanups = {
             let sessions = self.shared.sessions.lock().await;
             sessions
@@ -4933,6 +5056,81 @@ impl VodServe {
 }
 
 impl Shared {
+    async fn reconcile_obsolete_encoded_generations(&self) -> usize {
+        // This lock belongs only to the cleanup loop. Holding it across the
+        // exact Store delete and filesystem removal makes cancellation safe:
+        // the front candidate remains queued unless both steps finish.
+        let mut pending = self.obsolete_encoded_generations.lock().await;
+        let available = ENCODED_RECONCILE_BATCH.saturating_sub(pending.len());
+        if available > 0 {
+            let excluded = pending
+                .iter()
+                .map(|candidate| candidate.key.clone())
+                .collect::<HashSet<_>>();
+            let scanner = Arc::clone(&self.encoded_generation_scanner);
+            let process = crate::ffmpeg::encoded_process_identity().to_owned();
+            match tokio::task::spawn_blocking(move || {
+                scanner
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .discover(&process, ENCODED_RECONCILE_BATCH, available, &excluded)
+            })
+            .await
+            {
+                Ok(discovered) => pending.extend(discovered),
+                Err(error) => tracing::warn!(%error, "encoded VOD generation discovery failed"),
+            }
+        }
+
+        let mut removed = 0;
+        let attempts = pending.len().min(ENCODED_RECONCILE_BATCH);
+        for _ in 0..attempts {
+            let Some(candidate) = pending.front().cloned() else {
+                break;
+            };
+            if let Err(error) = self.store.forget_rendition_plan(&candidate.key).await {
+                tracing::warn!(
+                    rendition = %candidate.key,
+                    %error,
+                    "cannot forget an obsolete encoded rendition plan"
+                );
+                // Store availability is shared by the batch. Keep every
+                // directory, and retry from this exact candidate next tick.
+                break;
+            }
+            let path = candidate.path.clone();
+            let removal = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(path)).await;
+            let gone = match removal {
+                Ok(Ok(())) => true,
+                Ok(Err(error)) if error.kind() == io::ErrorKind::NotFound => true,
+                Ok(Err(error)) => {
+                    tracing::warn!(
+                        path = %candidate.path.display(),
+                        %error,
+                        "cannot remove an obsolete encoded VOD generation"
+                    );
+                    false
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "encoded VOD generation removal failed");
+                    false
+                }
+            };
+            if gone {
+                pending.pop_front();
+                removed += 1;
+            } else if let Some(candidate) = pending.pop_front() {
+                // One unreadable directory cannot pin every later obsolete
+                // generation. Its already-deleted plan makes a retry cheap.
+                pending.push_back(candidate);
+            }
+        }
+        if removed > 0 {
+            tracing::info!(removed, "reconciled obsolete encoded VOD generations");
+        }
+        removed
+    }
+
     async fn terminal_route_durably_non_live(&self, session_id: &str) -> bool {
         #[cfg(test)]
         if let Some(outcome) = self
@@ -5377,10 +5575,54 @@ impl Shared {
         )
         .await?;
         let dir = RenditionDir::new(self.base.join(key));
-        let existed = tokio::fs::metadata(dir.path()).await.is_ok();
+        let mut existed = tokio::fs::metadata(dir.path()).await.is_ok();
+        let encoded_process = recipe
+            .encoding
+            .as_ref()
+            .map(|encoding| encoding.engine.process_identity().to_owned());
+        if existed {
+            if let Some(process) = encoded_process.as_deref() {
+                match tokio::fs::read_to_string(dir.path().join(ENCODED_PROCESS_NAME)).await {
+                    Ok(owner) if owner.trim() == process => {}
+                    Ok(_) => {
+                        tokio::fs::remove_dir_all(dir.path())
+                            .await
+                            .map_err(|error| {
+                                format!("removing an obsolete encoded rendition directory: {error}")
+                            })?;
+                        existed = false;
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        // An encoded directory without its generation marker
+                        // is unverifiable. Never adopt it under a new marker.
+                        tokio::fs::remove_dir_all(dir.path())
+                            .await
+                            .map_err(|error| {
+                                format!("removing an unmarked encoded rendition directory: {error}")
+                            })?;
+                        existed = false;
+                    }
+                    Err(error) => {
+                        return Err(format!(
+                            "reading the encoded rendition process marker: {error}"
+                        ));
+                    }
+                }
+            }
+        }
         dir.create()
             .await
             .map_err(|error| format!("creating the rendition directory: {error}"))?;
+        if !existed {
+            if let Some(process) = encoded_process.as_deref() {
+                if let Err(error) = publish_encoded_process_marker(dir.path(), process).await {
+                    let _ = tokio::fs::remove_dir_all(dir.path()).await;
+                    return Err(format!(
+                        "publishing the encoded rendition process marker: {error}"
+                    ));
+                }
+            }
+        }
 
         let mut manifest = Manifest::new(plan.clone());
         let mut identity_state = IdentityState::default();
@@ -6442,12 +6684,10 @@ async fn spawn_generation(
 }
 
 async fn recipe_engine_is_current(recipe: &Recipe) -> bool {
-    if recipe
-        .encoding
-        .as_ref()
-        .is_some_and(|encoding| !encoding.executable.is_current() || !encoding.engine.is_current())
-    {
-        return false;
+    if let Some(encoding) = recipe.encoding.as_ref() {
+        if !encoding.executable.is_current() || !encoding.engine.is_current().await {
+            return false;
+        }
     }
     recipe.cluster_cache_key.is_none() || crate::ffmpeg::fragment_index_engine_is_current().await
 }
@@ -7678,7 +7918,8 @@ mod tests {
 
     use plurx_core::store::{
         FragmentIndexStore, LibraryStore as _, MediaSessionStore as _, MediaStore as _,
-        PlaybackTelemetryStore as _, SqliteStore, TimelineAnnotationStore as _,
+        PlaybackTelemetryStore as _, RenditionPlanStore as _, SqliteStore,
+        TimelineAnnotationStore as _,
     };
     use plurx_core::testfixtures;
 
@@ -7733,6 +7974,87 @@ mod tests {
                     });
                 },
             )
+        }
+    }
+
+    #[tokio::test]
+    async fn maintenance_converges_beyond_one_bounded_encoded_generation_batch() {
+        let base = crate::test_tempdir().expect("encoded generation cache");
+        let copy = base.path().join("copy-rendition");
+        let current = base.path().join("current-encoded");
+        for path in [&copy, &current] {
+            std::fs::create_dir_all(path).expect("rendition directory");
+        }
+        let current_process = crate::ffmpeg::encoded_process_identity();
+        std::fs::write(
+            current.join(ENCODED_PROCESS_NAME),
+            format!("{current_process}\n"),
+        )
+        .expect("current marker");
+        let stale_keys = (0..=ENCODED_RECONCILE_BATCH)
+            .map(|index| format!("stale-encoded-{index:03}"))
+            .collect::<Vec<_>>();
+        for key in &stale_keys {
+            let path = base.path().join(key);
+            std::fs::create_dir_all(&path).expect("stale rendition directory");
+            std::fs::write(path.join(ENCODED_PROCESS_NAME), "process-old\n").expect("stale marker");
+        }
+
+        let sqlite = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let index = synthetic_index(16);
+        let duration_ms = index_video_ms(&index);
+        let plan = plurx_core::segplan::plan_copy(
+            &index,
+            &shipped_policy(index.timescale),
+            &TrackDurations {
+                video_ms: duration_ms,
+                audio_ms: duration_ms,
+                audio_bits_per_second: 256_000,
+            },
+        );
+        let identity = SourceIdentity::new(1, 1, "generation-plan");
+        for key in stale_keys
+            .iter()
+            .map(String::as_str)
+            .chain(["copy-rendition", "current-encoded"])
+        {
+            sqlite
+                .put_rendition_plan(key, 7, &plan, &identity)
+                .await
+                .expect("store rendition plan");
+        }
+        let store: Arc<dyn Store> = sqlite.clone();
+        let serve = VodServe::new(base.path().to_path_buf(), store);
+
+        serve.maintain().await;
+        assert_eq!(
+            stale_keys
+                .iter()
+                .filter(|key| base.path().join(key).exists())
+                .count(),
+            1,
+            "one later batch remains after the bounded first pass"
+        );
+        serve.maintain().await;
+        assert!(stale_keys.iter().all(|key| !base.path().join(key).exists()));
+        assert!(copy.exists(), "an unmarked copy rendition is preserved");
+        assert!(
+            current.exists(),
+            "the current encoded generation is preserved"
+        );
+        for key in &stale_keys {
+            assert!(sqlite
+                .rendition_plan(key, &identity)
+                .await
+                .expect("read stale plan")
+                .is_none());
+        }
+        for key in ["copy-rendition", "current-encoded"] {
+            assert!(sqlite
+                .rendition_plan(key, &identity)
+                .await
+                .expect("read preserved plan")
+                .is_some());
         }
     }
 

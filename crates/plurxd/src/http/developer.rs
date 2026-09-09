@@ -590,8 +590,8 @@ fn playback_control_protocol(advertised: bool) -> DeveloperEnableItem {
 
     // The passive vocabulary is `hold`, `terminal` and `retry_resource` —
     // what a reporter applies to a stream already playing. Deliberately not
-    // the four-action "fully managed" reading: `prepare_replacement` is the
-    // prepared handoff, no client ships it, and it has its own row below. A
+    // the four-action "fully managed" reading: `prepare_replacement` belongs
+    // to the prepared handoff and has its own row below. A
     // passive-reporter row that demanded it answered `Unmet` on every fleet
     // that had a complete passive reporter on every client, which is a red
     // tick that means "measured something else".
@@ -683,9 +683,10 @@ fn prepared_quality_handoff() -> DeveloperEnableItem {
             evidence: format!(
                 "{declared} exchange(s) since start declared `prepare_replacement` (by platform \
                  web/apple/android: {prepare_capable:?}), but declaring the action is not the \
-                 measured handoff: no shipped client aligns a second timeline with \
-                 `media_origin_ms`, switches visibly, and then reports the switch. Preparations \
-                 since start: {} staged, {} refused.",
+                 physical qualification. The web, Apple and Android builds contain two-player \
+                 adapters; this process cannot prove their timeline alignment or qualifying first \
+                 frame from a capability declaration. Preparations since start: {} staged, {} \
+                 refused.",
                 staged.staged, staged.refused
             ),
         }
@@ -695,9 +696,10 @@ fn prepared_quality_handoff() -> DeveloperEnableItem {
             title: "A client owns a measured two-player handoff",
             status: RequirementStatus::Unmet,
             evidence: format!(
-                "No client has declared `prepare_replacement` to this process since it started, \
-                 and no shipped client implements the two-player switch this requirement \
-                 describes. Preparations since start: {} staged, {} refused.",
+                "The web, Apple and Android builds contain two-player adapters, but no client has \
+                 declared `prepare_replacement` to this process since it started. This node has \
+                 therefore observed no physical first-frame qualification. Preparations since \
+                 start: {} staged, {} refused.",
                 staged.staged, staged.refused
             ),
         }

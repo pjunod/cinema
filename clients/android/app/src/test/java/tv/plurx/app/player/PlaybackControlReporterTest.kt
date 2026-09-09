@@ -1391,10 +1391,10 @@ class PlaybackControlPreparedReplacementTest {
     }
 
     @Test
-    fun `a committed acknowledgement is never built onto an ending exchange`() {
-        // `demand: "end"` may not carry `state: "committed"`. The server
-        // refuses the pairing with a `400`, which costs the `end` as well as
-        // the commit — so the commit is dropped and the session still ends.
+    fun `a committed acknowledgement is settled before the ending exchange`() {
+        // `demand: "end"` may not carry `state: "committed"`. The reporter
+        // rewrites this one settlement to active; after it is accepted, the
+        // unchanged player snapshot sends end as the following exchange.
         val ending = snapshot(demand = PlaybackDemand.END).copy(
             acknowledgement = ActionAcknowledgement(
                 actionId,
@@ -1403,13 +1403,18 @@ class PlaybackControlPreparedReplacementTest {
                 firstFrameUnixMs = 1_788_000_000_000,
             ),
         )
-        assertNull(ending.sendableAcknowledgement)
+        val settlement = settlingSnapshot(ending)
+        assertEquals(PlaybackDemand.ACTIVE, settlement.demand)
+        assertNotNull(settlement.sendableAcknowledgement)
         val encoded = json.encodeToString(
             ControlRequest.serializer(),
-            request(demand = PlaybackDemand.END, acknowledgement = ending.sendableAcknowledgement),
+            request(
+                demand = settlement.demand,
+                acknowledgement = settlement.sendableAcknowledgement,
+            ),
         )
-        assertFalse(encoded.contains("\"state\":\"committed\""), encoded)
-        assertTrue(encoded.contains("\"demand\":\"end\""), encoded)
+        assertTrue(encoded.contains("\"state\":\"committed\""), encoded)
+        assertTrue(encoded.contains("\"demand\":\"active\""), encoded)
 
         // Every other state still rides an ending exchange: an abandoned
         // preparation must be settled, and the last exchange is often the only

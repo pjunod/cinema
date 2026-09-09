@@ -788,25 +788,39 @@ final class PlaybackControlReporterTests: XCTestCase {
         }
     }
 
-    /// The one body the server refuses outright, never built.
-    func testAnEndingExchangeNeverCarriesACommit() async throws {
+    /// A commit which collides with end is sent first, then end follows.
+    func testAnEndingCommitIsSettledBeforeTheEndExchange() async throws {
         let harness = Harness()
         var ending = snapshot(demand: .end)
-        ending.acknowledgement = ActionAcknowledgement(
+        let committed = ActionAcknowledgement(
             actionId: "6f1d2a44-2b7e-4a1c-9f3e-2c5a7b8d9e01",
             state: .committed,
             committedMediaOriginMs: 0,
             firstFrameUnixMs: 1_788_000_000_000
         )
-        harness.setSnapshot(ending)
+        ending.acknowledgement = committed
+        // The first send disappears. The commit must retry identically before
+        // the end exchange is allowed to follow.
+        harness.enqueue([.failure(ControlTransportError(status: nil, code: nil))])
         let reporter = try XCTUnwrap(makeReporter(harness))
-        await reporter.start()
-        XCTAssertTrue(harness.awaitExchanges(1))
-        XCTAssertEqual(harness.requests.first?.demand, .end)
-        XCTAssertNil(
-            harness.requests.first?.acknowledgement,
-            "demand `end` may not carry `committed`, and the server answers 400"
+        await reporter.finish(PlaybackControlCapture(
+            snapshot: ending,
+            intentGeneration: 0,
+            owner: PlaybackControlCaptureOwner(
+                lifecycleId: clientId, attachmentGeneration: 1
+            ),
+            sourceRevision: 1
+        ))
+        XCTAssertTrue(harness.awaitExchanges(3))
+        XCTAssertEqual(harness.requests[0].demand, .active)
+        XCTAssertGreaterThanOrEqual(
+            harness.requests[0].playbackRate,
+            PlaybackControlMapping.minimumActiveRate
         )
+        XCTAssertEqual(harness.requests[0].acknowledgement, committed)
+        XCTAssertEqual(harness.requests[1], harness.requests[0], "a dropped commit retries exactly")
+        XCTAssertEqual(harness.requests[2].demand, .end)
+        XCTAssertNil(harness.requests[2].acknowledgement)
         // An abort may end the session in the same breath.
         let harness2 = Harness()
         var aborting = snapshot(demand: .end)
