@@ -993,7 +993,7 @@ test_anchor = "testAnEndingCommitIsSettledBeforeTheEndExchange"
 # owners join every detached final reporter before invalidating that session,
 # while ordinary player teardown remains non-blocking.
 id = "apple.final-reporter-joins-before-transport-invalidation"
-commits = ["e46702c4"]
+commits = ["e46702c4", "298b4576"]
 source = "clients/apple/Sources/PlaybackControlSession.swift"
 source_anchor = "func endAndWait() async"
 test = "clients/apple/Tests/PlaybackControlSessionTests.swift"
