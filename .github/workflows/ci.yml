@@ -946,6 +946,16 @@ jobs:
             apple-dd-
       - name: Create isolated iPhone, iPad, and Apple TV simulators
         run: |
+          # A job-level timeout cancels its `always()` cleanup along with the
+          # test step. Remove only simulators owned by this workflow before
+          # creating the next isolated set, so a wedged prior boot cannot
+          # consume CoreSimulator capacity indefinitely.
+          stale_ids="$(xcrun simctl list devices | sed -n \
+            's/.*plurx CI .* (\([0-9A-F-][0-9A-F-]*\)) .*/\1/p')"
+          for stale_id in $stale_ids; do
+            xcrun simctl shutdown "$stale_id" || true
+            xcrun simctl delete "$stale_id" || true
+          done
           suffix="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           ios_id=$(xcrun simctl create \
             "plurx CI iPhone ${suffix}" \
@@ -962,6 +972,14 @@ jobs:
             com.apple.CoreSimulator.SimDeviceType.Apple-TV-4K-3rd-generation-4K \
             com.apple.CoreSimulator.SimRuntime.tvOS-26-5)
           echo "APPLE_TVOS_SIM=platform=tvOS Simulator,id=$tvos_id" >> "$GITHUB_ENV"
+          # `xcodebuild` can otherwise sit silently waiting for a destination
+          # that CoreSimulator has not finished starting. Boot each concrete
+          # device now and require SpringBoard/backboard readiness before the
+          # shared test target begins.
+          for simulator_id in "$ios_id" "$ipad_id" "$tvos_id"; do
+            xcrun simctl boot "$simulator_id"
+            xcrun simctl bootstatus "$simulator_id" -b
+          done
       - name: Run the shared XCTest suite on iPhone, iPad, and Apple TV
         run: make apple-test
       - name: Delete the run's simulators
