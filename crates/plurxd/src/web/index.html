@@ -14820,6 +14820,7 @@ function liveTvPaint(){
         <button type="button" onclick="muteLiveTv(this)">Mute</button>
         ${liveTvPipSupported()?'<button type="button" onclick="toggleLiveTvPip()">PiP</button>':""}
         <button type="button" onclick="liveTvGuideSheet()">Guide</button>
+        <button type="button" onclick="stopLiveTv().catch(liveTvFailure)" aria-label="Stop Live TV">Stop</button>
         <button type="button" onclick="exitLiveTvPresentation()">Exit</button>
       </div>
     </div>
@@ -15232,12 +15233,21 @@ function developerPanel(settings){
 // The unsaved state of the guide panel. `null` means "no edit yet, show what
 // is saved"; a value means the operator has chosen something the server has
 // not been told about.
-const LIVE_TV_GUIDE_DRAFT={source:null,url:null,checked:null};
+const LIVE_TV_GUIDE_DRAFT={source:null,url:null,hours:null,checked:null};
 function liveTvGuideSourceDraft(value){
   const url=document.getElementById("ltgurl");
+  const hours=document.getElementById("ltghours");
   if(url) LIVE_TV_GUIDE_DRAFT.url=url.value;
+  if(hours) LIVE_TV_GUIDE_DRAFT.hours=Number(hours.value);
   LIVE_TV_GUIDE_DRAFT.source=value;
+  // The repaint replaces the readiness mount too. Let the replacement run
+  // one current check instead of leaving its fresh "Checking…" row forever.
+  LIVE_TV_GUIDE_DRAFT.checked=null;
   renderSettings();
+  // `setCard`'s delegated change handler belongs to the card that the repaint
+  // just removed. Mark the replacement card explicitly, or its Save remains
+  // disabled even though the newly selected source is still visible.
+  markSetCard(document.getElementById("ltgsrc"));
 }
 function liveTvGuideCard(s){
   // The guide's own enable section. Everything here is advisory: it says what
@@ -15268,7 +15278,7 @@ function liveTvGuideCard(s){
     <div class="setfields">
       <div><label for="ltgsrc">Source</label><select id="ltgsrc" onchange="liveTvGuideSourceDraft(this.value)">${opt("off","Off")}${opt("hdhomerun","HDHomeRun guide")}${opt("xmltv","XMLTV")}</select></div>
       ${source==="xmltv"?`<div style="flex:1 1 340px"><label for="ltgurl">XMLTV URL</label><input id="ltgurl" value="${esc(LIVE_TV_GUIDE_DRAFT.url!==null?LIVE_TV_GUIDE_DRAFT.url:(s.live_tv_xmltv_url||""))}" placeholder="https://example/guide.xml.gz" maxlength="1024"><div class="hint">Plain or gzipped. Matched to your lineup by display name, then LCN, then callsign.</div></div>`:""}
-      <div><label for="ltghours">Look ahead</label><select id="ltghours">${[4,8,12,24,48,72].map(n=>`<option value="${n}"${n===Number(s.live_tv_guide_hours)?' selected':''}>${n} hours</option>`).join("")}</select></div>
+      <div><label for="ltghours">Look ahead</label><select id="ltghours">${[4,8,12,24,48,72].map(n=>`<option value="${n}"${n===Number(LIVE_TV_GUIDE_DRAFT.hours!==null?LIVE_TV_GUIDE_DRAFT.hours:s.live_tv_guide_hours)?' selected':''}>${n} hours</option>`).join("")}</select></div>
     </div>
     <h2 class="section">What must be true to enable it safely</h2>
     <div id="ltgready" aria-live="polite"><p class="muted">Checking…</p></div>
@@ -15280,13 +15290,20 @@ function liveTvGuideCard(s){
 async function saveLiveTvGuide(button){
   const source=document.getElementById("ltgsrc").value;
   const url=document.getElementById("ltgurl");
+  // A successful write repaints with the server's new source. Arm that paint
+  // to verify the saved source rather than retaining the pre-save check id.
+  LIVE_TV_GUIDE_DRAFT.checked=null;
   const saved=await liveTvSettingsWrite({live_tv_config_generation:SETTINGS.live_tv_config_generation,
     live_tv_guide_source:source,
     live_tv_xmltv_url:url?url.value.trim():(SETTINGS.live_tv_xmltv_url||""),
     live_tv_guide_hours:Number(document.getElementById("ltghours").value)},button,"ltgerr");
   // Only a save that landed retires the draft; a refused one keeps what the
   // operator typed so they can correct it rather than retype it.
-  if(saved){ LIVE_TV_GUIDE_DRAFT.source=null; LIVE_TV_GUIDE_DRAFT.url=null; }
+  if(saved){
+    LIVE_TV_GUIDE_DRAFT.source=null;
+    LIVE_TV_GUIDE_DRAFT.url=null;
+    LIVE_TV_GUIDE_DRAFT.hours=null;
+  }
   return saved;
 }
 function liveTvGuideReadyView(r){

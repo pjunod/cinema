@@ -199,7 +199,7 @@ def main(argv: list[str]) -> int:
                 frames_advance()
 
             def stop():
-                page.get_by_label("Stop", exact=True).click()
+                page.locator("#live-tv-host").get_by_label("Stop Live TV", exact=True).click()
 
             page.goto(host.base_url + "/#/live-tv")
             # A protected channel is drawn, dimmed and unclickable — never
@@ -235,7 +235,7 @@ def main(argv: list[str]) -> int:
             frames_advance()
             # Fullscreen takes the host, not the bare video: the overlay has to
             # be inside the fullscreen tree or there is no channel strip.
-            page.get_by_label("Fullscreen", exact=True).click()
+            page.locator("#live-tv-body").get_by_label("Fullscreen", exact=True).click()
             page.wait_for_function("document.fullscreenElement?.id === 'live-tv-host'")
             stop()
             page.wait_for_function("!document.fullscreenElement && document.querySelector('#live-tv-host').hidden")
