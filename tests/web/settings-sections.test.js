@@ -367,6 +367,78 @@ test("the guide's readiness rows are advisory and never disable the save", () =>
   assert.doesNotMatch(html, /disabled/, "an advisory panel must not render a disabled control");
 });
 
+test("changing the guide source dirties the replacement card after its repaint", () => {
+  let rendered = false;
+  const save = { disabled: true };
+  const state = { textContent: "Saved" };
+  const classes = new Set();
+  const card = {
+    classList: {
+      contains: (name) => classes.has(name),
+      add: (name) => classes.add(name),
+    },
+    querySelector: (selector) => selector.includes("button.primary") ? save : state,
+  };
+  const replacement = { closest: () => card };
+  const oldUrl = { value: "https://guide.example/listings.xml" };
+  const oldHours = { value: "48" };
+  const document = {
+    getElementById(id) {
+      if (id === "ltgurl") return rendered ? null : oldUrl;
+      if (id === "ltghours") return rendered ? null : oldHours;
+      if (id === "ltgsrc") return rendered ? replacement : null;
+      return null;
+    },
+  };
+  const guide = new Function(
+    "document", "renderSettings",
+    `${shippedConst("LIVE_TV_GUIDE_DRAFT")}
+     ${shippedSource("markSetCard")}
+     ${shippedSource("liveTvGuideSourceDraft")}
+     return {change:liveTvGuideSourceDraft,draft:LIVE_TV_GUIDE_DRAFT};`,
+  )(document, () => { rendered = true; });
+
+  guide.draft.checked = 42;
+  guide.change("hdhomerun");
+
+  assert.equal(guide.draft.source, "hdhomerun");
+  assert.equal(guide.draft.url, oldUrl.value);
+  assert.equal(guide.draft.hours, 48);
+  assert.equal(guide.draft.checked, null, "the replacement readiness panel runs a current check");
+  assert.ok(classes.has("dirty"), "the repainted card carries the unsaved state");
+  assert.equal(save.disabled, false, "the repainted card's Save is enabled");
+  assert.equal(state.textContent, "Unsaved changes");
+});
+
+test("saving the guide rechecks the saved source and retires its draft", async () => {
+  let written;
+  const fields = {
+    ltgsrc: { value: "hdhomerun" },
+    ltgurl: null,
+    ltghours: { value: "24" },
+  };
+  const guide = new Function(
+    "document", "liveTvSettingsWrite", "SETTINGS",
+    `${shippedConst("LIVE_TV_GUIDE_DRAFT")}
+     ${shippedSource("saveLiveTvGuide")}
+     return {save:saveLiveTvGuide,draft:LIVE_TV_GUIDE_DRAFT};`,
+  )(
+    { getElementById: (id) => fields[id] },
+    async (body) => { written = body; return true; },
+    { live_tv_config_generation: 7, live_tv_xmltv_url: "" },
+  );
+  Object.assign(guide.draft, { source: "hdhomerun", url: "old", hours: 48, checked: 42 });
+
+  assert.equal(await guide.save({}), true);
+  assert.deepEqual(written, {
+    live_tv_config_generation: 7,
+    live_tv_guide_source: "hdhomerun",
+    live_tv_xmltv_url: "",
+    live_tv_guide_hours: 24,
+  });
+  assert.deepEqual(guide.draft, { source: null, url: null, hours: null, checked: null });
+});
+
 test("Maintenance owns the timers, and each of its cards saves its own fields", () => {
   const panel = shippedSource("maintenancePanel");
   for (const card of ["precachePanel", "dvDiskPanel", "telemetryPanel"]) assert.match(panel, new RegExp(`${card}\\(`));
