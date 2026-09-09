@@ -5,9 +5,3 @@ commits = ["e93acf64"]
 points = ["offline.viewing"]
 checks = ["rust-gate", "rust-gate-ci", "history-regressions"]
 reason = "The retained offline manager regression scripts a refused primary, a yielded alternate, and a terminal refused alternate across a durable requeue. Its recovery-specific fixture enables the same runtime authorization required by production, so the first refusal must install and persist the alternate before the manager requeues the package; omitting that fixture guard fails the test by settling the package as decode_unhealthy instead."
-
-[[coverage]]
-commits = ["810a7457"]
-points = ["validation.framework"]
-checks = ["history-regressions"]
-reason = "This metadata-only commit registers the retained offline recovery fixture regression and does not change runtime or test behavior."
