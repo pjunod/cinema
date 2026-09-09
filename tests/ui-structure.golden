@@ -1464,6 +1464,9 @@ catalog|live-tv-grid@1280x860|dom|a.on[aria-current=page] > span.px-lbl[text]|1
 catalog|live-tv-grid@1280x860|dom|a.on[aria-current=page] > svg.px-ico[aria-hidden=true]|1
 catalog|live-tv-grid@1280x860|dom|a.px-tab > span[text]|2
 catalog|live-tv-grid@1280x860|dom|a.px-tab > svg.px-ico[aria-hidden=true]|2
+catalog|live-tv-grid@1280x860|dom|aside.lt-showinfo > h2[text]|1
+catalog|live-tv-grid@1280x860|dom|aside.lt-showinfo > p.synopsis[text]|1
+catalog|live-tv-grid@1280x860|dom|aside.lt-showinfo > span.eyebrow[text]|1
 catalog|live-tv-grid@1280x860|dom|aside.px-side > div#pxnav.px-scroll|1
 catalog|live-tv-grid@1280x860|dom|aside.px-side > div.px-foot|1
 catalog|live-tv-grid@1280x860|dom|aside.px-side > div.px-head|1
@@ -1506,8 +1509,10 @@ catalog|live-tv-grid@1280x860|dom|div.lt-head > span.muted[text]|1
 catalog|live-tv-grid@1280x860|dom|div.lt-nowbar > span.grow.muted[text]|1
 catalog|live-tv-grid@1280x860|dom|div.lt-split > div.lt-stage|1
 catalog|live-tv-grid@1280x860|dom|div.lt-split > div|1
-catalog|live-tv-grid@1280x860|dom|div.lt-stage > div#live-tv-slot.lt-slot|1
 catalog|live-tv-grid@1280x860|dom|div.lt-stage > div.lt-nowbar|1
+catalog|live-tv-grid@1280x860|dom|div.lt-stage > div.lt-stage-top|1
+catalog|live-tv-grid@1280x860|dom|div.lt-stage-top > aside.lt-showinfo|1
+catalog|live-tv-grid@1280x860|dom|div.lt-stage-top > div#live-tv-slot.lt-slot|1
 catalog|live-tv-grid@1280x860|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=false type=button text]|2
 catalog|live-tv-grid@1280x860|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=true type=button text]|2
 catalog|live-tv-grid@1280x860|dom|div.lt-times > div.pad|1
@@ -1571,6 +1576,9 @@ catalog|live-tv-grid@390x780|dom|a.on[aria-current=page] > span.px-lbl[text]|1
 catalog|live-tv-grid@390x780|dom|a.on[aria-current=page] > svg.px-ico[aria-hidden=true]|1
 catalog|live-tv-grid@390x780|dom|a.px-tab > span[text]|2
 catalog|live-tv-grid@390x780|dom|a.px-tab > svg.px-ico[aria-hidden=true]|2
+catalog|live-tv-grid@390x780|dom|aside.lt-showinfo > h2[text]|1
+catalog|live-tv-grid@390x780|dom|aside.lt-showinfo > p.synopsis[text]|1
+catalog|live-tv-grid@390x780|dom|aside.lt-showinfo > span.eyebrow[text]|1
 catalog|live-tv-grid@390x780|dom|aside.px-side > div#pxnav.px-scroll|1
 catalog|live-tv-grid@390x780|dom|aside.px-side > div.px-foot|1
 catalog|live-tv-grid@390x780|dom|aside.px-side > div.px-head|1
@@ -1613,8 +1621,10 @@ catalog|live-tv-grid@390x780|dom|div.lt-head > span.muted[text]|1
 catalog|live-tv-grid@390x780|dom|div.lt-nowbar > span.grow.muted[text]|1
 catalog|live-tv-grid@390x780|dom|div.lt-split > div.lt-stage|1
 catalog|live-tv-grid@390x780|dom|div.lt-split > div|1
-catalog|live-tv-grid@390x780|dom|div.lt-stage > div#live-tv-slot.lt-slot|1
 catalog|live-tv-grid@390x780|dom|div.lt-stage > div.lt-nowbar|1
+catalog|live-tv-grid@390x780|dom|div.lt-stage > div.lt-stage-top|1
+catalog|live-tv-grid@390x780|dom|div.lt-stage-top > aside.lt-showinfo|1
+catalog|live-tv-grid@390x780|dom|div.lt-stage-top > div#live-tv-slot.lt-slot|1
 catalog|live-tv-grid@390x780|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=false type=button text]|2
 catalog|live-tv-grid@390x780|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=true type=button text]|2
 catalog|live-tv-grid@390x780|dom|div.lt-times > div.pad|1
@@ -1678,6 +1688,9 @@ catalog|live-tv@1280x860|dom|a.on[aria-current=page] > span.px-lbl[text]|1
 catalog|live-tv@1280x860|dom|a.on[aria-current=page] > svg.px-ico[aria-hidden=true]|1
 catalog|live-tv@1280x860|dom|a.px-tab > span[text]|2
 catalog|live-tv@1280x860|dom|a.px-tab > svg.px-ico[aria-hidden=true]|2
+catalog|live-tv@1280x860|dom|aside.lt-showinfo > h2[text]|1
+catalog|live-tv@1280x860|dom|aside.lt-showinfo > p.synopsis[text]|1
+catalog|live-tv@1280x860|dom|aside.lt-showinfo > span.eyebrow[text]|1
 catalog|live-tv@1280x860|dom|aside.px-side > div#pxnav.px-scroll|1
 catalog|live-tv@1280x860|dom|aside.px-side > div.px-foot|1
 catalog|live-tv@1280x860|dom|aside.px-side > div.px-head|1
@@ -1715,8 +1728,10 @@ catalog|live-tv@1280x860|dom|div.lt-list[role=listbox aria-label=*] > button.lt-
 catalog|live-tv@1280x860|dom|div.lt-nowbar > span.grow.muted[text]|1
 catalog|live-tv@1280x860|dom|div.lt-split > div.lt-list[role=listbox aria-label=*]|1
 catalog|live-tv@1280x860|dom|div.lt-split > div.lt-stage|1
-catalog|live-tv@1280x860|dom|div.lt-stage > div#live-tv-slot.lt-slot|1
 catalog|live-tv@1280x860|dom|div.lt-stage > div.lt-nowbar|1
+catalog|live-tv@1280x860|dom|div.lt-stage > div.lt-stage-top|1
+catalog|live-tv@1280x860|dom|div.lt-stage-top > aside.lt-showinfo|1
+catalog|live-tv@1280x860|dom|div.lt-stage-top > div#live-tv-slot.lt-slot|1
 catalog|live-tv@1280x860|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=false type=button text]|2
 catalog|live-tv@1280x860|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=true type=button text]|2
 catalog|live-tv@1280x860|dom|div.px-brand > a.logo[text]|1
@@ -1781,6 +1796,9 @@ catalog|live-tv@390x780|dom|a.on[aria-current=page] > span.px-lbl[text]|1
 catalog|live-tv@390x780|dom|a.on[aria-current=page] > svg.px-ico[aria-hidden=true]|1
 catalog|live-tv@390x780|dom|a.px-tab > span[text]|2
 catalog|live-tv@390x780|dom|a.px-tab > svg.px-ico[aria-hidden=true]|2
+catalog|live-tv@390x780|dom|aside.lt-showinfo > h2[text]|1
+catalog|live-tv@390x780|dom|aside.lt-showinfo > p.synopsis[text]|1
+catalog|live-tv@390x780|dom|aside.lt-showinfo > span.eyebrow[text]|1
 catalog|live-tv@390x780|dom|aside.px-side > div#pxnav.px-scroll|1
 catalog|live-tv@390x780|dom|aside.px-side > div.px-foot|1
 catalog|live-tv@390x780|dom|aside.px-side > div.px-head|1
@@ -1818,8 +1836,10 @@ catalog|live-tv@390x780|dom|div.lt-list[role=listbox aria-label=*] > button.lt-r
 catalog|live-tv@390x780|dom|div.lt-nowbar > span.grow.muted[text]|1
 catalog|live-tv@390x780|dom|div.lt-split > div.lt-list[role=listbox aria-label=*]|1
 catalog|live-tv@390x780|dom|div.lt-split > div.lt-stage|1
-catalog|live-tv@390x780|dom|div.lt-stage > div#live-tv-slot.lt-slot|1
 catalog|live-tv@390x780|dom|div.lt-stage > div.lt-nowbar|1
+catalog|live-tv@390x780|dom|div.lt-stage > div.lt-stage-top|1
+catalog|live-tv@390x780|dom|div.lt-stage-top > aside.lt-showinfo|1
+catalog|live-tv@390x780|dom|div.lt-stage-top > div#live-tv-slot.lt-slot|1
 catalog|live-tv@390x780|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=false type=button text]|2
 catalog|live-tv@390x780|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=true type=button text]|2
 catalog|live-tv@390x780|dom|div.px-brand > a.logo[text]|1
@@ -3982,6 +4002,9 @@ classic|library@390x780|req|GET /api/v1/libraries|1
 classic|library@390x780|req|GET /api/v1/me|1
 classic|library@390x780|req|GET /api/v1/server|1
 classic|live-tv-grid@1280x860|dom|^ > div#app|1
+classic|live-tv-grid@1280x860|dom|aside.lt-showinfo > h2[text]|1
+classic|live-tv-grid@1280x860|dom|aside.lt-showinfo > p.synopsis[text]|1
+classic|live-tv-grid@1280x860|dom|aside.lt-showinfo > span.eyebrow[text]|1
 classic|live-tv-grid@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.lookword[text]|1
 classic|live-tv-grid@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.tsw|1
 classic|live-tv-grid@1280x860|dom|button.ghost.profile.sm > span.caret[text]|1
@@ -4015,8 +4038,10 @@ classic|live-tv-grid@1280x860|dom|div.lt-head > span.muted[text]|1
 classic|live-tv-grid@1280x860|dom|div.lt-nowbar > span.grow.muted[text]|1
 classic|live-tv-grid@1280x860|dom|div.lt-split > div.lt-stage|1
 classic|live-tv-grid@1280x860|dom|div.lt-split > div|1
-classic|live-tv-grid@1280x860|dom|div.lt-stage > div#live-tv-slot.lt-slot|1
 classic|live-tv-grid@1280x860|dom|div.lt-stage > div.lt-nowbar|1
+classic|live-tv-grid@1280x860|dom|div.lt-stage > div.lt-stage-top|1
+classic|live-tv-grid@1280x860|dom|div.lt-stage-top > aside.lt-showinfo|1
+classic|live-tv-grid@1280x860|dom|div.lt-stage-top > div#live-tv-slot.lt-slot|1
 classic|live-tv-grid@1280x860|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=false type=button text]|2
 classic|live-tv-grid@1280x860|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=true type=button text]|2
 classic|live-tv-grid@1280x860|dom|div.lt-times > div.pad|1
@@ -4064,6 +4089,9 @@ classic|live-tv-grid@1280x860|req|GET /api/v1/live-tv/guide|1
 classic|live-tv-grid@1280x860|req|GET /api/v1/me|1
 classic|live-tv-grid@1280x860|req|GET /api/v1/server|1
 classic|live-tv-grid@390x780|dom|^ > div#app|1
+classic|live-tv-grid@390x780|dom|aside.lt-showinfo > h2[text]|1
+classic|live-tv-grid@390x780|dom|aside.lt-showinfo > p.synopsis[text]|1
+classic|live-tv-grid@390x780|dom|aside.lt-showinfo > span.eyebrow[text]|1
 classic|live-tv-grid@390x780|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.lookword[text]|1
 classic|live-tv-grid@390x780|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.tsw|1
 classic|live-tv-grid@390x780|dom|button.ghost.profile.sm > span.caret[text]|1
@@ -4097,8 +4125,10 @@ classic|live-tv-grid@390x780|dom|div.lt-head > span.muted[text]|1
 classic|live-tv-grid@390x780|dom|div.lt-nowbar > span.grow.muted[text]|1
 classic|live-tv-grid@390x780|dom|div.lt-split > div.lt-stage|1
 classic|live-tv-grid@390x780|dom|div.lt-split > div|1
-classic|live-tv-grid@390x780|dom|div.lt-stage > div#live-tv-slot.lt-slot|1
 classic|live-tv-grid@390x780|dom|div.lt-stage > div.lt-nowbar|1
+classic|live-tv-grid@390x780|dom|div.lt-stage > div.lt-stage-top|1
+classic|live-tv-grid@390x780|dom|div.lt-stage-top > aside.lt-showinfo|1
+classic|live-tv-grid@390x780|dom|div.lt-stage-top > div#live-tv-slot.lt-slot|1
 classic|live-tv-grid@390x780|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=false type=button text]|2
 classic|live-tv-grid@390x780|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=true type=button text]|2
 classic|live-tv-grid@390x780|dom|div.lt-times > div.pad|1
@@ -4146,6 +4176,9 @@ classic|live-tv-grid@390x780|req|GET /api/v1/live-tv/guide|1
 classic|live-tv-grid@390x780|req|GET /api/v1/me|1
 classic|live-tv-grid@390x780|req|GET /api/v1/server|1
 classic|live-tv@1280x860|dom|^ > div#app|1
+classic|live-tv@1280x860|dom|aside.lt-showinfo > h2[text]|1
+classic|live-tv@1280x860|dom|aside.lt-showinfo > p.synopsis[text]|1
+classic|live-tv@1280x860|dom|aside.lt-showinfo > span.eyebrow[text]|1
 classic|live-tv@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.lookword[text]|1
 classic|live-tv@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.tsw|1
 classic|live-tv@1280x860|dom|button.ghost.profile.sm > span.caret[text]|1
@@ -4174,8 +4207,10 @@ classic|live-tv@1280x860|dom|div.lt-list[role=listbox aria-label=*] > button.lt-
 classic|live-tv@1280x860|dom|div.lt-nowbar > span.grow.muted[text]|1
 classic|live-tv@1280x860|dom|div.lt-split > div.lt-list[role=listbox aria-label=*]|1
 classic|live-tv@1280x860|dom|div.lt-split > div.lt-stage|1
-classic|live-tv@1280x860|dom|div.lt-stage > div#live-tv-slot.lt-slot|1
 classic|live-tv@1280x860|dom|div.lt-stage > div.lt-nowbar|1
+classic|live-tv@1280x860|dom|div.lt-stage > div.lt-stage-top|1
+classic|live-tv@1280x860|dom|div.lt-stage-top > aside.lt-showinfo|1
+classic|live-tv@1280x860|dom|div.lt-stage-top > div#live-tv-slot.lt-slot|1
 classic|live-tv@1280x860|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=false type=button text]|2
 classic|live-tv@1280x860|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=true type=button text]|2
 classic|live-tv@1280x860|dom|div.topctl > div|2
@@ -4224,6 +4259,9 @@ classic|live-tv@1280x860|req|GET /api/v1/live-tv/guide|1
 classic|live-tv@1280x860|req|GET /api/v1/me|1
 classic|live-tv@1280x860|req|GET /api/v1/server|1
 classic|live-tv@390x780|dom|^ > div#app|1
+classic|live-tv@390x780|dom|aside.lt-showinfo > h2[text]|1
+classic|live-tv@390x780|dom|aside.lt-showinfo > p.synopsis[text]|1
+classic|live-tv@390x780|dom|aside.lt-showinfo > span.eyebrow[text]|1
 classic|live-tv@390x780|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.lookword[text]|1
 classic|live-tv@390x780|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.tsw|1
 classic|live-tv@390x780|dom|button.ghost.profile.sm > span.caret[text]|1
@@ -4252,8 +4290,10 @@ classic|live-tv@390x780|dom|div.lt-list[role=listbox aria-label=*] > button.lt-r
 classic|live-tv@390x780|dom|div.lt-nowbar > span.grow.muted[text]|1
 classic|live-tv@390x780|dom|div.lt-split > div.lt-list[role=listbox aria-label=*]|1
 classic|live-tv@390x780|dom|div.lt-split > div.lt-stage|1
-classic|live-tv@390x780|dom|div.lt-stage > div#live-tv-slot.lt-slot|1
 classic|live-tv@390x780|dom|div.lt-stage > div.lt-nowbar|1
+classic|live-tv@390x780|dom|div.lt-stage > div.lt-stage-top|1
+classic|live-tv@390x780|dom|div.lt-stage-top > aside.lt-showinfo|1
+classic|live-tv@390x780|dom|div.lt-stage-top > div#live-tv-slot.lt-slot|1
 classic|live-tv@390x780|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=false type=button text]|2
 classic|live-tv@390x780|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=true type=button text]|2
 classic|live-tv@390x780|dom|div.topctl > div|2
@@ -6258,6 +6298,9 @@ theater|library@390x780|req|GET /api/v1/libraries|1
 theater|library@390x780|req|GET /api/v1/me|1
 theater|library@390x780|req|GET /api/v1/server|1
 theater|live-tv-grid@1280x860|dom|^ > div#app|1
+theater|live-tv-grid@1280x860|dom|aside.lt-showinfo > h2[text]|1
+theater|live-tv-grid@1280x860|dom|aside.lt-showinfo > p.synopsis[text]|1
+theater|live-tv-grid@1280x860|dom|aside.lt-showinfo > span.eyebrow[text]|1
 theater|live-tv-grid@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.lookword[text]|1
 theater|live-tv-grid@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.tsw|1
 theater|live-tv-grid@1280x860|dom|button.ghost.profile.sm > span.caret[text]|1
@@ -6288,8 +6331,10 @@ theater|live-tv-grid@1280x860|dom|div.lt-head > span.muted[text]|1
 theater|live-tv-grid@1280x860|dom|div.lt-nowbar > span.grow.muted[text]|1
 theater|live-tv-grid@1280x860|dom|div.lt-split > div.lt-stage|1
 theater|live-tv-grid@1280x860|dom|div.lt-split > div|1
-theater|live-tv-grid@1280x860|dom|div.lt-stage > div#live-tv-slot.lt-slot|1
 theater|live-tv-grid@1280x860|dom|div.lt-stage > div.lt-nowbar|1
+theater|live-tv-grid@1280x860|dom|div.lt-stage > div.lt-stage-top|1
+theater|live-tv-grid@1280x860|dom|div.lt-stage-top > aside.lt-showinfo|1
+theater|live-tv-grid@1280x860|dom|div.lt-stage-top > div#live-tv-slot.lt-slot|1
 theater|live-tv-grid@1280x860|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=false type=button text]|2
 theater|live-tv-grid@1280x860|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=true type=button text]|2
 theater|live-tv-grid@1280x860|dom|div.lt-times > div.pad|1
@@ -6342,6 +6387,9 @@ theater|live-tv-grid@1280x860|req|GET /api/v1/live-tv/guide|1
 theater|live-tv-grid@1280x860|req|GET /api/v1/me|1
 theater|live-tv-grid@1280x860|req|GET /api/v1/server|1
 theater|live-tv-grid@390x780|dom|^ > div#app|1
+theater|live-tv-grid@390x780|dom|aside.lt-showinfo > h2[text]|1
+theater|live-tv-grid@390x780|dom|aside.lt-showinfo > p.synopsis[text]|1
+theater|live-tv-grid@390x780|dom|aside.lt-showinfo > span.eyebrow[text]|1
 theater|live-tv-grid@390x780|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.lookword[text]|1
 theater|live-tv-grid@390x780|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.tsw|1
 theater|live-tv-grid@390x780|dom|button.ghost.profile.sm > span.caret[text]|1
@@ -6372,8 +6420,10 @@ theater|live-tv-grid@390x780|dom|div.lt-head > span.muted[text]|1
 theater|live-tv-grid@390x780|dom|div.lt-nowbar > span.grow.muted[text]|1
 theater|live-tv-grid@390x780|dom|div.lt-split > div.lt-stage|1
 theater|live-tv-grid@390x780|dom|div.lt-split > div|1
-theater|live-tv-grid@390x780|dom|div.lt-stage > div#live-tv-slot.lt-slot|1
 theater|live-tv-grid@390x780|dom|div.lt-stage > div.lt-nowbar|1
+theater|live-tv-grid@390x780|dom|div.lt-stage > div.lt-stage-top|1
+theater|live-tv-grid@390x780|dom|div.lt-stage-top > aside.lt-showinfo|1
+theater|live-tv-grid@390x780|dom|div.lt-stage-top > div#live-tv-slot.lt-slot|1
 theater|live-tv-grid@390x780|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=false type=button text]|2
 theater|live-tv-grid@390x780|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=true type=button text]|2
 theater|live-tv-grid@390x780|dom|div.lt-times > div.pad|1
@@ -6426,6 +6476,9 @@ theater|live-tv-grid@390x780|req|GET /api/v1/live-tv/guide|1
 theater|live-tv-grid@390x780|req|GET /api/v1/me|1
 theater|live-tv-grid@390x780|req|GET /api/v1/server|1
 theater|live-tv@1280x860|dom|^ > div#app|1
+theater|live-tv@1280x860|dom|aside.lt-showinfo > h2[text]|1
+theater|live-tv@1280x860|dom|aside.lt-showinfo > p.synopsis[text]|1
+theater|live-tv@1280x860|dom|aside.lt-showinfo > span.eyebrow[text]|1
 theater|live-tv@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.lookword[text]|1
 theater|live-tv@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.tsw|1
 theater|live-tv@1280x860|dom|button.ghost.profile.sm > span.caret[text]|1
@@ -6451,8 +6504,10 @@ theater|live-tv@1280x860|dom|div.lt-list[role=listbox aria-label=*] > button.lt-
 theater|live-tv@1280x860|dom|div.lt-nowbar > span.grow.muted[text]|1
 theater|live-tv@1280x860|dom|div.lt-split > div.lt-list[role=listbox aria-label=*]|1
 theater|live-tv@1280x860|dom|div.lt-split > div.lt-stage|1
-theater|live-tv@1280x860|dom|div.lt-stage > div#live-tv-slot.lt-slot|1
 theater|live-tv@1280x860|dom|div.lt-stage > div.lt-nowbar|1
+theater|live-tv@1280x860|dom|div.lt-stage > div.lt-stage-top|1
+theater|live-tv@1280x860|dom|div.lt-stage-top > aside.lt-showinfo|1
+theater|live-tv@1280x860|dom|div.lt-stage-top > div#live-tv-slot.lt-slot|1
 theater|live-tv@1280x860|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=false type=button text]|2
 theater|live-tv@1280x860|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=true type=button text]|2
 theater|live-tv@1280x860|dom|div.th-ctl > div.th-pop|2
@@ -6506,6 +6561,9 @@ theater|live-tv@1280x860|req|GET /api/v1/live-tv/guide|1
 theater|live-tv@1280x860|req|GET /api/v1/me|1
 theater|live-tv@1280x860|req|GET /api/v1/server|1
 theater|live-tv@390x780|dom|^ > div#app|1
+theater|live-tv@390x780|dom|aside.lt-showinfo > h2[text]|1
+theater|live-tv@390x780|dom|aside.lt-showinfo > p.synopsis[text]|1
+theater|live-tv@390x780|dom|aside.lt-showinfo > span.eyebrow[text]|1
 theater|live-tv@390x780|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.lookword[text]|1
 theater|live-tv@390x780|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.tsw|1
 theater|live-tv@390x780|dom|button.ghost.profile.sm > span.caret[text]|1
@@ -6531,8 +6589,10 @@ theater|live-tv@390x780|dom|div.lt-list[role=listbox aria-label=*] > button.lt-r
 theater|live-tv@390x780|dom|div.lt-nowbar > span.grow.muted[text]|1
 theater|live-tv@390x780|dom|div.lt-split > div.lt-list[role=listbox aria-label=*]|1
 theater|live-tv@390x780|dom|div.lt-split > div.lt-stage|1
-theater|live-tv@390x780|dom|div.lt-stage > div#live-tv-slot.lt-slot|1
 theater|live-tv@390x780|dom|div.lt-stage > div.lt-nowbar|1
+theater|live-tv@390x780|dom|div.lt-stage > div.lt-stage-top|1
+theater|live-tv@390x780|dom|div.lt-stage-top > aside.lt-showinfo|1
+theater|live-tv@390x780|dom|div.lt-stage-top > div#live-tv-slot.lt-slot|1
 theater|live-tv@390x780|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=false type=button text]|2
 theater|live-tv@390x780|dom|div.lt-switch[role=group aria-label=*] > button[aria-pressed=true type=button text]|2
 theater|live-tv@390x780|dom|div.th-ctl > div.th-pop|2
