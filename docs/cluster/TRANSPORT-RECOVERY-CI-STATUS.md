@@ -1,6 +1,6 @@
 # Transport recovery CI — implementation status and evidence
 
-**Status:** M6 reviewed candidate; repairing fast preflight metadata · **Owner:** Codex · **Updated:** 2026-09-09
+**Status:** M6 reviewed candidate; closing current-base integration failures · **Owner:** Codex · **Updated:** 2026-09-09
 
 Companion to
 [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md) (how this effort reaches
@@ -51,14 +51,22 @@ operations suite (294 tests), the full local validation suite (198 tests with
 one platform skip), the pinned Rust 1.97.1 check and Clippy gate, formatting,
 documentation indexing, history audit, and an exact-source Linux run of all 67
 transport-recovery tests.
-Current `main` moved twice after that review completed. Both updates were
-merged; the frozen candidate now includes `374e97ed`, the decoder selection
-and recovery effort promotion. Forgejo run
+Current `main` moved after that review completed. The candidate includes
+`2e77e2e1`, including the decoder selection and recovery promotion and the
+Apple terminal-settlement retry. Forgejo run
 [#1256](http://192.168.4.7:3000/noirr/plurx/actions/runs/1256) stopped at fast
 preflight because the final status-only commit `0247c428` lacked the required
-non-runtime history-ledger entry. The 20-cycle voter and learner jobs never
-started. This page and `validation/regressions.d/0247c428-validation-metadata.toml`
-record that integration repair before a new candidate is pushed.
+non-runtime history-ledger entry. Run
+[#1259](http://192.168.4.7:3000/noirr/plurx/actions/runs/1259) then reached the
+ordinary matrix but never started either 20-cycle role. It exposed a full
+Apple-suite teardown race and current-base Store migration failures; the fast
+Rust and web jobs stopped at a runner disk floor, the Android emulator stopped
+after boot, and one cluster-daemon case failed once before passing an exact
+focused rerun on pinned Rust 1.97.1. The affected runner reclaimed 10.62 GB of
+builder cache. Apple finalization now has a completion boundary before an
+injected transport is invalidated, and all 78 affected reporter and session
+tests pass on the exact merged tree. Store migration diagnosis is the remaining
+integration repair before the final candidate is pushed.
 
 ## Milestones — evidence closes the checkbox
 
