@@ -642,10 +642,11 @@ async function main() {
 
   const adapter = new Function(
     "PLAY_CAPS", "screen", "window", "playQuality", "selectedAudioIndex",
-    "PERSISTENT_STALL_MS", "ENDED_SLACK_SEC", "Hls",
+    "PERSISTENT_STALL_MS", "ENDED_SLACK_SEC", "Hls", "document",
     [
       // `preparedHandoffEnabled` reads storage this scope does not have, and
       // answers "off" when it cannot — which is what a private window does too.
+      shippedSource("streamHasVideo"),
       shippedSource("preparedHandoffEnabled"), shippedSource("preparedHandoffOffered"),
       shippedSource("pendingPlaybackControlAcknowledgement"),
       shippedSource("playbackControlCapabilities"),
@@ -669,6 +670,7 @@ async function main() {
     8_000,
     15,
     {ErrorTypes:{MEDIA_ERROR:"mediaError",NETWORK_ERROR:"networkError"}},
+    {getElementById:()=>video},
   );
   const video={
     currentTime:10,paused:false,ended:false,seeking:false,readyState:4,playbackRate:1,error:null,
@@ -2061,7 +2063,7 @@ async function main() {
         // frees a staged successor when it stops, so both paths are real here
         // rather than stubbed.
         shippedConst("PREPARED_TERMINAL_STATES"), shippedConst("PREPARED_ACK_QUEUE_MAX"),
-        shippedConst("PREPARED_SETTLED_MEMORY"),
+        shippedConst("PREPARED_SETTLED_MEMORY"), shippedConst("PREPARED_FINALIZATION_MS"),
         shippedSource("preparedVideoElement"), shippedSource("preparedState"),
         shippedSource("preparedSettlementDone"), shippedSource("markPreparedSettlement"),
         shippedSource("queuePlaybackControlAcknowledgement"),
@@ -2069,6 +2071,7 @@ async function main() {
         shippedSource("settlePlaybackControlAcknowledgement"),
         shippedSource("flushPreparedSettlement"), shippedSource("cancelPreparedFirstFrame"),
         shippedSource("endingPlaybackControlSnapshot"),
+        shippedSource("finishStoppingPlaybackControl"),
         shippedSource("continueStoppingPlaybackControl"),
         shippedSource("destroyHlsInstance"),
         shippedSource("freePreparedReplacement"), shippedSource("abandonPreparedReplacement"),
@@ -2738,7 +2741,7 @@ async function main() {
         // frees a staged successor when it stops, so both paths are real here
         // rather than stubbed.
         shippedConst("PREPARED_TERMINAL_STATES"), shippedConst("PREPARED_ACK_QUEUE_MAX"),
-        shippedConst("PREPARED_SETTLED_MEMORY"),
+        shippedConst("PREPARED_SETTLED_MEMORY"), shippedConst("PREPARED_FINALIZATION_MS"),
         shippedSource("preparedVideoElement"), shippedSource("preparedState"),
         shippedSource("preparedSettlementDone"), shippedSource("markPreparedSettlement"),
         shippedSource("queuePlaybackControlAcknowledgement"),
@@ -2746,6 +2749,7 @@ async function main() {
         shippedSource("settlePlaybackControlAcknowledgement"),
         shippedSource("flushPreparedSettlement"), shippedSource("cancelPreparedFirstFrame"),
         shippedSource("endingPlaybackControlSnapshot"),
+        shippedSource("finishStoppingPlaybackControl"),
         shippedSource("continueStoppingPlaybackControl"),
         shippedSource("destroyHlsInstance"),
         shippedSource("freePreparedReplacement"), shippedSource("abandonPreparedReplacement"),
@@ -3505,8 +3509,14 @@ async function main() {
 
   // Gate A is a switch this browser owns, and it is what the server reads.
   {
-    const capabilities = new Function("localStorage", "PLAY_CAPS", "screen", "window", [
+    const capabilityVideo = {
+      videoWidth: 1_920,
+      requestVideoFrameCallback() {},
+    };
+    const capabilities = new Function(
+      "localStorage", "PLAY_CAPS", "screen", "window", "document", [
       shippedConst("PREPARED_HANDOFF_KEY"),
+      shippedSource("streamHasVideo"),
       shippedSource("preparedHandoffEnabled"), shippedSource("preparedHandoffOffered"),
       shippedSource("setPreparedHandoffEnabled"),
       shippedSource("playbackControlCapabilities"),
@@ -3521,23 +3531,35 @@ async function main() {
       })(),
       { vcodec: "h264", maxheight: 1080 }, { height: 1080 },
       { innerHeight: 1080, devicePixelRatio: 1 },
+      { getElementById: () => capabilityVideo },
     );
     assert.equal(capabilities.capabilities().dual_player_preparation, false,
       "off until an operator turns it on: the server stages nothing for a false");
     capabilities.enable(true);
     assert.equal(capabilities.enabled(), true);
+    capabilities.player({ source: { video_codec: "h264" } });
     assert.equal(capabilities.capabilities().dual_player_preparation, true,
-      "and the switch is what reaches the wire — there is no separate code gate");
+      "an enabled video player with real presentation evidence offers preparation");
+    delete capabilityVideo.requestVideoFrameCallback;
+    assert.equal(capabilities.capabilities().dual_player_preparation, false,
+      "a video player without a presented-frame signal reports the runtime limitation");
+    capabilityVideo.videoWidth = 0;
+    capabilities.player({ source: {} });
+    assert.equal(capabilities.capabilities().dual_player_preparation, true,
+      "audio-only playback has honest advancing-clock evidence instead");
     // …and the player can withdraw the offer without the operator touching the
     // switch. A successor that died before it was ever playable is a statement
     // about this playback, and while staging starts no worker that is every
     // attempt — so the alternative is a doomed second pipeline on every quality
     // change, which is a regression, not a feature.
-    capabilities.player({ preparedRefused: true });
+    capabilityVideo.videoWidth = 1_920;
+    capabilityVideo.requestVideoFrameCallback = () => {};
+    capabilities.player({ source: { video_codec: "h264" }, preparedRefused: true });
     assert.equal(capabilities.capabilities().dual_player_preparation, false,
       "a playback that could not be handed a usable successor stops offering");
     capabilities.player(null);
-    assert.equal(capabilities.capabilities().dual_player_preparation, true);
+    assert.equal(capabilities.capabilities().dual_player_preparation, false,
+      "there is no runtime handoff offer without an attached player");
     capabilities.enable(false);
     assert.equal(capabilities.capabilities().dual_player_preparation, false);
   }
@@ -3783,6 +3805,37 @@ async function main() {
     "the in-flight request, commit, and end retain protocol order");
   }
   {
+    // Permanent transport failure during teardown has a hard ownership
+    // deadline. Drive the shipped callback with a fake clock at that deadline:
+    // the detached reporter must clear its timer and every retained marker
+    // instead of retrying a player closure forever.
+    const boundedFinalizer = new Function("reporter", [
+      shippedConst("PREPARED_FINALIZATION_MS"),
+      shippedSource("finishStoppingPlaybackControl"),
+      shippedSource("continueStoppingPlaybackControl"),
+      "return {bound:PREPARED_FINALIZATION_MS,handled:continueStoppingPlaybackControl("+
+        "null,reporter,null,{demand:'active',acknowledgement:{state:'committed'}},null,null)};",
+    ].join("\n"));
+    const cleared = [];
+    let stopped = 0;
+    const reporter = {
+      plurxSettling: true,
+      plurxSettlingUntil: 3_000,
+      plurxSettlingTimer: 17,
+      now: () => 3_000,
+      clearTimer: (timer) => cleared.push(timer),
+      stop: () => { stopped += 1; },
+    };
+    const result = boundedFinalizer(reporter);
+    assert.equal(result.bound, 3_000);
+    assert.equal(result.handled, true);
+    assert.deepEqual(cleared, [17]);
+    assert.equal(stopped, 1, "permanent outage cannot retain a detached reporter");
+    assert.equal(reporter.plurxSettling, false);
+    assert.equal(reporter.plurxSettlingUntil, null);
+    assert.equal(reporter.plurxSettlingTimer, null);
+  }
+  {
     // The snapshot seam: the shipped snapshot builder carries the queue's head,
     // and splits a same-turn commit+end into the required active commit first.
     const queued = Object.assign({}, player, {
@@ -3920,15 +3973,20 @@ async function main() {
       "an advancing clock is the first-frame evidence an audio-only title has");
   }
   {
-    // …and the same fallback is the only one older Safari and Firefox have.
+    // A video handoff without a presented-frame callback is not safely
+    // observable. A timeupdate only proves the media clock advanced; it does
+    // not prove the successor ever reached the screen.
     const h = preparedHarness({ videoFrameCallback: false });
     const p = h.set(preparedPlayer({ hls: { bandwidthEstimate: 1, destroy() {} } }));
     h.handle(prepareAction());
     h.instances[0].events.manifest();
     h.spare.ranges = [[0, 30]];
     h.instances[0].events.append();
+    assert.equal(latest(h).state, "failed",
+      "video preparation fails closed when presented-frame evidence is unavailable");
     h.spare.emit("timeupdate");
-    assert.equal(latest(h).state, "committed");
+    assert.equal(latest(h).state, "failed", "timeupdate alone can never commit video");
+    assert.equal(p.prepared, null, "the unobservable successor is released");
   }
 
   // ---- the element the page is talking to ---------------------------------

@@ -1415,6 +1415,10 @@ class PlaybackControlPreparedReplacementTest {
         )
         assertTrue(encoded.contains("\"state\":\"committed\""), encoded)
         assertTrue(encoded.contains("\"demand\":\"active\""), encoded)
+        val terminal = assertNotNull(endingSnapshotAfterSettlement(ending))
+        assertEquals(PlaybackDemand.END, terminal.demand)
+        assertNull(terminal.acknowledgement)
+        assertNull(endingSnapshotAfterSettlement(settlement), "only the original end intent queues it")
 
         // Every other state still rides an ending exchange: an abandoned
         // preparation must be settled, and the last exchange is often the only
@@ -1426,6 +1430,7 @@ class PlaybackControlPreparedReplacementTest {
             AcknowledgementState.ABORTED,
             assertNotNull(aborting.sendableAcknowledgement).state,
         )
+        assertNull(endingSnapshotAfterSettlement(aborting))
     }
 
     @Test
@@ -1631,6 +1636,35 @@ class PlaybackControlSettleTest {
             harness.requests.last().acknowledgement?.state,
         )
         subject.stop()
+    }
+
+    @Test
+    fun `an ending commit is accepted before its terminal exchange`() = runTest {
+        val harness = Harness(this)
+        val subject = assertNotNull(reporter(harness))
+        subject.start(backgroundScope)
+        runCurrent()
+
+        val ending = snapshot(demand = PlaybackDemand.END).copy(
+            acknowledgement = ActionAcknowledgement(
+                actionId,
+                AcknowledgementState.COMMITTED,
+                committedMediaOriginMs = 1_800_000,
+                firstFrameUnixMs = 1_788_000_000_000,
+            ),
+        )
+        val terminal = assertNotNull(endingSnapshotAfterSettlement(ending))
+        assertTrue(subject.settle(backgroundScope, capture(ending), capture(terminal)))
+        advanceTimeBy(5_000)
+        runCurrent()
+
+        val tail = harness.requests.takeLast(2)
+        assertEquals(2, tail.size)
+        assertEquals(PlaybackDemand.ACTIVE, tail[0].demand)
+        assertEquals(AcknowledgementState.COMMITTED, tail[0].acknowledgement?.state)
+        assertEquals(PlaybackDemand.END, tail[1].demand)
+        assertNull(tail[1].acknowledgement)
+        assertTrue(subject.isStopped(), "an accepted end closes the handed-off reporter")
     }
 
     @Test

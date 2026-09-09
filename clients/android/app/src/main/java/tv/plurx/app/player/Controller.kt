@@ -1040,16 +1040,13 @@ class Controller(
         abandonPreparedReplacement(failed = false)
         awaitingCommitFrameSinceMs = null
         val settling = settlingSnapshotIfOwed()
+        val endingSession = sessionId
         // Every read below this line is against a player that is about to be
         // released, so the observation is closed first.
         controlObservationIsClosed = true
         preparedRollbackReopen = null
         collectRetiredPlayer()
-        if (settling != null) {
-            playbackControl.endAfterFinalExchange(vm.viewModelScope, settling)
-        } else {
-            playbackControl.end()
-        }
+        endPlaybackControl(settling) { endingSession?.let(vm::endHlsSession) }
         // A verdict survives a reopen because the failure it explains usually
         // arrives after one. It must not survive the title: a confident
         // sentence about the wrong film is worse than a generic one.
@@ -1063,7 +1060,6 @@ class Controller(
         controlObservationOverride = null
         controlRenderOverride = null
         controlEvidencePositionMs = null
-        sessionId?.let { vm.endHlsSession(it) }
         sessionId = null
 
         player.removeListener(listener)
@@ -1248,8 +1244,8 @@ class Controller(
         val requestVersion = stallGuard.beginRequest()
         val recipe = currentRecipe()
         val createBody = sessionBody(ms, recipe = recipe.recipe)
-        endPlaybackControl()
-        sessionId?.let { vm.endHlsSession(it) }
+        val endingSession = sessionId
+        endPlaybackControl { endingSession?.let(vm::endHlsSession) }
         sessionId = null
         clearStatusPolling()
         encoder = null
@@ -1724,8 +1720,8 @@ class Controller(
 
     private fun leaveSessionPlayback() {
         stallGuard.invalidateForUserAction()
-        endPlaybackControl()
-        sessionId?.let { vm.endHlsSession(it) }
+        val endingSession = sessionId
+        endPlaybackControl { endingSession?.let(vm::endHlsSession) }
         sessionId = null
         clearStatusPolling()
         encoder = null
@@ -1896,7 +1892,6 @@ class Controller(
         pendingAcknowledgement?.let {
             playbackControlObservation()
                 ?.let(PlaybackControlMapping::snapshot)
-                ?.let(::settlingSnapshot)
         }
 
     /**
@@ -1918,13 +1913,20 @@ class Controller(
      * ignores an `action_id` not bound to the session it arrives on — and it is
      * strictly what happened before this hand-off existed.
      */
-    private fun endPlaybackControl() {
+    private fun endPlaybackControl(
+        settling: PlaybackControlSnapshot? = settlingSnapshotIfOwed(),
+        afterFinalExchange: () -> Unit = {},
+    ) {
         playbackControlBootstrapFence.invalidate()
-        val settling = settlingSnapshotIfOwed()
         if (settling != null) {
-            playbackControl.endAfterFinalExchange(vm.viewModelScope, settling)
+            playbackControl.endAfterFinalExchange(
+                vm.viewModelScope,
+                settling,
+                afterFinalExchange,
+            )
         } else {
             playbackControl.end()
+            afterFinalExchange()
         }
     }
 

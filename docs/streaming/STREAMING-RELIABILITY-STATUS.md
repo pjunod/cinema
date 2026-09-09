@@ -3,11 +3,14 @@
 **Status:** the earlier effort slice reached `main`; the continuation now has
 §4's server protocol, all three prepared-switch clients, and immutable encoded
 VOD integrated with current `main`. Draft [#178](http://192.168.4.7:3000/noirr/plurx/pulls/178)
-has local corrections for all seven P1s from its exact-candidate adversarial
-review, plus the retained Android rollback and live Developer-readiness gaps
-found while verifying those corrections. Focused Apple, Android, web, Rust,
-Store, and policy evidence is green. The fixed head will merge after exact-head
-approval and green fast-lane promotion jobs;
+completed its final adversarial review at `9249ddaa`. That pass found four
+remaining P1s: Android could DELETE before commit → end settled, Apple and web
+could retain finalization retry state forever, and web treated `timeupdate` as
+proof that video reached the screen. All four are corrected locally with
+bounded finalizers and ordering/evidence regressions. Focused Apple, Android,
+web, Rust, Store, and policy evidence is green. Per maintainer direction there
+will be no further review pass. The fixed head will merge after green fast-lane
+promotion jobs;
 the remaining promotion jobs continue after merge and any code correction gets
 a new pull request. Physical two-player evidence is advisory and open; it does
 not gate the enable control · **Updated:**
@@ -40,10 +43,10 @@ Completed tasks are removed from that queue and retained here as evidence.
 The working copy is an isolated clone under `/private/tmp`; the existing
 developer checkouts are not used for implementation or validation. Task
 branches merge into the effort branch through the compile-only development
-gate. The effort reaches `main` after exact-head adversarial approval and the
-main-promotion fast lane is green. Longer promotion jobs keep running after the
-merge; failures are watched to completion and any source correction is made in
-a new reviewed pull request.
+gate. This effort reaches `main` after its final adversarial review findings are
+corrected and the main-promotion fast lane is green. Longer promotion jobs keep
+running after the merge; failures are watched to completion and any source
+correction is made in a new pull request.
 
 ## Outcome — playback changes must preserve the player
 
@@ -147,7 +150,7 @@ or call a green unit suite physical playback evidence.
 
 | At (America/New_York) | State change |
 |---|---|
-| 2026-09-08 — final adversarial repair locally green | Draft [#178](http://192.168.4.7:3000/noirr/plurx/pulls/178) is open from the isolated effort clone. Its first exact-candidate adversarial pass found seven P1s: Apple retired the predecessor before its commit CAS; Android fabricated a frame timestamp on timeout; web destroyed its rollback path before presentation proof; terminal demand could drop a commit; process-random encoded keys leaked durable generations; the cached Fontconfig closure missed added inputs; and Apple lacked the visible advisory enable control. All seven are corrected. The verification pass also found that Android's UI collected the predecessor before the five-second frame deadline and that the web Developer tab fetched `/developer/readiness` without painting it; the predecessor now remains exact rollback authority, and live met / not met / not observable evidence patches the advisory rows without disabling a switch. Exact source passes Android's complete JVM/lint lane, both Apple device-SDK test builds, complete web checks, pinned Rust check and strict Clippy, focused Store/VOD/readiness regressions, formatting, and policy checks. Exact-head re-review and the promotion fast lane remain. Green fast-lane jobs permit merge; all remaining jobs are monitored after merge, and any source fix gets a new PR. |
+| 2026-09-08 — final adversarial review corrected; promotion next | Draft [#178](http://192.168.4.7:3000/noirr/plurx/pulls/178) is open from the isolated effort clone. Its first exact-candidate adversarial pass found seven P1s; all seven and two verification gaps were corrected at `9249ddaa`. The final requested review of that candidate found four remaining P1s. Android now owns a bounded immutable commit → end finalization and issues DELETE only afterward. Apple and web stop permanent-outage finalizers at three seconds and clear retained retry state. Web video reports prepared capability only when it has real presented-frame evidence, and `timeupdate` remains the separate audio-only proof. Regressions cover ordering, exact retry, permanent outage, and video-without-frame-callback rollback. Android's complete JVM/lint lane, both Apple device-SDK test builds, complete web checks, the focused operations contract, and diff hygiene pass on the corrections. No further review will be requested. The tracked effort commit, push, green promotion fast lanes, ready transition, and merge remain; longer jobs are watched after merge and any source correction gets a new PR. |
 | 2026-09-08 — current main integrated for final promotion | VOD [#173](http://192.168.4.7:3000/noirr/plurx/pulls/173) passed exact-head effort run 1121 and merged as `99eb542e`. Current `main` at `9fcd151c` is now integrated into the continuation candidate. Overlapping client files resolve to main's later production dual-player implementations and post-review fixes; the effort retains its server/VOD work, advisory Developer enablement, both route families, and both regression ledgers. The main docs reorganization moved the six continuation documents into their subject folders and indexed them. Conflict-focused checks precede final review; the one complete unit run remains reserved for the reviewed and corrected promotion candidate. |
 | 2026-09-08 — VOD integration failures corrected under the fast lane | A complete workspace suite was mistakenly started on task PR #173 before the effort-level CI boundary was clarified. It passed roughly 2,392 tests and exposed seven failures before reporting nonzero: the bounded-output test could leave a shell grandchild holding its pipes; FFmpeg 9 reports a missing required stream as `Stream map '' matches no streams`; five HTTP scenarios still expected the retired encoded-VOD 501; the new source-rescan and engine-attestation refusals fell through to generic 500s; real-media fixtures retained placeholder scanner identity; and immutable encoded sessions appeared as `hls-copy` in both ordinary and cluster activity. The process fixture, diagnostic classifier, typed wire mapping, exact scan fixture, current HTTP contracts, and delivery-method attribution are corrected. Every originally failing case, both wire mappings, the peer-attribution regression, pinned check, strict Clippy, formatting, and ownership inventory now pass focused validation. Per the clarified workflow, this task PR gets no second complete suite; the one authoritative complete run occurs only after final effort review and fixes, immediately before promotion to `main`. |
 | 2026-09-08 — VOD draft gate found and closed an ownership hole | Draft [#173](http://192.168.4.7:3000/noirr/plurx/pulls/173)'s first post-review effort gate correctly refused six stale process/task ownership counts. The audit found one additional lifecycle defect behind those counts: after a sidecar destination create, write, or flush error, the method could return while its spawned diagnostic reader remained detached and exact-child reap ran only in the drop fallback. Commit `d8806467` joins stdout copying and bounded stderr draining in one cancellation scope, stops and awaits the exact child on every daemon-I/O error, and transfers both readers plus the child together on cancellation. A pre-existing-destination regression and the physical-cap regression both prove confirmed reap. Pinned Rust all-target check, strict Clippy, formatting, diff hygiene, and all seven ownership contracts are green. The earlier incomplete workspace-suite attempt was stopped when the gate exposed this changed source; the task's one complete final run remains unspent. |

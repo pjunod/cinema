@@ -498,3 +498,12 @@ internal fun settlingSnapshot(snapshot: PlaybackControlSnapshot): PlaybackContro
         playbackRate = maxOf(PlaybackControlMapping.MIN_ACTIVE_RATE, snapshot.playbackRate),
     )
 }
+
+/** The terminal exchange owed after an ending commit is accepted. */
+internal fun endingSnapshotAfterSettlement(
+    snapshot: PlaybackControlSnapshot,
+): PlaybackControlSnapshot? {
+    if (snapshot.acknowledgement?.state != AcknowledgementState.COMMITTED) return null
+    if (snapshot.demand != PlaybackDemand.END) return null
+    return snapshot.copy(acknowledgement = null)
+}

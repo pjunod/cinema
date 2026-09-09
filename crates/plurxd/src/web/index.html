@@ -7127,6 +7127,10 @@ const PREPARED_ACK_QUEUE_MAX=4;
 // recognised rather than built again. The server replays a `Prepare`
 // byte-identically until it processes the acknowledgement.
 const PREPARED_SETTLED_MEMORY=8;
+// A detached reporter gets one bounded chance to settle commit → end. The
+// server's durable deadline owns cleanup after this; the browser must not keep
+// a player closure and retry timers alive forever after the viewer leaves.
+const PREPARED_FINALIZATION_MS=3000;
 // Whether this browser will OFFER to prepare, right now.
 //
 // The switch is the operator's answer; this is the player's. A successor that
@@ -7137,7 +7141,12 @@ const PREPARED_SETTLED_MEMORY=8;
 // forgotten when the player ends: no flag, nothing persisted, and nothing an
 // operator has to reset.
 function preparedHandoffOffered(p){
-  return preparedHandoffEnabled() && !(p&&p.preparedRefused);
+  if(!p||p.preparedRefused) return false;
+  let element=null;
+  try{ element=document.getElementById("video"); }catch(e){ return false; }
+  const presentationProof=!streamHasVideo(p,element)
+    ||!!(element&&typeof element.requestVideoFrameCallback==="function");
+  return preparedHandoffEnabled() && presentationProof;
 }
 function preparedHandoffEnabled(){
   // Any scope without storage — a private window that refuses it, and the test
@@ -7646,13 +7655,17 @@ function preparedFirstFrame(p,state,element,onFrame,onTimeout){
   };
   state.frameTimer=setTimeout(()=>finish(onTimeout),PREPARED_FIRST_FRAME_MS);
   const done=()=>finish(()=>onFrame(Date.now()));
-  // `requestVideoFrameCallback` is the only API that answers "has a frame been
-  // presented" — but it answers it for VIDEO. On an audio-only title it exists
-  // and never fires, so a healthy handoff would sit out the watchdog and report
-  // `failed`. There, the first advancing `timeupdate` is the honest substitute,
-  // and it is the only one older Safari and Firefox have either.
-  if(streamHasVideo(p,element)&&typeof element.requestVideoFrameCallback==="function"){
-    try{ state.frameCallbackId=element.requestVideoFrameCallback(()=>done()); return; }catch(e){}
+  // `requestVideoFrameCallback` is the only available API that proves video
+  // presentation. A video browser without it advertises no prepared capability;
+  // this defensive branch rolls back rather than turning clock movement into
+  // a fabricated picture. Audio-only playback has no frame to prove, so its
+  // first advancing `timeupdate` remains the honest presentation signal.
+  if(streamHasVideo(p,element)){
+    if(typeof element.requestVideoFrameCallback==="function"){
+      try{ state.frameCallbackId=element.requestVideoFrameCallback(()=>done()); return; }catch(e){}
+    }
+    finish(onTimeout);
+    return;
   }
   state.frameListener=()=>done();
   element.addEventListener("timeupdate",state.frameListener);
@@ -7752,9 +7765,12 @@ function stopPlaybackControl(p){
     // successor is accepted, `continueStoppingPlaybackControl` explicitly
     // queues the required end exchange before allowing the reporter to stop.
     reporter.plurxSettling=true;
+    reporter.plurxSettlingUntil=reporter.now()+PREPARED_FINALIZATION_MS;
+    reporter.plurxSettlingTimer=reporter.setTimer(
+      ()=>finishStoppingPlaybackControl(reporter),PREPARED_FINALIZATION_MS);
     const flushed=flushPreparedSettlement(p,reporter);
     p.controlReporter=null;
-    if(!flushed){ reporter.plurxSettling=false; reporter.stop(); }
+    if(!flushed) finishStoppingPlaybackControl(reporter);
   }
   clearPlaybackControlWaiters(p);
   if(p) p.controlAcknowledgements=[];
@@ -7816,6 +7832,17 @@ function endingPlaybackControlSnapshot(snapshot,carryAcknowledgement){
   return ending;
 }
 
+function finishStoppingPlaybackControl(reporter){
+  if(!reporter) return;
+  if(reporter.plurxSettlingTimer!=null){
+    reporter.clearTimer(reporter.plurxSettlingTimer);
+    reporter.plurxSettlingTimer=null;
+  }
+  reporter.plurxSettling=false;
+  reporter.plurxSettlingUntil=null;
+  reporter.stop();
+}
+
 // A stopping reporter is deliberately detached from `p.controlReporter`, so
 // its normal ownership callback must not publish observations or actions. It
 // still owns one narrow protocol obligation: retry its immutable settlement,
@@ -7825,8 +7852,12 @@ function endingPlaybackControlSnapshot(snapshot,carryAcknowledgement){
 // cadence, which may be a full minute.
 function continueStoppingPlaybackControl(p,reporter,v,request,response,captured){
   if(!reporter||!reporter.plurxSettling) return false;
+  if(reporter.now()>=reporter.plurxSettlingUntil){
+    finishStoppingPlaybackControl(reporter);
+    return true;
+  }
   if(request.demand==="end"){
-    if(response) reporter.plurxSettling=false;
+    if(response) finishStoppingPlaybackControl(reporter);
     else reporter.notify(captured);
     return true;
   }
@@ -7850,8 +7881,7 @@ function continueStoppingPlaybackControl(p,reporter,v,request,response,captured)
   // commit, the pending end capture above keeps that retry draining without
   // asking the now-detached page for a fresh capture.
   if(!response) return true;
-  reporter.plurxSettling=false;
-  reporter.stop();
+  finishStoppingPlaybackControl(reporter);
   return true;
 }
 

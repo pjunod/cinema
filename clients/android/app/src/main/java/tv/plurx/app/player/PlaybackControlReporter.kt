@@ -792,6 +792,10 @@ class PlaybackControlReporter private constructor(
      * is the truth" true rather than merely intended.
      */
     private var settled = false
+    /** The immutable capture whose acceptance unlocks [settlementFollowUp]. */
+    private var settlementCapture: PlaybackControlCapture? = null
+    /** Exact terminal capture queued only after the settlement is accepted. */
+    private var settlementFollowUp: PlaybackControlCapture? = null
     private var retryRequest: PendingRequest? = null
     private var acceptedCapabilities: DynamicCapabilities? = null
     private var lastStartedAt: Long? = null
@@ -921,8 +925,12 @@ class PlaybackControlReporter private constructor(
      * about a player already being released, and the acknowledgement this
      * exchange exists to carry lives only in the value handed in.
      */
-    suspend fun settle(scope: CoroutineScope, value: PlaybackControlCapture): Boolean {
-        if (!value.snapshot.isValid) return false
+    suspend fun settle(
+        scope: CoroutineScope,
+        value: PlaybackControlCapture,
+        followUp: PlaybackControlCapture? = null,
+    ): Boolean {
+        if (!value.snapshot.isValid || followUp?.snapshot?.isValid == false) return false
         val stale = mutex.withLock {
             if (stopped) return false
             val running = pump
@@ -945,6 +953,8 @@ class PlaybackControlReporter private constructor(
                 retryRequest = null
                 nextAllowedAt = 0L
                 pending = value
+                settlementCapture = value
+                settlementFollowUp = followUp
                 settled = true
                 true
             }
@@ -958,6 +968,8 @@ class PlaybackControlReporter private constructor(
             if (stopped) return
             stopped = true
             pending = null
+            settlementCapture = null
+            settlementFollowUp = null
             retryRequest = null
             // The coroutine about to be cancelled re-throws rather than
             // running its tail, so it never clears this itself. No reader
@@ -980,6 +992,8 @@ class PlaybackControlReporter private constructor(
             stopped = true
             terminalStop = captured
             pending = null
+            settlementCapture = null
+            settlementFollowUp = null
             retryRequest = null
             val running = pump
             pump = null
@@ -1133,6 +1147,14 @@ class PlaybackControlReporter private constructor(
                     PlaybackControl.MIN_EXCHANGE_MS,
                     response.action.afterMs,
                 )
+            }
+            // A committed acknowledgement may not ride `demand: end`. Keep
+            // the exact terminal capture behind the commit's accepted response
+            // so no coroutine scheduler or DELETE can invert them.
+            if (pendingRequest.capture === settlementCapture) {
+                pending = settlementFollowUp
+                settlementCapture = null
+                settlementFollowUp = null
             }
         }
         onExchange(Exchange(request, response, null, pendingRequest.capture))

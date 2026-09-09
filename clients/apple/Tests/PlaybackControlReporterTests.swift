@@ -836,6 +836,40 @@ final class PlaybackControlReporterTests: XCTestCase {
         await reporter2.stop()
     }
 
+    func testFinalizationStopsAtItsDeadlineDuringPersistentOutage() async throws {
+        let harness = Harness()
+        var ending = snapshot(demand: .end)
+        ending.acknowledgement = ActionAcknowledgement(
+            actionId: "6f1d2a44-2b7e-4a1c-9f3e-2c5a7b8d9e01",
+            state: .committed,
+            committedMediaOriginMs: 0,
+            firstFrameUnixMs: 1_788_000_000_000
+        )
+        harness.enqueue((0..<8).map { _ in
+            .failure(ControlTransportError(status: nil, code: nil))
+        })
+        let reporter = try XCTUnwrap(makeReporter(harness))
+        await reporter.finish(PlaybackControlCapture(
+            snapshot: ending,
+            intentGeneration: 0,
+            owner: PlaybackControlCaptureOwner(
+                lifecycleId: clientId, attachmentGeneration: 1
+            ),
+            sourceRevision: 1
+        ))
+        XCTAssertTrue(harness.waitUntil { !harness.requests.isEmpty })
+        XCTAssertTrue(harness.waitUntil {
+            harness.pacingSleeps.reduce(0, +)
+                >= PlaybackControlReporter.finalizationDeadlineMs
+        })
+        let status = await reporter.status()
+        XCTAssertEqual(status["stopped"], 1, "teardown may not orphan an indefinitely retrying actor")
+        XCTAssertEqual(status["in_flight"], 0)
+        XCTAssertEqual(status["pending"], 0)
+        XCTAssertEqual(status["retrying"], 0)
+        XCTAssertLessThan(harness.requests.count, 8, "the bounded finisher stops retrying")
+    }
+
     func testATerminalVerdictEndsReportingWithoutAProtocolError() async throws {
         let harness = Harness()
         harness.enqueue([.success(ControlResponse(

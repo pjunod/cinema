@@ -161,6 +161,20 @@ class EvidenceWorkflowCase(unittest.TestCase):
         )[0]
         self.assertIn("player = predecessor.player", rollback)
         self.assertIn("preparedRollbackReopen", rollback)
+        release = android.split("fun release()", 1)[1].split("fun switchAudio", 1)[0]
+        self.assertIn(
+            "endPlaybackControl(settling) { endingSession?.let(vm::endHlsSession) }",
+            release,
+        )
+        self.assertNotIn("sessionId?.let { vm.endHlsSession(it) }", release)
+        session = self.read(
+            "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackControlSession.kt"
+        )
+        finish = session.split("fun endAfterFinalExchange(", 1)[1].split(
+            "private companion object", 1
+        )[0]
+        self.assertIn("subject.settle(outerScope, settling, ending)", finish)
+        self.assertLess(finish.index("subject.stop()"), finish.rindex("afterFinalExchange()"))
 
     def test_apple_prepared_enablement_is_visible_and_advisory(self) -> None:
         view = self.read("clients/apple/Sources/LiveTvDeveloperView.swift")
