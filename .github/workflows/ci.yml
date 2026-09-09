@@ -962,6 +962,10 @@ jobs:
             com.apple.CoreSimulator.SimDeviceType.Apple-TV-4K-3rd-generation-4K \
             com.apple.CoreSimulator.SimRuntime.tvOS-26-5)
           echo "APPLE_TVOS_SIM=platform=tvOS Simulator,id=$tvos_id" >> "$GITHUB_ENV"
+          for simulator_id in "$ios_id" "$ipad_id" "$tvos_id"; do
+            xcrun simctl boot "$simulator_id"
+            xcrun simctl bootstatus "$simulator_id" -b
+          done
       - name: Run the shared XCTest suite on iPhone, iPad, and Apple TV
         run: make apple-test
       - name: Delete the run's simulators
