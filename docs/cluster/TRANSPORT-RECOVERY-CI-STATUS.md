@@ -1,6 +1,6 @@
 # Transport recovery CI — implementation status and evidence
 
-**Status:** M6 Forgejo concurrency correction verified; final qualification next · **Owner:** Codex · **Updated:** 2026-09-09
+**Status:** merged; post-merge M6 qualification and CI repair in progress · **Owner:** Codex · **Updated:** 2026-09-09
 
 Companion to
 [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md) (how this effort reaches
@@ -9,6 +9,17 @@ Companion to
 (what the retained leak statistic asserts) — this page says what has actually
 been built, reviewed, and proved. It is updated with each milestone so a green
 checkbox means retained evidence, not intent.
+
+## Live summary
+
+| Item | Current evidence |
+|---|---|
+| Product implementation | PR [#191](http://192.168.4.7:3000/noirr/plurx/pulls/191) merged as `c14ddba6`; M0–M5 are active in `main` with no product feature gate. |
+| Review | The requested single adversarial review is complete and all nine findings were implemented before merge. No second review was run. |
+| Main verification | Run [#1384](http://192.168.4.7:3000/noirr/plurx/actions/runs/1384) is the current post-merge run for `18ddffc1`. Rust, Store, WAL, daemon, web, Android, packaging, coverage, and transport contracts passed. The 20-cycle voter role is running; the independent learner role follows on the topology runner. |
+| Infrastructure repair | The VOD test never started because its runner had 42 GB free against the lane's 45 GB floor. The repository janitor is now installed there and one inactive 4.9 GB generated Cargo target was removed, restoring 50 GB free. |
+| Apple repair | The iPhone leg passed all 472 tests; the fresh iPad destination then stalled before XCTest and exhausted the job deadline. Fix-forward commit `4c93b342` removes only stale workflow-owned simulators and explicitly boots each isolated destination to runtime readiness before testing. |
+| Remaining merge work | Finish both role reports and their aggregate, publish this status/mapping repair through one draft PR, run the complete PR suite once, then merge only if every required job passes. |
 
 ## Current position — the one M6 adversarial review is complete
 
