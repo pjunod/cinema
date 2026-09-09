@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["879e4004"]
+points = ["live-tv.integration", "web.experience"]
+checks = ["rust-gate", "web-static"]
+reason = "The Rust regression pins a one-second initial HLS target, one-second forced keyframes, the four-second steady target, and the six-segment live window in the shared runtime/probe argument list, so restoring the old four-second startup cadence fails it. The shipped-web regression requires both List and Grid markup to place the player before the guide, rejects the old 400 px side column, requires both guide containers to take the measured player height, and toggles mute twice while asserting that every mute control remains an icon with synchronized accessible action labels."
