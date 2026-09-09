@@ -1,0 +1,16 @@
+version = 1
+
+[[coverage]]
+commits = [
+  "ee3f2241",
+]
+points = [
+  "operations.packaging",
+  "validation.framework",
+]
+checks = [
+  "operations-contract",
+  "catalog-contract",
+  "history-regressions",
+]
+reason = "Workflow-level event-context cancellation now preserves final effort and integration promotion runs while retaining superseding cancellation for ordinary pull requests and main pushes and leaving tags immutable. The qualification receipt force-fetches both live refs immediately before publication and refuses a moved head or base. Unit and operations tests cover the six-event table and both stale-ref cases, while isolated Forgejo 16.0.3 runs prove cancel-in-progress false queues both invocations to success and true cancels only the superseded probe."
