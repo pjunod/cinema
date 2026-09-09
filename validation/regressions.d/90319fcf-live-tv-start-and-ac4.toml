@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["90319fcf"]
+points = ["live-tv.integration", "operations.packaging"]
+checks = ["rust-gate", "web-static", "operations-contract", "container-runtime"]
+reason = "The Rust live-TV regressions pin the bounded probe and QSV pixel-format path, the browser unit suite pins typed start failures plus compact and expanded player behavior, and the operations contracts require the release image to install Jellyfin FFmpeg 8 and expose its AC-4 decoder. The container runtime smoke then builds and starts that shipped image rather than accepting a source-only package declaration."
