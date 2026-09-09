@@ -831,11 +831,14 @@ assert.equal(context.ACT_TIMER, null);
             rollout.index(proof), rollout.index("docker compose up -d --build")
         )
         self.assertIn('PLURX_HEALTH_START_PERIOD="$period" PLURX_BUILD_REF=', rollout)
+        self.assertIn("PLURX_BUILD_SHA=", rollout)
         self.assertIn("PLURX_NODE_HOSTNAME=", rollout)
         self.assertNotIn("-f deploy/docker-compose.yml", command)
 
         makefile = read("Makefile")
         self.assertIn("HOST_SHORTNAME := $(shell hostname -s", makefile)
+        self.assertIn("BUILD_SHA := $(shell git rev-parse HEAD", makefile)
+        self.assertIn('PLURX_BUILD_SHA="$(BUILD_SHA)"', makefile)
         self.assertIn('PLURX_NODE_HOSTNAME="$(HOST_SHORTNAME)"', makefile)
 
         dockerfile = read("Dockerfile")
@@ -845,6 +848,10 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn('ARG PLURX_BUILD_SHA=""', dockerfile)
         self.assertIn("ENV PLURX_BUILD_SHA=${PLURX_BUILD_SHA}", dockerfile)
         self.assertIn("PLURX_BUILD_REF: ${PLURX_BUILD_REF:-}", compose)
+        self.assertIn("PLURX_BUILD_SHA: ${PLURX_BUILD_SHA:-}", compose)
+
+        cluster_build = read("crates/plurx-cluster-check/build.rs")
+        self.assertIn('.filter(|value| !value.is_empty())', cluster_build)
 
         stages = list(re.finditer(r"(?im)^[ \t]*from\b.*$", dockerfile))
         runtime_stage = re.search(
