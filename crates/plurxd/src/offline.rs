@@ -1046,6 +1046,7 @@ mod tests {
             ),
         );
         transcode.test_publish_artifact_qualification(ArtifactQualification::HealthQualified);
+        transcode.set_automatic_decoder_recovery(true);
         fixture.manager = OfflineManager::new(
             Arc::clone(&fixture.store),
             transcode,
