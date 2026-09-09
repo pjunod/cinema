@@ -8174,12 +8174,14 @@ fn copied_audio_codec(file: &plurx_core::domain::MediaFile, selected: Option<i64
     }
 }
 
-/// What the legacy single-ffmpeg copy can actually deliver, given what the
-/// decision asked for.
+/// What a copy with no post-mux converter can actually deliver, given what
+/// the decision asked for.
 ///
-/// The live-HLS recovery path and the takeover muxer run one ffmpeg and have
-/// nowhere to put the RPU rewrite, so a decision that asked for a conversion
-/// has to give up its **preservation** here, not just its conversion.
+/// The takeover muxer and the structural legacy fallback run one ffmpeg and
+/// have nowhere to put the RPU rewrite, so a decision that asked for a
+/// conversion has to give up its **preservation** here, not just its
+/// conversion. A fresh GOP-aware copy does have that rewrite and deliberately
+/// bypasses this narrowing for a conversion request.
 ///
 /// The failure that closes: `decide` answers `preserve = true` for every
 /// converting client, because the RPUs must survive the bitstream filter for
@@ -19383,7 +19385,10 @@ impl TranscodeManager {
         // left the DV configuration in every remux, and had Chrome refuse the
         // stream Safari played fine.
         let have_dovi = self.dv_strippable();
-        // What this path can actually deliver — see `served_copy_options`.
+        // The GOP-aware segmenter owns an in-process RPU rewrite, so a fresh
+        // HEVC copy can deliver the requested P7 -> P8.1 conversion. Takeover
+        // and the legacy muxer cannot, and still narrow to the HDR10 base via
+        // `served_copy_options`.
         //
         // `options` is **shadowed** rather than read alongside the served
         // value, because reading the wrong one is the bug this exists to
@@ -19394,14 +19399,21 @@ impl TranscodeManager {
         // every later `options.` in this function is the served answer. `asked`
         // survives only to log the difference.
         let asked = options;
-        let options = served_copy_options(&file, asked);
+        let segmenting = takeover.is_none() && copyseg::supports(file.video_codec.as_deref());
+        let options = if segmenting && asked.convert_dolby_vision {
+            asked
+        } else {
+            served_copy_options(&file, asked)
+        };
         let served = options;
         let preserve = options.preserve_dolby_vision;
         // Logged whenever EITHER field was given up, not only when a conversion
         // was asked for. `convert && !preserve` is the pair split the other
         // way, and a path that silently discarded a conversion is exactly as
         // worth a line as one that silently discarded a preservation.
-        if asked.preserve_dolby_vision != preserve || asked.convert_dolby_vision {
+        if asked.preserve_dolby_vision != options.preserve_dolby_vision
+            || asked.convert_dolby_vision != options.convert_dolby_vision
+        {
             tracing::info!(
                 file_id,
                 asked_preserve = asked.preserve_dolby_vision,
@@ -19417,7 +19429,8 @@ impl TranscodeManager {
             probe_json.as_deref(),
             have_dovi,
             preserve,
-        );
+        )
+        .with_dolby_vision_conversion(options.convert_dolby_vision);
         if video_options.promotes_parameter_sets() && takeover.is_some() {
             return Err(
                 "this HEVC source requires GOP-aware init promotion and cannot use the legacy takeover muxer"
@@ -19460,7 +19473,6 @@ impl TranscodeManager {
         // leading picture at. A structural Unsupported result may ask the
         // actor for the one frozen legacy retry; the reader never performs the
         // replacement itself.
-        let segmenting = takeover.is_none() && copyseg::supports(file.video_codec.as_deref());
         let initial_args = if segmenting {
             transcode::copy_pipe_args_with_dolby_vision(
                 &file,
@@ -19511,7 +19523,10 @@ impl TranscodeManager {
             &copy_kind,
         );
         let presentation_contract_fingerprint = frozen_presentation.contract_fingerprint.clone();
-        let retry = (segmenting && !video_options.promotes_parameter_sets()).then(|| {
+        let retry = (segmenting
+            && !video_options.promotes_parameter_sets()
+            && !video_options.converts_dolby_vision())
+        .then(|| {
             PrepublicationCopyRetry::build(
                 legacy_args(),
                 &presentation_contract_fingerprint,
@@ -31416,23 +31431,16 @@ pub(crate) mod tests {
 
     /// And the call site, which the function above cannot speak for.
     ///
-    /// `a_copy_that_cannot_convert_serves_and_describes_the_hdr10_base` pins
-    /// `served_copy_options`; deleting the *call* to it in
-    /// `start_copy_with_audio_offset` leaves that test green and puts raw
-    /// Profile 7 back on the wire — `-strict unofficial`, RPUs and the
-    /// enhancement layer all retained — which is the exact argv the
-    /// 2026-09-02 production observation carried. So this one reads the argv
-    /// the process is actually given.
+    /// `served_copy_options` still pins legacy/takeover narrowing. A fresh
+    /// GOP-aware session has the post-mux converter, though, so this reads the
+    /// argv the real process is given and proves that the RPU survives for the
+    /// in-process stage while the enhancement layer does not.
     ///
-    /// It asserts the invariant rather than one string, because
-    /// `copy_video_args` has three strip shapes: the plain filter, the same
-    /// filter behind `dovi_rpu=strip=1` when the build has the bitstream
-    /// filter, and the parameter-set-promotion chain for a source whose
-    /// `hvcC` is a 23-byte stub. All three drop NAL types 62 and 63, and none
-    /// of them asks the muxer for `unofficial`; a preserving argv does the
-    /// opposite on both counts.
+    /// It asserts the invariant rather than the complete command: type 62
+    /// reaches the converter, type 63 does not, and movenc is allowed to carry
+    /// the source Dolby Vision side data until plurx replaces its record.
     #[tokio::test]
-    async fn a_copy_that_cannot_convert_strips_the_argv_it_spawns() {
+    async fn a_fresh_copy_conversion_preserves_the_rpu_argv_it_spawns() {
         use plurx_core::store::SqliteStore;
         use tracing_subscriber::prelude::*;
 
@@ -31527,14 +31535,12 @@ pub(crate) mod tests {
         drop(guard);
 
         assert!(
-            !argv.contains("-strict unofficial"),
-            "`-strict unofficial` is emitted only for preserved Dolby Vision; \
-             its presence means this copy kept the RPUs it cannot rewrite: {argv}"
+            argv.contains("-strict unofficial"),
+            "a converting copy must let ffmpeg retain Dolby Vision side data: {argv}"
         );
         assert!(
-            argv.contains("62-63"),
-            "the strip has to drop the RPU (62) and the enhancement layer (63); \
-             a filter that names neither is the preserving argv: {argv}"
+            !argv.contains("62-63"),
+            "the RPU (62) has to reach the in-process converter: {argv}"
         );
         assert!(
             argv.contains("-tag:v hvc1"),
@@ -31542,9 +31548,8 @@ pub(crate) mod tests {
              compatible one: {argv}"
         );
         assert!(
-            !argv.contains("remove_types=32-34|63"),
-            "that filter is the converting recipe, which this path has no \
-             stage for: {argv}"
+            argv.contains("remove_types=32-34|63"),
+            "the converting recipe keeps the RPU and drops the enhancement layer: {argv}"
         );
 
         let info = started.expect("the copy session starts");
@@ -31552,8 +31557,8 @@ pub(crate) mod tests {
             matches!(
                 info.kind,
                 SessionKind::Copy {
-                    preserve_dolby_vision: false,
-                    convert_dolby_vision: false,
+                    preserve_dolby_vision: true,
+                    convert_dolby_vision: true,
                     ..
                 }
             ),

@@ -401,7 +401,7 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
 ///   level bounds resolution and frame rate, neither of which the conversion
 ///   touches; the compatibility id says what a non-Dolby-Vision client sees of
 ///   the base layer, and the base layer is copied byte for byte.
-fn converted_dolby_vision_record(
+pub(crate) fn converted_dolby_vision_record(
     file: &MediaFile,
 ) -> Result<plurx_core::fmp4::DolbyVisionRecord, String> {
     let level = file
