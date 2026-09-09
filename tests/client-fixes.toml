@@ -806,6 +806,22 @@ test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "testQualityAudioAndSubtitleCommandsCreateANewPresentationDestinationSynchronously"
 
 [[fixes]]
+id = "android.prepared-switch-settlement-fences"
+commits = ["1865c051"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PreparedReplacement.kt"
+source_anchor = "fun committed("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedReplacementTest.kt"
+test_anchor = "nothing may replace a preparation the viewer is already watching"
+
+[[fixes]]
+id = "apple.prepared-switch-lifecycle-hardening"
+commits = ["638ac998"]
+source = "clients/apple/Sources/PreparedReplacement.swift"
+source_anchor = "var pendingAcknowledgement: ActionAcknowledgement?"
+test = "clients/apple/Tests/PreparedReplacementTests.swift"
+test_anchor = "testASettlementStaysPendingUntilItsExchangeReturns"
+
+[[fixes]]
 # `LiveTvInputPolicy.route` had exactly one call site in the repository and it
 # was its own test, so the transcribed routing table governed nothing: no key
 # handling, no four-second auto-hide, no channel up/down, and a television
@@ -894,3 +910,41 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackControlR
 source_anchor = "val newest = if (settled) pending else newestCapture(pending)"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
 test_anchor = "a teardown outlives the source that handed it over"
+
+[[fixes]]
+id = "apple.ending-commit-precedes-terminal-exchange"
+commits = ["9249ddaa"]
+source = "clients/apple/Sources/PlaybackControlReporter.swift"
+source_anchor = "func finish(_ final: PlaybackControlCapture?)"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testAnEndingCommitIsSettledBeforeTheEndExchange"
+
+[[fixes]]
+id = "apple.final-settlement-has-a-hard-deadline"
+commits = ["1f5b1f35"]
+source = "clients/apple/Sources/PlaybackControlReporter.swift"
+source_anchor = "static let finalizationDeadlineMs = 3_000"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testFinalizationStopsAtItsDeadlineDuringPersistentOutage"
+
+[[fixes]]
+# Live TV owns a separate AVPlayer, so the ordinary player's audio-session
+# setup never ran for it. On iPhone the default category followed the silent
+# switch; cleanup also must not deactivate a session Live TV never activated.
+id = "apple.live-tv-playback-audio-session"
+commits = ["08b8814f"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = "private func beginAudioSession()"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testLiveTvOwnsThePlaybackAudioSessionForItsSeparatePlayer"
+
+[[fixes]]
+# Promotion compares counters to the current merge target. This anchor keeps
+# the Android 76 claim tied to the collision regression that rejects reusing
+# the build number already present on main.
+id = "android.streaming-promotion-build-counter"
+commits = ["fdbed69e"]
+source = "clients/android/app/build.gradle.kts"
+source_anchor = "versionCode = 76"
+test = "tests/validation/test_mobile_versions.py"
+test_anchor = "test_android_counter_the_target_already_ships_fails_against_the_target"

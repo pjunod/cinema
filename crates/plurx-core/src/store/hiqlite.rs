@@ -51,8 +51,12 @@ use crate::error::StoreError;
 // analysis queue; v23 adds the staged-generation ledger, which is what lets a
 // successor session exist without being current; v24 adds the permanent
 // Profile 7 conversion ledger; v25 adds its non-cascading, attempt-identified
-// permanent recovery guard. Every additive
-// step is applied through Raft before the daemon opens the store. v5 remains a
+// permanent recovery guard; v26 retains per-attempt failure history; v27
+// records the requested video identity; v28 stores desired playback
+// selection; v29 fences pointer writes against that selection; v30 indexes
+// terminal analysis identity lookups so retention cannot stall Raft; v31 adds
+// the predecessor drain deadline and its old-writer ownership fence. Every
+// additive step is applied through Raft before the daemon opens the store. v5 remains a
 // supported direct-upgrade source so an offline node is
 // not forced to install every intermediate Cinema release; older or future
 // schemas still fail closed. Version-step targets are named independently of
@@ -76,7 +80,9 @@ const ATTEMPT_ERRORS_SCHEMA_VERSION: i64 = 26;
 const REQUEST_IDENTITY_SCHEMA_VERSION: i64 = 27;
 const DESIRED_SELECTION_SCHEMA_VERSION: i64 = 28;
 const POINTER_DESIRED_FENCE_SCHEMA_VERSION: i64 = 29;
-pub const AUTH_SCHEMA_VERSION: i64 = POINTER_DESIRED_FENCE_SCHEMA_VERSION;
+const ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA_VERSION: i64 = 30;
+const DRAIN_DEADLINE_SCHEMA_VERSION: i64 = 31;
+pub const AUTH_SCHEMA_VERSION: i64 = DRAIN_DEADLINE_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -103,6 +109,9 @@ const ATTEMPT_ERRORS_SCHEMA_MIGRATION_SOURCE: i64 = DV_RECOVERY_GUARDS_SCHEMA_VE
 const REQUEST_IDENTITY_SCHEMA_MIGRATION_SOURCE: i64 = ATTEMPT_ERRORS_SCHEMA_VERSION;
 const DESIRED_SELECTION_SCHEMA_MIGRATION_SOURCE: i64 = REQUEST_IDENTITY_SCHEMA_VERSION;
 const POINTER_DESIRED_FENCE_SCHEMA_MIGRATION_SOURCE: i64 = DESIRED_SELECTION_SCHEMA_VERSION;
+const ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA_MIGRATION_SOURCE: i64 =
+    POINTER_DESIRED_FENCE_SCHEMA_VERSION;
+const DRAIN_DEADLINE_SCHEMA_MIGRATION_SOURCE: i64 = ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA_VERSION;
 // Session routing and shared-cache identity are additive durable state and use
 // the existing Hiqlite transport contract. Protocol 4 stays supported so a
 // healthy v9/v10 cluster can authorize the daemon that advances its schema.
@@ -2174,6 +2183,66 @@ impl HiqliteAuthStore {
                     )
                     .await?;
                 }
+                SchemaMigrationAction::MigrateFrom(
+                    ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA_MIGRATION_SOURCE,
+                ) => {
+                    let now = self.now()?;
+                    let mut statements = super::hiqlite_fragment_index_cluster::
+                        analysis_terminal_identity_index_migration_statements()?;
+                    statements.push((
+                        "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                         WHERE singleton = 1 AND schema_version = $3"
+                            .to_owned(),
+                        params!(
+                            ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA_VERSION,
+                            now,
+                            ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA_MIGRATION_SOURCE
+                        ),
+                    ));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(
+                        ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(DRAIN_DEADLINE_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    // One nullable column and the trigger that keeps a binary
+                    // from before it out of a draining row's ownership. Null
+                    // is "not draining", so every row already in this table
+                    // is correct the instant the column exists.
+                    let mut statements = vec![
+                        (
+                            super::MEDIA_SESSION_DRAIN_DEADLINE_COLUMN.to_owned(),
+                            params!(),
+                        ),
+                        (
+                            super::MEDIA_SESSION_DRAIN_OWNERSHIP_FENCE_TRIGGER.to_owned(),
+                            params!(),
+                        ),
+                        (
+                            "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                             WHERE singleton = 1 AND schema_version = $3"
+                                .to_owned(),
+                            params!(
+                                DRAIN_DEADLINE_SCHEMA_VERSION,
+                                now,
+                                DRAIN_DEADLINE_SCHEMA_MIGRATION_SOURCE
+                            ),
+                        ),
+                    ];
+                    // A fresh install already declares the column, while a
+                    // stale marker can still name the predecessor version.
+                    // Drop the non-idempotent ALTER in that shape and retain
+                    // the trigger plus version CAS.
+                    if self.drain_deadline_column_present().await? {
+                        statements.remove(0);
+                    }
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(DRAIN_DEADLINE_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
                         "cluster schema {version} has no migration implementation"
@@ -2201,6 +2270,23 @@ impl HiqliteAuthStore {
             .query_consistent_map::<CountRow, _>(
                 "SELECT COUNT(*) AS count FROM pragma_table_info('media_playback_pointers') \
                  WHERE name = 'desired_revision'",
+                params!(),
+            )
+            .await?;
+        Ok(rows.first().is_some_and(|row| row.count > 0))
+    }
+
+    /// Whether `media_sessions` already carries `drain_deadline_ms`.
+    ///
+    /// A fresh install declares the column in the table; an upgrade adds it.
+    /// Both are correct and both are reachable from the same marker, so the
+    /// migration asks rather than assumes.
+    async fn drain_deadline_column_present(&self) -> Result<bool, StoreError> {
+        let rows = self
+            .client()
+            .query_consistent_map::<CountRow, _>(
+                "SELECT COUNT(*) AS count FROM pragma_table_info('media_sessions') \
+                 WHERE name = 'drain_deadline_ms'",
                 params!(),
             )
             .await?;
@@ -2817,6 +2903,12 @@ impl crate::store::RenditionPlanStore for HiqliteAuthStore {
     ) -> Result<Option<crate::segplan::SegmentPlan>, StoreError> {
         self.telemetry
             .rendition_plan(rendition_key.to_owned(), source.clone())
+            .await
+    }
+
+    async fn forget_rendition_plan(&self, rendition_key: &str) -> Result<bool, StoreError> {
+        self.telemetry
+            .forget_rendition_plan(rendition_key.to_owned())
             .await
     }
 
@@ -3890,7 +3982,9 @@ fn schema_migration_action(
         | ATTEMPT_ERRORS_SCHEMA_MIGRATION_SOURCE
         | REQUEST_IDENTITY_SCHEMA_MIGRATION_SOURCE
         | DESIRED_SELECTION_SCHEMA_MIGRATION_SOURCE
-        | POINTER_DESIRED_FENCE_SCHEMA_MIGRATION_SOURCE => {
+        | POINTER_DESIRED_FENCE_SCHEMA_MIGRATION_SOURCE
+        | ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA_MIGRATION_SOURCE
+        | DRAIN_DEADLINE_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -5693,9 +5787,28 @@ mod tests {
             "v28 must advance exactly one step to the pointer fence schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 24,
+            ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA_MIGRATION_SOURCE,
+            POINTER_DESIRED_FENCE_SCHEMA_VERSION,
+            "the terminal-identity index migration must start from the exact v29 shape"
+        );
+        assert_eq!(
+            ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA_MIGRATION_SOURCE + 1,
+            ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA_VERSION,
+            "v29 must advance exactly one step to the terminal-identity index schema"
+        );
+        assert_eq!(
+            DRAIN_DEADLINE_SCHEMA_MIGRATION_SOURCE, ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA_VERSION,
+            "the drain deadline migration must start from the exact v30 shape"
+        );
+        assert_eq!(
+            DRAIN_DEADLINE_SCHEMA_MIGRATION_SOURCE + 1,
+            DRAIN_DEADLINE_SCHEMA_VERSION,
+            "v30 must advance exactly one step to the drain deadline schema"
+        );
+        assert_eq!(
+            AUTH_SCHEMA_MIGRATION_SOURCE + 26,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v29 step"
+            "this implementation contains every additive v5→v31 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,
@@ -5866,6 +5979,18 @@ mod tests {
             )
             .expect("recovery-guard predecessor"),
             SchemaMigrationAction::MigrateFrom(DV_RECOVERY_GUARDS_SCHEMA_MIGRATION_SOURCE)
+        );
+        assert_eq!(
+            schema_migration_action(
+                &[row(
+                    ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA_MIGRATION_SOURCE
+                )],
+                ClusterCompatibility::CURRENT,
+            )
+            .expect("terminal-identity index predecessor"),
+            SchemaMigrationAction::MigrateFrom(
+                ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA_MIGRATION_SOURCE
+            )
         );
 
         for rows in [Vec::new(), vec![row(4)], vec![row(7), row(7)]] {

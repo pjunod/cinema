@@ -369,6 +369,16 @@ class PlaybackControlMappingThroughputTest {
     }
 }
 
+class PlaybackControlPreparedCapabilityTest {
+    @Test
+    fun `prepared replacement stays disabled on measured Android evidence`() {
+        val capabilities = controlCapabilities(
+            mapOf("vcodec" to "hevc,h264", "hdr" to "1", "dv" to "1"),
+        )
+        assertFalse(capabilities.dualPlayerPreparation)
+    }
+}
+
 class PlaybackControlMappingTotalityTest {
     @Test
     fun `every mapped state is accepted by snapshot validation`() {

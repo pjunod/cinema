@@ -114,6 +114,10 @@ page; the milestone files are contracts an executing agent works from.
 | [M6-AXIS-CASE-HANDOFF.md](playback-control/M6-AXIS-CASE-HANDOFF.md) | The one measurement M6 waits on, and how to take it. | done |
 | [M6-AXIS-CASE-RESULTS.md](playback-control/M6-AXIS-CASE-RESULTS.md) | The 30 Mbit/s axis run, below the throughput floor and superseded the same day by a 40 Mbit/s re-run that admitted the pair. Read the correction at the top. | superseded |
 | [M6-CLIENT-REPLACEMENT-CONTRACT.md](playback-control/M6-CLIENT-REPLACEMENT-CONTRACT.md) | The byte-level wire contract all three clients implement against. | open |
+| [CLIENT-PREPARED-SWITCH-CONTRACT.md](playback-control/CLIENT-PREPARED-SWITCH-CONTRACT.md) | The streaming-reliability prepared-switch adapter contract shared by Apple, Android, and web. | built |
+| [CLIENT-APPLE-HANDOFF.md](playback-control/CLIENT-APPLE-HANDOFF.md) | The implementation handoff for Apple prepared-switch message adaptation. | built |
+| [CLIENT-ANDROID-HANDOFF.md](playback-control/CLIENT-ANDROID-HANDOFF.md) | The implementation handoff for Android prepared-switch message adaptation. | built |
+| [CLIENT-WEB-HANDOFF.md](playback-control/CLIENT-WEB-HANDOFF.md) | The implementation handoff for web prepared-switch message adaptation. | built |
 | [M6-APPLE-CLIENT-BUILD.md](playback-control/M6-APPLE-CLIENT-BUILD.md) | Building the Apple half of M6 — the only one a viewer sees. | open |
 | [M6-WEB-CLIENT-BUILD.md](playback-control/M6-WEB-CLIENT-BUILD.md) | Building the web half of M6, proven by tests until a measurement lands. | open |
 | [M6-ANDROID-CLIENT-BUILD.md](playback-control/M6-ANDROID-CLIENT-BUILD.md) | Building the Android half of M6, proven by tests until a measurement lands. | open |
@@ -148,12 +152,14 @@ conversion, decoder selection, and the stall/stutter investigations.
 | [VOD-M3-HANDOFF.md](streaming/VOD-M3-HANDOFF.md) | Serving from the plan — the first code on the live path. | built |
 | [VOD-M4-HANDOFF.md](streaming/VOD-M4-HANDOFF.md) | Web adoption and release acceptance. | built |
 | [VOD-CUTOVER.md](streaming/VOD-CUTOVER.md) | The VOD-only HLS cutover, and what it retired. | built |
+| [VOD-ENCODING.md](streaming/VOD-ENCODING.md) | How immutable transcode and subtitle-burn VOD produce and verify the bytes named by a playlist. | built |
 | [VOD-SEEK-STORM-ACCEPTANCE-HANDOFF.md](streaming/VOD-SEEK-STORM-ACCEPTANCE-HANDOFF.md) | Restoring the seek-storm case that CI disabled 2026-08-26. | open |
 | [VOD-STALL-ACCEPTANCE-HANDOFF.md](streaming/VOD-STALL-ACCEPTANCE-HANDOFF.md) | Restoring the bandwidth-recovery case; blocked on a device measurement. | open |
 | [VOD-STEADY-ACCEPTANCE-HANDOFF.md](streaming/VOD-STEADY-ACCEPTANCE-HANDOFF.md) | Restoring the steady-play case that CI disabled 2026-08-26. | open |
 | [STREAMING-RELIABILITY-REVIEW.md](streaming/STREAMING-RELIABILITY-REVIEW.md) | Keeping the stream alive while its future changes. | done |
 | [STREAMING-RELIABILITY-STATUS.md](streaming/STREAMING-RELIABILITY-STATUS.md) | Review, repair and promotion status of that effort. | open |
 | [STREAMING-RELIABILITY-HANDOFF.md](streaming/STREAMING-RELIABILITY-HANDOFF.md) | The remaining work, for the next streaming agent. | open |
+| [STREAMING-CONTINUATION-HANDOFF.md](streaming/STREAMING-CONTINUATION-HANDOFF.md) | The continuation-session workflow, branch state, and integration queue for streaming reliability. | open |
 | [PLAYBACK-CAPS-V2-PLAN.md](streaming/PLAYBACK-CAPS-V2-PLAN.md) | Highest deliverable grade, negotiated rather than guessed. | open |
 | [PLAYBACK-CAPS-V2-M0.md](streaming/PLAYBACK-CAPS-V2-M0.md) | The M0 measurements taken on nuc4, 2026-08-30. | done |
 | [MEDIA-BADGES-PLAN.md](streaming/MEDIA-BADGES-PLAN.md) | Making the play menu tell the truth about HDR and Dolby Vision. | built |

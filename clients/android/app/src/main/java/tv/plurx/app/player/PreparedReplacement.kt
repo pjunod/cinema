@@ -37,14 +37,15 @@ internal const val PREPARED_SWITCH_RUNWAY_MS = 3_000L
 
 /**
  * How long a commit waits for the successor's own first rendered frame before
- * settling with the wall clock instead.
+ * failing the prepared path and taking the ordinary reopen.
  *
  * A prepared successor has no surface, so it renders nothing until the switch
  * puts it on one; `first_frame_unix_ms` is therefore always a moment *after*
  * the swap. If the frame never comes the switch still happened — the viewer is
- * looking at the successor either way — so the commit goes out with a less
- * precise number rather than not at all, which would hold the session's one
- * preparation slot until the server's 330 s deadline.
+ * looking at the successor either way — but inventing a frame would commit the
+ * server pointer to a black pipeline and drain the working predecessor. A
+ * timeout therefore restores the retained predecessor, reports `failed`, and
+ * only then reopens through the normal path.
  */
 internal const val PREPARED_COMMIT_FRAME_BOUND_MS = 5_000L
 
@@ -278,6 +279,20 @@ internal class PreparedReplacementLedger {
         return settlement
     }
 
+    /**
+     * The surface moved, but the successor never rendered a frame.
+     *
+     * This is the only terminal path out of SWITCHED besides a real commit.
+     * It exists separately because ordinary abort/failure must never tear down
+     * a successor the viewer is already watching, while a first-frame timeout
+     * must settle the server staging without fabricating presentation proof.
+     */
+    fun failedAfterSwitch(): ActionAcknowledgement? {
+        if (!isSwitched) return null
+        phase = PreparationPhase.FAILED
+        return acknowledgement(AcknowledgementState.FAILED)
+    }
+
     /** The viewer seeked, changed quality again, or left. */
     fun aborted(): ActionAcknowledgement? = terminal(PreparationPhase.ABORTED)
 
@@ -482,4 +497,13 @@ internal fun settlingSnapshot(snapshot: PlaybackControlSnapshot): PlaybackContro
         demand = PlaybackDemand.ACTIVE,
         playbackRate = maxOf(PlaybackControlMapping.MIN_ACTIVE_RATE, snapshot.playbackRate),
     )
+}
+
+/** The terminal exchange owed after an ending commit is accepted. */
+internal fun endingSnapshotAfterSettlement(
+    snapshot: PlaybackControlSnapshot,
+): PlaybackControlSnapshot? {
+    if (snapshot.acknowledgement?.state != AcknowledgementState.COMMITTED) return null
+    if (snapshot.demand != PlaybackDemand.END) return null
+    return snapshot.copy(acknowledgement = null)
 }

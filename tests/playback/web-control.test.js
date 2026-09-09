@@ -642,10 +642,11 @@ async function main() {
 
   const adapter = new Function(
     "PLAY_CAPS", "screen", "window", "playQuality", "selectedAudioIndex",
-    "PERSISTENT_STALL_MS", "ENDED_SLACK_SEC", "Hls",
+    "PERSISTENT_STALL_MS", "ENDED_SLACK_SEC", "Hls", "document",
     [
       // `preparedHandoffEnabled` reads storage this scope does not have, and
       // answers "off" when it cannot — which is what a private window does too.
+      shippedSource("streamHasVideo"),
       shippedSource("preparedHandoffEnabled"), shippedSource("preparedHandoffOffered"),
       shippedSource("pendingPlaybackControlAcknowledgement"),
       shippedSource("playbackControlCapabilities"),
@@ -669,6 +670,7 @@ async function main() {
     8_000,
     15,
     {ErrorTypes:{MEDIA_ERROR:"mediaError",NETWORK_ERROR:"networkError"}},
+    {getElementById:()=>video},
   );
   const video={
     currentTime:10,paused:false,ended:false,seeking:false,readyState:4,playbackRate:1,error:null,
@@ -996,6 +998,7 @@ async function main() {
       shippedSource("queuePlaybackControlAcknowledgement"),
       shippedSource("destroyHlsInstance"),
       shippedSource("freePreparedReplacement"), shippedSource("abandonPreparedReplacement"),
+      "function cancelPreparedFirstFrame(){}",
       shippedSource("rememberPlaybackTransportIntent"),shippedSource("pausePlaybackInternally"),
       shippedSource("resetPlaybackTransportEvents"),shippedSource("playbackTransportEvents"),
       shippedSource("setPlaybackMediaSource"),
@@ -2060,13 +2063,16 @@ async function main() {
         // frees a staged successor when it stops, so both paths are real here
         // rather than stubbed.
         shippedConst("PREPARED_TERMINAL_STATES"), shippedConst("PREPARED_ACK_QUEUE_MAX"),
-        shippedConst("PREPARED_SETTLED_MEMORY"), shippedConst("CONTROL_SETTLE_FLUSH_MS"),
+        shippedConst("PREPARED_SETTLED_MEMORY"), shippedConst("PREPARED_FINALIZATION_MS"),
         shippedSource("preparedVideoElement"), shippedSource("preparedState"),
         shippedSource("preparedSettlementDone"), shippedSource("markPreparedSettlement"),
         shippedSource("queuePlaybackControlAcknowledgement"),
         shippedSource("pendingPlaybackControlAcknowledgement"),
         shippedSource("settlePlaybackControlAcknowledgement"),
         shippedSource("flushPreparedSettlement"), shippedSource("cancelPreparedFirstFrame"),
+        shippedSource("endingPlaybackControlSnapshot"),
+        shippedSource("finishStoppingPlaybackControl"),
+        shippedSource("continueStoppingPlaybackControl"),
         shippedSource("destroyHlsInstance"),
         shippedSource("freePreparedReplacement"), shippedSource("abandonPreparedReplacement"),
         // The dispatch under test: a `prepare` answer must reach the player's
@@ -2735,13 +2741,16 @@ async function main() {
         // frees a staged successor when it stops, so both paths are real here
         // rather than stubbed.
         shippedConst("PREPARED_TERMINAL_STATES"), shippedConst("PREPARED_ACK_QUEUE_MAX"),
-        shippedConst("PREPARED_SETTLED_MEMORY"), shippedConst("CONTROL_SETTLE_FLUSH_MS"),
+        shippedConst("PREPARED_SETTLED_MEMORY"), shippedConst("PREPARED_FINALIZATION_MS"),
         shippedSource("preparedVideoElement"), shippedSource("preparedState"),
         shippedSource("preparedSettlementDone"), shippedSource("markPreparedSettlement"),
         shippedSource("queuePlaybackControlAcknowledgement"),
         shippedSource("pendingPlaybackControlAcknowledgement"),
         shippedSource("settlePlaybackControlAcknowledgement"),
         shippedSource("flushPreparedSettlement"), shippedSource("cancelPreparedFirstFrame"),
+        shippedSource("endingPlaybackControlSnapshot"),
+        shippedSource("finishStoppingPlaybackControl"),
+        shippedSource("continueStoppingPlaybackControl"),
         shippedSource("destroyHlsInstance"),
         shippedSource("freePreparedReplacement"), shippedSource("abandonPreparedReplacement"),
         shippedSource("askPlaybackControl"),
@@ -3145,7 +3154,6 @@ async function main() {
         shippedConst("PREPARED_TERMINAL_STATES"),
         shippedConst("PREPARED_ACK_QUEUE_MAX"),
         shippedConst("PREPARED_SETTLED_MEMORY"),
-        shippedConst("CONTROL_SETTLE_FLUSH_MS"),
         shippedSource("preparedHandoffEnabled"), shippedSource("setPreparedHandoffEnabled"),
         shippedSource("sessionMediaOriginMs"), shippedSource("realMediaPositionMs"),
         shippedSource("preparedLocalPositionMs"), shippedSource("playbackFilmPositionMs"),
@@ -3161,6 +3169,7 @@ async function main() {
         shippedSource("preparedHlsAttach"), shippedSource("preparedNativeAttach"),
         shippedSource("notePreparedMetadata"), shippedSource("preparedBufferedThroughMs"),
         shippedSource("notePreparedBuffer"), shippedSource("commitPreparedReplacement"),
+        shippedSource("retirePreparedPredecessor"), shippedSource("rollbackPreparedReplacement"),
         shippedSource("adoptPlaybackMediaElement"), shippedSource("disposeRetiredMediaElement"),
         shippedSource("preparedFirstFrame"), shippedSource("cancelPreparedFirstFrame"),
         shippedSource("failPreparedReplacement"),
@@ -3211,7 +3220,9 @@ async function main() {
     // harness is built would be null forever. Defined rather than assigned —
     // `Object.assign` would copy what the getter returns right now.
     Object.defineProperty(api, "spare", {
-      get: () => attached.find((node) => node.id === "video-prepared")
+      get: () => (api.current() && api.current().preparedCommitting
+        && api.current().preparedCommitting.frameElement)
+        || attached.find((node) => node.id === "video-prepared")
         || created[created.length - 1] || null,
     });
     return Object.assign(api, {
@@ -3311,7 +3322,8 @@ async function main() {
     // The switch itself — which readiness leads straight into, because the
     // client decides when to switch and the server never orders it.
     assert.equal(p.hls, h.instances[0], "the prepared instance is now authoritative");
-    assert.equal(incumbent.destroyed, true, "the predecessor is retired through the same teardown");
+    assert.equal(incumbent.destroyed, false,
+      "the predecessor remains recoverable until the successor proves a frame");
     assert.equal(p.sessionId, PREPARE_FIXTURE.session_id);
     assert.equal(p.offset, PREPARE_ORIGIN_MS / 1000, "the player's origin follows the session");
     assert.equal(h.spare.id, "video", "the successor is the element the page addresses");
@@ -3326,6 +3338,8 @@ async function main() {
     h.spare.frameCallback();
     assert.equal(latest(h).state, "committed");
     assert.ok(latest(h).first_frame_unix_ms > 0);
+    assert.equal(incumbent.destroyed, true,
+      "first-frame proof retires the predecessor through the normal teardown");
   }
 
   // The commit is sent only after a frame renders. It is a claim that the
@@ -3350,14 +3364,32 @@ async function main() {
   // Leaving it to the 330-second deadline costs the session its only slot.
   {
     const h = preparedHarness();
-    const p = h.set(preparedPlayer({ hls: { bandwidthEstimate: 1, destroy() {} } }));
+    const incumbent = { bandwidthEstimate: 1, destroyed: false,
+      destroy() { this.destroyed = true; } };
+    const p = h.set(preparedPlayer({ hls: incumbent, sessionId: "incumbent",
+      probeUrl: "/incumbent/probe", offset: 12 }));
     h.handle(prepareAction());
+    const successor = h.instances[0];
     h.instances[0].events.manifest();
     h.spare.ranges = [[0, 30]];
     h.instances[0].events.append();
+    assert.equal(incumbent.destroyed, false,
+      "the watchdog window keeps the proven predecessor alive");
     h.fireAll();
     assert.equal(latest(h).state, "failed",
       "the first-frame watchdog settles the staging rather than leaving it to the deadline");
+    assert.equal(p.hls, incumbent, "timeout restores the predecessor as authoritative");
+    assert.equal(p.sessionId, "incumbent");
+    assert.equal(p.probeUrl, "/incumbent/probe");
+    assert.equal(p.offset, 12);
+    assert.equal(incumbent.destroyed, false, "rollback keeps the proven pipeline alive");
+    assert.equal(successor.destroyed, true, "rollback destroys the frame-less successor");
+    assert.equal(h.live.id, "video");
+    assert.equal(h.live.style.display, "");
+    assert.equal(h.live.muted, false);
+    assert.equal(h.live.parentNode !== null, true);
+    assert.deepEqual(h.removed, [h.created[0]],
+      "the discarded successor, not the recovered predecessor, leaves the page");
   }
 
   // §C12.6 — an abandoned preparation is settled, and the instance is freed.
@@ -3432,15 +3464,15 @@ async function main() {
     assert.equal(h.instances.length, 0);
   }
 
-  // The commit waits for its own exchange rather than riding the one that ends
-  // the session, and an acknowledgement the server accepted is spent.
+  // The commit remains at the queue head even if the player ends in the same
+  // turn. The snapshot builder gives it an active exchange before the end.
   {
     const h = preparedHarness();
     const p = h.set(preparedPlayer());
     p.controlAcknowledgements = [{ action_id: PREPARE_FIXTURE.action_id, state: "committed",
       first_frame_unix_ms: 1_757_000_000_000, committed_media_origin_ms: PREPARE_ORIGIN_MS }];
-    assert.equal(h.pending("end"), null, "a commit never rides the end");
-    assert.ok(h.pending("active"), "…and is carried on the next ordinary exchange");
+    assert.ok(h.pending("end"), "the commit is never dropped by terminal demand");
+    assert.ok(h.pending("active"), "…and remains the head of the settlement queue");
     h.settle({ acknowledgement: { action_id: PREPARE_FIXTURE.action_id, state: "committed" } });
     assert.equal(h.queue().length, 0, "an accepted acknowledgement is spent");
     p.controlAcknowledgements = [{ action_id: PREPARE_FIXTURE.action_id, state: "buffer_ready",
@@ -3477,8 +3509,14 @@ async function main() {
 
   // Gate A is a switch this browser owns, and it is what the server reads.
   {
-    const capabilities = new Function("localStorage", "PLAY_CAPS", "screen", "window", [
+    const capabilityVideo = {
+      videoWidth: 1_920,
+      requestVideoFrameCallback() {},
+    };
+    const capabilities = new Function(
+      "localStorage", "PLAY_CAPS", "screen", "window", "document", [
       shippedConst("PREPARED_HANDOFF_KEY"),
+      shippedSource("streamHasVideo"),
       shippedSource("preparedHandoffEnabled"), shippedSource("preparedHandoffOffered"),
       shippedSource("setPreparedHandoffEnabled"),
       shippedSource("playbackControlCapabilities"),
@@ -3493,23 +3531,35 @@ async function main() {
       })(),
       { vcodec: "h264", maxheight: 1080 }, { height: 1080 },
       { innerHeight: 1080, devicePixelRatio: 1 },
+      { getElementById: () => capabilityVideo },
     );
     assert.equal(capabilities.capabilities().dual_player_preparation, false,
       "off until an operator turns it on: the server stages nothing for a false");
     capabilities.enable(true);
     assert.equal(capabilities.enabled(), true);
+    capabilities.player({ source: { video_codec: "h264" } });
     assert.equal(capabilities.capabilities().dual_player_preparation, true,
-      "and the switch is what reaches the wire — there is no separate code gate");
+      "an enabled video player with real presentation evidence offers preparation");
+    delete capabilityVideo.requestVideoFrameCallback;
+    assert.equal(capabilities.capabilities().dual_player_preparation, false,
+      "a video player without a presented-frame signal reports the runtime limitation");
+    capabilityVideo.videoWidth = 0;
+    capabilities.player({ source: {} });
+    assert.equal(capabilities.capabilities().dual_player_preparation, true,
+      "audio-only playback has honest advancing-clock evidence instead");
     // …and the player can withdraw the offer without the operator touching the
     // switch. A successor that died before it was ever playable is a statement
     // about this playback, and while staging starts no worker that is every
     // attempt — so the alternative is a doomed second pipeline on every quality
     // change, which is a regression, not a feature.
-    capabilities.player({ preparedRefused: true });
+    capabilityVideo.videoWidth = 1_920;
+    capabilityVideo.requestVideoFrameCallback = () => {};
+    capabilities.player({ source: { video_codec: "h264" }, preparedRefused: true });
     assert.equal(capabilities.capabilities().dual_player_preparation, false,
       "a playback that could not be handed a usable successor stops offering");
     capabilities.player(null);
-    assert.equal(capabilities.capabilities().dual_player_preparation, true);
+    assert.equal(capabilities.capabilities().dual_player_preparation, false,
+      "there is no runtime handoff offer without an attached player");
     capabilities.enable(false);
     assert.equal(capabilities.capabilities().dual_player_preparation, false);
   }
@@ -3579,6 +3629,41 @@ async function main() {
     h.stub.detach(player);
   }
   {
+    // A live reporter must not wait for ordinary cadence after the synthetic
+    // active commit. The accepted callback spends it and immediately wakes the
+    // true end snapshot as the next sequence.
+    const h = stallHarness(), player = stalledPlayer();
+    player.mediaAttachment = {}; player.controlIntentGeneration = 0;
+    let closing = false;
+    h.snapshotWith((_v, p) => {
+      const value = snapshot(55_000, closing ? "ended" : "rendering");
+      value.demand = closing ? "end" : "active";
+      value.acknowledgement = (p.controlAcknowledgements || [])[0] || null;
+      if (value.acknowledgement?.state === "committed") value.demand = "active";
+      return value;
+    });
+    h.stub.attach(player, stalledVideo, bootstrap());
+    h.attached.push(player);
+    await flush(); await flush();
+    const before = h.sent.length;
+    player.controlAcknowledgements = [{ action_id: PREPARE_ACTION_ID, state: "committed",
+      first_frame_unix_ms: 1_757_000_000_000, committed_media_origin_ms: 0 }];
+    closing = true;
+    h.stub.attachedAgain(player);
+    await settleExchange();
+    h.fire();
+    await flush(); await flush();
+    assert.equal(h.sent[before].demand, "active");
+    assert.equal(h.sent[before].acknowledgement.state, "committed");
+    await settleExchange();
+    h.fire();
+    await flush(); await flush();
+    assert.equal(h.sent[before + 1].demand, "end");
+    assert.equal(h.sent[before + 1].acknowledgement, null);
+    assert.equal(h.sent[before + 1].sequence, h.sent[before].sequence + 1);
+    h.stub.detach(player);
+  }
+  {
     // The teardown flush. The reporter's own capture refuses once the player
     // stops owning the media — which is the state every teardown path is in —
     // so a queued `aborted` reaches the wire only because `stopPlaybackControl`
@@ -3601,10 +3686,158 @@ async function main() {
     assert.ok(settled, "a teardown settles the staging rather than leaving it to the deadline");
     assert.equal(settled.acknowledgement.state, "aborted");
     assert.equal(settled.acknowledgement.action_id, PREPARE_ACTION_ID);
+    assert.equal(settled.demand, "end",
+      "a non-commit settlement closes in the same retryable exchange");
+  }
+  {
+    // A commit cannot share end, and a stopping reporter cannot rely on its
+    // ordinary cadence (the server may set that to a minute). A lost first
+    // response retries the exact active commit, then an accepted response
+    // immediately queues end as the next sequence before stopping.
+    const h = stallHarness();
+    const player = stalledPlayer();
+    player.mediaAttachment = {}; player.controlIntentGeneration = 0;
+    let closing = false;
+    h.snapshotWith((_v, p) => {
+      const value = snapshot(55_000, closing ? "ended" : "rendering");
+      value.demand = closing ? "end" : "active";
+      value.acknowledgement = (p.controlAcknowledgements || [])[0] || null;
+      if (value.acknowledgement && value.acknowledgement.state === "committed") {
+        value.demand = "active";
+      }
+      return value;
+    });
+    let dropped = false;
+    let droppedEnd = false;
+    h.holdWith((request) => {
+      if (request.acknowledgement?.state === "committed" && !dropped) {
+        dropped = true;
+        return Promise.reject(Object.assign(new Error("connection reset after request"),
+          { retryAfterMs: 250 }));
+      }
+      if (request.demand === "end" && !droppedEnd) {
+        droppedEnd = true;
+        return Promise.reject(Object.assign(new Error("connection reset after end"),
+          { retryAfterMs: 250 }));
+      }
+      return null;
+    });
+    h.stub.attach(player, stalledVideo, bootstrap());
+    h.attached.push(player);
+    await flush(); await flush();
+    const before = h.sent.length;
+    player.controlAcknowledgements = [{ action_id: PREPARE_ACTION_ID, state: "committed",
+      first_frame_unix_ms: 1_757_000_000_000, committed_media_origin_ms: 0 }];
+    closing = true;
+    h.stub.detach(player);
+    await settleExchange();
+    h.fire();
+    await flush(); await flush();
+    assert.equal(h.sent.length, before + 1, "the stopping reporter sends the active commit first");
+    const firstCommit = h.sent[before];
+    assert.equal(firstCommit.demand, "active");
+    assert.equal(firstCommit.acknowledgement.state, "committed");
+    await settleExchange();
+    h.fire();
+    await flush(); await flush();
+    const retriedCommit = h.sent[before + 1];
+    assert.strictEqual(retriedCommit, firstCommit,
+      "a missing response retries the exact commit request and sequence");
+    await settleExchange();
+    h.fire();
+    await flush(); await flush();
+    const end = h.sent[before + 2];
+    assert.equal(end.sequence, firstCommit.sequence + 1);
+    assert.equal(end.demand, "end");
+    assert.equal(end.acknowledgement, null);
+    await settleExchange();
+    h.fire();
+    await flush(); await flush();
+    assert.strictEqual(h.sent[before + 3], end,
+      "a missing terminal response retries the exact end request too");
+    assert.deepEqual(h.sent.slice(before).map((request) => request.demand),
+      ["active", "active", "end", "end"], "commit retry completes before terminal demand");
+  }
+  {
+    // Stopping can race an ordinary exchange that was already in flight. Its
+    // response must not stop the reporter and drop the queued settlement; it
+    // merely clears the lane so commit, then end, can drain behind it.
+    const held = deferred(), h = stallHarness(), player = stalledPlayer();
+    player.mediaAttachment = {}; player.controlIntentGeneration = 0;
+    let closing = false, heldOrdinary = false;
+    h.snapshotWith((_v, p) => {
+      const value = snapshot(55_000, closing ? "ended" : "rendering");
+      value.demand = closing ? "end" : "active";
+      value.acknowledgement = (p.controlAcknowledgements || [])[0] || null;
+      if (value.acknowledgement?.state === "committed") value.demand = "active";
+      return value;
+    });
+    h.holdWith((request) => {
+      if (!heldOrdinary && !request.acknowledgement) {
+        heldOrdinary = true;
+        return held.promise;
+      }
+      return null;
+    });
+    h.stub.attach(player, stalledVideo, bootstrap());
+    h.attached.push(player);
+    await flush(); await flush();
+    const ordinary = h.sent[0];
+    player.controlAcknowledgements = [{ action_id: PREPARE_ACTION_ID, state: "committed",
+      first_frame_unix_ms: 1_757_000_000_000, committed_media_origin_ms: 0 }];
+    closing = true;
+    h.stub.detach(player);
+    assert.equal(h.sent.length, 1, "the settlement waits behind the in-flight request");
+    held.resolve(response(ordinary));
+    await flush(); await flush();
+    await settleExchange();
+    h.fire();
+    await flush(); await flush();
+    assert.equal(h.sent[1].acknowledgement.state, "committed",
+      "the ordinary response leaves the queued commit intact");
+    await settleExchange();
+    h.fire();
+    await flush(); await flush();
+    assert.equal(h.sent[2].demand, "end");
+    assert.deepEqual(h.sent.map((request) => [request.demand,
+      request.acknowledgement?.state || null]),
+    [["active", null], ["active", "committed"], ["end", null]],
+    "the in-flight request, commit, and end retain protocol order");
+  }
+  {
+    // Permanent transport failure during teardown has a hard ownership
+    // deadline. Drive the shipped callback with a fake clock at that deadline:
+    // the detached reporter must clear its timer and every retained marker
+    // instead of retrying a player closure forever.
+    const boundedFinalizer = new Function("reporter", [
+      shippedConst("PREPARED_FINALIZATION_MS"),
+      shippedSource("finishStoppingPlaybackControl"),
+      shippedSource("continueStoppingPlaybackControl"),
+      "return {bound:PREPARED_FINALIZATION_MS,handled:continueStoppingPlaybackControl("+
+        "null,reporter,null,{demand:'active',acknowledgement:{state:'committed'}},null,null)};",
+    ].join("\n"));
+    const cleared = [];
+    let stopped = 0;
+    const reporter = {
+      plurxSettling: true,
+      plurxSettlingUntil: 3_000,
+      plurxSettlingTimer: 17,
+      now: () => 3_000,
+      clearTimer: (timer) => cleared.push(timer),
+      stop: () => { stopped += 1; },
+    };
+    const result = boundedFinalizer(reporter);
+    assert.equal(result.bound, 3_000);
+    assert.equal(result.handled, true);
+    assert.deepEqual(cleared, [17]);
+    assert.equal(stopped, 1, "permanent outage cannot retain a detached reporter");
+    assert.equal(reporter.plurxSettling, false);
+    assert.equal(reporter.plurxSettlingUntil, null);
+    assert.equal(reporter.plurxSettlingTimer, null);
   }
   {
     // The snapshot seam: the shipped snapshot builder carries the queue's head,
-    // and refuses to put a commit on an exchange that ends the session.
+    // and splits a same-turn commit+end into the required active commit first.
     const queued = Object.assign({}, player, {
       controlAcknowledgements: [{ action_id: PREPARE_ACTION_ID, state: "buffer_ready",
         buffered_through_ms: 42_000 }],
@@ -3622,9 +3855,20 @@ async function main() {
     // truncated stream is active failed demand, not the end of the title.
     const endingVideo = Object.assign({}, video, { ended: true, currentTime: 55 });
     const endSnapshot = adapter.playbackControlSnapshot(endingVideo, ending);
-    assert.equal(endSnapshot.demand, "end");
-    assert.equal(endSnapshot.acknowledgement, null,
-      "a commit never rides the exchange that ends the session");
+    assert.equal(endSnapshot.demand, "active",
+      "the commit is published before terminal demand closes the new session");
+    assert.equal(endSnapshot.playback_rate, 1);
+    assert.equal(endSnapshot.render_state, "ended",
+      "the synthetic demand does not falsify the renderer observation");
+    assert.equal(endSnapshot.acknowledgement.state, "committed");
+    assert.ok(control.capture(endSnapshot, 0,
+      { lifecycleId: "commit-before-end", attachmentGeneration: 1 }),
+      "the synthetic active commit is accepted by the shipped wire validator");
+    const afterCommit = adapter.playbackControlSnapshot(endingVideo,
+      Object.assign({}, ending, { controlAcknowledgements: [] }));
+    assert.equal(afterCommit.demand, "end",
+      "once the commit is spent, the next snapshot carries terminal demand");
+    assert.equal(afterCommit.acknowledgement, null);
   }
 
   // ---- what the commit owes, and what it must not break -------------------
@@ -3729,15 +3973,20 @@ async function main() {
       "an advancing clock is the first-frame evidence an audio-only title has");
   }
   {
-    // …and the same fallback is the only one older Safari and Firefox have.
+    // A video handoff without a presented-frame callback is not safely
+    // observable. A timeupdate only proves the media clock advanced; it does
+    // not prove the successor ever reached the screen.
     const h = preparedHarness({ videoFrameCallback: false });
     const p = h.set(preparedPlayer({ hls: { bandwidthEstimate: 1, destroy() {} } }));
     h.handle(prepareAction());
     h.instances[0].events.manifest();
     h.spare.ranges = [[0, 30]];
     h.instances[0].events.append();
+    assert.equal(latest(h).state, "failed",
+      "video preparation fails closed when presented-frame evidence is unavailable");
     h.spare.emit("timeupdate");
-    assert.equal(latest(h).state, "committed");
+    assert.equal(latest(h).state, "failed", "timeupdate alone can never commit video");
+    assert.equal(p.prepared, null, "the unobservable successor is released");
   }
 
   // ---- the element the page is talking to ---------------------------------
@@ -3771,9 +4020,14 @@ async function main() {
     assert.equal(successor.plays >= 1, true,
       "and it is asked to play again after being un-muted — WebKit pauses an "
         + "element that loses its mute without a gesture");
-    // The retired element leaves the page. Keeping it as the next successor's
-    // host would have a hidden pipeline driving the visible stream's overlays.
-    assert.deepEqual(h.removed, [h.live], "the predecessor's element is disposed");
+    // The predecessor stays available until the successor proves a frame.
+    assert.deepEqual(h.removed, [], "nothing is disposed during the rollback window");
+    assert.equal(h.live.parentNode !== null, true);
+    successor.frameCallback();
+    // The retired element then leaves the page. Keeping it as the next
+    // successor's host would have a hidden pipeline driving the visible
+    // stream's overlays.
+    assert.deepEqual(h.removed, [h.live], "first-frame proof disposes the predecessor");
     assert.equal(h.live.parentNode, null);
     const second = "77777777-7777-4777-8777-777777777777";
     h.handle(prepareAction({ action_id: second }));
@@ -3786,8 +4040,11 @@ async function main() {
     // left armed it files a failure against a session that ended for an
     // unrelated reason — on a player whose queue has already been cleared.
     const h = preparedHarness();
-    const p = h.set(preparedPlayer({ hls: { bandwidthEstimate: 1, destroy() {} } }));
+    const incumbent = { bandwidthEstimate: 1, destroyed: false,
+      destroy() { this.destroyed = true; } };
+    const p = h.set(preparedPlayer({ hls: incumbent }));
     h.handle(prepareAction());
+    const successor = h.instances[0];
     h.instances[0].events.manifest();
     h.spare.ranges = [[0, 30]];
     h.instances[0].events.append();
@@ -3796,9 +4053,34 @@ async function main() {
     h.cancelFrame();
     assert.equal(p.preparedCommitting, null);
     assert.equal(h.timers.size, 0, "a teardown disarms it");
+    assert.equal(p.hls, incumbent, "cancelling the proof window restores the predecessor");
+    assert.equal(incumbent.destroyed, false);
+    assert.equal(successor.destroyed, true);
     h.fireAll();
-    assert.equal(latest(h).state, "buffer_ready",
-      "so nothing files a failure after the player is gone");
+    assert.equal(latest(h).state, "failed",
+      "the cancelled, unproven switch has one honest terminal settlement");
+    h.created[0].frameCallback();
+    assert.equal(latest(h).state, "failed",
+      "a stale frame callback cannot turn the cancelled switch into a commit");
+  }
+  {
+    // A full media teardown during the proof window owns both pipelines. It
+    // settles failure, discards the successor through rollback, then tears
+    // down the restored incumbent through the ordinary path.
+    const h = preparedHarness();
+    const incumbent = { bandwidthEstimate: 1, destroyed: false,
+      destroy() { this.destroyed = true; } };
+    const p = h.set(preparedPlayer({ hls: incumbent }));
+    h.handle(prepareAction());
+    const successor = h.instances[0];
+    h.instances[0].events.manifest();
+    h.spare.ranges = [[0, 30]];
+    h.instances[0].events.append();
+    h.teardown();
+    assert.equal(latest(h).state, "failed");
+    assert.equal(successor.destroyed, true, "teardown destroys the unproven successor");
+    assert.equal(incumbent.destroyed, true, "teardown also destroys the retained predecessor");
+    assert.equal(p.hls, null);
   }
   {
     // A staging this client settled is replayed until the server processes the

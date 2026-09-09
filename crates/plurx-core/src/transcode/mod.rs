@@ -17,6 +17,7 @@ mod encoder;
 pub mod manifest;
 mod pipeline;
 mod recipe;
+mod vod;
 
 pub use encoder::{
     detect_encoders, detect_video_decoders, validate_quality_rate_control,
@@ -25,6 +26,9 @@ pub use encoder::{
 };
 pub use pipeline::{Pipeline, CANDIDATES as PIPELINE_CANDIDATES};
 pub use recipe::{PipelineDigest, Recipe};
+pub use vod::{
+    vod_audio_anchor, vod_pipe_args, VodFrameGrid, VOD_AAC_FRAME_SAMPLES, VOD_AUDIO_RATE,
+};
 
 use crate::domain::MediaFile;
 use std::path::PathBuf;
@@ -1138,14 +1142,13 @@ pub fn audio_offset_filter(offset_ms: i64) -> Option<String> {
     }
 }
 
-/// Build the full ffmpeg argument vector to transcode `source` into HLS in
-/// `out_dir` (which must exist). Produces `index.m3u8` + `seg%05d.ts`.
-pub fn hls_args(
+/// Shared source selection, decode, filters, and encoder recipe. Presentation
+/// builders append their own timestamp, keyframe, and muxer contracts.
+fn encode_input_args(
     source: &MediaFile,
     encoder: Encoder,
     opts: &TranscodeOptions,
     pacing: Pacing,
-    out_dir: &str,
 ) -> Vec<String> {
     let source_path = source.path.to_string_lossy().into_owned();
     let mut args: Vec<String> = vec!["-hide_banner".into(), "-loglevel".into(), "error".into()];
@@ -1305,6 +1308,20 @@ pub fn hls_args(
     args.push(opts.audio_channels.to_string());
     args.push("-b:a".into());
     args.push(format!("{}k", opts.audio_bitrate_kbps));
+
+    args
+}
+
+/// Build the growing-HLS presentation from the shared decode/filter/encode
+/// recipe. Immutable VOD uses the same recipe with its own timeline and muxer.
+pub fn hls_args(
+    source: &MediaFile,
+    encoder: Encoder,
+    opts: &TranscodeOptions,
+    pacing: Pacing,
+    out_dir: &str,
+) -> Vec<String> {
+    let mut args = encode_input_args(source, encoder, opts, pacing);
 
     // Start the MPEG-TS timeline at zero.
     //

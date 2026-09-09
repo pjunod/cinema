@@ -1,5 +1,4 @@
 # M5 fleet results — server and clients at `c571a50d`
-
 **Status:** deployment complete · acceptance failed/blocked ·
 **Executed:** 2026-08-31 · **Server:** `c571a50d` ·
 **Clients:** Apple build 101 · Android versionCode 57
@@ -201,4 +200,3 @@ completed §4.
 
 Keep every existing client recovery path. Resume acceptance only after fixing
 the web reporter and unlocking or waking the physical devices.
-

@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["4e168372"]
+points = ["playback.pipeline", "core.media", "server.api"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "The commit before this one closed a 503 retry loop on a draining predecessor by letting a later terminal exchange replace the session's retained reply. That traded one defect for two: every reader of that row still requires byte-exact equality with what the prepared commit wrote, so a lost commit response replayed after the viewer closed the player is classified as refused and writes a rejection tombstone for a successor the pointer already names; and the ordering rule used a sequence that is monotone per client instance rather than per session. The retained reply is immutable again, and a terminal exchange on a draining predecessor ends the row instead -- once ended, a client that missed the answer gets the same terminal from the row. Store contract coverage is in media_session_commit_atomically_retains_its_control_receipt on both backends; the owner-tick corrections that came with it are covered by the daemon suite."

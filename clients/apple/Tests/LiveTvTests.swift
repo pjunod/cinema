@@ -164,6 +164,23 @@ final class LiveTvTests: XCTestCase {
         XCTAssertEqual(LiveTvPlayerController.playerFailure(decoder).code, "codec_unsupported")
     }
 
+    func testLiveTvOwnsThePlaybackAudioSessionForItsSeparatePlayer() async {
+        let requests = LiveTvMockRequests(result: started())
+        var audioEvents: [String] = []
+        let controller = LiveTvPlayerController.testing(
+            requests: requests,
+            activateAudioSession: { audioEvents.append("activate") },
+            deactivateAudioSession: { audioEvents.append("deactivate") }
+        )
+
+        await controller.stop()
+        XCTAssertEqual(audioEvents, [], "an idle Live TV controller does not release another player's audio")
+        await controller.watch(channel)
+        XCTAssertEqual(audioEvents, ["activate"], "audio is active before live playback begins")
+        await controller.stop()
+        XCTAssertEqual(audioEvents, ["activate", "deactivate"])
+    }
+
     func testSettingsWritesSeparateConfigEnableAndExactPhysicalRecovery() throws {
         func fields(_ change: LiveTvSettingsChange) throws -> [String: Any] {
             try XCTUnwrap(JSONSerialization.jsonObject(with: change.body(generation: 12)) as? [String: Any])

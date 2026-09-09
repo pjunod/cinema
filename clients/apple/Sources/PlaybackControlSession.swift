@@ -95,6 +95,9 @@ struct PlaybackControlTransport {
         if let generation = fields["generation"] as? String { failure.generation = generation }
         if let epoch = fields["control_epoch"] as? Int { failure.controlEpoch = epoch }
         if let retryAfter = fields["retry_after_ms"] as? Int { failure.retryAfterMs = retryAfter }
+        if let invalidField = fields["invalid_field"] as? String {
+            failure.invalidField = invalidField
+        }
         return failure
     }
 }
@@ -452,6 +455,21 @@ final class PlaybackControlSession {
     }
 
     func end() {
+        // Capture before revoking publication. `PlayerController.stop` has
+        // already mapped this player to end and queued any prepared settlement.
+        // The reporter owns the two-exchange committed-then-end sequence even
+        // after the live source slot is gone.
+        let final = publish().map { captured in
+            var snapshot = captured.snapshot
+            snapshot.demand = .end
+            snapshot.playbackRate = 0
+            return PlaybackControlCapture(
+                snapshot: snapshot,
+                intentGeneration: captured.intentGeneration,
+                owner: captured.owner,
+                sourceRevision: captured.sourceRevision
+            )
+        }
         activeGeneration = nil
         // A callback may already have passed the capture-slot guard on the
         // reporter actor. Revoke publication under the verdict slot's lock;
@@ -462,7 +480,7 @@ final class PlaybackControlSession {
         observe = nil
         guard let reporter else { return }
         self.reporter = nil
-        Task { await reporter.stop() }
+        Task { await reporter.finish(final) }
     }
 
     /// Read the player once, on the actor that owns it, and publish what the

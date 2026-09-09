@@ -204,6 +204,19 @@ cache_dir_for_config() {
   ' "$1"
 }
 
+stop_runner() {
+  local unit
+  unit=$1
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$STOP_TIMEOUT" systemctl stop "$unit"
+  else
+    # GNU coreutils `timeout` is present on the Linux runner hosts. macOS does
+    # not provide it, so keep the script testable and operable there while
+    # retaining the production stop bound wherever the command exists.
+    systemctl stop "$unit"
+  fi
+}
+
 reset_cache() {
   local unit dir used_kb
   unit=$1
@@ -224,7 +237,7 @@ reset_cache() {
   # worse outcome than the disk it was reclaiming.
   trap 'systemctl start "$unit" >/dev/null 2>&1 || true' RETURN
   say "stopping $unit (graceful; up to ${STOP_TIMEOUT}s if a job is finishing)"
-  timeout "$STOP_TIMEOUT" systemctl stop "$unit" || {
+  stop_runner "$unit" || {
     say "$unit did not stop in ${STOP_TIMEOUT}s; leaving its cache alone"
     return 0
   }

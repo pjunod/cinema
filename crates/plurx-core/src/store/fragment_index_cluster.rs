@@ -156,6 +156,18 @@ CREATE INDEX IF NOT EXISTS cluster_fragment_index_jobs_status_history
     ON cluster_fragment_index_jobs(state, updated_at_ms DESC, cache_key);
 "#;
 
+/// Keeps the terminal-history retention trigger from searching every request
+/// for each candidate after the retained window fills. The predicate exactly
+/// matches the trigger's `newer` subquery so SQLite can prove that this partial
+/// index is eligible.
+pub const ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA: &str = r#"
+CREATE INDEX IF NOT EXISTS analysis_requests_terminal_identity
+    ON analysis_requests(file_id, source_size, source_mtime, component,
+                         pipeline_version, requested_generation, target_node_id,
+                         updated_at_ms, request_id)
+    WHERE state IN ('ready', 'failed', 'cancelled') AND force_rebuild = 0;
+"#;
+
 /// v41/v22 widens the already-durable request identity to the replicated
 /// semantic component. A table rebuild is required because SQLite cannot
 /// alter a CHECK constraint in place.
@@ -625,6 +637,27 @@ pub fn bounded_analysis_backoff_max_secs(value: Option<&str>) -> i64 {
     )
 }
 
+/// Read a stored boolean setting, one way, in one place.
+///
+/// Three separate parses of the same stored string is how a server ends up
+/// serving overlays while the Settings card's checkbox says off: the reader,
+/// the settings DTO and the readiness route each decided independently what
+/// `"On"` meant. `default_on` carries the only real difference between these
+/// switches — most are off unless turned on, and the Dolby Vision conversion
+/// is on unless turned off.
+///
+/// Every spelling an operator plausibly writes by hand is accepted in both
+/// directions, case-folded and trimmed. A value that is neither takes the
+/// default rather than guessing, because a typo is not an instruction.
+#[must_use]
+pub fn stored_switch(value: Option<&str>, default_on: bool) -> bool {
+    match value.map(|value| value.trim().to_ascii_lowercase()) {
+        Some(value) if matches!(value.as_str(), "1" | "true" | "yes" | "on") => true,
+        Some(value) if matches!(value.as_str(), "0" | "false" | "no" | "off") => false,
+        _ => default_on,
+    }
+}
+
 pub fn bounded_subtitle_window_seconds(value: Option<&str>) -> i64 {
     bounded_analysis_seconds(
         value,
@@ -762,6 +795,7 @@ pub(super) const ANALYSIS_CANONICAL_CTE: &str = r#"WITH request_ranked AS (
    WHERE NOT EXISTS (
      SELECT 1 FROM analysis_requests request
       WHERE request.result_cache_key = job.cache_key
+        AND request.result_cache_key <> ''
         AND request.target_node_id = job.target_node_id)
 ), classified_base AS (
   SELECT canonical.*,
@@ -858,6 +892,7 @@ pub(super) const ANALYSIS_SUMMARY_CTE: &str = r#"WITH request_ranked AS (
    WHERE NOT EXISTS (
      SELECT 1 FROM analysis_requests request
       WHERE request.result_cache_key = job.cache_key
+        AND request.result_cache_key <> ''
         AND request.target_node_id = job.target_node_id)
 ), summary_classified AS (
   SELECT summary_canonical.*,

@@ -7,11 +7,14 @@ publish.workspace = true
 repository.workspace = true
 
 [features]
-default = ["live-hls-recovery"]
-# Incident recovery only. VOD remains the preferred segmented presentation;
-# this retains the proven growing-HLS engine so a missing/stale prerequisite
-# never makes an otherwise playable title unavailable.
-live-hls-recovery = []
+# `live-hls-recovery` was a default feature gating the retained growing-HLS
+# engine. It is gone, not because the engine is: nothing in the Makefile,
+# Dockerfile, deploy or scripts ever passed `--no-default-features`, so the
+# switch decided nothing while hiding ~100 code sites and a whole streaming
+# engine behind a compile flag no build ever flipped. Whether the engine runs
+# is a runtime setting an operator can see and change; whether it exists is
+# not a question a build should answer silently.
+
 # Separate-process daemon tests bind several loopback listeners, launch real
 # voters, and create media with ffmpeg. Keep them out of the ordinary unit lane;
 # validation targets enable them explicitly where those contracts belong.

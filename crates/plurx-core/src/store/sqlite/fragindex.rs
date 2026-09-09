@@ -121,6 +121,12 @@ impl RenditionPlanStore for SqliteStore {
             .await
     }
 
+    async fn forget_rendition_plan(&self, rendition_key: &str) -> Result<bool, StoreError> {
+        let rendition_key = rendition_key.to_owned();
+        self.with_conn(move |conn| crate::store::renditionplan::forget_key(conn, &rendition_key))
+            .await
+    }
+
     async fn forget_rendition_plans(&self, file_id: i64) -> Result<usize, StoreError> {
         self.with_conn(move |conn| crate::store::renditionplan::forget_file(conn, file_id))
             .await

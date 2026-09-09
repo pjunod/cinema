@@ -682,6 +682,14 @@ impl NodeLocalTelemetry {
             .await
     }
 
+    pub(crate) async fn forget_rendition_plan(
+        &self,
+        rendition_key: String,
+    ) -> Result<bool, StoreError> {
+        self.with_conn(move |conn| crate::store::renditionplan::forget_key(conn, &rendition_key))
+            .await
+    }
+
     pub(crate) async fn forget_rendition_plans(&self, file_id: i64) -> Result<usize, StoreError> {
         self.with_conn(move |conn| crate::store::renditionplan::forget_file(conn, file_id))
             .await

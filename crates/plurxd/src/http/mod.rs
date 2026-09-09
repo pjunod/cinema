@@ -12,6 +12,7 @@ mod cluster;
 pub(crate) mod cluster_operations;
 pub mod comingsoon;
 pub use comingsoon::ComingSoonCache;
+mod developer;
 mod dto;
 mod dv_disk;
 mod error;
@@ -87,6 +88,11 @@ pub fn router(state: AppState) -> Router {
             "/settings",
             get(system::get_settings).put(system::update_settings),
         )
+        // Advisory only. The Developer section lists what must be true
+        // before each switch is safe; this is the other half — what this
+        // process can currently observe. Nothing reads it to decide
+        // whether a switch may be flipped.
+        .route("/developer/readiness", get(developer::readiness))
         .route("/live-tv/readiness", get(live_tv::readiness))
         .route(
             "/live-tv/readiness/refresh",
@@ -1078,6 +1084,10 @@ mod tests {
             (Method::POST, "/api/v1/live-tv/readiness/refresh"),
             (Method::POST, "/api/v1/live-tv/guide/refresh"),
             (Method::POST, crate::live_tv::SNAPSHOT_PATH),
+            // Advisory administration, and its cluster rows read the local
+            // applied roster. A learner answering it would report a roster
+            // view nobody asked this node for.
+            (Method::GET, "/api/v1/developer/readiness"),
             (Method::POST, "/api/v1/libraries"),
             (Method::POST, "/api/v1/cluster/join-tokens"),
             (Method::POST, "/api/v1/cluster/learner-join-tokens"),
@@ -1197,6 +1207,7 @@ mod tests {
             (Method::GET, "/api/v1/live-tv/channels"),
             (Method::GET, "/api/v1/live-tv/guide"),
             (Method::POST, "/api/v1/live-tv/readiness/refresh"),
+            (Method::GET, "/api/v1/developer/readiness"),
             (Method::POST, "/api/v1/live-tv/guide/refresh"),
             (Method::POST, crate::live_tv::SNAPSHOT_PATH),
             (Method::POST, crate::live_tv::START_PATH),
@@ -1713,6 +1724,173 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "setup failed: {body}");
         body["token"].as_str().expect("token").to_owned()
+    }
+
+    /// Encoder capacity is settable, and the number the page saves is the
+    /// number admission reads.
+    ///
+    /// Both keys were settings the admission path already read and no page
+    /// ever showed. Giving them a control is the easy half; the half that has
+    /// gone wrong before is the *reader*, so the round trip ends at
+    /// `TranscodeManager`, which is what actually refuses a start, rather than
+    /// at the DTO that reports it.
+    ///
+    /// Zero is asserted on both keys, and it is a stored value rather than a
+    /// refused one on each. Both readers honour it, so the DTO reports it
+    /// rather than the default — a page that answered `2` for a node running
+    /// `0` would claim capacity that node will never admit — and the API
+    /// accepts it, because a control that cannot write back a value its own
+    /// page displays makes the whole card unsavable for the node that has one.
+    ///
+    /// An earlier draft refused a zero software pool on the theory that
+    /// `try_admit_software` admits nothing against a budget of zero. It does
+    /// not: `SwPool::try_take` grants unconditionally while the pool is empty,
+    /// on purpose, so that a two-core box is not banned by its own budget.
+    #[tokio::test]
+    async fn encoder_capacity_is_settable_and_the_admission_path_reads_what_was_saved() {
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+
+        let (_, before) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+        assert_eq!(
+            before["transcode_max_hw_sessions"],
+            crate::admission::DEFAULT_MAX_HW_SESSIONS as i64,
+            "an untouched node reports the cap it is actually running"
+        );
+        assert_eq!(
+            before["transcode_software_pool_threads"],
+            crate::admission::software_budget() as i64
+        );
+
+        let (status, after) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({ "transcode_max_hw_sessions": 6,
+                        "transcode_software_pool_threads": 12 }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{after}");
+        assert_eq!(after["transcode_max_hw_sessions"], 6);
+        assert_eq!(after["transcode_software_pool_threads"], 12);
+        assert_eq!(
+            state.transcode.max_hw_sessions().await,
+            6,
+            "the admission path reads the saved cap, not a boot-time copy of it"
+        );
+        assert_eq!(state.transcode.software_budget().await, 12);
+        assert_eq!(
+            state.transcode.hardware_slots().await.1,
+            6,
+            "System's read-only pair reports the same cap the control writes"
+        );
+
+        // Zero survives the round trip on both keys, in both directions. The
+        // reader honours it either way, so a DTO that answered the default
+        // here would describe a node that does not exist, and an API that
+        // refused it would leave the node that has one unable to save
+        // anything else on the same card.
+        for field in [
+            "transcode_max_hw_sessions",
+            "transcode_software_pool_threads",
+        ] {
+            let (status, off) = call(
+                &app,
+                put("/api/v1/settings", Some(&admin), json!({ field: 0 })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{field}: {off}");
+            assert_eq!(
+                off[field], 0,
+                "{field}: a deliberate zero must read back as zero, not as the default"
+            );
+        }
+        assert_eq!(state.transcode.max_hw_sessions().await, 0);
+        assert_eq!(state.transcode.software_budget().await, 0);
+
+        for (field, value) in [
+            ("transcode_max_hw_sessions", -1),
+            ("transcode_max_hw_sessions", 1_025),
+            ("transcode_software_pool_threads", -1),
+            ("transcode_software_pool_threads", 1_025),
+        ] {
+            let (status, body) = call(
+                &app,
+                put("/api/v1/settings", Some(&admin), json!({ field: value })),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{field}={value} was accepted: {body}"
+            );
+        }
+        assert_eq!(
+            state.transcode.max_hw_sessions().await,
+            0,
+            "a refused write leaves the running capacity alone"
+        );
+    }
+
+    /// One parser owns the stored offline switch, at the two readers reachable
+    /// through HTTP.
+    ///
+    /// Three copies of a negated `matches!` existed — the settings DTO, the
+    /// offline API boundary, and the background preparer — and none of them
+    /// trimmed or folded case, so a value written by hand or by an older
+    /// client could read as *enabled* at all three while saying `OFF`. That is
+    /// the defect #141 found in the subtitle overlay switch, in three more
+    /// files.
+    ///
+    /// This test covers the first two. The preparer is not reachable from a
+    /// request, so it is pinned where it lives, by
+    /// `the_preparer_reads_the_stored_switch_the_way_every_other_reader_does`
+    /// in `offline.rs` — deliberately, and not as a matter of convenience: an
+    /// adversarial review found the first version of this change claiming all
+    /// three readers here while touching two, and the preparer's only existing
+    /// test stored lowercase `off`, which the old parser also read as
+    /// disabled. That reader could have been left behind entirely with the
+    /// suite green.
+    #[tokio::test]
+    async fn a_stored_offline_switch_reads_the_same_way_wherever_it_is_read() {
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+
+        for (stored, expected) in [
+            ("0", false),
+            ("false", false),
+            ("off", false),
+            ("no", false),
+            (" OFF ", false),
+            ("True", true),
+            ("1", true),
+            ("on", true),
+            ("", true),
+        ] {
+            state
+                .store
+                .put_setting(plurx_core::store::keys::OFFLINE_ENABLED, stored)
+                .await
+                .expect("store the switch");
+            let (_, settings) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+            assert_eq!(
+                settings["offline_enabled"], expected,
+                "the settings page reads {stored:?} as {expected}"
+            );
+            // The offline API checks the switch before it looks at anything
+            // else, so a file that does not exist still separates the two
+            // answers: refused for the switch, or refused for the file.
+            let (status, body) =
+                call(&app, get("/api/v1/files/1/offline-options", Some(&admin))).await;
+            let disabled_here =
+                status == StatusCode::SERVICE_UNAVAILABLE && body["code"] == "offline_disabled";
+            assert_eq!(
+                !disabled_here, expected,
+                "the offline API answers {stored:?} the same way the page renders it: {body}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -4475,6 +4653,361 @@ mod tests {
         assert_eq!(users.as_array().expect("array").len(), 1);
     }
 
+    /// The Developer section's prerequisite rows, and the rule that they are
+    /// reporting rather than deciding.
+    ///
+    /// The assertions that matter are the honest ones. Every row this test app
+    /// can reach is a fact about a single-node SQLite install with no roster
+    /// and no fleet receipt, so almost all of them must come back
+    /// `unobservable` with a sentence saying what was read and what was not. A
+    /// `met` here would be a fail-open default rendered as a green tick, which
+    /// is the failure mode the route exists to replace — and one of them
+    /// (`cache_revocation_capability`, whose accessor answers `Ok(true)` for
+    /// an unreplicated node because its real caller is asking a different
+    /// question) shipped exactly that way in the first draft.
+    #[tokio::test]
+    async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
+        let app = test_app();
+        let (status, _) = call(&app, get("/api/v1/developer/readiness", None)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        let admin = setup_admin(&app).await;
+        let (status, body) = call(&app, get("/api/v1/developer/readiness", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let items = body["items"].as_array().expect("items array");
+        let ids = items
+            .iter()
+            .map(|item| item["id"].as_str().expect("item id"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            vec![
+                "cluster_transport_recovery",
+                "playback_control_protocol_v1",
+                "prepared_quality_handoff",
+                "live_hls_recovery",
+                "pgs_overlay",
+                "dolby_vision_convert"
+            ],
+            "every Developer card with prerequisites needs a row here: {body}"
+        );
+
+        let mut seen = std::collections::BTreeMap::new();
+        for item in items {
+            for requirement in item["requirements"].as_array().expect("requirements") {
+                let id = requirement["id"].as_str().expect("requirement id");
+                let status = requirement["status"].as_str().expect("requirement status");
+                assert!(
+                    matches!(status, "met" | "unmet" | "unobservable"),
+                    "{id} reported an unbounded status {status}"
+                );
+                let evidence = requirement["evidence"].as_str().expect("evidence");
+                assert!(
+                    evidence.len() > 20,
+                    "{id} reported {status} with no evidence behind it: {evidence:?}"
+                );
+                assert!(
+                    seen.insert(id.to_owned(), status.to_owned()).is_none(),
+                    "requirement id {id} is used twice"
+                );
+            }
+        }
+
+        // Nothing on a single-node install may report `met`. Asserted as a set
+        // rather than row by row so a row added later cannot quietly arrive
+        // green: the first draft had two roster rows and this test pinned only
+        // one of them, which is how the fail-open `met` survived review.
+        let green = seen
+            .iter()
+            .filter(|(_, status)| status.as_str() == "met")
+            .map(|(id, _)| id.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            green.is_empty(),
+            "a node with no roster, no fleet receipt and no candidate worker read nothing that \
+             could be met, yet reported: {green:?}"
+        );
+        // Order-independent because no row reachable here has a `met` branch a
+        // sibling test could reach: the retained engine's two rows refuse
+        // `met` by construction, and everything else is a roster or artifact
+        // this process does not have.
+
+        // A CI artifact is not reachable from a running daemon, and a roster
+        // this node does not have cannot be judged. Each of these says so.
+        for id in [
+            "recovery_receipt",
+            "fleet_receipt",
+            "recovery_budgets",
+            "cluster_api_advertised",
+            "cache_revocation_capability",
+        ] {
+            assert_eq!(
+                seen.get(id).map(String::as_str),
+                Some("unobservable"),
+                "{id} claimed to have read something this process cannot reach: {body}"
+            );
+        }
+        // Statements about this build, true whatever the deployment looks
+        // like. They flip when a candidate worker and a shipped two-player
+        // client exist, not when an operator changes a setting.
+        for id in ["server_preparation_is_real", "client_two_player_handoff"] {
+            assert_eq!(seen.get(id).map(String::as_str), Some("unmet"));
+        }
+        // The retained engine has served nothing in this process, so neither
+        // of its rows has read anything. "Nothing bypassed the switch" is
+        // vacuously true here and must not render as satisfied — that is the
+        // same green-tick-meaning-not-checked this route exists to remove,
+        // and it shipped once already in `cache_revocation_capability`.
+        // The retained engine's counters are process-global and monotone, so
+        // a sibling test that serves one live session changes what these rows
+        // say. Assert the property that holds whatever ran first: neither row
+        // may ever answer `met`, because one is a claim about coverage no
+        // counter can prove and the other is about a bypass that is
+        // structural. That is also what the rows are for.
+        for id in ["vod_coverage_replaces_it", "no_session_bypasses_the_switch"] {
+            let status = seen.get(id).map(String::as_str);
+            assert!(
+                matches!(status, Some("unobservable" | "unmet")),
+                "{id} answered {status:?}; neither of these can be earned: {body}"
+            );
+        }
+    }
+
+    /// Advisory means advisory. This is the test that fails if anyone makes a
+    /// reading a precondition.
+    ///
+    /// It drives the switch whose own prerequisite is `unmet` — deterministically,
+    /// by recording one partial-vocabulary exchange through the counter
+    /// production writes, because `unobservable` is the state a fresh process
+    /// is in and a gate spelled `if status == Unmet { refuse }` would sail
+    /// past a test that only ever saw `unobservable`. It then drives the
+    /// switch both ways: a gate that refuses only the enable would survive a
+    /// test that only enables.
+    #[tokio::test]
+    async fn an_unmet_prerequisite_does_not_block_the_switch() {
+        let app = test_app();
+        let admin = setup_admin(&app).await;
+        crate::playback_control::record_partial_vocabulary_for_tests();
+
+        let control_row = |body: &Value| -> (Value, Value) {
+            let item = body["items"]
+                .as_array()
+                .expect("items")
+                .iter()
+                .find(|item| item["id"] == "playback_control_protocol_v1")
+                .expect("the control protocol item")
+                .clone();
+            (
+                item["enabled"].clone(),
+                item["requirements"][0]["status"].clone(),
+            )
+        };
+
+        let (_, before) = call(&app, get("/api/v1/developer/readiness", Some(&admin))).await;
+        let (enabled, status) = control_row(&before);
+        assert_eq!(enabled, false);
+        assert_eq!(
+            status, "unmet",
+            "this test is worthless unless the switch's own prerequisite is refused"
+        );
+
+        for want in [true, false, true] {
+            let (status, _) = call(
+                &app,
+                put(
+                    "/api/v1/settings",
+                    Some(&admin),
+                    serde_json::json!({"playback_control_protocol_v1": want}),
+                ),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "an unmet advisory prerequisite must not refuse the switch in either direction"
+            );
+
+            let (_, after) = call(&app, get("/api/v1/developer/readiness", Some(&admin))).await;
+            let (enabled, requirement) = control_row(&after);
+            assert_eq!(
+                enabled, want,
+                "the row reports the switch's real position, not the position it thinks is safe"
+            );
+            assert_eq!(
+                requirement, "unmet",
+                "turning the switch on does not make its prerequisite true"
+            );
+        }
+
+        // Every switch this route reports on, not only the one whose own
+        // prerequisite is refused. A gate is cheapest to add on a *different*
+        // switch than the row that motivated it — refusing to turn the live
+        // recovery fallback off while `vod_coverage_replaces_it` is unmet is
+        // the obvious "don't strand viewers" reflex, and it is exactly the
+        // shape this route exists to refuse. A test that only drives
+        // `playback_control_protocol_v1` would not see it.
+        let switches = call(&app, get("/api/v1/developer/readiness", Some(&admin)))
+            .await
+            .1["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .filter_map(|item| item["setting"].as_str().map(str::to_owned))
+            .collect::<Vec<_>>();
+        assert!(
+            switches.len() >= 2,
+            "the readiness route reports more than one switch; if it stops, this \
+             assertion is the thing that should be revisited, not deleted: {switches:?}"
+        );
+        for setting in switches {
+            for want in [false, true, false] {
+                let (status, body) = call(
+                    &app,
+                    put(
+                        "/api/v1/settings",
+                        Some(&admin),
+                        serde_json::json!({ setting.clone(): want }),
+                    ),
+                )
+                .await;
+                assert_eq!(
+                    status,
+                    StatusCode::OK,
+                    "no advisory prerequisite may refuse `{setting}` in either \
+                     direction: {body}"
+                );
+                // The status code alone proves nothing here. `UpdateSettings`
+                // ignores a field it does not recognise and answers 200, so a
+                // name this request cannot write makes the whole loop pass by
+                // writing nothing — which is exactly how the first version of
+                // this test passed while carrying store keys instead of API
+                // field names. Read the value back.
+                assert_eq!(
+                    body[&setting],
+                    serde_json::json!(want),
+                    "`{setting}` did not take the value this request wrote, so this \
+                     loop is not exercising the switch it names"
+                );
+            }
+        }
+    }
+
+    /// Both new switches answer from the store on the next request, and the
+    /// settings page and the readiness route agree with the server about what
+    /// the stored string means.
+    ///
+    /// One stored value parsed in three places is how a server ends up serving
+    /// overlays while the card's checkbox says off, so the spelling an
+    /// operator might hand-edit is the interesting input, not `1`.
+    #[tokio::test]
+    async fn a_hand_written_switch_value_reads_the_same_everywhere() {
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+
+        // Defaults, before anyone has answered: the overlay is off and the
+        // conversion is on, and both surfaces say so.
+        let (_, settings) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+        assert_eq!(settings["pgs_overlay"], serde_json::json!(false));
+        assert_eq!(settings["dolby_vision_convert"], serde_json::json!(true));
+        assert!(!state
+            .pgs_overlay_enabled()
+            .await
+            .expect("read the overlay switch"));
+        assert!(state.transcode.dv_convert_enabled().await);
+
+        // Both keys set on every row, because a leftover from the previous
+        // one would make this pass by accident.
+        for (overlay_value, convert_value, overlay, convert) in [
+            ("On", "1", true, true),
+            (" TRUE ", "yes", true, true),
+            ("nonsense", "nonsense", false, true),
+            ("0", "OFF", false, false),
+            ("off", "No", false, false),
+        ] {
+            let stored = format!("overlay {overlay_value:?}, convert {convert_value:?}");
+            state
+                .store
+                .put_setting(plurx_core::store::keys::PGS_OVERLAY, overlay_value)
+                .await
+                .expect("store a hand-written value");
+            state
+                .store
+                .put_setting(plurx_core::store::keys::DV_CONVERT, convert_value)
+                .await
+                .expect("store a hand-written value");
+            let (_, settings) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+            let (_, readiness) = call(&app, get("/api/v1/developer/readiness", Some(&admin))).await;
+            let reported = |id: &str| {
+                readiness["items"]
+                    .as_array()
+                    .expect("items")
+                    .iter()
+                    .find(|item| item["id"] == id)
+                    .expect("item")["enabled"]
+                    .clone()
+            };
+            assert_eq!(
+                (
+                    state
+                        .pgs_overlay_enabled()
+                        .await
+                        .expect("read the overlay switch"),
+                    state.transcode.dv_convert_enabled().await,
+                    settings["pgs_overlay"].clone(),
+                    settings["dolby_vision_convert"].clone(),
+                    reported("pgs_overlay"),
+                    reported("dolby_vision_convert"),
+                ),
+                (
+                    overlay,
+                    convert,
+                    serde_json::json!(overlay),
+                    serde_json::json!(convert),
+                    serde_json::json!(overlay),
+                    serde_json::json!(convert),
+                ),
+                "{stored}: the server, the settings page and the readiness route must \
+                 not disagree about one stored string"
+            );
+        }
+    }
+
+    /// The switches take effect on the next request rather than at the next
+    /// restart, which is the whole reason they stopped being environment
+    /// variables.
+    #[tokio::test]
+    async fn turning_a_switch_on_needs_no_restart() {
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        assert!(!state
+            .pgs_overlay_enabled()
+            .await
+            .expect("read the overlay switch"));
+
+        let (status, body) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                serde_json::json!({"pgs_overlay": true, "dolby_vision_convert": false}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            state
+                .pgs_overlay_enabled()
+                .await
+                .expect("read the overlay switch"),
+            "the same process has to honour the switch it was just given"
+        );
+        assert!(
+            !state.transcode.dv_convert_enabled().await,
+            "the transcoder reads the switch, not the value this process booted with"
+        );
+    }
+
     #[tokio::test]
     async fn system_info_is_admin_only() {
         let app = test_app();
@@ -5751,10 +6284,10 @@ mod tests {
         (router(state.clone()), state)
     }
 
-    fn test_state_with_pgs_overlay() -> (Router, AppState) {
+    async fn test_state_with_pgs_overlay() -> (Router, AppState) {
         let store = SqliteStore::open_in_memory().expect("store");
         let base = crate::test_temp_path(format!("plurx-pgs-api-{}", uuid::Uuid::new_v4()));
-        let mut state = AppState::new(
+        let state = AppState::new(
             "test".into(),
             Arc::new(store),
             test_dirs(&base),
@@ -5763,7 +6296,11 @@ mod tests {
             Default::default(),
             Arc::new(crate::logbuf::LogBuffer::new(64)),
         );
-        state.pgs_overlay_enabled = true;
+        state
+            .store
+            .put_setting(plurx_core::store::keys::PGS_OVERLAY, "1")
+            .await
+            .expect("enable the pgs overlay");
         (router(state.clone()), state)
     }
 
@@ -7159,7 +7696,7 @@ mod tests {
         };
         use sha2::{Digest, Sha256};
 
-        let (app, state) = test_state_with_pgs_overlay();
+        let (app, state) = test_state_with_pgs_overlay().await;
         let admin = setup_admin(&app).await;
         let source_dir =
             crate::test_temp_path(format!("plurx-pgs-source-{}", uuid::Uuid::new_v4()));
@@ -8525,24 +9062,41 @@ mod tests {
         assert_eq!(body["delivered_dynamic_range"], "sdr", "{body}");
     }
 
-    /// ADAPTIVE-QUALITY Phase 1 still advertises the source-filtered ladder,
-    /// but M4 must not use the removed live engine to fulfill a rung. Until D6
-    /// unlocks transcode-rung VOD, both a stray rung and the source-height
-    /// promise fail with the same typed, honest refusal.
+    /// ADAPTIVE-QUALITY advertises the source-filtered ladder, and immutable
+    /// encoded VOD normalizes a stray height to the closest supported rung
+    /// while preserving an explicit source-height request. Live recovery is
+    /// pinned off so it cannot hide an encoded-path regression.
     #[tokio::test]
     async fn the_ladder_is_advertised_and_stray_heights_snap() {
         crate::transcode::require_ffmpeg();
         let (app, state) = test_state();
         let admin = setup_admin(&app).await;
         let s = seed_content(&state).await;
+        // Encoded VOD must satisfy both requests without the retained engine.
+        state
+            .store
+            .put_setting(plurx_core::store::keys::VOD_LIVE_RECOVERY, "0")
+            .await
+            .expect("pin the refusal policy this test is about");
 
         // A 900p source: not itself a rung, which is the interesting case.
         let dir = crate::test_temp_path(format!("plurx-ladder-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("dir");
         let path = dir.join("Odd.mkv");
-        std::fs::write(&path, b"\x00\x00\x00\x18ftypmp42 placeholder").expect("write");
+        write_real_av_fixture(&path, 8);
+        let metadata = std::fs::metadata(&path).expect("fixture metadata");
+        let mtime = metadata
+            .modified()
+            .expect("fixture mtime")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("fixture after Unix epoch")
+            .as_secs() as i64;
+        let held = std::fs::File::open(&path).expect("held fixture source");
+        let raw_json = crate::ffmpeg::held_source_probe_json(&held)
+            .await
+            .expect("exact fixture probe");
         let probe = plurx_core::domain::ProbeResult {
-            duration_ms: Some(600_000),
+            duration_ms: Some(8_000),
             container: Some("mkv".into()),
             video_codec: Some("h264".into()),
             width: Some(1600),
@@ -8554,13 +9108,21 @@ mod tests {
                 default: true,
                 ..Default::default()
             }],
+            raw_json: Some(raw_json),
             ..Default::default()
         };
         let odd = state
             .store
-            .upsert_file(s.movie, &path.to_string_lossy(), 77, 1, &probe)
+            .upsert_file(
+                s.movie,
+                &path.to_string_lossy(),
+                i64::try_from(metadata.len()).expect("fixture size"),
+                mtime,
+                &probe,
+            )
             .await
             .expect("file");
+        store_current_fragment_index(&state, odd).await;
 
         // The decision advertises the ladder, filtered to the source: a 900p
         // file offers 720 and below, priced both ways.
@@ -8587,7 +9149,9 @@ mod tests {
         assert_eq!(body["ladder"][0]["total_kbps"], 4_160, "{body}");
         assert_eq!(body["ladder"][0]["peak_kbps"], 6_160, "{body}");
 
-        for (playback_id, height) in [("pb-snap", 850), ("pb-promise", 900)] {
+        for (playback_id, height, expected_height) in
+            [("pb-snap", 850, 720), ("pb-promise", 900, 900)]
+        {
             let (status, body) = call(
                 &app,
                 post(
@@ -8597,14 +9161,13 @@ mod tests {
                 ),
             )
             .await;
-            assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{body}");
-            assert_eq!(body["code"], "vod_transcode_unavailable", "{body}");
-            assert!(
-                body["message"]
-                    .as_str()
-                    .is_some_and(|message| message.contains("D6 device measurement")),
-                "the refusal names the gate instead of falling back: {body}"
-            );
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["vod"], true, "{body}");
+            assert_eq!(body["height"], expected_height, "{body}");
+            state
+                .transcode
+                .stop_session(body["session_id"].as_str().expect("session id"), "test")
+                .await;
         }
     }
 
@@ -10815,6 +11378,140 @@ mod tests {
         );
     }
 
+    /// The shipped default, which no test had ever asserted.
+    ///
+    /// Not "never run" — the integration tests spawn real `plurxd` binaries,
+    /// so `cfg(not(test))` and this default have been executing in CI all
+    /// along. What had never happened is a VOD prerequisite refusal in front
+    /// of it with an assertion on the other side.
+    ///
+    /// `live_hls_recovery_enabled` used to read `== Some("1")` under
+    /// `cfg(test)` and `!= Some("0")` otherwise, so every VOD-refusal
+    /// regression in this file described the opposite of what the fleet does:
+    /// with the setting absent, a typed prerequisite refusal is answered by
+    /// the retained live engine, not returned to the client. Four tests
+    /// changed answer when the two were unified, and each of them now says
+    /// which policy it is asserting. This one asserts the default.
+    ///
+    /// It also pins the attribution. The engine spends encode time on this
+    /// node; before this, a session it served appeared in a log line and
+    /// nowhere else — no metric, no admin surface, nothing that would let an
+    /// operator watching a busy GPU find out what was running or that a
+    /// switch existed.
+    #[tokio::test]
+    async fn the_shipped_default_answers_an_index_refusal_with_the_retained_engine() {
+        crate::transcode::require_ffmpeg();
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let s = seed_content(&state).await;
+        prepare_vod_copy_fixture(&state, s.file, 16).await;
+        assert!(
+            state
+                .store
+                .forget_fragment_index(s.file)
+                .await
+                .expect("remove fixture index"),
+            "the default-recovery setup must reach an index refusal"
+        );
+        assert!(
+            state
+                .store
+                .get_setting(plurx_core::store::keys::VOD_LIVE_RECOVERY)
+                .await
+                .expect("setting read")
+                .is_none(),
+            "this test is about the absent-setting default; it must not be written first"
+        );
+
+        let before = crate::transcode::live_recovery_snapshot();
+
+        // The absent index is a typed VOD prerequisite refusal, so the shipped
+        // default answers it with the retained engine.
+        let (status, body) = call(
+            &app,
+            post(
+                &format!("/api/v1/files/{}/hls/sessions", s.file),
+                Some(&admin),
+                json!({ "playback_id": "pb-default-recovery", "copy": true }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "the shipped default serves the retained engine rather than refusing: {body}"
+        );
+        assert_eq!(body["vod"], false, "{body}");
+
+        // Monotone, not exact. These are process-global counters shared with
+        // every other test in this binary, and three `transcode::tests`
+        // creates increment index 0 on their own; an exact delta here would
+        // be a flake whose message points at this route rather than at the
+        // fixture that moved underneath it.
+        let after = crate::transcode::live_recovery_snapshot();
+        assert!(
+            after[1] > before[1],
+            "a session the retained engine served must be attributable to the reason it was \
+             chosen, or an operator watching this node encode has nothing to read"
+        );
+
+        // And it is readable from outside the process, which is the half a
+        // log line never had — including the exposition's own headers, since
+        // a body with samples and no TYPE line is not a scrape.
+        let exposition = crate::transcode::live_recovery_prometheus();
+        assert!(
+            exposition.starts_with(
+                "# HELP plurx_live_hls_recovery_sessions_total Sessions served by the retained \
+                 live-HLS engine, by why it was chosen.\n# TYPE \
+                 plurx_live_hls_recovery_sessions_total counter\n"
+            ),
+            "{exposition}"
+        );
+        for label in [
+            "requested_live",
+            "vod_index_pending",
+            "vod_transcode_unavailable",
+            "vod_subtitle_burn_unavailable",
+            "vod_source_unsupported",
+        ] {
+            assert!(
+                exposition.contains(&format!(
+                    "plurx_live_hls_recovery_sessions_total{{reason=\"{label}\"}} "
+                )),
+                "every reason keeps a sample so a zero is visible as a zero: {exposition}"
+            );
+        }
+
+        // The exposition has to reach `/metrics`, which is where an operator
+        // reads it. Nothing else asserted that it is wired in.
+        let scrape = app
+            .clone()
+            .oneshot(get("/metrics", Some(&admin)))
+            .await
+            .expect("metrics");
+        let scrape = String::from_utf8(
+            axum::body::to_bytes(scrape.into_body(), usize::MAX)
+                .await
+                .expect("metrics body")
+                .to_vec(),
+        )
+        .expect("utf8");
+        assert!(
+            scrape.contains("plurx_live_hls_recovery_sessions_total{reason=\"vod_index_pending\"}"),
+            "the family must appear in the scrape, not only in the function that builds it"
+        );
+
+        // Do not leave an encoder running: this binary is CPU-sensitive and a
+        // stray ffmpeg has tipped timing-bound tests elsewhere.
+        state
+            .transcode
+            .stop_session(
+                body["session_id"].as_str().expect("session id"),
+                "test cleanup",
+            )
+            .await;
+    }
+
     /// All four routes at once, each under its own name, from the three places
     /// that actually know: the transcode manager, the progressive registry,
     /// and the direct-play registry that S2 added because nothing else held
@@ -10825,6 +11522,12 @@ mod tests {
         let (app, state) = test_state();
         let admin = setup_admin(&app).await;
         let s = seed_content(&state).await;
+        // Every HLS row must come from immutable VOD, never live recovery.
+        state
+            .store
+            .put_setting(plurx_core::store::keys::VOD_LIVE_RECOVERY, "0")
+            .await
+            .expect("pin the refusal policy this test is about");
         // Progressive remux is intentionally allowed to run at several times
         // realtime. Keep enough source behind it that the response-owned
         // activity guard cannot reach EOF while the VOD session starts under
@@ -10856,7 +11559,7 @@ mod tests {
             .expect("r");
         assert_eq!(remux.status(), StatusCode::OK);
 
-        // 3. Immutable copy VOD is the only HLS method available before D6.
+        // 3. Immutable copy VOD.
         let (st, copy) = call(
             &app,
             post(
@@ -10868,8 +11571,7 @@ mod tests {
         .await;
         assert_eq!(st, StatusCode::OK, "{copy}");
 
-        // The old fourth method is not a fallback. A transcode request is an
-        // explicit typed refusal until transcode-rung VOD is unlocked.
+        // 4. Immutable encoded VOD.
         let (st, tx) = call(
             &app,
             post(
@@ -10879,10 +11581,11 @@ mod tests {
             ),
         )
         .await;
-        assert_eq!(st, StatusCode::NOT_IMPLEMENTED, "{tx}");
-        assert_eq!(tx["code"], "vod_transcode_unavailable", "{tx}");
+        assert_eq!(st, StatusCode::OK, "{tx}");
+        assert_eq!(tx["vod"], true, "{tx}");
+        assert_eq!(tx["height"], 720, "{tx}");
 
-        let rows = settled_deliveries(&app, &admin, 3).await;
+        let rows = settled_deliveries(&app, &admin, 4).await;
         let mut methods: Vec<&str> = rows
             .iter()
             .map(|r| r["method"].as_str().unwrap_or("?"))
@@ -10890,29 +11593,35 @@ mod tests {
         methods.sort_unstable();
         assert_eq!(
             methods,
-            ["direct", "hls-copy", "remux"],
-            "three viable routes, three names: {rows:?}"
+            ["direct", "hls-copy", "remux", "transcode"],
+            "four viable routes, four names: {rows:?}"
         );
         for row in &rows {
             assert_eq!(row["user"], "paul", "{row}");
             assert_eq!(row["title"], "The Target", "{row}");
             assert_eq!(row["file_id"], s.file, "{row}");
         }
-        // Only immutable VOD is a session. Direct and progressive remux keep
+        // Both immutable VOD deliveries are sessions. Direct and progressive remux keep
         // their existing non-session accounting.
         let with_session = rows.iter().filter(|r| !r["session_id"].is_null()).count();
-        assert_eq!(with_session, 1, "{rows:?}");
+        assert_eq!(with_session, 2, "{rows:?}");
         let (_, page) = call(&app, get("/api/v1/activity/detail", Some(&admin))).await;
         let sessions = page["sessions"].as_array().expect("sessions");
-        assert_eq!(sessions.len(), 1, "only VOD copy is live: {page}");
+        assert_eq!(
+            sessions.len(),
+            2,
+            "both immutable VOD sessions are live: {page}"
+        );
         assert!(
             sessions[0].get("encoder").is_some() && sessions[0].get("user_name").is_some(),
             "and unchanged in shape: {page}"
         );
 
         // Each row ends the way its delivery does. VOD when it is stopped...
-        let id = copy["session_id"].as_str().expect("session id");
-        assert!(state.transcode.stop_session(id, "test").await);
+        for body in [&copy, &tx] {
+            let id = body["session_id"].as_str().expect("session id");
+            assert!(state.transcode.stop_session(id, "test").await);
+        }
         // ...the remux when its body is dropped, which is the same moment
         // `kill_on_drop` takes its ffmpeg down...
         drop(remux);
@@ -11138,19 +11847,25 @@ mod tests {
             .expect("file read")
             .expect("file");
         write_real_av_fixture(&file.path, seconds);
-        let size = i64::try_from(
-            std::fs::metadata(&file.path)
-                .expect("fixture metadata")
-                .len(),
-        )
-        .expect("fixture size");
+        let held = std::fs::File::open(&file.path).expect("held fixture source");
+        let raw_json = crate::ffmpeg::held_source_probe_json(&held)
+            .await
+            .expect("exact fixture probe");
+        let metadata = std::fs::metadata(&file.path).expect("fixture metadata");
+        let size = i64::try_from(metadata.len()).expect("fixture size");
+        let mtime = metadata
+            .modified()
+            .expect("fixture mtime")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("fixture after Unix epoch")
+            .as_secs() as i64;
         let refreshed = state
             .store
             .upsert_file(
                 file.item_id,
                 &file.path.to_string_lossy(),
                 size,
-                file.mtime,
+                mtime,
                 &ProbeResult {
                     duration_ms: Some(i64::from(seconds) * 1_000),
                     container: file.container.clone(),
@@ -11164,6 +11879,7 @@ mod tests {
                     bitrate: file.bitrate,
                     audio_streams: file.audio_streams.clone(),
                     subtitle_streams: file.subtitle_streams.clone(),
+                    raw_json: Some(raw_json),
                     ..Default::default()
                 },
             )
@@ -11446,6 +12162,12 @@ mod tests {
         let (app, state) = test_state();
         let admin = setup_admin(&app).await;
         let s = seed_content(&state).await;
+        // Every compatibility shape in this test must stay on immutable VOD.
+        state
+            .store
+            .put_setting(plurx_core::store::keys::VOD_LIVE_RECOVERY, "0")
+            .await
+            .expect("pin the refusal policy this test is about");
         prepare_vod_copy_fixture(&state, s.file, 16).await;
 
         // Unknown session → 404 for both playlist and segment.
@@ -11462,15 +12184,16 @@ mod tests {
             StatusCode::NOT_FOUND
         );
 
-        // The query-shaped compatibility route has no copy recipe. It must
-        // refuse that transcode honestly instead of reviving live HLS.
+        // The query-shaped compatibility route creates the same immutable
+        // encoded presentation as the JSON route.
         let (st, old_start) = call(
             &app,
             get_q(&format!("/api/v1/files/{}/hls/start?token={admin}", s.file)),
         )
         .await;
-        assert_eq!(st, StatusCode::NOT_IMPLEMENTED, "{old_start}");
-        assert_eq!(old_start["code"], "vod_transcode_unavailable");
+        assert_eq!(st, StatusCode::OK, "{old_start}");
+        assert_eq!(old_start["vod"], true, "{old_start}");
+        let old_session = old_start["session_id"].as_str().expect("session id");
 
         // A client that explicitly names the removed presentation gets a
         // terminal typed answer; omission below means VOD.
@@ -11584,6 +12307,14 @@ mod tests {
             status_of(
                 &app,
                 delete(&format!("/api/v1/hls/{session}"), Some(&admin))
+            )
+            .await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            status_of(
+                &app,
+                delete(&format!("/api/v1/hls/{old_session}"), Some(&admin))
             )
             .await,
             StatusCode::NO_CONTENT
@@ -11874,10 +12605,21 @@ mod tests {
     /// that missing context as permission to turn a known HDR source into
     /// H.264 SDR. The refusal happens before playback accounting or ffmpeg.
     #[tokio::test]
-    async fn hls_create_refuses_hdr_downgrades_but_accepts_an_existing_sdr_plan() {
+    async fn hls_create_refuses_hdr_downgrades_and_preserves_an_existing_sdr_plan() {
         crate::transcode::require_ffmpeg();
         let (app, state) = test_state();
         let admin = setup_admin(&app).await;
+        // This test asserts the typed VOD refusal, so it says which policy
+        // it is under. The shipped default is the other one: an absent
+        // `playback.vod_live_recovery` falls back to the retained live engine.
+        // The two used to be decided by `cfg(test)`, which is how every
+        // refusal regression here came to describe a policy production never
+        // runs.
+        state
+            .store
+            .put_setting(plurx_core::store::keys::VOD_LIVE_RECOVERY, "0")
+            .await
+            .expect("pin the refusal policy this test is about");
         let file = seed_mixed_subtitles(&state, Some("hdr10")).await;
 
         let (status, preflight) = call(
@@ -11925,9 +12667,10 @@ mod tests {
 
         // TCL 9445X / Bad Boys for Life's route: the display advertises
         // `hdr=0`, so the decision may still select an SDR transcode before
-        // considering its forced PGS track. M4 must not fulfill that decision
-        // through the removed live engine: session creation names the deferred
-        // transcode-rung VOD gate instead.
+        // considering its forced PGS track. This synthetic fixture carries
+        // structured PGS facts but no exact raw probe. Session creation must
+        // preserve the SDR plan while refusing the unattested source; it must
+        // not revive live HLS or misreport the refusal as an HDR downgrade.
         let (status, sdr_preflight) = call(
             &app,
             get(
@@ -11963,8 +12706,8 @@ mod tests {
             ),
         )
         .await;
-        assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{accepted}");
-        assert_eq!(accepted["code"], "vod_transcode_unavailable", "{accepted}");
+        assert_eq!(status, StatusCode::CONFLICT, "{accepted}");
+        assert_eq!(accepted["code"], "vod_source_rescan_required", "{accepted}");
     }
 
     /// `/decision` used to promise more than the server would accept: a

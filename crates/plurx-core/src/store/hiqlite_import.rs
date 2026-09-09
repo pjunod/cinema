@@ -748,6 +748,7 @@ const TABLES: &[TablePlan] = &[
             "media_sequence",
             "discontinuity_sequence",
             "updated_at_ms",
+            "drain_deadline_ms",
         ],
         order_by: "incarnation_id",
         minimum_schema: 25,
@@ -2228,6 +2229,15 @@ fn value_projection(table: TablePlan, schema_version: i64, qualify: bool) -> Str
                 && schema_version < 35
             {
                 "0".to_owned()
+            } else if table.name == "media_sessions"
+                && *column == "drain_deadline_ms"
+                && schema_version < 50
+            {
+                // A source from before the column has no draining session to
+                // describe, and null is what "not draining" is spelled as
+                // everywhere else. Zero would be a deadline in 1970 that every
+                // reader would then have to except.
+                "NULL".to_owned()
             } else if table.name == "files"
                 && matches!(
                     *column,
@@ -2879,7 +2889,7 @@ mod tests {
                 .await
                 .expect("read source import chunk");
             assert_eq!(rows.len(), 1);
-            assert_eq!(rows[0].len(), 19, "media session import parameter count");
+            assert_eq!(rows[0].len(), 20, "media session import parameter count");
             let expected_terminal = if schema_version < 34 {
                 Param::Null
             } else {
@@ -2912,6 +2922,11 @@ mod tests {
                     Param::Integer(4),
                     Param::Integer(5),
                     Param::Integer(9_000),
+                    // v51's drain deadline. No legacy source has the column,
+                    // and null is what "not draining" means on every row it
+                    // migrates onto, so the import projects it rather than
+                    // inventing a deadline in 1970.
+                    Param::Null,
                 ],
                 "schema v{schema_version} import row",
             );

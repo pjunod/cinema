@@ -1027,7 +1027,9 @@ consumed. The active copy cut's broad invocation is also consumed: it produced
 the 1,292/5/3 `plurxd` result recorded above and must not be repeated. All five
 failed names plus the two directly affected startup contracts are green by
 exact rerun. Compile-only
-`cargo check --locked -p plurxd --features live-hls-recovery --tests` succeeded
+`cargo check --locked -p plurxd --tests` succeeded (the run recorded here used
+`--features live-hls-recovery`; that feature was removed once it was found to
+be a default nothing ever turned off, so the command is the same check)
 before that run. The ownership ledger now expects 16 `failure_fence` tokens;
 rerun its static validator during final static validation rather than assuming
 the earlier zero-mismatch snapshot still names the current head.

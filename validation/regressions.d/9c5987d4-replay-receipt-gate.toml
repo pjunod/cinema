@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["9c5987d4"]
+points = ["server.api", "playback.pipeline"]
+checks = ["rust-gate", "rust-gate-ci", "history-regressions"]
+reason = "`the_relay_replays_a_committed_preparation_from_its_durable_receipt` drives a lost commit response through the relay and requires the durable answer rather than whatever the live control plane would say. It passed before this change for the wrong reason: the gate was the predecessor's `ended`/`superseded` state, which is the same fact as \"this commit already happened\" only while the commit retires the predecessor in its own transaction. §4 has to stop it doing that, and the moment it does, that gate stops matching and the client is answered live — the one case §4 says must always replay. The receipt is a stricter fence than the state it replaces: incarnation, owner, epoch, client instance, sequence and request fingerprint are all compared, so only the byte-identical request that produced a receipt can replay it and a live serving session cannot have a real exchange short-circuited. Restoring the state gate leaves this test passing today and failing the moment the drain lands, which is why it is landed ahead of it."

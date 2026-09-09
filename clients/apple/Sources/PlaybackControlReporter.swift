@@ -652,6 +652,7 @@ struct ControlTransportError: Error, Equatable {
     var generation: String?
     var controlEpoch: Int?
     var retryAfterMs: Int?
+    var invalidField: String?
     var canceled: Bool = false
 
     static let deadlineExceeded = ControlTransportError(status: 408, code: "exchange_deadline")
@@ -692,6 +693,9 @@ struct PlaybackControlCapture: Equatable, Sendable {
 actor PlaybackControlReporter {
     typealias Send = @Sendable (String, ControlRequest) async throws -> ControlResponse
     typealias Sleep = @Sendable (Int, SleepKind) async throws -> Void
+
+    /// Teardown is best-effort after this bound; the server owns durable reap.
+    static let finalizationDeadlineMs = 3_000
 
     /// Why the reporter is waiting. Pacing waits are the exchange cadence and
     /// the retry backoff; the deadline wait races one in-flight exchange. They
@@ -737,6 +741,11 @@ actor PlaybackControlReporter {
     private var lastStartedAt: Int?
     private var nextAllowedAt = 0
     private var pump: Task<Void, Never>?
+    /// A source-independent final capture owned by teardown. When it contains
+    /// committed+end, the reporter must finish the commit (including retries)
+    /// and only then send the end exchange.
+    private var finishing = false
+    private var finishingDeadlineAt: Int?
 
     init?(
         bootstrap: ControlBootstrap,
@@ -810,6 +819,8 @@ actor PlaybackControlReporter {
 
     func stop() {
         terminalStop = nil
+        finishing = false
+        finishingDeadlineAt = nil
         guard !stopped else { return }
         stopped = true
         pending = nil
@@ -818,11 +829,35 @@ actor PlaybackControlReporter {
         pump = nil
     }
 
+    /// Finish reporting from an immutable teardown capture.
+    ///
+    /// The source slot is revoked immediately after this call is scheduled, so
+    /// this path deliberately does not reconcile through `capture`. A commit
+    /// colliding with end is retried byte-for-byte until accepted, then the
+    /// reporter derives the acknowledgement-free end from the same capture.
+    func finish(_ final: PlaybackControlCapture?) {
+        guard let final, final.owner == owner, final.snapshot.isValid else {
+            stop()
+            return
+        }
+        terminalStop = nil
+        stopped = false
+        finishing = true
+        finishingDeadlineAt = now() + Self.finalizationDeadlineMs
+        pending = final
+        if !inFlight {
+            pump?.cancel()
+            pump = Task { [weak self] in await self?.run() }
+        }
+    }
+
     /// A terminal stops only the captured intent. MainActor may publish B
     /// immediately after this check, so B's notification can resume this
     /// latch. Explicit End/stop and protocol failure remain permanent.
     private func stopForTerminal(_ captured: PlaybackControlCapture) {
         guard !stopped, captured.hasSameIntent(as: newestCapture(pending)) else { return }
+        finishing = false
+        finishingDeadlineAt = nil
         stopped = true
         terminalStop = captured
         pending = nil
@@ -854,6 +889,10 @@ actor PlaybackControlReporter {
 
     private func run() async {
         while !stopped && !Task.isCancelled {
+            if finishingExpired() {
+                stop()
+                return
+            }
             if pending == nil && retryRequest == nil {
                 pending = newestCapture(nil)
             }
@@ -880,7 +919,13 @@ actor PlaybackControlReporter {
 
     private func waitBeforeNextExchange() -> Int {
         let rateAllowedAt = lastStartedAt.map { $0 + PlaybackControl.minimumExchangeMs } ?? 0
-        return max(0, max(rateAllowedAt, nextAllowedAt) - now())
+        let ordinary = max(0, max(rateAllowedAt, nextAllowedAt) - now())
+        guard finishing, let finishingDeadlineAt else { return ordinary }
+        return min(ordinary, max(0, finishingDeadlineAt - now()))
+    }
+
+    private func finishingExpired() -> Bool {
+        finishing && finishingDeadlineAt.map { now() >= $0 } == true
     }
 
     /// A retry replays the exact request that failed — the same sequence, the
@@ -888,13 +933,26 @@ actor PlaybackControlReporter {
     /// not consume a sequence number, and the server dedupes on it.
     private func nextRequest() -> PendingRequest? {
         if let retryRequest { return retryRequest }
-        guard let pending = newestCapture(pending), pending.snapshot.isValid else {
+        let selected = finishing ? pending : newestCapture(pending)
+        guard let pending = selected, pending.snapshot.isValid else {
             pending = nil
             return nil
         }
         self.pending = nil
         sequence += 1
-        let snapshot = pending.snapshot
+        var snapshot = pending.snapshot
+        // A first-frame commit and a terminal player event can land in the
+        // same capture. The server deliberately rejects committed+end, but
+        // dropping the acknowledgement loses the durable pointer move. Send
+        // the commit as an active settlement first; once that accepted
+        // exchange clears the acknowledgement, the next capture carries end.
+        if snapshot.demand == .end, snapshot.acknowledgement?.state == .committed {
+            snapshot.demand = .active
+            snapshot.playbackRate = max(
+                PlaybackControlMapping.minimumActiveRate,
+                snapshot.playbackRate
+            )
+        }
         var request = ControlRequest(
             proto: PlaybackControl.protocolName,
             generation: bootstrap.generation,
@@ -933,7 +991,10 @@ actor PlaybackControlReporter {
         inFlight = true
         defer { inFlight = false }
         do {
-            let response = try await withDeadline(PlaybackControl.exchangeDeadlineMs) {
+            let exchangeDeadline = finishingDeadlineAt.map {
+                max(1, min(PlaybackControl.exchangeDeadlineMs, $0 - now()))
+            } ?? PlaybackControl.exchangeDeadlineMs
+            let response = try await withDeadline(exchangeDeadline) {
                 [send, bootstrap] in
                 try await send(bootstrap.url, request)
             }
@@ -955,6 +1016,19 @@ actor PlaybackControlReporter {
                 failure: nil,
                 capture: pendingRequest.capture
             ))
+            if finishing,
+               pendingRequest.capture.snapshot.demand == .end,
+               pendingRequest.capture.snapshot.acknowledgement?.state == .committed,
+               request.demand == .active {
+                var ending = pendingRequest.capture.snapshot
+                ending.acknowledgement = nil
+                pending = PlaybackControlCapture(
+                    snapshot: ending,
+                    intentGeneration: pendingRequest.capture.intentGeneration,
+                    owner: pendingRequest.capture.owner,
+                    sourceRevision: pendingRequest.capture.sourceRevision + 1
+                )
+            }
             // A terminal verdict ends reporting. It does not tear the player
             // down: this reporter still owns no recovery, and buffer already
             // fetched is still worth playing. The milestone that moves that
@@ -1035,6 +1109,10 @@ actor PlaybackControlReporter {
             )
         )
         if failure is ControlProtocolError {
+            stop()
+            return
+        }
+        if finishingExpired() {
             stop()
             return
         }
