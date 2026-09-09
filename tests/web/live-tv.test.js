@@ -33,6 +33,36 @@ function memoryStorage() {
 }
 
 async function main() {
+  await test("both guide views put the full-width player above a player-height guide", () => {
+    const list = shipped("liveTvListMarkup"), grid = shipped("liveTvGridMarkup");
+    assert.ok(list.indexOf('class="lt-stage"') < list.indexOf('class="lt-list"'));
+    assert.ok(grid.indexOf('class="lt-stage"') < grid.indexOf('class="lt-gridwrap"'));
+    assert.doesNotMatch(grid, /grid-template-columns:minmax\(0,1fr\) 400px/);
+    assert.match(shell, /\.lt-list\{[^}]*overflow:auto[^}]*height:var\(--live-tv-slot-height,64vh\)/s);
+    assert.match(shell, /\.lt-gridwrap\{[^}]*height:var\(--live-tv-slot-height,64vh\)/s);
+    assert.match(shipped("liveTvTrackSlot"), /--live-tv-slot-height/);
+  });
+
+  await test("mute stays an icon while its accessible action follows player state", () => {
+    const video = { muted: false };
+    const buttons = [
+      { textContent: "🔇", title: "Mute", setAttribute(name, value) { this[name] = value; } },
+      { textContent: "🔇", title: "Mute", setAttribute(name, value) { this[name] = value; } },
+    ];
+    const toggle = new Function("document",
+      `${shipped("liveTvSyncMuteButtons")}${shipped("muteLiveTv")} return muteLiveTv;`)(
+      { getElementById: id => id === "live-tv-video" ? video : null,
+        querySelectorAll: selector => selector === "[data-live-tv-mute]" ? buttons : [] });
+    toggle();
+    assert.equal(video.muted, true);
+    assert.deepEqual(buttons.map(button => [button.textContent, button.title, button["aria-label"]]),
+      [["🔊", "Unmute", "Unmute"], ["🔊", "Unmute", "Unmute"]]);
+    toggle();
+    assert.equal(video.muted, false);
+    assert.deepEqual(buttons.map(button => [button.textContent, button.title, button["aria-label"]]),
+      [["🔇", "Mute", "Mute"], ["🔇", "Mute", "Mute"]]);
+  });
+
   await test("protected channels are visible but never watchable", () => {
     assert.deepEqual(liveTv.channelView({ drm: true, support: "drm_unsupported" }), {
       disabled: true,

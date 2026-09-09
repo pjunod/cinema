@@ -403,9 +403,9 @@
   .lt-switch button[aria-pressed="true"]{background:var(--panel2);color:var(--text)}
   .lt-switch button:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
 
-  .lt-split{display:grid;grid-template-columns:400px minmax(0,1fr);gap:20px;align-items:start}
-  @media (max-width:1100px){.lt-split{grid-template-columns:minmax(0,1fr)}}
-  .lt-list{border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;background:var(--panel)}
+  .lt-split{display:grid;grid-template-columns:minmax(0,1fr);gap:20px;align-items:start}
+  .lt-list{border:1px solid var(--line);border-radius:var(--radius);overflow:auto;background:var(--panel);
+    height:var(--live-tv-slot-height,64vh)}
   .lt-row{display:grid;grid-template-columns:52px minmax(0,1fr) auto;gap:10px;align-items:start;
     width:100%;text-align:left;background:none;border:0;border-top:1px solid var(--line);
     color:var(--text);cursor:pointer;padding:12px 14px;min-height:78px;font-family:inherit;font-size:13.5px}
@@ -441,7 +441,7 @@
 
   /* the grid: sticky channel column, sticky time header, one now line */
   .lt-gridwrap{border:1px solid var(--line);border-radius:var(--radius);overflow:auto;
-    background:var(--panel);max-height:64vh;position:relative}
+    background:var(--panel);height:var(--live-tv-slot-height,64vh);position:relative}
   .lt-grid{position:relative;min-width:max-content}
   .lt-times{display:flex;position:sticky;top:0;z-index:3;background:var(--panel);
     border-bottom:1px solid var(--line)}
@@ -14518,6 +14518,8 @@ function liveTvTrackSlot(){
   const box=slot.getBoundingClientRect();
   host.style.left=`${box.left}px`; host.style.top=`${box.top}px`;
   host.style.width=`${box.width}px`; host.style.height=`${box.height}px`;
+  const body=document.getElementById("live-tv-body");
+  if(body) body.style.setProperty("--live-tv-slot-height",`${box.height}px`);
   host.hidden=false;
 }
 function liveTvWireSlot(){
@@ -14625,6 +14627,8 @@ function liveTvNowBar(channel){
   const pct=at.progress===null?0:Math.round(at.progress*100);
   const playing=!!LIVE_TV_LEASE.current;
   const left=at.now?Math.max(0,Math.round((at.now.end-liveTvNowSeconds())/60)):null;
+  const muted=!!document.getElementById("live-tv-video")?.muted;
+  const muteLabel=muted?"Unmute":"Mute";
   return `<div class="lt-nowbar">
     <span class="grow"><b>${at.now?esc(at.now.title):esc(channel.guide_name)}</b>
       ${playing?'<span class="pill" style="color:var(--bad)">● LIVE</span>':""}
@@ -14632,7 +14636,7 @@ function liveTvNowBar(channel){
     </span>
     <span class="lt-mini" style="width:120px"><i style="width:${pct}%"></i></span>
     <button type="button" onclick="pauseLiveTv()" title="Pause" aria-label="Pause">⏸</button>
-    <button type="button" onclick="muteLiveTv(this)" title="Mute" aria-label="Mute">🔇</button>
+    <button type="button" data-live-tv-mute onclick="muteLiveTv()" title="${muteLabel}" aria-label="${muteLabel}">${muted?"🔊":"🔇"}</button>
     ${liveTvPipSupported()?'<button type="button" onclick="toggleLiveTvPip()" title="Picture-in-picture (P)" aria-label="Picture-in-picture">⧉</button>':""}
     <button type="button" onclick="fullscreenLiveTv()" title="Fullscreen (F)" aria-label="Fullscreen">⛶</button>
     <button type="button" onclick="stopLiveTv().catch(liveTvFailure)" title="Stop" aria-label="Stop">■</button>
@@ -14652,14 +14656,14 @@ function liveTvTonight(channel){
 }
 function liveTvListMarkup(visible,selected){
   return `<div class="lt-split">
-    <div class="lt-list" role="listbox" aria-label="Channels">${
-      visible.length?visible.map(channel=>liveTvRowMarkup(channel,selected&&selected.id)).join("")
-        :'<div style="padding:18px" class="muted">No matching channels.</div>'}</div>
     <div class="lt-stage">
       <div class="lt-slot" id="live-tv-slot"></div>
       ${liveTvNowBar(selected)}
       ${liveTvTonight(selected)}
     </div>
+    <div class="lt-list" role="listbox" aria-label="Channels">${
+      visible.length?visible.map(channel=>liveTvRowMarkup(channel,selected&&selected.id)).join("")
+        :'<div style="padding:18px" class="muted">No matching channels.</div>'}</div>
   </div>`;
 }
 function liveTvGridWindow(){
@@ -14699,17 +14703,17 @@ function liveTvGridMarkup(visible,selected){
     </div>`;
   }).join("");
   const nowLine=layout.nowX===null?"":`<div class="lt-now" style="left:${180+layout.nowX}px"></div>`;
-  return `<div class="lt-split" style="grid-template-columns:minmax(0,1fr) 400px">
+  return `<div class="lt-split">
+    <div class="lt-stage">
+      <div class="lt-slot" id="live-tv-slot"></div>
+      ${liveTvNowBar(selected)}
+    </div>
     <div>
       <div class="lt-gridwrap"><div class="lt-grid">
         <div class="lt-times"><div class="pad"></div>${times}</div>
         ${rows||'<div style="padding:18px" class="muted">No matching channels.</div>'}
         ${nowLine}
       </div></div>
-    </div>
-    <div class="lt-stage">
-      <div class="lt-slot" id="live-tv-slot"></div>
-      ${liveTvNowBar(selected)}
     </div>
   </div>`;
 }
@@ -14810,6 +14814,8 @@ function liveTvPaint(){
   const around=liveTvStrip(visible,channel);
   const pct=at.progress===null?0:Math.round(at.progress*100);
   const left=at.now?Math.max(0,Math.round((at.now.end-liveTvNowSeconds())/60)):null;
+  const muted=!!document.getElementById("live-tv-video")?.muted;
+  const muteLabel=muted?"Unmute":"Mute";
   overlay.innerHTML=`<div class="lth-top">
       <div class="lth-now">
         <span class="lth-chip">${esc(channel?channel.guide_name.slice(0,5):"")}</span>
@@ -14817,7 +14823,7 @@ function liveTvPaint(){
           <span class="lth-sub">${esc(channel?channel.guide_number+" · "+channel.guide_name:"")}${at.now?" · "+esc(liveTvClock(at.now.start))+"–"+esc(liveTvClock(at.now.end)):""}${at.next?" · Next: "+esc(at.next.title):""}</span></span>
       </div>
       <div class="lth-acts">
-        <button type="button" onclick="muteLiveTv(this)">Mute</button>
+        <button type="button" data-live-tv-mute onclick="muteLiveTv()" title="${muteLabel}" aria-label="${muteLabel}">${muted?"🔊":"🔇"}</button>
         ${liveTvPipSupported()?'<button type="button" onclick="toggleLiveTvPip()">PiP</button>':""}
         <button type="button" onclick="liveTvGuideSheet()">Guide</button>
         <button type="button" onclick="stopLiveTv().catch(liveTvFailure)" aria-label="Stop Live TV">Stop</button>
@@ -14959,7 +14965,7 @@ function liveTvKeydown(event){
   if(hotkey&&state!=="page"){
     event.preventDefault();
     if(hotkey==="fullscreen") fullscreenLiveTv();
-    else if(hotkey==="mute"){ const v=document.getElementById("live-tv-video"); if(v) v.muted=!v.muted; }
+    else if(hotkey==="mute") muteLiveTv();
     else if(hotkey==="picture_in_picture") toggleLiveTvPip();
     else if(hotkey==="guide_sheet") liveTvGuideSheet();
     else if(hotkey==="exit") exitLiveTvPresentation();
@@ -15134,8 +15140,16 @@ function pauseLiveTv(){
   const video=document.getElementById("live-tv-video");
   if(video&&LIVE_TV_LEASE.current){ video.pause(); liveTvMessage("Paused. The tuner is released after 30 seconds without playback; resuming has no rewind guarantee."); }
 }
-function muteLiveTv(button){
-  const video=document.getElementById("live-tv-video"); if(video){ video.muted=!video.muted; button.textContent=video.muted?"Unmute":"Mute"; }
+function liveTvSyncMuteButtons(){
+  const video=document.getElementById("live-tv-video"); if(!video) return;
+  const label=video.muted?"Unmute":"Mute", icon=video.muted?"🔊":"🔇";
+  document.querySelectorAll("[data-live-tv-mute]").forEach(button=>{
+    button.textContent=icon; button.title=label; button.setAttribute("aria-label",label);
+  });
+}
+function muteLiveTv(){
+  const video=document.getElementById("live-tv-video");
+  if(video){ video.muted=!video.muted; liveTvSyncMuteButtons(); }
 }
 function fullscreenLiveTv(){
   const panel=document.getElementById("live-tv-host"), video=document.getElementById("live-tv-video");
