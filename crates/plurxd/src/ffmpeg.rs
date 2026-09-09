@@ -334,7 +334,7 @@ pub(crate) async fn held_source_probe_json(source: &std::fs::File) -> Result<Str
     }
 }
 
-fn normalized_probe_document(raw: &str) -> Result<Vec<u8>, String> {
+fn normalized_probe_document(raw: &str) -> Result<serde_json::Value, String> {
     let mut value: serde_json::Value =
         serde_json::from_str(raw).map_err(|error| format!("invalid ffprobe JSON: {error}"))?;
     if let Some(format) = value
@@ -345,11 +345,47 @@ fn normalized_probe_document(raw: &str) -> Result<Vec<u8>, String> {
         // used /dev/fd/3. The spelling is not a media fact.
         format.remove("filename");
     }
-    serde_json::to_vec(&value).map_err(|error| error.to_string())
+    Ok(value)
+}
+
+fn ignore_optional_stream_field_omissions(
+    stored: &mut serde_json::Value,
+    held: &mut serde_json::Value,
+) {
+    const OPTIONAL_CODEC_REPORT_FIELDS: [&str; 3] = ["closed_captions", "film_grain", "refs"];
+    let (Some(stored_streams), Some(held_streams)) = (
+        stored
+            .get_mut("streams")
+            .and_then(serde_json::Value::as_array_mut),
+        held.get_mut("streams")
+            .and_then(serde_json::Value::as_array_mut),
+    ) else {
+        return;
+    };
+    for (stored_stream, held_stream) in stored_streams.iter_mut().zip(held_streams.iter_mut()) {
+        let (Some(stored_stream), Some(held_stream)) =
+            (stored_stream.as_object_mut(), held_stream.as_object_mut())
+        else {
+            continue;
+        };
+        for field in OPTIONAL_CODEC_REPORT_FIELDS {
+            // ffprobe releases may omit these decoder-analysis fields even
+            // when probing the same bytes. Compare a reported value whenever
+            // both documents have one, but do not turn schema availability
+            // into a source-replacement verdict.
+            if !stored_stream.contains_key(field) || !held_stream.contains_key(field) {
+                stored_stream.remove(field);
+                held_stream.remove(field);
+            }
+        }
+    }
 }
 
 pub(crate) fn probes_describe_same_input(stored: &str, held: &str) -> Result<bool, String> {
-    Ok(normalized_probe_document(stored)? == normalized_probe_document(held)?)
+    let mut stored = normalized_probe_document(stored)?;
+    let mut held = normalized_probe_document(held)?;
+    ignore_optional_stream_field_omissions(&mut stored, &mut held);
+    Ok(stored == held)
 }
 
 /// Which pacing flags this ffmpeg understands. `-readrate` landed in 5.1 and
@@ -1722,12 +1758,15 @@ mod tests {
     }
 
     #[test]
-    fn held_probe_comparison_ignores_only_the_descriptor_spelling() {
-        let scanned = r#"{"streams":[{"codec_type":"video","width":1920}],"format":{"filename":"/media/a.mkv","duration":"60.0"}}"#;
+    fn held_probe_comparison_ignores_descriptor_and_optional_schema_drift() {
+        let scanned = r#"{"streams":[{"codec_type":"video","width":1920,"closed_captions":0,"film_grain":0,"refs":1}],"format":{"filename":"/media/a.mkv","duration":"60.0"}}"#;
         let held = r#"{"streams":[{"codec_type":"video","width":1920}],"format":{"filename":"/dev/fd/3","duration":"60.0"}}"#;
         assert!(probes_describe_same_input(scanned, held).expect("compare probes"));
         let replacement = held.replace("1920", "1280");
         assert!(!probes_describe_same_input(scanned, &replacement).expect("detect stale probe"));
+        let reported_change = scanned.replace("\"refs\":1", "\"refs\":2");
+        assert!(!probes_describe_same_input(scanned, &reported_change)
+            .expect("compare reported codec facts"));
     }
 
     #[tokio::test]

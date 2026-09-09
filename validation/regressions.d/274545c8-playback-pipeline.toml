@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["274545c8"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "The retained held-probe comparison regression now reproduces ffprobe schema drift by omitting closed_captions, film_grain, and refs from the descriptor-bound document, requires that omission to match the stored scan, and still rejects changed geometry or conflicting reported codec facts."
