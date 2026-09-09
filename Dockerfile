@@ -48,8 +48,9 @@ ARG MKVTOOLNIX_VERSION=74.0.0-1
 # overflows partway through with an error naming the apt cache rather than the
 # real cause. Cleaning between stages keeps the peak to one stack at a time.
 #
-# The jellyfin-ffmpeg install below is deliberately unpinned — it should track
-# the current build — but it is then ASSERTED to carry `dovi_rpu`, the
+# The jellyfin-ffmpeg install below tracks the current build in major 8, which
+# adds the AC-4 decoder required by clear ATSC 3.0 broadcasts. It is then
+# ASSERTED to carry both that decoder and `dovi_rpu`, the
 # bitstream filter (ffmpeg 7.1+) that removes a Dolby Vision configuration
 # from a remux. That is a capability, not a nicety: without it every DV film
 # is re-encoded for browsers that cannot decode Dolby Vision (Chrome cannot;
@@ -75,16 +76,21 @@ RUN sed -i 's/Components: main/Components: main non-free non-free-firmware/' \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/jellyfin.gpg] https://repo.jellyfin.org/debian bookworm main" \
         > /etc/apt/sources.list.d/jellyfin.list \
     && apt-get update \
-    && apt-get install -y --no-install-recommends jellyfin-ffmpeg7 \
+    && apt-get install -y --no-install-recommends jellyfin-ffmpeg8 \
     && apt-get clean \
+    && ( /usr/lib/jellyfin-ffmpeg/ffmpeg -hide_banner -decoders 2>&1 \
+        | grep -Eq '^[[:space:]]*A[^[:space:]]*[[:space:]]+ac4[[:space:]]' \
+      || ( echo "FATAL: this jellyfin-ffmpeg8 has no AC-4 decoder." >&2; \
+           echo "Clear ATSC 3.0 channels require AC-4 audio decoding." >&2; \
+           exit 1 ) ) \
     && ( /usr/lib/jellyfin-ffmpeg/ffmpeg -hide_banner -bsfs 2>&1 | grep -qx 'dovi_rpu' \
-      || ( echo "FATAL: this jellyfin-ffmpeg7 has no dovi_rpu bitstream filter." >&2; \
+      || ( echo "FATAL: this jellyfin-ffmpeg8 has no dovi_rpu bitstream filter." >&2; \
            echo "Got: $(/usr/lib/jellyfin-ffmpeg/ffmpeg -version 2>&1 | head -1)" >&2; \
            echo "dovi_rpu needs ffmpeg 7.1+; see the note above this RUN." >&2; \
            echo "Rebuild fetching current packages: docker build --no-cache --pull" >&2; \
            exit 1 ) ) \
     && ( /usr/lib/jellyfin-ffmpeg/ffmpeg -hide_banner -h filter=tonemapx 2>&1 | grep -q '^[[:space:]]*apply_dovi[[:space:]]' \
-      || ( echo "FATAL: this jellyfin-ffmpeg7 has no tonemapx apply_dovi renderer." >&2; \
+      || ( echo "FATAL: this jellyfin-ffmpeg8 has no tonemapx apply_dovi renderer." >&2; \
            echo "Profile 5 fallback requires tonemapx with Dolby Vision RPU reshaping." >&2; \
            exit 1 ) ) \
     && dovi_arch="${TARGETARCH:-$(dpkg --print-architecture)}" \

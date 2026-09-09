@@ -426,7 +426,16 @@
   .lt-star{color:var(--accent);font-size:13px}
 
   .lt-stage{border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;background:var(--panel)}
-  .lt-slot{width:100%;aspect-ratio:16/9;background:#000}
+  .lt-stage-top{display:grid;grid-template-columns:minmax(0,2fr) minmax(240px,1fr);align-items:stretch;aspect-ratio:8/3;min-height:0}
+  .lt-stage.wide .lt-stage-top{grid-template-columns:minmax(0,1fr);aspect-ratio:16/9}
+  .lt-stage.wide .lt-showinfo{display:none}
+  .lt-slot{width:100%;height:100%;background:#000}
+  .lt-showinfo{min-width:0;min-height:0;padding:20px 22px;border-left:1px solid var(--line);overflow:auto}
+  .lt-showinfo .eyebrow{color:var(--accent);font-size:11px;font-weight:700;letter-spacing:.09em;text-transform:uppercase}
+  .lt-showinfo h2{margin:7px 0 5px;font-size:20px;line-height:1.2}
+  .lt-showinfo .meta{color:var(--muted);font-size:12px;line-height:1.5}
+  .lt-showinfo .synopsis{margin:14px 0 0;color:var(--prose);font-size:13px;line-height:1.55}
+  .lt-showinfo .nextup{margin-top:18px;padding-top:12px;border-top:1px solid var(--line);font-size:12.5px;color:var(--muted)}
   .lt-nowbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 14px;
     border-top:1px solid var(--line);font-size:13px}
   .lt-nowbar .grow{flex:1;min-width:120px}
@@ -467,6 +476,12 @@
   .lt-pop h3{margin:0 0 4px;font-size:14.5px}
   .lt-pop p{margin:6px 0 0;color:var(--muted);font-size:12.5px}
   .lt-pop .pills{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+  @media(max-width:760px){
+    .lt-stage-top,.lt-stage.wide .lt-stage-top{grid-template-columns:minmax(0,1fr);aspect-ratio:auto}
+    .lt-slot{height:auto;aspect-ratio:16/9}
+    .lt-showinfo{border-left:0;border-top:1px solid var(--line)}
+    .lt-stage.wide .lt-showinfo{display:block}
+  }
   @media(prefers-reduced-motion:reduce){.lth-overlay{transition:none}}
   .modal{position:fixed;inset:0;background:#000;z-index:50;display:none;place-items:center;padding:0}
   .modal.open{display:grid}
@@ -14545,12 +14560,11 @@ function liveTvMarkerId(){
 const LIVE_TV_BARRIER=new PlurxLiveTv.StartBarrier(()=>localStorage,liveTvNow,liveTvMarkerId);
 // Observe persisted uncertainty at document boot, not at the first Watch click.
 try{ LIVE_TV_BARRIER.sync(); }catch(e){}
-// A start that failed before the owner could open a tuner is safe to forget.
-// Everything else — every 5xx, and every code this client does not recognise —
-// may already hold a physical tuner whose release never reached us, so the
-// durable marker must survive it. This is an allowlist on purpose: with a
-// denylist, adding a server error code silently makes this client less safe.
-const LIVE_TV_DEFINITIVE_REFUSALS=new Set(["live_tv_disabled","live_tv_protocol_unready","drm_unsupported","channel_not_found","settings_conflict","tuner_capacity","admin_required","invalid_settings"]);
+// Typed worker failures are sent only after the owner has reaped FFmpeg,
+// released admission, and closed the tuner response. They are real answers,
+// not lost starts, so the browser must show them instead of inventing a
+// 90-second quarantine. Unknown transport/owner failures retain the marker.
+const LIVE_TV_DEFINITIVE_REFUSALS=new Set(["live_tv_disabled","live_tv_protocol_unready","drm_unsupported","channel_not_found","settings_conflict","tuner_capacity","tuner_unavailable","device_unavailable","codec_unsupported","stream_failed","capability_expired","admin_required","invalid_settings"]);
 const LIVE_TV_LEASE=new PlurxLiveTv.Lease({
   start:async channel=>{
     const marker=LIVE_TV_BARRIER.begin(); // durable before the POST can leave
@@ -14661,6 +14675,7 @@ function liveTvSetPref(key,value){
   try{ localStorage.setItem(key,value); }catch(e){}
 }
 function liveTvView(){ return liveTvPref("plurx_live_tv_view","list",["list","grid"]); }
+function liveTvPlayerSize(){ return liveTvPref("plurx_live_tv_player_size","compact",["compact","wide"]); }
 function liveTvFilter(){ return liveTvPref("plurx_live_tv_filter","all",["all","favorites"]); }
 function liveTvHideProtected(){ return liveTvPref("plurx_live_tv_hide_protected","0",["0","1"])==="1"; }
 function liveTvNowSeconds(){ return Math.floor(Date.now()/1000); }
@@ -14798,6 +14813,7 @@ function liveTvNowBar(channel){
   const left=at.now?Math.max(0,Math.round((at.now.end-liveTvNowSeconds())/60)):null;
   const muted=!!document.getElementById("live-tv-video")?.muted;
   const muteLabel=muted?"Unmute":"Mute";
+  const wide=liveTvPlayerSize()==="wide";
   return `<div class="lt-nowbar">
     <span class="grow"><b>${at.now?esc(at.now.title):esc(channel.guide_name)}</b>
       ${playing?'<span class="pill" style="color:var(--bad)">● LIVE</span>':""}
@@ -14805,10 +14821,33 @@ function liveTvNowBar(channel){
     </span>
     <span class="lt-mini" style="width:120px"><i style="width:${pct}%"></i></span>
     <button type="button" onclick="pauseLiveTv()" title="Pause" aria-label="Pause">⏸</button>
+    <button type="button" onclick="liveTvTogglePlayerSize()" title="${wide?"Use compact player":"Use original-size player"}" aria-label="${wide?"Use compact player":"Use original-size player"}">${wide?"⤡ Smaller":"⤢ Larger"}</button>
     <button type="button" data-live-tv-mute onclick="muteLiveTv()" title="${muteLabel}" aria-label="${muteLabel}">${muted?"🔊":"🔇"}</button>
     ${liveTvPipSupported()?'<button type="button" onclick="toggleLiveTvPip()" title="Picture-in-picture (P)" aria-label="Picture-in-picture">⧉</button>':""}
     <button type="button" onclick="fullscreenLiveTv()" title="Fullscreen (F)" aria-label="Fullscreen">⛶</button>
     <button type="button" onclick="stopLiveTv().catch(liveTvFailure)" title="Stop" aria-label="Stop">■</button>
+  </div>`;
+}
+function liveTvShowInfo(channel){
+  if(!channel) return `<aside class="lt-showinfo"><span class="eyebrow">On now</span><h2>Select a channel</h2><p class="synopsis">Programme details will appear here while the channel plays.</p></aside>`;
+  const at=liveTvProgramme(channel.id), row=at.now;
+  const time=row?`${esc(liveTvClock(row.start))}–${esc(liveTvClock(row.end))}`:"Schedule unavailable";
+  const episode=row&&[row.episode,row.episode_title].filter(Boolean).join(" · ");
+  const next=at.next?`<div class="nextup"><b>Up next</b><br>${esc(liveTvClock(at.next.start))} · ${esc(at.next.title)}</div>`:"";
+  return `<aside class="lt-showinfo" aria-label="Current programme details">
+    <span class="eyebrow">On now</span>
+    <h2>${row?esc(row.title):esc(channel.guide_name)}</h2>
+    <div class="meta">${esc(channel.guide_number)} · ${esc(channel.guide_name)} · ${time}${episode?"<br>"+esc(episode):""}</div>
+    <p class="synopsis">${row&&row.synopsis?esc(row.synopsis):"No programme description is available."}</p>
+    ${next}
+  </aside>`;
+}
+function liveTvStageMarkup(channel,withTonight){
+  const wide=liveTvPlayerSize()==="wide";
+  return `<div class="lt-stage${wide?" wide":""}">
+    <div class="lt-stage-top"><div class="lt-slot" id="live-tv-slot"></div>${liveTvShowInfo(channel)}</div>
+    ${liveTvNowBar(channel)}
+    ${withTonight?liveTvTonight(channel):""}
   </div>`;
 }
 function liveTvTonight(channel){
@@ -14825,11 +14864,7 @@ function liveTvTonight(channel){
 }
 function liveTvListMarkup(visible,selected){
   return `<div class="lt-split">
-    <div class="lt-stage">
-      <div class="lt-slot" id="live-tv-slot"></div>
-      ${liveTvNowBar(selected)}
-      ${liveTvTonight(selected)}
-    </div>
+    ${liveTvStageMarkup(selected,true)}
     <div class="lt-list" role="listbox" aria-label="Channels">${
       visible.length?visible.map(channel=>liveTvRowMarkup(channel,selected&&selected.id)).join("")
         :'<div style="padding:18px" class="muted">No matching channels.</div>'}</div>
@@ -14873,10 +14908,7 @@ function liveTvGridMarkup(visible,selected){
   }).join("");
   const nowLine=layout.nowX===null?"":`<div class="lt-now" style="left:${180+layout.nowX}px"></div>`;
   return `<div class="lt-split">
-    <div class="lt-stage">
-      <div class="lt-slot" id="live-tv-slot"></div>
-      ${liveTvNowBar(selected)}
-    </div>
+    ${liveTvStageMarkup(selected,false)}
     <div>
       <div class="lt-gridwrap"><div class="lt-grid">
         <div class="lt-times"><div class="pad"></div>${times}</div>
@@ -14915,6 +14947,10 @@ function renderLiveTvChannels(){
 // never stops the stream, never restarts it, and never refetches.
 function liveTvSetView(view){
   liveTvSetPref("plurx_live_tv_view",view); renderLiveTvChannels();
+}
+function liveTvTogglePlayerSize(){
+  liveTvSetPref("plurx_live_tv_player_size",liveTvPlayerSize()==="wide"?"compact":"wide");
+  renderLiveTvChannels();
 }
 function liveTvSetFilter(filter){
   liveTvSetPref("plurx_live_tv_filter",filter); renderLiveTvChannels();

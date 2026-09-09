@@ -990,7 +990,7 @@ assert.equal(context.ACT_TIMER, null);
         dockerfile = read("Dockerfile")
         distro_install = dockerfile.index("intel-media-va-driver-non-free")
         first_clean = dockerfile.index("apt-get clean", distro_install)
-        jellyfin_install = dockerfile.index("apt-get install -y --no-install-recommends jellyfin-ffmpeg7")
+        jellyfin_install = dockerfile.index("apt-get install -y --no-install-recommends jellyfin-ffmpeg8")
         second_clean = dockerfile.index("apt-get clean", jellyfin_install)
 
         self.assertLess(distro_install, first_clean)
@@ -1007,6 +1007,12 @@ assert.equal(context.ACT_TIMER, null);
         )
         self.assertNotIn("-h filter=libplacebo", dockerfile)
         self.assertNotIn("apply_dolbyvision", dockerfile)
+
+    def test_docker_build_requires_the_atsc3_audio_decoder(self):
+        dockerfile = read("Dockerfile")
+        self.assertIn("jellyfin-ffmpeg8", dockerfile)
+        self.assertIn("-decoders", dockerfile)
+        self.assertIn("AC-4 decoder", dockerfile)
 
     def test_docker_build_pins_and_verifies_disk_conversion_tools(self):
         dockerfile = read("Dockerfile")
