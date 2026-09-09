@@ -1,0 +1,13 @@
+version = 1
+
+[[coverage]]
+commits = ["1d9981a0"]
+points = ["operations.packaging"]
+checks = ["operations-contract", "rust-gate"]
+reason = "Supported Docker builds now pass the checkout's full commit SHA through Compose, while a deliberately unstamped direct Docker build treats the empty default as absent instead of crashing the cluster-check build script. The deployment contract proves the Make and Compose wiring, and the Rust gate compiles the build-script behavior."
+
+[[coverage]]
+commits = ["1d9981a0"]
+points = ["cluster.auth"]
+checks = ["rust-gate"]
+reason = "The cluster qualification binary retains strict validation for every non-empty embedded revision while accepting the Dockerfile's documented empty unstamped default."

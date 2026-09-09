@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["7db3d422"]
+points = ["offline.viewing"]
+checks = ["rust-gate"]
+reason = "The offline-manager recovery fixture now explicitly enables the direct Developer switch before asserting the one-shot hardware-to-software handoff. This keeps the regression aligned with the production authorization boundary: retained qualification remains advisory and cannot silently enable recovery, while the enabled path still proves durable requeue and terminal handoff."

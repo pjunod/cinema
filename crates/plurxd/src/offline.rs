@@ -1047,6 +1047,10 @@ mod tests {
         );
         transcode.set_automatic_decoder_recovery(true);
         transcode.test_publish_artifact_qualification(ArtifactQualification::HealthQualified);
+        // This fixture proves the operator-enabled recovery path. Recovery is
+        // now controlled by the direct Developer switch, so qualification
+        // evidence alone must not silently authorize it in tests either.
+        transcode.set_automatic_decoder_recovery(true);
         fixture.manager = OfflineManager::new(
             Arc::clone(&fixture.store),
             transcode,
