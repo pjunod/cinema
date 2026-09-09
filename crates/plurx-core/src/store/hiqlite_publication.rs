@@ -1224,6 +1224,7 @@ impl FencedPublicationStore for HiqliteAuthStore {
         node_id: &str,
         relative_dir: &str,
         bytes: i64,
+        manifest_digest: Option<&str>,
         lease: &Lease,
         replacement: &Lease,
     ) -> Result<(), StoreError> {
@@ -1232,18 +1233,24 @@ impl FencedPublicationStore for HiqliteAuthStore {
             lease,
             replacement,
             vec![(
+                // `COALESCE` for the same reason as the unfenced twin: `None`
+                // says this publication carries no digest, never that an
+                // existing one should be cleared.
                 "UPDATE transcode_cache_locations
                  SET relative_dir = $1, complete = 1, bytes = $2,
-                     last_used_at = MAX(last_used_at, $3),
-                     last_seen_at = MAX(last_seen_at, $3)
-                 WHERE recipe_hash = $4 AND node_id = $5 AND storage_class = 'local'
+                     manifest_digest = COALESCE($3, manifest_digest),
+                     publication_generation = publication_generation + 1,
+                     last_used_at = MAX(last_used_at, $4),
+                     last_seen_at = MAX(last_seen_at, $4)
+                 WHERE recipe_hash = $5 AND node_id = $6 AND storage_class = 'local'
                    AND EXISTS (SELECT 1 FROM job_leases
-                     WHERE resource = $6 AND owner_node_id = $7
-                       AND fence = $8 AND revision = $9 AND expires_at_ms = $10)"
+                     WHERE resource = $7 AND owner_node_id = $8
+                       AND fence = $9 AND revision = $10 AND expires_at_ms = $11)"
                     .to_owned(),
                 params!(
                     relative_dir,
                     bytes,
+                    manifest_digest.map(str::to_owned),
                     now,
                     recipe_hash,
                     node_id,

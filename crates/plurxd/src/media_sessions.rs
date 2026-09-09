@@ -4736,12 +4736,16 @@ async fn supervise_takeover_settlement(
     let creation_request = request.clone();
     let creation_user = user_name.clone();
     let creation_start = start.clone();
-    let creation_user_id = original.user_id;
+    let creation_recovery = crate::transcode::SessionRecoveryIdentity {
+        user_id: original.user_id,
+        incarnation_id: original.incarnation_id.clone(),
+        recovery_epoch: original.recovery_epoch.clone(),
+    };
     let creation = tokio::spawn(async move {
         creation_manager
             .create_cluster_takeover_session_under_guard(
                 &creation_request,
-                creation_user_id,
+                &creation_recovery,
                 &creation_user,
                 creation_deadline,
                 creation_start,
@@ -5305,6 +5309,7 @@ mod tests {
         let mut request = RemoteActivateRequest {
             target_generation: 0,
             activation: MediaSessionActivation {
+                recovery_epoch: String::new(),
                 expected_desired_revision: None,
                 incarnation_id: "00000000-0000-4000-8000-0000000000a1".to_owned(),
                 session_id: "00000000-0000-4000-8000-0000000000b1".to_owned(),
@@ -5421,6 +5426,7 @@ mod tests {
 
     pub(super) fn media_route(session_id: &str) -> MediaSessionRoute {
         MediaSessionRoute {
+            recovery_epoch: String::new(),
             incarnation_id: format!("incarnation-{session_id}"),
             session_id: session_id.to_owned(),
             user_id: 7,

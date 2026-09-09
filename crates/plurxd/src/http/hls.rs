@@ -1988,6 +1988,23 @@ pub async fn create(
         .media_session_route_for_playback(user.id, &request.playback_id)
         .await
         .map_err(|error| session_store_error("reading the predecessor route", error))?;
+    // One mint for this start, bound here rather than called twice.
+    //
+    // `recovery_epoch_for` is not a pure function: with no predecessor it
+    // draws a fresh UUID, which is the whole point of it — a deliberate new
+    // play is a new budget, and `recovery_epoch_for`'s own test asserts that
+    // two calls with `None` differ. So calling it once for the session and
+    // again for the activation would give a new play two epochs: the live
+    // session would believe in one that exists in no durable row, and the
+    // next continuation would inherit the other and find it unspent. That is
+    // one automatic recovery per attempt against a file that cannot be
+    // decoded, which is the loop the budget exists to close.
+    //
+    // Bound above placement because the session that carries it is built by
+    // the task the placement loop spawns, 268 lines before the activation
+    // literal is reached. The only input is the predecessor route, already
+    // read above, so this costs one binding and no store read.
+    let recovery_epoch = recovery_epoch_for(activation_predecessor.as_ref());
     if activation_predecessor
         .as_ref()
         .is_some_and(|route| route.state == "active" && route.publication_ready_at_ms != 0)
@@ -2132,12 +2149,17 @@ pub async fn create(
             let guard_incarnation = incarnation_id.clone();
             let guard_request = request_claim_id.clone();
             let guard_user = user.id;
+            let worker_recovery = crate::transcode::SessionRecoveryIdentity {
+                user_id: user.id,
+                incarnation_id: incarnation_id.clone(),
+                recovery_epoch: recovery_epoch.clone(),
+            };
             let worker_serving_authority = ingress_serving_authority.clone();
             let mut start_task = tokio::spawn(async move {
                 let started = transcode
                     .create_cluster_session(
                         &worker_request,
-                        guard_user,
+                        &worker_recovery,
                         &user_name,
                         placement_deadline,
                         admitted_serving_generation,
@@ -2392,6 +2414,19 @@ pub async fn create(
     let response_json = serde_json::to_string(&response)?;
     let activation_now_ms = unix_ms();
     let activation = MediaSessionActivation {
+        // The one mint for this start, from the local bound above placement.
+        //
+        // This used to call `recovery_epoch_for` here, with a comment saying a
+        // local copy could be believed after the store had ruled otherwise.
+        // That reasoning is about a *read*: the store decides the row's epoch,
+        // an activation that loses a race keeps whatever the winning row had,
+        // and `activation_route_matches` does not compare this field — all
+        // still true, and all reasons to trust the route the store hands back
+        // rather than this value. It was never a reason to mint twice, and
+        // minting twice is what calling it here a second time now does, since
+        // the session start above needs the same epoch this row is about to
+        // be given.
+        recovery_epoch: recovery_epoch.clone(),
         // The revision this create recorded, not the one that is current now.
         //
         // Re-reading here would defeat the compare: a control exchange that
@@ -3038,6 +3073,36 @@ async fn wait_for_publishable_activation(
         }
         tokio::time::sleep(Duration::from_millis(250).min(remaining)).await;
     }
+}
+
+/// The recovery budget's identity for one activation.
+///
+/// Decided from the playback pointer, because that is the only thing that
+/// knows whether this is a deliberate new play or a continuation of one
+/// already in progress. A new play mints; every continuation — an automatic
+/// reopen, a seek, a track change, an ownership handoff — carries its
+/// predecessor's, and that is the entire difference between one automatic
+/// decode recovery per playback and one per attempt.
+///
+/// What the epoch buys, stated exactly: under one `playback_id`, a new request
+/// id, a new client session id, or a different owner node cannot present
+/// themselves as a fresh playback and be granted a second budget. It does not
+/// bound a client that varies `playback_id` itself — the ledger's key contains
+/// `playback_id`, so a fresh one lands on a fresh row whatever the epoch is.
+/// That client is bounded by the ordinary session caps (`MAX_CURRENT_PER_USER`
+/// and the per-node active count), not by this.
+///
+/// An empty predecessor epoch is inherited as empty rather than replaced.
+/// Those are sessions that started before the column existed and never had a
+/// budget; minting here would hand a fresh allowance to every continuation of
+/// one, which is exactly the failure this prevents, arriving through an
+/// upgrade instead of through a client. They gain an epoch the next time
+/// somebody deliberately presses play.
+fn recovery_epoch_for(predecessor: Option<&MediaSessionRoute>) -> String {
+    predecessor.map_or_else(
+        || uuid::Uuid::new_v4().to_string(),
+        |route| route.recovery_epoch.clone(),
+    )
 }
 
 fn valid_playback_id(playback_id: &str) -> bool {
@@ -11363,6 +11428,138 @@ fn segment_content_type(name: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    /// A deliberate new play mints a budget; every continuation inherits one.
+    ///
+    /// The whole decoder-recovery budget rests on this one expression. Mint on
+    /// a continuation and a viewer whose file cannot be decoded gets a fresh
+    /// automatic retry after every reopen, seek and track change — an
+    /// unbounded loop against a decoder that will never succeed, which is the
+    /// outcome the ledger was built to make impossible.
+    #[test]
+    fn a_new_play_mints_a_budget_and_every_continuation_inherits_one() {
+        use plurx_core::domain::MediaSessionRoute;
+
+        let route = |recovery_epoch: &str| MediaSessionRoute {
+            recovery_epoch: recovery_epoch.to_owned(),
+            drain_deadline_ms: None,
+            incarnation_id: "inc".to_owned(),
+            session_id: "sess".to_owned(),
+            user_id: 1,
+            playback_id: "playback".to_owned(),
+            request_fingerprint: "f".repeat(64),
+            owner_node_id: "node".to_owned(),
+            owner_epoch: 1,
+            lease_expires_at_ms: 0,
+            state: "active".to_owned(),
+            terminal_reason: None,
+            publication_ready_at_ms: 0,
+            recipe_json: "{}".to_owned(),
+            response_json: "{}".to_owned(),
+            produced_playable_through_ms: 0,
+            fetched_through_ms: 0,
+            media_origin_ms: 0,
+            media_sequence: 0,
+            discontinuity_sequence: 0,
+            updated_at_ms: 0,
+        };
+
+        // No predecessor: the playback pointer named nobody, so this is a
+        // deliberate new play and it gets one budget.
+        let minted = super::recovery_epoch_for(None);
+        assert!(
+            uuid::Uuid::parse_str(&minted).is_ok(),
+            "a minted epoch is server-owned and unguessable, never derived \
+             from anything a client sends"
+        );
+        assert_ne!(
+            minted,
+            super::recovery_epoch_for(None),
+            "two deliberate plays are two budgets"
+        );
+
+        // A predecessor: this continues a playback that already has one.
+        assert_eq!(
+            super::recovery_epoch_for(Some(&route("epoch-one"))),
+            "epoch-one",
+            "a continuation spends the budget it already has"
+        );
+
+        // A predecessor from before the column existed. Inherited as empty —
+        // no budget — rather than minted. Minting here would give every
+        // continuation of a pre-upgrade session a fresh allowance, which is
+        // the failure this prevents arriving through an upgrade.
+        assert_eq!(
+            super::recovery_epoch_for(Some(&route(""))),
+            "",
+            "a session that never had a budget does not gain one by continuing"
+        );
+    }
+
+    /// One start mints one epoch, and the session and the durable row get the
+    /// same one.
+    ///
+    /// `recovery_epoch_for` is deliberately not pure: with no predecessor it
+    /// draws a fresh UUID, and the test above asserts that two calls differ.
+    /// That makes "call it where each value is needed" — which reads as the
+    /// careful choice, and which this file's own comment used to recommend —
+    /// the way to give one new play two budgets: the live session believes in
+    /// an epoch that reaches no durable row, and the next continuation
+    /// inherits the other and finds it unspent. One automatic recovery per
+    /// attempt against a file that cannot be decoded is the loop the ledger
+    /// exists to close, so this is pinned rather than left to review.
+    ///
+    /// A control-flow property of one `async fn` that needs a store, a
+    /// transcode manager and an authenticated owner to reach, so nothing
+    /// executes it. Pinned where it lives, like the reservation above.
+    #[test]
+    fn one_start_mints_one_recovery_epoch_for_both_the_session_and_the_row() {
+        // The production half only: this module's own text contains every
+        // literal it asserts about, so counting the whole file counts the test.
+        let source = include_str!("hls.rs")
+            .split_once("\nmod tests {")
+            .expect("the test module boundary")
+            .0;
+        assert_eq!(
+            source
+                .matches("recovery_epoch_for(activation_predecessor.as_ref())")
+                .count(),
+            1,
+            "the epoch is minted once per start; a second call mints a second budget"
+        );
+        assert!(
+            source.contains(
+                "let recovery_epoch = recovery_epoch_for(activation_predecessor.as_ref());"
+            ),
+            "the one mint is bound to a local"
+        );
+        let after_mint = source
+            .split_once("let recovery_epoch = recovery_epoch_for(activation_predecessor.as_ref());")
+            .expect("the mint")
+            .1;
+        assert!(
+            after_mint.contains("recovery_epoch: recovery_epoch.clone(),"),
+            "the session identity and the activation both read that local"
+        );
+        assert_eq!(
+            after_mint
+                .matches("recovery_epoch: recovery_epoch.clone(),")
+                .count(),
+            2,
+            "both the session identity and the durable activation, and nothing else"
+        );
+        // And the mint precedes placement, because the session that carries it
+        // is built by the task the placement loop spawns.
+        let placement = source
+            .find("let mut start_task = tokio::spawn(async move {")
+            .expect("the placement task");
+        let mint = source
+            .find("let recovery_epoch = recovery_epoch_for(activation_predecessor.as_ref());")
+            .expect("the mint");
+        assert!(
+            mint < placement,
+            "a mint after placement cannot reach the session placement starts"
+        );
+    }
 
     /// The reservation is a control-flow property of one `async fn` that needs
     /// a store, a transcode manager and an authenticated owner to reach, so
@@ -12000,6 +12197,7 @@ mod tests {
             plan_notes: Vec::new(),
         };
         let route = MediaSessionRoute {
+            recovery_epoch: String::new(),
             incarnation_id: generation.clone(),
             session_id,
             user_id: 7,
@@ -12077,6 +12275,7 @@ mod tests {
         let route = activate_ready(
             &fixture.store,
             MediaSessionActivation {
+                recovery_epoch: String::new(),
                 expected_desired_revision: None,
                 incarnation_id,
                 session_id: session_id.clone(),
@@ -12198,6 +12397,7 @@ mod tests {
         let route = activate_ready(
             &fixture.store,
             MediaSessionActivation {
+                recovery_epoch: String::new(),
                 expected_desired_revision: None,
                 incarnation_id: incarnation_id.clone(),
                 session_id: session_id.clone(),
@@ -12262,6 +12462,7 @@ mod tests {
         activate_ready(
             &fixture.store,
             MediaSessionActivation {
+                recovery_epoch: String::new(),
                 expected_desired_revision: None,
                 incarnation_id,
                 session_id: session_id.clone(),
@@ -12360,6 +12561,7 @@ mod tests {
         activate_ready(
             &fixture.store,
             MediaSessionActivation {
+                recovery_epoch: String::new(),
                 expected_desired_revision: None,
                 incarnation_id: uuid::Uuid::new_v4().to_string(),
                 session_id: session_id.clone(),
@@ -12671,6 +12873,7 @@ mod tests {
                 session_id: session_id.clone(),
                 user_id: user.id,
                 playback_id: "drain-release".to_owned(),
+                recovery_epoch: "drain-release".to_owned(),
                 expected_predecessor_incarnation_id: None,
                 fence_predecessor: false,
                 request_id: None,
@@ -12906,6 +13109,7 @@ mod tests {
         let route = activate_ready(
             &fixture.store,
             MediaSessionActivation {
+                recovery_epoch: String::new(),
                 expected_desired_revision: None,
                 incarnation_id: generation.clone(),
                 session_id: session_id.clone(),
@@ -13139,6 +13343,7 @@ mod tests {
             let route = activate_ready(
                 &fixture.store,
                 MediaSessionActivation {
+                    recovery_epoch: String::new(),
                     expected_desired_revision: None,
                     incarnation_id: generation.clone(),
                     session_id: session_id.clone(),
@@ -14379,6 +14584,7 @@ mod tests {
             let activation = |incarnation: &str, admitted: &RestartAdmission| {
                 let now_ms = crate::media_sessions::unix_ms();
                 plurx_core::domain::MediaSessionActivation {
+                    recovery_epoch: String::new(),
                     expected_desired_revision: None,
                     incarnation_id: incarnation.to_owned(),
                     // A restart is a new session taking over one playback, so
@@ -15221,6 +15427,7 @@ mod tests {
         activate_ready(
             &fixture.store,
             MediaSessionActivation {
+                recovery_epoch: String::new(),
                 expected_desired_revision: None,
                 incarnation_id: incarnation_id.clone(),
                 session_id: session_id.clone(),
@@ -15461,6 +15668,7 @@ mod tests {
         let route = activate_ready(
             &fixture.store,
             MediaSessionActivation {
+                recovery_epoch: String::new(),
                 expected_desired_revision: None,
                 incarnation_id,
                 session_id: session_id.clone(),
@@ -18248,6 +18456,7 @@ mod tests {
         activate_ready(
             &fixture.store,
             MediaSessionActivation {
+                recovery_epoch: String::new(),
                 expected_desired_revision: None,
                 incarnation_id: incarnation_id.clone(),
                 session_id: session_id.clone(),
@@ -18470,6 +18679,7 @@ mod tests {
     #[test]
     fn delayed_resolved_replay_rechecks_the_current_lease_boundary() {
         let mut route = MediaSessionRoute {
+            recovery_epoch: String::new(),
             incarnation_id: "00000000-0000-4000-8000-0000000000d1".to_owned(),
             session_id: "00000000-0000-4000-8000-0000000000d2".to_owned(),
             user_id: 7,
@@ -18514,6 +18724,7 @@ mod tests {
         let recipe_json = "{}".to_owned();
         let response_json = r#"{"session":"confirmed"}"#.to_owned();
         let activation = MediaSessionActivation {
+            recovery_epoch: String::new(),
             expected_desired_revision: None,
             incarnation_id: incarnation_id.to_owned(),
             session_id: session_id.to_owned(),
@@ -18532,6 +18743,7 @@ mod tests {
             lease_expires_at_ms: unix_ms() + 60_000,
         };
         let mut route = MediaSessionRoute {
+            recovery_epoch: String::new(),
             incarnation_id: incarnation_id.to_owned(),
             session_id: session_id.to_owned(),
             user_id: 7,
@@ -18565,6 +18777,7 @@ mod tests {
     fn idempotent_publication_replay_accepts_the_current_takeover_epoch() {
         let now_ms = unix_ms();
         let observed = MediaSessionRoute {
+            recovery_epoch: String::new(),
             incarnation_id: "00000000-0000-4000-8000-0000000000e3".to_owned(),
             session_id: "00000000-0000-4000-8000-0000000000e4".to_owned(),
             user_id: 7,

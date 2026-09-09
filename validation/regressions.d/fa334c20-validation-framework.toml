@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["fa334c20"]
+points = ["validation.framework"]
+checks = ["history-regressions"]
+reason = "The history audit retains the M1 ownership-repair mapping after the final runtime commit and requires the exact validation receipt to cover its own corrective ledger change."

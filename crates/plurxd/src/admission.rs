@@ -34,6 +34,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use plurx_core::domain::MediaFile;
+use plurx_core::transcode::{DecodeBackend, Encoder, ResolvedTranscode};
 
 /// Concurrent hardware sessions, unless the admin says otherwise. Two is the
 /// number OPERATIONS has always warned about, now enforced.
@@ -235,6 +236,32 @@ impl SwPool {
         })
     }
 
+    /// Announce that a live session is waiting for CPU, so background work
+    /// yields. Same guard the hardware queue uses; the pool shares its state.
+    pub fn wait_for_capacity(&self) -> LiveWait {
+        let mut permits = self
+            .permits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        permits.live_waiting += 1;
+        drop(permits);
+        LiveWait {
+            permits: Arc::clone(&self.permits),
+        }
+    }
+
+    /// Take the CPU a recovery needs while it keeps the encoder it already
+    /// has, under the ordinary bound.
+    ///
+    /// Distinct from [`Self::take_forced`]: this is not a demotion. The session
+    /// holds its hardware slot throughout and is only adding the decode work it
+    /// did not previously do, so there is no reason to overcommit — a refusal
+    /// here is a bounded capacity failure the caller reports, which is what §5
+    /// asks for in place of forcing every decode recovery through.
+    pub fn try_take_delta(&self, budget: usize, weight: usize) -> Option<SwPermit> {
+        self.try_take(budget, weight, Priority::Live)
+    }
+
     /// Take `weight` threads unconditionally. For the hardware→software
     /// fallback mid-session: the viewer is already watching, and holding
     /// their film hostage to the budget would turn an accounting rule into a
@@ -253,6 +280,83 @@ impl SwPool {
             owner: PermitOwner::Live,
             weight,
         }
+    }
+}
+
+/// What one planned transcode will actually consume.
+///
+/// Derived from the resolved plan and the workload, never from the encoder's
+/// name. A hardware encoder is not evidence that the pipeline avoids CPU work:
+/// software-decoding 4K HEVC into a hardware encoder spends most of a box's
+/// cores on the decode, and accounting for that pipeline as "hardware, so no
+/// CPU" is how several of them end up on one node together, each under
+/// realtime. That mistake is invisible in every counter, because nothing ever
+/// reserved the CPU it was using.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TranscodeResourceEstimate {
+    /// Whether the encode needs one of the node's hardware sessions.
+    pub hardware_slot: bool,
+    /// Total CPU threads to reserve for the whole pipeline.
+    pub cpu_threads: usize,
+    /// A cap to pass to the decoder, where the selected decoder takes one.
+    /// Distinct from the output encoder's `-threads`, and `None` unless the
+    /// plan names an implementation whose cap we know.
+    pub decoder_threads: Option<usize>,
+}
+
+impl TranscodeResourceEstimate {
+    /// `Workload::software_threads` is the whole pipeline's estimate, not the
+    /// encoder's share, so a mixed pipeline reserves it once and an
+    /// all-software pipeline keeps exactly the number it always had. Adding a
+    /// second full encode estimate on top of it would halve the node's
+    /// apparent capacity for work that has not changed.
+    pub fn of(plan: &ResolvedTranscode, work: &Workload<'_>) -> Self {
+        let software_decode = plan.decode().backend() == DecodeBackend::Software;
+        let software_encode = plan.encoder() == Encoder::Software;
+        // The filter chain counts too. Two hardware-decode, hardware-encode
+        // sessions whose renderer is the CPU float tone-map are the same
+        // failure as two software decodes — real cores, spent, reserved by
+        // nobody — and the measurement that made this pipeline's own header a
+        // warning was 0.71x on exactly that chain. A subtitle burn is libass
+        // on the CPU whatever the rest of the graph does, and on the two
+        // vendor graphs it also forces a download of every frame.
+        let cpu_filters = !plan.options().pipeline.keeps_frames_off_the_cpu()
+            || plan.options().subtitle_burn.is_some();
+        let cpu_threads = if software_decode || software_encode || cpu_filters {
+            work.software_threads()
+        } else {
+            0
+        };
+        Self {
+            hardware_slot: !software_encode,
+            cpu_threads,
+            // The startup inventory names no implementation, so there is no
+            // decoder whose cap we can claim to know. M3 measures one.
+            decoder_threads: None,
+        }
+    }
+}
+
+/// Everything one transcode reserved, released together when it is dropped.
+///
+/// The two pools are one mutex, so the bundle is taken all at once or not at
+/// all. That is deliberate and it is the whole safety argument: acquiring the
+/// hardware slot first and then waiting for CPU would hold the node's scarcest
+/// resource while blocked on its most contended one, and two starts doing that
+/// in opposite orders is a deadlock. There is no partial state to unwind
+/// because there is no moment at which one half is held without the other.
+#[derive(Debug, Default)]
+pub struct TranscodePermit {
+    hardware: Option<HwSlot>,
+    software: Option<SwPermit>,
+}
+
+impl TranscodePermit {
+    /// Split the bundle into the two guards a session stores. Both halves were
+    /// granted together; taking them apart here does not un-grant anything,
+    /// and each still releases itself on drop.
+    pub fn into_parts(mut self) -> (Option<HwSlot>, Option<SwPermit>) {
+        (self.hardware.take(), self.software.take())
     }
 }
 
@@ -371,6 +475,76 @@ impl Admissions {
         priority: Priority,
     ) -> Option<SwPermit> {
         self.software.try_take(budget, weight, priority)
+    }
+
+    /// Take everything a planned transcode needs, or nothing.
+    ///
+    /// One lock, one decision. The priority rules are the same ones each pool
+    /// applies on its own — a live caller waits out background ownership of
+    /// either pool, a background caller yields to a queuing live start — and
+    /// they are checked once here rather than twice with a window between.
+    ///
+    /// The empty-pool exception is preserved exactly: a box whose every session
+    /// is over budget would otherwise have its budget turned into a ban.
+    pub fn try_admit_bundle(
+        &self,
+        hardware_max: usize,
+        software_budget: usize,
+        estimate: &TranscodeResourceEstimate,
+        priority: Priority,
+    ) -> Option<TranscodePermit> {
+        let mut permits = self
+            .permits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match priority {
+            Priority::Live if permits.background_active() => return None,
+            Priority::Background if permits.live_waiting > 0 || permits.live_active() => {
+                return None;
+            }
+            _ => {}
+        }
+        if estimate.hardware_slot && permits.hardware_used() >= hardware_max {
+            return None;
+        }
+        if estimate.cpu_threads > 0 {
+            let used = permits.software_used();
+            if used > 0 && used + estimate.cpu_threads > software_budget {
+                return None;
+            }
+        }
+        // Past every refusal: from here the whole bundle is granted, so no
+        // caller can observe one half without the other.
+        if estimate.hardware_slot {
+            match priority {
+                Priority::Live => permits.hardware_live += 1,
+                Priority::Background => permits.hardware_background += 1,
+            }
+        }
+        if estimate.cpu_threads > 0 {
+            match priority {
+                Priority::Live => {
+                    permits.software_live_permits += 1;
+                    permits.software_live_used += estimate.cpu_threads;
+                }
+                Priority::Background => {
+                    permits.software_background_permits += 1;
+                    permits.software_background_used += estimate.cpu_threads;
+                }
+            }
+        }
+        drop(permits);
+        Some(TranscodePermit {
+            hardware: estimate.hardware_slot.then(|| HwSlot {
+                permits: Arc::clone(&self.permits),
+                owner: priority.into(),
+            }),
+            software: (estimate.cpu_threads > 0).then(|| SwPermit {
+                permits: Arc::clone(&self.permits),
+                owner: priority.into(),
+                weight: estimate.cpu_threads,
+            }),
+        })
     }
 
     /// Announce that a live start is queuing. Hold the guard for as long as the
@@ -560,6 +734,16 @@ impl<'a> Workload<'a> {
     }
 
     /// The bucket that answers the admission question.
+    /// The bucket for a software decode feeding a hardware encoder.
+    ///
+    /// Neither existing bucket fits: it is far slower than all-hardware and
+    /// usually faster than all-software, so filing it under either poisons that
+    /// bucket's measured speed for the work actually in it — and the
+    /// measurement is what admits the next session.
+    pub fn mixed_class(&self, encoder: &str) -> String {
+        format!("{}+swdecode", self.class(encoder))
+    }
+
     pub fn software_class(&self) -> String {
         self.class(SOFTWARE)
     }
@@ -631,6 +815,215 @@ mod tests {
             hdr,
             target_height,
         }
+    }
+
+    fn mixed(cpu_threads: usize) -> TranscodeResourceEstimate {
+        TranscodeResourceEstimate {
+            hardware_slot: true,
+            cpu_threads,
+            decoder_threads: None,
+        }
+    }
+
+    /// The reason the bundle exists. Taking the hardware slot and then waiting
+    /// for CPU would hold the node's scarcest resource while blocked on its
+    /// most contended one; two starts doing that in opposite orders is a
+    /// deadlock. So there is no order: either both halves are reserved or
+    /// neither is, and a refusal leaves the counters exactly where it found
+    /// them.
+    #[test]
+    fn a_bundle_is_taken_whole_or_not_at_all() {
+        let a = Admissions::new();
+        let held = a
+            .try_admit_bundle(1, 16, &mixed(4), Priority::Live)
+            .expect("the first mixed pipeline fits");
+        assert_eq!(a.in_use(), 1);
+        assert_eq!(a.software_in_use(), 4);
+
+        // Hardware is full. The CPU half must not be reserved on the way to
+        // discovering that.
+        assert!(
+            a.try_admit_bundle(1, 16, &mixed(4), Priority::Live)
+                .is_none(),
+            "no hardware slot, no bundle"
+        );
+        assert_eq!(a.software_in_use(), 4, "and no CPU was taken in passing");
+
+        // CPU is full. The hardware half must not be reserved either.
+        assert!(
+            a.try_admit_bundle(4, 6, &mixed(4), Priority::Live)
+                .is_none(),
+            "not enough CPU, no bundle"
+        );
+        assert_eq!(a.in_use(), 1, "and no slot was taken in passing");
+
+        drop(held);
+        assert_eq!(a.in_use(), 0);
+        assert_eq!(a.software_in_use(), 0, "both halves came back together");
+    }
+
+    /// A hardware encoder is not evidence that the pipeline avoids CPU work.
+    /// The whole point of the mixed estimate is that this reservation happens
+    /// at all — before it, a software decode feeding a hardware encoder
+    /// reserved nothing, and several of them fit on one node with every
+    /// counter reading healthy.
+    #[test]
+    fn a_hardware_encoder_still_reserves_the_cpu_its_decode_spends() {
+        let a = Admissions::new();
+        let _first = a
+            .try_admit_bundle(4, 8, &mixed(6), Priority::Live)
+            .expect("first mixed pipeline");
+        assert_eq!(a.software_in_use(), 6);
+        assert!(
+            a.try_admit_bundle(4, 8, &mixed(6), Priority::Live)
+                .is_none(),
+            "the second one is refused on CPU even though hardware has room"
+        );
+        assert_eq!(a.in_use(), 1);
+    }
+
+    /// The empty-pool exception is the one rule the bundle must not quietly
+    /// tighten: on a small box every session is over budget, and refusing all
+    /// of them turns the budget into a ban.
+    #[test]
+    fn an_empty_pool_still_admits_a_mixed_bundle() {
+        let a = Admissions::new();
+        let big = a
+            .try_admit_bundle(2, 2, &mixed(8), Priority::Live)
+            .expect("the only session may saturate the box");
+        assert_eq!(a.software_in_use(), 8);
+        assert!(
+            a.try_admit_bundle(2, 2, &mixed(2), Priority::Live)
+                .is_none(),
+            "but nothing joins it while it does"
+        );
+        drop(big);
+    }
+
+    /// An all-software plan reserves CPU and no slot; an all-hardware plan
+    /// reserves a slot and no CPU. The bundle has to express both, or callers
+    /// go back to reasoning from the encoder's name.
+    #[test]
+    fn a_bundle_reserves_only_what_its_estimate_asks_for() {
+        let a = Admissions::new();
+        let software = a
+            .try_admit_bundle(
+                1,
+                16,
+                &TranscodeResourceEstimate {
+                    hardware_slot: false,
+                    cpu_threads: 4,
+                    decoder_threads: None,
+                },
+                Priority::Live,
+            )
+            .expect("all-software");
+        assert_eq!(a.in_use(), 0, "software work takes no hardware slot");
+        assert_eq!(a.software_in_use(), 4);
+        let (hardware_half, software_half) = software.into_parts();
+        assert!(
+            hardware_half.is_none(),
+            "software work takes no hardware slot"
+        );
+        assert_eq!(software_half.as_ref().map(SwPermit::threads), Some(4));
+        let software = (hardware_half, software_half);
+
+        let hardware = a
+            .try_admit_bundle(
+                1,
+                16,
+                &TranscodeResourceEstimate {
+                    hardware_slot: true,
+                    cpu_threads: 0,
+                    decoder_threads: None,
+                },
+                Priority::Live,
+            )
+            .expect("all-hardware");
+        assert_eq!(a.in_use(), 1);
+        assert_eq!(a.software_in_use(), 4, "and reserved no further CPU");
+        let (hardware_half, software_half) = hardware.into_parts();
+        assert!(hardware_half.is_some());
+        assert!(software_half.is_none());
+        drop(software);
+    }
+
+    /// Adding decode work to a session that keeps its encoder is a capacity
+    /// question with a real answer. The forced take exists for the mid-film
+    /// demotion, where the viewer is already watching and the encoder is
+    /// changing under them; extending it to every decode recovery would make
+    /// the budget advisory.
+    #[test]
+    fn a_delta_take_is_bounded_where_a_forced_take_is_not() {
+        let a = Admissions::new();
+        let pool = a.software_pool();
+        let _held = a
+            .try_admit_software(8, 6, Priority::Live)
+            .expect("first session");
+        assert!(
+            pool.try_take_delta(8, 6).is_none(),
+            "a delta that does not fit is refused"
+        );
+        let forced = pool.take_forced(6);
+        assert_eq!(
+            a.software_in_use(),
+            12,
+            "the forced overcommit is on the books"
+        );
+        drop(forced);
+    }
+
+    /// The bundle applies the priority rules once instead of twice, and it has
+    /// to apply the same ones. Without this, deleting the whole `match
+    /// priority` block leaves every other bundle test green, because they all
+    /// run on a pool with no background owner.
+    #[test]
+    fn a_bundle_obeys_the_same_priority_rules_as_the_two_pools_it_replaces() {
+        let a = Admissions::new();
+        let background = a
+            .try_admit_bundle(4, 16, &mixed(4), Priority::Background)
+            .expect("background takes the bundle on an idle box");
+        assert!(
+            a.try_admit_bundle(4, 16, &mixed(4), Priority::Live)
+                .is_none(),
+            "a live caller waits for background ownership to end, as it does for either pool alone"
+        );
+        drop(background);
+
+        let waiter = a.wait_for_slot();
+        assert!(
+            a.try_admit_bundle(4, 16, &mixed(4), Priority::Background)
+                .is_none(),
+            "background yields to a queuing live start"
+        );
+        drop(waiter);
+        assert!(
+            a.try_admit_bundle(4, 16, &mixed(4), Priority::Background)
+                .is_some(),
+            "and takes it again once the start is gone"
+        );
+    }
+
+    /// A bundle that fits exactly fits. Every other test in this file uses
+    /// strict inequalities, so a `>` silently becoming `>=` would refuse work
+    /// the budget allows and nothing would notice.
+    #[test]
+    fn a_bundle_that_exactly_fills_the_budget_is_admitted() {
+        let a = Admissions::new();
+        let first = a
+            .try_admit_bundle(4, 8, &mixed(4), Priority::Live)
+            .expect("half the budget");
+        let second = a
+            .try_admit_bundle(4, 8, &mixed(4), Priority::Live)
+            .expect("the other half fits exactly");
+        assert_eq!(a.software_in_use(), 8);
+        assert!(
+            a.try_admit_bundle(4, 8, &mixed(1), Priority::Live)
+                .is_none(),
+            "and one thread more does not"
+        );
+        drop(first);
+        drop(second);
     }
 
     /// The property the cap exists for: two starts racing for the last slot,

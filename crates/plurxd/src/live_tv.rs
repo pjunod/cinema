@@ -2893,6 +2893,12 @@ async fn run_live_session_inner(
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.encoder = admission.encoder.label().to_owned();
     }
+    let transcode_plan = LiveTvTranscodePlan::new(
+        &owner.system,
+        admission.encoder,
+        admission.software_threads(),
+        config.output_height,
+    )?;
     tokio::select! {
         biased;
         _ = session.cancel.cancelled() => {
@@ -2933,13 +2939,7 @@ async fn run_live_session_inner(
         }
         response = open_tuner_stream(client, stream_url, startup_deadline) => response?,
     };
-    let mut child = spawn_live_ffmpeg(
-        &owner.system,
-        admission.encoder,
-        admission.software_threads(),
-        config.output_height,
-        &session.directory,
-    )?;
+    let mut child = spawn_live_ffmpeg(&owner.system, &transcode_plan, &session.directory)?;
     let stdin = child.stdin.take();
     let stderr = child.stderr.take().map(|stderr| {
         tokio::spawn(capture_live_stderr(
@@ -3187,36 +3187,94 @@ async fn open_tuner_stream(
     }
 }
 
-fn spawn_live_ffmpeg(
-    system: &SystemInfo,
+/// A tuner stream cannot expose codec/profile facts until after its HTTP body
+/// is flowing. Freeze the complete route that is knowable before spawn and
+/// state the remaining input contract explicitly: software auto-detection of
+/// the first video stream. This keeps Live TV out of the movie-plan cache
+/// namespace without leaving a command-construction bypass that re-infers the
+/// encoder or decoder route.
+#[derive(Debug, Clone)]
+struct LiveTvTranscodePlan {
     encoder: Encoder,
     software_threads: Option<u32>,
-    height: u16,
+    output_height: u16,
+    video_map: &'static str,
+    force_idr: bool,
+}
+
+impl LiveTvTranscodePlan {
+    fn new(
+        system: &SystemInfo,
+        encoder: Encoder,
+        software_threads: Option<u32>,
+        output_height: u16,
+    ) -> Result<Self, LiveTvError> {
+        if system.ffmpeg.trim().is_empty() {
+            return Err(LiveTvError::CodecUnsupported(
+                "FFmpeg is not configured on the tuner owner".into(),
+            ));
+        }
+        if output_height == 0 || software_threads == Some(0) {
+            return Err(LiveTvError::CodecUnsupported(
+                "the live-TV transcode execution contract is invalid".into(),
+            ));
+        }
+        Ok(Self {
+            encoder,
+            software_threads,
+            output_height,
+            video_map: "0:v:0",
+            force_idr: system.encoders.forced_idr.wanted_by(encoder),
+        })
+    }
+}
+
+fn spawn_live_ffmpeg(
+    system: &SystemInfo,
+    plan: &LiveTvTranscodePlan,
     directory: &Path,
 ) -> Result<tokio::process::Child, LiveTvError> {
-    if system.ffmpeg.trim().is_empty() {
-        return Err(LiveTvError::CodecUnsupported(
-            "FFmpeg is not configured on the tuner owner".into(),
-        ));
-    }
+    let mut command = live_ffmpeg_command(system, plan, directory)?;
+    command
+        .spawn()
+        .map_err(|error| LiveTvError::CodecUnsupported(format!("starting live-TV FFmpeg: {error}")))
+}
+
+fn live_ffmpeg_command(
+    system: &SystemInfo,
+    plan: &LiveTvTranscodePlan,
+    directory: &Path,
+) -> Result<tokio::process::Command, LiveTvError> {
     let playlist = directory.join("index.m3u8");
     let segments = directory.join("segment-%06d.ts");
     let mut command = tokio::process::Command::new(&system.ffmpeg);
     command
         .args(["-hide_banner", "-loglevel", "warning", "-nostdin", "-y"])
-        .args(encoder.init_args())
+        .args(plan.encoder.init_args())
+        .args(["-hwaccel", "none"])
         .args(["-fflags", "+genpts+discardcorrupt"])
         .args(live_probe_args())
         .args([
-            "-i", "pipe:0", "-map", "0:v:0", "-map", "0:a:0", "-sn", "-dn",
+            "-i",
+            "pipe:0",
+            "-map",
+            plan.video_map,
+            "-map",
+            "0:a:0",
+            "-sn",
+            "-dn",
         ]);
-    let filter = live_video_filter(encoder, height);
+    let filter = live_video_filter(plan.encoder, plan.output_height);
     command.args(["-vf", &filter]);
-    command.args(encoder.encode_args(
-        if height == 1080 { 8_000 } else { 4_000 },
+    command.args(plan.encoder.encode_args(
+        if plan.output_height == 1080 {
+            8_000
+        } else {
+            4_000
+        },
         EffectiveRateControl::Vbr,
-        system.encoders.forced_idr.wanted_by(encoder),
-        software_threads,
+        plan.force_idr,
+        plan.software_threads,
     ));
     command.args(LIVE_HLS_OUTPUT_ARGS);
     command
@@ -3225,9 +3283,8 @@ fn spawn_live_ffmpeg(
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|error| LiveTvError::CodecUnsupported(format!("starting live-TV FFmpeg: {error}")))
+        .kill_on_drop(true);
+    Ok(command)
 }
 
 /// How long FFmpeg may look at a tuner before it has to start producing.
@@ -3305,6 +3362,10 @@ async fn capture_live_stderr(
         let text = String::from_utf8_lossy(&window).to_ascii_lowercase();
         if text.contains("decoding requested, but no decoder found for:")
             || (text.contains("decoder (codec ") && text.contains(") not found for input stream"))
+            // FFmpeg 8.1.2 can redact the requested map between the quotes in
+            // this exact live-TV child. Both mapped streams are mandatory, so
+            // every stream-map failure proves this profile cannot be produced
+            // from the tuner input; it does not identify a decoder.
             || (text.contains("stream map") && text.contains("matches no streams"))
         {
             decoder_unavailable.store(true, Ordering::Release);
@@ -4932,8 +4993,10 @@ exec /bin/cat >/dev/null
             ffmpeg,
             ..SystemInfo::default()
         };
-        let mut child = spawn_live_ffmpeg(&system, Encoder::Software, Some(2), 720, root.path())
-            .expect("start exact production graph");
+        let plan = LiveTvTranscodePlan::new(&system, Encoder::Software, Some(2), 720)
+            .expect("prepare live-TV plan");
+        let mut child =
+            spawn_live_ffmpeg(&system, &plan, root.path()).expect("start exact production graph");
         let detected = Arc::new(AtomicBool::new(false));
         let stderr = tokio::spawn(capture_live_stderr(
             child.stderr.take().expect("stderr"),
@@ -5186,6 +5249,98 @@ exec /bin/cat >/dev/null
             probesize >= 512 * 1024,
             "512 KiB was the smallest value measured; below it nothing was \
              won and detection has less to work with"
+        );
+    }
+
+    /// Live TV has no pre-body codec facts, so its plan freezes the explicit
+    /// software-auto input contract instead of reusing a movie cache plan.
+    #[test]
+    fn live_tv_software_hls_argument_baseline_is_stable() {
+        let system = SystemInfo {
+            ffmpeg: "/fixture/ffmpeg".to_owned(),
+            ..SystemInfo::default()
+        };
+        let plan = LiveTvTranscodePlan::new(&system, Encoder::Software, Some(2), 720)
+            .expect("prepare live-TV plan");
+        let command = live_ffmpeg_command(&system, &plan, Path::new("/fixture/live"))
+            .expect("build live-TV FFmpeg command");
+        let actual = command
+            .as_std()
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let expected = [
+            "-hide_banner",
+            "-loglevel",
+            "warning",
+            "-nostdin",
+            "-y",
+            "-hwaccel",
+            "none",
+            "-fflags",
+            "+genpts+discardcorrupt",
+            "-probesize",
+            "524288",
+            "-analyzeduration",
+            "1000000",
+            "-i",
+            "pipe:0",
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a:0",
+            "-sn",
+            "-dn",
+            "-vf",
+            "bwdif=mode=send_frame:parity=auto:deint=interlaced,scale=-2:720,format=yuv420p",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-b:v",
+            "4000k",
+            "-maxrate",
+            "6000k",
+            "-bufsize",
+            "8000k",
+            "-profile:v",
+            "high",
+            "-threads",
+            "2",
+            "-force_key_frames",
+            "expr:gte(t,n_forced*1)",
+            "-g",
+            "120",
+            "-keyint_min",
+            "1",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-ac",
+            "2",
+            "-f",
+            "hls",
+            "-hls_init_time",
+            "1",
+            "-hls_time",
+            "4",
+            "-hls_list_size",
+            "6",
+            "-hls_delete_threshold",
+            "1",
+            "-hls_flags",
+            "delete_segments+temp_file+independent_segments+omit_endlist",
+            "-hls_segment_filename",
+            "/fixture/live/segment-%06d.ts",
+            "/fixture/live/index.m3u8",
+        ];
+        assert_eq!(actual, expected);
+        assert!(
+            actual
+                .windows(2)
+                .any(|arguments| arguments == ["-hwaccel", "none"]),
+            "the live-TV plan must state its software decode contract"
         );
     }
 

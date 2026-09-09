@@ -13,11 +13,12 @@ use crate::error::StoreError;
 use crate::store::OfflinePackageStore;
 
 const PACKAGE_COLS: &str = "id, request_id, user_id, file_id, node_id, source_path, \
-    source_size, source_mtime, recipe_hash, effective_rate_control, target_height, audio_index, audio_offset_ms, \
+    source_size, source_mtime, recipe_hash, claim_generation, decoder_recovery_state, alternate_recipe_hash, \
+    effective_rate_control, target_height, audio_index, audio_offset_ms, \
     output_width, output_height, subtitle_index, subtitle_language, subtitle_mode, state, phase, progress_millis, estimated_bytes, \
     reserved_bytes, actual_bytes, duration_ms, error_code, error_message, created_at, updated_at, \
     last_access_at, expires_at";
-const PACKAGE_COL_COUNT: usize = 31;
+const PACKAGE_COL_COUNT: usize = 34;
 
 fn package_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OfflinePackage> {
     Ok(OfflinePackage {
@@ -30,28 +31,31 @@ fn package_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OfflinePackage>
         source_size: row.get(6)?,
         source_mtime: row.get(7)?,
         recipe_hash: row.get(8)?,
-        effective_rate_control: row.get(9)?,
-        target_height: row.get(10)?,
-        audio_index: row.get(11)?,
-        audio_offset_ms: row.get(12)?,
-        output_width: row.get(13)?,
-        output_height: row.get(14)?,
-        subtitle_index: row.get(15)?,
-        subtitle_language: row.get(16)?,
-        subtitle_mode: row.get(17)?,
-        state: row.get(18)?,
-        phase: row.get(19)?,
-        progress_millis: row.get(20)?,
-        estimated_bytes: row.get(21)?,
-        reserved_bytes: row.get(22)?,
-        actual_bytes: row.get(23)?,
-        duration_ms: row.get(24)?,
-        error_code: row.get(25)?,
-        error_message: row.get(26)?,
-        created_at: row.get(27)?,
-        updated_at: row.get(28)?,
-        last_access_at: row.get(29)?,
-        expires_at: row.get(30)?,
+        claim_generation: row.get(9)?,
+        decoder_recovery_state: row.get(10)?,
+        alternate_recipe_hash: row.get(11)?,
+        effective_rate_control: row.get(12)?,
+        target_height: row.get(13)?,
+        audio_index: row.get(14)?,
+        audio_offset_ms: row.get(15)?,
+        output_width: row.get(16)?,
+        output_height: row.get(17)?,
+        subtitle_index: row.get(18)?,
+        subtitle_language: row.get(19)?,
+        subtitle_mode: row.get(20)?,
+        state: row.get(21)?,
+        phase: row.get(22)?,
+        progress_millis: row.get(23)?,
+        estimated_bytes: row.get(24)?,
+        reserved_bytes: row.get(25)?,
+        actual_bytes: row.get(26)?,
+        duration_ms: row.get(27)?,
+        error_code: row.get(28)?,
+        error_message: row.get(29)?,
+        created_at: row.get(30)?,
+        updated_at: row.get(31)?,
+        last_access_at: row.get(32)?,
+        expires_at: row.get(33)?,
     })
 }
 
@@ -424,10 +428,33 @@ impl OfflinePackageStore for SqliteStore {
         self.with_conn(move |conn| {
             Ok(conn.execute(
                 "UPDATE offline_packages SET state = 'queued', \
-                 phase = 'waiting_for_encoder', updated_at = unixepoch() \
+                 phase = 'waiting_for_encoder', claim_generation = claim_generation + 1, \
+                 updated_at = unixepoch() \
                  WHERE node_id = ?1 AND state = 'preparing'",
                 [node],
             )? as u64)
+        })
+        .await
+    }
+
+    async fn disable_offline_packages(&self) -> Result<u64, StoreError> {
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
+                "INSERT INTO settings (key, value, updated_at)
+                 VALUES ('offline.enabled', '0', unixepoch())
+                 ON CONFLICT(key) DO UPDATE SET value = '0', updated_at = unixepoch()",
+                [],
+            )?;
+            let fenced = tx.execute(
+                "UPDATE offline_packages SET state = 'queued',
+                    phase = 'waiting_for_encoder', progress_millis = 0,
+                    claim_generation = claim_generation + 1, updated_at = unixepoch()
+                 WHERE state = 'preparing'",
+                [],
+            )? as u64;
+            tx.commit()?;
+            Ok(fenced)
         })
         .await
     }
@@ -443,6 +470,9 @@ impl OfflinePackageStore for SqliteStore {
                 .query_row(
                     "SELECT candidate.id FROM offline_packages candidate \
                      WHERE candidate.node_id = ?1 AND candidate.state = 'queued' \
+                       AND COALESCE((SELECT value FROM settings \
+                                     WHERE key = 'offline.enabled'), '1') \
+                           NOT IN ('0', 'false', 'off', 'no') \
                      ORDER BY (SELECT COUNT(*) FROM offline_packages served \
                                WHERE served.node_id = candidate.node_id \
                                  AND served.user_id = candidate.user_id \
@@ -458,7 +488,8 @@ impl OfflinePackageStore for SqliteStore {
             };
             tx.execute(
                 "UPDATE offline_packages SET state = 'preparing', \
-                 phase = 'waiting_for_encoder', updated_at = unixepoch() \
+                 phase = 'waiting_for_encoder', claim_generation = claim_generation + 1, \
+                 updated_at = unixepoch() \
                  WHERE id = ?1 AND state = 'queued'",
                 [&id],
             )?;
@@ -477,14 +508,17 @@ impl OfflinePackageStore for SqliteStore {
         &self,
         package_id: &str,
         node_id: &str,
+        claim_generation: i64,
     ) -> Result<bool, StoreError> {
         let (id, node) = (package_id.to_owned(), node_id.to_owned());
         self.with_conn(move |conn| {
             Ok(conn.execute(
                 "UPDATE offline_packages SET state = 'queued', \
-                 phase = 'waiting_for_encoder', updated_at = unixepoch() \
-                 WHERE id = ?1 AND node_id = ?2 AND state = 'preparing'",
-                params![id, node],
+                 phase = 'waiting_for_encoder', claim_generation = claim_generation + 1, \
+                 updated_at = unixepoch() \
+                 WHERE id = ?1 AND node_id = ?2 AND claim_generation = ?3 \
+                   AND state = 'preparing'",
+                params![id, node, claim_generation],
             )? > 0)
         })
         .await
@@ -493,15 +527,135 @@ impl OfflinePackageStore for SqliteStore {
     async fn set_offline_package_recipe(
         &self,
         package_id: &str,
+        node_id: &str,
+        claim_generation: i64,
         recipe_hash: &str,
     ) -> Result<bool, StoreError> {
-        let (id, hash) = (package_id.to_owned(), recipe_hash.to_owned());
+        let (id, node, hash) = (
+            package_id.to_owned(),
+            node_id.to_owned(),
+            recipe_hash.to_owned(),
+        );
         self.with_conn(move |conn| {
             Ok(conn.execute(
-                "UPDATE offline_packages SET recipe_hash = ?2, updated_at = unixepoch() \
-                 WHERE id = ?1 AND state = 'preparing' \
-                   AND (recipe_hash IS NULL OR recipe_hash = ?2)",
-                params![id, hash],
+                "UPDATE offline_packages SET recipe_hash = ?4, updated_at = unixepoch() \
+                 WHERE id = ?1 AND node_id = ?2 AND claim_generation = ?3 \
+                   AND state = 'preparing' \
+                   AND (recipe_hash IS NULL OR recipe_hash = ?4) \
+                   AND ((decoder_recovery_state = 'primary' \
+                         AND alternate_recipe_hash IS NULL) \
+                        OR (decoder_recovery_state = 'alternate' \
+                            AND alternate_recipe_hash = ?4))",
+                params![id, node, claim_generation, hash],
+            )? > 0)
+        })
+        .await
+    }
+
+    async fn begin_offline_decode_recovery(
+        &self,
+        package_id: &str,
+        node_id: &str,
+        claim_generation: i64,
+        failed_recipe_hash: &str,
+    ) -> Result<bool, StoreError> {
+        let (id, node, failed) = (
+            package_id.to_owned(),
+            node_id.to_owned(),
+            failed_recipe_hash.to_owned(),
+        );
+        self.with_conn(move |conn| {
+            Ok(conn.execute(
+                "UPDATE offline_packages SET decoder_recovery_state = 'recovery_pending', \
+                    recipe_hash = NULL, updated_at = unixepoch() \
+                 WHERE id = ?1 AND node_id = ?2 AND claim_generation = ?3 \
+                   AND state = 'preparing' AND decoder_recovery_state = 'primary' \
+                   AND recipe_hash = ?4",
+                params![id, node, claim_generation, failed],
+            )? > 0)
+        })
+        .await
+    }
+
+    async fn install_offline_decode_alternate(
+        &self,
+        package_id: &str,
+        node_id: &str,
+        claim_generation: i64,
+        alternate_recipe_hash: &str,
+    ) -> Result<bool, StoreError> {
+        let (id, node, alternate) = (
+            package_id.to_owned(),
+            node_id.to_owned(),
+            alternate_recipe_hash.to_owned(),
+        );
+        self.with_conn(move |conn| {
+            Ok(conn.execute(
+                "UPDATE offline_packages SET decoder_recovery_state = 'alternate', \
+                    alternate_recipe_hash = ?4, recipe_hash = ?4, \
+                    updated_at = unixepoch() \
+                 WHERE id = ?1 AND node_id = ?2 AND claim_generation = ?3 \
+                   AND state = 'preparing' \
+                   AND decoder_recovery_state IN ('recovery_pending', 'rehome_pending') \
+                   AND recipe_hash IS NULL AND alternate_recipe_hash IS NULL",
+                params![id, node, claim_generation, alternate],
+            )? > 0)
+        })
+        .await
+    }
+
+    async fn offline_package_claim_is_current(
+        &self,
+        package_id: &str,
+        node_id: &str,
+        claim_generation: i64,
+        recipe_hash: &str,
+    ) -> Result<bool, StoreError> {
+        let (id, node, hash) = (
+            package_id.to_owned(),
+            node_id.to_owned(),
+            recipe_hash.to_owned(),
+        );
+        self.with_conn(move |conn| {
+            Ok(conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM offline_packages \
+                 WHERE id = ?1 AND node_id = ?2 AND claim_generation = ?3 \
+                   AND state = 'preparing' AND recipe_hash = ?4)",
+                params![id, node, claim_generation, hash],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+    }
+
+    async fn complete_offline_cache_entry(
+        &self,
+        package_id: &str,
+        node_id: &str,
+        claim_generation: i64,
+        recipe_hash: &str,
+        bytes: i64,
+        manifest_digest: Option<&str>,
+    ) -> Result<bool, StoreError> {
+        let (id, node, hash) = (
+            package_id.to_owned(),
+            node_id.to_owned(),
+            recipe_hash.to_owned(),
+        );
+        let digest = manifest_digest.map(str::to_owned);
+        self.with_conn(move |conn| {
+            Ok(conn.execute(
+                "UPDATE transcode_cache_locations \
+                 SET complete = 1, bytes = ?5, \
+                     manifest_digest = COALESCE(?6, manifest_digest), \
+                     publication_generation = publication_generation + 1, \
+                     last_used_at = unixepoch(), last_seen_at = unixepoch() \
+                 WHERE recipe_hash = ?4 AND node_id = ?2 \
+                   AND storage_class = 'local' \
+                   AND EXISTS (SELECT 1 FROM offline_packages \
+                     WHERE id = ?1 AND node_id = ?2 AND claim_generation = ?3 \
+                       AND state = 'preparing' AND recipe_hash = ?4)",
+                params![id, node, claim_generation, hash, bytes, digest],
             )? > 0)
         })
         .await
@@ -511,6 +665,7 @@ impl OfflinePackageStore for SqliteStore {
         &self,
         package_id: &str,
         node_id: &str,
+        claim_generation: i64,
         phase: &str,
         progress_millis: i64,
     ) -> Result<bool, StoreError> {
@@ -520,8 +675,15 @@ impl OfflinePackageStore for SqliteStore {
                 "UPDATE offline_packages SET phase = ?3, \
                  progress_millis = MAX(progress_millis, ?4), \
                  updated_at = unixepoch() \
-                 WHERE id = ?1 AND node_id = ?2 AND state = 'preparing'",
-                params![id, node, phase, progress_millis.clamp(0, 999)],
+                 WHERE id = ?1 AND node_id = ?2 AND claim_generation = ?5 \
+                   AND state = 'preparing'",
+                params![
+                    id,
+                    node,
+                    phase,
+                    progress_millis.clamp(0, 999),
+                    claim_generation
+                ],
             )? > 0)
         })
         .await
@@ -531,6 +693,7 @@ impl OfflinePackageStore for SqliteStore {
         &self,
         package_id: &str,
         node_id: &str,
+        claim_generation: i64,
         phase: &str,
         code: &str,
         message: &str,
@@ -545,9 +708,11 @@ impl OfflinePackageStore for SqliteStore {
         self.with_conn(move |conn| {
             Ok(conn.execute(
                 "UPDATE offline_packages SET state = 'failed', phase = ?3, \
-                 error_code = ?4, error_message = ?5, updated_at = unixepoch() \
-                 WHERE id = ?1 AND node_id = ?2 AND state IN ('queued', 'preparing')",
-                params![id, node, phase, code, message],
+                 error_code = ?4, error_message = ?5, \
+                 claim_generation = claim_generation + 1, updated_at = unixepoch() \
+                 WHERE id = ?1 AND node_id = ?2 AND claim_generation = ?6 \
+                   AND state = 'preparing'",
+                params![id, node, phase, code, message, claim_generation],
             )? > 0)
         })
         .await
@@ -743,6 +908,7 @@ impl OfflinePackageStore for SqliteStore {
         &self,
         package_id: &str,
         node_id: &str,
+        claim_generation: i64,
         recipe_hash: &str,
         actual_bytes: i64,
         duration_ms: i64,
@@ -758,9 +924,11 @@ impl OfflinePackageStore for SqliteStore {
                 "UPDATE offline_packages SET state = 'ready', phase = 'ready', \
                  progress_millis = 1000, recipe_hash = ?3, actual_bytes = ?4, \
                  duration_ms = ?5, error_code = NULL, error_message = NULL, \
+                 claim_generation = claim_generation + 1, \
                  updated_at = unixepoch(), last_access_at = unixepoch() \
-                 WHERE id = ?1 AND node_id = ?2 AND state IN ('queued', 'preparing')",
-                params![id, node, hash, actual_bytes, duration_ms],
+                 WHERE id = ?1 AND node_id = ?2 AND claim_generation = ?6 \
+                   AND state = 'preparing' AND recipe_hash = ?3",
+                params![id, node, hash, actual_bytes, duration_ms, claim_generation],
             )?;
             if changed == 1 {
                 let expires_at = tx.query_row(
@@ -1070,7 +1238,7 @@ mod tests {
     #[tokio::test]
     async fn lease_is_hashed_stable_and_renewable() {
         let store = store().await;
-        let package = match store
+        let _package = match store
             .create_offline_package(&request("one"), 10, 1_000, 2_000)
             .await
             .expect("package")
@@ -1078,8 +1246,24 @@ mod tests {
             OfflineCreateOutcome::Created(package) => package,
             other => panic!("unexpected {other:?}"),
         };
+        let package = store
+            .claim_next_offline_package("node-a")
+            .await
+            .expect("claim")
+            .expect("package");
         assert!(store
-            .mark_offline_package_ready(&package.id, "node-a", "recipe", 350, 90_000)
+            .set_offline_package_recipe(&package.id, "node-a", package.claim_generation, "recipe",)
+            .await
+            .expect("bind recipe"));
+        assert!(store
+            .mark_offline_package_ready(
+                &package.id,
+                "node-a",
+                package.claim_generation,
+                "recipe",
+                350,
+                90_000,
+            )
             .await
             .expect("ready"));
 
@@ -1190,11 +1374,23 @@ mod tests {
         assert_eq!(claimed.state, "preparing");
         assert_eq!(claimed.effective_rate_control, "vbr");
         store
-            .update_offline_progress(&package.id, "node-a", "transcoding", 600)
+            .update_offline_progress(
+                &package.id,
+                "node-a",
+                claimed.claim_generation,
+                "transcoding",
+                600,
+            )
             .await
             .expect("progress");
         store
-            .update_offline_progress(&package.id, "node-a", "transcoding", 200)
+            .update_offline_progress(
+                &package.id,
+                "node-a",
+                claimed.claim_generation,
+                "transcoding",
+                200,
+            )
             .await
             .expect("stale progress");
         let current = store
@@ -1252,11 +1448,22 @@ mod tests {
                 .expect("claim")
                 .expect("queued package");
             owners.push(package.user_id);
+            let recipe = format!("recipe-{turn}");
+            assert!(store
+                .set_offline_package_recipe(
+                    &package.id,
+                    "node-a",
+                    package.claim_generation,
+                    &recipe,
+                )
+                .await
+                .expect("bind recipe"));
             assert!(store
                 .mark_offline_package_ready(
                     &package.id,
                     "node-a",
-                    &format!("recipe-{turn}"),
+                    package.claim_generation,
+                    &recipe,
                     400,
                     90_000,
                 )
@@ -1288,7 +1495,7 @@ mod tests {
             preparing.id
         );
 
-        let ready = match store
+        let _ready = match store
             .create_offline_package(&request("ready"), 10, 10_000, 20_000)
             .await
             .expect("ready package")
@@ -1296,8 +1503,24 @@ mod tests {
             OfflineCreateOutcome::Created(package) => package,
             other => panic!("unexpected {other:?}"),
         };
+        let ready = store
+            .claim_next_offline_package("node-a")
+            .await
+            .expect("claim ready")
+            .expect("ready package");
         assert!(store
-            .mark_offline_package_ready(&ready.id, "node-a", "recipe", 350, 90_000)
+            .set_offline_package_recipe(&ready.id, "node-a", ready.claim_generation, "recipe",)
+            .await
+            .expect("bind ready recipe"));
+        assert!(store
+            .mark_offline_package_ready(
+                &ready.id,
+                "node-a",
+                ready.claim_generation,
+                "recipe",
+                350,
+                90_000,
+            )
             .await
             .expect("ready"));
         assert!(matches!(
@@ -1308,7 +1531,7 @@ mod tests {
             OfflineLeaseOutcome::Created(_)
         ));
 
-        let failed = match store
+        let _failed = match store
             .create_offline_package(&request("failed"), 10, 10_000, 20_000)
             .await
             .expect("failed package")
@@ -1316,10 +1539,16 @@ mod tests {
             OfflineCreateOutcome::Created(package) => package,
             other => panic!("unexpected {other:?}"),
         };
+        let failed = store
+            .claim_next_offline_package("node-a")
+            .await
+            .expect("claim failed")
+            .expect("failed package");
         assert!(store
             .fail_offline_package(
                 &failed.id,
                 "node-a",
+                failed.claim_generation,
                 "transcoding",
                 "encoder_failed",
                 "failed"

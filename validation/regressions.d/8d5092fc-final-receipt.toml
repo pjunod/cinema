@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["8d5092fc"]
+reason = "This commit only added the current-check receipt for the preceding validation/status mapping; it changed no runtime behavior."
+ignore = true

@@ -573,6 +573,7 @@ mod tests {
             .expect("create session owner");
         let now_ms = crate::media_sessions::unix_ms();
         let activation = MediaSessionActivation {
+            recovery_epoch: String::new(),
             expected_desired_revision: None,
             incarnation_id: "00000000-0000-4000-8000-0000000000c1".to_owned(),
             session_id: "00000000-0000-4000-8000-0000000000d1".to_owned(),

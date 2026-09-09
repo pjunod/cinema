@@ -1,0 +1,4 @@
+# Sanitized output from the running plurxd container's FFmpeg 5.1.9. This
+# family does not attribute this failure through structured vist/dec contexts.
+0	[rawvideo @ <address>] [error] Packet too small (1)
+0	[error] Error while decoding stream #0:0: Invalid data found when processing input

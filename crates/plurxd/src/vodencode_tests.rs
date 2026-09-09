@@ -1,6 +1,69 @@
 // Included in vodserve::tests to exercise the real attachment/GET/producer
 // seams with the same fixtures and publication commit as the copy tests.
 
+fn encoded_plan(
+    file: &MediaFile,
+    options: &plurx_core::transcode::TranscodeOptions,
+    encoder: plurx_core::transcode::Encoder,
+) -> plurx_core::transcode::ResolvedTranscode {
+    use plurx_core::transcode::{
+        resolve_transcode, AttemptRestrictions, DecodeCapabilities,
+        DecodeCapabilitySnapshotIdentity, DecodeFacts, DecodePlanPolicy, DecodePolicySnapshot,
+        DecodeSourceIdentity, SoftwareDecoder, TranscodeMediaOptions, TranscodeRequest,
+    };
+
+    let codec = file.video_codec.as_deref().unwrap_or("h264");
+    let facts = DecodeFacts::from_ffprobe_json(
+        &serde_json::json!({
+            "streams": [{
+                "index": 0,
+                "codec_type": "video",
+                "codec_name": codec,
+                "width": file.width.unwrap_or(320),
+                "height": file.height.unwrap_or(180),
+                "pix_fmt": "yuv420p",
+                "avg_frame_rate": "24000/1001",
+                "r_frame_rate": "24000/1001",
+                "disposition": {"attached_pic": 0}
+            }]
+        }),
+        DecodeSourceIdentity::from_sha256("a".repeat(64)).expect("source identity"),
+    )
+    .expect("decode facts");
+    let capabilities = DecodeCapabilities::new(
+        DecodeCapabilitySnapshotIdentity::new(
+            "b".repeat(64),
+            "vod-test-node".to_owned(),
+            None,
+        )
+        .expect("capability identity"),
+        vec![],
+        vec![SoftwareDecoder {
+            codec: codec.to_owned(),
+            implementation: Some(codec.to_owned()),
+        }],
+    )
+    .expect("capabilities");
+    resolve_transcode(
+        &TranscodeRequest::new(encoder, TranscodeMediaOptions::from_options(file, options)),
+        &facts,
+        &capabilities,
+        &DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+        &AttemptRestrictions::none(),
+    )
+    .expect("resolved VOD fixture plan")
+}
+
+fn refresh_encoded_plan(file: &MediaFile, encoding: &mut crate::vodencode::Encoding) {
+    let plan = encoded_plan(file, &encoding.options, encoding.plan.encoder());
+    let resources = crate::admission::TranscodeResourceEstimate::of(
+        &plan,
+        &crate::admission::Workload::of(file, encoding.options.target_height),
+    );
+    encoding.plan = plan;
+    encoding.resources = resources;
+}
+
 // Each test below owns a fresh `Admissions`, while production encoders on
 // one daemon share a single admission budget. Running these restart campaigns
 // concurrently can therefore launch more real FFmpeg processes than a daemon
@@ -41,19 +104,26 @@ async fn encoded_fixture(base: &Path) -> (MediaFile, Arc<crate::vodencode::Encod
         .duration_since(std::time::UNIX_EPOCH)
         .expect("unix mtime")
         .as_secs() as i64;
+    let options = TranscodeOptions {
+        target_height: 144,
+        video_bitrate_kbps: 300,
+        software_threads: Some(2),
+        ..Default::default()
+    };
+    let plan = encoded_plan(&file, &options, Encoder::Software);
+    let resources = crate::admission::TranscodeResourceEstimate::of(
+        &plan,
+        &crate::admission::Workload::of(&file, options.target_height),
+    );
     let encoding = Arc::new(crate::vodencode::Encoding {
         source_object_version: crate::fragment_index_cluster::open_source_fence(&file, None)
             .await
             .expect("source identity")
             .object_version()
             .to_owned(),
-        encoder: Encoder::Software,
-        options: TranscodeOptions {
-            target_height: 144,
-            video_bitrate_kbps: 300,
-            software_threads: Some(2),
-            ..Default::default()
-        },
+        plan,
+        resources,
+        options,
         grid: VodFrameGrid::new(24000, 1001).expect("NTSC grid"),
         subtitle: None,
         subtitle_digest: None,
@@ -176,6 +246,15 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
         .object_version()
         .to_owned();
     mutable.options.target_height = 64;
+    mutable.plan = encoded_plan(
+        &file,
+        &mutable.options,
+        plurx_core::transcode::Encoder::Software,
+    );
+    mutable.resources = crate::admission::TranscodeResourceEstimate::of(
+        &mutable.plan,
+        &crate::admission::Workload::of(&file, mutable.options.target_height),
+    );
     mutable.grid = plurx_core::transcode::VodFrameGrid::new(24, 1).expect("grid");
     let cache = base.path().join("renditions");
     let old = bare_serve(&cache);
@@ -246,7 +325,8 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
             .expect("new source fence")
             .object_version()
             .to_owned(),
-        encoder: encoding.encoder,
+        plan: encoding.plan.clone(),
+        resources: encoding.resources,
         options: encoding.options.clone(),
         grid: encoding.grid,
         subtitle: None,
@@ -730,6 +810,7 @@ async fn encoded_vod_hdr10_gets_keep_main10_and_pq_across_restarts() {
         .expect("PQ source fence")
         .object_version()
         .to_owned();
+    refresh_encoded_plan(&file, mutable);
     let serve = bare_serve(&base.path().join("renditions"));
     let mut first_init = None;
     for entry in [0, 45, 1] {
@@ -1027,13 +1108,13 @@ async fn encoded_vod_two_hour_audio_restart_budget() {
         .expect("unix mtime")
         .as_secs() as i64;
     let serve = bare_serve(&base.path().join("renditions"));
-    Arc::get_mut(&mut encoding)
-        .expect("unique recipe")
-        .source_object_version = crate::fragment_index_cluster::open_source_fence(&file, None)
+    let mutable = Arc::get_mut(&mut encoding).expect("unique recipe");
+    mutable.source_object_version = crate::fragment_index_cluster::open_source_fence(&file, None)
         .await
         .expect("long source identity")
         .object_version()
         .to_owned();
+    refresh_encoded_plan(&file, mutable);
     #[cfg(unix)]
     let cpu_before = child_cpu_seconds();
     let started = std::time::Instant::now();
@@ -1304,13 +1385,13 @@ async fn encoded_vod_vfr_input_is_sampled_on_the_declared_rational_grid() {
         .expect("probe VFR");
     Arc::get_mut(&mut encoding).expect("unique recipe").grid =
         crate::vodencode::frame_grid(probe.raw_json.as_deref()).expect("declared output cadence");
-    Arc::get_mut(&mut encoding)
-        .expect("unique recipe")
-        .source_object_version = crate::fragment_index_cluster::open_source_fence(&file, None)
+    let mutable = Arc::get_mut(&mut encoding).expect("unique recipe");
+    mutable.source_object_version = crate::fragment_index_cluster::open_source_fence(&file, None)
         .await
         .expect("VFR source identity")
         .object_version()
         .to_owned();
+    refresh_encoded_plan(&file, mutable);
     let packets = tokio::process::Command::new(crate::ffmpeg::ffprobe_bin())
         .args([
             "-v",
@@ -1426,6 +1507,7 @@ async fn encoded_vod_bitmap_burn_restores_cues_that_predate_video_seek_landing()
     });
     frozen.options.subtitle_file = Some("/dev/fd/5".into());
     frozen.subtitle = Some(Arc::new(subtitle));
+    refresh_encoded_plan(&file, frozen);
     assert_encoded_restarts(base.path(), file, encoding).await;
     for ordinal in 0..3 {
         let decoded = tokio::process::Command::new(ffmpeg_bin())
@@ -1466,8 +1548,12 @@ async fn encoded_vod_manual_audio_correction_keeps_restart_init_stable() {
     let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
     for offset in [-250, 250] {
         let base = crate::test_tempdir().expect("audio offset fixture");
-        let (mut file, encoding) = encoded_fixture(base.path()).await;
+        let (mut file, mut encoding) = encoded_fixture(base.path()).await;
         file.audio_offset_ms = offset;
+        refresh_encoded_plan(
+            &file,
+            Arc::get_mut(&mut encoding).expect("unique recipe"),
+        );
         assert_encoded_restarts(base.path(), file, encoding).await;
     }
 }
@@ -1493,6 +1579,7 @@ async fn encoded_vod_text_burn_gets_keep_absolute_cue_time_after_seek() {
     encoding_mut.subtitle = Some(Arc::new(
         std::fs::File::open(path).expect("subtitle handle"),
     ));
+    refresh_encoded_plan(&file, encoding_mut);
     assert_encoded_restarts(base.path(), file, encoding).await;
     // The source's entire bottom band is black. Cues began before the
     // decoder preroll; white pixels there prove the correct absolute-time

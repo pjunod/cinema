@@ -912,6 +912,46 @@ test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlRep
 test_anchor = "a teardown outlives the source that handed it over"
 
 [[fixes]]
+id = "android.prepared-replacement-identity"
+commits = ["fa01cf77"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PreparedReplacement.kt"
+source_anchor = "if (inbound.actionId == actionId) return PreparationOffer.Same"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedReplacementTest.kt"
+test_anchor = "a replayed action id after the ladder settled is still the same preparation"
+
+[[fixes]]
+id = "android.cancelled-exchange-unwinds"
+commits = ["8a6ee8b3"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackControlReporter.kt"
+source_anchor = "catch (cancelled: CancellationException) {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "a teardown across an in-flight exchange sends the snapshot it was handed"
+
+[[fixes]]
+id = "android.prepared-offer-is-learned"
+commits = ["96a1be44"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PreparedReplacement.kt"
+source_anchor = "if (!canOfferPreparation) return PreparationOffer.Refuse"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedReplacementTest.kt"
+test_anchor = "a successor that was never playable ends the offers for this playback"
+
+[[fixes]]
+id = "android.observed-throughput-is-headroom"
+commits = ["24dd3c58"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/MediaOrigin.kt"
+source_anchor = "internal class ThroughputWindow"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/MediaOriginTest.kt"
+test_anchor = "idleTimeBetweenSegmentsIsNotInTheDenominator"
+
+[[fixes]]
+id = "android.commit-echoes-the-offers-origin"
+commits = ["a0746179"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PreparedReplacement.kt"
+source_anchor = "val origin = action?.mediaOriginMs ?: return null"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedReplacementTest.kt"
+test_anchor = "a commit echoes the offer's origin rather than recomputing one"
+
+[[fixes]]
 id = "apple.ending-commit-precedes-terminal-exchange"
 commits = ["9249ddaa"]
 source = "clients/apple/Sources/PlaybackControlReporter.swift"

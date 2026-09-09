@@ -1,0 +1,8 @@
+version = 1
+
+[[coverage]]
+commits = ["d6ecbfb7"]
+points = []
+checks = []
+reason = "This validation-and-status-only commit adds the retained self-map for the preceding M1 evidence commit and updates its receipt; it does not change runtime behavior or runnable checks."
+ignore = true

@@ -95,10 +95,14 @@ checkout of the module alone will not configure:
   (`app/build.gradle.kts:80-85`), consumed by `ModelContractTest` and
   `PlaybackInfoContractTest`.
 
-`clients/android/README.md:249`, `clients/android/Dockerfile:36` and
-`docs/PUBLISHING.md:360` all say AGP 9.3.1. The catalog says 9.3.2. The catalog
-is right; the three docs are stale. Fixing them is a courtesy, not part of this
-milestone.
+`clients/android/Dockerfile:36` still names an older AGP than the catalog's
+`9.3.2`, and it is left alone deliberately: the Android CI job pulls an image
+tagged by that file's hash, so editing it — even a comment — makes the next
+Android job miss its tag and rebuild the whole SDK from Google.
+`clients/android/README.md` and `docs/PUBLISHING.md` said the same thing and
+have since been corrected. `tests/operations/test_mobile_build_claims.py` holds
+the rule now, with the Dockerfile named as its one exclusion so the exclusion
+cannot outlive its reason.
 
 **The control plane** is three files mirroring web's reference implementation,
 which `PlaybackControlReporter.kt:20-24` states as an explicit contract —

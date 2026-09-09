@@ -4,16 +4,21 @@ use std::sync::{Arc, Mutex};
 
 use plurx_core::domain::MediaFile;
 use plurx_core::segplan::SourceIdentity;
-use plurx_core::transcode::{vod_pipe_args, Encoder, TranscodeOptions, VodFrameGrid};
+use plurx_core::transcode::{
+    vod_pipe_args, Pacing, ResolvedTranscode, TranscodeExecution, TranscodeOptions, VodFrameGrid,
+};
 use sha2::{Digest, Sha256};
 
-use crate::admission::{Admissions, HwSlot, LiveWait, Priority, SwPermit};
+use crate::admission::{
+    Admissions, HwSlot, LiveWait, Priority, SwPermit, TranscodeResourceEstimate,
+};
 
 /// Resolved once before attachment. A restart cannot silently change encoder,
 /// grade, cadence, rate control, tracks, or burn pixels under an immutable URI.
 pub(crate) struct Encoding {
     pub source_object_version: String,
-    pub encoder: Encoder,
+    pub plan: ResolvedTranscode,
+    pub resources: TranscodeResourceEstimate,
     pub options: TranscodeOptions,
     pub grid: VodFrameGrid,
     pub subtitle: Option<Arc<std::fs::File>>,
@@ -33,7 +38,9 @@ impl std::fmt::Debug for Encoding {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("Encoding")
-            .field("encoder", &self.encoder)
+            .field("decoder", &self.plan.decode().backend())
+            .field("encoder", &self.plan.encoder())
+            .field("resources", &self.resources)
             .field("options", &self.options)
             .field("grid", &self.grid)
             .finish_non_exhaustive()
@@ -97,30 +104,23 @@ impl Encoding {
             .unwrap_or_else(crate::admission::software_budget);
         let mut queued = self.queued.lock().expect("VOD encoder admission");
         queued.get_or_insert_with(|| self.admissions.wait_for_slot());
-        let permit = if self.encoder == Encoder::Software {
-            let weight = self.options.software_threads.unwrap_or(1) as usize;
-            // The legacy live pool admits one oversize job when idle. An
-            // immutable recipe cannot shrink its thread count on retry, and
-            // an operator's zero/lowered budget must not be bypassed here.
-            if weight == 0 || weight > software_budget {
-                return None;
-            }
-            EncodePermit {
-                _hardware: None,
-                _software: Some(self.admissions.try_admit_software(
-                    software_budget,
-                    weight,
-                    Priority::Live,
-                )?),
-            }
-        } else {
-            EncodePermit {
-                _hardware: Some(
-                    self.admissions
-                        .try_acquire(hardware_limit, Priority::Live)?,
-                ),
-                _software: None,
-            }
+        // The shared pool deliberately admits one oversize job when otherwise
+        // idle. A frozen VOD recipe cannot shrink its thread demand on retry,
+        // so an operator lowering the budget below that exact plan is an
+        // explicit refusal rather than an oversize exception.
+        if self.resources.cpu_threads > software_budget {
+            return None;
+        }
+        let bundle = self.admissions.try_admit_bundle(
+            hardware_limit,
+            software_budget,
+            &self.resources,
+            Priority::Live,
+        )?;
+        let (hardware, software) = bundle.into_parts();
+        let permit = EncodePermit {
+            _hardware: hardware,
+            _software: software,
         };
         queued.take();
         Some(permit)
@@ -140,7 +140,9 @@ impl Encoding {
     pub fn args(&self, file: &MediaFile, start_seconds: f64, duration_seconds: f64) -> Vec<String> {
         let mut options = self.options.clone();
         options.start_seconds = start_seconds;
-        vod_pipe_args(file, self.encoder, &options, self.grid, duration_seconds)
+        let execution = TranscodeExecution::from_options(file, &options, Pacing::unpaced(), ".")
+            .expect("frozen VOD execution remains valid");
+        vod_pipe_args(file, &self.plan, &execution, self.grid, duration_seconds)
     }
 
     pub fn identity(&self, file: &MediaFile, duration_seconds: f64) -> SourceIdentity {
@@ -151,6 +153,7 @@ impl Encoding {
         hash.update(self.ffmpeg_build.as_bytes());
         hash.update(self.executable.digest.as_bytes());
         hash.update(self.engine.digest.as_bytes());
+        hash.update(self.plan.plan_digest().as_bytes());
         for argument in self.args(file, 0.0, duration_seconds) {
             hash.update((argument.len() as u64).to_le_bytes());
             hash.update(argument.as_bytes());

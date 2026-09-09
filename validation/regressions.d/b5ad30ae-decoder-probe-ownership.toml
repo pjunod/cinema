@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["b5ad30ae"]
+points = ["playback.pipeline", "validation.framework"]
+checks = ["rust-gate", "catalog-contract"]
+reason = "The Rust gate covers absolute decoder geometry, bounded source-identity ownership, whole-launch deadlines, production pidfd/supervisor faults, and a real produce_into neutral-timeout route that still launches legacy FFmpeg with its original budget. The catalog contract preserves the narrow immutable-primary-ELF boundary, Forgejo review findings, and exact validation provenance."

@@ -283,3 +283,63 @@ class StatusHistoricalBuildMentionCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class AndroidToolchainClaimCase(unittest.TestCase):
+    """Prose that names the Android toolchain must name the pinned one.
+
+    `gradle/libs.versions.toml` is the only thing a build actually reads. Three
+    documents quoted `AGP 9.3.1` for long enough after the catalog moved to
+    9.3.2 that a build brief written from them named the wrong pin -- which is
+    the cheap kind of wrong, right up until someone reproduces a build from a
+    document instead of from the catalog.
+
+    **`clients/android/Dockerfile` is deliberately excluded, and the exclusion
+    is the interesting part.** The Android CI job pulls
+    `noirr/android-build:$(sha256sum clients/android/Dockerfile | cut -c1-16)`,
+    so editing that file -- even a comment -- is a tag miss: the next Android
+    job falls through to a full `docker build` that re-downloads the whole SDK
+    from Google, then pushes the new tag. One job pays for it, not every job,
+    and on a runner whose registry access has already been seen to fail that is
+    still a poor trade for a comment. So it stays until the image is rebuilt for
+    a real reason.
+
+    The check therefore names the exclusion rather than implying it, and a
+    second case fails if the Dockerfile ever stops naming a version -- so the
+    exclusion cannot outlive its reason.
+    """
+
+    CATALOG = "clients/android/gradle/libs.versions.toml"
+    EXCLUDED = ("clients/android/Dockerfile",)
+    AGP_MENTION = re.compile(r"\bAGP (\d+\.\d+\.\d+)")
+
+    def pinned(self) -> str:
+        catalog = (ROOT / self.CATALOG).read_text(encoding="utf-8")
+        found = re.search(r'^agp = "([^"]+)"', catalog, re.MULTILINE)
+        self.assertIsNotNone(found, f"{self.CATALOG} no longer pins agp")
+        return found.group(1)
+
+    def test_every_document_naming_agp_names_the_pinned_one(self) -> None:
+        pinned = self.pinned()
+        wrong: list[str] = []
+        for path in sorted(ROOT.rglob("*.md")):
+            relative = path.relative_to(ROOT).as_posix()
+            if relative.startswith(("target/", "clients/android/.gradle")):
+                continue
+            for line, text in enumerate(
+                path.read_text(encoding="utf-8", errors="replace").splitlines(), 1
+            ):
+                for named in self.AGP_MENTION.findall(text):
+                    if named != pinned:
+                        wrong.append(f"{relative}:{line} says AGP {named}, catalog says {pinned}")
+        self.assertEqual(wrong, [], "\n".join(wrong))
+
+    def test_the_dockerfile_exclusion_is_named_rather_than_implied(self) -> None:
+        # If the Dockerfile ever stops naming a version, this exclusion has
+        # outlived its reason and should go with it.
+        for relative in self.EXCLUDED:
+            contents = (ROOT / relative).read_text(encoding="utf-8")
+            self.assertRegex(
+                contents,
+                self.AGP_MENTION,
+                f"{relative} no longer names an AGP version; drop it from EXCLUDED",
+            )

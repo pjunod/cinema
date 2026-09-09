@@ -453,6 +453,67 @@ host it runs on is part of the experiment:
 | `hiqlite-vendor-clippy` (`make hiqlite-vendor-clippy`) | `cluster.auth` | Compiles the excluded vendored Hiqlite production snapshot-transport matrix with warnings denied. It runs in the effort Rust compile job and the main topology job, so a vendored refactor cannot bypass Clippy merely because the crate is outside the root workspace. |
 | `cluster-auth` (`make cluster-check`) | `cluster.auth` · `persistence.upgrades` | Three voters run as separate processes and every call carries a three-second per-operation deadline (`STORE_TIMEOUT` in `crates/plurx-core/src/store/hiqlite.rs`). Under a full `make validate` those voters compete with every other check for the same cores, and that deadline is reachable by scheduling pressure alone |
 
+The catalog gives this aggregate check a 3,600-second outer budget. That budget
+covers the cold vendor builds, the serial replicated-store sweep, the live
+topology workloads, and the daemon activation tests that `make cluster-check`
+contains. It does not relax any production operation deadline. A 1,800-second
+outer budget was too small on a loaded development host: the durable-store and
+topology contracts completed successfully, but the runner terminated the
+following activation suite partway through. The activation suite then passed
+7/7 in isolation in 73.83 seconds on the same candidate.
+On POSIX, the runner first proves that its process census is available, then
+starts every check in a new session. If the outer budget expires, one bounded
+cleanup deadline covers discovery, termination, direct-shell reap, and output
+EOF; half of its remaining time is reserved for final kill, reap, and proof.
+The runner immediately stops the root process group, discovers both the
+launch session and retained-parent child sessions, stops newly observed groups
+until a complete stopped closure is confirmed unchanged by two subsequent
+censuses, and sends `SIGKILL`
+deepest-first without resuming the tree. A bounded post-kill census then proves
+that every recorded live process identity disappeared; zombies are accepted as
+non-executable and left to their owning system reaper. The runner reaps only
+its owned shell and does not claim to reap grandchildren. Exit 124 is recorded
+only when the closure, kill, live-identity proof, reap, and output drain all
+succeed. Census, convergence, signal, reap, identity, or EOF failure aborts
+validation as an infrastructure error. Linux uses a bounded `ps` enumeration,
+then binds each candidate to the parent, group, session, state, and
+boot-relative start ticks read atomically from `/proc/<pid>/stat`. The initial
+anchored root-group stop is numeric; Linux stops discovered child identities
+and performs every final kill through pidfds, never through a reusable numeric
+group at final teardown. Darwin preserves a stable PID/start identity across
+ordinary parent or state changes, retries relevant group/session ambiguity,
+commits a numeric group only after a matching stopped identity is observed,
+and refuses to signal a final group containing an unowned identity. Every
+group for which a stop was attempted remains in the final cleanup ledger even
+when its confirming census fails. A detected unowned stopped replacement
+aborts with an explicit warning that operator recovery may be required; it
+never becomes a timeout verdict. Darwin's unavoidable
+census-to-signal interval is accepted only under this trusted-host contract;
+it is not pidfd-grade containment against hostile PID churn. Windows uses
+bounded `taskkill /T /F`, and every launch error, nonzero, timed-out, or
+incomplete result likewise aborts instead of producing a timeout verdict.
+
+The final fallback also kills the still-owned root process group, never just
+the shell PID. This matters when the census itself fails after the initial
+`SIGSTOP`: killing only the shell abandons any stopped same-group child under
+PID 1. The root group is safe to address here because `_run_shell` created it
+as a new session and its unreaped live leader still owns that numeric identity.
+The Linux-only regression injects this exact census failure, binds fixture
+identities through `/proc` start ticks and pidfds, and requires the child PID
+to be gone or non-executable before the test returns. The nynuc incident and its
+process-to-run correlation are recorded in
+[NYNUC-RUNNER-ORPHANED-PROCESSES.md](ci/NYNUC-RUNNER-ORPHANED-PROCESSES.md).
+
+This is ownership for trusted validation checks, not containment for hostile
+code. A check may create process groups and sessions, but every live child
+session must retain a parent in the check tree. Checks must not double-fork,
+daemonize, deliberately orphan a child session, or launch an unowned host
+service. A harness that needs background service behavior must retain and reap
+its controller or use its own kernel/container ownership boundary. The current
+cluster controller's separate process group and the decoder probe's retained
+`setsid()` child obey this contract; arbitrary detached-session containment is
+not claimed on Darwin.
+
 **What a timeout there means.** `Database("replicated store operation timed out")`
 is the host reporting that it could not finish an operation in three seconds.
 It is not durable-state evidence in either direction: nothing was proved and

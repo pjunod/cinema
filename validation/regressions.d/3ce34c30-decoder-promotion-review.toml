@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["3ce34c30"]
+points = ["playback.pipeline", "cluster.auth", "offline.viewing"]
+checks = ["rust-gate", "cluster-auth", "offline-contract"]
+reason = "The final effort review exposed three promotion boundaries. The immutable encoded-VOD regressions require the held source to resolve one decoder plan and require VFR plus bitmap restart fragments to retain the exact frame grid; reverting the plan-aware filter input produces a four-second fragment under a two-second immutable URI. Real v50/v51 Hiqlite import fixtures pin `drain_deadline_ms` to the version that created it, while v25/v53/v54 cache projections pin both storage identity and publication generation. The retained Store, offline publication, decode-probe deadline, decoder-inventory, and Live TV argument regressions reproduce every failure from the first PR #189 Rust run and pass through the same Rust, cluster, and offline gates that exercise those paths."

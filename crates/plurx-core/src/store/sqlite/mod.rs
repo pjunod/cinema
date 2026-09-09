@@ -1000,6 +1000,102 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     // a binary from before the column neither writes nor reads it, and its
     // sessions behave exactly as they do today.
     crate::store::MEDIA_SESSION_DRAIN_DEADLINE_SCHEMA,
+    // v52: the decoder-recovery budget, as a durable ledger rather than a
+    // counter in a process. An automatic recovery has to survive the thing it
+    // is recovering from — the producer dying, the session ending, the node
+    // handing the playback to another node — and an in-memory allowance
+    // survives none of those. Keyed by the server-owned epoch so that a new
+    // request id, a new client session, or a different node cannot present
+    // themselves as a fresh playback and be granted a second attempt.
+    super::MEDIA_SESSION_PRODUCER_RECOVERY_SCHEMA,
+    // v53: the epoch that names a recovery budget, on the session row that
+    // owns it. v52 gave the budget a durable ledger keyed by the epoch and
+    // nothing could say what a session's epoch was, so the ledger had a key
+    // nobody could present. A deliberate new play mints one; every
+    // continuation — reopen, seek, track change, handoff — inherits its
+    // predecessor's, which is the whole point: none of them may mint a second
+    // allowance. Empty means a session that predates the column, which had no
+    // epoch and therefore no budget.
+    super::MEDIA_SESSION_RECOVERY_EPOCH_SCHEMA,
+    // v54: an offline producer claim is a real incarnation fence, and its
+    // one automatic decoder recovery is consumed before fallible alternate
+    // planning. The trigger keeps already-running older workers from
+    // replenishing or replacing a consumed alternate during a rolling
+    // upgrade; new workers additionally fence every write by generation.
+    "ALTER TABLE offline_packages ADD COLUMN claim_generation INTEGER NOT NULL DEFAULT 0
+        CHECK (claim_generation >= 0);
+     ALTER TABLE offline_packages ADD COLUMN decoder_recovery_state TEXT NOT NULL DEFAULT 'primary'
+        CHECK (decoder_recovery_state IN
+            ('primary', 'recovery_pending', 'rehome_pending', 'alternate'));
+     ALTER TABLE offline_packages ADD COLUMN alternate_recipe_hash TEXT;
+     ALTER TABLE transcode_cache_locations
+        ADD COLUMN publication_generation INTEGER NOT NULL DEFAULT 0
+        CHECK (publication_generation >= 0);
+     CREATE TRIGGER cache_publication_generation_guard
+        BEFORE UPDATE OF complete, bytes, manifest_digest, relative_dir, storage_id,
+                         generation_id, publication_generation
+        ON transcode_cache_locations
+        WHEN NEW.complete = 1
+             AND (OLD.complete != 1 OR NEW.bytes != OLD.bytes
+                  OR NEW.manifest_digest IS NOT OLD.manifest_digest
+                  OR NEW.relative_dir != OLD.relative_dir
+                  OR NEW.storage_id != OLD.storage_id
+                  OR NEW.generation_id != OLD.generation_id)
+             AND NEW.publication_generation != OLD.publication_generation + 1
+        BEGIN
+            SELECT RAISE(ABORT, 'cache publication requires a current-generation writer');
+        END;
+     CREATE TRIGGER offline_claim_lifecycle_guard
+        BEFORE UPDATE OF state, claim_generation ON offline_packages
+        WHEN (OLD.state = 'queued' AND NEW.state = 'preparing'
+                AND (NEW.claim_generation != OLD.claim_generation + 1
+                     OR COALESCE((SELECT value FROM settings
+                                  WHERE key = 'offline.enabled'), '1')
+                        IN ('0', 'false', 'off', 'no')))
+          OR (OLD.state = 'queued' AND NEW.state = 'ready')
+          OR (OLD.state = 'preparing' AND NEW.state IN ('queued', 'ready', 'failed')
+                AND NEW.claim_generation != OLD.claim_generation + 1)
+          OR (OLD.state IN ('queued', 'preparing') AND NEW.node_id != OLD.node_id
+                AND NEW.claim_generation != OLD.claim_generation + 1)
+        BEGIN
+            SELECT RAISE(ABORT, 'invalid offline claim lifecycle transition');
+        END;
+     CREATE TRIGGER offline_recovery_guard
+        BEFORE UPDATE OF recipe_hash, decoder_recovery_state, alternate_recipe_hash
+        ON offline_packages
+        WHEN (OLD.decoder_recovery_state = 'primary'
+                AND NEW.decoder_recovery_state NOT IN ('primary', 'recovery_pending'))
+          OR (OLD.decoder_recovery_state = 'recovery_pending'
+                AND NEW.decoder_recovery_state NOT IN
+                    ('recovery_pending', 'rehome_pending', 'alternate'))
+          OR (OLD.decoder_recovery_state = 'alternate'
+                AND NEW.decoder_recovery_state NOT IN ('alternate', 'rehome_pending'))
+          OR (OLD.decoder_recovery_state = 'rehome_pending'
+                AND NEW.decoder_recovery_state NOT IN ('rehome_pending', 'alternate'))
+          OR (OLD.decoder_recovery_state IN ('recovery_pending', 'alternate')
+                AND NEW.decoder_recovery_state = 'rehome_pending'
+                AND (NEW.node_id = OLD.node_id OR NEW.state != 'queued'
+                     OR NEW.recipe_hash IS NOT NULL
+                     OR NEW.alternate_recipe_hash IS NOT NULL))
+          OR (OLD.alternate_recipe_hash IS NOT NULL
+                AND NEW.alternate_recipe_hash IS NOT OLD.alternate_recipe_hash
+                AND NOT (OLD.decoder_recovery_state = 'alternate'
+                         AND NEW.decoder_recovery_state = 'rehome_pending'
+                         AND NEW.node_id != OLD.node_id
+                         AND NEW.state = 'queued'
+                         AND NEW.recipe_hash IS NULL
+                         AND NEW.alternate_recipe_hash IS NULL))
+          OR (NEW.decoder_recovery_state = 'primary'
+                AND NEW.alternate_recipe_hash IS NOT NULL)
+          OR (NEW.decoder_recovery_state IN ('recovery_pending', 'rehome_pending')
+                AND (NEW.recipe_hash IS NOT NULL OR NEW.alternate_recipe_hash IS NOT NULL))
+          OR (NEW.decoder_recovery_state = 'alternate'
+                AND (NEW.alternate_recipe_hash IS NULL
+                     OR (NEW.recipe_hash IS NOT NULL
+                         AND NEW.recipe_hash != NEW.alternate_recipe_hash)))
+        BEGIN
+            SELECT RAISE(ABORT, 'invalid offline decoder recovery transition');
+        END;",
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -2404,7 +2500,7 @@ mod tests {
             .expect("version");
         assert_eq!(version, MIGRATIONS.len() as i64);
         assert_eq!(
-            version, 51,
+            version, 54,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );
@@ -3135,9 +3231,8 @@ mod tests {
             // 5 since v49 added `desired_revision`, the ask a pointer write
             // was decided against.
             ("media_playback_pointers", 5),
-            // 20 since v51 added `drain_deadline_ms`, when a predecessor kept
-            // alive on purpose stops being kept.
-            ("media_sessions", 20),
+            // 21 after v51's drain deadline and v53's recovery epoch.
+            ("media_sessions", 21),
         ] {
             assert_eq!(
                 conn.query_row(
@@ -3225,10 +3320,10 @@ mod tests {
                 (recipe_hash, node_id, storage_class, relative_dir, bytes, complete,
                  manifest_digest, scrub_object_index, last_used_at, last_seen_at)
              VALUES ('rolling-recipe', 'node-b', 'local', 'rolling-generation',
-                     200, 1, NULL, 0, 40, 40)",
+                     0, 0, NULL, 0, 40, 40)",
             [],
         )
-        .expect("legacy binary write on v26 schema");
+        .expect("legacy incomplete write on v26 schema");
         assert_eq!(
             conn.query_row(
                 "SELECT storage_id, generation_id FROM transcode_cache_locations
@@ -3466,6 +3561,121 @@ mod tests {
             )
             .expect("lease indexes");
         assert!(package_id_unique > 0, "one stable lease per package");
+    }
+
+    #[test]
+    fn v54_migration_rejects_legacy_offline_claim_and_publication_sql() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("plurx.db");
+        {
+            let conn = Connection::open(&db).expect("raw v53 open");
+            for (index, sql) in MIGRATIONS.iter().enumerate().take(53) {
+                conn.execute_batch(&format!("BEGIN;\n{sql}\nCOMMIT;"))
+                    .unwrap_or_else(|error| panic!("v{}: {error}", index + 1));
+            }
+            conn.pragma_update(None, "user_version", 53)
+                .expect("v53 marker");
+            conn.execute(
+                "INSERT INTO users (id, username, password_hash, is_admin)
+                 VALUES (1, 'legacy-offline', 'hash', 1)",
+                [],
+            )
+            .expect("seed user");
+            conn.execute_batch(
+                "INSERT INTO libraries (id, name, kind, paths, anime)
+                    VALUES (1, 'Legacy offline', 'movies', '[]', 0);
+                 INSERT INTO items (id, library_id, kind, title, sort_title)
+                    VALUES (42, 1, 'movie', 'Legacy offline', 'legacy offline');
+                 INSERT INTO files (id, item_id, path, size, mtime)
+                    VALUES (42, 42, '/media/legacy.mkv', 100, 1);",
+            )
+            .expect("seed cache recipe parents");
+            conn.execute(
+                "INSERT INTO offline_packages
+                    (id, request_id, user_id, file_id, node_id, source_path,
+                     source_size, source_mtime, target_height, subtitle_mode,
+                     state, phase, estimated_bytes, reserved_bytes, expires_at)
+                 VALUES ('legacy-package', 'legacy-request', 1, 42, 'legacy-node',
+                         '/media/legacy.mkv', 100, 1, 720, 'none', 'queued',
+                         'waiting_for_encoder', 50, 50, 999999)",
+                [],
+            )
+            .expect("seed v53 package");
+            conn.execute(
+                "INSERT INTO transcode_cache_recipes (recipe_hash, file_id, recipe_version)
+                 VALUES ('legacy-recipe', 42, 1)",
+                [],
+            )
+            .expect("seed recipe");
+            conn.execute(
+                "INSERT INTO transcode_cache_locations
+                    (recipe_hash, node_id, storage_class, relative_dir, bytes, complete)
+                 VALUES ('legacy-recipe', 'legacy-node', 'local', 'legacy-recipe', 0, 0)",
+                [],
+            )
+            .expect("seed incomplete cache location");
+        }
+
+        SqliteStore::open(&db).expect("migrate v53 through offline fences");
+        let conn = Connection::open(&db).expect("raw current reopen");
+        assert!(conn
+            .execute(
+                "UPDATE offline_packages SET state = 'preparing'
+                 WHERE id = 'legacy-package' AND state = 'queued'",
+                [],
+            )
+            .is_err());
+        conn.execute(
+            "UPDATE offline_packages
+             SET state = 'preparing', claim_generation = claim_generation + 1
+             WHERE id = 'legacy-package' AND state = 'queued'",
+            [],
+        )
+        .expect("current claim shape");
+        assert!(conn
+            .execute(
+                "UPDATE offline_packages SET state = 'queued'
+                 WHERE id = 'legacy-package' AND state = 'preparing'",
+                [],
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "UPDATE offline_packages SET state = 'ready', recipe_hash = 'legacy-recipe'
+                 WHERE id = 'legacy-package'",
+                [],
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "UPDATE offline_packages SET state = 'failed'
+                 WHERE id = 'legacy-package'",
+                [],
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "UPDATE transcode_cache_locations
+                 SET complete = 1, bytes = 100
+                 WHERE recipe_hash = 'legacy-recipe' AND node_id = 'legacy-node'",
+                [],
+            )
+            .is_err());
+        conn.execute(
+            "UPDATE transcode_cache_locations
+             SET complete = 1, bytes = 100,
+                 publication_generation = publication_generation + 1
+             WHERE recipe_hash = 'legacy-recipe' AND node_id = 'legacy-node'",
+            [],
+        )
+        .expect("current cache publication shape");
+        assert!(conn
+            .execute(
+                "UPDATE transcode_cache_locations SET bytes = 101
+                 WHERE recipe_hash = 'legacy-recipe' AND node_id = 'legacy-node'",
+                [],
+            )
+            .is_err());
     }
 
     #[tokio::test]
@@ -3734,30 +3944,10 @@ mod tests {
             .expect("seed a v50 session");
         }
 
-        SqliteStore::open(&db).expect("migrate v50 to current");
         {
             let conn = Connection::open(&db).expect("raw reopen");
-            assert_eq!(
-                conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
-                    .expect("version"),
-                SQLITE_SCHEMA_VERSION
-            );
-            let (state, deadline) = conn
-                .query_row(
-                    "SELECT state, drain_deadline_ms FROM media_sessions
-                      WHERE incarnation_id = 'inc-v50'",
-                    [],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?)),
-                )
-                .expect("the v50 session survives");
-            assert_eq!(state, "active", "the migration is additive");
-            assert_eq!(
-                deadline, None,
-                "a session that existed before the column is not draining, and \
-                 null is how this schema says so"
-            );
-            conn.pragma_update(None, "user_version", 50)
-                .expect("simulate interruption after the v51 schema commit");
+            conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATIONS[50]))
+                .expect("commit the v51 shape without advancing its marker");
         }
 
         SqliteStore::open(&db).expect("settle the committed v51 migration");
@@ -3769,6 +3959,19 @@ mod tests {
         );
         assert!(SqliteStore::drain_deadline_column_exists(&conn)
             .expect("inspect the drain deadline column"));
+        let (state, deadline) = conn
+            .query_row(
+                "SELECT state, drain_deadline_ms FROM media_sessions
+                  WHERE incarnation_id = 'inc-v50'",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?)),
+            )
+            .expect("the v50 session survives");
+        assert_eq!(state, "active", "the migration is additive");
+        assert_eq!(
+            deadline, None,
+            "a session that existed before the column is not draining, and null is how this schema says so"
+        );
     }
 
     /// A binary that predates the drain cannot take a draining session over.

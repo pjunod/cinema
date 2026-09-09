@@ -3,7 +3,7 @@
 use crate::domain::MediaFile;
 use crate::segplan::{PlanCut, PlanEntry, PlanEntryKind, SegmentPlan, SEGPLAN_VERSION};
 
-use super::{Encoder, Pacing, TranscodeOptions, BURNED_VIDEO_LABEL};
+use super::{ResolvedTranscode, TranscodeExecution, BURNED_VIDEO_LABEL};
 
 pub const VOD_AUDIO_RATE: u32 = 48_000;
 pub const VOD_AAC_FRAME_SAMPLES: u64 = 1_024;
@@ -112,26 +112,32 @@ impl VodFrameGrid {
 /// seeking. The output frame grid and IDRs are identical on every restart.
 pub fn vod_pipe_args(
     source: &MediaFile,
-    encoder: Encoder,
-    opts: &TranscodeOptions,
+    plan: &ResolvedTranscode,
+    execution: &TranscodeExecution,
     grid: VodFrameGrid,
     duration_seconds: f64,
 ) -> Vec<String> {
-    let target = opts.start_seconds.max(0.0);
+    let media = plan.options();
+    let target = execution.start_seconds.max(0.0);
     let audio_anchor = vod_audio_anchor(target) as f64 / f64::from(VOD_AUDIO_RATE);
-    let audio_target = audio_anchor - source.audio_offset_ms as f64 / 1_000.0;
-    let mut input = opts.clone();
+    let audio_target = audio_anchor - media.audio_offset_ms as f64 / 1_000.0;
+    let mut input = execution.clone();
     // Decode a short preroll. Positive correction needs earlier audio;
     // negative correction is an absolute trim, not repeated per-seek silence.
     input.start_seconds = (target.min(audio_target) - 2.0).max(0.0);
-    let mut unshifted_source = source.clone();
-    unshifted_source.audio_offset_ms = 0;
-    let mut args = super::encode_input_args(&unshifted_source, encoder, &input, Pacing::unpaced());
+    let mut args = super::encode_input_args_for_plan(plan, &input);
+    // The VOD presentation owns a film-global sample-lattice correction
+    // below. The shared plan builder must still own decoder/renderer/encoder
+    // selection, but its ordinary one-input A/V filter would apply the same
+    // semantic offset a second time.
+    if let Some(index) = args.iter().position(|argument| argument == "-af") {
+        args.drain(index..=index + 1);
+    }
     // Explicit film-clock trim below owns the accurate landing. Letting the
     // input seek also trim audio can discard a different partial packet on
     // each restart before its sample-clock correction sees the frame.
     args.splice(0..0, ["-copyts".to_owned(), "-noaccurate_seek".to_owned()]);
-    let has_audio = !source.audio_streams.is_empty();
+    let has_audio = media.input_has_audio;
     if has_audio {
         let before_map = args
             .iter()
@@ -142,7 +148,10 @@ pub fn vod_pipe_args(
         // trim on the sample clock. Video retains its independent fast seek.
         args.splice(
             before_map..before_map,
-            ["-i".into(), source.path.to_string_lossy().into_owned()],
+            [
+                "-i".into(),
+                execution.source_path.to_string_lossy().into_owned(),
+            ],
         );
         for argument in &mut args {
             if argument.starts_with("0:a:") {
@@ -150,8 +159,8 @@ pub fn vod_pipe_args(
             }
         }
     }
-    if opts.subtitle_burn.as_ref().is_some_and(|burn| burn.bitmap) {
-        if let Some(subtitle) = &opts.subtitle_file {
+    if media.subtitle_burn.as_ref().is_some_and(|burn| burn.bitmap) {
+        if let Some(subtitle) = &execution.subtitle_file {
             let before_map = args
                 .iter()
                 .position(|arg| arg == "-map")
@@ -178,8 +187,8 @@ pub fn vod_pipe_args(
     );
     // Use the same explicit even raster for CPU scale, GPU/bitmap scale,
     // identity and HLS facts; -2's independent aspect rounding can differ.
-    if let Some((width, height)) = super::output_size(source, opts.target_height) {
-        let automatic = format!("scale=-2:'min({},ih)'", opts.target_height);
+    if let Some((width, height)) = super::output_size(source, media.target_height) {
+        let automatic = format!("scale=-2:'min({},ih)'", media.target_height);
         for flag in ["-vf", "-filter_complex"] {
             if let Some(index) = args.iter().position(|arg| arg == flag) {
                 args[index + 1] =
@@ -190,11 +199,12 @@ pub fn vod_pipe_args(
     if let Some(index) = args.iter().position(|arg| arg == "-vf") {
         args[index + 1] = format!("{first}{}{last}", args[index + 1]);
     } else if let Some(index) = args.iter().position(|arg| arg == "-filter_complex") {
-        let graph = args[index + 1].replacen("[0:v]", &format!("[0:v]{first}"), 1);
-        let graph = if let Some(burn) = opts
+        let video_input = format!("[0:{}]", plan.decode().input_video_stream());
+        let graph = args[index + 1].replacen(&video_input, &format!("{video_input}{first}"), 1);
+        let graph = if let Some(burn) = media
             .subtitle_burn
             .as_ref()
-            .filter(|burn| burn.bitmap && opts.subtitle_file.is_some())
+            .filter(|burn| burn.bitmap && execution.subtitle_file.is_some())
         {
             graph.replace(
                 &format!("[0:s:{}]", burn.subtitle_index),

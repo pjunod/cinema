@@ -1784,7 +1784,7 @@ mod tests {
     ) -> PathBuf {
         let dir = claim(store, root, file, hash).await;
         store
-            .complete_cache_entry(hash, NODE, bytes)
+            .complete_cache_entry(hash, NODE, bytes, None)
             .await
             .expect("complete");
         dir
@@ -1887,7 +1887,11 @@ mod tests {
         crate::test_tempdir().expect("root")
     }
 
-    async fn preparing_package(store: &Arc<dyn Store>, file: i64, recipe: &str) -> (String, i64) {
+    async fn preparing_package(
+        store: &Arc<dyn Store>,
+        file: i64,
+        recipe: &str,
+    ) -> (String, i64, i64) {
         let user = store
             .create_user(&format!("user-{recipe}"), "hash", false)
             .await
@@ -1928,10 +1932,10 @@ mod tests {
             .expect("queued package");
         assert_eq!(claimed.id, package.id);
         assert!(store
-            .set_offline_package_recipe(&package.id, recipe)
+            .set_offline_package_recipe(&package.id, NODE, claimed.claim_generation, recipe,)
             .await
             .expect("bind recipe"));
-        (package.id, user.id)
+        (package.id, user.id, claimed.claim_generation)
     }
 
     /// The budget is a ceiling and eviction stops the moment it is met — the
@@ -2025,7 +2029,7 @@ mod tests {
             .await
             .expect("corrupt cache row"));
         store
-            .complete_cache_entry(recipe, NODE, 16)
+            .complete_cache_entry(recipe, NODE, 16, None)
             .await
             .expect("complete corrupt row");
         store
@@ -2084,12 +2088,22 @@ mod tests {
     async fn a_published_offline_package_is_neither_evicted_nor_orphaned() {
         let (store, file) = store().await;
         let root = root();
-        let (package_id, _user_id) = preparing_package(&store, file, "efready").await;
+        let (package_id, _user_id, claim_generation) =
+            preparing_package(&store, file, "efready").await;
         let dir = entry(&store, root.path(), file, "efready", 100).await;
-        assert!(store
-            .mark_offline_package_ready(&package_id, NODE, "efready", 100, 90_000)
-            .await
-            .expect("ready"));
+        assert!(
+            store
+                .mark_offline_package_ready(
+                    &package_id,
+                    NODE,
+                    claim_generation,
+                    "efready",
+                    100,
+                    90_000,
+                )
+                .await
+                .expect("ready")
+        );
         store
             .put_setting(keys::CACHE_MAX_GB, "0")
             .await
@@ -2234,7 +2248,8 @@ mod tests {
     async fn offline_preparation_keeps_its_staging_directory() {
         let (store, file) = store().await;
         let root = root();
-        let (_package_id, _user_id) = preparing_package(&store, file, "ghoffline").await;
+        let (_package_id, _user_id, _claim_generation) =
+            preparing_package(&store, file, "ghoffline").await;
         store
             .claim_cache_entry("ghoffline", file, 1, NODE, "gh/ghoffline")
             .await
@@ -2526,9 +2541,9 @@ mod tests {
             &manifest.manifest_digest,
         )
         .await;
-        let (package_id, user_id) = preparing_package(&store, file, recipe).await;
+        let (package_id, user_id, claim_generation) = preparing_package(&store, file, recipe).await;
         assert!(store
-            .mark_offline_package_ready(&package_id, NODE, recipe, 1_000, 90_000)
+            .mark_offline_package_ready(&package_id, NODE, claim_generation, recipe, 1_000, 90_000,)
             .await
             .expect("ready scrubbed package"));
 
@@ -2800,7 +2815,7 @@ mod tests {
                     .await
                     .expect("claim location"));
                 store
-                    .complete_cache_entry(recipe, NODE, 16)
+                    .complete_cache_entry(recipe, NODE, 16, None)
                     .await
                     .expect("complete location");
                 drop(guard);
@@ -2977,7 +2992,7 @@ mod tests {
             .await
             .expect("claim");
         store
-            .complete_cache_entry("aastuck", NODE, 100)
+            .complete_cache_entry("aastuck", NODE, 100, None)
             .await
             .expect("complete");
 
@@ -3169,7 +3184,7 @@ mod tests {
                 .await
                 .expect("cache claim");
             store
-                .complete_cache_entry("aakeep", &cluster_id, 20)
+                .complete_cache_entry("aakeep", &cluster_id, 20, None)
                 .await
                 .expect("complete cache");
 
@@ -3203,21 +3218,30 @@ mod tests {
                     .expect("ready package"),
                 OfflineCreateOutcome::Created(_)
             ));
-            assert_eq!(
-                store
-                    .claim_next_offline_package(&cluster_id)
-                    .await
-                    .expect("claim ready")
-                    .expect("ready package exists")
-                    .id,
-                ready_id
-            );
+            let ready_claim = store
+                .claim_next_offline_package(&cluster_id)
+                .await
+                .expect("claim ready")
+                .expect("ready package exists");
+            assert_eq!(ready_claim.id, ready_id);
             store
-                .set_offline_package_recipe(ready_id, "aakeep")
+                .set_offline_package_recipe(
+                    ready_id,
+                    &cluster_id,
+                    ready_claim.claim_generation,
+                    "aakeep",
+                )
                 .await
                 .expect("bind recipe");
             assert!(store
-                .mark_offline_package_ready(ready_id, &cluster_id, "aakeep", 20, 90_000)
+                .mark_offline_package_ready(
+                    ready_id,
+                    &cluster_id,
+                    ready_claim.claim_generation,
+                    "aakeep",
+                    20,
+                    90_000,
+                )
                 .await
                 .expect("publish ready package"));
 
@@ -3289,7 +3313,7 @@ mod tests {
             .await
             .expect("current cache claim");
         store
-            .complete_cache_entry("bbcurrent", &identity.node_id, 20)
+            .complete_cache_entry("bbcurrent", &identity.node_id, 20, None)
             .await
             .expect("complete current cache");
         assert_eq!(

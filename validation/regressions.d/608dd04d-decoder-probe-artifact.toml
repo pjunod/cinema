@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["608dd04d"]
+points = ["playback.pipeline", "validation.framework"]
+checks = ["rust-gate", "catalog-contract"]
+reason = "The Rust gate rejects indirect and dynamically linked parser artifacts, proves Linux snapshots are write-sealed, confines a native launcher from executing a second parser, consumes process-group termination exactly once, and retains the descriptor, deadline, cancellation, and cache fences across macOS and Linux test surfaces. The catalog contract freezes every added task, timer, and process shape and requires the status ledger to bind the adversarial findings and cross-platform receipts to this exact runtime commit."

@@ -122,15 +122,24 @@ impl TranscodeCacheStore for SqliteStore {
         recipe_hash: &str,
         node_id: &str,
         bytes: i64,
+        manifest_digest: Option<&str>,
     ) -> Result<(), StoreError> {
         let (hash, node) = (recipe_hash.to_owned(), node_id.to_owned());
+        let digest = manifest_digest.map(str::to_owned);
         self.with_conn(move |conn| {
+            // `COALESCE` rather than an unconditional write: a row that already
+            // carries a digest was fenced by a queue completion, and a later
+            // unfenced completion of the same recipe must not blank it. Passing
+            // `None` means "this publication has none", never "clear the one
+            // that is there".
             conn.execute(
                 "UPDATE transcode_cache_locations
                  SET complete = 1, bytes = ?3,
+                     manifest_digest = COALESCE(?4, manifest_digest),
+                     publication_generation = publication_generation + 1,
                      last_used_at = unixepoch(), last_seen_at = unixepoch()
                  WHERE recipe_hash = ?1 AND node_id = ?2 AND storage_class = 'local'",
-                params![hash, node, bytes],
+                params![hash, node, bytes, digest],
             )?;
             Ok(())
         })
@@ -553,7 +562,7 @@ mod tests {
         assert_eq!(store.cache_bytes(NODE).await.expect("bytes"), 0);
 
         store
-            .complete_cache_entry("abc123", NODE, 4_000_000)
+            .complete_cache_entry("abc123", NODE, 4_000_000, None)
             .await
             .expect("complete");
         let hit = store.cache_hit("abc123", NODE).await.expect("hit");
@@ -594,7 +603,7 @@ mod tests {
             "the second producer has to be told it lost, or it publishes over the first"
         );
         store
-            .complete_cache_entry("abc", NODE, 10)
+            .complete_cache_entry("abc", NODE, 10, None)
             .await
             .expect("complete");
         let hit = store
@@ -618,7 +627,7 @@ mod tests {
                 .await
                 .expect("claim");
             store
-                .complete_cache_entry(hash, NODE, 100)
+                .complete_cache_entry(hash, NODE, 100, None)
                 .await
                 .expect("complete");
             store
@@ -688,8 +697,10 @@ mod tests {
             .with_conn(|conn| {
                 conn.execute(
                     "INSERT INTO transcode_cache_locations
-                         (recipe_hash, node_id, storage_class, relative_dir, complete, bytes)
-                     VALUES ('scoped', ?1, 'shared', 'shared/scoped', 1, 20)",
+                         (recipe_hash, node_id, storage_class, relative_dir, complete, bytes,
+                          storage_id, generation_id)
+                     VALUES ('scoped', ?1, 'shared', 'shared/scoped', 1, 20,
+                             'shared-storage', 'shared-generation')",
                     [NODE],
                 )?;
                 Ok(())
@@ -749,7 +760,7 @@ mod tests {
 
         // …and a completed entry is never a leftover, however old.
         store
-            .complete_cache_entry("fresh", NODE, 1)
+            .complete_cache_entry("fresh", NODE, 1, None)
             .await
             .expect("complete");
         assert!(store
@@ -827,7 +838,7 @@ mod tests {
             .await
             .expect("claim");
         store
-            .complete_cache_entry("flight", NODE, 900)
+            .complete_cache_entry("flight", NODE, 900, None)
             .await
             .expect("complete");
         let package = NewOfflinePackage {
@@ -856,8 +867,24 @@ mod tests {
             .create_offline_package(&package, 10, 2_000, 3_000)
             .await
             .expect("package");
+        let claimed = store
+            .claim_next_offline_package(NODE)
+            .await
+            .expect("claim")
+            .expect("package");
+        assert!(store
+            .set_offline_package_recipe(&claimed.id, NODE, claimed.claim_generation, "flight",)
+            .await
+            .expect("bind recipe"));
         store
-            .mark_offline_package_ready("package", NODE, "flight", 900, 1_000)
+            .mark_offline_package_ready(
+                "package",
+                NODE,
+                claimed.claim_generation,
+                "flight",
+                900,
+                1_000,
+            )
             .await
             .expect("ready");
         assert_eq!(store.cache_bytes(NODE).await.expect("bytes"), 0);
@@ -882,7 +909,7 @@ mod tests {
             .await
             .expect("claim");
         store
-            .complete_cache_entry("gone", NODE, 1)
+            .complete_cache_entry("gone", NODE, 1, None)
             .await
             .expect("complete");
         store.delete_files(&[file]).await.expect("delete");

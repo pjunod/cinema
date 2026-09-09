@@ -6,6 +6,7 @@ artifact_dir = "target/validation"
 always_checks = ["catalog-contract", "history-regressions"]
 audit_paths = [
   ".dockerignore",
+  ".gitignore",
   ".github/actions/**",
   ".github/workflows/**",
   "Cargo.lock",
@@ -17,6 +18,7 @@ audit_paths = [
   "clients/**",
   "crates/**",
   "deploy/**",
+  "docs/DECODER_SELECTION_RECOVERY_STATUS.md",
   "plurx.example.toml",
   "rust-toolchain.toml",
   "scripts/**",
@@ -257,7 +259,7 @@ profiles = ["commit", "full", "nightly"]
 platforms = ["darwin", "linux"]
 requires = ["cargo", "make"]
 missing = "fail"
-timeout_seconds = 1800
+timeout_seconds = 3600
 
 [[checks]]
 id = "cluster-transport-recovery"
@@ -642,9 +644,10 @@ paths = [
   "crates/plurx-core/src/tracks.rs",
   "crates/plurx-core/src/segplan.rs",
   "crates/plurx-core/src/transcode/**",
+  "crates/plurx-core/tests/decoder_selection.rs",
   "crates/plurx-pgs/**",
   "fuzz/**",
-  "crates/plurxd/src/{admission,copyseg,delivery,dvpipe,ffmpeg,fragindex,fragment_index_cluster,meter,pgs_overlay,pipeprobe,playback_control,playstart,prodexec,prodrun,prodsched,produce,progressive,renditiondir,subtitles,titlestore,transcode,vodencode,vodencode_manager_tests,vodencode_tests,vodgen,vodserve,waitpool}.rs",
+  "crates/plurxd/src/{admission,copyseg,decode_facts,decoder_health,delivery,dvpipe,ffmpeg,fragindex,fragment_index_cluster,meter,pgs_overlay,pipeprobe,playback_control,playstart,prodexec,prodrun,prodsched,produce,progressive,renditiondir,subtitles,titlestore,transcode,vodencode,vodencode_manager_tests,vodencode_tests,vodgen,vodserve,waitpool}.rs",
   "crates/plurxd/src/manifest_cache.rs",
   "crates/plurxd/src/media_sessions.rs",
   "crates/plurxd/src/http/internal_media_sessions.rs",
@@ -657,6 +660,7 @@ paths = [
   "docs/streaming/PLAYBACK-CAPS-V2-*.md",
   "docs/streaming/STUTTER-4K.md",
   "scripts/dv-evidence",
+  "scripts/decoder-media-baseline",
   "scripts/verify-dv-timeline",
   "scripts/dv-timeline-check",
   "scripts/playback-lab",
@@ -850,6 +854,7 @@ paths = [
   "scripts/release-package-candidate",
   "scripts/{bench,dv-evidence,gop-census,mkpgs,perf-report,perf2-rate-control-n1-corpus.json,perf2-rate-control-smoke-corpus.json,ship,ship-physical}",
   "scripts/container-smoke",
+  "scripts/decoder-diagnostic-qualification",
   "scripts/validate-docker-startup-budget",
   "scripts/registry-push",
   "tests/operations/**",
@@ -864,9 +869,11 @@ contract = "Every governed source file maps to a named point, every point maps t
 paths = [
   ".github/actions/**",
   ".github/workflows/**",
+  ".gitignore",
   "Makefile",
   "docs/VALIDATION.md",
   "docs/ci/CI_EXECUTION_ACCELERATION_PLAN.md",
+  "docs/DECODER_SELECTION_RECOVERY_STATUS.md",
   "scripts/pre-commit",
   "scripts/ci-flake-report",
   "scripts/history-audit",

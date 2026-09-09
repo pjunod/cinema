@@ -1,0 +1,748 @@
+from __future__ import annotations
+
+import hashlib
+import json
+from pathlib import Path
+import runpy
+import tempfile
+import tomllib
+import unittest
+
+
+ROOT = Path(__file__).resolve().parents[2]
+SCRIPT = ROOT / "scripts/decoder-diagnostic-qualification"
+MEDIA_SCRIPT = ROOT / "scripts/decoder-media-baseline"
+FIXTURES = ROOT / "tests/playback/decoder-health"
+CHECKER = runpy.run_path(str(SCRIPT))
+MEDIA_CHECKER = runpy.run_path(str(MEDIA_SCRIPT))
+RAWVIDEO_CONTRACT = "ffmpeg-8.0.1-3ubuntu2-rawvideo-v1"
+CONTRACT_FIELDS = (
+    "id",
+    "host",
+    "ffmpeg_version",
+    "binary_sha256",
+    "buildconf_sha256",
+    "stderr_mode",
+    "input_codec",
+    "decoder",
+    "require_context_addresses",
+    "primary_message",
+    "subordinate_message",
+    "attributes_every_failure",
+    "error_detail",
+    "fixture",
+    "fixture_sha256",
+    "scope",
+)
+EXPECTED_INVENTORY_IDS = {
+    "builder.prepublication_retry",
+    "builder.resumable_part",
+    "builder.live_hls",
+    "builder.live_tv_hls",
+    "process.settings_ffmpeg_version",
+    "process.observed_ffmpeg",
+    "process.fragmented_ffmpeg",
+    "process.live_tv_producer",
+    "process.live_tv_stderr",
+    "process.live_tv_graph_probe",
+    "process.vod_generation",
+    "process.vod_head_regeneration",
+    "process.vod_pipe_consumer",
+    "process.pgs_demux",
+    "process.fragment_index",
+    "process.progressive_remux",
+    "process.subtitle_extract",
+    "process.subtitle_window",
+    "process.pipe_probe",
+    "process.ffmpeg_engine_identity",
+    "process.ffmpeg_capability_query",
+    "process.dovi_reshape_graph_probe",
+    "process.dovi_passthrough_probe",
+    "process.hdr10_passthrough_probe",
+    "process.hdr10_qsv_probe",
+    "process.dovi_qsv_probe",
+    "process.dovi_pixel_probe",
+    "process.pacing_probe",
+    "process.media_origin_probe",
+    "process.chapter_probe",
+    "process.dv_disk_capability",
+    "process.dv_disk_media_probe",
+    "process.dv_disk_unbound_conversion",
+    "process.dv_disk_bound_conversion",
+    "renderer.candidates",
+    "renderer.live_tv_filter",
+    "renderer.pairing",
+    "renderer.residency",
+    "renderer.dynamic_range",
+    "renderer.decode_arguments",
+    "renderer.device_initialization",
+    "renderer.filters",
+    "renderer.software_requirement",
+    "renderer.session_selection",
+    "renderer.output_grade",
+    "renderer.fallback",
+    "renderer.declined",
+    "cache.shared_mount_io",
+    "cache.shared_root_identity",
+    "cache.shared_root_admission",
+    "cache.local_publish",
+    "cache.manifest_publish",
+    "cache.manifest_capability_publish",
+    "cache.shared_publish",
+    "cache.location_read",
+    "cache.local_location_read",
+    "cache.speculative_hit",
+    "cache.offer_verification",
+    "cache.shared_read_prepare",
+    "cache.session_serve",
+    "cache.playlist_read",
+    "cache.object_read",
+    "cache.decoded_manifest",
+    "offline.prepare",
+    "offline.publish_ready",
+    "offline.generation_cache",
+    "offline.location_validation",
+    "offline.playlist",
+    "offline.segment",
+    "client.web_actions",
+    "client.live_tv_web",
+    "client.apple_actions",
+    "client.android_actions",
+}
+
+
+def write_bound_contract(
+    path: Path,
+    fixture: Path,
+    *,
+    overrides: dict[str, object] | None = None,
+    omit: set[str] | None = None,
+) -> None:
+    with (FIXTURES / "diagnostic-contracts.toml").open("rb") as document:
+        contracts = tomllib.load(document)["contracts"]
+    # By id, not by position: the table has more than one entry now, and
+    # reordering it must not silently rebind every provenance test to a
+    # different build.
+    (contract,) = [
+        entry for entry in contracts if entry["id"] == RAWVIDEO_CONTRACT
+    ]
+    contract["fixture"] = fixture.name
+    contract["fixture_sha256"] = hashlib.sha256(fixture.read_bytes()).hexdigest()
+    contract.update(overrides or {})
+    omitted = omit or set()
+    lines = ["version = 2", "", "[[contracts]]"]
+    for field in CONTRACT_FIELDS:
+        if field in omitted:
+            continue
+        value = contract[field]
+        lines.append(
+            f"{field} = "
+            + (str(value).lower() if isinstance(value, bool) else json.dumps(value))
+        )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+class DecoderDiagnosticQualificationTests(unittest.TestCase):
+    def test_qualified_ffmpeg_8_shape_latches_fifth_record_in_361_ms(self) -> None:
+        result = CHECKER["qualify"](
+            FIXTURES / "qualified-ffmpeg-8.stderr",
+            contract_id=RAWVIDEO_CONTRACT,
+        )
+
+        self.assertEqual(result.primary_video_error_records, 5)
+        self.assertEqual(result.severity_qualified_primary_records, 5)
+        self.assertEqual(result.contract_qualified_primary_records, 5)
+        self.assertEqual(result.fault_at_ms, 361)
+        self.assertEqual(result.detection_latency_ms, 361)
+        self.assertTrue(result.observation_complete)
+        self.assertTrue(result.automatic_action_qualified)
+
+    def test_structural_match_without_exact_contract_is_observation_only(self) -> None:
+        fixture = FIXTURES / "qualified-ffmpeg-8.stderr"
+        without_contract = CHECKER["qualify"](fixture)
+
+        self.assertEqual(without_contract.primary_video_error_records, 5)
+        self.assertEqual(without_contract.contract_qualified_primary_records, 0)
+        self.assertFalse(without_contract.automatic_action_qualified)
+
+    def test_contract_rejects_addressless_codec_or_detail_mismatch(self) -> None:
+        cases = {
+            "addressless": (
+                "[vist#0:0/rawvideo] [dec:rawvideo] [error] "
+                "Error submitting packet to decoder: invalid data"
+            ),
+            "different-codec": (
+                "[vist#0:0/h264 @ <address>] [dec:h264 @ <address>] [error] "
+                "Error submitting packet to decoder: invalid data"
+            ),
+            "different-detail": (
+                "[vist#0:0/rawvideo @ <address>] "
+                "[dec:rawvideo @ <address>] [error] "
+                "Error submitting packet to decoder: arbitrary failure"
+            ),
+        }
+        contract = CHECKER["action_contract"](RAWVIDEO_CONTRACT)
+        for name, primary in cases.items():
+            with self.subTest(case=name):
+                match = CHECKER["primary_video_error"](
+                    {"primary_message": "Error submitting packet to decoder:"}
+                ).fullmatch(primary)
+                self.assertIsNotNone(match)
+                self.assertFalse(CHECKER["matches_action_contract"](match, contract))
+
+    def test_contract_rejects_unbound_copy_of_qualified_records(self) -> None:
+        source = FIXTURES / "qualified-ffmpeg-8.stderr"
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory) / source.name
+            fixture.write_bytes(source.read_bytes() + b"# changed evidence\n")
+            result = CHECKER["qualify"](
+                fixture,
+                contract_id=RAWVIDEO_CONTRACT,
+            )
+
+        self.assertEqual(result.primary_video_error_records, 5)
+        self.assertEqual(result.contract_qualified_primary_records, 0)
+        self.assertFalse(result.automatic_action_qualified)
+
+    def test_legacy_issue_capture_is_diagnostic_but_not_action_qualified(self) -> None:
+        result = CHECKER["qualify"](FIXTURES / "issue-913-legacy.stderr")
+
+        self.assertEqual(result.primary_video_error_records, 5)
+        self.assertEqual(result.severity_qualified_primary_records, 0)
+        self.assertEqual(result.selected_primary_repeat_summaries, 2)
+        self.assertEqual(result.selected_primary_repeated_messages, 49)
+        self.assertEqual(result.detection_latency_ms, 361)
+        self.assertFalse(result.automatic_action_qualified)
+
+    def test_deployed_ffmpeg_5_shape_remains_unqualified(self) -> None:
+        result = CHECKER["qualify"](FIXTURES / "unqualified-ffmpeg-5.stderr")
+
+        self.assertEqual(result.primary_video_error_records, 0)
+        self.assertIsNone(result.fault_at_ms)
+        self.assertTrue(result.observation_complete)
+        self.assertFalse(result.automatic_action_qualified)
+
+    def test_tolerant_controls_do_not_latch_or_count_other_stages(self) -> None:
+        result = CHECKER["qualify"](FIXTURES / "tolerant-controls.stderr")
+
+        self.assertEqual(result.primary_video_error_records, 5)
+        self.assertEqual(result.severity_qualified_primary_records, 5)
+        self.assertEqual(result.subordinate_records, 1)
+        self.assertIsNone(result.fault_at_ms)
+        self.assertFalse(result.automatic_action_qualified)
+
+    def test_selected_stream_attribution_is_exact(self) -> None:
+        result = CHECKER["qualify"](
+            FIXTURES / "tolerant-controls.stderr",
+            (0, 2),
+        )
+
+        self.assertEqual(result.primary_video_error_records, 1)
+        self.assertIsNone(result.fault_at_ms)
+
+    def test_repeat_summaries_retain_only_unambiguous_provenance(self) -> None:
+        result = CHECKER["qualify"](
+            FIXTURES / "repeat-attribution-controls.stderr"
+        )
+
+        self.assertEqual(result.selected_primary_repeat_summaries, 1)
+        self.assertEqual(result.selected_primary_repeated_messages, 6)
+        self.assertEqual(result.unrelated_repeat_summaries, 2)
+        self.assertEqual(result.ambiguous_repeat_summaries, 2)
+
+    def test_repeat_message_count_saturates_at_unsigned_64_bit_maximum(self) -> None:
+        primary = (
+            "[vist#0:0/rawvideo @ <address>] "
+            "[dec:rawvideo @ <address>] [error] "
+            "Error submitting packet to decoder: invalid data"
+        )
+        maximum = CHECKER["MAX_RETAINED_COUNTER"]
+        lines = [
+            f"0\t{primary}",
+            f"1\tLast message repeated {maximum} times",
+            f"2\t{primary}",
+            f"3\tLast message repeated {maximum + 1} times",
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory) / "saturating-repeat.stderr"
+            fixture.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            result = CHECKER["qualify"](fixture)
+
+        self.assertEqual(result.selected_primary_repeat_summaries, 2)
+        self.assertEqual(result.selected_primary_repeated_messages, maximum)
+        self.assertTrue(result.observation_complete)
+
+    def test_any_repeat_summary_blocks_action_even_when_unrelated(self) -> None:
+        primary = (
+            "[vist#0:0/rawvideo @ <address>] "
+            "[dec:rawvideo @ <address>] [error] "
+            "Error submitting packet to decoder: "
+            "Invalid data found when processing input"
+        )
+        audio = (
+            "[aist#0:1/aac @ <address>] [dec:aac @ <address>] [error] "
+            "Error submitting packet to decoder: invalid data"
+        )
+        lines = [f"0\t{audio}", "1\t[error] Last message repeated 3 times"]
+        lines.extend(f"{observed}\t{primary}" for observed in range(10, 15))
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory) / "qualified-repeat.stderr"
+            fixture.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            contract_path = Path(directory) / "contracts.toml"
+            write_bound_contract(contract_path, fixture)
+            checker_globals = CHECKER["qualify"].__globals__
+            original_contracts_path = checker_globals["CONTRACTS_PATH"]
+            checker_globals["CONTRACTS_PATH"] = contract_path
+            try:
+                result = CHECKER["qualify"](
+                    fixture,
+                    contract_id=RAWVIDEO_CONTRACT,
+                )
+            finally:
+                checker_globals["CONTRACTS_PATH"] = original_contracts_path
+
+        self.assertEqual(result.unrelated_repeat_summaries, 1)
+        self.assertEqual(result.contract_qualified_primary_records, 5)
+        self.assertIsNotNone(result.fault_at_ms)
+        self.assertFalse(result.automatic_action_qualified)
+
+    def test_contract_rejects_incomplete_or_mismatched_build_provenance(self) -> None:
+        fixture = FIXTURES / "qualified-ffmpeg-8.stderr"
+        cases = {
+            "missing-version": ({}, {"ffmpeg_version"}),
+            "wrong-version": ({"ffmpeg_version": "8.0.2"}, set()),
+            "wrong-binary": ({"binary_sha256": "0" * 64}, set()),
+            "wrong-build": ({"buildconf_sha256": "1" * 64}, set()),
+            "wrong-mode": ({"stderr_mode": "level+error"}, set()),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            checker_globals = CHECKER["action_contract"].__globals__
+            original_contracts_path = checker_globals["CONTRACTS_PATH"]
+            try:
+                for name, (overrides, omit) in cases.items():
+                    contract_path = Path(directory) / f"{name}.toml"
+                    write_bound_contract(
+                        contract_path,
+                        fixture,
+                        overrides=overrides,
+                        omit=omit,
+                    )
+                    checker_globals["CONTRACTS_PATH"] = contract_path
+                    with self.subTest(case=name):
+                        with self.assertRaises(CHECKER["QualificationError"]):
+                            CHECKER["action_contract"](RAWVIDEO_CONTRACT)
+            finally:
+                checker_globals["CONTRACTS_PATH"] = original_contracts_path
+
+    def test_latency_starts_with_triggering_window_not_stale_error(self) -> None:
+        primary = (
+            "[vist#0:0/h264 @ <address>] [dec:h264 @ <address>] [error] "
+            "Error submitting packet to decoder: corrupt input packet"
+        )
+        lines = [f"0\t{primary}"] + [
+            f"{observed}\t{primary}"
+            for observed in (10_000, 10_010, 10_020, 10_030, 10_040)
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory) / "stale.stderr"
+            fixture.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            result = CHECKER["qualify"](fixture)
+
+        self.assertEqual(result.first_primary_at_ms, 0)
+        self.assertEqual(result.triggering_window_started_at_ms, 10_000)
+        self.assertEqual(result.fault_at_ms, 10_040)
+        self.assertEqual(result.detection_latency_ms, 40)
+
+    def test_coverage_loss_is_bounded_drained_and_never_action_qualified(self) -> None:
+        primary = (
+            b"[vist#0:0/h264 @ <address>] [dec:h264 @ <address>] [error] "
+            b"Error submitting packet to decoder: corrupt input packet"
+        )
+        records = b"".join(
+            str(observed).encode("ascii") + b"\t" + primary + b"\n"
+            for observed in range(5)
+        )
+        cases = {
+            "oversized": (
+                b"0\t"
+                + b"x" * (CHECKER["MAX_DIAGNOSTIC_LINE_BYTES"] + 1)
+                + b"\n"
+            ),
+            "invalid-utf8": b"0\tbad-utf8-\xff\n",
+            "giant-comment": (
+                b"#" + b"x" * CHECKER["MAX_FIXTURE_RECORD_BYTES"] + b"\n"
+            ),
+        }
+        results = {}
+        with tempfile.TemporaryDirectory() as directory:
+            for name, prefix in cases.items():
+                fixture = Path(directory) / f"{name}.stderr"
+                fixture.write_bytes(prefix + records)
+                results[name] = CHECKER["qualify"](fixture)
+
+        for name, result in results.items():
+            with self.subTest(case=name):
+                self.assertEqual(result.primary_video_error_records, 5)
+                self.assertEqual(result.fault_at_ms, 4)
+                self.assertFalse(result.observation_complete)
+                self.assertFalse(result.automatic_action_qualified)
+        self.assertEqual(results["oversized"].oversized_lines, 1)
+        self.assertEqual(results["invalid-utf8"].invalid_utf8_lines, 1)
+        self.assertEqual(results["giant-comment"].oversized_lines, 1)
+
+    def test_many_lines_do_not_require_retaining_the_fixture(self) -> None:
+        audio = (
+            b"[aist#0:1/aac @ <address>] [dec:aac @ <address>] [error] "
+            b"Error submitting packet to decoder: invalid data"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory) / "many.stderr"
+            with fixture.open("wb") as output:
+                for observed in range(20_000):
+                    output.write(
+                        str(observed).encode("ascii") + b"\t" + audio + b"\n"
+                    )
+            result = CHECKER["qualify"](fixture)
+
+        self.assertEqual(result.primary_video_error_records, 0)
+        self.assertTrue(result.observation_complete)
+
+    def test_exact_line_limit_is_accepted_and_repeat_count_is_bounded(self) -> None:
+        prefix = b"0\t"
+        exact = prefix + b"x" * CHECKER["MAX_DIAGNOSTIC_LINE_BYTES"] + b"\n"
+        huge_repeat = (
+            b"1\tLast message repeated "
+            + b"9" * 21
+            + b" times\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory) / "bounds.stderr"
+            fixture.write_bytes(exact + huge_repeat)
+            result = CHECKER["qualify"](fixture)
+
+        self.assertEqual(result.oversized_lines, 0)
+        self.assertEqual(result.malformed_lines, 1)
+        self.assertFalse(result.observation_complete)
+
+    def test_retained_fixtures_contain_no_incident_identity(self) -> None:
+        for fixture in FIXTURES.glob("*.stderr"):
+            text = fixture.read_text(encoding="utf-8")
+            with self.subTest(fixture=fixture.name):
+                self.assertNotIn("session=", text)
+                self.assertNotRegex(text, r"@ 0x[0-9a-fA-F]+")
+                self.assertNotIn("/media/", text)
+
+
+class DecoderSelectionInventoryTests(unittest.TestCase):
+    def inventory(self) -> list[dict[str, str]]:
+        path = ROOT / "tests/playback/decoder-selection-m0-inventory.toml"
+        with path.open("rb") as document:
+            inventory = tomllib.load(document)
+        self.assertEqual(inventory["version"], 1)
+        return inventory["surfaces"]
+
+    def test_every_inventory_anchor_exists_and_identifiers_are_unique(self) -> None:
+        surfaces = self.inventory()
+        identifiers = [surface["id"] for surface in surfaces]
+        self.assertEqual(len(identifiers), len(set(identifiers)))
+        self.assertEqual(set(identifiers), EXPECTED_INVENTORY_IDS)
+        self.assertEqual(len(surfaces), 73)
+        for surface in surfaces:
+            with self.subTest(surface=surface["id"]):
+                source = ROOT / surface["source"]
+                self.assertTrue(source.is_file())
+                self.assertEqual(
+                    source.read_text(encoding="utf-8").count(surface["anchor"]),
+                    1,
+                    f'{surface["id"]} must name one exact source anchor',
+                )
+                self.assertTrue(surface["obligation"])
+
+    def test_every_shipping_hls_builder_is_in_the_m0_inventory(self) -> None:
+        transcode = (ROOT / "crates/plurxd/src/transcode.rs").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(
+            transcode.count("transcode::hls_args("),
+            3,
+            "update the M0 inventory when a shipping HLS builder is added or migrated",
+        )
+        live_tv = (ROOT / "crates/plurxd/src/live_tv.rs").read_text(
+            encoding="utf-8"
+        ).split("#[cfg(test)]", 1)[0]
+        self.assertEqual(
+            live_tv.count("tokio::process::Command::new("),
+            2,
+            "inventory every direct shipping Live TV FFmpeg command",
+        )
+        for anchor in (
+            "fn live_ffmpeg_command(",
+            "fn spawn_live_ffmpeg(",
+            "fn live_video_filter(",
+            "async fn capture_live_stderr(",
+            "async fn run_graph_probe(\n    ffmpeg: &str,",
+        ):
+            self.assertEqual(
+                live_tv.count(anchor),
+                1,
+                f"Live TV decoder surface moved or multiplied: {anchor}",
+            )
+        builders = {
+            surface["id"]
+            for surface in self.inventory()
+            if surface["kind"] == "hls_builder"
+        }
+        self.assertEqual(
+            builders,
+            {
+                "builder.prepublication_retry",
+                "builder.resumable_part",
+                "builder.live_hls",
+                "builder.live_tv_hls",
+            },
+        )
+
+        status = (
+            ROOT / "docs/DECODER_SELECTION_RECOVERY_STATUS.md"
+        ).read_text(encoding="utf-8")
+        for owner in (
+            "PrepublicationTranscodeRetry::build",
+            "ProducerRunner::produce_into",
+            "Manager::start_with_audio_offset",
+            "live_ffmpeg_command",
+        ):
+            self.assertIn(owner, status)
+
+    def test_inventory_freezes_each_cross_cutting_contract_class(self) -> None:
+        kinds = {surface["kind"] for surface in self.inventory()}
+        self.assertTrue(
+            {
+                "process_owner",
+                "process_consumer",
+                "support_process",
+                "renderer_contract",
+                "cache_write",
+                "cache_lookup",
+                "cache_serve",
+                "offline_owner",
+                "offline_lookup",
+                "offline_serve",
+                "client_capability",
+            }.issubset(kinds)
+        )
+
+    def test_fleet_provenance_is_retained_without_claiming_qualification(self) -> None:
+        path = FIXTURES / "fleet-ffmpeg-2026-09-05.toml"
+        with path.open("rb") as document:
+            fleet = tomllib.load(document)
+
+        self.assertEqual(fleet["qualification"], "advertised-only")
+        self.assertEqual(set(fleet["capture"]), {
+            "host_binary_sha256",
+            "host_buildconf_sha256",
+            "container_binary_sha256",
+            "container_buildconf_sha256",
+            "container_decoder_inventory_sha256",
+            "container_hwaccels_sha256",
+            "container_image_id",
+            "canonicalization",
+        })
+        nodes = {node["name"]: node for node in fleet["nodes"]}
+        self.assertEqual(set(nodes), {"nynuc", "m6", "nuc4", "nuc3"})
+        for name, node in nodes.items():
+            with self.subTest(node=name):
+                for field in (
+                    "container_binary_sha256",
+                    "container_buildconf_sha256",
+                    "container_decoder_inventory_sha256",
+                    "container_hwaccels_sha256",
+                ):
+                    self.assertRegex(node[field], r"^[0-9a-f]{64}$")
+                self.assertRegex(node["container_image_id"], r"^sha256:[0-9a-f]{64}$")
+                self.assertEqual(
+                    node["advertised_hwaccels"],
+                    ["vdpau", "cuda", "vaapi", "qsv", "drm", "opencl", "vulkan"],
+                )
+                if node["host_ffmpeg"] != "not-on-PATH":
+                    self.assertRegex(node["host_binary_sha256"], r"^[0-9a-f]{64}$")
+                    self.assertRegex(node["host_buildconf_sha256"], r"^[0-9a-f]{64}$")
+
+    def test_diagnostic_contract_is_versioned_and_bound_to_one_binary(self) -> None:
+        path = FIXTURES / "diagnostic-contracts.toml"
+        with path.open("rb") as document:
+            contracts = tomllib.load(document)
+
+        self.assertEqual(contracts["version"], 2)
+        self.assertEqual(len(contracts["contracts"]), 2)
+        contract = contracts["contracts"][0]
+        # `subordinate_message` is the one optional field: a build that prints
+        # no detail line omits it rather than spelling it as an empty prefix,
+        # which would match every line ever printed.
+        self.assertLessEqual(set(contract), set(CONTRACT_FIELDS))
+        self.assertLessEqual(
+            set(CONTRACT_FIELDS) - {"subordinate_message"}, set(contract)
+        )
+        self.assertEqual(contract["id"], RAWVIDEO_CONTRACT)
+        self.assertEqual(contract["host"], "nynuc")
+        self.assertEqual(len(contract["binary_sha256"]), 64)
+        self.assertEqual(len(contract["buildconf_sha256"]), 64)
+        fixture = FIXTURES / contract["fixture"]
+        self.assertEqual(
+            hashlib.sha256(fixture.read_bytes()).hexdigest(),
+            contract["fixture_sha256"],
+        )
+        self.assertEqual(
+            contract["error_detail"],
+            "Invalid data found when processing input",
+        )
+        self.assertIn("not deployed producer", contract["scope"])
+
+        # The wording that opens a primary record is the build's, not this
+        # repository's. FFmpeg 9 contains no `Error submitting packet to
+        # decoder` string at all, so a grammar carrying FFmpeg 8's wording
+        # matches nothing on it — and a grammar that matches nothing reports
+        # every stream as clean.
+        self.assertEqual(
+            contract["primary_message"], "Error submitting packet to decoder:"
+        )
+        self.assertEqual(contract["subordinate_message"], "No frame decoded?")
+        self.assertTrue(contract["attributes_every_failure"])
+
+        ffmpeg9 = contracts["contracts"][1]
+        self.assertEqual(ffmpeg9["primary_message"], "Decoding error:")
+        self.assertNotIn("subordinate_message", ffmpeg9)
+        # Measured: however corrupt the input, this build announces the failure
+        # once per decode session, so the five-in-two-seconds rule can never
+        # reach its limit and must not claim it can.
+        self.assertFalse(ffmpeg9["attributes_every_failure"])
+        self.assertEqual(ffmpeg9["input_codec"], "h264")
+        self.assertIn("not a deployed fleet build", ffmpeg9["scope"])
+        fixture9 = FIXTURES / ffmpeg9["fixture"]
+        self.assertEqual(
+            hashlib.sha256(fixture9.read_bytes()).hexdigest(),
+            ffmpeg9["fixture_sha256"],
+        )
+
+    def test_the_ffmpeg_9_capture_counts_but_cannot_act(self) -> None:
+        """The two tiers, on a real build that only supports one of them.
+
+        A structural record refuses a cache artifact. An automatic action needs
+        a window of five, and this build emits one record per decode session
+        however corrupt the input is — so the refusal fires and the action
+        cannot, which is the failure direction that is safe.
+        """
+        result = CHECKER["qualify"](
+            FIXTURES / "qualified-ffmpeg-9.stderr",
+            contract_id="ffmpeg-9.0.1-homebrew-h264-v1",
+        )
+        self.assertEqual(result.primary_video_error_records, 1)
+        self.assertEqual(result.contract_qualified_primary_records, 1)
+        self.assertTrue(result.observation_complete)
+        self.assertFalse(result.automatic_action_qualified)
+        self.assertFalse(result.windowed_action_qualified)
+        self.assertIsNone(result.fault_at_ms)
+
+    def test_an_unqualified_attribution_latches_but_cannot_act(self) -> None:
+        """The harness and the daemon apply one rule, not two.
+
+        The harness is what qualifies a contract before it is retained, so a
+        harness that certified an automatic action for a build on which the
+        daemon refuses to take one would be certifying something that cannot
+        happen. A fabricated five-record replay is the only way to reach this
+        on a build that does not emit five.
+        """
+        record = (
+            "[vist#0:0/h264 @ <address>] [dec:h264 @ <address>] [error] "
+            "Decoding error: Invalid data found when processing input"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory) / "burst.stderr"
+            fixture.write_text(
+                "".join(f"{step * 10}\t{record}\n" for step in range(5)),
+                encoding="utf-8",
+            )
+            contracts = Path(directory) / "contracts.toml"
+            write_bound_contract(
+                contracts,
+                fixture,
+                overrides={
+                    "primary_message": "Decoding error:",
+                    "input_codec": "h264",
+                    "decoder": "h264",
+                    "attributes_every_failure": False,
+                },
+                omit={"subordinate_message"},
+            )
+            checker_globals = CHECKER["qualify"].__globals__
+            original = checker_globals["CONTRACTS_PATH"]
+            checker_globals["CONTRACTS_PATH"] = contracts
+            try:
+                result = CHECKER["qualify"](fixture, contract_id=RAWVIDEO_CONTRACT)
+            finally:
+                checker_globals["CONTRACTS_PATH"] = original
+        # The fault is still seen — refusing to see it would throw away the
+        # strongest thing the observation had to say.
+        self.assertEqual(result.primary_video_error_records, 5)
+        self.assertIsNotNone(result.fault_at_ms)
+        # And the action is still refused, because nobody qualified the rule
+        # against this build's attribution.
+        self.assertFalse(result.windowed_action_qualified)
+        self.assertFalse(result.automatic_action_qualified)
+
+    def test_actual_media_baseline_is_bound_to_generator_and_output_evidence(self) -> None:
+        path = ROOT / "tests/playback/decoder-media-baseline-2026-09-05.toml"
+        with path.open("rb") as document:
+            baseline = tomllib.load(document)
+        generator = ROOT / baseline["generator"]
+
+        self.assertEqual(
+            hashlib.sha256(generator.read_bytes()).hexdigest(),
+            baseline["generator_sha256"],
+        )
+        self.assertFalse(baseline["incident_media_available"])
+        self.assertEqual(
+            {control["id"] for control in baseline["controls"]},
+            {"h264-sdr", "mpeg4-simple-avi", "hevc-main10-hdr10"},
+        )
+        for control in baseline["controls"]:
+            with self.subTest(control=control["id"]):
+                for field in (
+                    "source_sha256",
+                    "playlist_sha256",
+                    "segment_sha256",
+                    "decoded_framemd5_sha256",
+                ):
+                    self.assertRegex(control[field], r"^[0-9a-f]{64}$")
+                self.assertIn("codec_name=", control["source_probe"])
+                self.assertIn("codec_name=", control["output_probe"])
+
+        build = {
+            field: baseline[field]
+            for field in (
+                "ffmpeg_version",
+                "ffmpeg_binary_sha256",
+                "ffmpeg_buildconf_sha256",
+                "generator_sha256",
+            )
+        }
+        controls = [dict(control) for control in baseline["controls"]]
+        MEDIA_CHECKER["verify"](path, build, controls)
+        controls[0]["source_sha256"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "h264-sdr.source_sha256"):
+            MEDIA_CHECKER["verify"](path, build, controls)
+
+    def test_media_probe_rows_are_unambiguous(self) -> None:
+        normalize = MEDIA_CHECKER["normalize_probe_rows"]
+        path = Path("control.mp4")
+        fact = "codec_name=h264|profile=High"
+
+        self.assertEqual(normalize(fact, path), fact)
+        self.assertEqual(normalize(f"{fact}\n\n {fact} \n", path), fact)
+        for output in ("", "\n  \n", f"{fact}\ncodec_name=hevc|profile=Main"):
+            with self.subTest(output=output):
+                with self.assertRaisesRegex(ValueError, "ambiguous video probe"):
+                    normalize(output, path)
+
+
+if __name__ == "__main__":
+    unittest.main()
