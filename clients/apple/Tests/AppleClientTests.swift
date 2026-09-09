@@ -5664,24 +5664,37 @@ final class AppleClientTests: XCTestCase {
         }
     }
 
-    func testDualPlayerPreparationIsDeclaredOnEveryAppleDevice() {
+    func testDualPlayerPreparationFollowsTheAdvisoryDeveloperSwitch() {
         for hevc in [true, false] {
             for av1 in [true, false] {
                 for displayHDR in [true, false] {
-                    let capabilities = Caps.controlCapabilities(
-                        hevc: hevc,
-                        av1: av1,
-                        displayHDR: displayHDR,
-                        dolbyVision: displayHDR && hevc
-                    )
-                    XCTAssertTrue(
-                        capabilities.dualPlayerPreparation,
-                        "hevc=\(hevc) av1=\(av1) hdr=\(displayHDR)"
-                    )
+                    for enabled in [false, true] {
+                        let capabilities = Caps.controlCapabilities(
+                            hevc: hevc,
+                            av1: av1,
+                            displayHDR: displayHDR,
+                            dolbyVision: displayHDR && hevc,
+                            dualPlayerPreparation: enabled
+                        )
+                        XCTAssertEqual(
+                            capabilities.dualPlayerPreparation,
+                            enabled,
+                            "hevc=\(hevc) av1=\(av1) hdr=\(displayHDR) enabled=\(enabled)"
+                        )
+                    }
                 }
             }
         }
-        XCTAssertTrue(Caps.controlCapabilities().dualPlayerPreparation)
+    }
+
+    func testPreparedHandoffEnablementDefaultsOffAndPersists() throws {
+        let suite = "plurx-prepared-handoff-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let fresh = SettingsStore(defaults: defaults)
+        XCTAssertFalse(fresh.preparedHandoffEnabled)
+        fresh.preparedHandoffEnabled = true
+        XCTAssertTrue(SettingsStore(defaults: defaults).preparedHandoffEnabled)
     }
 
     func testAppleCapsDocumentCoversTheProbeMatrixWithoutInventingAHeight() throws {

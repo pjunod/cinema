@@ -1252,8 +1252,8 @@ mod tests {
                 // v44's recovery guards, v45's negative index, v46's attempt
                 // history, v47's request identity, v48's desired-selection
                 // row, v49's pointer fence, v50's terminal-identity index,
-                // v51's producer-recovery ledger, v52's recovery epoch, and
-                // v53's offline recovery fences.
+                // v51's drain deadline, v52's producer-recovery ledger, v53's
+                // recovery epoch, and v54's offline recovery fences.
                 //
                 // Leaving a *column* behind makes the replay fail outright on
                 // an `ADD COLUMN` against a table that already has it.
@@ -1278,6 +1278,8 @@ mod tests {
                  ALTER TABLE offline_packages DROP COLUMN claim_generation;
                  ALTER TABLE media_sessions DROP COLUMN recovery_epoch;
                  DROP TABLE IF EXISTS media_session_producer_recovery;
+                 DROP TRIGGER IF EXISTS media_sessions_drain_ownership_fence_au;
+                 ALTER TABLE media_sessions DROP COLUMN drain_deadline_ms;
                  DROP TRIGGER IF EXISTS media_playback_pointers_desired_fence_ai;
                  DROP TRIGGER IF EXISTS media_playback_pointers_desired_fence_au;
                  ALTER TABLE media_playback_pointers DROP COLUMN desired_revision;
@@ -1365,6 +1367,10 @@ mod tests {
     /// was not extended, and the failure landed on a guard test in a file the
     /// change never touched.
     ///
+    /// Each entry names whatever that migration added, which is not always a
+    /// table: v49 and v51 add a column and a trigger, and a column has to be
+    /// dropped after the triggers that read it or SQLite refuses.
+    ///
     /// So the count is asserted rather than the drops derived. Deriving them
     /// would mean working out which objects a migration created and how to
     /// undo them, which is a down-migration this store deliberately does not
@@ -1374,13 +1380,14 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 9] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 10] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
             "media_playback_desired",
             "desired_revision",
             "analysis_requests_terminal_identity",
+            "drain_deadline_ms",
             "media_session_producer_recovery",
             // Not the bare column name: `recovery_epoch` is also a column of
             // v51's ledger table, so the guard's "some migration after the

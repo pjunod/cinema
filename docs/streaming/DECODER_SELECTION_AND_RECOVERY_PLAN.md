@@ -874,8 +874,9 @@ promise previously delivered corrupt frames can be recalled.
 
 ### 8.5 Offline and speculative production have the same health contract
 
-Wire the observer into every FFmpeg producer, including builds without
-`live-hls-recovery`. Offline jobs use their existing job owner and claim fence,
+Wire the observer into every FFmpeg producer, including the retained live
+engine (which is now unconditionally compiled — the `live-hls-recovery` feature
+this sentence assumed is gone). Offline jobs use their existing job owner and claim fence,
 not the live playback actor, to consume the same typed fault and choose at
 most one frozen alternative for that job. Persist budget consumption with
 the job's existing attempt/claim state so a worker restart does not retry

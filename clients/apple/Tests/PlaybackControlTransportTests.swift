@@ -32,6 +32,14 @@ final class PlaybackControlTransportTests: XCTestCase {
         XCTAssertEqual(value.retryAfterMs, 4_000)
     }
 
+    func testAnInvalidFieldIsCarriedThrough() {
+        let value = failure(
+            400,
+            #"{"code":"invalid_control","invalid_field":"acknowledgement.first_frame_unix_ms"}"#
+        )
+        XCTAssertEqual(value.invalidField, "acknowledgement.first_frame_unix_ms")
+    }
+
     func testAnOwnerChangeCarriesTheNewOwner() {
         let value = failure(409, """
         {"code":"owner_changed","message":"moved",
@@ -54,13 +62,18 @@ final class PlaybackControlTransportTests: XCTestCase {
     }
 
     func testTheClassificationsTheReporterDependsOnRoundTrip() {
-        // These four are the whole retryable set. If a rename on the server
-        // ever breaks one, this is where it shows up rather than in a client
-        // that quietly stopped reporting.
+        // These are the typed outcomes the reporter branches on. If a rename
+        // on the server ever breaks one, this is where it shows up rather than
+        // in a client that quietly stopped reporting.
+        XCTAssertEqual(failure(400, #"{"code":"invalid_control"}"#).code, "invalid_control")
+        XCTAssertEqual(failure(404, #"{"code":"session_gone"}"#).code, "session_gone")
         XCTAssertEqual(failure(425, #"{"code":"owner_transition"}"#).code, "owner_transition")
         XCTAssertEqual(failure(429, #"{"code":"control_rate_limited"}"#).code, "control_rate_limited")
         XCTAssertEqual(failure(503, #"{"code":"control_unavailable"}"#).code, "control_unavailable")
         XCTAssertEqual(failure(409, #"{"code":"owner_changed"}"#).code, "owner_changed")
+        XCTAssertEqual(failure(409, #"{"code":"stale_control"}"#).code, "stale_control")
+        XCTAssertEqual(failure(410, #"{"code":"session_ended"}"#).code, "session_ended")
+        XCTAssertEqual(failure(410, #"{"code":"owner_lost"}"#).code, "owner_lost")
     }
 
     func testAControlPathIsRequiredBeforeAnyRequestIsBuilt() async {

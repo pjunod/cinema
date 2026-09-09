@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["5e1b06e6"]
+points = ["server.api", "playback.pipeline", "web.experience"]
+checks = ["rust-gate", "rust-gate-ci", "web-static", "history-regressions"]
+reason = "`the_shipped_default_answers_a_vod_refusal_with_the_retained_engine` now requires the reason counter to move only for a session that actually started, requires every reason to keep a sample with its HELP and TYPE headers, and requires the family to appear in a real `/metrics` scrape rather than only in the function that builds the exposition — nothing asserted that wiring before, so deleting the interpolation was invisible. It also stops the session it creates, because this binary is CPU-sensitive and a stray encoder has tipped timing-bound tests elsewhere. `developer_readiness_reports_what_it_reads_and_admits_what_it_cannot` asserts the property that survives any sibling test writing the process-global counters: neither retained-engine row may ever answer `met`, one because no counter can prove coverage and the other because the bypass it names is structural rather than empirical. The earlier exact-status and exact-delta assertions passed only on alphabetical dispatch order and would have gone red pointing at the route rather than at the fixture that moved."

@@ -20,8 +20,10 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `75` — native viewer parity across phone, foldable,
-> and TV. Build 75 gives Live TV a programme guide: channel rows say what is on
+> Status: **v0.3.0**, build `76` — native viewer parity across phone, foldable,
+> and TV. Build 76 completes bounded commit → end settlement for prepared
+> replacements and retains the predecessor until final settlement. Build 75
+> gives Live TV a programme guide: channel rows say what is on
 > now with a bar to its end and what is next, a phone or tablet can switch to a
 > half-hour grid, and picture-in-picture keeps playing when the app goes to the
 > background rather than releasing the tuner. Build 74 speaks the M6

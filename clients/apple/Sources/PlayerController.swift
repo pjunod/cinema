@@ -7409,7 +7409,6 @@ extension PlayerController: PreparedSuccessorHost {
         // be worse than reporting nothing: it is the instrument that could not
         // separate a codec change from no change.
         let boundaryMs = max(preparedFilmPositionMs, realPositionMs())
-        let superseded = sessionId
         stopStatusPolling()
         installSeekVideoOutput(on: item)
         #if os(iOS)
@@ -7440,16 +7439,11 @@ extension PlayerController: PreparedSuccessorHost {
         refreshPGSOverlayWindow(at: boundaryMs, force: true)
         ttffMeasurement.rebasePosition(at: realPositionMs())
         let firstFrameUnixMs = await awaitPreparedFirstFrame(boundaryMs: boundaryMs)
-        // The predecessor goes only once its successor is the thing on screen.
-        // Its encoder slot comes back at once rather than at the idle reaper's
-        // convenience — the same order `open()` uses, for the same reason.
-        // Unconditionally: the swap has already happened, so the predecessor
-        // is not what the viewer is watching whether or not a qualifying frame
-        // arrived. Holding its encoder open would spend hardware on a session
-        // nobody can see.
-        if superseded != action.sessionId {
-            await release(session: superseded)
-        }
+        // Do not DELETE the predecessor here. The committed control exchange
+        // is the compare-and-swap that makes this successor authoritative and
+        // starts the predecessor's bounded drain. Ending it first removes the
+        // exact route that CAS is bound to, so even a visibly successful
+        // switch could never settle durably.
         guard let firstFrameUnixMs else { return .switchedWithoutAFrame }
         return .committed(firstFrameUnixMs: firstFrameUnixMs)
     }

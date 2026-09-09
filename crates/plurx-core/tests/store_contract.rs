@@ -429,15 +429,19 @@ const OFFLINE_METHODS: &[&str] = &[
     "offline_package_stats",
     "reset_interrupted_offline_packages",
     "claim_next_offline_package",
+    "offline_package_claim_is_current",
     "requeue_offline_package",
     "set_offline_package_recipe",
-    "advance_offline_package_recipe",
+    "begin_offline_decode_recovery",
+    "install_offline_decode_alternate",
     "update_offline_progress",
     "fail_offline_package",
     "invalidate_ready_offline_package",
     "put_offline_lease",
     "offline_package_for_lease",
     "mark_offline_package_ready",
+    "complete_offline_cache_entry",
+    "disable_offline_packages",
     "delete_offline_package",
     "expire_offline_packages",
     // Node removal (`CLUSTERING-PLAN.md` §6.7). Cluster-only behavior: the
@@ -476,6 +480,7 @@ const FRAGMENT_INDEX_METHODS: &[&str] = &[
 const RENDITION_PLAN_METHODS: &[&str] = &[
     "put_rendition_plan",
     "rendition_plan",
+    "forget_rendition_plan",
     "forget_rendition_plans",
 ];
 const TIMELINE_ANNOTATION_METHODS: &[&str] = &[
@@ -2977,13 +2982,41 @@ async fn media_session_commit_advances_the_exact_expected_pointer_once() {
         assert_eq!(commit.route.state, "active", "{backend}");
         let predecessor_route = commit
             .predecessor
-            .unwrap_or_else(|| panic!("{backend}: commit reports the retired predecessor"));
-        assert_eq!(predecessor_route.state, "ended", "{backend}");
+            .unwrap_or_else(|| panic!("{backend}: commit reports the draining predecessor"));
         assert_eq!(
-            predecessor_route.terminal_reason.as_deref(),
-            Some("superseded"),
-            "{backend}: the same retirement an activation performs, against an \
-             exact named incarnation rather than whatever the pointer held"
+            predecessor_route.state, "active",
+            "{backend}: the predecessor keeps serving the client that has not \
+             finished switching; retiring it here is what the drain replaced"
+        );
+        assert_eq!(
+            predecessor_route.terminal_reason, None,
+            "{backend}: nothing has decided a terminal cause for it yet"
+        );
+
+        // The drain is a fact on the row, not a rule inferred from the
+        // pointer or the lease. The owner reads it from the inventory it
+        // already walks every three seconds.
+        let owned = store
+            .owned_media_sessions("staged-node", 2_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: owner inventory: {error}"));
+        let draining = owned
+            .iter()
+            .find(|lease| lease.incarnation_id == predecessor)
+            .unwrap_or_else(|| {
+                panic!("{backend}: a draining predecessor is still owned and still renewable")
+            });
+        assert_eq!(
+            draining.drain_deadline_ms,
+            Some(3_000 + plurx_core::domain::MEDIA_SESSION_DRAIN_MS),
+            "{backend}: the deadline is the commit's own clock plus the window"
+        );
+        assert!(
+            owned
+                .iter()
+                .all(|lease| lease.incarnation_id == predecessor
+                    || lease.drain_deadline_ms.is_none()),
+            "{backend}: exactly one row is draining, and it is the predecessor"
         );
 
         let current = store
@@ -3015,6 +3048,53 @@ async fn media_session_commit_advances_the_exact_expected_pointer_once() {
         assert_eq!(
             replay.route.updated_at_ms, current.updated_at_ms,
             "{backend}: a replay must not touch the row it reads back"
+        );
+
+        // Nobody may adopt a draining predecessor. Its successor is already
+        // the pointer's current incarnation, so a second node behind it would
+        // be a second node serving a stream the client has been told to leave.
+        let lapsed = 3_000 + plurx_core::domain::MEDIA_SESSION_DRAIN_MS;
+        assert!(
+            store
+                .expired_media_sessions(1_000_000, None, 16)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: takeover inventory: {error}"))
+                .iter()
+                .all(|route| route.incarnation_id != predecessor),
+            "{backend}: a draining predecessor is not work to inherit"
+        );
+
+        // The cross-node backstop. The owner ends its own draining rows on
+        // the tick it already runs; this is what happens when that node
+        // stopped running, and it writes the same cause.
+        store
+            .maintain_media_sessions(lapsed)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: maintenance: {error}"));
+        let drained = store
+            .media_session_route_by_incarnation(predecessor)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: predecessor after the sweep: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the row is ended, not deleted"));
+        assert_eq!(drained.state, "ended", "{backend}");
+        assert_eq!(
+            drained.terminal_reason.as_deref(),
+            Some("superseded"),
+            "{backend}: the cause the successor taking the pointer earned, and \
+             the same one the owner's own end writes"
+        );
+        let successor = store
+            .media_session_route_for_playback(user.id, playback)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: route after the sweep: {error}"))
+            .unwrap_or_else(|| {
+                panic!("{backend}: ending the predecessor must not take the successor's pointer")
+            });
+        assert_eq!(successor.incarnation_id, staged, "{backend}");
+        assert_eq!(
+            successor.state, "active",
+            "{backend}: the successor is not draining, so the same sweep that \
+             ended the predecessor leaves it alone"
         );
     })
     .await;
@@ -3476,6 +3556,47 @@ async fn media_session_commit_atomically_retains_its_control_receipt() {
                 .unwrap_or_else(|error| panic!("{backend}: mismatched replay: {error}"))
                 .is_none(),
             "{backend}: pointer equality cannot replay a different response receipt"
+        );
+
+        // The viewer closes the player during the drain. That is an ordinary
+        // `demand: end`, and on a draining predecessor the daemon answers it
+        // by ending the row rather than by asking for a second receipt: this
+        // session's one receipt slot already holds the commit's, and a write
+        // that lost to it would read back as "not durably committed" — a 503
+        // the client retries twice a second for the rest of the window.
+        //
+        // What the Store has to guarantee for that to be safe is the two
+        // things below: the commit receipt stays exactly as written, and
+        // ending the predecessor leaves the successor's pointer alone.
+        let ended = store
+            .end_media_session(&receipt.session_id, "superseded", 4_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: end the draining predecessor: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the draining predecessor is still endable"));
+        assert_eq!(ended.incarnation_id, predecessor, "{backend}");
+        assert_eq!(
+            ended.terminal_reason.as_deref(),
+            Some("superseded"),
+            "{backend}: the client saying it is done earns the same cause the \
+             deadline would have written"
+        );
+        assert_eq!(
+            store
+                .media_session_terminal_ack(&receipt.session_id, 4_001)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: receipt after the end: {error}")),
+            Some(receipt.clone()),
+            "{backend}: the commit's retained reply survives the terminal that \
+             followed it, because the commit still has to be able to replay"
+        );
+        assert_eq!(
+            store
+                .media_session_route_for_playback(user.id, playback)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: pointer after the end: {error}"))
+                .map(|route| route.incarnation_id),
+            Some(staged.to_owned()),
+            "{backend}: ending the predecessor must not take the successor's pointer"
         );
     })
     .await;
@@ -14255,10 +14376,10 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
     connection
         .execute_batch(
             "PRAGMA foreign_keys = OFF;
-             -- v53's offline recovery fences, v52's recovery epoch, v51's
-             -- durable decoder-recovery ledger, and v50's terminal-identity
-             -- index first, then v49's
-             -- pointer fence: both of its triggers name
+             -- v54's offline recovery fences, v53's recovery epoch, v52's
+             -- durable decoder-recovery ledger, v51's drain deadline, and
+             -- v50's terminal-identity index first, then v49's pointer fence:
+             -- both of its triggers name
              -- `media_playback_desired`, so once that table is gone every
              -- write to `media_playback_pointers` fails with \"no such
              -- table\" instead of anything to do with this fixture. Then
@@ -14274,6 +14395,8 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
              ALTER TABLE offline_packages DROP COLUMN claim_generation;
              ALTER TABLE media_sessions DROP COLUMN recovery_epoch;
              DROP TABLE media_session_producer_recovery;
+             DROP TRIGGER IF EXISTS media_sessions_drain_ownership_fence_au;
+             ALTER TABLE media_sessions DROP COLUMN drain_deadline_ms;
              DROP TRIGGER IF EXISTS media_playback_pointers_desired_fence_ai;
              DROP TRIGGER IF EXISTS media_playback_pointers_desired_fence_au;
              ALTER TABLE media_playback_pointers DROP COLUMN desired_revision;
@@ -16040,12 +16163,10 @@ fn contract_inventory_matches_every_store_method() {
     .copied()
     .collect::<BTreeSet<_>>();
 
-    // 290 at the shared base. Current main adds six credential methods from
-    // cluster recovery and five desired/settings/pointer methods; this effort
-    // adds the durable decoder-recovery ledger's. Both independently reviewed
-    // method sets survive the integration, and the total is read off the
-    // merged trait rather than carried across from either parent.
-    assert_eq!(declared.len(), 305, "review the Store method count");
+    // Both independently reviewed method sets survive this integration. Read
+    // the total from the merged trait rather than carrying either parent's
+    // count across the promotion merge.
+    assert_eq!(declared.len(), 311, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -16358,6 +16479,32 @@ async fn rendition_plan_contract_runs_through_dyn_store() {
             .put_rendition_plan("rk-other", 43, &plan, &identity)
             .await
             .unwrap_or_else(|error| panic!("{backend}: store another file's: {error}"));
+        assert!(
+            store
+                .forget_rendition_plan("rk-720")
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: forget one plan: {error}")),
+            "backend {backend}: the exact plan existed"
+        );
+        assert!(
+            store
+                .rendition_plan("rk", &identity)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: preserve sibling plan: {error}"))
+                .is_some(),
+            "backend {backend}: exact deletion must preserve a sibling plan for the file"
+        );
+        assert!(
+            !store
+                .forget_rendition_plan("rk-720")
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: forget one plan twice: {error}")),
+            "backend {backend}: exact deletion is idempotent"
+        );
+        store
+            .put_rendition_plan("rk-720", 42, &plan, &identity)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: restore the second rendition: {error}"));
         assert_eq!(
             store
                 .forget_rendition_plans(42)

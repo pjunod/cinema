@@ -97,7 +97,12 @@ pub enum Outcome {
 /// Everything a generation needs to know, owned so the task is `'static`.
 pub struct Generation {
     pub plan: SegmentPlan,
-    pub index: FragmentIndex,
+    /// Copy pipes locate their demuxer landing against the indexed source.
+    /// Encoded pipes start on the exact frame grid and have no copy index.
+    pub index: Option<FragmentIndex>,
+    /// Encoded AAC begins before video so its transform/overlap state is
+    /// warm at the cut. Its origin is a film-global 1024-sample boundary.
+    pub encoded_audio_anchor: Option<u64>,
     pub identity: InitIdentity,
     /// Rewrite this generation's Dolby Vision RPUs to Profile 8.1 as its
     /// fragments arrive.
@@ -151,6 +156,7 @@ where
     S: Sink,
 {
     let mut reader = FragmentReader::new();
+    let encoded_entry = generation.start_entry;
     let mut state = GenerationRun {
         generation,
         sink,
@@ -164,6 +170,8 @@ where
         segmenter: None,
         produced_through: None,
         warned_memory: false,
+        encoded_entry,
+        encoded_init: None,
     };
     let mut buf = vec![0u8; READ_CHUNK];
 
@@ -247,6 +255,8 @@ struct GenerationRun<'a, S> {
     segmenter: Option<Segmenter>,
     produced_through: Option<u32>,
     warned_memory: bool,
+    encoded_entry: u32,
+    encoded_init: Option<Init>,
 }
 
 impl<S: Sink> GenerationRun<'_, S> {
@@ -264,6 +274,9 @@ impl<S: Sink> GenerationRun<'_, S> {
         match self.generation.identity.served_init_for(&muxer) {
             Ok(served) => {
                 self.video_id = served.video().map(|video| video.id);
+                if self.generation.index.is_none() {
+                    self.encoded_init = Some(served.clone());
+                }
                 if self.generation.convert_dolby_vision {
                     match crate::dvpipe::Converter::for_init(&served) {
                         Ok(converter) => self.converter = Some(converter),
@@ -298,12 +311,14 @@ impl<S: Sink> GenerationRun<'_, S> {
     }
 
     async fn on_fragment(&mut self, fragment: Fragment, reader_held: usize) -> Result<(), Outcome> {
+        self.validate_encoded_fragment(&fragment)?;
         // Before anything measures it. The landing matcher compares video
         // byte counts against the index, and the index for a converting
         // identity was built from converted fragments — so the count taken
         // here has to be the converted one or the match is against the wrong
         // stream.
         let mut fragment = fragment;
+        self.place_encoded_audio(&mut fragment)?;
         if let Some(converter) = self.converter.as_mut() {
             let before = converter.report().source_profile;
             if let Err(refused) = converter.convert(&mut fragment) {
@@ -348,11 +363,114 @@ impl<S: Sink> GenerationRun<'_, S> {
             // reads only the first `LANDING_WINDOW` values, so more fragments
             // cannot change what it says. A shorter window is only consulted
             // at end of stream, where "the pipe ran out" is itself evidence.
-            if self.observed.len() >= LANDING_WINDOW {
+            if self.observed.len() >= LANDING_WINDOW
+                || (self.generation.index.is_none() && !self.observed.is_empty())
+            {
                 self.engage().await?;
             }
         }
         self.warn_memory(reader_held);
+        Ok(())
+    }
+
+    /// Encoder flags are an instruction, not proof. Refuse off-grid or
+    /// non-random-access output before publishing even the first URI.
+    fn validate_encoded_fragment(&mut self, fragment: &Fragment) -> Result<(), Outcome> {
+        let Some(init) = &self.encoded_init else {
+            return Ok(());
+        };
+        let Some(video) = init.video().and_then(|video| fragment.track(video.id)) else {
+            return Ok(());
+        };
+        let Some(entry) = self.generation.plan.entry(self.encoded_entry) else {
+            return Err(landing_failed(
+                "encoded video exceeded its immutable plan".into(),
+            ));
+        };
+        let origin = self
+            .generation
+            .plan
+            .entry(self.generation.start_entry)
+            .expect("start entry")
+            .start_ticks;
+        if !plurx_core::fmp4::classify(fragment, init).is_clean()
+            || video.base_decode_time != entry.start_ticks - origin
+            || video.duration() != entry.duration_ticks
+            || video.samples().any(|sample| sample.cto != 0)
+        {
+            return Err(landing_failed(format!(
+                "encoded entry {} does not match its clean frame grid: dts {}, duration {}, expected {} + {}",
+                entry.index, video.base_decode_time, video.duration(), entry.start_ticks - origin, entry.duration_ticks,
+            )));
+        }
+        self.encoded_entry += 1;
+        Ok(())
+    }
+
+    fn place_encoded_audio(&self, fragment: &mut Fragment) -> Result<(), Outcome> {
+        use plurx_core::transcode::{VOD_AAC_FRAME_SAMPLES, VOD_AUDIO_RATE};
+        let Some(anchor) = self.generation.encoded_audio_anchor else {
+            return Ok(());
+        };
+        let Some(init) = &self.encoded_init else {
+            return Ok(());
+        };
+        let start = self
+            .generation
+            .plan
+            .entry(self.generation.start_entry)
+            .expect("start entry")
+            .start_ticks;
+        // This is also the common shift Segmenter::following applies from
+        // video's zero tfdt to the film clock. Match its outward rounding.
+        let shift = start
+            .saturating_mul(u64::from(VOD_AUDIO_RATE))
+            .div_ceil(u64::from(self.generation.plan.timescale));
+        let first = shift.div_ceil(VOD_AAC_FRAME_SAMPLES) * VOD_AAC_FRAME_SAMPLES;
+        for track in &mut fragment.tracks {
+            if !init.tracks.iter().any(|item| {
+                item.id == track.track_id && item.kind == plurx_core::fmp4::TrackKind::Audio
+            }) {
+                continue;
+            }
+            if init
+                .tracks
+                .iter()
+                .find(|item| item.id == track.track_id)
+                .is_none_or(|item| item.timescale != VOD_AUDIO_RATE)
+            {
+                return Err(landing_failed(
+                    "encoded AAC did not retain its declared 48kHz clock".into(),
+                ));
+            }
+            let mut absolute = i128::from(anchor) + i128::from(track.base_decode_time)
+                - i128::from(VOD_AAC_FRAME_SAMPLES);
+            for run in &mut track.runs {
+                let mut discard = 0;
+                for sample in &run.samples {
+                    if absolute >= i128::from(first) {
+                        break;
+                    }
+                    absolute += i128::from(sample.duration);
+                    run.data_offset += sample.size as usize;
+                    discard += 1;
+                }
+                run.samples.drain(..discard);
+                if !run.samples.is_empty() {
+                    break;
+                }
+            }
+            if track.sample_count() > 0 {
+                if absolute < i128::from(shift) || absolute % i128::from(VOD_AAC_FRAME_SAMPLES) != 0
+                {
+                    return Err(landing_failed(
+                        "encoded AAC lost its global sample phase".into(),
+                    ));
+                }
+                track.base_decode_time = (absolute - i128::from(shift)) as u64;
+            }
+        }
+        fragment.tracks.retain(|track| track.sample_count() > 0);
         Ok(())
     }
 
@@ -369,18 +487,31 @@ impl<S: Sink> GenerationRun<'_, S> {
             )));
         };
         let entry_start_ticks = entry.start_ticks;
-        let row = match match_landing(&self.generation.index, &self.observed) {
-            Ok(row) => row,
-            Err(error) => return Err(landing_failed(error.to_string())),
-        };
-        // Always forward: `-noaccurate_seek -ss` lands at the RAP at-or-before
-        // the boundary by design. A landing past the entry means the spawner
-        // and the plan disagree about where this generation is.
-        let Some(discards) = discards_to(&self.generation.index, row, entry) else {
-            return Err(landing_failed(format!(
-                "landed at index row {row}, past entry {start_entry} at \
-                 {entry_start_ticks} ticks"
-            )));
+        let discards = if let Some(index) = &self.generation.index {
+            let row = match match_landing(index, &self.observed) {
+                Ok(row) => row,
+                Err(error) => return Err(landing_failed(error.to_string())),
+            };
+            // Copy's demuxer may land before, but never after, the plan RAP.
+            let Some(discards) = discards_to(index, row, entry) else {
+                return Err(landing_failed(format!(
+                    "landed at index row {row}, past entry {start_entry} at \
+                     {entry_start_ticks} ticks"
+                )));
+            };
+            discards
+        } else {
+            if self
+                .served
+                .as_ref()
+                .and_then(Init::video)
+                .is_none_or(|video| video.timescale != self.generation.plan.timescale)
+            {
+                return Err(landing_failed(
+                    "encoded video timescale differs from the plan".into(),
+                ));
+            }
+            0
         };
         // The boundaries this generation will cut on: the plan's VIDEO
         // entries from the start entry onward. Audio-tail entries have no
@@ -955,7 +1086,8 @@ mod tests {
         Generation {
             convert_dolby_vision: false,
             plan: film.plan.clone(),
-            index: film.index.clone(),
+            index: Some(film.index.clone()),
+            encoded_audio_anchor: None,
             identity: film.identity.clone(),
             start_entry,
             policy: film.policy,
@@ -1372,7 +1504,8 @@ mod tests {
         let generation = Generation {
             convert_dolby_vision: false,
             plan: film.plan.clone(),
-            index: film.index.clone(),
+            index: Some(film.index.clone()),
+            encoded_audio_anchor: None,
             identity,
             start_entry: 0,
             policy: film.policy,

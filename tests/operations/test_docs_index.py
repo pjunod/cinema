@@ -31,7 +31,6 @@ UNLISTED_DIRS = {"apple-builds", "evidence", "img", "mockups", "archive/retro-20
 # case-insensitive and CI is not, so a lowercase path can resolve locally and
 # fail on Linux — this list is judged by the Linux answer.
 KNOWN_ABSENT = {
-    "docs/VOD-ENCODING.md",                          # named by streaming/STREAMING-RELIABILITY-HANDOFF.md
     "docs/FRAGMENT-INDEX-QUEUE-REPAIR-HANDOFF.md",   # named by crates/plurx-core/src/store/placeholder_census.rs
     # clients/EBOOK-READER-PLAN.md §M6 names three files in *Curator's* docs/,
     # not this repo's. The path shape is identical, so the sweep sees them.

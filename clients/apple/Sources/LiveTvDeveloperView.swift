@@ -4,6 +4,7 @@ import SwiftUI
 /// generation; enabling is a separate runtime mutation, never a build switch.
 struct LiveTvDeveloperView: View {
     @EnvironmentObject private var model: AppModel
+    @AppStorage("plurx.preparedHandoff") private var preparedHandoffEnabled = false
     @State private var api: LiveTvAPI?
     @State private var saved: LiveTvSettings?
     @State private var readiness: LiveTvReadiness?
@@ -24,6 +25,20 @@ struct LiveTvDeveloperView: View {
 
     var body: some View {
         Form {
+            Section("Prepared quality handoff · advisory enablement") {
+                Toggle("Enable two-player prepared handoff", isOn: $preparedHandoffEnabled)
+                Text("Off by default. This controls whether Apple advertises dual-player preparation. The checks below explain risk; they never disable or override the switch.")
+                Label("Client implementation and first-frame proof: Met", systemImage: "checkmark.circle")
+                Label("Measured Apple cohort: Met", systemImage: "checkmark.circle")
+                Text("iPhone 17 Pro Max and Apple TV 4K (3rd generation) each completed 20 of 20 same-codec and codec/HDR handoffs.")
+                    .font(.caption)
+                Label("Server successor media priming: Not met", systemImage: "exclamationmark.triangle")
+                Text("This server release reserves the staged successor but does not start its media worker before commit, so the client may fall back to the ordinary reopen.")
+                    .font(.caption)
+                Label("Current playback throughput: Checked during playback", systemImage: "questionmark.circle")
+                Text("A live session must report delivered throughput and this device must measure enough download headroom. Settings has no active session to measure.")
+                    .font(.caption)
+            }
             Section("HDHomeRun Live TV · runtime enablement") {
                 Text("Watch unprotected antenna channels from one network tuner. No special build is needed.")
                 Text("Before enabling: finish the HDHomeRun channel scan, reserve a stable private IPv4 address, and choose one reachable, committed tuner-owner node. Keep all serving nodes on a compatible plurx version.")

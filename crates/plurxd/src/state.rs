@@ -646,6 +646,9 @@ pub struct AppState {
     pub node_id: String,
     /// Whether LAN discovery must distinguish this node from cluster peers.
     pub cluster_advertisement: bool,
+    /// Reported by the Developer readiness route; not consulted by any
+    /// recovery path, which reads them from `Config` when it builds the node.
+    pub snapshot_recovery_budgets: crate::state::SnapshotRecoveryBudgets,
     pub artwork_dir: PathBuf,
     /// Shared peer-artwork HTTP client, per-filename singleflight, and global
     /// response-buffer bound for request and background reconciliation paths.
@@ -662,10 +665,6 @@ pub struct AppState {
     /// Where extracted subtitles are kept, keyed by file identity and source
     /// fingerprint — see `http::stream::subtitles_vtt`.
     pub subs_dir: PathBuf,
-    /// Staged rollout gate for the authenticated `pgs-v1` overlay API. The
-    /// daemon only advertises the capability when the same process will serve
-    /// it. Default-off until physical-client acceptance is complete.
-    pub pgs_overlay_enabled: bool,
     pub jobs: Arc<JobManager>,
     pub transcode: Arc<TranscodeManager>,
     pub offline: Arc<OfflineManager>,
@@ -716,6 +715,26 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Whether PGS subtitle tracks are served through the `pgs-v1` overlay.
+    ///
+    /// Read at the request boundary rather than latched at boot, so an
+    /// operator who turns it on in Settings sees the next request honour it.
+    ///
+    /// The store error is propagated rather than answered `false`, and that is
+    /// deliberate. Off is not the safe default here: it is the expensive one.
+    /// A selected PGS track with the overlay off becomes a burn-in, which
+    /// re-encodes the video and drops it to SDR, so one failed read during a
+    /// leader election would silently turn a direct-play HDR remux into a full
+    /// SDR transcode. The handlers that ask this already propagate store
+    /// errors a few lines later, so swallowing it here buys no availability —
+    /// it only substitutes a wrong answer for an honest failure.
+    pub(crate) async fn pgs_overlay_enabled(&self) -> Result<bool, plurx_core::error::StoreError> {
+        Ok(plurx_core::store::stored_switch(
+            self.store.get_setting(keys::PGS_OVERLAY).await?.as_deref(),
+            false,
+        ))
+    }
+
     /// Resolve the operator's bounded forward subtitle span at the request
     /// boundary. A malformed hand-edited row falls back to the 200-second
     /// default; the settings API itself only persists values inside 30–900.
@@ -759,6 +778,7 @@ impl AppState {
                 shared_cache_dir: PathBuf::new(),
                 shared_cache_id: String::new(),
                 catalogue,
+                snapshot_recovery_budgets: SnapshotRecoveryBudgets::default(),
             },
             store,
             dirs,
@@ -791,6 +811,7 @@ impl AppState {
             shared_cache_dir,
             shared_cache_id,
             catalogue,
+            snapshot_recovery_budgets,
         } = config;
         let serving = crate::serving_fence::ServingFence::new(replication.metrics_handle());
         let Dirs {
@@ -912,18 +933,13 @@ impl AppState {
             server_name,
             node_id,
             cluster_advertisement,
+            snapshot_recovery_budgets,
             artwork_dir,
             artwork_fetch: crate::http::images::ArtworkCoordinator::new(),
             cache_dir,
             runtime_cache_dir: runtime_cache,
             shared_cache,
             subs_dir,
-            pgs_overlay_enabled: std::env::var("PLURX_PGS_OVERLAY").is_ok_and(|value| {
-                matches!(
-                    value.trim().to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes" | "on"
-                )
-            }),
             jobs,
             transcode,
             offline,
@@ -1039,6 +1055,25 @@ impl AppState {
     }
 }
 
+/// What this node has budgeted for one Raft snapshot recovery.
+///
+/// These live in `[cluster]` config and are consumed only when the Hiqlite
+/// node is built, so nothing in the admin surface could report them. The
+/// Developer readiness route needs to say what they actually are — an
+/// operator asked whether the budgets fit their deployment cannot answer that
+/// from a document listing the defaults.
+///
+/// `cluster.trusted_network` was carried here in a first draft and removed:
+/// nothing in the daemon reads it, so printing it beside a row about keeping
+/// the transport off the public Internet would have implied a boundary the
+/// process is not holding.
+#[derive(Clone, Debug, Default)]
+pub struct SnapshotRecoveryBudgets {
+    pub chunk_secs: u64,
+    pub transfer_secs: u64,
+    pub install_secs: u64,
+}
+
 pub struct AppConfig {
     pub server_name: String,
     pub node_id: String,
@@ -1055,6 +1090,7 @@ pub struct AppConfig {
     pub shared_cache_dir: PathBuf,
     pub shared_cache_id: String,
     pub catalogue: CatalogueReader,
+    pub snapshot_recovery_budgets: SnapshotRecoveryBudgets,
 }
 
 /// Status of the most recent (or in-flight) scan for one library.
@@ -6088,7 +6124,14 @@ impl JobManager {
 
         let deadline = std::time::Instant::now() + INDEX_WINDOW;
         let have_dovi = transcode.dv_strippable();
-        let convert = transcode.dv_convertible();
+        // The live answer, not the one this process booted with. The indexer
+        // is what builds the converting identity a Dolby Vision client is
+        // later served, so an operator who turns the conversion on in
+        // Settings and gets a boot-latched `false` here has a switch that
+        // says convert, a decision path that agrees, and nothing that ever
+        // builds the index the player then waits on — forever, and only a
+        // restart heals it.
+        let convert = transcode.dv_convert_enabled().await;
         let runtime_cache = transcode.runtime_cache_dir().to_path_buf();
         let libraries = match self.store.list_libraries().await {
             Ok(libraries) => libraries,
@@ -6424,7 +6467,7 @@ impl JobManager {
                 self.store.as_ref(),
                 &file,
                 transcode.dv_strippable(),
-                transcode.dv_convertible(),
+                transcode.dv_convert_enabled().await,
             )
             .await
             {
@@ -6906,7 +6949,7 @@ impl JobManager {
             self.store.as_ref(),
             &file,
             have_dovi,
-            transcode.dv_convertible(),
+            transcode.dv_convert_enabled().await,
             &request.video_identity,
         )
         .await
@@ -7152,7 +7195,7 @@ impl JobManager {
             engine_sha256: crate::ffmpeg::fragment_index_engine_digest().await,
             cache_root: crate::fragment_index_cluster::cache_root(transcode.runtime_cache_dir()),
             have_dovi: transcode.dv_strippable(),
-            convert_dolby_vision: transcode.dv_convertible(),
+            convert_dolby_vision: transcode.dv_convert_enabled().await,
             retry_policy: self.analysis_retry_policy().await,
         };
         let mut built = 0_usize;

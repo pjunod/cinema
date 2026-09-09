@@ -333,6 +333,19 @@ class PreparedReplacementLedgerTest {
         assertNull(ledger.committed(-1))
         assertTrue(ledger.isLive)
     }
+
+    @Test
+    fun `a switched successor with no frame fails without a commit timestamp`() {
+        val ledger = PreparedReplacementLedger()
+        ledger.offer(prepare())
+        assertTrue(ledger.switched())
+        val failed = assertNotNull(ledger.failedAfterSwitch())
+        assertEquals(AcknowledgementState.FAILED, failed.state)
+        assertNull(failed.firstFrameUnixMs)
+        assertNull(failed.committedMediaOriginMs)
+        assertFalse(ledger.isLive)
+        assertNull(ledger.failedAfterSwitch(), "the terminal settlement is emitted once")
+    }
 }
 
 class PreparedSwitchPointTest {

@@ -215,7 +215,7 @@ Runbook, with the owner-move procedure: [OPERATIONS.md](OPERATIONS.md).
 | `PLURX_CREDENTIAL_KEY_FILE` | `<data_dir>/credentials.key` | Key encrypting the stored Trakt credential — back it up with the database |
 | `PLURX_HLS_CLOSED_CAPTIONS_NONE` | off | Experiment: `CLOSED-CAPTIONS=NONE` on the HLS variant |
 | `PLURX_HLS_FORCED_AUTOSELECT` | off | Experiment: `AUTOSELECT=YES` on forced subtitle renditions |
-| `PLURX_PGS_OVERLAY` | off | Staged authenticated PGS manifest/PNG producer; not a production rollout switch until device acceptance |
+| `PLURX_PGS_OVERLAY` | off | **Seeds a setting; no longer a gate.** The switch is Settings → Developer (`subtitles.pgs_overlay`). Not a production rollout until device acceptance |
 
 The last two are HLS master experiments, not settings: enable **one per
 deploy**, restart, and watch a real Apple TV — the device is the only thing
@@ -240,6 +240,7 @@ the credential it takes, and what comes back.
 | `POST /api/v1/system/search-index/rebuild` | Rebuild the node-local search index (admin) |
 | `/api/v1/keys` | Mint/list/revoke scoped API keys (admin token) |
 | `GET /api/v1/live-tv/channels` | The sanitized tuner lineup; DRM channels are listed and marked unplayable (bearer) |
+| `GET /api/v1/developer/readiness` | What this server can currently see of each Developer enable prerequisite — advisory, gates nothing (**admin**) |
 | `GET /api/v1/live-tv/readiness` | The last readiness verdict, without probing (**admin**) |
 | `POST /api/v1/live-tv/readiness/refresh` | Probe the tuner and report one named check per thing that can be wrong (**admin**) |
 | `POST /api/v1/live-tv/channels/{channel}/sessions` | Start a live session; returns one opaque capability (bearer) |

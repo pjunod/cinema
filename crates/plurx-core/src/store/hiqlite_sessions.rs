@@ -12,7 +12,7 @@ use crate::domain::{
     MediaSessionEnd, MediaSessionPreparationAbortRequest, MediaSessionPreparationCommitRequest,
     MediaSessionProjectionCompletion, MediaSessionRenewal, MediaSessionRequestClaim,
     MediaSessionRoute, MediaSessionTakeover, MediaSessionTakeoverCursor, MediaSessionTerminalAck,
-    OwnedMediaSessionLease, MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS,
+    OwnedMediaSessionLease, MEDIA_SESSION_DRAIN_MS, MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS,
     MEDIA_SESSION_PUBLICATION_BLOCKED,
 };
 use crate::error::StoreError;
@@ -204,7 +204,12 @@ pub(super) const MEDIA_SESSIONS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS media
     media_sequence                INTEGER NOT NULL DEFAULT 0,
     discontinuity_sequence        INTEGER NOT NULL DEFAULT 0,
     updated_at_ms                 INTEGER NOT NULL,
-    recovery_epoch                TEXT NOT NULL DEFAULT ''
+    recovery_epoch                TEXT NOT NULL DEFAULT '',
+    -- When a predecessor being drained on purpose stops being kept. Null means
+    -- not draining, which is what every session starts as. A fresh cluster
+    -- declares it here; an upgrade adds it by `ALTER`, and the migration has
+    -- to ask which of the two it is looking at before it tries.
+    drain_deadline_ms             INTEGER
 ) STRICT";
 
 /// Exact v10 shape used only by the v9 -> v10 migration. Later additive
@@ -284,6 +289,9 @@ pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), Store
         MEDIA_SESSION_TERMINAL_ACKS_EXPIRY_INDEX,
         super::MEDIA_SESSION_PREPARATIONS_SCHEMA,
         super::MEDIA_SESSION_PRODUCER_RECOVERY_SCHEMA,
+        // After the table it guards, and it guards a column the fresh table
+        // above declares.
+        super::MEDIA_SESSION_DRAIN_OWNERSHIP_FENCE_TRIGGER,
         super::MEDIA_PLAYBACK_DESIRED_SCHEMA,
         // Last, because both fence triggers reference the ask table above.
         super::MEDIA_PLAYBACK_POINTER_DESIRED_FENCE_INSERT_TRIGGER,
@@ -300,7 +308,8 @@ pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), Store
 const ROUTE_COLS: &str = "incarnation_id, session_id, user_id, playback_id,
     request_fingerprint, owner_node_id, owner_epoch, lease_expires_at_ms, state, terminal_reason,
     publication_ready_at_ms, recipe_json, response_json, produced_playable_through_ms, fetched_through_ms,
-    media_origin_ms, media_sequence, discontinuity_sequence, updated_at_ms, recovery_epoch";
+    media_origin_ms, media_sequence, discontinuity_sequence, updated_at_ms, recovery_epoch,
+    drain_deadline_ms";
 
 struct RouteRow(MediaSessionRoute);
 
@@ -327,6 +336,7 @@ impl From<&mut Row<'_>> for RouteRow {
             discontinuity_sequence: row.get("discontinuity_sequence"),
             updated_at_ms: row.get("updated_at_ms"),
             recovery_epoch: row.get("recovery_epoch"),
+            drain_deadline_ms: row.get("drain_deadline_ms"),
         })
     }
 }
@@ -908,6 +918,7 @@ impl From<&mut Row<'_>> for OwnedLeaseRow {
             session_id: row.get("session_id"),
             owner_epoch: row.get("owner_epoch"),
             lease_expires_at_ms: row.get("lease_expires_at_ms"),
+            drain_deadline_ms: row.get("drain_deadline_ms"),
         })
     }
 }
@@ -2261,7 +2272,6 @@ impl MediaSessionStore for HiqliteAuthStore {
             }
         }
         let predecessor_incarnation = staged.expected_predecessor_incarnation_id.clone();
-        let lease_resource = format!("session:{predecessor_incarnation}");
         let staged_lease_resource = format!("session:{}", staged.staged_incarnation_id);
         let receipt_session_id = request
             .control_receipt
@@ -2368,40 +2378,32 @@ impl MediaSessionStore for HiqliteAuthStore {
                 ),
             ),
             (
-                "UPDATE media_sessions SET state = 'ended', terminal_reason = 'superseded',
-                        lease_expires_at_ms = $1, publication_ready_at_ms = $2, updated_at_ms = $1
+                // The predecessor is given a deadline, not retired. See the
+                // SQLite twin for why: state, cause, publication readiness,
+                // lease, pins and `job_leases` all stay as they were, so it
+                // keeps renewing and keeps serving a client that has not
+                // finished switching. Its owner ends it on the tick it
+                // already runs; the maintenance sweep is the backstop for an
+                // owner that stops running.
+                //
+                // Still guarded on the pointer naming the successor, like
+                // every other statement in this transaction: the guard makes
+                // the whole set apply or not apply together, which is the
+                // property the two backends are checked against.
+                "UPDATE media_sessions
+                    SET drain_deadline_ms = $1, updated_at_ms = $2
                   WHERE incarnation_id = $3 AND state != 'ended'
+                    AND drain_deadline_ms IS NULL
                     AND EXISTS (SELECT 1 FROM media_playback_pointers
                       WHERE user_id = $4 AND playback_id = $5
                         AND current_incarnation_id = $6)",
                 params!(
+                    now_ms.saturating_add(MEDIA_SESSION_DRAIN_MS),
                     now_ms,
-                    MEDIA_SESSION_PUBLICATION_BLOCKED,
                     predecessor_incarnation.as_str(),
                     user_id,
                     playback_id,
                     staged.staged_incarnation_id.as_str()
-                ),
-            ),
-            (
-                "DELETE FROM cache_consumer_pins
-                  WHERE consumer_kind = 'media_session' AND consumer_id = $1
-                    AND EXISTS (SELECT 1 FROM media_sessions
-                      WHERE incarnation_id = $1 AND state = 'ended' AND updated_at_ms = $2)",
-                params!(predecessor_incarnation.as_str(), now_ms),
-            ),
-            (
-                "UPDATE job_leases
-                    SET expires_at_ms = CASE
-                          WHEN expires_at_ms < $1 THEN expires_at_ms ELSE $1 END,
-                        revision = revision + 1, updated_at_ms = $1
-                  WHERE resource = $2 AND revision < 9223372036854775807
-                    AND EXISTS (SELECT 1 FROM media_sessions
-                      WHERE incarnation_id = $3 AND state = 'ended' AND updated_at_ms = $1)",
-                params!(
-                    now_ms,
-                    lease_resource.as_str(),
-                    predecessor_incarnation.as_str()
                 ),
             ),
             (
@@ -3627,6 +3629,9 @@ impl MediaSessionStore for HiqliteAuthStore {
             "SELECT {ROUTE_COLS} FROM media_sessions
               WHERE state = 'active' AND lease_expires_at_ms <= $1
                 AND publication_ready_at_ms != $2
+                -- A draining predecessor is not work to inherit; the sweep
+                -- ends it. See the SQLite twin.
+                AND drain_deadline_ms IS NULL
                 AND NOT EXISTS (SELECT 1 FROM media_session_requests request
                   WHERE request.user_id = media_sessions.user_id
                     AND request.incarnation_id = media_sessions.incarnation_id
@@ -3682,6 +3687,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                             AND owner_node_id = $6 AND owner_epoch = $7
                             AND state = 'active' AND lease_expires_at_ms <= $4
                             AND publication_ready_at_ms != $10
+                            AND drain_deadline_ms IS NULL
                             AND NOT EXISTS (SELECT 1 FROM media_session_requests request
                               WHERE request.user_id = media_sessions.user_id
                                 AND request.incarnation_id = media_sessions.incarnation_id
@@ -3721,6 +3727,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                       WHERE incarnation_id = $5 AND owner_node_id = $6 AND owner_epoch = $7
                         AND state = 'active' AND lease_expires_at_ms <= $4
                         AND publication_ready_at_ms != $8
+                        AND drain_deadline_ms IS NULL
                         AND NOT EXISTS (SELECT 1 FROM media_session_requests request
                           WHERE request.user_id = media_sessions.user_id
                             AND request.incarnation_id = media_sessions.incarnation_id
@@ -4034,6 +4041,15 @@ impl MediaSessionStore for HiqliteAuthStore {
                 "SELECT 1 AS pending WHERE
                     EXISTS (SELECT 1 FROM media_sessions
                       WHERE state = 'active' AND lease_expires_at_ms <= $1)
+                    -- A lapsed drain is work even when the row's lease is
+                    -- still in the future, which it usually is: a dead owner
+                    -- renewed it up to twelve seconds before it died, and the
+                    -- retirement cutoff above is a minute behind that. Without
+                    -- this the backstop proposes nothing and the row waits for
+                    -- a condition that has nothing to do with draining.
+                    OR EXISTS (SELECT 1 FROM media_sessions
+                      WHERE state = 'active' AND drain_deadline_ms IS NOT NULL
+                        AND drain_deadline_ms <= $2)
                     OR EXISTS (SELECT 1 FROM job_leases lease
                       JOIN media_sessions session
                         ON lease.resource = 'session:' || session.incarnation_id
@@ -4094,6 +4110,24 @@ impl MediaSessionStore for HiqliteAuthStore {
                      WHERE staged.deadline_ms <= $1
                      ORDER BY staged.deadline_ms, staged.staged_incarnation_id LIMIT $3)",
                 params!(now_ms, MEDIA_SESSION_PUBLICATION_BLOCKED, MAINTENANCE_BATCH),
+            ),
+            (
+                // The cross-node backstop for a drain; see the SQLite twin.
+                // Only reached when the owner stopped running, because the
+                // owner ends its own draining rows on its three-second tick.
+                "UPDATE media_sessions SET state = 'ended', terminal_reason = 'superseded',
+                        lease_expires_at_ms = $1, publication_ready_at_ms = $2,
+                        updated_at_ms = $1
+                  WHERE incarnation_id IN (
+                    SELECT incarnation_id FROM media_sessions
+                     WHERE state = 'active' AND drain_deadline_ms IS NOT NULL
+                       AND drain_deadline_ms <= $1
+                     ORDER BY drain_deadline_ms, incarnation_id LIMIT $3)",
+                params!(
+                    now_ms,
+                    MEDIA_SESSION_PUBLICATION_BLOCKED,
+                    MAINTENANCE_BATCH
+                ),
             ),
             (
                 "UPDATE media_sessions SET state = 'ended', terminal_reason = 'replaced', lease_expires_at_ms = $1,
@@ -4245,7 +4279,8 @@ impl MediaSessionStore for HiqliteAuthStore {
         Ok(self
             .client()
             .query_consistent_map::<OwnedLeaseRow, _>(
-                "SELECT incarnation_id, session_id, owner_epoch, lease_expires_at_ms
+                "SELECT incarnation_id, session_id, owner_epoch, lease_expires_at_ms,
+                        drain_deadline_ms
                    FROM media_sessions
                   WHERE owner_node_id = $1 AND state = 'active'
                     AND lease_expires_at_ms > $2

@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["08c30a9e"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "The encoded-VOD restart regressions fetch real init and media bytes after forward and backward seeks for NTSC, VFR, manually corrected audio, text subtitles, and bitmap subtitles. Each decodes the first destination frame and rejects an opening-frame restart whose timestamps were merely relabeled; the Store contract separately keeps the prepared-successor census in the complete Store method inventory. Restoring start_at_zero makes all five real-media restart cases fail at their destination-pixel assertion."

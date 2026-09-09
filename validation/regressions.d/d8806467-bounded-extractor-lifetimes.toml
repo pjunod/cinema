@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["d8806467"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "bounded_output_reaps_the_child_when_the_destination_cannot_be_created drives the production BoundedDiagnosticChild owner through create_new failure while an unbounded shell writer fills both pipes, requires the original AlreadyExists error, and then requires the owner's confirmed-reap signal. bounded_output_kills_and_reaps_at_the_physical_disk_cap covers the sibling oversize path and exact on-disk ceiling. The rolling-producer ownership inventory records that stderr is joined in the same cancellation scope rather than detached, the piped child remains kill-on-drop, every daemon-I/O error start-kills the exact process, and normal and error completion await its wait before returning. Restoring the spawned diagnostic task or either early question-mark return makes the new regression time out or return before the reap receipt."

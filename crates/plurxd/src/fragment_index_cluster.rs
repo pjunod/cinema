@@ -163,6 +163,17 @@ pub(crate) struct SourceFence {
 }
 
 impl SourceFence {
+    pub(crate) fn object_version(&self) -> &str {
+        &self.object_version
+    }
+
+    /// A second demuxer needs an independent file description: on macOS,
+    /// opening /dev/fd/N duplicates its seek offset, unlike Linux procfs.
+    /// Reopen by name only after checking the complete held object identity.
+    pub(crate) async fn reopen(&self, file: &MediaFile) -> Result<Self, String> {
+        open_source_fence(file, Some(&self.object_version)).await
+    }
+
     pub(crate) fn unchanged(&self) -> bool {
         self.drift().is_none()
     }

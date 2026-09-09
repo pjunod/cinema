@@ -748,6 +748,7 @@ const TABLES: &[TablePlan] = &[
             "media_sequence",
             "discontinuity_sequence",
             "updated_at_ms",
+            "drain_deadline_ms",
         ],
         order_by: "incarnation_id",
         minimum_schema: 25,
@@ -2232,6 +2233,15 @@ fn value_projection(table: TablePlan, schema_version: i64, qualify: bool) -> Str
                 && schema_version < 35
             {
                 "0".to_owned()
+            } else if table.name == "media_sessions"
+                && *column == "drain_deadline_ms"
+                && schema_version < 50
+            {
+                // A source from before the column has no draining session to
+                // describe, and null is what "not draining" is spelled as
+                // everywhere else. Zero would be a deadline in 1970 that every
+                // reader would then have to except.
+                "NULL".to_owned()
             } else if table.name == "files"
                 && matches!(
                     *column,
@@ -2276,7 +2286,7 @@ fn value_projection(table: TablePlan, schema_version: i64, qualify: bool) -> Str
                     *column,
                     "claim_generation" | "decoder_recovery_state" | "alternate_recipe_hash"
                 )
-                && schema_version < 53
+                && schema_version < 54
             {
                 match *column {
                     "claim_generation" => "0".to_owned(),
@@ -2313,7 +2323,7 @@ fn value_projection(table: TablePlan, schema_version: i64, qualify: bool) -> Str
                 }
             } else if table.name == "transcode_cache_locations"
                 && *column == "publication_generation"
-                && schema_version < 53
+                && schema_version < 54
             {
                 "0".to_owned()
             } else if qualify {
@@ -2547,16 +2557,16 @@ mod tests {
     }
 
     #[test]
-    fn pre_v53_offline_projection_supplies_unspent_recovery_claim() {
+    fn pre_v54_offline_projection_supplies_unspent_recovery_claim() {
         let table = TABLES
             .iter()
             .find(|table| table.name == "offline_packages")
             .copied()
             .expect("offline package plan");
-        let v52 = value_projection(table, 52, false);
+        let v53 = value_projection(table, 53, false);
         let current = value_projection(table, SQLITE_SCHEMA_VERSION, false);
         assert!(
-            v52.contains("recipe_hash, 0, 'primary', NULL, effective_rate_control, target_height")
+            v53.contains("recipe_hash, 0, 'primary', NULL, effective_rate_control, target_height")
         );
         assert!(current.contains(
             "recipe_hash, claim_generation, decoder_recovery_state, alternate_recipe_hash, effective_rate_control, target_height"
@@ -2919,7 +2929,7 @@ mod tests {
                 .await
                 .expect("read source import chunk");
             assert_eq!(rows.len(), 1);
-            assert_eq!(rows[0].len(), 19, "media session import parameter count");
+            assert_eq!(rows[0].len(), 20, "media session import parameter count");
             let expected_terminal = if schema_version < 34 {
                 Param::Null
             } else {
@@ -2952,6 +2962,11 @@ mod tests {
                     Param::Integer(4),
                     Param::Integer(5),
                     Param::Integer(9_000),
+                    // v51's drain deadline. No legacy source has the column,
+                    // and null is what "not draining" means on every row it
+                    // migrates onto, so the import projects it rather than
+                    // inventing a deadline in 1970.
+                    Param::Null,
                 ],
                 "schema v{schema_version} import row",
             );

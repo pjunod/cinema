@@ -409,7 +409,7 @@ impl PartialEq for HwSlot {
 
 /// The node's hardware budget, and what it has learned about how fast things
 /// actually run here.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Admissions {
     permits: Arc<Mutex<PermitState>>,
     /// Encoder threads the software pool has handed out. Software transcodes
@@ -421,7 +421,7 @@ pub struct Admissions {
     /// Recent speed, by class of work — see [`class_of`]. Learned from real
     /// sessions rather than configured, because the answer depends on the box
     /// and no default could be right for both a NUC and a Xeon.
-    measured: Mutex<HashMap<String, f64>>,
+    measured: Arc<Mutex<HashMap<String, f64>>>,
 }
 
 impl Default for Admissions {
@@ -438,7 +438,7 @@ impl Admissions {
                 permits: Arc::clone(&permits),
             },
             permits,
-            measured: Mutex::new(HashMap::new()),
+            measured: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 

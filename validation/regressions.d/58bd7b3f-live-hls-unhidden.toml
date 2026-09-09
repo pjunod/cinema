@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["58bd7b3f"]
+points = ["server.api", "playback.pipeline", "web.experience"]
+checks = ["rust-gate", "rust-gate-ci", "web-static", "history-regressions"]
+reason = "`the_shipped_default_answers_a_vod_refusal_with_the_retained_engine` runs the policy the fleet actually has: with `playback.vod_live_recovery` absent, a typed VOD prerequisite refusal is answered by the retained engine rather than returned, and the session is attributable to the reason it was chosen in both the process counter and the scrapeable exposition. Nothing covered that before, because `live_hls_recovery_enabled` answered `== Some(\"1\")` under `cfg(test)` and `!= Some(\"0\")` otherwise — restoring either half of that inversion fails this test. The four refusal regressions it displaced (`every_delivery_method_is_listed_under_its_own_name`, `the_ladder_is_advertised_and_stray_heights_snap`, `hls_http_endpoints`, `hls_create_refuses_hdr_downgrades_but_accepts_an_existing_sdr_plan`) now write the setting they depend on, so each names its policy instead of inheriting a different one. `developer_readiness_reports_what_it_reads_and_admits_what_it_cannot` gains the retained engine's two rows and requires both to answer `unobservable` while nothing has been served, which is what refuses a vacuously green tick. The web contracts require the card to name the switch rather than duplicate it."

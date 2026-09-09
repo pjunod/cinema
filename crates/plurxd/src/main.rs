@@ -41,6 +41,7 @@ mod titlestore;
 mod trakt;
 mod transcode;
 mod version;
+mod vodencode;
 mod vodgen;
 mod vodserve;
 mod waitpool;
@@ -1835,6 +1836,7 @@ async fn probe_system(
     }
 
     let hwaccel_pref = resolve_hwaccel_pref(store).await?;
+    seed_switch_settings(store).await?;
     let probe_pref = probe_preference(&hwaccel_pref);
     let encoder_selected = encoder_caps.choose(&probe_pref).label().to_owned();
     // Which tone-map graph this node may use. After encoder detection, because
@@ -1942,16 +1944,14 @@ fn system_info(
         hdr10_passthrough_qsv: measured.hdr10_passthrough_qsv,
         dv_disk: measured.dv_disk,
         // Not measured: the conversion is plurx's own code, so the only
-        // question is whether an operator has turned it off. `PLURX_DV_CONVERT=0`
-        // is the off switch, and the default is on — a Profile 7 title that
-        // reaches a Dolby Vision client as HDR10 is the thing this exists to
-        // stop, so it should not need enabling.
+        // question is whether an operator has turned it off. The default is
+        // on — a Profile 7 title that reaches a Dolby Vision client as HDR10
+        // is the thing this exists to stop, so it should not need enabling.
         //
-        // Case-folded, like every other boolean switch plurx reads
-        // (`PLURX_PGS_OVERLAY`, `state.rs:579`). An operator who writes
-        // `PLURX_DV_CONVERT=OFF` in a compose file means off; a switch that
-        // quietly ignored them would leave the feature on with nothing to
-        // explain why.
+        // The boot record only. What the daemon actually converts is the
+        // replicated `playback.dolby_vision_convert` setting, read per
+        // request; this variable seeds it once on a node that has never been
+        // told either way, and `stored_switch` case-folds both the same way.
         dolby_vision_convert: dv_convert_enabled(std::env::var("PLURX_DV_CONVERT").ok().as_deref()),
     }
 }
@@ -1969,6 +1969,49 @@ fn dv_convert_enabled(value: Option<&str>) -> bool {
             "0" | "false" | "off" | "no"
         )
     })
+}
+
+/// Carry a deployment's `PLURX_PGS_OVERLAY` and `PLURX_DV_CONVERT` across to
+/// the settings that replaced them, once.
+///
+/// Two properties, and both matter.
+///
+/// **Seed-when-absent, not env-wins.** `resolve_hwaccel_pref` below lets the
+/// variable win on every boot, because that one is a hint about this machine's
+/// hardware. These two are switches the product now owns: if a stale compose
+/// file re-asserted itself at every restart, turning one off in Settings would
+/// appear to work and then quietly undo itself on the next deploy, which is
+/// worse than the boot-time gate it replaces.
+///
+/// **First writer wins, and on a cluster that is one node deciding for the
+/// fleet.** These settings are replicated; the variables were per-node. So a
+/// three-node cluster where one node still carries `PLURX_DV_CONVERT=0` will
+/// take that node's answer for every node, if it is the first to upgrade —
+/// which is why the write is `put_setting_if_absent` rather than a read
+/// followed by a put. The atomic form is what makes "first" mean the first
+/// durable commit rather than the first node to *look*: an operator changing
+/// the switch on node B while node A restarts would otherwise have their
+/// change silently reverted by A's compose file. It does not make one node
+/// deciding for the fleet correct — it makes it bounded, visible in Settings
+/// immediately after, and impossible to repeat on the next restart.
+async fn seed_switch_settings(store: &Arc<dyn plurx_core::store::Store>) -> anyhow::Result<()> {
+    if let Ok(value) = std::env::var("PLURX_PGS_OVERLAY") {
+        let on = plurx_core::store::stored_switch(Some(value.as_str()), false);
+        store
+            .put_setting_if_absent(keys::PGS_OVERLAY, if on { "1" } else { "0" })
+            .await?;
+    }
+    // Only an explicit off is worth recording. This switch defaults on, so a
+    // node whose variable was unset or said on already answers the way the
+    // absent setting answers, and writing that down would make a stored value
+    // where the operator never expressed one — and, on a cluster, would let a
+    // node that was never configured claim the key first.
+    if let Ok(value) = std::env::var("PLURX_DV_CONVERT") {
+        if !plurx_core::store::stored_switch(Some(value.as_str()), true) {
+            store.put_setting_if_absent(keys::DV_CONVERT, "0").await?;
+        }
+    }
+    Ok(())
 }
 
 /// The encoder preference this boot runs under.
@@ -2037,6 +2080,11 @@ fn build_state(
             shared_cache_dir: config.cluster.shared_cache_dir.clone(),
             shared_cache_id: config.cluster.shared_cache_id.clone(),
             catalogue,
+            snapshot_recovery_budgets: crate::state::SnapshotRecoveryBudgets {
+                chunk_secs: config.cluster.snapshot_chunk_timeout_secs,
+                transfer_secs: config.cluster.snapshot_transfer_timeout_secs,
+                install_secs: config.cluster.install_snapshot_timeout_secs,
+            },
         },
         store,
         dirs,
@@ -5069,6 +5117,112 @@ mod startup_tests {
         for on in ["1", "true", "on", "yes", "", "maybe", "0.0"] {
             assert!(dv_convert_enabled(Some(on)), "{on:?} must leave it on");
         }
+    }
+
+    /// Seeding carries an operator's old variable across exactly once, and
+    /// never over an answer they have since given.
+    ///
+    /// The second half is the part worth pinning. These settings are
+    /// replicated and the variables were per-node, so a node whose compose
+    /// file still says off must not be able to re-answer for the fleet on
+    /// every restart — that would make turning the switch on in Settings look
+    /// like it worked and then undo itself at the next deploy.
+    #[tokio::test]
+    async fn the_switch_seed_writes_once_and_never_over_an_operator() {
+        let store: Arc<dyn plurx_core::store::Store> =
+            Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+
+        // Absent variables seed nothing: the defaults already answer.
+        std::env::remove_var("PLURX_PGS_OVERLAY");
+        std::env::remove_var("PLURX_DV_CONVERT");
+        seed_switch_settings(&store)
+            .await
+            .expect("seed with no variables");
+        assert_eq!(
+            store.get_setting(keys::PGS_OVERLAY).await.expect("read"),
+            None
+        );
+        assert_eq!(
+            store.get_setting(keys::DV_CONVERT).await.expect("read"),
+            None
+        );
+
+        // An explicit on carries across; so does an explicit off.
+        std::env::set_var("PLURX_PGS_OVERLAY", "On");
+        std::env::set_var("PLURX_DV_CONVERT", "off");
+        seed_switch_settings(&store)
+            .await
+            .expect("seed from variables");
+        assert_eq!(
+            store
+                .get_setting(keys::PGS_OVERLAY)
+                .await
+                .expect("read")
+                .as_deref(),
+            Some("1"),
+            "a hand-written spelling has to carry across, not only `1`"
+        );
+        assert_eq!(
+            store
+                .get_setting(keys::DV_CONVERT)
+                .await
+                .expect("read")
+                .as_deref(),
+            Some("0")
+        );
+
+        // The operator now answers for themselves. A restart with the same
+        // stale compose file must not take it back.
+        store
+            .put_setting(keys::PGS_OVERLAY, "0")
+            .await
+            .expect("operator turns it off");
+        store
+            .put_setting(keys::DV_CONVERT, "1")
+            .await
+            .expect("operator turns it on");
+        seed_switch_settings(&store)
+            .await
+            .expect("seed after an operator answered");
+        assert_eq!(
+            store
+                .get_setting(keys::PGS_OVERLAY)
+                .await
+                .expect("read")
+                .as_deref(),
+            Some("0"),
+            "a stale variable reverted the operator on the next boot"
+        );
+        assert_eq!(
+            store
+                .get_setting(keys::DV_CONVERT)
+                .await
+                .expect("read")
+                .as_deref(),
+            Some("1"),
+            "a stale variable reverted the operator on the next boot"
+        );
+        std::env::remove_var("PLURX_PGS_OVERLAY");
+        std::env::remove_var("PLURX_DV_CONVERT");
+    }
+
+    /// A node that was never told either way must not claim the key for the
+    /// fleet. The conversion defaults on, so an unset or on variable already
+    /// answers the way the absent setting answers.
+    #[tokio::test]
+    async fn an_unconfigured_node_does_not_claim_the_conversion_key() {
+        let store: Arc<dyn plurx_core::store::Store> =
+            Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+        std::env::remove_var("PLURX_PGS_OVERLAY");
+        std::env::set_var("PLURX_DV_CONVERT", "1");
+        seed_switch_settings(&store).await.expect("seed");
+        assert_eq!(
+            store.get_setting(keys::DV_CONVERT).await.expect("read"),
+            None,
+            "writing the default down makes a stored value the operator never chose, \
+             and on a cluster lets a node that was never configured answer first"
+        );
+        std::env::remove_var("PLURX_DV_CONVERT");
     }
 
     /// The settings page and every session read this record, so the encoder it

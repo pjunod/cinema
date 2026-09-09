@@ -14,7 +14,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-One binary serves everything on one port (`:32400` by default). plurx has 173
+One binary serves everything on one port (`:32400` by default). plurx has 174
 routes across the four surfaces below. Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
@@ -382,6 +382,7 @@ of never storing it.
 | GET | `/api/v1/system/library-shape` | admin | Codec and HDR census over the library |
 | POST | `/api/v1/system/storage` | admin | Re-measures storage. Costs real I/O |
 | POST | `/api/v1/system/search-index/rebuild` | admin | Rebuilds the derived search index on every voter |
+| GET | `/api/v1/developer/readiness` | admin | Reports advisory observations for Developer enable controls; never gates them |
 | POST | `/api/v1/client-log` | bearer | Files one client-side playback error into the server log |
 | GET | `/api/v1/scan/status` | bearer | Per-library scan status |
 | GET | `/api/v1/activity` | bearer | Flat list of what the server is doing |

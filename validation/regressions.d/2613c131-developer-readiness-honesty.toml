@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["2613c131"]
+points = ["server.api", "web.experience"]
+checks = ["rust-gate", "rust-gate-ci", "web-static", "history-regressions"]
+reason = "Two adversarial reviews found the Developer readiness route reporting statuses it had not read, and both halves of its advisory proof blind. `developer_readiness_reports_what_it_reads_and_admits_what_it_cannot` now refuses any `met` on a node with no roster, no fleet receipt and no candidate worker, asserted as a set so a later row cannot arrive green unpinned — the fail-open `cache_admin_revocation_ready()` value survived review because the earlier test named one of two roster rows. `an_unmet_prerequisite_does_not_block_the_switch` records one partial-vocabulary exchange through the production counter so the prerequisite it drives is genuinely refused rather than merely unobserved, and drives the switch on, off and on again; the earlier version passed against a gate keyed on `Unmet` and failed beside any sibling that recorded an action. `a_prepared_successor_still_publishes_a_staged_encoder` binds the `server_preparation_is_real` row to the staging path it describes, so a candidate worker cannot land while the tab still calls the capability metadata only. The web contracts serialise every stubbed argument and compare the whole panel with the reading spans stripped, which is what rejects a switch disabled through `togRow`'s trailing attributes and a card removed under an unmet reading."

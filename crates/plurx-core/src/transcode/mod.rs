@@ -20,6 +20,7 @@ pub mod health;
 pub mod manifest;
 mod pipeline;
 mod recipe;
+mod vod;
 
 pub use decode::{
     plan_can_name_decoder, resolve_transcode, ArtifactQualification, AttemptRestrictions,
@@ -39,6 +40,9 @@ pub use encoder::{
 };
 pub use pipeline::{Pipeline, CANDIDATES as PIPELINE_CANDIDATES};
 pub use recipe::{PipelineDigest, Recipe, CACHE_RECIPE_VERSION};
+pub use vod::{
+    vod_audio_anchor, vod_pipe_args, VodFrameGrid, VOD_AAC_FRAME_SAMPLES, VOD_AUDIO_RATE,
+};
 
 use crate::domain::MediaFile;
 use std::path::PathBuf;
@@ -1363,7 +1367,6 @@ pub fn hls_args_for_plan(plan: &ResolvedTranscode, execution: &TranscodeExecutio
     )
 }
 
-#[cfg(test)]
 fn hls_args_with_compatibility(
     source: &MediaFile,
     encoder: Encoder,
@@ -1691,6 +1694,25 @@ fn hls_args_inner(
         .map(|s| s.to_string()),
     );
     args.push(format!("{out_dir}/index.m3u8"));
+    args
+}
+
+/// Shared legacy source selection, decode, filters, and encoder recipe used by
+/// immutable VOD while its caller is migrated to the resolved-plan interface.
+/// Presentation builders append their own timestamp, keyframe, and muxer
+/// contracts.
+fn encode_input_args(
+    source: &MediaFile,
+    encoder: Encoder,
+    opts: &TranscodeOptions,
+    pacing: Pacing,
+) -> Vec<String> {
+    let mut args = hls_args_with_compatibility(source, encoder, opts, pacing, "", false);
+    let presentation = args
+        .iter()
+        .position(|argument| argument == "-muxdelay")
+        .expect("the shared encode recipe precedes the HLS presentation");
+    args.truncate(presentation);
     args
 }
 

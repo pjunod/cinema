@@ -48,13 +48,13 @@ fn typed(status: StatusCode, code: &'static str, message: impl Into<String>) -> 
 }
 
 async fn enabled(state: &AppState) -> Result<bool, ApiError> {
-    Ok(!matches!(
+    Ok(plurx_core::store::stored_switch(
         state
             .store
             .get_setting(keys::OFFLINE_ENABLED)
             .await?
             .as_deref(),
-        Some("0" | "false" | "off" | "no")
+        true,
     ))
 }
 

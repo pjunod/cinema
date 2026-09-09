@@ -93,6 +93,37 @@ const CAPABILITY_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 const PROVISIONAL_TIMEOUT: Duration = Duration::from_secs(40);
 const SESSION_TICK: Duration = Duration::from_millis(250);
 const ADMISSION_WAIT: Duration = Duration::from_secs(5);
+// Publish one short segment so a channel can reach the player promptly, then
+// return to the four-second steady cadence that keeps the six-segment live
+// window resilient. Forced one-second keyframes let the HLS muxer honor the
+// initial target without making every steady-state segment one second long.
+const LIVE_HLS_OUTPUT_ARGS: [&str; 25] = [
+    "-force_key_frames",
+    "expr:gte(t,n_forced*1)",
+    "-g",
+    "120",
+    "-keyint_min",
+    "1",
+    "-c:a",
+    "aac",
+    "-b:a",
+    "192k",
+    "-ac",
+    "2",
+    "-f",
+    "hls",
+    "-hls_init_time",
+    "1",
+    "-hls_time",
+    "4",
+    "-hls_list_size",
+    "6",
+    "-hls_delete_threshold",
+    "1",
+    "-hls_flags",
+    "delete_segments+temp_file+independent_segments+omit_endlist",
+    "-hls_segment_filename",
+];
 pub(crate) const MAX_PLAYLIST_BYTES: u64 = 64 * 1024;
 pub(crate) const MAX_SEGMENT_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_SESSION_BYTES: u64 = MAX_SEGMENT_BYTES;
@@ -3245,31 +3276,7 @@ fn live_ffmpeg_command(
         plan.force_idr,
         plan.software_threads,
     ));
-    command.args([
-        "-force_key_frames",
-        "expr:gte(t,n_forced*4)",
-        "-g",
-        "120",
-        "-keyint_min",
-        "120",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "192k",
-        "-ac",
-        "2",
-        "-f",
-        "hls",
-        "-hls_time",
-        "4",
-        "-hls_list_size",
-        "6",
-        "-hls_delete_threshold",
-        "1",
-        "-hls_flags",
-        "delete_segments+temp_file+independent_segments+omit_endlist",
-        "-hls_segment_filename",
-    ]);
+    command.args(LIVE_HLS_OUTPUT_ARGS);
     command
         .arg(segments)
         .arg(playlist)
@@ -3350,13 +3357,11 @@ async fn capture_live_stderr(
         let text = String::from_utf8_lossy(&window).to_ascii_lowercase();
         if text.contains("decoding requested, but no decoder found for:")
             || (text.contains("decoder (codec ") && text.contains(") not found for input stream"))
-            || text.contains("stream map '0:a:0' matches no streams")
-            || text.contains("stream map '0:v:0' matches no streams")
             // FFmpeg 8.1.2 can redact the requested map between the quotes in
             // this exact live-TV child. Both mapped streams are mandatory, so
-            // the unattributed spelling still proves this profile cannot be
-            // produced from the tuner input; it does not identify a decoder.
-            || text.contains("stream map '' matches no streams")
+            // every stream-map failure proves this profile cannot be produced
+            // from the tuner input; it does not identify a decoder.
+            || (text.contains("stream map") && text.contains("matches no streams"))
         {
             decoder_unavailable.store(true, Ordering::Release);
         }
@@ -4319,31 +4324,7 @@ async fn run_graph_probe(
         system.encoders.forced_idr.wanted_by(encoder),
         (encoder == Encoder::Software).then_some(2),
     ));
-    command.args([
-        "-force_key_frames",
-        "expr:gte(t,n_forced*4)",
-        "-g",
-        "120",
-        "-keyint_min",
-        "120",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "192k",
-        "-ac",
-        "2",
-        "-f",
-        "hls",
-        "-hls_time",
-        "4",
-        "-hls_list_size",
-        "6",
-        "-hls_delete_threshold",
-        "1",
-        "-hls_flags",
-        "delete_segments+temp_file+independent_segments+omit_endlist",
-        "-hls_segment_filename",
-    ]);
+    command.args(LIVE_HLS_OUTPUT_ARGS);
     command.arg(segments).arg(&playlist);
     command.kill_on_drop(true);
     let output = tokio::time::timeout(Duration::from_secs(20), command.output())
@@ -5324,9 +5305,9 @@ exec /bin/cat >/dev/null
             "-threads",
             "2",
             "-force_key_frames",
-            "expr:gte(t,n_forced*4)",
+            "expr:gte(t,n_forced*1)",
             "-g",
-            "120",
+            "1",
             "-keyint_min",
             "120",
             "-c:a",
@@ -5337,6 +5318,8 @@ exec /bin/cat >/dev/null
             "2",
             "-f",
             "hls",
+            "-hls_init_time",
+            "1",
             "-hls_time",
             "4",
             "-hls_list_size",
@@ -5356,6 +5339,25 @@ exec /bin/cat >/dev/null
                 .any(|arguments| arguments == ["-hwaccel", "none"]),
             "the live-TV plan must state its software decode contract"
         );
+    }
+
+    /// Startup should not make the viewer wait for the normal four-second
+    /// segment cadence. Keep the short initial cadence, steady cadence, and
+    /// live window explicit here so tuning cannot silently regress while the
+    /// runtime and graph-probe commands continue to share one argument list.
+    #[test]
+    fn live_hls_publishes_short_startup_segments_before_steady_cadence() {
+        let value_after = |flag: &str| {
+            LIVE_HLS_OUTPUT_ARGS
+                .windows(2)
+                .find_map(|pair| (pair[0] == flag).then_some(pair[1]))
+                .unwrap_or_else(|| panic!("missing {flag} from live HLS arguments"))
+        };
+
+        assert_eq!(value_after("-hls_init_time"), "1");
+        assert_eq!(value_after("-hls_time"), "4");
+        assert_eq!(value_after("-hls_list_size"), "6");
+        assert_eq!(value_after("-force_key_frames"), "expr:gte(t,n_forced*1)");
     }
 
     #[test]

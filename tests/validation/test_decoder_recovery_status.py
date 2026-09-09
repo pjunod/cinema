@@ -1133,10 +1133,10 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         self.assertRegex(hiqlite, r"AUTH_SCHEMA_MIGRATION_SOURCE \+ \d+,")
         self.assertRegex(hiqlite, r"every additive v5→v\d+ step")
         self.assertRegex(
-            # The recovery pair now sits behind main's terminal-identity index.
+            # The recovery pair now sits behind main's drain-deadline step.
             # What is pinned is that the final chain remains contiguous.
             hiqlite,
-            r"PRODUCER_RECOVERY_SCHEMA_MIGRATION_SOURCE: i64 =\s+ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA_VERSION",
+            r"PRODUCER_RECOVERY_SCHEMA_MIGRATION_SOURCE: i64 =\s+DRAIN_DEADLINE_SCHEMA_VERSION",
         )
 
         # Both hand-written downgrade fixtures give the v48 table back.
@@ -1488,9 +1488,9 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             SQLITE_STORE.read_text(encoding="utf-8"),
         )
         self.assertIn(
-            # v31 after the final main freeze: main's terminal-identity index
-            # now owns v30, so the recovery ledger and epoch follow it.
-            "RECOVERY_EPOCH_SCHEMA_MIGRATION_SOURCE, 31,",
+            # v32 after the final main freeze: main's drain deadline owns v31,
+            # so the recovery ledger and epoch follow it.
+            "RECOVERY_EPOCH_SCHEMA_MIGRATION_SOURCE, 32,",
             HIQLITE.read_text(encoding="utf-8"),
         )
 

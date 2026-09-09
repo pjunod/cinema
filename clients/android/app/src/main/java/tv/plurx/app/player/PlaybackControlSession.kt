@@ -547,13 +547,22 @@ class PlaybackControlSession(
     fun endAfterFinalExchange(
         outerScope: CoroutineScope,
         finalSnapshot: PlaybackControlSnapshot,
+        afterFinalExchange: () -> Unit,
     ) {
         dispatching = false
-        val subject = reporter ?: return
+        val subject = reporter
+        if (subject == null) {
+            afterFinalExchange()
+            return
+        }
         // Stamped before the invalidation below, from the identity the reporter
         // was built with — it is answering for that session, not for whatever
         // replaces it.
         val settling = captureOf(finalSnapshot)
+        // A commit that arrived on the player's ending snapshot is rewritten
+        // to active for the CAS. Preserve the original end as a second exact
+        // capture; the reporter publishes it only after the commit succeeds.
+        val ending = endingSnapshotAfterSettlement(finalSnapshot)?.let(::captureOf)
         // The same synchronous invalidation [end] performs, and for the same
         // reason twice over. A reopen calls this and then begins a new session
         // immediately, so an exchange still returning from HTTP on the old
@@ -587,15 +596,23 @@ class PlaybackControlSession(
             // "straight after it" never arrives, and the coroutine dies inside
             // `send` without ever clearing `inFlight`. Re-homing
             // unconditionally is what makes this path work at all.
-            val handed = subject.settle(outerScope, settling)
-            val deadline = monotonicNowMs() + FINAL_EXCHANGE_MS
-            while (handed && monotonicNowMs() < deadline) {
-                val status = subject.status()
-                if (status.stopped) break
-                if (!status.inFlight && !status.pending && !status.retrying) break
-                kotlinx.coroutines.delay(ASK_POLL_MS)
+            try {
+                val handed = subject.settle(outerScope, settling, ending)
+                val deadline = monotonicNowMs() + FINAL_EXCHANGE_MS
+                while (handed && monotonicNowMs() < deadline) {
+                    val status = subject.status()
+                    if (status.stopped) break
+                    if (!status.inFlight && !status.pending && !status.retrying) break
+                    kotlinx.coroutines.delay(ASK_POLL_MS)
+                }
+            } finally {
+                subject.stop()
+                // DELETE belongs after the final exchange. Calling it in
+                // Controller immediately after this asynchronous hand-off let
+                // DELETE retire the predecessor before the commit CAS reached
+                // the server.
+                afterFinalExchange()
             }
-            subject.stop()
         }
     }
 

@@ -349,10 +349,10 @@ protocol PreparedSuccessorHost: AnyObject {
     /// Release the second pipeline. Idempotent, and called on every exit.
     func discardPreparedSuccessor()
 
-    /// Put the primed successor in front of the viewer and retire the
-    /// incumbent. See `PreparedCommitOutcome` — the three answers differ in
-    /// whether anything was switched, which is what decides both the
-    /// settlement and whether there is an incumbent left to fall back to.
+    /// Put the primed successor in front of the viewer. The committed control
+    /// exchange, not an eager DELETE from the client, retires the incumbent.
+    /// See `PreparedCommitOutcome` — the three answers differ in whether
+    /// anything was switched, which decides the settlement and fallback.
     func commitPreparedSuccessor(_ action: PreparedReplacementAction) async -> PreparedCommitOutcome
 
     /// The in-place quality change this platform has always done. The
@@ -551,9 +551,10 @@ final class PreparedReplacementCoordinator {
     ///   this is an `aborted` plus the ordinary in-place change. It says
     ///   nothing about whether a successor could have been primed, so it does
     ///   not stop this playback asking again.
-    /// - **switchedWithoutAFrame** — the item is already gone and the
-    ///   predecessor released. There is no incumbent to keep, so this is a
-    ///   `failed` *and* a reopen, and the interruption is measured.
+    /// - **switchedWithoutAFrame** — the local item was replaced, but the
+    ///   predecessor remains the server's authority because no commit was
+    ///   sent. This is a `failed` *and* an ordinary reopen, and the
+    ///   interruption is measured.
     ///
     /// The staging is named through every branch. `ledger.active` cannot be
     /// trusted across the await — `.switching` stops anything else opening

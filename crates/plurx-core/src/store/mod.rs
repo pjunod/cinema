@@ -596,6 +596,101 @@ pub(crate) const MEDIA_PLAYBACK_POINTER_DESIRED_FENCE_INSERT_TRIGGER: &str =
 pub(crate) const MEDIA_PLAYBACK_POINTER_DESIRED_FENCE_UPDATE_TRIGGER: &str =
     pointer_desired_fence_update_trigger!();
 
+/// When a predecessor kept alive on purpose stops being kept.
+///
+/// Null means "not draining", which is every row that exists today and every
+/// row a session starts life as. A non-null value is a deadline in the same
+/// milliseconds every other clock column here uses: past it, the session is
+/// over regardless of what its lease says.
+///
+/// The column exists because three earlier attempts tried to *infer* "this
+/// session is draining" — from the playback pointer, and through the session
+/// lease — and each inference was already carrying a different meaning for
+/// somebody else. The pointer is deleted by an ordinary viewer action, so a
+/// drain keyed on it never ends; the lease is what the owner's renewal loop
+/// reads as liveness, so a drain keyed on it kills the worker in one tick.
+/// Neither is a fact about draining. This is, and it is durable, so it
+/// survives the restart of the node that set it and is visible to the node
+/// that inherits the work when that node does not come back.
+///
+/// Deliberately nullable rather than `NOT NULL DEFAULT 0`: a zero would be a
+/// deadline in 1970, and every reader would have to spell out that zero is not
+/// really a deadline. The null says it once, in the schema.
+macro_rules! media_session_drain_deadline_column {
+    () => {
+        // No trailing semicolon. The replicated backend submits this as one
+        // prepared statement and a trailing `;` makes it unpreparable — the
+        // failure the pointer-fence step above documents at length.
+        "ALTER TABLE media_sessions ADD COLUMN drain_deadline_ms INTEGER"
+    };
+}
+
+/// Refuse to move a draining session's ownership.
+///
+/// Application SQL already excludes a non-null deadline from both halves of
+/// takeover — the expired-route inventory and the CAS. That fences *this*
+/// binary and does nothing at all about an older one, because an older binary
+/// simply does not emit the predicate. Schema compatibility is checked when a
+/// database is opened and never again, so during a rolling upgrade every node
+/// still running the previous binary keeps issuing takeover SQL from before
+/// this column existed, against a store that already has it.
+///
+/// What that costs without the trigger is the exact failure the whole drain
+/// design was rewritten to avoid. A new-binary owner dies mid-drain, its lease
+/// lapses, and an old-binary node adopts the predecessor — a stream the
+/// pointer no longer names — starts an encoder for it, and then renews it
+/// every three seconds for as long as that node lives. Nothing on the old node
+/// ends it, because nothing on the old node knows it is draining. An immortal
+/// predecessor holding an encoder, an admission permit and a shared-cache
+/// generation, arriving through the upgrade door.
+///
+/// `RAISE(IGNORE)` rather than `RAISE(ABORT)`, which is the opposite of the
+/// pointer fence above and for a reason. Takeover's CAS already checks that it
+/// updated exactly one row and rolls the whole transaction back when it did
+/// not — that is how it handles losing a race to another survivor. Making the
+/// update affect no rows therefore lands the old binary in a path it already
+/// implements correctly, and it lands there quietly, once per attempt, instead
+/// of raising an error it would log and retry forever. The pointer fence
+/// chose `ABORT` because its old writer had no such check and would have
+/// believed it succeeded.
+///
+/// Guarded on the ownership columns only. The owner renews the lease on this
+/// row every three seconds for the whole drain, deliberately, and the sweep
+/// and the owner's own end both write `state` — none of those move ownership,
+/// and none of them may be fenced.
+macro_rules! media_session_drain_ownership_fence_trigger {
+    () => {
+        "CREATE TRIGGER IF NOT EXISTS media_sessions_drain_ownership_fence_au
+    BEFORE UPDATE OF owner_node_id, owner_epoch ON media_sessions
+    WHEN OLD.drain_deadline_ms IS NOT NULL
+     AND (NEW.owner_node_id IS NOT OLD.owner_node_id
+          OR NEW.owner_epoch IS NOT OLD.owner_epoch)
+    BEGIN
+      SELECT RAISE(IGNORE);
+    END;"
+    };
+}
+
+/// The drain deadline column, for the replicated migration's first statement.
+pub(crate) const MEDIA_SESSION_DRAIN_DEADLINE_COLUMN: &str = media_session_drain_deadline_column!();
+
+/// The ownership fence on its own, for the replicated migration and install.
+pub(crate) const MEDIA_SESSION_DRAIN_OWNERSHIP_FENCE_TRIGGER: &str =
+    media_session_drain_ownership_fence_trigger!();
+
+/// Column and fence as one SQLite migration, applied in one transaction.
+///
+/// One step, for the reason the pointer fence above spells out: a database
+/// holding the column without the trigger accepts exactly the writes the
+/// trigger exists to refuse, and that database is the middle of every rolling
+/// upgrade. The trigger cannot be created before the column exists, so they
+/// cannot be two steps.
+pub(crate) const MEDIA_SESSION_DRAIN_DEADLINE_SCHEMA: &str = concat!(
+    media_session_drain_deadline_column!(),
+    ";\n",
+    media_session_drain_ownership_fence_trigger!(),
+);
+
 const MEDIA_SESSION_PUBLICATION_CLAIM_TRIGGER_SCHEMA: &str =
     "CREATE TRIGGER IF NOT EXISTS media_session_publication_claim_au
     AFTER UPDATE OF publication_ready_at_ms ON media_sessions
@@ -644,12 +739,12 @@ pub use fragment_index_cluster::{
     bounded_analysis_lease_secs, bounded_analysis_max_attempts, bounded_subtitle_window_seconds,
     cluster_fragment_index_blob_sha256, cluster_fragment_index_generation_key,
     cluster_fragment_index_key, cluster_fragment_index_pipeline_digest,
-    decode_cluster_fragment_index_blob, encode_cluster_fragment_index_blob, AnalysisAttempt,
-    AnalysisFileLabel, AnalysisHistoryCursor, AnalysisHistoryFilter, AnalysisHistoryPage,
-    AnalysisHistoryQuery, AnalysisHistoryRow, AnalysisRequest, AnalysisStatusSummary,
-    ClusterFragmentIndexArtifact, ClusterFragmentIndexJob, ClusterFragmentIndexLocation,
-    ClusterFragmentIndexStore, FragmentIndexSourceObservation, NewAnalysisRequest,
-    NewClusterFragmentIndexJob, DEFAULT_ANALYSIS_BACKOFF_BASE_SECS,
+    decode_cluster_fragment_index_blob, encode_cluster_fragment_index_blob, stored_switch,
+    AnalysisAttempt, AnalysisFileLabel, AnalysisHistoryCursor, AnalysisHistoryFilter,
+    AnalysisHistoryPage, AnalysisHistoryQuery, AnalysisHistoryRow, AnalysisRequest,
+    AnalysisStatusSummary, ClusterFragmentIndexArtifact, ClusterFragmentIndexJob,
+    ClusterFragmentIndexLocation, ClusterFragmentIndexStore, FragmentIndexSourceObservation,
+    NewAnalysisRequest, NewClusterFragmentIndexJob, DEFAULT_ANALYSIS_BACKOFF_BASE_SECS,
     DEFAULT_ANALYSIS_BACKOFF_MAX_SECS, DEFAULT_ANALYSIS_LEASE_SECS, DEFAULT_ANALYSIS_MAX_ATTEMPTS,
     DEFAULT_SUBTITLE_WINDOW_SECS, MAX_ACTIVE_ANALYSIS_REQUESTS, MAX_ANALYSIS_BACKOFF_BASE_SECS,
     MAX_ANALYSIS_BACKOFF_MAX_SECS, MAX_ANALYSIS_LEASE_SECS, MAX_ANALYSIS_MAX_ATTEMPTS,
@@ -1471,6 +1566,28 @@ pub mod keys {
     /// cannot honour the request. Absent or `0` is off.
     pub const DECODER_HEALTH_QUALIFIED_ARTIFACTS: &str =
         "playback.decoder_health_qualified_artifacts";
+    /// Serve PGS subtitle tracks through the authenticated `pgs-v1` overlay
+    /// API instead of hiding them.
+    ///
+    /// This was `PLURX_PGS_OVERLAY`, read once at boot. An environment
+    /// variable is the wrong place for it twice over: it decides which
+    /// subtitle tracks a client is even offered, which is a product question
+    /// an operator should be able to see and answer, and it could only be
+    /// changed by restarting the daemon with a different compose file. The
+    /// setting is the switch now; the old variable is read once at startup to
+    /// seed it, so a deployment that had turned it on keeps it on and can
+    /// then find it in Settings.
+    pub const PGS_OVERLAY: &str = "subtitles.pgs_overlay";
+    /// Convert a Dolby Vision Profile 7 title to Profile 8.1 so a Dolby Vision
+    /// client sees Dolby Vision rather than HDR10.
+    ///
+    /// This was `PLURX_DV_CONVERT`, and unlike most switches it defaults *on*:
+    /// the conversion is plurx's own code, and a Profile 7 title reaching a
+    /// Dolby Vision client as HDR10 is the thing it exists to stop. Absent
+    /// therefore means on. It is a setting rather than an environment variable
+    /// for the same reason as the overlay above: an operator turning off work
+    /// their GPU is doing should be able to find the switch, and see it is off.
+    pub const DV_CONVERT: &str = "playback.dolby_vision_convert";
     /// Node-wide byte budget for un-admitted VOD rendition working sets.
     /// Absent takes the built-in default. A parsed zero is refused at the
     /// settings surface: "no working set" and "not configured" are opposite
@@ -1508,8 +1625,15 @@ pub mod keys {
     /// Threads the software-encoder CPU pool may hand out at once. Defaults
     /// to every core but one (plurxd derives it from the machine); an admin
     /// sets it lower on a box whose CPU has other jobs, or higher at their
-    /// own risk. API-settable, deliberately no UI dropdown — the same policy
-    /// as the scratch limits.
+    /// own risk.
+    ///
+    /// A dropdown in Playback → Streaming, alongside [`MAX_HW_SESSIONS`]. Note
+    /// what a stored `0` means here, because it is not what it looks like:
+    /// `SwPool::try_take` grants unconditionally while the pool is empty, so a
+    /// zero budget is not a ban but a degradation to one saturating session at
+    /// a time. The default is per-node while this key is replicated, so a
+    /// write pins one machine's core count on the whole cluster — which is why
+    /// the page sends this field only when an operator actually moved it.
     pub const SW_POOL_THREADS: &str = "transcode.software_pool_threads";
     /// Disk the pre-transcode cache may occupy, in gigabytes. `0` turns the
     /// cache off: nothing is produced, and what is already there is evicted.
@@ -4036,6 +4160,11 @@ pub trait RenditionPlanStore: Send + Sync + 'static {
         rendition_key: &str,
         source: &crate::segplan::SourceIdentity,
     ) -> Result<Option<crate::segplan::SegmentPlan>, StoreError>;
+
+    /// Drop exactly one rendition plan by its immutable rendition key.
+    /// Answers whether a row existed. Process-generation cache reconciliation
+    /// uses this instead of deleting every valid copy/current plan for a file.
+    async fn forget_rendition_plan(&self, rendition_key: &str) -> Result<bool, StoreError>;
 
     /// Drop every rendition plan for a file. Answers how many went.
     async fn forget_rendition_plans(&self, file_id: i64) -> Result<usize, StoreError>;
