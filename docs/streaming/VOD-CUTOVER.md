@@ -50,10 +50,10 @@ status explicit:
 | Request or source | Result |
 |---|---|
 | Copy/remux, positive duration, current fragment index, stable parameter sets | Immutable copy VOD session |
-| Video transcode rung or subtitle burn, positive duration, exact stored probe, stable held source, usable cadence, and attested encoder inputs | Immutable encoded VOD session |
+| Video transcode rung or subtitle burn, positive duration, matching stored media facts, stable held source, usable cadence, and attested encoder inputs | Immutable encoded VOD session |
 | Index not built yet | 503 `vod_index_pending` |
 | VOD session creation administratively disabled | 503 `vod_disabled` |
-| The source cannot be held, changed during preparation, or its exact current probe differs from the stored scan | 409 `vod_source_rescan_required` |
+| The source cannot be held, changed during preparation, or its current media facts differ from the stored scan (optional ffprobe field omissions are schema drift, not source drift) | 409 `vod_source_rescan_required` |
 | The selected FFmpeg executable, loaded dependency closure, font inputs, or encoder graph cannot be attested | 503 `vod_engine_unattested` |
 | Missing or unusable frame cadence | 422 `vod_frame_cadence_unknown` |
 | Selected audio or subtitle track absent from the exact probe | 422 `vod_audio_track_missing` or `vod_subtitle_track_missing` |
