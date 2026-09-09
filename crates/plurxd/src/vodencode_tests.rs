@@ -1257,6 +1257,7 @@ async fn assert_encoded_restarts(
 }
 
 #[tokio::test]
+#[ignore = "run serially by the Rust gate; real FFmpeg restart fixture"]
 async fn encoded_vod_vfr_input_is_sampled_on_the_declared_rational_grid() {
     let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
     let base = crate::test_tempdir().expect("VFR fixture");
@@ -1341,6 +1342,7 @@ async fn encoded_vod_vfr_input_is_sampled_on_the_declared_rational_grid() {
 }
 
 #[tokio::test]
+#[ignore = "run serially by the Rust gate; real FFmpeg restart fixture"]
 async fn encoded_vod_bitmap_burn_restores_cues_that_predate_video_seek_landing() {
     let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
     let base = crate::test_tempdir().expect("bitmap fixture");
