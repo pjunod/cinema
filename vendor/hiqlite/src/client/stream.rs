@@ -1429,8 +1429,11 @@ async fn try_forward_response(
                         false
                     }
                     Some(ack) => {
-                        if let Err(err) = ack.send(Ok(response.result)) {
-                            error!("client ack could not be sent for {:?}", err);
+                        if ack.send(Ok(response.result)).is_err() {
+                            error!(
+                                request_id = response.request_id,
+                                "client acknowledgement receiver dropped"
+                            );
                         } else {
                             debug!("ApiStreamResponse sent to client from in_flight_buf");
                         }
@@ -1444,8 +1447,11 @@ async fn try_forward_response(
         }
 
         Some(ack) => {
-            if let Err(err) = ack.send(Ok(response.result)) {
-                error!("client ack could not be sent for {:?}", err);
+            if ack.send(Ok(response.result)).is_err() {
+                error!(
+                    request_id = response.request_id,
+                    "client acknowledgement receiver dropped"
+                );
             } else {
                 debug!("ApiStreamResponse sent to client");
             }
@@ -1659,6 +1665,42 @@ fn leader_change_matches_connection(
 mod tests {
     use super::*;
     use fastwebsockets::Role;
+    use std::io::{self, Write};
+    use tracing_subscriber::fmt::MakeWriter;
+
+    #[derive(Clone, Default)]
+    struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+    struct CapturedLogWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl CapturedLogs {
+        fn contents(&self) -> String {
+            String::from_utf8(self.0.lock().expect("captured log lock").clone())
+                .expect("captured logs are UTF-8")
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for CapturedLogs {
+        type Writer = CapturedLogWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            CapturedLogWriter(Arc::clone(&self.0))
+        }
+    }
+
+    impl Write for CapturedLogWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("captured log lock")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
 
     #[cfg(feature = "sqlite")]
     fn forward_to_leader_error() -> Error {
@@ -2043,6 +2085,72 @@ mod tests {
             "the current socket owns recovery even after caller cancellation"
         );
         assert!(in_flight.is_empty());
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_client_acknowledgements_never_log_response_payloads() {
+        use crate::query::rows::{ColumnOwned, RowOwned, ValueOwned};
+
+        const SECRET: &str = "sentinel-service-credential-never-log";
+
+        let sensitive_payload = || {
+            ApiStreamResponsePayload::QueryConsistent(Ok(vec![RowOwned {
+                columns: vec![ColumnOwned {
+                    name: "value".to_owned(),
+                    value: ValueOwned::Text(SECRET.to_owned()),
+                }],
+            }]))
+        };
+        assert!(
+            format!("{:?}", sensitive_payload()).contains(SECRET),
+            "the fixture must prove that debug-formatting the payload would disclose it"
+        );
+
+        let captured = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::ERROR)
+            .without_time()
+            .with_ansi(false)
+            .with_writer(captured.clone())
+            .finish();
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+
+        for (request_id, buffered) in [(81, false), (82, true)] {
+            let mut in_flight = HashMap::new();
+            let mut in_flight_buf = HashMap::new();
+            let (ack, caller) = oneshot::channel();
+            drop(caller);
+            if buffered {
+                in_flight_buf.insert(request_id, ack);
+            } else {
+                in_flight.insert(request_id, ack);
+            }
+
+            assert!(
+                !try_forward_response(
+                    &mut in_flight,
+                    &mut in_flight_buf,
+                    buffered,
+                    ApiStreamResponse {
+                        request_id,
+                        result: sensitive_payload(),
+                    },
+                )
+                .await
+            );
+        }
+
+        let output = captured.contents();
+        assert_eq!(
+            output.matches("client acknowledgement receiver dropped").count(),
+            2,
+            "both cancellation paths must retain a payload-free diagnostic: {output}"
+        );
+        assert!(
+            !output.contains(SECRET),
+            "cancelled acknowledgement disclosed its response payload: {output}"
+        );
     }
 
     #[cfg(feature = "sqlite")]
