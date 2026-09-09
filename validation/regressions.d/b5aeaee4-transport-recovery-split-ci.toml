@@ -3,6 +3,7 @@ version = 1
 [[coverage]]
 commits = [
   "b5aeaee4",
+  "19f79624",
 ]
 points = [
   "cluster.auth",
