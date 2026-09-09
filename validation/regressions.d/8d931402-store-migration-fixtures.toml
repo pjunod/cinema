@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["8d931402"]
+points = ["core.media"]
+checks = ["rust-gate"]
+reason = "The retained Store migration and populated-import contracts now reconstruct the exact historical schema boundary and advance shared-cache publication identity, so the Rust gate fails if current replicated objects leak into old-schema fixtures or a fixture violates the publication guard."

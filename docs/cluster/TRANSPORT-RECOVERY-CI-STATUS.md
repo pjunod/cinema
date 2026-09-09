@@ -1,6 +1,6 @@
 # Transport recovery CI — implementation status and evidence
 
-**Status:** M6 corrected final candidate verified; full PR qualification next · **Owner:** Codex · **Updated:** 2026-09-09
+**Status:** M6 current `main` integrated and focused-verified; full PR qualification next · **Owner:** Codex · **Updated:** 2026-09-09
 
 Companion to
 [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md) (how this effort reaches
@@ -51,9 +51,9 @@ operations suite (294 tests), the full local validation suite (198 tests with
 one platform skip), the pinned Rust 1.97.1 check and Clippy gate, formatting,
 documentation indexing, history audit, and an exact-source Linux run of all 67
 transport-recovery tests.
-Current `main` moved after that review completed. The candidate includes
-`2e77e2e1`, including the decoder selection and recovery promotion and the
-Apple terminal-settlement retry. Forgejo run
+Current `main` moved after that review completed. The first corrected candidate
+included `2e77e2e1`, including the decoder selection and recovery promotion and
+the Apple terminal-settlement retry. Forgejo run
 [#1256](http://192.168.4.7:3000/noirr/plurx/actions/runs/1256) stopped at fast
 preflight because the final status-only commit `0247c428` lacked the required
 non-runtime history-ledger entry. Run
@@ -105,9 +105,30 @@ not-yet-scheduled task as runnable. The assertion now gives the exact recorded
 identity a bounded settlement window; a genuinely abandoned child remains
 live long enough to write the existing failure marker. Ten consecutive Linux
 stress passes cover 20 injected discovery-denial positions, and the complete
-198-test validation suite passes. The next push is the frozen candidate for
-the one full PR qualification run; no second adversarial review is planned or
-required.
+198-test validation suite passes.
+
+Forgejo run
+[#1305](http://192.168.4.7:3000/noirr/plurx/actions/runs/1305) then passed its
+unit, Apple, Android, package, validation, WAL, and daemon work on candidate
+`aa757d85`. It found two Store migration-fixture failures while current `main`
+advanced to `1566118a`; that main merge contains the independently qualified
+fixture repair, so repository policy made the still-running candidate stale.
+The remaining work was cancelled before either 20-cycle recovery role began.
+The web job had also refused an idle runner at its 25 GB disk floor after the
+source-only compile loop grew that runner's persistent Cargo cache. The
+repository-owned bounded pruner reduced the exact cache root from 35 GB to
+24 GB and restored 32 GB free without deleting a source checkout or touching
+an active runner job.
+
+Merge `e9e40c8f` now integrates that current `main` into the reviewed effort.
+The conflict resolution takes main's newer Apple finalization ownership,
+Store-fixture downgrade helpers, and VOD fixture sampling intact; the effort's
+transport recovery implementation and production trim-before-grid seek fix
+remain. Exact archived source on Rust 1.97.1 passes formatting, the `plurxd`
+all-target check, both Store migrations that failed on the stale base, and the
+real-FFmpeg VFR and bitmap restart regressions. The next push is the frozen
+candidate for the one current-tree PR qualification; no second adversarial
+review is planned or required.
 
 ## Milestones — evidence closes the checkbox
 

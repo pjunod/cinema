@@ -301,6 +301,20 @@ final class PlaybackControlSessionTests: XCTestCase {
         )
     }
 
+    /// An injected URLSession may only be invalidated after every detached
+    /// final reporter has stopped. URLSession raises an Objective-C exception
+    /// (rather than returning an Error) if one of those reporters creates its
+    /// end request after invalidation.
+    private func tearDownTransport(
+        _ session: PlaybackControlSession,
+        _ urlSession: URLSession
+    ) {
+        addTeardownBlock { @MainActor in
+            await session.endAndWait()
+            urlSession.invalidateAndCancel()
+        }
+    }
+
     private func waitForExchange(
         timeout: TimeInterval = 5,
         where predicate: (ControlRequest) -> Bool
@@ -314,25 +328,12 @@ final class PlaybackControlSessionTests: XCTestCase {
         throw ExchangeTimeout()
     }
 
-    /// The product keeps teardown asynchronous for UI callers, while XCTest
-    /// must not invalidate its injected transport or start the next test until
-    /// the final exchange has actually settled.
-    private func tearDownSession(
-        _ session: PlaybackControlSession,
-        _ urlSession: URLSession
-    ) {
-        addTeardownBlock { @MainActor in
-            if let finishing = session.end() { await finishing.value }
-            urlSession.invalidateAndCancel()
-        }
-    }
-
     func testAStartedSessionExchangesWhatThePlayerReported() async throws {
         controlExchanges.reset()
         let player = PlayerStub()
         let (transport, urlSession) = makeTransport()
         let session = PlaybackControlSession()
-        tearDownSession(session, urlSession)
+        tearDownTransport(session, urlSession)
 
         session.begin(
             bootstrap: sessionBootstrap(),
@@ -358,7 +359,7 @@ final class PlaybackControlSessionTests: XCTestCase {
         let player = PlayerStub()
         let (transport, urlSession) = makeTransport()
         let session = PlaybackControlSession()
-        tearDownSession(session, urlSession)
+        tearDownTransport(session, urlSession)
         var reads = 0
         session.begin(bootstrap: sessionBootstrap(), transport: transport, observe: {
             MainActor.assertIsolated()
@@ -409,7 +410,7 @@ final class PlaybackControlSessionTests: XCTestCase {
         })
         let player = PlayerStub()
         let (transport, urlSession) = makeTransport()
-        tearDownSession(session, urlSession)
+        tearDownTransport(session, urlSession)
         defer {
             release.signal()
             controlAnswer.set(ControlAction(type: "none")); controlAnswer.setReadiness(nil)
@@ -442,7 +443,7 @@ final class PlaybackControlSessionTests: XCTestCase {
         let callbacks = SubtitleCallbackQueue()
         let session = PlaybackControlSession(scheduleSubtitleReady: { callbacks.append($0) })
         let (transport, urlSession) = makeTransport()
-        tearDownSession(session, urlSession)
+        tearDownTransport(session, urlSession)
         var deliveries = 0
 
         session.begin(
@@ -509,7 +510,7 @@ final class PlaybackControlSessionTests: XCTestCase {
         let player = PlayerStub()
         let (transport, urlSession) = makeTransport()
         let session = PlaybackControlSession()
-        tearDownSession(session, urlSession)
+        tearDownTransport(session, urlSession)
 
         session.begin(
             bootstrap: sessionBootstrap(),
@@ -544,7 +545,7 @@ final class PlaybackControlSessionTests: XCTestCase {
         let player = PlayerStub()
         let (transport, urlSession) = makeTransport()
         let session = PlaybackControlSession()
-        tearDownSession(session, urlSession)
+        tearDownTransport(session, urlSession)
 
         session.begin(
             bootstrap: sessionBootstrap(),
@@ -575,7 +576,7 @@ final class PlaybackControlSessionTests: XCTestCase {
         let player = PlayerStub()
         let (transport, urlSession) = makeTransport()
         let session = PlaybackControlSession()
-        tearDownSession(session, urlSession)
+        tearDownTransport(session, urlSession)
 
         session.begin(
             bootstrap: sessionBootstrap(),
@@ -607,7 +608,7 @@ final class PlaybackControlSessionTests: XCTestCase {
         let player = PlayerStub()
         let (transport, urlSession) = makeTransport()
         let session = PlaybackControlSession()
-        tearDownSession(session, urlSession)
+        tearDownTransport(session, urlSession)
 
         session.begin(
             bootstrap: sessionBootstrap(),
@@ -644,7 +645,7 @@ final class PlaybackControlSessionTests: XCTestCase {
         let player = PlayerStub()
         let (transport, urlSession) = makeTransport()
         let session = PlaybackControlSession()
-        tearDownSession(session, urlSession)
+        tearDownTransport(session, urlSession)
 
         session.begin(
             bootstrap: sessionBootstrap(),
@@ -670,7 +671,7 @@ final class PlaybackControlSessionTests: XCTestCase {
         let player = PlayerStub()
         let (transport, urlSession) = makeTransport()
         let session = PlaybackControlSession()
-        tearDownSession(session, urlSession)
+        tearDownTransport(session, urlSession)
 
         // The bootstrap exchange answers `none`, or the reporter stops before
         // the ask exists and the test measures that instead.
@@ -701,7 +702,7 @@ final class PlaybackControlSessionTests: XCTestCase {
         let player = PlayerStub()
         let (transport, urlSession) = makeTransport()
         let session = PlaybackControlSession()
-        tearDownSession(session, urlSession)
+        tearDownTransport(session, urlSession)
 
         // Sequence 1 is held with a verdict this ask must refuse.
         controlAnswer.set(ControlAction(
@@ -736,7 +737,7 @@ final class PlaybackControlSessionTests: XCTestCase {
         let player = PlayerStub()
         let (transport, urlSession) = makeTransport()
         let session = PlaybackControlSession()
-        tearDownSession(session, urlSession)
+        tearDownTransport(session, urlSession)
 
         session.begin(
             bootstrap: sessionBootstrap(),
@@ -772,7 +773,7 @@ final class PlaybackControlSessionTests: XCTestCase {
         let player = PlayerStub()
         let (transport, urlSession) = makeTransport()
         let session = PlaybackControlSession()
-        tearDownSession(session, urlSession)
+        tearDownTransport(session, urlSession)
 
         session.begin(
             bootstrap: sessionBootstrap(),
@@ -805,7 +806,7 @@ final class PlaybackControlSessionTests: XCTestCase {
         let player = PlayerStub()
         let (transport, urlSession) = makeTransport()
         let session = PlaybackControlSession()
-        tearDownSession(session, urlSession)
+        tearDownTransport(session, urlSession)
 
         // The shortest lease the bootstrap validator accepts — it must be at
         // least `nextExchangeMs` — so the bound is reachable in a test rather
@@ -841,7 +842,7 @@ final class PlaybackControlSessionTests: XCTestCase {
         let player = PlayerStub()
         let (transport, urlSession) = makeTransport()
         let session = PlaybackControlSession()
-        tearDownSession(session, urlSession)
+        tearDownTransport(session, urlSession)
 
         // Generation 1 asks, and the server's terminal answer is held.
         controlAnswer.set(ControlAction(
@@ -877,7 +878,7 @@ final class PlaybackControlSessionTests: XCTestCase {
         let player = PlayerStub()
         let (transport, urlSession) = makeTransport()
         let session = PlaybackControlSession()
-        tearDownSession(session, urlSession)
+        tearDownTransport(session, urlSession)
 
         session.begin(
             bootstrap: sessionBootstrap(),
@@ -899,7 +900,7 @@ final class PlaybackControlSessionTests: XCTestCase {
         let player = PlayerStub()
         let (transport, urlSession) = makeTransport()
         let session = PlaybackControlSession()
-        tearDownSession(session, urlSession)
+        tearDownTransport(session, urlSession)
 
         session.begin(
             bootstrap: sessionBootstrap(),
@@ -923,7 +924,7 @@ final class PlaybackControlSessionTests: XCTestCase {
         var unusable = sessionBootstrap()
         unusable.url = "/api/v1/hls/session-1/notcontrol"
         let session = PlaybackControlSession()
-        tearDownSession(session, urlSession)
+        tearDownTransport(session, urlSession)
 
         session.begin(bootstrap: unusable, transport: transport, observe: { player.observation() })
 

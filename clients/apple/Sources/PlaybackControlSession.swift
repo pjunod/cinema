@@ -111,11 +111,13 @@ struct PlaybackControlTransport {
 @MainActor
 final class PlaybackControlSession {
     private var reporter: PlaybackControlReporter?
-    /// Final exchanges from successive attachments are serialized so teardown
-    /// can expose one completion boundary without making synchronous owners
-    /// wait. Tests and other injected-session owners use that boundary before
-    /// invalidating the transport they supplied.
-    private var pendingFinish: Task<Void, Never>?
+    /// Detached reporters still completing their bounded final exchange.
+    ///
+    /// The player does not wait for them, but an owner of an injected
+    /// transport can call `endAndWait()` before invalidating that transport.
+    /// Entries remove themselves so ordinary reopen cycles do not retain a
+    /// history of completed tasks.
+    private var finalizations: [UUID: Task<Void, Never>] = [:]
     private var observe: (() -> PlayerControlObservation?)?
     private var activeGeneration: Int?
     /// How a value the reporter's actor produced reaches `@MainActor`.
@@ -459,8 +461,7 @@ final class PlaybackControlSession {
         latest.store(nil)
     }
 
-    @discardableResult
-    func end() -> Task<Void, Never>? {
+    func end() {
         // Capture before revoking publication. `PlayerController.stop` has
         // already mapped this player to end and queued any prepared settlement.
         // The reporter owns the two-exchange committed-then-end sequence even
@@ -484,15 +485,24 @@ final class PlaybackControlSession {
         answers.begin(generation: generation)
         latest.store(nil)
         observe = nil
-        guard let reporter else { return pendingFinish }
+        guard let reporter else { return }
         self.reporter = nil
-        let precedingFinish = pendingFinish
-        let finishing = Task {
-            await precedingFinish?.value
-            await reporter.finish(final)
+        let id = UUID()
+        finalizations[id] = Task { [weak self] in
+            await reporter.finishAndWait(final)
+            self?.finalizations[id] = nil
         }
-        pendingFinish = finishing
-        return finishing
+    }
+
+    /// End this session and join every reporter detached by this player.
+    ///
+    /// Normal player teardown uses `end()` and remains non-blocking. This is
+    /// the ownership boundary for injected transports whose lifetime is
+    /// shorter than the process-wide production session.
+    func endAndWait() async {
+        end()
+        let pending = Array(finalizations.values)
+        for task in pending { await task.value }
     }
 
     /// Read the player once, on the actor that owns it, and publish what the

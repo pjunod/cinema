@@ -811,7 +811,7 @@ final class PlaybackControlReporterTests: XCTestCase {
         // the end exchange is allowed to follow.
         harness.enqueue([.failure(ControlTransportError(status: nil, code: nil))])
         let reporter = try XCTUnwrap(makeReporter(harness))
-        await reporter.finish(PlaybackControlCapture(
+        await reporter.finishAndWait(PlaybackControlCapture(
             snapshot: ending,
             intentGeneration: 0,
             owner: PlaybackControlCaptureOwner(
@@ -819,12 +819,15 @@ final class PlaybackControlReporterTests: XCTestCase {
             ),
             sourceRevision: 1
         ))
-        assertAsyncResult(await harness.awaitExchanges(3))
         let requests = harness.requests
-        guard requests.count >= 3 else {
-            XCTFail("finalization did not send commit, retry, and end")
-            return
-        }
+        let finalStatus = await reporter.status()
+        XCTAssertGreaterThanOrEqual(
+            requests.count,
+            3,
+            "finalization produced \(requests.count) request(s): \(requests.map(\.demand)); "
+                + "status: \(finalStatus); pacing: \(harness.pacingSleeps)"
+        )
+        guard requests.count >= 3 else { return }
         XCTAssertEqual(requests[0].demand, .active)
         XCTAssertGreaterThanOrEqual(
             requests[0].playbackRate,

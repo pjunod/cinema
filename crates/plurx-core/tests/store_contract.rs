@@ -10336,7 +10336,84 @@ async fn api_key_activity_refresh_is_bounded_and_disabled_keys_do_not_touch() {
 }
 
 #[cfg(feature = "hiqlite-contract-tests")]
-async fn remove_hiqlite_schema_after_v32(client: &Client) {
+async fn downgrade_current_schema_after_request_identity(client: &Client) {
+    let results = client
+        .txn([
+            (
+                "DROP TRIGGER IF EXISTS cache_publication_generation_guard",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TRIGGER IF EXISTS offline_claim_lifecycle_guard",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TRIGGER IF EXISTS offline_recovery_guard",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE transcode_cache_locations DROP COLUMN publication_generation",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE offline_packages DROP COLUMN alternate_recipe_hash",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE offline_packages DROP COLUMN decoder_recovery_state",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE offline_packages DROP COLUMN claim_generation",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE media_sessions DROP COLUMN recovery_epoch",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TABLE media_session_producer_recovery",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TRIGGER IF EXISTS media_sessions_drain_ownership_fence_au",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE media_sessions DROP COLUMN drain_deadline_ms",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS analysis_requests_terminal_identity",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TRIGGER IF EXISTS media_playback_pointers_desired_fence_ai",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TRIGGER IF EXISTS media_playback_pointers_desired_fence_au",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE media_playback_pointers DROP COLUMN desired_revision",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TABLE IF EXISTS media_playback_desired",
+                hiqlite::params!(),
+            ),
+        ])
+        .await
+        .expect("submit post-v27 fixture downgrade");
+    results
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("commit post-v27 fixture downgrade");
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn downgrade_current_schema_after_producer_recovery(client: &Client) {
     let results = client
         .txn([
             (
@@ -10373,69 +10450,11 @@ async fn remove_hiqlite_schema_after_v32(client: &Client) {
             ),
         ])
         .await
-        .expect("remove schema tail newer than v32");
+        .expect("submit post-v32 fixture downgrade");
     results
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
-        .expect("commit schema-tail removal");
-}
-
-#[cfg(feature = "hiqlite-contract-tests")]
-async fn remove_hiqlite_schema_after_v31(client: &Client) {
-    remove_hiqlite_schema_after_v32(client).await;
-    client
-        .execute(
-            "DROP TABLE IF EXISTS media_session_producer_recovery",
-            hiqlite::params!(),
-        )
-        .await
-        .expect("remove v32 producer-recovery ledger");
-}
-
-#[cfg(feature = "hiqlite-contract-tests")]
-async fn remove_hiqlite_schema_after_v27(client: &Client) {
-    // These fixtures begin from the current install schema, then wind it back
-    // to the literal version each test names. Keep the shared tail removal in
-    // reverse chronological order: otherwise every schema addition makes a
-    // dozen older fixtures current-shaped under an old marker.
-    remove_hiqlite_schema_after_v31(client).await;
-    let results = client
-        .txn([
-            (
-                "DROP TRIGGER IF EXISTS media_sessions_drain_ownership_fence_au",
-                hiqlite::params!(),
-            ),
-            (
-                "ALTER TABLE media_sessions DROP COLUMN drain_deadline_ms",
-                hiqlite::params!(),
-            ),
-            (
-                "DROP INDEX IF EXISTS analysis_requests_terminal_identity",
-                hiqlite::params!(),
-            ),
-            (
-                "DROP TRIGGER IF EXISTS media_playback_pointers_desired_fence_ai",
-                hiqlite::params!(),
-            ),
-            (
-                "DROP TRIGGER IF EXISTS media_playback_pointers_desired_fence_au",
-                hiqlite::params!(),
-            ),
-            (
-                "ALTER TABLE media_playback_pointers DROP COLUMN desired_revision",
-                hiqlite::params!(),
-            ),
-            (
-                "DROP TABLE IF EXISTS media_playback_desired",
-                hiqlite::params!(),
-            ),
-        ])
-        .await
-        .expect("remove v28 through v31 schema tail");
-    results
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()
-        .expect("commit schema-tail removal");
+        .expect("commit post-v32 fixture downgrade");
 }
 
 #[cfg(feature = "hiqlite-contract-tests")]
@@ -10466,8 +10485,8 @@ async fn replicated_v5_store_migrates_atomically_through_v11_on_daemon_open() {
         .await
         .expect("seed unrelated replicated row");
     drop(current);
-    remove_hiqlite_schema_after_v27(&client).await;
 
+    downgrade_current_schema_after_request_identity(&client).await;
     let results = client
         .txn([
             (
@@ -10698,8 +10717,8 @@ async fn replicated_v23_store_migrates_the_conversion_ledger_on_daemon_open() {
         .await
         .expect("seed unrelated replicated row");
     drop(current);
-    remove_hiqlite_schema_after_v27(&client).await;
 
+    downgrade_current_schema_after_request_identity(&client).await;
     let results = client
         .txn([
             (
@@ -10825,13 +10844,13 @@ async fn replicated_v27_store_migrates_the_request_identity_on_daemon_open() {
         .await
         .expect("seed unrelated replicated row");
     drop(current);
-    remove_hiqlite_schema_after_v27(&client).await;
 
     // Rewind to v26: the identity column gone, a request row already in the
     // table, and the meta version pinned to the literal it is named for. The
     // row is what proves the migration is additive — a file already queued
     // when the fleet upgrades must come out the other side asking for the same
     // work, which for an empty identity means "whichever identity is next".
+    downgrade_current_schema_after_request_identity(&client).await;
     client
         .txn([
             (
@@ -10977,9 +10996,10 @@ async fn replicated_v32_store_migrates_the_producer_recovery_ledger_on_daemon_op
         .await
         .expect("seed unrelated replicated row");
     drop(current);
-    remove_hiqlite_schema_after_v31(&client).await;
 
-    // Rewind to v31: no ledger, marker pinned to the literal it is named for.
+    // Rewind to v31: no ledger, marker pinned to the exact predecessor of the
+    // producer-recovery migration.
+    downgrade_current_schema_after_producer_recovery(&client).await;
     client
         .txn([
             (
@@ -11056,12 +11076,12 @@ async fn replicated_v32_store_migrates_the_producer_recovery_ledger_on_daemon_op
     // refuse and this one must not: `CREATE TABLE IF NOT EXISTS` is idempotent,
     // so the loser of a two-voter race simply finds the work done. Refusing
     // here would leave a cluster interrupted mid-migration unable to open.
-    remove_hiqlite_schema_after_v32(&client).await;
+    downgrade_current_schema_after_producer_recovery(&client).await;
     client
-        .execute(
+        .txn([(
             "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
             hiqlite::params!(V31_SCHEMA_VERSION),
-        )
+        )])
         .await
         .expect("rewind the marker under an already-migrated shape");
     let reopened = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
@@ -11116,10 +11136,10 @@ async fn replicated_v26_store_migrates_attempt_errors_on_daemon_open() {
         .await
         .expect("seed unrelated replicated row");
     drop(current);
-    remove_hiqlite_schema_after_v27(&client).await;
 
     // Rewind to v25: the attempt-history column gone, a job row already in the
     // table, and the meta version pinned to the literal it is named for.
+    downgrade_current_schema_after_request_identity(&client).await;
     client
         .txn([
             (
@@ -11271,8 +11291,8 @@ async fn replicated_v24_store_migrates_recovery_guards_and_rejects_malformed_sha
         .await
         .expect("seed unrelated replicated row");
     drop(current);
-    remove_hiqlite_schema_after_v27(&client).await;
 
+    downgrade_current_schema_after_request_identity(&client).await;
     let results = client
         .txn([
             (
@@ -11539,6 +11559,7 @@ async fn replicated_v24_store_migrates_recovery_guards_and_rejects_malformed_sha
         .expect("commit recoverable v25 fixture"));
     drop(migrated);
 
+    downgrade_current_schema_after_request_identity(&client).await;
     let results = client
         .txn([
             (
@@ -11651,8 +11672,8 @@ async fn replicated_v6_store_migrates_atomically_to_v11_on_daemon_open() {
         .await
         .expect("seed unrelated replicated row");
     drop(current);
-    remove_hiqlite_schema_after_v27(&client).await;
 
+    downgrade_current_schema_after_request_identity(&client).await;
     let results = client
         .txn([
             (
@@ -11870,8 +11891,8 @@ async fn replicated_v7_store_migrates_atomically_to_v11_on_daemon_open() {
         .await
         .expect("seed unrelated replicated row");
     drop(current);
-    remove_hiqlite_schema_after_v27(&client).await;
 
+    downgrade_current_schema_after_request_identity(&client).await;
     client
         .txn([
             (
@@ -12059,8 +12080,8 @@ async fn replicated_v8_store_migrates_exactly_to_v11_on_daemon_open() {
         .await
         .expect("seed unrelated replicated row");
     drop(current);
-    remove_hiqlite_schema_after_v27(&client).await;
 
+    downgrade_current_schema_after_request_identity(&client).await;
     client
         .txn([
             (
@@ -12280,8 +12301,8 @@ async fn replicated_v9_store_migrates_exactly_to_v11_on_daemon_open() {
         .await
         .expect("seed unrelated replicated row");
     drop(current);
-    remove_hiqlite_schema_after_v27(&client).await;
 
+    downgrade_current_schema_after_request_identity(&client).await;
     client
         .txn([
             (
@@ -12447,8 +12468,8 @@ async fn replicated_v10_store_migrates_exactly_to_current_on_daemon_open() {
         .await
         .expect("seed unrelated replicated row");
     drop(current);
-    remove_hiqlite_schema_after_v27(&client).await;
 
+    downgrade_current_schema_after_request_identity(&client).await;
     client
         .txn([
             (
@@ -12722,8 +12743,8 @@ async fn replicated_v11_and_v12_migrations_are_atomic_restartable_and_stepwise()
         .await
         .expect("seed unrelated replicated row");
     drop(current);
-    remove_hiqlite_schema_after_v27(&client).await;
 
+    downgrade_current_schema_after_request_identity(&client).await;
     client
         .txn([
             (
@@ -12915,6 +12936,7 @@ async fn replicated_v11_and_v12_migrations_are_atomic_restartable_and_stepwise()
     }
     drop(migrated);
 
+    downgrade_current_schema_after_request_identity(&client).await;
     client
         .txn([
             (
@@ -13281,11 +13303,11 @@ async fn replicated_analysis_schema_bootstrap_and_stale_marker_retries_are_idemp
         CONTRACT_INSTANCE_ID
     );
     drop(retried);
-    remove_hiqlite_schema_after_v27(&client).await;
 
     // Model a committed v22 shape whose marker acknowledgement was lost. The
     // daemon must advance only the marker instead of replaying ALTER/rename
     // statements against the already-current tables.
+    downgrade_current_schema_after_request_identity(&client).await;
     let results = client
         .txn([
             // Bootstrap installs the current v25 shape. Rewind every schema
@@ -14200,13 +14222,11 @@ fn populated_current_import_fixture(data_dir: &std::path::Path) -> PathBuf {
                  VALUES ('fixture-recipe', 30, 1, 123);
              INSERT INTO transcode_cache_locations
                  (recipe_hash, node_id, storage_class, relative_dir, bytes, complete,
-                  manifest_digest, storage_id, generation_id,
-                  publication_generation, last_used_at, last_seen_at)
+                  manifest_digest, last_used_at, last_seen_at, storage_id, generation_id)
                  VALUES ('fixture-recipe', 'fixture-node', 'local', 'fixture-recipe',
                          2048, 1,
                          'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-                         'node:fixture-node:cache', 'fixture-recipe', 1,
-                         124, 125);
+                         124, 125, 'node:fixture-node:cache', 'fixture-recipe');
              INSERT INTO pretranscode_jobs
                  (id, dedupe_key, file_id, source_size, source_mtime, target_height,
                   policy_generation, requirements_json, reason, priority, state,
@@ -14275,10 +14295,9 @@ fn populated_current_import_fixture(data_dir: &std::path::Path) -> PathBuf {
                 .execute(
                     "INSERT INTO transcode_cache_locations
                          (recipe_hash, node_id, storage_class, relative_dir, bytes, complete,
-                          storage_id, generation_id, publication_generation,
-                          last_used_at, last_seen_at)
-                     VALUES ('fixture-recipe', ?1, ?2, ?3, ?4, 1,
-                             'node:' || ?1 || ':cache', ?3, 1, ?5, ?6)",
+                          last_used_at, last_seen_at, storage_id, generation_id)
+                     VALUES ('fixture-recipe', ?1, ?2, ?3, ?4, 1, ?5, ?6,
+                             'node:' || ?1 || ':cache', ?3)",
                     rusqlite::params![
                         format!("fixture-page-node-{ordinal:03}"),
                         storage_class,
