@@ -13,6 +13,11 @@ fn encoded_plan(
     };
 
     let codec = file.video_codec.as_deref().unwrap_or("h264");
+    let transfer = match plurx_core::transcode::routing_hdr(file) {
+        Some("hdr10" | "hdr10plus" | "dolby_vision") => Some("smpte2084"),
+        Some("hlg") => Some("arib-std-b67"),
+        _ => Some("bt709"),
+    };
     let facts = DecodeFacts::from_ffprobe_json(
         &serde_json::json!({
             "streams": [{
@@ -21,9 +26,10 @@ fn encoded_plan(
                 "codec_name": codec,
                 "width": file.width.unwrap_or(320),
                 "height": file.height.unwrap_or(180),
-                "pix_fmt": "yuv420p",
+                "pix_fmt": if file.bit_depth.unwrap_or(8) >= 10 { "yuv420p10le" } else { "yuv420p" },
                 "avg_frame_rate": "24000/1001",
                 "r_frame_rate": "24000/1001",
+                "color_transfer": transfer,
                 "disposition": {"attached_pic": 0}
             }]
         }),
