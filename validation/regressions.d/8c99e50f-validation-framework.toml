@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["8c99e50f"]
+points = ["validation.framework"]
+checks = ["history-regressions"]
+reason = "The corrective-history audit retains the exact offline recovery fixture mapping while treating the mapping commit itself as validation metadata rather than runtime authorization."

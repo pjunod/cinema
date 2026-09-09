@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["a183fd9c"]
+points = ["playback.pipeline", "validation.framework"]
+checks = ["rust-gate", "catalog-contract"]
+reason = "The retained Rust regression `a_copy_that_cannot_convert_strips_the_argv_it_spawns` still drives the production copy path with a real 10-bit HEVC source, but its fixture encoder is now part of the test's bounded ownership: Tokio kills it when the 30-second deadline expires, and libx265 receives one worker instead of deriving an unrestricted pool from the host. Reverting this commit restores the synchronous `Command::status` call that occupied the remainder of current-main fast-Rust run #1377 under full-suite contention. The focused test passes alone and in 24 concurrent processes, while the full `rust-gate` retains the contention shape that exposed the defect."
