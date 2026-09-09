@@ -1,0 +1,20 @@
+version = 1
+
+[[coverage]]
+commits = [
+  "948a14c5",
+]
+points = [
+  "cluster.auth",
+  "operations.packaging",
+  "validation.framework",
+]
+checks = [
+  "rust-gate",
+  "rust-gate-ci",
+  "cluster-transport-recovery",
+  "operations-contract",
+  "catalog-contract",
+  "history-regressions",
+]
+reason = "The recovery harness now builds both roles with a dedicated optimized profile that retains debug information, overflow checks, and debug assertions, stamps the actual compilation settings into closed role reports, and uses the same binary throughout role and aggregate validation. Same-runner three-cycle evidence reduces voter wall time by 86.8% and learner wall time by 44.9%; exact-source macOS and Linux focused suites, vendored transport regressions, operations contracts, and schema validation cover the retained profile."
