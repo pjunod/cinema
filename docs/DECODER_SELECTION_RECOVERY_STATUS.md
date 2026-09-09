@@ -1,14 +1,16 @@
 # Decoder selection and recovery — implementation status
 
 **Status:** M0–M5 and M7 complete · effort promoted and post-merge repairs
-merged · M6 reserve-and-prime implementation in final validation · broader
+merged · M6 reserve-and-prime implementation in draft PR #203 · broader
 fleet qualification remains post-merge evidence · **Updated:** 2026-09-09 ·
 **Current main base:** `18ddffc1` · **Active branch:**
 `codex/m6-server-prime`
 
-**Live checkpoint:** [Forgejo #189](http://192.168.4.7:3000/noirr/plurx/pulls/189)
-and its post-merge repairs are complete on `main`. The remaining M6 server gap
-is implemented on `codex/m6-server-prime`: a successor is durably reserved,
+**Live checkpoint:** [Forgejo #203](http://192.168.4.7:3000/noirr/plurx/pulls/203)
+is the draft M6 server-prime follow-up. Promotion
+[PR #189](http://192.168.4.7:3000/noirr/plurx/pulls/189) and its post-merge
+repairs are complete on `main`. The remaining M6 server gap is implemented on
+`codex/m6-server-prime`: a successor is durably reserved,
 its real VOD worker is attached before the actor announces it, staged media is
 authorized without granting staged control authority, committed media remains
 readable through predecessor drain by durable marker plus current-pointer
@@ -39,7 +41,7 @@ An unchecked item is not implied by a nearby passing check.
 | Stage | State | What remains |
 |---|---|---|
 | M0–M5 · selection, observation, receipts, admission and bounded prepublication recovery | Done on the effort branch | No planned build work |
-| M6 · prepared replacement contract, clients, and server prime | Implementation complete on `codex/m6-server-prime`; PR/fast lane pending | Physical first-frame smoke on the devices of interest and the cross-client fleet receipt remain evidence, not code gates |
+| M6 · prepared replacement contract, clients, and server prime | Implementation complete in draft [PR #203](http://192.168.4.7:3000/noirr/plurx/pulls/203); fast lane running | Physical first-frame smoke on the devices of interest and the cross-client fleet receipt remain evidence, not code gates |
 | M7a · advisory Developer settings | Done | Keep the prerequisites accurate as hardware contracts land; the controls advise and never gate enablement |
 | M7b · hardware diagnostic path | Merged | [Forgejo #174](http://192.168.4.7:3000/noirr/plurx/pulls/174) merged approved head `0a685526` into the effort at `0c831b88` after the complete Effort development gate. Backend-aware measurement, path-scoped qualification, same-codec recovery pairing, compatible v2 reporting, and advisory Developer readiness are implemented. A real hardware contract is separate M8 fleet evidence |
 | M7 remainder · offline durability and handoff enforcement | Merged | [Forgejo #179](http://192.168.4.7:3000/noirr/plurx/pulls/179) fast-forwarded approved head `990bf334` into the effort after its adversarial findings were fixed and the Effort development gate passed; the repair includes one replicated cluster-wide kill-switch transaction |
@@ -60,15 +62,15 @@ remain evidence work; neither blocks the new prepared-handoff checkbox.
 | Task base | Effort head `990bf334` was the historical promotion candidate; it is not the current follow-up base |
 | Current follow-up base | Forgejo `main` at `18ddffc1` |
 | Task branch | `codex/m6-server-prime` in the agent-owned clone at `/private/tmp/codex-plurx-decoder.RRcx8j/repo` |
-| Task PR | Pending until the implementation commit is pushed; it remains draft through the fast lane |
+| Task PR | Draft [Forgejo #203](http://192.168.4.7:3000/noirr/plurx/pulls/203) at rebased head `c683e337` |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
 | Audit scope | Prepared-successor durability, VOD worker attachment, media-only staged authority, commit publication, worker cleanup, lease renewal, and direct Developer enablement |
 | Current finding | The old path staged metadata only and double-counted the VOD resume as an origin. The branch now reserves first, primes the VOD worker, announces only after attachment, serves staged media under the exact ledger capability, keeps VOD origin zero, and after commit requires both the prepared marker and current pointer while control/status remain fenced through predecessor drain |
 | Adversarial review | Complete. Einstein found three promotion blockers: immutable VOD bypassed the resolved decoder plan, the v50 Hiqlite import projected `drain_deadline_ms` one version too early, and the cache-location projection test stopped at v53 despite v54's publication generation. VOD now retains one descriptor-bound plan and uses it for arguments, identity, and mixed admission; real v50/v51 import fixtures and v25/v53/v54 cache projections pin the schema boundaries. Per owner direction, there is no additional task-review loop |
-| Focused evidence | Pinned Rust 1.97.1 all-target compile and strict Clippy pass; 37 preparation regressions, exact staged-media authority, four VOD origin/resume boundary tests, settings persistence, committed-renewal Store contract, 19 Developer settings tests, passive web control, and docs-index validation pass |
-| Fast lane | Not run yet on the committed head |
+| Focused evidence | Pinned Rust 1.97.1 all-target compile and strict Clippy pass; 37 preparation regressions, exact staged-media authority, four VOD origin/resume boundary tests, settings persistence, 19 Developer settings tests, passive web control, and docs-index validation pass. The broad tracked commit profile exposed an unpublished-activation inventory regression; the repair's ordinary-activation exclusion and committed-successor renewal contracts both pass on SQLite and three-node Hiqlite after rebasing |
+| Fast lane | Running for draft PR #203. Checks already completed by the tracked commit profile are accepted as exact implementation evidence; only unique fast-lane checks block merge, per owner direction |
 | Validation order | Task PRs into the effort do not run the full unit suite. After M7: functionality smoke evidence and a green fast lane before promotion; after they pass, merge and continue watching the remaining promotion and broader suites. The owner explicitly approved watching the remaining promotion jobs on `main`; a code failure gets a new PR |
-| Next | Finish focused regressions and docs · commit · open draft PR · run fast lane · mark ready and merge · watch remaining suites on `main` |
+| Next | Finish unique fast-lane checks · mark PR #203 ready and merge · watch duplicate and broader suites on `main` |
 | External blocker | None. Physical hardware is useful for smoke/qualification after merge but does not gate enabling or merging this implementation |
 
 ## Milestones
