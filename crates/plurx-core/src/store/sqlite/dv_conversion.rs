@@ -1266,6 +1266,7 @@ mod tests {
                  DROP TRIGGER IF EXISTS media_playback_pointers_desired_fence_au;
                  ALTER TABLE media_playback_pointers DROP COLUMN desired_revision;
                  DROP INDEX dv_conversions_recovery_guard;
+                 DROP INDEX IF EXISTS analysis_requests_terminal_identity;
                  DROP TABLE dv_recovery_guards;
                  DROP TABLE IF EXISTS fragment_index_outcomes;
                  DROP TABLE IF EXISTS media_playback_desired;
@@ -1357,12 +1358,13 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 5] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 6] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
             "media_playback_desired",
             "desired_revision",
+            "analysis_requests_terminal_identity",
         ];
 
         assert!(
