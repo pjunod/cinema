@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["72b245d4"]
+reason = "This commit only carried the pre-rebase validation lineage; the current-main rebase changed those commit identities, and the following metadata-only commit replaces every stale reference."
+ignore = true

@@ -69,13 +69,27 @@ WAL, daemon, and both package builds in rerun
 stopped before testing on the 45 GB disk floor; verified-idle cleanup restored
 that exact runner to 58 GB. Fast Rust exposed one remaining fixture defect:
 the real HEVC argv regression synchronously launched unrestricted libx265 with
-no deadline and occupied the rest of the 30-minute job. Current `main` at
-`3ce2ea0d` includes M6 prepared-successor priming and the newer Live TV signal
-quality/mobile-version work.
-The narrow correction in draft
-[#207](http://192.168.4.7:3000/noirr/plurx/pulls/207) integrates that tree and
-gives the subprocess a 30-second kill-on-drop deadline and one worker; no
-production behavior changes · **Updated:**
+no deadline and occupied the rest of the 30-minute job. The narrow correction
+[#207](http://192.168.4.7:3000/noirr/plurx/pulls/207) merged as `9258f36b` and
+gives the subprocess a 30-second kill-on-drop deadline and one worker. Its Rust
+lane passed 2,145 tests before exposing a second contention-sensitive fact
+probe and an offline recovery fixture that had not enabled the behavior it
+tests. [#209](http://192.168.4.7:3000/noirr/plurx/pulls/209) and
+[#210](http://192.168.4.7:3000/noirr/plurx/pulls/210) repair that offline
+fixture and Docker packaging as `aff2dc12`; [#212](http://192.168.4.7:3000/noirr/plurx/pulls/212)
+then normalizes that Docker evidence as `d9e8d7d4`. [#208](http://192.168.4.7:3000/noirr/plurx/pulls/208)
+removes the duplicate offline-fixture line and records its Developer golden as
+`633a32ad`; [#213](http://192.168.4.7:3000/noirr/plurx/pulls/213) then closes
+the decoder status document as `894fd3da`. [#216](http://192.168.4.7:3000/noirr/plurx/pulls/216)
+lands Dolby Vision recovery and tvOS Live TV starts as `b36397cf`; [#217](http://192.168.4.7:3000/noirr/plurx/pulls/217)
+adds the remaining decoder M8 evidence handoff on current `main` at `3915c1d1`.
+Draft follow-up
+[#211](http://192.168.4.7:3000/noirr/plurx/pulls/211) gives the remaining fact
+probe its production budget and separates the compile-only fast Rust verdict
+from the continuing unit/SQLite job. Its exact current-main app passes the
+whole-workspace compile command; its preceding `d9e8d7d4` tree also completed a
+78-capture sweep matching all 7,698 structural facts with no console or page
+errors. No production behavior changes · **Updated:**
 2026-09-09 · **Effort:**
 `effort/streaming-reliability` (merged) · **Started:** 2026-09-04 ·
 **Effort fork:** `48615baf` · **Continuation merged to main:** `1f6d6645` via
