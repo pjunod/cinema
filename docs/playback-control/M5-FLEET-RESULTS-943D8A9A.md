@@ -1,5 +1,4 @@
 # M5 fleet results — client build 99 / versionCode 56 at `943d8a9a`
-
 **Status:** deployment complete · acceptance not established ·
 **Executed:** 2026-08-31 · **Source:** `943d8a9a` ·
 **Clients:** Apple build 99 · Android versionCode 56
@@ -141,4 +140,3 @@ The first request proves that `scripts/ship-physical` works end to end and that
 the signed artifacts can be installed on reachable hardware. It does not prove
 M5 behavior on any platform. The web reporter defect and inaccessible physical
 viewers prevent acceptance.
-

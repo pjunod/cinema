@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["c7b87df5"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "The retained VOD regressions drive every corrected production boundary: encoded_engine_refuses_dependency_replacement_and_isolates_processes and encoded_identity_never_shares_a_renderer_across_processes pin dependency withdrawal and cross-node key isolation; text_renderer_attests_active_font_rules_and_files retains the text-render input closure; encoded_vod_manager_refuses_replaced_source_with_stale_probe replaces the pathname with different geometry while preserving scanner size and whole-second mtime and requires public creation to return vod_source_rescan_required with no session; bounded_output_kills_and_reaps_at_the_physical_disk_cap proves the daemon writer stores at most its exact bound and confirms child reap; and burn_extractor_physically_caps_oversized_matroska_attachment drives the production extractor with an attachment larger than 64 MiB and requires no overflow publication."

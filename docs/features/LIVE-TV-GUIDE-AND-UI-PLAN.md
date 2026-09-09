@@ -312,7 +312,7 @@ cache.
    ```json
    [
      { "GuideNumber": "7.1", "GuideName": "WABC", "Affiliate": "ABC",
-       "ImageURL": "https://…", 
+       "ImageURL": "https://…",
        "Guide": [
          { "StartTime": 1789000800, "EndTime": 1789002600,
            "Title": "City Beat", "EpisodeTitle": "Pier 40",

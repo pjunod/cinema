@@ -1,6 +1,7 @@
 # VOD-only HLS cutover
 
-**Status:** implemented and automated acceptance passed 2026-08-25
+**Status:** immutable copy and encoded production implemented; final effort
+qualification pending 2026-09-08
 
 **Decision:** the growing live-HLS presentation is not a fallback and is no
 longer available to production session creation
@@ -48,11 +49,14 @@ status explicit:
 
 | Request or source | Result |
 |---|---|
-| Copy/remux, positive duration, current fragment index, stable parameter sets | Immutable VOD session |
+| Copy/remux, positive duration, current fragment index, stable parameter sets | Immutable copy VOD session |
+| Video transcode rung or subtitle burn, positive duration, exact stored probe, stable held source, usable cadence, and attested encoder inputs | Immutable encoded VOD session |
 | Index not built yet | 503 `vod_index_pending` |
 | VOD session creation administratively disabled | 503 `vod_disabled` |
-| Video transcode rung | 501 `vod_transcode_unavailable` |
-| Bitmap or styled subtitle burn | 501 `vod_subtitle_burn_unavailable` |
+| The source cannot be held, changed during preparation, or its exact current probe differs from the stored scan | 409 `vod_source_rescan_required` |
+| The selected FFmpeg executable, loaded dependency closure, font inputs, or encoder graph cannot be attested | 503 `vod_engine_unattested` |
+| Missing or unusable frame cadence | 422 `vod_frame_cadence_unknown` |
+| Selected audio or subtitle track absent from the exact probe | 422 `vod_audio_track_missing` or `vod_subtitle_track_missing` |
 | Missing duration, varying parameter sets, or empty plan | 422 `vod_source_unsupported` |
 | Owner takeover that needs a new immutable handle | 409 `vod_reopen_required` |
 | The owning node is gone and a successor may still claim the session | 503 `media_owner_transition`, carrying `film_position_ms` |
@@ -70,10 +74,11 @@ something to reopen onto. See
 is built".
 
 Those refusals are honest product boundaries, not invitations to use the old
-engine. Transcode-rung VOD still depends on the P2/D6 AVPlayer and Media3
-timing measurement in
-[VOD-PRESENTATION-PLAN.md](VOD-PRESENTATION-PLAN.md). Subtitle-burn VOD needs a
-planned transcode producer after that decision.
+engine. The encoded producer now supplies transcode-rung and subtitle-burn
+VOD. The P2/D6 AVPlayer and Media3 timing measurement in
+[VOD-PRESENTATION-PLAN.md](VOD-PRESENTATION-PLAN.md) remains physical evidence
+for enabling transparent two-player handoff; it does not gate creation of an
+ordinary immutable encoded session.
 
 ## Operator controls
 

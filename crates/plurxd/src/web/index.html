@@ -7067,13 +7067,23 @@ function playbackControlSnapshot(v,p){
   const triggerObservation=playbackControlObservationOverride(p.controlObservationOverride);
   if(triggerObservation) Object.assign(observation,triggerObservation);
   const bps=p.hls&&Number(p.hls.bandwidthEstimate);
-  return {demand,position_ms:positionMs,buffered_from_ms:range.from,
+  const snapshot={demand,position_ms:positionMs,buffered_from_ms:range.from,
     buffered_through_ms:range.through,playback_rate:playbackRate,render_state:render,
     seek_target_ms:render==="seeking"
       ? (pendingSeek?pendingSeek.targetMs:positionMs) : null,
     observed_download_bps:Number.isFinite(bps)&&bps>0?Math.round(bps):null,
     selection:playbackControlSelection(p),capabilities:playbackControlCapabilities(),
     observation,acknowledgement:pendingPlaybackControlAcknowledgement(p,demand)};
+  // A commit and terminal demand are both true, but the protocol deliberately
+  // refuses them in one exchange: publishing the successor has to win before
+  // ending the newly-published session. Carry the commit on one synthetic
+  // active snapshot; once the accepted acknowledgement leaves the queue, the
+  // next capture reports the element's real `end` demand.
+  if(snapshot.demand==="end"&&snapshot.acknowledgement?.state==="committed"){
+    snapshot.demand="active";
+    snapshot.playback_rate=Math.max(0.25,snapshot.playback_rate||0);
+  }
+  return snapshot;
 }
 
 // ---- prepared replacement --------------------------------------------------
@@ -7117,11 +7127,10 @@ const PREPARED_ACK_QUEUE_MAX=4;
 // recognised rather than built again. The server replays a `Prepare`
 // byte-identically until it processes the acknowledgement.
 const PREPARED_SETTLED_MEMORY=8;
-// How long a stopping reporter is left alive to deliver a final settlement.
-// One exchange, not a lease: the cadence floor is 250 ms and the deadline is
-// four seconds, so anything longer is waiting on a server that is not going to
-// answer.
-const CONTROL_SETTLE_FLUSH_MS=5000;
+// A detached reporter gets one bounded chance to settle commit → end. The
+// server's durable deadline owns cleanup after this; the browser must not keep
+// a player closure and retry timers alive forever after the viewer leaves.
+const PREPARED_FINALIZATION_MS=3000;
 // Whether this browser will OFFER to prepare, right now.
 //
 // The switch is the operator's answer; this is the player's. A successor that
@@ -7132,7 +7141,12 @@ const CONTROL_SETTLE_FLUSH_MS=5000;
 // forgotten when the player ends: no flag, nothing persisted, and nothing an
 // operator has to reset.
 function preparedHandoffOffered(p){
-  return preparedHandoffEnabled() && !(p&&p.preparedRefused);
+  if(!p||p.preparedRefused) return false;
+  let element=null;
+  try{ element=document.getElementById("video"); }catch(e){ return false; }
+  const presentationProof=!streamHasVideo(p,element)
+    ||!!(element&&typeof element.requestVideoFrameCallback==="function");
+  return preparedHandoffEnabled() && presentationProof;
 }
 function preparedHandoffEnabled(){
   // Any scope without storage — a private window that refuses it, and the test
@@ -7187,14 +7201,10 @@ function playbackFilmPositionMs(v,p){
 function pendingPlaybackControlAcknowledgement(p,demand){
   const queue=p&&p.controlAcknowledgements;
   if(!queue||!queue.length) return null;
-  // The head, unless it is a commit and this exchange ends the session: a
-  // `committed` may not share an exchange with `demand:"end"` — the server
-  // answers 400 to the pair — so the commit waits for its own exchange instead
-  // of being dropped or renamed. Switching and then closing is two exchanges,
-  // in that order.
-  const head=queue[0];
-  if(head.state==="committed"&&demand==="end") return null;
-  return head;
+  // Never hide the head. `playbackControlSnapshot` turns a same-turn
+  // commit+end into the required active commit exchange; hiding it here loses
+  // the only durable proof that the viewer reached the successor.
+  return queue[0];
 }
 
 function queuePlaybackControlAcknowledgement(p,actionId,state,extra){
@@ -7453,11 +7463,11 @@ function notePreparedBuffer(p,state){
 // The switch.
 //
 // Order matters and it is not negotiable: the successor becomes visible and
-// audible, the predecessor is retired, and only then — once a frame has
-// actually rendered — is `committed` sent. The commit is a claim that the
-// switch already happened, and the store CAS that follows moves the playback
-// pointer; a commit sent early moves it to a session the viewer is not
-// watching.
+// audible, the predecessor remains recoverable, and only once a frame has
+// actually rendered is the predecessor retired and `committed` sent. The
+// commit is a claim that the switch happened, and the store CAS that follows
+// moves the playback pointer; destroying the predecessor before that proof
+// turns a failed successor into an unrecoverable black player.
 function commitPreparedReplacement(p,state){
   const v=document.getElementById("video"), spare=preparedVideoElement();
   if(!v||!spare||PLAYER!==p||preparedState(p)!==state) return false;
@@ -7469,6 +7479,9 @@ function commitPreparedReplacement(p,state){
   const drift=Math.abs((spare.currentTime||0)-wanted)*1000;
   if(drift>PREPARED_ALIGN_SLACK_MS) try{ spare.currentTime=Math.max(0,wanted); }catch(e){}
   const predecessor=p.hls, retired=v;
+  state.predecessor={hls:predecessor,element:retired,sessionId:p.sessionId,
+    probeUrl:p.probeUrl,offset:p.offset,wantsPlayback:p.wantsPlayback,
+    muted:retired.muted,volume:retired.volume};
   // Authoritative before visible, so anything that reads PLAYER.hls during the
   // swap reads the instance that owns the picture.
   p.hls=state.hls;
@@ -7493,8 +7506,8 @@ function commitPreparedReplacement(p,state){
   // rather than moving nodes keeps every `getElementById("video")` correct
   // without touching the modal's structure — but only the lookups. Everything
   // bound to the old NODE has to move too, which is what `adoptPlaybackMediaElement`
-  // is for, and it runs before the predecessor is destroyed so the retired
-  // element is never the one the page is talking to.
+  // is for. The retired element remains alive and hidden until a real successor
+  // frame proves that rollback is no longer needed.
   retired.id="video-prepared";
   spare.id="video";
   adoptPlaybackMediaElement(p,spare);
@@ -7506,11 +7519,8 @@ function commitPreparedReplacement(p,state){
   p.wantsPlayback=true;
   // Un-muting without a user gesture pauses the element on WebKit, and the
   // last gesture was minutes ago. Ask again: a switch whose picture never
-  // advances is reported as a failure eight seconds later, after the
-  // predecessor is already gone.
+  // advances is reported as a failure eight seconds later and rolled back.
   try{ const resumed=spare.play(); if(resumed&&resumed.catch) resumed.catch(()=>{}); }catch(e){}
-  destroyHlsInstance(p,predecessor,retired);
-  disposeRetiredMediaElement(retired);
   // The delivery badges and the info panel are painted from the session, and
   // the session just changed. Without this they describe the predecessor for
   // the rest of the film — on a handoff whose entire purpose was to change what
@@ -7519,6 +7529,7 @@ function commitPreparedReplacement(p,state){
   preparedFirstFrame(p,state,spare,unixMs=>{
     state.state="committed";
     if(p.preparedCommitting===state) p.preparedCommitting=null;
+    retirePreparedPredecessor(p,state);
     queuePlaybackControlAcknowledgement(p,state.actionId,"committed",
       {first_frame_unix_ms:unixMs,committed_media_origin_ms:state.offeredOriginMs});
     clientLog(Object.assign({level:"info",event:"prepared_replacement",detail:"committed",
@@ -7531,11 +7542,59 @@ function commitPreparedReplacement(p,state){
     // to a session showing the viewer nothing.
     state.state="failed";
     if(p.preparedCommitting===state) p.preparedCommitting=null;
+    rollbackPreparedReplacement(p,state,spare);
     queuePlaybackControlAcknowledgement(p,state.actionId,"failed");
     clientLog(Object.assign({level:"error",event:"prepared_replacement",detail:"no_first_frame",
       message:`successor ${state.sessionId} rendered no frame within ${PREPARED_FIRST_FRAME_MS}ms`},
       playbackContext()));
   });
+  return true;
+}
+
+// First-frame proof makes the switch irreversible. Until this function runs,
+// both the old hls.js instance and its media element are deliberately alive.
+function retirePreparedPredecessor(p,state){
+  const predecessor=state&&state.predecessor;
+  if(!predecessor) return;
+  state.predecessor=null;
+  destroyHlsInstance(p,predecessor.hls,predecessor.element);
+  disposeRetiredMediaElement(predecessor.element);
+}
+
+// Restore the last proven picture after the visible successor renders no
+// frame. This completes before `failed` is queued, so the acknowledgement is
+// an honest description of a recovered viewer rather than a black player.
+function rollbackPreparedReplacement(p,state,successor){
+  const predecessor=state&&state.predecessor;
+  if(!p||!predecessor||!predecessor.element||!successor) return false;
+  const retired=predecessor.element, successorHls=state.hls;
+  state.predecessor=null;
+  p.hls=predecessor.hls;
+  p.sessionId=predecessor.sessionId;
+  p.probeUrl=predecessor.probeUrl;
+  p.offset=predecessor.offset;
+  p.wantsPlayback=predecessor.wantsPlayback;
+  successor.id="";
+  retired.id="video";
+  successor.id="video-prepared";
+  retired.style.display="";
+  retired.muted=predecessor.muted;
+  try{ retired.volume=predecessor.volume; }catch(e){}
+  retired.removeAttribute("aria-hidden");
+  successor.style.display="none";
+  successor.muted=true;
+  successor.setAttribute("aria-hidden","true");
+  adoptPlaybackMediaElement(p,retired);
+  resetPlaybackTransportEvents(retired);
+  if(predecessor.wantsPlayback===false){
+    try{ retired.pause(); }catch(e){}
+  }else{
+    try{ const resumed=retired.play(); if(resumed&&resumed.catch) resumed.catch(()=>{}); }catch(e){}
+  }
+  destroyHlsInstance(null,successorHls,successor);
+  state.hls=null;
+  disposeRetiredMediaElement(successor);
+  renderPlayerInfo();
   return true;
 }
 // Move every per-element binding onto the element that now owns the picture.
@@ -7580,25 +7639,33 @@ function disposeRetiredMediaElement(retired){
 
 function preparedFirstFrame(p,state,element,onFrame,onTimeout){
   let settled=false;
+  state.frameCancelled=false;
+  state.frameElement=element;
   const finish=(run)=>{
-    if(settled) return;
+    if(settled||state.frameCancelled) return;
     settled=true;
     if(state.frameTimer!=null){ clearTimeout(state.frameTimer); state.frameTimer=null; }
     if(state.frameListener){
       try{ element.removeEventListener("timeupdate",state.frameListener); }catch(e){}
       state.frameListener=null;
     }
+    state.frameCallbackId=null;
+    state.frameElement=null;
     run();
   };
   state.frameTimer=setTimeout(()=>finish(onTimeout),PREPARED_FIRST_FRAME_MS);
   const done=()=>finish(()=>onFrame(Date.now()));
-  // `requestVideoFrameCallback` is the only API that answers "has a frame been
-  // presented" — but it answers it for VIDEO. On an audio-only title it exists
-  // and never fires, so a healthy handoff would sit out the watchdog and report
-  // `failed`. There, the first advancing `timeupdate` is the honest substitute,
-  // and it is the only one older Safari and Firefox have either.
-  if(streamHasVideo(p,element)&&typeof element.requestVideoFrameCallback==="function"){
-    try{ element.requestVideoFrameCallback(()=>done()); return; }catch(e){}
+  // `requestVideoFrameCallback` is the only available API that proves video
+  // presentation. A video browser without it advertises no prepared capability;
+  // this defensive branch rolls back rather than turning clock movement into
+  // a fabricated picture. Audio-only playback has no frame to prove, so its
+  // first advancing `timeupdate` remains the honest presentation signal.
+  if(streamHasVideo(p,element)){
+    if(typeof element.requestVideoFrameCallback==="function"){
+      try{ state.frameCallbackId=element.requestVideoFrameCallback(()=>done()); return; }catch(e){}
+    }
+    finish(onTimeout);
+    return;
   }
   state.frameListener=()=>done();
   element.addEventListener("timeupdate",state.frameListener);
@@ -7693,27 +7760,44 @@ function stopPlaybackControl(p){
   cancelPreparedFirstFrame(p);
   const reporter=p&&p.controlReporter;
   if(reporter){
+    // The reporter owns this settlement until the server accepts it. Its
+    // built-in retry path preserves the exact request; after a committed
+    // successor is accepted, `continueStoppingPlaybackControl` explicitly
+    // queues the required end exchange before allowing the reporter to stop.
+    reporter.plurxSettling=true;
+    reporter.plurxSettlingUntil=reporter.now()+PREPARED_FINALIZATION_MS;
+    reporter.plurxSettlingTimer=reporter.setTimer(
+      ()=>finishStoppingPlaybackControl(reporter),PREPARED_FINALIZATION_MS);
     const flushed=flushPreparedSettlement(p,reporter);
     p.controlReporter=null;
-    if(flushed) setTimeout(()=>reporter.stop(),CONTROL_SETTLE_FLUSH_MS);
-    else reporter.stop();
+    if(!flushed) finishStoppingPlaybackControl(reporter);
   }
   clearPlaybackControlWaiters(p);
   if(p) p.controlAcknowledgements=[];
 }
-// A switch whose first frame is still pending when the player goes away. The
-// watchdog is the only thing still holding that staging, and left armed it
-// reports a failure against a session that ended for an unrelated reason.
+// Cancel an unproven visible switch before its reporter or media owner goes
+// away. The predecessor is still the last known-good picture, so restore it
+// and settle the successor as failed; the caller may then tear that restored
+// pipeline down through the ordinary path.
 function cancelPreparedFirstFrame(p){
   const state=p&&p.preparedCommitting;
   if(!state) return;
   p.preparedCommitting=null;
+  state.frameCancelled=true;
   if(state.frameTimer!=null){ clearTimeout(state.frameTimer); state.frameTimer=null; }
-  const spare=document.getElementById("video");
+  const spare=state.frameElement||document.getElementById("video");
   if(state.frameListener&&spare){
     try{ spare.removeEventListener("timeupdate",state.frameListener); }catch(e){}
   }
   state.frameListener=null;
+  if(state.frameCallbackId!=null&&spare&&typeof spare.cancelVideoFrameCallback==="function"){
+    try{ spare.cancelVideoFrameCallback(state.frameCallbackId); }catch(e){}
+  }
+  state.frameCallbackId=null;
+  state.frameElement=null;
+  state.state="failed";
+  rollbackPreparedReplacement(p,state,spare);
+  queuePlaybackControlAcknowledgement(p,state.actionId,"failed");
 }
 // One last exchange for a settlement that has nowhere else to go.
 //
@@ -7729,10 +7813,76 @@ function flushPreparedSettlement(p,reporter){
   const queue=p.controlAcknowledgements;
   if(!queue||!queue.length) return false;
   const v=document.getElementById("video");
-  const snapshot=playbackControlSnapshot(v,p);
+  let snapshot=playbackControlSnapshot(v,p);
   if(!snapshot||!snapshot.acknowledgement) return false;
+  // Failed and aborted settlements may close in the same exchange. A commit
+  // may not; `playbackControlSnapshot` has already made that one active, and
+  // the accepted callback below follows it with an acknowledgement-free end.
+  if(snapshot.acknowledgement.state!=="committed")
+    snapshot=endingPlaybackControlSnapshot(snapshot,true);
   const capture=PlurxPlaybackControl.capture(snapshot,p.controlIntentGeneration||0,p.controlOwner);
   return !!(capture&&reporter.notify(capture));
+}
+
+function endingPlaybackControlSnapshot(snapshot,carryAcknowledgement){
+  if(!snapshot) return null;
+  const ending=Object.assign({},snapshot,{demand:"end",
+    playback_rate:Math.max(0,Math.min(4,Number(snapshot.playback_rate)||0))});
+  if(!carryAcknowledgement) ending.acknowledgement=null;
+  return ending;
+}
+
+function finishStoppingPlaybackControl(reporter){
+  if(!reporter) return;
+  if(reporter.plurxSettlingTimer!=null){
+    reporter.clearTimer(reporter.plurxSettlingTimer);
+    reporter.plurxSettlingTimer=null;
+  }
+  reporter.plurxSettling=false;
+  reporter.plurxSettlingUntil=null;
+  reporter.stop();
+}
+
+// A stopping reporter is deliberately detached from `p.controlReporter`, so
+// its normal ownership callback must not publish observations or actions. It
+// still owns one narrow protocol obligation: retry its immutable settlement,
+// then (for a commit) send end as the next sequence. `notify` from inside the
+// accepted callback becomes pending while the reporter is in flight, so its
+// `finally` drains it after the 250 ms protocol floor rather than the ordinary
+// cadence, which may be a full minute.
+function continueStoppingPlaybackControl(p,reporter,v,request,response,captured){
+  if(!reporter||!reporter.plurxSettling) return false;
+  if(reporter.now()>=reporter.plurxSettlingUntil){
+    finishStoppingPlaybackControl(reporter);
+    return true;
+  }
+  if(request.demand==="end"){
+    if(response) finishStoppingPlaybackControl(reporter);
+    else reporter.notify(captured);
+    return true;
+  }
+  const committed=request.acknowledgement&&request.acknowledgement.state==="committed";
+  if(committed){
+    const element=document.getElementById("video")||v;
+    const snapshot=endingPlaybackControlSnapshot(playbackControlSnapshot(element,p),false);
+    const ending=snapshot&&PlurxPlaybackControl.capture(snapshot,
+      captured.intentGeneration,captured.owner);
+    if(ending&&reporter.notify(ending)) return true;
+  }
+  // stopPlaybackControl may have queued the settlement while an earlier
+  // ordinary/progress exchange was already in flight. Its callback owns no
+  // stopping decision: leave the reporter alive so `finally` drains the
+  // pending settlement. Only the request that actually carries commit/end may
+  // complete this stopping sequence.
+  if(!request.acknowledgement) return true;
+  if(!committed) return true;
+  // Retryable failures are classified by Reporter after this callback. Leave
+  // the settling marker intact so its exact request can retry; if this was a
+  // commit, the pending end capture above keeps that retry draining without
+  // asking the now-detached page for a fresh capture.
+  if(!response) return true;
+  finishStoppingPlaybackControl(reporter);
+  return true;
 }
 
 function notifyPlaybackControl(renderOverride,observationOverride){
@@ -7980,6 +8130,7 @@ function startPlaybackControl(v,p,bootstrap){
       capture,
       send:sendPlaybackControl,
       onExchange:({request,response,error,capture:captured})=>{
+        if(continueStoppingPlaybackControl(p,reporter,v,request,response,captured)) return;
         if(!playbackOwnsAttachedMedia(p)||p.controlReporter!==reporter
           ||p.mediaAttachment!==attachment||captured.owner.lifecycleId!==owner.lifecycleId
           ||captured.owner.attachmentGeneration!==owner.attachmentGeneration) return;
@@ -7987,7 +8138,14 @@ function startPlaybackControl(v,p,bootstrap){
         settlePlaybackControlWaiters(p,request,response,error);
         // An acknowledgement the server accepted is spent; one whose exchange
         // failed stays queued for the next.
+        const committedBeforeEnd=!!(response&&request.demand==="active"
+          &&request.render_state==="ended"
+          &&request.acknowledgement&&request.acknowledgement.state==="committed");
         if(response) settlePlaybackControlAcknowledgement(p,request);
+        // The active demand above was synthetic solely because commit+end is
+        // invalid. Wake the real end snapshot immediately after the server
+        // accepts that commit; ordinary cadence may be a full minute.
+        if(committedBeforeEnd) reporter.notify();
         // The wire tag is `prepare`; the DECLARED name is
         // `prepare_replacement`, and switching on the declared name here is
         // the mistake that produces a silent no-op rather than a failure.
@@ -10118,6 +10276,7 @@ function teardownHls(){
   // left to the 330-second deadline: a preparation nobody answered holds this
   // session's only preparation slot for the rest of its life.
   abandonPreparedReplacement(PLAYER,"aborted","the playing stream was replaced");
+  cancelPreparedFirstFrame(PLAYER);
   if(PLAYER&&PLAYER.hls){
     const video=document.getElementById("video");
     rememberPlaybackTransportIntent(video,PLAYER);
@@ -13660,6 +13819,7 @@ const SETTINGS_ENDPOINTS={
   libs:()=>api("/libraries"),settings:()=>api("/settings"),status:()=>api("/scan/status"),
   dvConversions:()=>api("/dv-conversions"),
   sys:()=>api("/system"),users:()=>api("/users"),trakt:()=>api("/trakt/status"),
+  developerReadiness:()=>api("/developer/readiness"),
   analysis:()=>api("/analysis/summary"),
   playbackEvents:()=>api(`/system/playback-events?since=${Date.now()-7*24*60*60*1000}&limit=2000`),
   cluster:()=>api("/cluster/nodes").catch(error=>{
@@ -13696,7 +13856,7 @@ const SETTINGS_MANIFEST={
   system:{required:["sys"],secondary:["playbackEvents"]},
   cluster:{required:["cluster"],secondary:["clusterOps"]},
   integrations:{required:["settings","trakt"],secondary:[]},
-  developer:{required:["settings"],secondary:[]},
+  developer:{required:["settings"],secondary:["developerReadiness"]},
 };
 function cacheSettings(value){
   SETTINGS=value; SETTINGS_DATA.settings=value; SETTINGS_LOADED.add("settings");
@@ -13769,6 +13929,12 @@ function patchSettingsSecondary(tab,key,value){
     const mount=document.getElementById("settings-playback-events");
     if(mount) mount.innerHTML=playbackSummaryCard(SETTINGS_DATA.playbackEvents||[]);
   }
+  if(tab==="developer"&&key==="developerReadiness"){
+    // Patch only the evidence rows. Re-rendering the entire panel here could
+    // overwrite a local prepared-handoff toggle while its change event is in
+    // flight.
+    applyDeveloperReadiness(value);
+  }
   if(tab==="cluster"&&key==="clusterOps"){
     // The roster is already interactive while this secondary request is in
     // flight. Hold a result that arrives under an election decision rather
@@ -13791,6 +13957,9 @@ function patchSettingsSecondaryError(tab,key,error){
   if(tab==="system"&&key==="playbackEvents"){
     const mount=document.getElementById("settings-playback-events");
     if(mount) mount.innerHTML=`<div class="card"><h2 class="section" style="margin-top:0">Playback <span class="muted">(7 days)</span></h2><span class="muted">Playback history is unavailable: ${message}</span></div>`;
+  }
+  if(tab==="developer"&&key==="developerReadiness"){
+    applyDeveloperReadiness({unavailable:error&&error.message||"request failed"});
   }
   if(tab==="cluster"&&key==="clusterOps"){
     const mount=document.getElementById("cluster-operations");
@@ -13915,7 +14084,7 @@ function settingsPanel(tab,d){
   if(tab==="system")       return systemPanel(d.sys,d.playbackEvents);
   if(tab==="cluster")      return clusterPanel(d);
   if(tab==="integrations") return integrationsPanel(d.settings,d.trakt);
-  if(tab==="developer")    return developerPanel(d.settings);
+  if(tab==="developer")    return developerPanel(d.settings,d.developerReadiness);
   return librariesPanel(d.libs,d.status,d.settings,d.dvConversions);
 }
 // The section header: name, one line of summary, the section's bulk actions.
@@ -15205,16 +15374,62 @@ function setPreparedHandoff(on){
     ?"This browser now offers prepared handoff — from the next control exchange"
     :"Prepared handoff switched off for this browser");
 }
-function developerPanel(settings){
+
+// A readiness status is evidence, not authority. The daemon can report facts
+// it can observe on this node; the controls remain available regardless of
+// the answer, including when the reading itself is unavailable.
+const DEV_READINESS_LABEL={met:"met",unmet:"not met",unobservable:"not observable"};
+function devReadinessRow(readiness,itemId,reqId){
+  if(!readiness||!Array.isArray(readiness.items)) return null;
+  const item=readiness.items.find(row=>row&&row.id===itemId);
+  if(!item||!Array.isArray(item.requirements)) return null;
+  return item.requirements.find(row=>row&&row.id===reqId)||null;
+}
+function devReadinessPill(found,readiness){
+  if(readiness&&readiness.unavailable) return `<span class="pill warn">unavailable</span>`;
+  if(!found) return readiness?`<span class="pill warn">not reported</span>`:`<span class="pill">checking…</span>`;
+  const label=DEV_READINESS_LABEL[found.status]||"unknown";
+  if(found.status==="met") return `<span class="pill" style="color:var(--good);border-color:var(--good)">${esc(label)}</span>`;
+  if(found.status==="unmet") return `<span class="pill warn">${esc(label)}</span>`;
+  return `<span class="pill">${esc(label)}</span>`;
+}
+function devReadinessEvidence(found,readiness){
+  if(readiness&&readiness.unavailable) return `The prerequisite reading failed: ${readiness.unavailable}`;
+  if(found) return found.evidence;
+  return readiness?"This server did not report on this prerequisite.":"";
+}
+function devReq(readiness,itemId,reqId,title,detail){
+  const found=devReadinessRow(readiness,itemId,reqId);
+  const key=`${itemId}:${reqId}`;
+  return `<div class="tog"><span>${title} <span data-devstat="${esc(key)}">${devReadinessPill(found,readiness)}</span><small>${detail}</small><small class="hint" data-devev="${esc(key)}">${esc(devReadinessEvidence(found,readiness))}</small></span></div>`;
+}
+function applyDeveloperReadiness(readiness){
+  document.querySelectorAll("[data-devstat]").forEach(node=>{
+    const [itemId,reqId]=String(node.getAttribute("data-devstat")).split(":");
+    node.innerHTML=devReadinessPill(devReadinessRow(readiness,itemId,reqId),readiness);
+  });
+  document.querySelectorAll("[data-devev]").forEach(node=>{
+    const [itemId,reqId]=String(node.getAttribute("data-devev")).split(":");
+    node.textContent=devReadinessEvidence(devReadinessRow(readiness,itemId,reqId),readiness);
+  });
+}
+
+function developerPanel(settings,readiness){
+  const advisory=`<div class="hint">Each reading below says what <b>this server</b> can currently see. It is advisory: no result disables a switch, and “not observable” means the fact lives somewhere the running daemon cannot inspect.</div>`;
   const transportRecovery=setCard(`${cardHead("Enable cluster transport recovery","The corrected transport is compiled in and activates automatically on clustered nodes; there is no hidden production feature flag.",`<span class="pill" style="color:var(--good);border-color:var(--good)">automatic</span>`)}
       <div class="hint"><b>Safe enablement means deployment qualification, not flipping a code gate.</b> Keep a ready voter majority, deploy one node at a time, and leave the cluster API listener reachable only on the trusted cluster network. Cache-only recovery authorization stays disabled until every current committed node has heartbeat-proven the cache revocation capability and the automatic guarded activation has cleared cached proofs cluster-wide; a rollback closes it again.</div>
       <h2 class="section">What must be true first</h2>
-      <div class="tog"><span>Recovery budgets fit the deployment<small>Keep chunk, whole-transfer, final-install, startup, and container health allowances aligned. The defaults are 30 s, 1,200 s, and 120 s; the rollout may use a longer final-install allowance when measured state size requires it.</small></span></div>
-      <div class="tog"><span>Authenticated diagnostics are reachable<small>Every node must advertise its private Hiqlite API address, share the cluster API credential, and keep <code>/cluster/transport/sqlite</code> off the public Internet. Port 32400 may remain closed while a learner catches up.</small></span></div>
-      <div class="tog"><span>The recovery receipt passes<small>Require the real-TLS 3 MiB transport matrix, acknowledged-write verification, and twenty learner plus twenty voter recovery cycles on the supported Linux path before fleet rollout.</small></span></div>
+      ${advisory}
+      ${devReq(readiness,"cluster_transport_recovery","recovery_budgets","Recovery budgets fit the deployment","Keep chunk, whole-transfer, final-install, startup, and container health allowances aligned. The defaults are 30 s, 1,200 s, and 120 s; the rollout may use a longer final-install allowance when measured state size requires it.")}
+      ${devReq(readiness,"cluster_transport_recovery","cluster_api_advertised","Authenticated diagnostics are reachable","Every node must advertise its private Hiqlite API address, share the cluster API credential, and keep <code>/cluster/transport/sqlite</code> off the public Internet. Port 32400 may remain closed while a learner catches up.")}
+      ${devReq(readiness,"cluster_transport_recovery","cache_revocation_capability","Every committed node proves cache revocation","Cache-only recovery authorization stays closed until every member of the exact committed configuration writes the capability inside its current heartbeat.")}
+      ${devReq(readiness,"cluster_transport_recovery","recovery_receipt","The recovery receipt passes","Require the real-TLS 3 MiB transport matrix, acknowledged-write verification, and twenty learner plus twenty voter recovery cycles on the supported Linux path before fleet rollout.")}
       <div class="hint"><b>Enable path after those checks pass:</b> use the supported one-node-at-a-time cluster deployment. The recovery code and read-only status route are always present; failed readiness remains fail-closed.</div>`);
   const preview=setCard(`${cardHead("Playback control protocol","The additive control endpoint clients use to report what they are playing and ask for changes. Off by default until every client has a passive reporter.")}
       ${togRow("pcpv1",`Advertise playback control protocol v1 <span class="pill">preview</span>`,"New sessions advertise the control endpoint. Passive on its own: the server measures what a quality change would cost, and takes no automatic action.",settings.playback_control_protocol_v1)}
+      <h2 class="section">What must be true first</h2>
+      ${advisory}
+      ${devReq(readiness,"playback_control_protocol_v1","clients_report","Every client has a passive reporter","A silent client cannot be counted, so the server reports only the vocabulary it has actually observed since this process started.")}
       <div class="err" id="dverr"></div>
       ${setCardFoot("saveDeveloper")}`);
   // Advisory, never a gate. Each requirement says what it is and whether it
@@ -15231,11 +15446,12 @@ function developerPanel(settings){
   const prepared=setCard(`${cardHead("Enable prepared quality handoff","The server announces, acknowledges, commits and aborts a staged successor, and the Apple client now drives one. It does not yet start or prime that successor's encoder.",`<span class="pill warn">integration only</span>`)}
       <div class="hint"><b>Do not enable this for viewers yet.</b> The staged route still reports <code>encoder: staged</code> and has no worker behind its playlist: a client that opens the successor's playlist before commit is answered <code>503 media_owner_transition</code> on every request. Committing it is useful for protocol and Store integration tests, not playback.</div>
       <h2 class="section">What must be true first, and whether it is</h2>
+      ${advisory}
       ${req(settings.playback_control_protocol_v1?"met":"unmet","The control endpoint is advertised","New sessions carry the control block only while <b>Advertise playback control protocol v1</b> above is on. Nothing is staged for a session that never had one.")}
-      ${req("unmet","The server primes the successor it stages","<code>stage_prepared_successor</code> is stage-only: a durable row and the actor's one successor slot, nothing produced. The <i>reserve and prime</i> phase must reserve capacity, start the unpublished successor, bound every Store write and teardown, and prove abort releases both the worker and the slot.")}
-      ${req("partly","A client owns a measured two-player handoff","Apple build 119 advertises <code>prepare_replacement</code>, aligns the second timeline with <code>media_origin_ms</code>, reports metadata and buffer readiness, switches visibly, then sends <code>committed</code> with the first qualifying frame timestamp; failed setup sends <code>failed</code> or <code>aborted</code>. Android and web remain unqualified.")}
+      ${devReq(readiness,"prepared_quality_handoff","server_preparation_is_real","The server primes the successor it stages","The reserve-and-prime phase must reserve capacity, start the unpublished successor, bound every Store write and teardown, and prove abort releases both the worker and the slot.")}
+      ${devReq(readiness,"prepared_quality_handoff","client_two_player_handoff","A client owns a measured two-player handoff","Apple, Android, and web contain the adapter, but runtime declarations and a physical first-frame qualification determine whether the deployed clients are ready.")}
       ${req("met","A prepared handoff can fire on the sessions you actually serve","The throughput floor needs both the client's observed rate and the server's delivered rate. Both are reported now, on VOD as well as live: the clients fill <code>observed_download_bps</code> and the VOD serving boundary measures <code>delivered_bps</code>. A window that has not closed yet still refuses, which is the honest reading rather than a missing input.")}
-      ${req("unmet","The fleet receipt is complete","Requires twenty consecutive commits on the corrected realistic-runway instrument with stable memory, and a measured fallback interruption on at least one Apple device. Apple is the measured candidate for two live pipelines; neither of these numbers exists yet.")}
+      ${devReq(readiness,"prepared_quality_handoff","fleet_receipt","The fleet receipt is complete","Requires twenty consecutive commits on the corrected realistic-runway instrument with stable memory, plus a measured fallback interruption on physical clients.")}
       ${togRow("pdp",`Tell the server this browser can prepare a second player <span class="pill warn">unqualified</span>`,"Sets <code>dual_player_preparation</code> on this browser's control exchanges, which is the only thing that lets the server stage a successor for it. Nothing above blocks this switch — the list is what tells you the cost. It reaches the server on the next control exchange, and a playback whose successor was never playable stops offering for the rest of that playback.",preparedHandoffEnabled(),'onchange="setPreparedHandoff(this.checked)"')}
       <div class="hint"><b>Enable path after those checks pass:</b> turn on <b>Advertise playback control protocol v1</b> above and deploy only a qualified client that declares the action. There is no separate hidden server flag, and nothing on this card prevents you enabling it now — a client that is offered a successor it cannot prime settles it and falls back to the ordinary in-place change.</div>`);
   const experimental=setCard(`${cardHead("Experimental delivery","Changes the shape of the stream itself. Applies to new sessions only.")}

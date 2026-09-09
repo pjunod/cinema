@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["4bedb286"]
+points = ["server.api", "playback.pipeline", "web.experience"]
+checks = ["rust-gate", "web-static"]
+reason = "Two Developer readiness rows reported a status from a reading the code never took: the passive-reporter row measured the four-action fully-managed counter, so it answered unmet on every fleet whose clients all carry a complete passive reporter, and the cache-revocation row named a peer's heartbeat as the cause of a closure whose live cause on this fleet is an unactivated credential guard. The correction adds a passive-vocabulary counter in playback_control.rs, narrows the revocation evidence to the cause it can actually read, and extends both gates-nothing tests -- the Rust one now walks every switch the route reports rather than the one it named, and the web one pins that no other panel, save function, or tab route can reach a reading at all."

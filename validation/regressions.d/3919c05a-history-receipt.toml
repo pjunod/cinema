@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["3919c05a"]
+points = ["validation.framework"]
+checks = ["history-regressions"]
+reason = "This commit introduced the d8806467 receipt and matching VOD/status evidence, but its test(history) subject deliberately places the bookkeeping change under the corrective-history contract. history-regressions parses both receipt files, requires the runtime hash to resolve to playback.pipeline, requires this receipt hash to resolve to validation.framework, and rejects either missing or misclassified entry."

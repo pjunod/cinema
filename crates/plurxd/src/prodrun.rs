@@ -60,7 +60,24 @@ pub struct ProducerSlot {
 
 struct Inner {
     child: Option<Child>,
+    /// Capacity follows the exact child, not its pipe reader or epoch.
+    resources: Option<Box<dyn Send>>,
     belief: Producer,
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.start_kill();
+            let resources = self.resources.take();
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(async move {
+                    let _ = child.wait().await;
+                    drop(resources);
+                });
+            }
+        }
+    }
 }
 
 /// What the caller must do because this layer cannot: spawn a new child.
@@ -82,6 +99,7 @@ impl ProducerSlot {
         ProducerSlot {
             inner: Mutex::new(Inner {
                 child: None,
+                resources: None,
                 belief: Producer::Absent {
                     produced_through: None,
                 },
@@ -97,13 +115,20 @@ impl ProducerSlot {
     /// Attach a freshly spawned child positioned at `at` — the caller's half
     /// of a [`Performed::NeedsSpawn`]. Records the belief via [`after`], as
     /// the successful completion of the `Start` this spawn is.
+    #[cfg(test)]
     pub async fn attach(&self, child: Child, at: u32) {
+        self.attach_owned(child, at, None).await;
+    }
+
+    /// Retain admission through confirmed termination, including slot drop.
+    pub async fn attach_owned(&self, child: Child, at: u32, resources: Option<Box<dyn Send>>) {
         let mut inner = self.inner.lock().await;
         debug_assert!(
             inner.child.is_none(),
             "attach expects the empty slot NeedsSpawn left behind"
         );
         inner.child = Some(child);
+        inner.resources = resources;
         inner.belief = after(inner.belief, Step::Start { at });
     }
 
@@ -195,6 +220,7 @@ impl ProducerSlot {
                 // `wait`, and SIGKILL still works on a stopped process.
                 child.kill().await?;
                 inner.child = None;
+                inner.resources = None;
                 inner.belief = after(inner.belief, step);
                 Ok(Performed::Done)
             }
@@ -203,6 +229,7 @@ impl ProducerSlot {
                 if let Some(child) = inner.child.as_mut() {
                     child.kill().await?;
                     inner.child = None;
+                    inner.resources = None;
                 }
                 // This layer performs only the terminate half of a restart;
                 // the start half is the caller's spawn, recorded by `attach`.
@@ -261,6 +288,52 @@ fn signal(pid: u32, signal: libc::c_int) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn encoded_capacity_is_released_only_after_slot_reap() {
+        let admissions = crate::admission::Admissions::new();
+        let slot = super::ProducerSlot::new();
+        let child = sleeper();
+        let pid = child.id().expect("child pid");
+        let permit = admissions
+            .try_admit_software(2, 2, crate::admission::Priority::Live)
+            .expect("encoder permit");
+        slot.attach_owned(child, 0, Some(Box::new(permit))).await;
+        assert_eq!(admissions.software_in_use(), 2);
+        slot.perform(
+            super::Step::Terminate {
+                why: super::Termination::Idle,
+            },
+            || {},
+        )
+        .await
+        .expect("reap exact producer");
+        assert_eq!(admissions.software_in_use(), 0);
+        assert!(is_reaped(pid).await);
+    }
+
+    #[tokio::test]
+    async fn dropping_encoded_slot_transfers_capacity_to_its_reaper() {
+        let admissions = crate::admission::Admissions::new();
+        let slot = super::ProducerSlot::new();
+        let child = sleeper();
+        let pid = child.id().expect("child pid");
+        let permit = admissions
+            .try_admit_software(2, 2, crate::admission::Priority::Live)
+            .expect("encoder permit");
+        slot.attach_owned(child, 0, Some(Box::new(permit))).await;
+        drop(slot);
+        // Drop transfers the child and permit together; cancellation of its
+        // former task cannot advertise capacity before wait has completed.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while admissions.software_in_use() > 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("owned reaper releases capacity");
+        assert!(is_reaped(pid).await);
+    }
+
     use super::*;
 
     use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};

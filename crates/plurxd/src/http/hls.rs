@@ -3425,6 +3425,25 @@ fn session_start_error(file_id: i64, error: String) -> ApiError {
             "vod_source_unsupported" => {
                 (StatusCode::UNPROCESSABLE_ENTITY, "vod_source_unsupported")
             }
+            "vod_video_geometry_unknown" => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "vod_video_geometry_unknown",
+            ),
+            "vod_frame_cadence_unknown" => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "vod_frame_cadence_unknown",
+            ),
+            "vod_source_rescan_required" => (StatusCode::CONFLICT, "vod_source_rescan_required"),
+            "vod_engine_unattested" => (StatusCode::SERVICE_UNAVAILABLE, "vod_engine_unattested"),
+            "vod_audio_track_missing" => {
+                (StatusCode::UNPROCESSABLE_ENTITY, "vod_audio_track_missing")
+            }
+            "vod_subtitle_track_missing" => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "vod_subtitle_track_missing",
+            ),
+            "vod_invalid_height" => (StatusCode::BAD_REQUEST, "vod_invalid_height"),
+            "vod_recipe_unresolved" => (StatusCode::INTERNAL_SERVER_ERROR, "vod_recipe_unresolved"),
             "vod_reopen_required" => (StatusCode::CONFLICT, "vod_reopen_required"),
             "live_presentation_removed" => (StatusCode::GONE, "live_presentation_removed"),
             _ => return ApiError::Internal(error),
@@ -4974,6 +4993,34 @@ impl crate::playback_control::TerminalControlCommitter for DurableTerminalCommit
         };
         let store = Arc::clone(&self.store);
         let faults = self.faults.clone();
+        // A terminal exchange on a *draining* predecessor is not receipted,
+        // and that is the whole handling.
+        //
+        // The receipt table holds one row per `session_id`, and on a draining
+        // predecessor that row is already the commit's: the prepared commit
+        // runs on this route and retains its reply here. Until the drain, no
+        // second receipted exchange could reach a predecessor, because the
+        // commit ended it in the same transaction. Now the viewer closing the
+        // player sends `demand: end` to a session that is still live, and a
+        // write that loses to the commit receipt reads back as "not durably
+        // committed" — a 503 the client retries twice a second for the rest
+        // of the window.
+        //
+        // Ending the row is a better answer than a receipt anyway. The
+        // retained reply exists so a lost terminal answer can be replayed;
+        // once this row is `ended`, a client that missed the reply asks again
+        // and gets `410 session_ended` from the row itself, which is the same
+        // terminal by a shorter path. So the drain ends here, early, and the
+        // commit keeps the receipt slot it needs for its own replay.
+        //
+        // `end_media_session` rather than the owner-scoped CAS: the lease
+        // boundary on this route was read when the request arrived and the
+        // owner's tick renews every three seconds, so an exact-boundary CAS
+        // would lose a race it has no reason to enter. The pointer delete
+        // inside it is guarded on this exact incarnation, and the pointer
+        // names the successor, so ending the predecessor cannot take it.
+        let draining = self.route.drain_deadline_ms.is_some();
+        let session_id = self.route.session_id.clone();
         crate::playback_control::TerminalCommitReceipt::retryable_until(
             acknowledgement.expires_at_ms,
             move |attempt| {
@@ -4982,20 +5029,30 @@ impl crate::playback_control::TerminalControlCommitter for DurableTerminalCommit
                 let response = response.clone();
                 let handoff = handoff.clone();
                 let faults = faults.clone();
+                let session_id = session_id.clone();
                 if let Some(handoff) = &handoff {
                     handoff.restart();
                 }
                 tokio::spawn(async move {
-                    let persisted = match faults {
-                        Some(faults) => {
-                            persist_terminal_ack_with_faults(
-                                store,
-                                acknowledgement,
-                                Some(faults.as_ref()),
-                            )
-                            .await
+                    let persisted = if draining {
+                        matches!(
+                            store
+                                .end_media_session(&session_id, "superseded", unix_ms())
+                                .await,
+                            Ok(Some(_))
+                        )
+                    } else {
+                        match faults {
+                            Some(faults) => {
+                                persist_terminal_ack_with_faults(
+                                    store,
+                                    acknowledgement,
+                                    Some(faults.as_ref()),
+                                )
+                                .await
+                            }
+                            None => persist_terminal_ack(store, acknowledgement).await,
                         }
-                        None => persist_terminal_ack(store, acknowledgement).await,
                     };
                     if let Some(handoff) = handoff {
                         handoff.complete();
@@ -5078,13 +5135,27 @@ pub(crate) async fn preparation_ack_replay(
     request: &crate::playback_control::ControlRequestV1,
     deadline_unix_ms: i64,
 ) -> Result<Option<TerminalAckReplay>, ()> {
-    if route.state != "ended"
-        || route.terminal_reason.as_deref() != Some("superseded")
-        || !matches!(
-            request.acknowledgement.as_ref().map(|ack| ack.state),
-            Some(crate::playback_control::AcknowledgementState::Committed)
-        )
-    {
+    // Gated on the receipt, not on the route's state.
+    //
+    // The state check was the same fact by a different name — the commit
+    // retires the predecessor in its own transaction, so `ended`/`superseded`
+    // and "this commit already happened" were one condition. §4 has to break
+    // that pairing: a predecessor a client may still be displaying cannot be
+    // retired at commit, and the moment it is not, a client whose commit
+    // response was lost would be answered by the live control plane instead of
+    // by the exact durable answer — the one case §4 says must always replay.
+    //
+    // The receipt is a stricter fence than the state was. Its two writers are
+    // the commit transaction and `record_media_session_terminal_ack`, which
+    // ends the session in the same transaction, and every field of the
+    // exchange is compared below: incarnation, owner, epoch, client instance,
+    // sequence and request fingerprint. Only the byte-identical request that
+    // produced a receipt can replay it, so a live serving session cannot have
+    // a real exchange short-circuited.
+    if !matches!(
+        request.acknowledgement.as_ref().map(|ack| ack.state),
+        Some(crate::playback_control::AcknowledgementState::Committed)
+    ) {
         return Ok(None);
     }
     let Some(receipt) = state
@@ -5626,7 +5697,48 @@ pub(crate) async fn control_local(
     // deadline. Keep admission and every nonterminal mutation in that caller
     // future; only an already-accepted End receives a detached continuation
     // below for its durable acknowledgement.
-    control_local_inner(state, route, request, deadline_unix_ms).await
+    //
+    // `switched` on a draining predecessor releases it, and it is released
+    // *here* — after the exchange, on the owner — for three reasons, each of
+    // which was a defect in the first placement:
+    //
+    // Only the owner reaches this function, and it reaches it on both paths:
+    // public ingress that owns the route falls through to it, and a relayed
+    // request arrives at `internal_media_sessions::control_authorized`, which
+    // calls it directly. `control_inner` is on neither of those for a remote
+    // route, so a release placed there ran only when the client happened to
+    // hit the owning node.
+    //
+    // After the exchange, so the exchange is answered. Ending the row first
+    // meant the very packet reporting the switch was answered `410
+    // session_ended` — every successful early release counted as `Gone`, and
+    // anything else riding that request was dropped.
+    //
+    // After the actor's fences. `control_inner` checks the generation, the
+    // owner epoch and the route state; the client-instance and monotonic
+    // sequence fences live in `ControlState::accept`, inside this call. The
+    // drain exists to protect the instance that committed, so a packet from a
+    // second instance — or a replayed one with a stale sequence — must not be
+    // able to pull it out from under that instance.
+    let releases_drain = route.drain_deadline_ms.is_some()
+        && request.acknowledgement.as_ref().map(|ack| ack.state)
+            == Some(crate::playback_control::AcknowledgementState::Switched);
+    let response = control_local_inner(state, route, request, deadline_unix_ms).await;
+    // Only on an accepted exchange. A refused one proves nothing about what
+    // reached a screen.
+    if releases_drain && response.status().is_success() {
+        if let Err(error) = state
+            .store
+            .end_media_session(&route.session_id, "superseded", unix_ms())
+            .await
+        {
+            // Not fatal. The deadline and the cross-node sweep are both still
+            // behind this, so a failed early release costs the rest of the
+            // window, not correctness.
+            tracing::debug!(%error, "a switched acknowledgement could not release the drain");
+        }
+    }
+    response
 }
 
 async fn control_local_inner(
@@ -11905,6 +12017,7 @@ mod tests {
             media_sequence: 0,
             discontinuity_sequence: 0,
             updated_at_ms: unix_ms(),
+            drain_deadline_ms: None,
         };
         let request = crate::playback_control::ControlRequestV1 {
             intent: None,
@@ -12452,6 +12565,282 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         drop(held);
+    }
+
+    /// One client instance across a drain-release exchange, so the ascending
+    /// sequences are judged against each other rather than being waved through
+    /// as a new instance.
+    fn drain_control_request(
+        generation: String,
+        sequence: u64,
+    ) -> crate::playback_control::ControlRequestV1 {
+        crate::playback_control::ControlRequestV1 {
+            intent: None,
+            protocol: crate::playback_control::PROTOCOL_V1.to_owned(),
+            generation,
+            control_epoch: 1,
+            client_instance_id: "6f1c2f8e-4a3b-4d5e-9f60-71a2b3c4d5e6".to_owned(),
+            sequence,
+            demand: crate::playback_control::PlaybackDemand::Active,
+            position_ms: 1_000,
+            buffered_from_ms: Some(0),
+            buffered_through_ms: 10_000,
+            playback_rate: 1.0,
+            render_state: crate::playback_control::RenderState::Rendering,
+            seek_target_ms: None,
+            observed_download_bps: None,
+            selection: crate::playback_control::ClientSelection {
+                quality: crate::playback_control::QualitySelection::Auto,
+                audio_track: None,
+                subtitle: crate::playback_control::SubtitleSelection {
+                    mode: crate::playback_control::SubtitleMode::Off,
+                    track: None,
+                },
+                audio_offset_ms: 0,
+                codec: crate::playback_control::CodecPolicy::Auto,
+                dynamic_range: crate::playback_control::DynamicRangePolicy::Auto,
+            },
+            capabilities: Some(crate::playback_control::DynamicCapabilities {
+                platform: crate::playback_control::ClientPlatform::Web,
+                max_height: 1080,
+                codecs: vec![crate::playback_control::CodecPolicy::H264],
+                dynamic_ranges: vec![crate::playback_control::DynamicRangePolicy::Sdr],
+                dual_player_preparation: false,
+            }),
+            observation: None,
+            acknowledgement: None,
+            supported_actions: None,
+        }
+    }
+
+    /// A `switched` on a draining predecessor releases it, and only on an
+    /// exchange that was actually accepted.
+    ///
+    /// Every assertion here corresponds to a way the first placement of this
+    /// hook was wrong. It ran before the exchange, so the packet reporting the
+    /// switch was answered `410 session_ended` — hence the status assertion,
+    /// which is not incidental. It ran on every packet that named the state,
+    /// accepted or not — hence the refused case, because a refused exchange
+    /// proves nothing about what reached a screen. And it lived in
+    /// `control_inner`, which a relayed request never reaches — hence this
+    /// test entering through `control_authorized`, the relay's own door, so
+    /// that moving the hook back out of `control_local` fails here.
+    #[tokio::test]
+    async fn a_switch_releases_the_drain_through_the_relay_and_only_when_accepted() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let generation = uuid::Uuid::new_v4().to_string();
+        let fixture = HlsDeliveryFixture::publish(dir.path(), &session_id).await;
+        let user = fixture
+            .store
+            .create_user("drain-release", "hash", false)
+            .await
+            .expect("drain release user");
+        let recipe_json = crate::media_sessions::takeover_eligible_route(&session_id, &generation)
+            .recipe_json
+            .replace("\"user_id\":7", &format!("\"user_id\":{}", user.id));
+        let start = StartResponse {
+            session_id: session_id.clone(),
+            playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
+            duration_ms: Some(60_000),
+            start_seconds: 0.0,
+            media_origin_ms: Some(0),
+            height: 720,
+            encoder: "software".to_owned(),
+            vod: false,
+            ladder: vec![],
+            prior_kbps: None,
+            delivered_dynamic_range: Some("sdr".to_owned()),
+            delivered_dolby_vision_profile: None,
+            control: crate::playback_control::ControlBootstrap::new(
+                &session_id,
+                &generation,
+                1,
+                crate::playback_control::ROLLING_LEASE_TIMEOUT_MS,
+            ),
+            plan_notes: Vec::new(),
+        };
+        let now_ms = unix_ms();
+        activate_ready(
+            &fixture.store,
+            MediaSessionActivation {
+                expected_desired_revision: None,
+                incarnation_id: generation.clone(),
+                session_id: session_id.clone(),
+                user_id: user.id,
+                playback_id: "drain-release".to_owned(),
+                expected_predecessor_incarnation_id: None,
+                fence_predecessor: false,
+                request_id: None,
+                request_fingerprint: "a".repeat(64),
+                owner_node_id: fixture.state.node_id.clone(),
+                lease_expires_at_ms: now_ms.saturating_add(60_000),
+                recipe_json: recipe_json.clone(),
+                response_json: serde_json::to_string(&start).expect("start response"),
+                publication_ready_at_ms: 0,
+                media_origin_ms: 0,
+                now_ms,
+            },
+        )
+        .await;
+
+        // The drain is put on the row the way production puts it there: by
+        // committing a successor. Setting the column by hand would test the
+        // hook against a state the store never produces.
+        let successor_incarnation = uuid::Uuid::new_v4().to_string();
+        let successor_session = uuid::Uuid::new_v4().to_string();
+        fixture
+            .store
+            .prepare_media_session(&plurx_core::domain::MediaSessionPreparation {
+                expected_desired_revision: None,
+                incarnation_id: successor_incarnation.clone(),
+                session_id: successor_session.clone(),
+                user_id: user.id,
+                playback_id: "drain-release".to_owned(),
+                expected_predecessor_incarnation_id: generation.clone(),
+                expected_predecessor_owner_node_id: fixture.state.node_id.clone(),
+                expected_predecessor_owner_epoch: 1,
+                request_fingerprint: "b".repeat(64),
+                owner_node_id: fixture.state.node_id.clone(),
+                recipe_json,
+                response_json: serde_json::to_string(&start).expect("successor response"),
+                media_origin_ms: 0,
+                now_ms,
+                deadline_ms: now_ms.saturating_add(60_000),
+            })
+            .await
+            .expect("stage successor")
+            .expect("staging wins");
+        fixture
+            .store
+            .commit_media_session_preparation(
+                user.id,
+                "drain-release",
+                &plurx_core::domain::MediaSessionPreparationCommitRequest {
+                    expected_desired_revision: None,
+                    staged_incarnation_id: successor_incarnation.clone(),
+                    expected_predecessor_owner_node_id: fixture.state.node_id.clone(),
+                    expected_predecessor_owner_epoch: 1,
+                    now_ms,
+                    lease_expires_at_ms: now_ms.saturating_add(60_000),
+                    control_receipt: None,
+                },
+            )
+            .await
+            .expect("commit successor")
+            .expect("commit wins");
+
+        let draining = fixture
+            .store
+            .media_session_route(&session_id)
+            .await
+            .expect("predecessor route")
+            .expect("the predecessor keeps serving while it drains");
+        assert_eq!(draining.state, "active");
+        assert!(
+            draining.drain_deadline_ms.is_some(),
+            "the commit is what puts the predecessor into its drain",
+        );
+
+        let switched = || crate::playback_control::ActionAcknowledgement {
+            action_id: uuid::Uuid::new_v4().to_string(),
+            state: crate::playback_control::AcknowledgementState::Switched,
+            buffered_through_ms: None,
+            committed_media_origin_ms: None,
+            first_frame_unix_ms: Some(unix_ms()),
+        };
+
+        // A refused exchange: the generation names an incarnation this route
+        // is not on, so the relay's own fence answers before any acceptance.
+        let mut refused = drain_control_request(generation.clone(), 1);
+        refused.acknowledgement = Some(switched());
+        let response = crate::http::internal_media_sessions::control_authorized(
+            fixture.state.clone(),
+            crate::playback_control::ControlRelayRequest {
+                session_id: session_id.clone(),
+                generation: uuid::Uuid::new_v4().to_string(),
+                expected_owner_node_id: fixture.state.node_id.clone(),
+                expected_owner_epoch: 1,
+                deadline_unix_ms: unix_ms().saturating_add(4_000),
+                control: refused,
+            },
+        )
+        .await;
+        assert!(
+            !response.status().is_success(),
+            "a control naming another generation is refused",
+        );
+        assert_eq!(
+            fixture
+                .store
+                .media_session_route(&session_id)
+                .await
+                .expect("route after refusal")
+                .map(|route| route.state),
+            Some("active".to_owned()),
+            "a refused exchange proves nothing about what reached a screen, \
+             and must not end the stream the client is still watching",
+        );
+
+        // An accepted exchange carrying no acknowledgement is ordinary
+        // traffic on a draining route, and leaves the drain alone.
+        let response = crate::http::internal_media_sessions::control_authorized(
+            fixture.state.clone(),
+            crate::playback_control::ControlRelayRequest {
+                session_id: session_id.clone(),
+                generation: generation.clone(),
+                expected_owner_node_id: fixture.state.node_id.clone(),
+                expected_owner_epoch: 1,
+                deadline_unix_ms: unix_ms().saturating_add(4_000),
+                control: drain_control_request(generation.clone(), 1),
+            },
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            fixture
+                .store
+                .media_session_route(&session_id)
+                .await
+                .expect("route after silent exchange")
+                .map(|route| route.state),
+            Some("active".to_owned()),
+            "the drain runs its window unless a client says it is done with it",
+        );
+
+        // And the exchange that does say so: answered, then released. Spaced
+        // past `MIN_CONTROL_INTERVAL`, which the previous exchange has just
+        // started; a rate-limited packet is refused, and a refusal is what the
+        // case above is already about.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let mut releasing = drain_control_request(generation.clone(), 2);
+        releasing.acknowledgement = Some(switched());
+        let response = crate::http::internal_media_sessions::control_authorized(
+            fixture.state.clone(),
+            crate::playback_control::ControlRelayRequest {
+                session_id: session_id.clone(),
+                generation: generation.clone(),
+                expected_owner_node_id: fixture.state.node_id.clone(),
+                expected_owner_epoch: 1,
+                deadline_unix_ms: unix_ms().saturating_add(4_000),
+                control: releasing,
+            },
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "the packet that reports the switch is answered; ending the row \
+             ahead of it is what answered it 410",
+        );
+        let released = fixture
+            .store
+            .media_session_route(&session_id)
+            .await
+            .expect("route after the switch")
+            .expect("the row is still readable once it has ended");
+        assert_eq!(released.state, "ended");
+        assert_eq!(released.terminal_reason.as_deref(), Some("superseded"));
     }
 
     #[tokio::test]
@@ -14894,6 +15283,60 @@ mod tests {
         );
     }
 
+    /// Takeover will not adopt a live-HLS session while the switch that
+    /// governs the live engine is off, and says which switch it was.
+    ///
+    /// Takeover is the only producer of a `Presentation::Live` recipe —
+    /// `takeover_recipe_is_valid` requires that stamp and both public and
+    /// worker ingress refuse it — so before this it was the one path that
+    /// could put a session on the retained engine with the fallback disabled.
+    /// The window is narrow: a session that started while the fallback was on,
+    /// kept running when an operator turned it off, and then outlived its
+    /// owner. It is also the reason the rule is worth having, because the
+    /// setting is replicated and every node agrees about it, so a refusal here
+    /// can only ever mean what it says.
+    ///
+    /// The message is asserted, not only the refusal. "Takeover failed" sends
+    /// an operator to look at the node that died; naming the switch sends them
+    /// to the one they turned off.
+    #[tokio::test]
+    async fn attempt_takeover_refuses_a_live_session_while_the_fallback_is_off() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "fallback-off-unrelated").await;
+        let route = || {
+            let mut route = eligible_owner_loss_route();
+            route.owner_node_id = "some-other-node".to_owned();
+            route
+        };
+
+        // With the fallback on, this fixture gets past the switch: whatever it
+        // is refused for next, it is not this. Without that half the test
+        // would pass against a build that refuses every takeover.
+        let allowed = crate::media_sessions::attempt_takeover_for_test(&fixture.state, route())
+            .await
+            .err()
+            .unwrap_or_default();
+        assert!(
+            !allowed.contains("live HLS fallback"),
+            "the switch is on, so it cannot be the reason: {allowed}"
+        );
+
+        for stored in ["0", "false", " OFF ", "no"] {
+            fixture
+                .store
+                .put_setting(plurx_core::store::keys::VOD_LIVE_RECOVERY, stored)
+                .await
+                .expect("disable the fallback");
+            let refusal = crate::media_sessions::attempt_takeover_for_test(&fixture.state, route())
+                .await
+                .expect_err("a live session is not adopted while the engine is disabled");
+            assert!(
+                refusal.contains("live HLS fallback is disabled cluster-wide"),
+                "{stored:?} must refuse and name the switch: {refusal}"
+            );
+        }
+    }
+
     async fn control_body(response: Response) -> (StatusCode, serde_json::Value) {
         let http_status = response.status();
         let bytes = response
@@ -15093,6 +15536,61 @@ mod tests {
                 .incarnation_id,
             route.incarnation_id,
             "staging must not advance the pointer — `activate_media_session` would have",
+        );
+    }
+
+    /// The Developer readiness row `server_preparation_is_real` reports
+    /// `unmet`, and this is the other end of that sentence.
+    ///
+    /// That row is a claim about this build — "a prepared successor publishes
+    /// `encoder: staged` with no candidate worker behind its playlist" — and a
+    /// claim about a build goes stale silently: §4 ships a real worker, and the
+    /// Developer tab keeps telling operators the capability is metadata only,
+    /// with every test still green. So the claim is pinned here, where the
+    /// staging happens. When a candidate worker exists this test fails, and
+    /// whoever makes it pass is holding the reason the readiness row has to
+    /// change with it.
+    #[tokio::test]
+    async fn a_prepared_successor_still_publishes_a_staged_encoder() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let (fixture, session_id, route) = staging_fixture(dir.path()).await;
+
+        stage_prepared_successor(
+            &fixture.state,
+            &session_id,
+            &route,
+            &staged_predecessor_recipe(&route),
+            &staged_candidate_request(),
+            Some(&staged_source_file()),
+            AcceptedAsk {
+                film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                desired_digest: None,
+            },
+        )
+        .await;
+
+        let staged = fixture
+            .state
+            .store
+            .staged_media_session_for_playback(route.user_id, &route.playback_id)
+            .await
+            .expect("ledger read")
+            .expect("a successor is staged");
+        let published = fixture
+            .state
+            .store
+            .media_session_route_by_incarnation(&staged.staged_incarnation_id)
+            .await
+            .expect("staged route read")
+            .expect("the staged successor has a durable route");
+        let response: serde_json::Value =
+            serde_json::from_str(&published.response_json).expect("the published start response");
+
+        assert_eq!(
+            response["encoder"], "staged",
+            "the Developer readiness row `server_preparation_is_real` tells operators this build \
+             stages metadata only. If a candidate worker now names itself here, that row is \
+             lying, and it lives in crates/plurxd/src/http/developer.rs"
         );
     }
 
@@ -15993,7 +16491,14 @@ mod tests {
             .await
             .expect("predecessor route")
             .expect("the predecessor remains readable");
-        assert_ne!(predecessor.state, "active");
+        // Still serving, on purpose. The commit gives it a drain deadline
+        // instead of retiring it, so a client that has not finished switching
+        // keeps getting media until its owner's next tick past the deadline.
+        assert_eq!(predecessor.state, "active");
+        assert_eq!(
+            predecessor.terminal_reason, None,
+            "nothing has decided a terminal cause for the predecessor yet"
+        );
         assert!(fixture
             .state
             .store
@@ -16894,16 +17399,17 @@ mod tests {
             .expect("committed route")
             .expect("the successor is now current");
         assert_eq!(committed.incarnation_id, staged.staged_incarnation_id);
-        let retired_predecessor = fixture
+        let draining_predecessor = fixture
             .state
             .store
             .media_session_route(&session_id)
             .await
             .expect("predecessor route after acknowledgement")
-            .expect("the predecessor remains as a terminal route");
-        assert_ne!(
-            retired_predecessor.state, "active",
-            "pointer advancement retires the predecessor"
+            .expect("the predecessor remains readable");
+        assert_eq!(
+            draining_predecessor.state, "active",
+            "pointer advancement no longer retires the predecessor: it starts a drain, \
+             and the predecessor keeps serving until its owner's tick passes the deadline"
         );
         assert!(
             fixture
@@ -17042,14 +17548,17 @@ mod tests {
             committed_before_retry.incarnation_id, staged.staged_incarnation_id,
             "the timed-out request's detached task, not the retry, must advance the pointer"
         );
-        let retired_predecessor = fixture
+        let draining_predecessor = fixture
             .state
             .store
             .media_session_route(&session_id)
             .await
             .expect("predecessor after detached settlement")
-            .expect("the predecessor remains as a terminal route");
-        assert_ne!(retired_predecessor.state, "active");
+            .expect("the predecessor remains readable");
+        assert_eq!(
+            draining_predecessor.state, "active",
+            "the detached settlement starts the predecessor's drain rather than retiring it"
+        );
         let retained_receipt = fixture
             .state
             .store
@@ -17978,6 +18487,7 @@ mod tests {
             media_sequence: 0,
             discontinuity_sequence: 0,
             updated_at_ms: 1,
+            drain_deadline_ms: None,
         };
         assert!(resolved_replay_is_live(&route, 1_000));
         route.publication_ready_at_ms = 1_001;
@@ -18039,6 +18549,7 @@ mod tests {
             media_sequence: 0,
             discontinuity_sequence: 0,
             updated_at_ms: unix_ms(),
+            drain_deadline_ms: None,
         };
         assert!(route_matches_activation(&route, &activation));
         route.owner_epoch = 2;
@@ -18071,6 +18582,7 @@ mod tests {
             media_sequence: 0,
             discontinuity_sequence: 0,
             updated_at_ms: now_ms,
+            drain_deadline_ms: None,
         };
         let mut published = observed.clone();
         published.owner_node_id = "surviving-owner".to_owned();
@@ -19620,6 +20132,23 @@ mod tests {
             ("vod_transcode_unavailable", StatusCode::NOT_IMPLEMENTED),
             ("vod_subtitle_burn_unavailable", StatusCode::NOT_IMPLEMENTED),
             ("vod_source_unsupported", StatusCode::UNPROCESSABLE_ENTITY),
+            (
+                "vod_video_geometry_unknown",
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                "vod_frame_cadence_unknown",
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            ("vod_source_rescan_required", StatusCode::CONFLICT),
+            ("vod_engine_unattested", StatusCode::SERVICE_UNAVAILABLE),
+            ("vod_audio_track_missing", StatusCode::UNPROCESSABLE_ENTITY),
+            (
+                "vod_subtitle_track_missing",
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            ("vod_invalid_height", StatusCode::BAD_REQUEST),
+            ("vod_recipe_unresolved", StatusCode::INTERNAL_SERVER_ERROR),
             ("vod_reopen_required", StatusCode::CONFLICT),
             ("live_presentation_removed", StatusCode::GONE),
         ];

@@ -129,6 +129,63 @@ class EvidenceWorkflowCase(unittest.TestCase):
         self.assertNotIn("controller.skip", hidden)
         self.assertIn("skipped Apple HEVC tier normalization", hls)
 
+    def test_prepared_switches_preserve_authority_and_real_frame_evidence(self) -> None:
+        apple = self.read("clients/apple/Sources/PlayerController.swift")
+        apple_commit = apple.split("func commitPreparedSuccessor(", 1)[1].split(
+            "private func awaitPreparedFirstFrame", 1
+        )[0]
+        self.assertNotIn("release(session:", apple_commit)
+        self.assertIn("guard let firstFrameUnixMs", apple_commit)
+
+        android = self.read(
+            "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+        )
+        android_poll = android.split("private fun pollPreparedReplacement()", 1)[1].split(
+            "private fun commitPreparedReplacement()", 1
+        )[0]
+        self.assertIn("val restored = rollbackSwitchedReplacement()", android_poll)
+        self.assertIn("failSwitchedReplacement()", android_poll)
+        self.assertIn('restartAt(realPosition(), "prepared successor rendered no frame")', android_poll)
+        self.assertNotIn("settleCommitOnFirstFrame(System.currentTimeMillis())", android_poll)
+        self.assertEqual(
+            android.count("settleCommitOnFirstFrame(System.currentTimeMillis())"),
+            1,
+            "only Media3's real rendered-frame callback may publish a commit",
+        )
+        collect = android.split("fun collectRetiredPlayer()", 1)[1].split(
+            "private var pendingAcknowledgement", 1
+        )[0]
+        self.assertIn("awaitingCommitFrameSinceMs != null", collect)
+        rollback = android.split("private fun rollbackSwitchedReplacement()", 1)[1].split(
+            "private fun failSwitchedReplacement()", 1
+        )[0]
+        self.assertIn("player = predecessor.player", rollback)
+        self.assertIn("preparedRollbackReopen", rollback)
+        release = android.split("fun release()", 1)[1].split("fun switchAudio", 1)[0]
+        self.assertIn(
+            "endPlaybackControl(settling) { endingSession?.let(vm::endHlsSession) }",
+            release,
+        )
+        self.assertNotIn("sessionId?.let { vm.endHlsSession(it) }", release)
+        session = self.read(
+            "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackControlSession.kt"
+        )
+        finish = session.split("fun endAfterFinalExchange(", 1)[1].split(
+            "private companion object", 1
+        )[0]
+        self.assertIn("subject.settle(outerScope, settling, ending)", finish)
+        self.assertLess(finish.index("subject.stop()"), finish.rindex("afterFinalExchange()"))
+
+    def test_apple_prepared_enablement_is_visible_and_advisory(self) -> None:
+        view = self.read("clients/apple/Sources/LiveTvDeveloperView.swift")
+        section = view.split(
+            'Section("Prepared quality handoff · advisory enablement")', 1
+        )[1].split('Section("HDHomeRun Live TV · runtime enablement")', 1)[0]
+        self.assertIn('Toggle("Enable two-player prepared handoff"', section)
+        self.assertIn("Not met", section)
+        self.assertIn("Checked during playback", section)
+        self.assertNotIn(".disabled", section)
+
 
 if __name__ == "__main__":
     unittest.main()

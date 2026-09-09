@@ -228,8 +228,11 @@ Only after mixed-fleet evidence:
 - default protocol advertisement on;
 - default the actor recovery engine on, remove the compatibility engine;
 - remove `/status` polling and deprecated client recovery code;
-- re-evaluate whether `live-hls-recovery` is still necessary once VOD
-  eligibility covers the supported catalog.
+- re-evaluate whether the retained live engine is still necessary once VOD
+  eligibility covers the supported catalog. The `live-hls-recovery` feature
+  that used to gate it is removed; the question is now about the engine and
+  the `playback.vod_live_recovery` setting, and Settings → Developer reports
+  how many sessions still depend on it.
 
 **Acceptance:** a repository search finds only the three approved progress
 deadlines and the named lifecycle timers; playback-lab plus physical matrices

@@ -57,7 +57,7 @@ recorded on the status page; do not redo them.
 ## Immediate queue — preserve proof before adding changes
 
 1. **Finish the dirty VOD recipe task, not a second implementation.** Read
-   that worktree's `docs/VOD-ENCODING.md` and `docs/streaming/VOD-M3-HANDOFF.md`, inspect
+   that worktree's `docs/streaming/VOD-ENCODING.md` and `docs/streaming/VOD-M3-HANDOFF.md`, inspect
    its diff/untracked files, and obtain the final source manifest and review.
    It is not approved for commit/push merely because intermediate tests pass.
    Active files include `vodencode.rs`, `vodencode_tests.rs`,
@@ -326,6 +326,81 @@ fixture defect on the same day.**
 
 ### 4. Executable prepared transaction and three client adapters
 
+> **The successor's worker is blocked on a device measurement, not on code.
+> Read this before planning any of §4's remaining work.**
+>
+> Staging starts no worker — `ControlAction::Prepare`'s own doc says *"This
+> slice deliberately starts no worker behind that route"* — so a client that
+> is offered a successor cannot fetch it. Closing that looks like server work.
+> It mostly is not, and the reason is three facts that stack:
+>
+> 1. `PREPARED_AXIS_SETS` admits exactly two crossings: `{ResolutionOrBitrate}`
+>    alone, and that paired with `{DeliveryMethod}`.
+> 2. `rendition_key` (`vodserve.rs`) hashes file id, source identity, audio
+>    index, AAC, the two Dolby Vision flags, audio offset and cluster cache
+>    key. **Not height. Not bitrate.** Two Copy recipes differing only in
+>    resolution or bitrate therefore share one rendition — the same producer
+>    and the same bytes. On a Copy source the delivered media *is* the source,
+>    so `{ResolutionOrBitrate}` alone is not a transition in delivery terms;
+>    there is nothing to switch to.
+> 3. The pair that does change the media — Copy→Transcode, which is what the
+>    2026-09-03 hardware run measured — is refused by immutable-VOD serving:
+>    `try_create_with_release_fence` answers `501 vod_transcode_unavailable`,
+>    *"transcode serving is gated on the D6 device measurement"*.
+>
+> So the worker can be built, and for every case VOD may legally serve it
+> would produce the identical stream the viewer already has. **Transcode-rung
+> VOD stays unavailable until the open P2/D6 measurement establishes that
+> AVPlayer and Media3 tolerate the planned EXTINF timing**
+> ([PLAYBACK-TESTING.md](../PLAYBACK-TESTING.md)) — an Apple TV and an Android TV
+> in a room, not a PR. Do not spend a week on the plumbing expecting to
+> demonstrate a switch at the end of it.
+>
+> **Two findings to keep, for whoever does build it after D6 lifts.**
+>
+> **Publishing the staged row is a fork, and the cheap-looking side is the
+> wrong one.** `classify_durable_route` reads four fields and never joins the
+> pointer, so clearing `publication_ready_at_ms` makes a staged route fully
+> playable while the pointer still names its predecessor — no new gate needed.
+> But the sentinel is also what keeps the row out of `owned_media_sessions`
+> and out of the retirement sweep. Clear it and the 3-second lease loop adopts
+> the row and renews `lease_expires_at_ms` to a 12-second TTL, overwriting the
+> 330-second deadline the preparation ledger mirrors — the exact thing
+> `MediaSessionPreparation::deadline_ms` forbids in its own words: *"Two clocks
+> over one row is how a staged generation ends up half reaped."* Worse, a
+> published row whose worker stops being `live` becomes a stale-settlement
+> candidate and is ended within one tick, so a slow client's commit then fails
+> the CAS and reports a rejected acknowledgement for a successor **the server
+> killed while the viewer did exactly what it was told**. The recorded
+> preference is therefore the other side: leave the sentinel, and teach
+> `classify_durable_route` one additional case for a route that is the
+> currently-staged successor of this playback — with the extra read taken only
+> when the route would otherwise be refused, so a serving route still
+> short-circuits on `publication_ready_at_ms == 0` and the hot path is
+> unchanged.
+>
+> **There is a fourth teardown path nobody has enumerated.** Abort, deadline
+> lapse and owner death are all durable-only and none of them stops a worker.
+> On top of those, `SESSION_IDLE_TTL` is 300 s while `PREPARATION_DEADLINE_MS`
+> is 330 s, so a successor the client never fetches is idle-reaped **thirty
+> seconds before its own deadline** — and that reap is deliberately
+> tombstone-free (*"an idle reap is the one ending a session may come back
+> from"*), so `Session::abort_staged_preparation` never runs and nothing clears
+> the slot. The reap also acts on the *successor's* session, whose control
+> state holds no slot; the slot is on the predecessor. In that 30-second window
+> the offer still validates and a commit still succeeds, onto a successor with
+> no worker. Any slice here must release the worker on all four paths.
+>
+> **Also do not write the acceptance on `install_http_test_session`.** Every
+> existing `stage_prepared_successor` test runs against the *rolling* gate, not
+> `VodPreparationGate`, because the fixture registers into the rolling map —
+> the same miss `PreparationGate`'s own doc predicted once already: *"a gate
+> that existed only on the actor would let M6 stage successors on a path
+> viewers do not take, and its acceptance would pass while the feature fired on
+> nothing."* The only assertion this gap's definition supports is fetching a
+> real segment from the successor's playlist while the pointer still names the
+> predecessor.
+
 Retain the existing durable ledger; do not build a second competing transaction.
 Create a real candidate worker with capacity ownership, immutable recipe/codec
 metadata and bounded exact-candidate priming reads. Never remove the global
@@ -415,6 +490,236 @@ a settled contract instead of three guesses.
   successor, which is exactly the window §4's drain needs. No schema change is
   required.
 
+  **BUILT AND WITHDRAWN, 2026-09-07 — the lease is the wrong thing to bound a
+  drain with, and the paragraph below is the first of three reasons why.** An
+  implementation reached green contracts on both backends and three
+  independent adversarial reviews each found a different P0 in it. It is not
+  in the tree. What is in the tree is this record, because the next reader
+  will otherwise reach the same design a fourth time.
+
+  The shape that was tried: the commit stops retiring the predecessor and
+  writes it a lease ceiling instead; the drain is bounded by a rule in
+  `renew_media_sessions` about which incarnation the playback pointer names.
+  Every variant of that rule fails, and they fail for the same underlying
+  reason — **the owner's lease loop already owns the meaning of a lease, and a
+  drain is not a lease.**
+
+  1. **Refusing the renewal kills the worker in one tick.** The paragraph
+     below says the maintenance sweep bounds the drain. It cannot:
+     `renew_media_sessions` consults no pointer, and neither does
+     `owned_media_sessions`, which is what feeds the owner's lease loop. The
+     old commit hid the predecessor from all of these at once, and it did so
+     three times over: `state = 'ended'`, a lease collapsed to `now`, and the
+     blocked publication sentinel. **Every one of those four readers filters
+     `state = 'active'`, so any one of the three would have hidden the row —
+     and the withdrawn attempt cleared none of them.** (An earlier version of
+     this paragraph credited the sentinel alone. That is wrong, and it is
+     wrong in a way that matters: `begin_removal_attempt_sql`, named below as
+     a third pointer-free reader, has no sentinel predicate at all, so for
+     that reader `state = 'ended'` was doing all of the work.) So the owner
+     keeps offering the predecessor, reads an omitted renewal as `cluster
+     lease lost`, and fences and kills the worker on its next three-second
+     tick, while the store still says `active`.
+  2. **Clamping the renewal only delays it by about eight seconds.** Make the
+     renewal succeed at an unmoving value and the loop still drops the route
+     from its batch at `ceiling - LEASE_RENEWAL_MIN_REMAINING_MS` (4 s) and
+     fails it closed down the same `cluster lease lost` path. Every healthy
+     prepared switch then emits the split-brain log line and metric. And after
+     that reap the row is a zombie: `fence_and_reap_sessions`'s VOD arm handles
+     `ended` and missing, so an `active` route falls through it writing no
+     terminal and stopping no worker. (It does begin a publication fence
+     before the match, so the viewer stops receiving media immediately — the
+     zombie is the row and the encoder behind it, not the delivery.) The row
+     then sits with a lapsed lease until the maintenance sweep — `now - 60 s`
+     on a five-minute tick, so up to six minutes.
+  3. **"Absence of a pointer row renews normally" makes the session
+     immortal.** That rule is needed because a session mid-creation has no
+     pointer yet. But `end_media_session` *deletes* the pointer row, which is
+     what happens when the viewer closes the tab. Sequence: commit at t=0,
+     viewer stops at t=2 s, pointer deleted; at t=3 s the predecessor is still
+     `active` with a live lease and a live worker, the clamp finds no pointer,
+     and it renews. Forever. An encoder, one of two admission permits and a
+     shared-cache generation, held for a stream nobody is watching, until the
+     process exits — and node removal refuses the whole time
+     (`membership.rs` `begin_removal_attempt_sql` is a **third** reader with no
+     pointer predicate, alongside `expired_media_sessions` and
+     `claim_media_session_takeover`).
+
+  **What the design has to be instead: the drain is durable state that the
+  owner acts on, and the lease machinery is not touched at all.**
+
+  The failure common to all three attempts is that "this session is draining"
+  was *inferred* — from the pointer, through the lease. Inference is what broke:
+  the pointer is deleted by an ordinary user action, and the lease already
+  means something else to the loop that owns it. Write the fact down instead.
+
+  - **Schema.** One nullable column, `media_sessions.drain_deadline_ms`
+    (SQLite 49 → 50, replicated AUTH 29 → 30). Null means "not draining", which
+    is every row that exists today, so the migration is additive and an old
+    binary reading the table is unaffected.
+  - **Commit.** Stop ending the predecessor. Stop deleting its pins. Stop
+    collapsing its `job_leases`. Set `drain_deadline_ms = now + DRAIN_MS` and
+    change nothing else. State, cause, publication readiness and lease are
+    untouched, so `owned_media_sessions`, `renew_media_sessions` and the reap
+    classifier all keep working exactly as they do now — which is the whole
+    point, because every attempt that touched them broke something.
+  - **The owner ends it, on the tick it already runs.** The lease loop already
+    walks `owned_media_sessions` every three seconds. Any owned row whose
+    `drain_deadline_ms` has passed gets `end_media_session_if_owner` with cause
+    `superseded` — the right cause, the ordinary teardown, the pointer delete
+    already guarded on the exact incarnation so it cannot take the successor's.
+    No new timer, no spawned task to lose across a restart.
+  - **`Switched` ends it early.** Step 2 calls the same function from the
+    acknowledgement instead of waiting for the deadline. That is the only
+    difference between the two steps, which is why they are one piece of work.
+  - **The sweep is the cross-node backstop.** `maintain_media_sessions` ends
+    any row whose `drain_deadline_ms` has passed, whoever owns it, so a node
+    that dies mid-drain cannot leave one behind. Its five-minute tick is a
+    backstop interval, not the bound; the owner's own three-second tick is the
+    bound, and it survives a restart because the deadline is on the row rather
+    than in a task.
+  - **Takeover excludes a non-null `drain_deadline_ms`.** Durable, so it holds
+    when the pointer is gone — which is exactly the case that defeated the
+    pointer-based exclusion.
+
+  Check against the three failures above: (1) nothing about renewal changes, so
+  no refusal is read as lease loss; (2) nothing is dropped from the renewal
+  batch early, so the worker lives the whole window; (3) the drain does not
+  depend on a pointer row existing, so deleting the pointer changes nothing.
+
+  **Things this design must still be held to.**
+
+  - ~~The drain window has to be shorter than the `cache_consumer_pins` TTL,
+    because a draining predecessor's pins are renewed by no statement that
+    survives the commit.~~ **Withdrawn — this was carried over from the
+    withdrawn design and is not true of this one.** `renew_media_sessions`
+    renews the pins of every session whose lease update succeeded, in the same
+    call, and this design keeps the predecessor `active`, unsentineled and
+    renewing for the whole drain. Its pins ride the renewal it has always had.
+    The constraint was real only where renewal was refused or clamped. Do not
+    add a pin-renew path for the drain, and do not expect the sweep to collect
+    a generation it cannot.
+  - A `Switched` that arrives after the deadline has already ended the row
+    must be idempotent, not an error — `end_media_session_if_owner`'s CAS
+    answers that, but the acknowledgement path has to treat "already ended" as
+    success.
+  - **The predecessor can now need a second receipt, and the table holds one
+    per session.** `media_session_terminal_acks` is `session_id PRIMARY KEY`,
+    and the commit transaction writes the commit receipt under the
+    *predecessor's* session id. Before the drain that was harmless because the
+    same transaction ended the predecessor, so no second receipted exchange
+    could reach it. A draining predecessor stays live and answers the
+    `demand: end` every shipped reporter sends when the viewer closes the
+    player: the write loses to the commit receipt, the caller reads that as
+    "not durably committed", and the client gets a `503 control_unavailable`
+    it retries twice a second for the rest of the window.
+
+    ~~The retained reply has to become the most recent receipted exchange
+    rather than the first one.~~ **Built that way, then withdrawn under
+    review, because it is worse than what it replaced.** Every reader of that
+    row demands byte-exact equality with what the commit wrote, so a commit
+    whose response was lost and is replayed after the viewer closed the player
+    reads back non-exact and is classified as *refused* — a rejection
+    tombstone for a successor the pointer already names. And the ordering rule
+    it needed was wrong: `sequence` is monotone per *client instance*, not per
+    session, so a reloaded page starting again at one either starves or
+    clobbers depending on which side of the stored number it lands.
+
+    **What shipped instead: a terminal exchange on a draining predecessor is
+    not receipted at all — it ends the row.** The retained reply exists so a
+    lost terminal answer can be replayed; once the row is `ended`, a client
+    that missed the answer asks again and gets `410 session_ended` from the
+    row itself, which is the same terminal by a shorter path. The commit keeps
+    the receipt slot it needs for its own replay, and the route carries
+    `drain_deadline_ms` so the control plane can tell the two cases apart.
+    This is also most of what step 2's `Switched` was for: the ordinary case
+    releases the encoder and its admission permit immediately rather than
+    waiting out the window.
+  - **An old binary must not be able to take a draining session over, and SQL
+    predicates cannot make that true.** Compatibility is checked when a store
+    is opened and never again, so during a rolling upgrade every node still
+    running the previous binary keeps issuing takeover SQL that has no drain
+    predicate in it. A new-binary owner that dies mid-drain is then adopted by
+    an old-binary node, which starts an encoder for a stream the pointer no
+    longer names and renews it forever — failure 3 arriving through the
+    upgrade door. This needs a trigger, the way the v49 pointer fence did, and
+    the trigger has to ship in the same migration step as the column.
+
+  Step 2 then replaces "after the window" with "when `Switched` arrives, or the
+  window lapses", which is the same call at a different trigger.
+
+  **Step 2's server half has landed. Its client half must not follow in the
+  same release, and this is the part the first attempt got wrong.**
+  `AcknowledgementState` has no unknown-value fallback, so a `switched` sent to
+  an owner that does not know the word is a deserialize failure, an empty 400,
+  and a 503 with `retry_after_ms` that the client retries forever. During any
+  rolling upgrade some owners are older than some clients. So the sequencing is
+  fixed and is not a matter of taste:
+
+  1. **This release** teaches every node to accept `switched` and act on it —
+     it releases a draining predecessor early. No client sends it, so nothing
+     can wedge.
+  2. **A later release**, once every node in the fleet runs a binary from step
+     1, teaches clients to send it.
+
+  **How a client will learn which owner it is talking to is step 2's problem,
+  and it is not solved by adding a response field.** The first attempt at this
+  advertised the vocabulary as `ControlResponseV1.accepted_acknowledgements`
+  and had to be withdrawn before merge: `ControlResponseV1` carries
+  `#[serde(deny_unknown_fields)]` and is re-parsed by the *relaying* node in
+  `validated_control_relay_response`, so a new field on it is not additive at
+  all — during a rolling upgrade an older ingress relaying to a newer owner
+  fails to parse the reply and answers `503 control_unavailable`, and the same
+  applies to a `RetainedTerminalResponse.response_json` replayed after a
+  rollback. Any negotiation field therefore needs `deny_unknown_fields`
+  relaxed, shipped alone, and rolled out fleet-wide *first* — which is three
+  releases, not two, and is why none of it belongs in this one. Alternatives
+  worth weighing when step 2 is picked up: relaxing the attribute on its own;
+  putting the vocabulary in the start response, which is minted by the owner
+  and not re-parsed by a relay; or having the client discover it by sending
+  `switched` once and treating a `400` as "this owner is older", which needs no
+  wire change at all but costs one wasted exchange per session.
+
+  What step 2's client half is worth, now that `demand: end` already releases
+  the drain: the client that switches and keeps the tab open. That client tears
+  nothing down, so without `switched` it pays the full window — and the window
+  is one of two admission permits.
+
+  ~~**Land step 1 and step 2 together.** Step 1 alone makes the product worse
+  for the window it opens: today a superseded predecessor answers a clean
+  terminal `410 session_ended`, and a half-built drain replaces that with a
+  retry or a `owner_lost` for a client that has no `Switched` to send.~~
+  **Withdrawn — that was a property of the lease-bounded drain, not of this
+  one.** Nothing in the request path consults the pointer: `control_inner` and
+  the manifest and segment paths all resolve authority from the row named by
+  the URL, so a draining predecessor answers *normally* for the window and
+  then, when the owner ends it with cause `superseded`, answers the same clean
+  `410 session_ended` it answers today — just later. `owner_lost` and the
+  retry came from fencing the worker while the row still said `active`, which
+  is what this design stopped doing. Step 1 is shippable on its own; step 2 is
+  what stops every switch paying the full window when the client has already
+  moved.
+
+  **To settle before the candidate worker lands.**
+  `DEFAULT_MAX_HW_SESSIONS` is 2 and an admission permit is held for a
+  session's whole life, so prepare-plus-drain with a real successor costs two
+  of two per viewer — the first real cutover on a two-slot node refuses its own
+  successor. This is the strongest argument for step 2: without a `Switched`,
+  every switch holds the second permit for the whole window whether the client
+  needed it or not.
+
+  **Landed from that work, because it is correct on its own:**
+  `preparation_ack_replay` no longer gates on `state = 'ended' AND
+  terminal_reason = 'superseded'`. That was the same fact as "this commit
+  already happened" only while the commit retires the predecessor; the receipt
+  is the real fence and a stricter one, comparing incarnation, owner, epoch,
+  client instance, sequence and request fingerprint, so only the byte-identical
+  request that produced a receipt can replay it. Doing this first means step 1
+  cannot silently break lost-commit replay when it lands.
+
+  **Two stale numbers while we are here:** SQLite schema is **49** and
+  replicated AUTH schema is **29** (next available 50/30), not 47/27.
+
   **And the bound the drain needs already exists: the predecessor's lease.**
   The maintenance sweep at `sessions.rs:3372` ends any session with
   `state = 'active' AND lease_expires_at_ms <= ?`, in batches, without
@@ -476,6 +781,164 @@ Prove retained complete recipe, seek and Pause through failure/Retry/Close,
 including native/overlay subtitle awaits and delayed old attachment callbacks.
 
 ### 5. Visible enablement, qualification and promotion
+
+**Landed — the readings, not the whole item.** `GET /api/v1/developer/readiness`
+(`http/developer.rs`) answers every prerequisite the Developer cards list with
+`met` / `unmet` / `unobservable` plus the sentence it read, and the tab renders
+them in place. Four things to know before extending it:
+
+- **`Unobservable` is the common answer and must not be relaxed.** Most of
+  these questions are not answerable from a running daemon: a CI receipt, a
+  roster a single-node install does not have, a fleet of clients the counters
+  can only see once they report. Two adversarial reviews found five rows
+  claiming otherwise in the first draft — including a green tick built on
+  `cache_admin_revocation_ready()`'s deliberate fail-open for an unreplicated
+  node. If a row you are adding can only ever be `Met` by rounding, make it
+  `Unobservable` and put the numbers in the evidence.
+- **The requirement copy stays in `index.html`; only the reading comes from the
+  daemon.** The server never starts owning UI prose.
+- **The advisory rule is pinned from both sides, and the first version of both
+  pins was blind.** `an_unmet_prerequisite_does_not_block_the_switch` must
+  drive a prerequisite that is genuinely `unmet` — it originally drove an
+  `unobservable` one, which a gate keyed on `Unmet` would have walked past —
+  and the web assertion compares the whole panel with the reading spans
+  stripped, because the earlier per-control comparison used a stub that dropped
+  the argument a `disabled` flag travels in.
+- **A row the route does not report renders "not reported", not "checking…".**
+  `the panel asks for exactly the rows the server reports` keeps the two sides
+  in step.
+
+Rows that are claims about the build rather than the deployment need a pin at
+the code they describe, or they go stale silently: `server_preparation_is_real`
+has `a_prepared_successor_still_publishes_a_staged_encoder` in `http::hls`, and
+that test is what will tell whoever finishes §4 that this row now lies.
+
+**Landed — the hidden gates around the retained live engine.** The
+`live-hls-recovery` Cargo feature is gone. It was a *default* feature that
+nothing in the Makefile, Dockerfile, deploy or scripts ever turned off, so it
+decided nothing while hiding ~100 code sites and a whole streaming engine
+behind a compile flag; whether the engine runs is a runtime setting an operator
+can see, and whether it exists is not a question a build should answer
+silently. Three things came with it:
+
+- **The test and production defaults were opposites.** `live_hls_recovery_enabled`
+  read `== Some("1")` under `cfg(test)` and `!= Some("0")` otherwise, so every
+  VOD-refusal regression in the repo described a policy the fleet does not run.
+  Four tests changed answer when the two were unified — including one whose own
+  comment said *"The old fourth method is not a fallback"* about a path that is
+  exactly a fallback in production. Each of them now states which policy it is
+  asserting, and
+  `the_shipped_default_answers_a_vod_refusal_with_the_retained_engine` covers
+  the default that had never once run.
+- **The engine is attributable now.** It transcodes, so a session it serves
+  costs encode time on the node, and it announced that in a `tracing::warn!`
+  and nowhere else. `plurx_live_hls_recovery_sessions_total{reason}` counts
+  what it served and why, and a Developer card reports the same numbers and
+  names the switch that stops the fallback. The switch itself stays in
+  Playback → Streaming; two copies of one control drift.
+- **One path does not consult the switch, and that is now settled rather than
+  open.** A request arriving already stamped `Presentation::Live` goes straight
+  to the retained engine — today the only producer of one is peer takeover,
+  whose `takeover_recipe_is_valid` *requires* that stamp, while public and
+  worker ingress both require `Presentation::Vod`. It is counted under
+  `requested_live` and reported by `no_session_bypasses_the_switch`, because a
+  node serving live-HLS sessions with the fallback off is otherwise invisible.
+
+  **Decision (Paul, 2026-09-08): takeover consults the setting and refuses,
+  and the refusal names the switch.** `attempt_takeover` now answers *"live HLS
+  fallback is disabled cluster-wide, so this session cannot be adopted"*, right
+  after the EVENT gate.
+
+  Two earlier framings of this were wrong and are worth keeping so nobody
+  re-derives them. The note first left the question open on the premise that a
+  node might be configured differently from its cluster; it cannot be, because
+  settings are replicated. What it was actually describing is a *time* gap — a
+  session that started while the fallback was on, kept running when it was
+  turned off, and then outlived its owner. The second framing used that
+  narrowness to argue for adopting anyway: the session exists, someone is
+  watching, and refusing ends a film rather than preventing a stream. **The
+  rule beat the trade.** The cluster does not do what a setting says it may
+  not do — a system that quietly makes exceptions to its own configuration is
+  one an operator cannot reason about, and the rarity of the case is an
+  argument that the rule is cheap, not that it can be skipped.
+
+  A store read that fails is a skip rather than an adoption, so the next sweep
+  asks again instead of proceeding on a value nobody read.
+
+  This was the fourth reader of `playback.vod_live_recovery`, and adding it is
+  what settled the parse: the engine, the settings DTO and the Developer card
+  each compared the raw string against `Some("0")`, with the card's comment
+  pinned to that on purpose so the row could not report a switch the engine was
+  not honouring. All four share `stored_switch` now, which keeps that pin.
+
+Not done here: removing the engine. §5 conditions that on real VOD recipe
+coverage replacing it, and the coverage row exists precisely so someone can
+tell when that is true.
+
+Still open here: the qualification/promotion run. The hidden-gate inventory
+below is closed — every entry in it now has a visible control — and is kept
+for what each one cost, because the shape repeats.
+
+**The hidden-gate inventory**, found while doing the above. Each was a switch
+that changed product behaviour with no visible control:
+
+- ~~`PLURX_PGS_OVERLAY`~~ — **done.** It is `subtitles.pgs_overlay`, read at
+  the request boundary, with a Settings → Developer card carrying the switch
+  and what has to be true first. The variable seeds the setting once on a node
+  that has never been told either way and does nothing after that.
+- ~~`PLURX_DV_CONVERT`~~ — **done.** `playback.dolby_vision_convert`, same
+  shape. Worth knowing for the next one of these: moving the switch is the
+  easy half. The expensive defect was a *reader left behind* — the fragment
+  indexer still read the boot value, so turning the conversion on gave a
+  decision path that named a converting identity nothing would ever build, and
+  it healed only on restart. Grep for every reader of the old boot-latched
+  value before believing the move is complete, and make one parser own the
+  stored string: three parses of it meant a hand-edited `TRUE` served overlays
+  while the card said off.
+- ~~`OFFLINE_ENABLED`~~ — **done.** It had a settings-API field and no
+  control, along with the three offline budgets beside it; all four now render
+  as an Offline downloads card in Maintenance. The same three-parsers defect
+  #141 found in the overlay switch was here too — the DTO, the preparer and
+  the offline API each ran their own negated `matches!`, none trimming or
+  folding case, so a hand-written ` OFF ` read as *enabled* at all three. One
+  `stored_switch` now. Two of the three readers are reachable from a request
+  and are asserted together in `http/mod.rs`; the preparer is pinned where it
+  lives, in `offline.rs`, because its only existing test stored lowercase
+  `off` — a value the old parser also read as disabled — so that reader could
+  have been left behind with the suite green.
+- ~~`SW_POOL_THREADS`~~ and ~~`MAX_HW_SESSIONS`~~ — **done.** Both are fields
+  on the settings DTO and selects in Playback → Streaming. The round-trip test
+  ends at `TranscodeManager`, not at the DTO, because the expensive half of
+  moving a switch is always the reader. Three things the adversarial pass on
+  that PR established, each of which had been guessed wrong first:
+  - **A stored zero is reported and writable on both keys**, because both
+    readers honour it. The first draft refused a zero software pool on the
+    theory that `try_admit_software` admits nothing against a budget of zero.
+    It does not — `SwPool::try_take` grants unconditionally while the pool is
+    empty, deliberately, so a two-core box is not banned by its own budget.
+    Worse, refusing it made the *whole Streaming card* unsavable on any node
+    that already held a zero, because the DTO reports a stored value verbatim
+    and the page sent the card whole. **A control must be able to write back
+    every value its own page can display.**
+  - **A zero hardware cap is not a software-only mode**, and must not be
+    offered as one. `admit_live` still takes the hardware branch whenever the
+    node has an encoder, so every start queues for a slot that never frees,
+    waits out the full five-second admission window and only then falls back —
+    and a 4K HEVC HDR stream, which software cannot keep up with, is refused
+    outright with "all 0 hardware transcode slots are in use". The mechanism
+    for software-only is `keys::HWACCEL`.
+  - **The software default is per-node and the setting is replicated.** The
+    page therefore sends either capacity field only when an operator actually
+    moved it; a card that always wrote them would give a 4-core node a 16-core
+    machine's budget from an edit about the buffer limit.
+  **`LIBRARY_DV_DISK_CONVERT` is not one of these** — it has a
+  dedicated API in `http/dv_disk.rs` and a per-library select in the web UI
+  (`dvModeSelect`). It was listed here in a first draft and is recorded as a
+  correction so the next reader does not build a control that already ships.
+
+`PLURX_HWACCEL` is the pattern the rest should follow: it seeds a stored
+setting the admin UI then displays, rather than being an invisible decision
+input at each call site.
 
 Finish the Developer Enable section's prerequisites and actual behavior;
 remove retained compile/default hidden live-HLS fallback once real VOD recipe

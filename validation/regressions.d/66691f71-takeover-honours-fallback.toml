@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["66691f71"]
+points = ["core.media", "playback.pipeline", "cluster.media-observation"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "attempt_takeover_refuses_a_live_session_while_the_fallback_is_off is the evidence, and its first half is what makes the second half mean anything: it drives the same fixture with the switch on and requires the refusal, if any, not to be this one, so a build that refused every takeover would fail rather than pass. It then disables the fallback over four stored spellings and requires the refusal text to name the switch, not merely to exist -- takeover failed sends an operator to the node that died, while live HLS fallback is disabled cluster-wide sends them to the control they turned off. One of those spellings is a padded, upper-case OFF, which the pre-unification comparison against Some(0) read as enabled, so reverting stored_switch at any of the four readers of playback.vod_live_recovery fails it. The gate sits after the EVENT refusal on purpose and the existing attempt_takeover_refuses_an_event_session pins that order from the other side. Takeover is the only producer of a Presentation::Live recipe -- takeover_recipe_is_valid requires that stamp while public and worker ingress refuse it -- so this test covers the whole of the path that could previously put a session on the retained engine with its switch off."

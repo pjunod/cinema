@@ -3300,8 +3300,7 @@ async fn capture_live_stderr(
         let text = String::from_utf8_lossy(&window).to_ascii_lowercase();
         if text.contains("decoding requested, but no decoder found for:")
             || (text.contains("decoder (codec ") && text.contains(") not found for input stream"))
-            || text.contains("stream map '0:a:0' matches no streams")
-            || text.contains("stream map '0:v:0' matches no streams")
+            || (text.contains("stream map") && text.contains("matches no streams"))
         {
             decoder_unavailable.store(true, Ordering::Release);
         }
@@ -4969,6 +4968,7 @@ exec /bin/cat >/dev/null
             ("Decoding requested, but no decoder found for: ac4", true),
             ("Decoder (codec ac4) not found for input stream #0:1", true),
             ("Stream map '0:a:0' matches no streams.", true),
+            ("Stream map '' matches no streams.", true),
             ("Error opening output: no space left on device", false),
             ("Invalid data found when processing input", false),
         ] {

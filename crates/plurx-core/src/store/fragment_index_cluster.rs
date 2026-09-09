@@ -637,6 +637,27 @@ pub fn bounded_analysis_backoff_max_secs(value: Option<&str>) -> i64 {
     )
 }
 
+/// Read a stored boolean setting, one way, in one place.
+///
+/// Three separate parses of the same stored string is how a server ends up
+/// serving overlays while the Settings card's checkbox says off: the reader,
+/// the settings DTO and the readiness route each decided independently what
+/// `"On"` meant. `default_on` carries the only real difference between these
+/// switches — most are off unless turned on, and the Dolby Vision conversion
+/// is on unless turned off.
+///
+/// Every spelling an operator plausibly writes by hand is accepted in both
+/// directions, case-folded and trimmed. A value that is neither takes the
+/// default rather than guessing, because a typo is not an instruction.
+#[must_use]
+pub fn stored_switch(value: Option<&str>, default_on: bool) -> bool {
+    match value.map(|value| value.trim().to_ascii_lowercase()) {
+        Some(value) if matches!(value.as_str(), "1" | "true" | "yes" | "on") => true,
+        Some(value) if matches!(value.as_str(), "0" | "false" | "no" | "off") => false,
+        _ => default_on,
+    }
+}
+
 pub fn bounded_subtitle_window_seconds(value: Option<&str>) -> i64 {
     bounded_analysis_seconds(
         value,

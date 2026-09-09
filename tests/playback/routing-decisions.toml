@@ -117,7 +117,7 @@ id = "server.hdr-subtitle-burn-guard"
 source = "crates/plurxd/src/http/hls.rs"
 source_anchor = "fn hdr_subtitle_burn_is_refused("
 test = "crates/plurxd/src/http/mod.rs"
-test_anchor = "hls_create_refuses_hdr_downgrades_but_accepts_an_existing_sdr_plan"
+test_anchor = "hls_create_refuses_hdr_downgrades_and_preserves_an_existing_sdr_plan"
 
 [[decisions]]
 id = "server.pgs-overlay"

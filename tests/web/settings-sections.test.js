@@ -79,7 +79,7 @@ test("every section is a route, grouped in the rail's order", () => {
     system: "systemPanel(d.sys,d.playbackEvents)",
     cluster: "clusterPanel(d)",
     integrations: "integrationsPanel(d.settings,d.trakt)",
-    developer: "developerPanel(d.settings)",
+    developer: "developerPanel(d.settings,d.developerReadiness)",
   };
   const panel = shippedSource("settingsPanel");
   for (const [id] of r.SET_TABS) {
@@ -243,7 +243,9 @@ test("Developer is where the switches that cost something live", () => {
     // `//` comment and swallow whatever follows it.
     [
       shippedSource("preparedHandoffEnabled"), shippedSource("liveTvSettingsCard"),
-      shippedSource("liveTvGuideCard"),
+      shippedSource("liveTvGuideCard"), shippedConst("DEV_READINESS_LABEL"),
+      shippedSource("devReadinessRow"), shippedSource("devReadinessPill"),
+      shippedSource("devReadinessEvidence"), shippedSource("devReq"),
       shippedSource("developerPanel"), "return developerPanel;",
     ].join("\n"),
   )(
@@ -258,12 +260,20 @@ test("Developer is where the switches that cost something live", () => {
     (fn) => `FOOT:${fn}`,
     esc,
   );
+  const readiness = { items: [{
+    id: "prepared_quality_handoff",
+    requirements: [
+      { id: "server_preparation_is_real", status: "unmet", evidence: "This build still stages metadata without a running worker." },
+      { id: "client_two_player_handoff", status: "unobservable", evidence: "This node cannot prove a physical first-frame qualification." },
+      { id: "fleet_receipt", status: "unobservable", evidence: "The fleet receipt is not visible to this daemon." },
+    ],
+  }] };
   const html = panel({
     playback_control_protocol_v1: true,
     hls_typeless_sliding: false,
     live_tv_guide_source: "hdhomerun",
     live_tv_guide_hours: 24,
-  });
+  }, readiness);
   for (const id of ["pcpv1", "phs"]) {
     assert.match(html, new RegExp(`TOG:${id}\\|`), `Developer is missing the ${id} switch`);
   }
@@ -272,7 +282,7 @@ test("Developer is where the switches that cost something live", () => {
   assert.match(html, /Enable prepared quality handoff/);
   assert.match(html, /encoder: staged/);
   assert.match(html, /twenty consecutive commits/);
-  assert.match(html, /Android and web remain unqualified/);
+  assert.match(html, /Apple, Android, and web contain the adapter/);
   assert.match(html, /no separate hidden server flag/);
   // The prepared card says what has to be true *and whether it is*, because
   // a requirement an operator cannot check is a requirement they will skip.
@@ -294,7 +304,7 @@ test("Developer is where the switches that cost something live", () => {
     "…and no save: the switch is this browser's, not a server setting");
   assert.doesNotMatch(preparedCard, /disabled/,
     "nothing in the readiness list disables it");
-  const off = panel({ playback_control_protocol_v1: false, hls_typeless_sliding: false });
+  const off = panel({ playback_control_protocol_v1: false, hls_typeless_sliding: false }, readiness);
   assert.match(html, /The control endpoint is advertised<small>[\s\S]*?<span class="pill" style="color:var\(--good\)/);
   assert.match(off, /The control endpoint is advertised<small>[\s\S]*?<span class="pill warn">not met<\/span>/);
   assert.match(html, /Enable cluster transport recovery/);
@@ -318,12 +328,15 @@ test("Developer is where the switches that cost something live", () => {
   // Readiness pills, counted rather than matched, because "not met" contains
   // "met": an assertion that only looks for the word cannot tell a met row from
   // an unmet one, and would pass with the two renderings swapped.
-  const pills = html.match(/>(met|not met|partly met)<\/span>/g) || [];
+  const pills = html.match(/>(met|not met|not observable)<\/span>/g) || [];
   const counted = (word) => pills.filter((pill) => pill === `>${word}</span>`).length;
-  assert.ok(counted("not met") >= 2,
+  assert.ok(counted("not met") >= 1,
     "the unmet requirements say so beside the switch — the staged route has no worker");
   assert.ok(counted("met") >= 2, "…and the ones this page checked and found true say that");
-  assert.ok(counted("partly met") >= 1, "…and a half-answered one is not rounded either way");
+  assert.ok(counted("not observable") >= 2,
+    "…and a fleet fact the daemon cannot inspect is not rounded either way");
+  assert.match(html, /This build still stages metadata without a running worker/,
+    "the page paints the daemon's live evidence, not just a source-hardcoded label");
   assert.match(html, /HDHomeRun Live TV/);
   assert.match(html, /Save the configuration, check readiness, then enable/);
   // Readiness is advice, not a gate (2026-09-07). The card has to say so where

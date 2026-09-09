@@ -10,6 +10,10 @@ Companion to
 [VOD-PRESENTATION-IMPLEMENTATION-HANDOFF.md](VOD-PRESENTATION-IMPLEMENTATION-HANDOFF.md)
 (the whole programme) — this is *the milestone where it starts serving*.
 
+The later [encoded VOD producer](VOD-ENCODING.md) extends these serving and
+ownership contracts to actual transcode and subtitle-burn recipes; this M3
+document retains the original copy-path milestone history.
+
 ## 1. Orientation — read this, work like this
 
 Read, in order: plan §2.1–2.5 and §8's M3 row; this file; then
