@@ -8,7 +8,9 @@ use super::fragment_index_cluster::{
     bounded_analysis_backoff_base_secs, bounded_analysis_backoff_max_secs,
     bounded_analysis_max_attempts,
 };
-use super::fragment_index_cluster::{ANALYSIS_CANONICAL_CTE, ANALYSIS_SUMMARY_CTE};
+use super::fragment_index_cluster::{
+    ANALYSIS_CANONICAL_CTE, ANALYSIS_SUMMARY_CTE, ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA,
+};
 use super::hiqlite::{database_error, validate_sql, HiqliteAuthStore};
 use super::{
     cluster_fragment_index_generation_key, cluster_fragment_index_key, AnalysisAttempt,
@@ -227,6 +229,9 @@ const ANALYSIS_HISTORY_INDEX_STATEMENTS: &[&str] = &[
     r#"CREATE INDEX IF NOT EXISTS cluster_fragment_index_jobs_status_history
         ON cluster_fragment_index_jobs(state, updated_at_ms DESC, cache_key)"#,
 ];
+
+const ANALYSIS_TERMINAL_IDENTITY_INDEX_STATEMENTS: &[&str] =
+    &[ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA];
 
 const ANALYSIS_COMPONENT_STATEMENTS: &[&str] = &[
     "ALTER TABLE cluster_fragment_index_jobs ADD COLUMN priority TEXT NOT NULL DEFAULT 'normal' CHECK (priority IN ('normal','forced','foreground'))",
@@ -613,6 +618,11 @@ pub(super) fn analysis_history_index_migration_statements(
     migration_statements(ANALYSIS_HISTORY_INDEX_STATEMENTS)
 }
 
+pub(super) fn analysis_terminal_identity_index_migration_statements(
+) -> Result<Vec<(String, hiqlite::Params)>, StoreError> {
+    migration_statements(ANALYSIS_TERMINAL_IDENTITY_INDEX_STATEMENTS)
+}
+
 pub(super) fn analysis_component_migration_statements(
 ) -> Result<Vec<(String, hiqlite::Params)>, StoreError> {
     migration_statements(ANALYSIS_COMPONENT_STATEMENTS)
@@ -697,6 +707,7 @@ pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), Store
     statements.extend(analysis_component_migration_statements()?);
     statements.extend(analysis_attempt_errors_migration_statements()?);
     statements.extend(analysis_request_identity_migration_statements()?);
+    statements.extend(analysis_terminal_identity_index_migration_statements()?);
     client
         .txn(statements)
         .await
@@ -3835,11 +3846,12 @@ mod tests {
     use super::{
         ANALYSIS_ATTEMPT_ERRORS_STATEMENTS, ANALYSIS_COMPONENT_STATEMENTS,
         ANALYSIS_HISTORY_INDEX_STATEMENTS, ANALYSIS_REQUEST_SCHEMA_STATEMENTS,
-        FRAGMENT_INDEX_SCHEMA_STATEMENTS,
+        ANALYSIS_TERMINAL_IDENTITY_INDEX_STATEMENTS, FRAGMENT_INDEX_SCHEMA_STATEMENTS,
     };
     use crate::store::fragment_index_cluster::{
         ANALYSIS_ATTEMPT_ERRORS_SCHEMA, ANALYSIS_COMPONENTS_SCHEMA, ANALYSIS_HISTORY_INDEX_SCHEMA,
-        ANALYSIS_REQUESTS_SCHEMA, CLUSTER_FRAGMENT_INDEX_SCHEMA,
+        ANALYSIS_REQUESTS_SCHEMA, ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA,
+        CLUSTER_FRAGMENT_INDEX_SCHEMA,
     };
 
     fn fixture() -> Connection {
@@ -3901,6 +3913,7 @@ mod tests {
         assert_eq!(ANALYSIS_REQUEST_SCHEMA_STATEMENTS.len(), 7);
         assert_eq!(ANALYSIS_HISTORY_INDEX_STATEMENTS.len(), 2);
         assert_eq!(ANALYSIS_ATTEMPT_ERRORS_STATEMENTS.len(), 1);
+        assert_eq!(ANALYSIS_TERMINAL_IDENTITY_INDEX_STATEMENTS.len(), 1);
 
         let sqlite = fixture();
         sqlite
@@ -3921,6 +3934,9 @@ mod tests {
         sqlite
             .execute_batch(ANALYSIS_ATTEMPT_ERRORS_SCHEMA)
             .expect("SQLite v46 attempt-history column");
+        sqlite
+            .execute_batch(ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA)
+            .expect("SQLite v50 terminal-identity index");
 
         let replicated = fixture();
         for sql in FRAGMENT_INDEX_SCHEMA_STATEMENTS
@@ -3929,6 +3945,7 @@ mod tests {
             .chain(ANALYSIS_HISTORY_INDEX_STATEMENTS)
             .chain(ANALYSIS_COMPONENT_STATEMENTS)
             .chain(ANALYSIS_ATTEMPT_ERRORS_STATEMENTS)
+            .chain(ANALYSIS_TERMINAL_IDENTITY_INDEX_STATEMENTS)
         {
             replicated
                 .execute_batch(sql)
