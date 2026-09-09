@@ -57,9 +57,17 @@
     "resource_owned_async_task_envelope_allowance": { "const": 0 },
     "resource_cleanup_horizon_millis": { "const": 60000 },
     "resource_stable_samples": { "const": 2 },
-    "campaign": { "type": "object" }
+    "campaign": { "$ref": "#/$defs/roleCampaign" }
   },
   "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "role": {
+      "type": "string",
+      "enum": ["learner", "voter"]
+    },
     "snapshotPolicy": {
       "type": "object",
       "additionalProperties": false,
@@ -98,6 +106,259 @@
         },
         "separate_node_processes": { "const": true },
         "separate_writer_process": { "const": true }
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["threads", "sockets", "owned_async_tasks"],
+      "properties": {
+        "threads": { "type": "integer", "minimum": 1 },
+        "sockets": { "type": "integer", "minimum": 1 },
+        "owned_async_tasks": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "resourceNodeKind": {
+      "type": "string",
+      "enum": ["persistent_source_voter", "restarted_target"]
+    },
+    "nodeResource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node_id", "kind", "baseline", "post_quiescence"],
+      "properties": {
+        "node_id": { "type": "integer", "minimum": 1, "maximum": 4 },
+        "kind": { "$ref": "#/$defs/resourceNodeKind" },
+        "baseline": { "$ref": "#/$defs/resources" },
+        "post_quiescence": { "$ref": "#/$defs/resources" }
+      }
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "marker",
+        "minimum_sqlite_bytes",
+        "rows",
+        "payload_bytes",
+        "content_sha256"
+      ],
+      "properties": {
+        "marker": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "minimum_sqlite_bytes": { "type": "integer", "minimum": 88559616 },
+        "rows": { "type": "integer", "minimum": 1 },
+        "payload_bytes": { "type": "integer", "minimum": 88559616 },
+        "content_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["snapshot_id", "bytes", "sha256"],
+      "properties": {
+        "snapshot_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "bytes": { "type": "integer", "minimum": 88559616 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "write": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "value_sha256", "acknowledged_at_unix_ms"],
+      "properties": {
+        "key": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "value_sha256": { "$ref": "#/$defs/sha256" },
+        "acknowledged_at_unix_ms": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "sourceOutbound": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "observing_node_id",
+        "target_node_id",
+        "attempt_id",
+        "attempt_started_at_unix_ms",
+        "completed_at_unix_ms",
+        "attempted_bytes",
+        "acknowledged_bytes",
+        "total_bytes",
+        "attempts",
+        "reconnect_count",
+        "retry_count",
+        "elapsed_millis"
+      ],
+      "properties": {
+        "observing_node_id": { "type": "integer", "minimum": 1, "maximum": 3 },
+        "target_node_id": { "const": 4 },
+        "attempt_id": { "type": "integer", "minimum": 1 },
+        "attempt_started_at_unix_ms": { "type": "integer", "minimum": 1 },
+        "completed_at_unix_ms": { "type": "integer", "minimum": 1 },
+        "attempted_bytes": { "type": "integer", "minimum": 88559616 },
+        "acknowledged_bytes": { "type": "integer", "minimum": 88559616 },
+        "total_bytes": { "type": "integer", "minimum": 88559616 },
+        "attempts": { "type": "integer", "minimum": 1 },
+        "reconnect_count": { "type": "integer", "minimum": 0 },
+        "retry_count": { "type": "integer", "minimum": 0 },
+        "elapsed_millis": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "targetInbound": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "observing_node_id",
+        "source_node_id",
+        "attempt_id",
+        "receive_started_at_unix_ms",
+        "last_local_receive_at_unix_ms",
+        "install_started_at_unix_ms",
+        "install_completed_at_unix_ms",
+        "received_bytes",
+        "total_bytes",
+        "transfer_millis",
+        "install_millis"
+      ],
+      "properties": {
+        "observing_node_id": { "const": 4 },
+        "source_node_id": { "type": "integer", "minimum": 1, "maximum": 3 },
+        "attempt_id": { "type": "integer", "minimum": 1 },
+        "receive_started_at_unix_ms": { "type": "integer", "minimum": 1 },
+        "last_local_receive_at_unix_ms": { "type": "integer", "minimum": 1 },
+        "install_started_at_unix_ms": { "type": "integer", "minimum": 1 },
+        "install_completed_at_unix_ms": { "type": "integer", "minimum": 1 },
+        "received_bytes": { "type": "integer", "minimum": 88559616 },
+        "total_bytes": { "type": "integer", "minimum": 88559616 },
+        "transfer_millis": { "type": "integer", "minimum": 1 },
+        "install_millis": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "cycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "role",
+        "cycle",
+        "recovery_started_at_unix_ms",
+        "recovery_finished_at_unix_ms",
+        "snapshot_index",
+        "purged_index",
+        "applied_index",
+        "source_snapshot",
+        "installed_snapshot",
+        "image",
+        "source_outbound",
+        "target_inbound",
+        "recovery_millis",
+        "acknowledged_writes",
+        "acknowledged_write_digest",
+        "target_write_digest",
+        "node_resources"
+      ],
+      "properties": {
+        "role": { "$ref": "#/$defs/role" },
+        "cycle": { "type": "integer", "minimum": 1, "maximum": 20 },
+        "recovery_started_at_unix_ms": { "type": "integer", "minimum": 0 },
+        "recovery_finished_at_unix_ms": { "type": "integer", "minimum": 0 },
+        "snapshot_index": { "type": "integer", "minimum": 1 },
+        "purged_index": { "type": "integer", "minimum": 1 },
+        "applied_index": { "type": "integer", "minimum": 1 },
+        "source_snapshot": { "$ref": "#/$defs/snapshot" },
+        "installed_snapshot": { "$ref": "#/$defs/snapshot" },
+        "image": { "$ref": "#/$defs/image" },
+        "source_outbound": { "$ref": "#/$defs/sourceOutbound" },
+        "target_inbound": { "$ref": "#/$defs/targetInbound" },
+        "recovery_millis": { "type": "integer", "minimum": 1, "maximum": 1500000 },
+        "acknowledged_writes": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 4096,
+          "items": { "$ref": "#/$defs/write" }
+        },
+        "acknowledged_write_digest": { "$ref": "#/$defs/sha256" },
+        "target_write_digest": { "$ref": "#/$defs/sha256" },
+        "node_resources": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": { "$ref": "#/$defs/nodeResource" }
+        }
+      }
+    },
+    "worst": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["recovery_millis", "transfer_millis", "install_millis"],
+      "properties": {
+        "recovery_millis": { "type": "integer", "minimum": 1, "maximum": 1500000 },
+        "transfer_millis": { "type": "integer", "minimum": 1 },
+        "install_millis": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "resourceBand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["floor", "ceiling"],
+      "properties": {
+        "floor": { "$ref": "#/$defs/resources" },
+        "ceiling": { "$ref": "#/$defs/resources" }
+      }
+    },
+    "nodeResourceEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node_id", "kind", "opening", "closing"],
+      "properties": {
+        "node_id": { "type": "integer", "minimum": 1, "maximum": 4 },
+        "kind": { "$ref": "#/$defs/resourceNodeKind" },
+        "opening": { "$ref": "#/$defs/resourceBand" },
+        "closing": { "$ref": "#/$defs/resourceBand" }
+      }
+    },
+    "resourceEnvelopes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "opening_window_last_cycle",
+        "closing_window_samples",
+        "closing_ceiling_sustained_samples",
+        "nodes"
+      ],
+      "properties": {
+        "opening_window_last_cycle": { "type": "integer", "minimum": 0, "maximum": 10 },
+        "closing_window_samples": { "type": "integer", "minimum": 1, "maximum": 10 },
+        "closing_ceiling_sustained_samples": { "const": 4 },
+        "nodes": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": { "$ref": "#/$defs/nodeResourceEnvelope" }
+        }
+      }
+    },
+    "roleCampaign": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "role",
+        "cycles_required",
+        "minimum_sqlite_bytes",
+        "cycles",
+        "worst_durations",
+        "resource_envelopes"
+      ],
+      "properties": {
+        "role": { "$ref": "#/$defs/role" },
+        "cycles_required": { "type": "integer", "minimum": 1, "maximum": 20 },
+        "minimum_sqlite_bytes": { "type": "integer", "enum": [88559616, 177119232] },
+        "cycles": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 20,
+          "items": { "$ref": "#/$defs/cycle" }
+        },
+        "worst_durations": { "$ref": "#/$defs/worst" },
+        "resource_envelopes": { "$ref": "#/$defs/resourceEnvelopes" }
       }
     }
   }

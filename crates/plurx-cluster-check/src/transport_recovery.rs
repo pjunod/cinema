@@ -21,9 +21,10 @@ use plurx_core::store::{AUTH_PROTOCOL_MAX, AUTH_PROTOCOL_MIN, AUTH_SCHEMA_VERSIO
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::process::{Child, Command};
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-use super::topology::{resolve_build_sha, unix_ms};
+use super::topology::{resolve_build_sha, resolve_embedded_build_sha, unix_ms};
 use super::{
     allocate_nodes, harness_executable, wait_for_protocol_pending, with_port_retry,
     ClusterProcesses, NodeLaunch, NodeProcess, NodeSpec, Request, Response, API_SECRET,
@@ -748,7 +749,9 @@ pub async fn run_transport_recovery_campaign(output: &Path) -> Result<()> {
     };
     print_role_paths(&voter_plan)?;
     print_role_paths(&learner_plan)?;
-    let results = run_independent_roles(voter_plan.clone(), learner_plan.clone()).await;
+    let cancellation = RecoveryCancellationMonitor::start()?;
+    let results =
+        run_independent_roles(voter_plan.clone(), learner_plan.clone(), &cancellation).await;
     match require_independent_roles(results) {
         Ok((_voter, _learner)) => assemble_transport_recovery_reports(RecoveryAssemblePlan {
             execution_id,
@@ -763,16 +766,21 @@ pub async fn run_transport_recovery_campaign(output: &Path) -> Result<()> {
 async fn run_independent_roles(
     voter: RecoveryRolePlan,
     learner: RecoveryRolePlan,
+    cancellation: &RecoveryCancellationMonitor,
 ) -> (
     Result<TransportRecoveryRoleReport>,
     Result<TransportRecoveryRoleReport>,
 ) {
-    run_role_sequence(voter, learner, run_transport_recovery_role).await
+    run_role_sequence(voter, learner, Some(cancellation), |plan| {
+        run_transport_recovery_role_monitored(plan, cancellation)
+    })
+    .await
 }
 
 async fn run_role_sequence<F, Fut>(
     voter: RecoveryRolePlan,
     learner: RecoveryRolePlan,
+    cancellation: Option<&RecoveryCancellationMonitor>,
     mut runner: F,
 ) -> (
     Result<TransportRecoveryRoleReport>,
@@ -783,6 +791,9 @@ where
     Fut: Future<Output = Result<TransportRecoveryRoleReport>>,
 {
     let voter = runner(voter).await;
+    if let Some(signal) = cancellation.and_then(RecoveryCancellationMonitor::observed) {
+        return (voter, Err(anyhow::Error::new(RecoveryCancelled { signal })));
+    }
     if voter.as_ref().err().is_some_and(is_recovery_cancelled) {
         return (
             voter,
@@ -798,6 +809,81 @@ where
 #[derive(Debug)]
 struct RecoveryCancelled {
     signal: String,
+}
+
+struct RecoveryCancellationMonitor {
+    receiver: watch::Receiver<Option<String>>,
+    task: Option<JoinHandle<()>>,
+}
+
+impl RecoveryCancellationMonitor {
+    fn start() -> Result<Self> {
+        let (sender, receiver) = watch::channel(None);
+        #[cfg(unix)]
+        let task = {
+            let mut interrupt =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                    .context("install SIGINT handler")?;
+            let mut terminate =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .context("install SIGTERM handler")?;
+            tokio::spawn(async move {
+                let signal = tokio::select! {
+                    _ = interrupt.recv() => "SIGINT",
+                    _ = terminate.recv() => "SIGTERM",
+                };
+                let _ = sender.send(Some(signal.to_owned()));
+            })
+        };
+        #[cfg(not(unix))]
+        let task = tokio::spawn(async move {
+            let signal = match tokio::signal::ctrl_c().await {
+                Ok(()) => "interrupt".to_owned(),
+                Err(error) => format!("signal handler failed: {error:#}"),
+            };
+            let _ = sender.send(Some(signal));
+        });
+        Ok(Self {
+            receiver,
+            task: Some(task),
+        })
+    }
+
+    fn observed(&self) -> Option<String> {
+        self.receiver.borrow().clone()
+    }
+
+    async fn wait(&self) -> String {
+        let mut receiver = self.receiver.clone();
+        loop {
+            if let Some(signal) = receiver.borrow().clone() {
+                return signal;
+            }
+            if receiver.changed().await.is_err() {
+                return "signal monitor stopped".to_owned();
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn test() -> (Self, watch::Sender<Option<String>>) {
+        let (sender, receiver) = watch::channel(None);
+        (
+            Self {
+                receiver,
+                task: None,
+            },
+            sender,
+        )
+    }
+}
+
+impl Drop for RecoveryCancellationMonitor {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
 }
 
 impl std::fmt::Display for RecoveryCancelled {
@@ -867,6 +953,14 @@ fn print_role_paths(plan: &RecoveryRolePlan) -> Result<()> {
 pub async fn run_transport_recovery_role(
     plan: RecoveryRolePlan,
 ) -> Result<TransportRecoveryRoleReport> {
+    let cancellation = RecoveryCancellationMonitor::start()?;
+    run_transport_recovery_role_monitored(plan, &cancellation).await
+}
+
+async fn run_transport_recovery_role_monitored(
+    plan: RecoveryRolePlan,
+    cancellation: &RecoveryCancellationMonitor,
+) -> Result<TransportRecoveryRoleReport> {
     validate_execution_id(&plan.execution_id)?;
     if !(1..=TRANSPORT_RECOVERY_CYCLES_PER_ROLE).contains(&plan.cycles_required) {
         bail!("transport-recovery role requires 1..={TRANSPORT_RECOVERY_CYCLES_PER_ROLE} cycles");
@@ -876,8 +970,12 @@ pub async fn run_transport_recovery_role(
     if std::env::consts::OS != "linux" {
         bail!("transport-recovery role requires Linux /proc evidence");
     }
-    let build_sha = resolve_build_sha()
-        .context("resolve transport-recovery candidate SHA before role start")?;
+    let build_sha = if plan.cycles_required == TRANSPORT_RECOVERY_CYCLES_PER_ROLE {
+        resolve_embedded_build_sha()
+    } else {
+        resolve_build_sha()
+    }
+    .context("resolve transport-recovery candidate SHA before role start")?;
     let started_at_unix_ms = unix_ms()?;
     let build_profile = build_profile_descriptor();
     let diagnostics = RecoveryDiagnostics::create(
@@ -892,6 +990,9 @@ pub async fn run_transport_recovery_role(
     let cycles_required = plan.cycles_required;
     let output = plan.output.clone();
     let mut cancelled = false;
+    if let Some(signal) = cancellation.observed() {
+        return Err(anyhow::Error::new(RecoveryCancelled { signal }));
+    }
     let result = {
         let run = async {
             let executable = harness_executable()?;
@@ -933,19 +1034,19 @@ pub async fn run_transport_recovery_role(
             Ok::<_, anyhow::Error>(report)
         };
         tokio::pin!(run);
-        let cancellation = wait_for_recovery_cancellation();
-        tokio::pin!(cancellation);
+        let cancellation_wait = cancellation.wait();
+        tokio::pin!(cancellation_wait);
         match plan.max_runtime_seconds {
             Some(seconds) => {
                 let timeout = tokio::time::sleep(Duration::from_secs(seconds));
                 tokio::pin!(timeout);
                 tokio::select! {
-                    result = &mut run => result,
-                    signal = &mut cancellation => {
+                    biased;
+                    signal = &mut cancellation_wait => {
                         cancelled = true;
-                        let signal = signal.unwrap_or_else(|error| format!("signal handler failed: {error:#}"));
                         Err(anyhow::Error::new(RecoveryCancelled { signal }))
                     }
+                    result = &mut run => result,
                     _ = &mut timeout => {
                         let (phase, cycle) = diagnostics.active_phase()?;
                         Err(anyhow::anyhow!(
@@ -958,12 +1059,12 @@ pub async fn run_transport_recovery_role(
                 }
             }
             None => tokio::select! {
-                result = &mut run => result,
-                signal = &mut cancellation => {
+                biased;
+                signal = &mut cancellation_wait => {
                     cancelled = true;
-                    let signal = signal.unwrap_or_else(|error| format!("signal handler failed: {error:#}"));
                     Err(anyhow::Error::new(RecoveryCancelled { signal }))
                 }
+                result = &mut run => result,
             },
         }
     };
@@ -994,7 +1095,7 @@ pub async fn run_transport_recovery_role(
     };
     let cleanup_result = diagnostics.cleanup_registered(CLEANUP_BUDGET).await;
     let (cleanup, cleanup_error) = match cleanup_result {
-        Ok(cleanup) => (cleanup, None),
+        Ok(cleanup) => (cleanup.summary, cleanup.error),
         Err(error) => {
             let surviving_processes = diagnostics.registered_processes().unwrap_or_default();
             (
@@ -1028,38 +1129,42 @@ pub async fn run_transport_recovery_role(
             Err(primary) => Err(primary.context(cleanup_error)),
         }
     };
+    let result = if !cancelled {
+        if let Some(signal) = cancellation.observed() {
+            cancelled = true;
+            let cancellation_error = anyhow::Error::new(RecoveryCancelled { signal });
+            let cancellation_error = match result {
+                Ok(_) => cancellation_error,
+                Err(primary) => cancellation_error.context(format!(
+                    "role work also failed before cancellation completed: {primary:#}"
+                )),
+            };
+            let message = format!("{cancellation_error:#}");
+            match diagnostics.record_terminal_observation(
+                DiagnosticOutcome::Cancelled,
+                None,
+                Some(&message),
+            ) {
+                Ok(()) => Err(cancellation_error),
+                Err(diagnostic_error) => Err(cancellation_error.context(format!(
+                    "also failed to record cancellation during cleanup: {diagnostic_error:#}"
+                ))),
+            }
+        } else {
+            result
+        }
+    } else {
+        result
+    };
     match result {
         Ok(report) => {
-            let publish = (|| -> Result<()> {
-                let mut bytes = serde_json::to_vec_pretty(&report)?;
-                bytes.push(b'\n');
-                publish_artifact_atomically(&output, &bytes)
-            })();
-            if let Err(error) = publish {
-                let message = format!("publish passing role report: {error:#}");
-                let _ = diagnostics.write_summary(
-                    DiagnosticOutcome::Failed,
-                    false,
-                    Some(FailureClass::EvidenceIo),
-                    Some(&message),
-                    cleanup,
-                );
-                return Err(error).context("publish passing transport-recovery role report");
-            }
-            let summary = match diagnostics.write_summary(
-                DiagnosticOutcome::Passed,
-                report.resource_envelope_asserted,
-                None,
-                None,
+            let summary = publish_passing_role_evidence(
+                &report,
+                &diagnostics,
+                &output,
                 cleanup,
-            ) {
-                Ok(summary) => summary,
-                Err(error) => {
-                    let _ = std::fs::remove_file(&output);
-                    return Err(error)
-                        .context("publish passing transport-recovery diagnostic summary");
-                }
-            };
+                cancellation,
+            )?;
             println!(
                 "cluster-check: {cycles_required}/{cycles_required} {} recoveries passed for {}; resource envelope asserted: {}",
                 role.label(),
@@ -1101,6 +1206,100 @@ pub async fn run_transport_recovery_role(
     }
 }
 
+fn publish_passing_role_evidence(
+    report: &TransportRecoveryRoleReport,
+    diagnostics: &RecoveryDiagnostics,
+    output: &Path,
+    cleanup: CleanupSummary,
+    cancellation: &RecoveryCancellationMonitor,
+) -> Result<crate::transport_recovery_diagnostics::RecoveryDiagnosticSummary> {
+    publish_passing_role_evidence_with(
+        report,
+        diagnostics,
+        output,
+        cleanup,
+        cancellation,
+        publish_artifact_atomically,
+    )
+}
+
+fn publish_passing_role_evidence_with<F>(
+    report: &TransportRecoveryRoleReport,
+    diagnostics: &RecoveryDiagnostics,
+    output: &Path,
+    cleanup: CleanupSummary,
+    cancellation: &RecoveryCancellationMonitor,
+    publish_role: F,
+) -> Result<crate::transport_recovery_diagnostics::RecoveryDiagnosticSummary>
+where
+    F: FnOnce(&Path, &[u8]) -> Result<()>,
+{
+    let mut bytes = serde_json::to_vec_pretty(report)
+        .context("serialize passing transport-recovery role report")?;
+    bytes.push(b'\n');
+    let summary = diagnostics
+        .write_summary(
+            DiagnosticOutcome::Passed,
+            report.resource_envelope_asserted,
+            None,
+            None,
+            cleanup.clone(),
+        )
+        .context("publish passing transport-recovery diagnostic summary")?;
+    if let Err(error) = publish_role(output, &bytes) {
+        let message = format!("publish passing role report: {error:#}");
+        let mut failure = error.context("publish passing transport-recovery role report");
+        if let Err(remove_error) = remove_artifact_if_present(output) {
+            failure = failure.context(format!(
+                "also failed to remove an incompletely published passing role report: {remove_error:#}"
+            ));
+        }
+        if let Err(summary_error) = diagnostics.write_summary(
+            DiagnosticOutcome::Failed,
+            false,
+            Some(FailureClass::EvidenceIo),
+            Some(&message),
+            cleanup,
+        ) {
+            failure = failure.context(format!(
+                "also failed to replace the passing diagnostic summary: {summary_error:#}"
+            ));
+        }
+        return Err(failure);
+    }
+    if let Some(signal) = cancellation.observed() {
+        let message = format!("transport-recovery cancelled by {signal}");
+        let mut failure = anyhow::Error::new(RecoveryCancelled { signal });
+        if let Err(remove_error) = remove_artifact_if_present(output) {
+            failure = failure.context(format!(
+                "also failed to revoke the passing role report after cancellation: {remove_error:#}"
+            ));
+        }
+        if let Err(event_error) = diagnostics.record_terminal_observation(
+            DiagnosticOutcome::Cancelled,
+            None,
+            Some(&message),
+        ) {
+            failure = failure.context(format!(
+                "also failed to record cancellation during publication: {event_error:#}"
+            ));
+        }
+        if let Err(summary_error) = diagnostics.write_summary(
+            DiagnosticOutcome::Cancelled,
+            false,
+            None,
+            Some(&message),
+            cleanup,
+        ) {
+            failure = failure.context(format!(
+                "also failed to replace the passing summary after cancellation: {summary_error:#}"
+            ));
+        }
+        return Err(failure);
+    }
+    Ok(summary)
+}
+
 fn diagnostic_contracts(role: RecoveryRole) -> DiagnosticContracts {
     DiagnosticContracts {
         minimum_sqlite_bytes: role.minimum_sqlite_bytes(),
@@ -1115,6 +1314,7 @@ fn diagnostic_contracts(role: RecoveryRole) -> DiagnosticContracts {
     }
 }
 
+#[cfg(all(test, target_os = "linux"))]
 pub(crate) async fn wait_for_recovery_cancellation() -> Result<String> {
     #[cfg(unix)]
     {
@@ -3609,6 +3809,22 @@ fn prepare_artifact_output(output: &Path) -> Result<()> {
     Ok(())
 }
 
+fn remove_artifact_if_present(output: &Path) -> Result<()> {
+    match std::fs::remove_file(output) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("remove transport-recovery artifact {output:?}"));
+        }
+    }
+    let parent = artifact_parent(output);
+    File::open(parent)
+        .with_context(|| format!("open transport-recovery artifact directory {parent:?}"))?
+        .sync_all()
+        .with_context(|| format!("sync transport-recovery artifact directory {parent:?}"))
+}
+
 fn publish_artifact_atomically(output: &Path, bytes: &[u8]) -> Result<()> {
     let parent = artifact_parent(output);
     let mut temporary = tempfile::NamedTempFile::new_in(parent)
@@ -4334,6 +4550,28 @@ mod tests {
         }
     }
 
+    fn empty_cleanup_summary() -> CleanupSummary {
+        CleanupSummary {
+            attempted: false,
+            budget_millis: duration_millis(CLEANUP_BUDGET),
+            registered_processes: 0,
+            reaped_processes: 0,
+            surviving_processes: Vec::new(),
+        }
+    }
+
+    fn create_test_diagnostics(plan: &RecoveryRolePlan) -> RecoveryDiagnostics {
+        std::fs::create_dir(&plan.diagnostics_dir).expect("create diagnostics directory");
+        RecoveryDiagnostics::create(
+            plan,
+            &"d".repeat(40),
+            &build_profile_descriptor(),
+            diagnostic_contracts(plan.role),
+            1,
+        )
+        .expect("create diagnostics")
+    }
+
     #[test]
     fn complete_twenty_plus_twenty_artifact_is_accepted() {
         validate_transport_recovery_artifact(&artifact()).expect("valid recovery artifact");
@@ -4597,6 +4835,7 @@ mod tests {
         let results = run_role_sequence(
             role_plan(RecoveryRole::Voter, root.path()),
             role_plan(RecoveryRole::Learner, root.path()),
+            None,
             move |plan| {
                 let observed = observed.clone();
                 async move {
@@ -4623,6 +4862,7 @@ mod tests {
         let results = run_role_sequence(
             role_plan(RecoveryRole::Voter, root.path()),
             role_plan(RecoveryRole::Learner, root.path()),
+            None,
             move |plan| {
                 let observed = observed.clone();
                 async move {
@@ -4642,6 +4882,42 @@ mod tests {
             .0
             .expect_err("voter cancelled")
             .is::<RecoveryCancelled>());
+        assert!(results
+            .1
+            .expect_err("learner suppressed")
+            .is::<RecoveryCancelled>());
+    }
+
+    #[tokio::test]
+    async fn latched_cancellation_between_roles_prevents_the_learner_attempt() {
+        let root = tempfile::tempdir().expect("sequence root");
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = calls.clone();
+        let (cancellation, sender) = RecoveryCancellationMonitor::test();
+        let results = run_role_sequence(
+            role_plan(RecoveryRole::Voter, root.path()),
+            role_plan(RecoveryRole::Learner, root.path()),
+            Some(&cancellation),
+            move |plan| {
+                let observed = observed.clone();
+                let sender = sender.clone();
+                async move {
+                    observed.lock().expect("record role call").push(plan.role);
+                    if plan.role == RecoveryRole::Voter {
+                        sender
+                            .send(Some("injected SIGTERM".to_owned()))
+                            .expect("latch cancellation");
+                    }
+                    Ok(role_report(plan.role, 3))
+                }
+            },
+        )
+        .await;
+        assert_eq!(
+            *calls.lock().expect("read role calls"),
+            vec![RecoveryRole::Voter]
+        );
+        assert!(results.0.is_ok());
         assert!(results
             .1
             .expect_err("learner suppressed")
@@ -4714,6 +4990,95 @@ mod tests {
         assert_eq!(summary.completed_cycles, 1);
         assert_eq!(summary.failing_cycle, Some(2));
         assert!(!plan.output.exists());
+    }
+
+    #[test]
+    fn passing_role_report_is_not_published_when_its_summary_cannot_publish() {
+        let root = tempfile::tempdir().expect("evidence root");
+        let plan = role_plan(RecoveryRole::Voter, root.path());
+        let diagnostics = create_test_diagnostics(&plan);
+        std::fs::create_dir(plan.diagnostics_dir.join("summary.json"))
+            .expect("block summary publication with a directory");
+        let (cancellation, _sender) = RecoveryCancellationMonitor::test();
+
+        let error = publish_passing_role_evidence_with(
+            &role_report(RecoveryRole::Voter, 3),
+            &diagnostics,
+            &plan.output,
+            empty_cleanup_summary(),
+            &cancellation,
+            publish_artifact_atomically,
+        )
+        .expect_err("summary failure must prevent role publication");
+        assert!(format!("{error:#}").contains("diagnostic summary"));
+        assert!(!plan.output.exists());
+    }
+
+    #[test]
+    fn failed_role_publication_removes_success_and_replaces_passing_summary() {
+        use crate::transport_recovery_diagnostics::RecoveryDiagnosticSummary;
+
+        let root = tempfile::tempdir().expect("evidence root");
+        let plan = role_plan(RecoveryRole::Learner, root.path());
+        let diagnostics = create_test_diagnostics(&plan);
+        let (cancellation, _sender) = RecoveryCancellationMonitor::test();
+        let error = publish_passing_role_evidence_with(
+            &role_report(RecoveryRole::Learner, 3),
+            &diagnostics,
+            &plan.output,
+            empty_cleanup_summary(),
+            &cancellation,
+            |output, bytes| {
+                publish_artifact_atomically(output, bytes)?;
+                bail!("injected directory sync failure after publication")
+            },
+        )
+        .expect_err("role publication failure must fail the evidence pair");
+        assert!(format!("{error:#}").contains("injected directory sync failure"));
+        assert!(!plan.output.exists());
+
+        let summary: RecoveryDiagnosticSummary = serde_json::from_slice(
+            &std::fs::read(plan.diagnostics_dir.join("summary.json"))
+                .expect("read replacement summary"),
+        )
+        .expect("decode replacement summary");
+        assert_eq!(summary.status, DiagnosticOutcome::Failed);
+        assert_eq!(summary.failure_class, Some(FailureClass::EvidenceIo));
+        assert!(!summary.resource_envelope_asserted);
+    }
+
+    #[test]
+    fn cancellation_during_publication_revokes_role_and_passing_summary() {
+        use crate::transport_recovery_diagnostics::RecoveryDiagnosticSummary;
+
+        let root = tempfile::tempdir().expect("evidence root");
+        let plan = role_plan(RecoveryRole::Voter, root.path());
+        let diagnostics = create_test_diagnostics(&plan);
+        let (cancellation, sender) = RecoveryCancellationMonitor::test();
+        let error = publish_passing_role_evidence_with(
+            &role_report(RecoveryRole::Voter, 3),
+            &diagnostics,
+            &plan.output,
+            empty_cleanup_summary(),
+            &cancellation,
+            |output, bytes| {
+                publish_artifact_atomically(output, bytes)?;
+                sender
+                    .send(Some("injected SIGTERM".to_owned()))
+                    .context("latch injected cancellation")
+            },
+        )
+        .expect_err("cancellation must revoke passing evidence");
+        assert!(error.is::<RecoveryCancelled>());
+        assert!(!plan.output.exists());
+
+        let summary: RecoveryDiagnosticSummary = serde_json::from_slice(
+            &std::fs::read(plan.diagnostics_dir.join("summary.json"))
+                .expect("read cancellation summary"),
+        )
+        .expect("decode cancellation summary");
+        assert_eq!(summary.status, DiagnosticOutcome::Cancelled);
+        assert!(!summary.resource_envelope_asserted);
     }
 
     #[test]
@@ -5694,5 +6059,18 @@ mod tests {
             .expect("role report object")
             .insert("invented".to_owned(), serde_json::json!(true));
         assert!(!role_validator.is_valid(&role_value));
+
+        let valid_role =
+            serde_json::to_value(role_report(RecoveryRole::Voter, 3)).expect("role fixture");
+        let mut unknown_campaign = valid_role.clone();
+        unknown_campaign["campaign"]["invented"] = serde_json::json!(true);
+        assert!(!role_validator.is_valid(&unknown_campaign));
+        let mut unknown_nested = valid_role.clone();
+        unknown_nested["campaign"]["cycles"][0]["source_outbound"]["invented"] =
+            serde_json::json!(true);
+        assert!(!role_validator.is_valid(&unknown_nested));
+        let mut missing_campaign = valid_role;
+        missing_campaign["campaign"] = serde_json::json!({});
+        assert!(!role_validator.is_valid(&missing_campaign));
     }
 }

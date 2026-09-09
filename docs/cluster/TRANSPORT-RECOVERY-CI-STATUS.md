@@ -1,6 +1,6 @@
 # Transport recovery CI — implementation status and evidence
 
-**Status:** preparing M6 promotion · **Owner:** Codex · **Updated:** 2026-09-08
+**Status:** M6 review fixes complete; running unit tests · **Owner:** Codex · **Updated:** 2026-09-09
 
 Companion to
 [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md) (how this effort reaches
@@ -10,7 +10,7 @@ Companion to
 been built, reviewed, and proved. It is updated with each milestone so a green
 checkbox means retained evidence, not intent.
 
-## Current position — M5 is complete and split qualification is staged
+## Current position — the one M6 adversarial review is complete
 
 The effort begins at remote `main`
 `9fcd151c98485707d2dc28195adf9c0c1e4a6d4c`, the same source reviewed by the
@@ -33,6 +33,21 @@ the same time. No smoke or partial run is recorded as qualification.
 lane, so it does not start the old four-hour campaign. M6 deliberately restores
 and runs the full voter and learner qualification once the final candidate is
 frozen.
+
+Draft promotion PR
+[#191](http://192.168.4.7:3000/noirr/plurx/pulls/191) contains the current
+`main` merge and remains unqualified. Its automatically started pre-review run
+[#1214](http://192.168.4.7:3000/noirr/plurx/actions/runs/1214) was cancelled
+before expensive work so it cannot be mistaken for the one final candidate
+run. Exactly one adversarial agent review is complete. Its nine findings are
+implemented in the local promotion candidate: a frozen Make execution ID;
+Cargo freshness and an embedded qualification SHA; cancellation latched
+through cleanup, publication, and the role handoff; summary-before-report
+publication with failure repair; best-effort cleanup of every owned process;
+a recursively closed role schema; deepest failing-phase preservation;
+UTF-8-safe diagnostic truncation; and role-schema validation routing. Focused
+unit and contract tests are now running before the reviewed candidate is
+pushed once for full M6 qualification.
 
 ## Milestones — evidence closes the checkbox
 

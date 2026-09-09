@@ -159,6 +159,12 @@ pub struct CleanupSummary {
     pub surviving_processes: Vec<ProcessIdentity>,
 }
 
+#[derive(Debug)]
+pub struct CleanupResult {
+    pub summary: CleanupSummary,
+    pub error: Option<anyhow::Error>,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TimingStatistic {
@@ -316,7 +322,7 @@ impl RecoveryDiagnostics {
             {
                 state.active_phases.remove(position);
             }
-            if result.is_err() {
+            if result.is_err() && state.failed_phase.is_none() {
                 state.failed_phase = Some(token.phase.clone());
                 state.failed_cycle = Some(token.cycle);
             }
@@ -417,7 +423,13 @@ impl RecoveryDiagnostics {
         failure_class: Option<FailureClass>,
         message: Option<&str>,
     ) -> Result<()> {
-        let (phase, cycle) = self.active_phase()?;
+        let (phase, cycle) = {
+            let state = self.lock()?;
+            state.active_phases.last().cloned().map_or_else(
+                || (state.failed_phase.clone(), state.failed_cycle),
+                |(phase, cycle)| (Some(phase), Some(cycle)),
+            )
+        };
         self.record_event(RecoveryDiagnosticEvent::TerminalObserved {
             outcome,
             failure_class,
@@ -467,25 +479,63 @@ impl RecoveryDiagnostics {
             .map_or((None, None), |(phase, cycle)| (Some(phase), Some(cycle))))
     }
 
-    pub async fn cleanup_registered(&self, budget: Duration) -> Result<CleanupSummary> {
+    pub async fn cleanup_registered(&self, budget: Duration) -> Result<CleanupResult> {
+        self.cleanup_registered_with(budget, |diagnostics, action, identity, result| {
+            diagnostics.process_action(action, identity, result)
+        })
+        .await
+    }
+
+    async fn cleanup_registered_with<F>(
+        &self,
+        budget: Duration,
+        mut record_action: F,
+    ) -> Result<CleanupResult>
+    where
+        F: FnMut(&Self, &str, &ProcessIdentity, &Result<()>) -> Result<()>,
+    {
         let processes = self.registered_processes()?;
         if processes.is_empty() {
-            return Ok(CleanupSummary {
-                attempted: false,
-                budget_millis: duration_millis(budget),
-                registered_processes: 0,
-                reaped_processes: 0,
-                surviving_processes: Vec::new(),
+            return Ok(CleanupResult {
+                summary: CleanupSummary {
+                    attempted: false,
+                    budget_millis: duration_millis(budget),
+                    registered_processes: 0,
+                    reaped_processes: 0,
+                    surviving_processes: Vec::new(),
+                },
+                error: None,
             });
         }
+        let deadline = Instant::now() + budget;
+        let mut errors = Vec::new();
         for identity in &processes {
             let result = kill_exact_process(identity);
-            self.process_action("kill", identity, &result)?;
+            if let Err(error) = &result {
+                errors.push(format!(
+                    "kill process {}:{}: {error:#}",
+                    identity.pid, identity.start_ticks
+                ));
+            }
+            if let Err(error) = record_action(self, "kill", identity, &result) {
+                errors.push(format!(
+                    "record kill process {}:{}: {error:#}",
+                    identity.pid, identity.start_ticks
+                ));
+            }
         }
-        let deadline = Instant::now() + budget;
         let mut survivors = processes.clone();
         loop {
-            survivors.retain(|identity| process_identity_is_live(identity).unwrap_or(true));
+            survivors.retain(|identity| match process_identity_is_live(identity) {
+                Ok(live) => live,
+                Err(error) => {
+                    errors.push(format!(
+                        "inspect process {}:{} during cleanup: {error:#}",
+                        identity.pid, identity.start_ticks
+                    ));
+                    true
+                }
+            });
             if survivors.is_empty() || Instant::now() >= deadline {
                 break;
             }
@@ -498,15 +548,23 @@ impl RecoveryDiagnostics {
         for identity in &processes {
             if !survivor_keys.contains(&(identity.pid, identity.start_ticks)) {
                 let result = Ok(());
-                self.process_action("reap", identity, &result)?;
+                if let Err(error) = record_action(self, "reap", identity, &result) {
+                    errors.push(format!(
+                        "record reap process {}:{}: {error:#}",
+                        identity.pid, identity.start_ticks
+                    ));
+                }
             }
         }
-        Ok(CleanupSummary {
-            attempted: true,
-            budget_millis: duration_millis(budget),
-            registered_processes: processes.len(),
-            reaped_processes: processes.len().saturating_sub(survivors.len()),
-            surviving_processes: survivors,
+        Ok(CleanupResult {
+            summary: CleanupSummary {
+                attempted: true,
+                budget_millis: duration_millis(budget),
+                registered_processes: processes.len(),
+                reaped_processes: processes.len().saturating_sub(survivors.len()),
+                surviving_processes: survivors,
+            },
+            error: (!errors.is_empty()).then(|| anyhow::anyhow!(errors.join("; "))),
         })
     }
 
@@ -771,7 +829,11 @@ fn sanitize_message(message: &str) -> String {
         })
         .collect::<String>();
     if sanitized.len() > MAX_SAFE_MESSAGE_BYTES {
-        sanitized.truncate(MAX_SAFE_MESSAGE_BYTES);
+        let mut boundary = MAX_SAFE_MESSAGE_BYTES;
+        while !sanitized.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        sanitized.truncate(boundary);
         sanitized.push('…');
     }
     sanitized
@@ -980,6 +1042,88 @@ mod tests {
         assert!(!plan.output.exists());
     }
 
+    #[test]
+    fn nested_failure_preserves_the_deepest_phase_in_terminal_evidence() {
+        let root = tempfile::tempdir().expect("diagnostic root");
+        let plan = plan(root.path());
+        let diagnostics =
+            RecoveryDiagnostics::create(&plan, &"a".repeat(40), "debug", contracts(), 1)
+                .expect("create diagnostics");
+        let parent = diagnostics
+            .phase_start("learner_admission", 0, Some("cluster_start"))
+            .expect("parent phase start");
+        let child = diagnostics
+            .phase_start("admission_token_redeem", 0, Some("learner_admission"))
+            .expect("child phase start");
+        let failure = Err(anyhow::anyhow!("injected nested failure"));
+        diagnostics
+            .phase_end(child, &failure)
+            .expect("child phase failure");
+        diagnostics
+            .phase_end(parent, &failure)
+            .expect("parent phase failure");
+        diagnostics
+            .record_terminal_observation(
+                DiagnosticOutcome::Failed,
+                Some(FailureClass::Admission),
+                Some("injected nested failure"),
+            )
+            .expect("terminal observation");
+
+        let events = read_complete_jsonl::<RecoveryDiagnosticRecord>(
+            &plan.diagnostics_dir.join("events.jsonl"),
+        )
+        .expect("read durable events");
+        let terminal = events
+            .records
+            .iter()
+            .rev()
+            .find_map(|record| match &record.detail {
+                RecoveryDiagnosticEvent::TerminalObserved { phase, cycle, .. } => {
+                    Some((phase.as_deref(), *cycle))
+                }
+                _ => None,
+            })
+            .expect("terminal event");
+        assert_eq!(terminal, (Some("admission_token_redeem"), Some(0)));
+
+        let summary = diagnostics
+            .write_summary(
+                DiagnosticOutcome::Failed,
+                false,
+                Some(FailureClass::Admission),
+                Some("injected nested failure"),
+                CleanupSummary {
+                    attempted: false,
+                    budget_millis: 1,
+                    registered_processes: 0,
+                    reaped_processes: 0,
+                    surviving_processes: Vec::new(),
+                },
+            )
+            .expect("write diagnostic summary");
+        assert_eq!(
+            summary.failing_phase.as_deref(),
+            Some("admission_token_redeem")
+        );
+        assert_eq!(summary.failing_cycle, Some(0));
+    }
+
+    #[test]
+    fn message_sanitization_truncates_only_at_utf8_boundaries() {
+        for character in ['é', '€', '🦀'] {
+            let message = format!(
+                "{}{character}{}",
+                "a".repeat(MAX_SAFE_MESSAGE_BYTES - 1),
+                "b".repeat(8)
+            );
+            let sanitized = sanitize_message(&message);
+            assert!(sanitized.ends_with('…'));
+            assert!(sanitized.len() <= MAX_SAFE_MESSAGE_BYTES + '…'.len_utf8());
+            assert!(sanitized.is_char_boundary(sanitized.len()));
+        }
+    }
+
     #[tokio::test]
     #[cfg(target_os = "linux")]
     async fn sigterm_cleanup_reaps_a_real_owned_child() {
@@ -1015,11 +1159,58 @@ mod tests {
             .cleanup_registered(Duration::from_secs(3))
             .await
             .expect("bounded cleanup");
+        assert!(cleanup.error.is_none());
+        let cleanup = cleanup.summary;
         let status = wait.await.expect("join child wait");
         assert!(!status.success());
         assert!(cleanup.surviving_processes.is_empty());
         assert_eq!(cleanup.reaped_processes, 1);
         assert!(!Path::new(&format!("/proc/{pid}")).exists());
+    }
+
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn cleanup_kills_every_child_after_a_diagnostic_write_failure() {
+        let root = tempfile::tempdir().expect("diagnostic root");
+        let plan = plan(root.path());
+        let diagnostics =
+            RecoveryDiagnostics::create(&plan, &"a".repeat(40), "debug", contracts(), 1)
+                .expect("create diagnostics");
+        let mut children = Vec::new();
+        for node_id in 1..=2 {
+            let child = tokio::process::Command::new("sleep")
+                .arg("30")
+                .kill_on_drop(false)
+                .spawn()
+                .expect("spawn real child");
+            let pid = child.id().expect("child pid");
+            diagnostics
+                .register_process(pid, "node", Some(node_id))
+                .expect("register child identity");
+            children.push((pid, child));
+        }
+        let mut injected = false;
+        let cleanup = diagnostics
+            .cleanup_registered_with(
+                Duration::from_secs(3),
+                |diagnostics, action, identity, result| {
+                    if action == "kill" && !injected {
+                        injected = true;
+                        bail!("injected process journal failure");
+                    }
+                    diagnostics.process_action(action, identity, result)
+                },
+            )
+            .await
+            .expect("bounded cleanup still completes");
+        assert!(cleanup.error.is_some());
+        assert!(cleanup.summary.surviving_processes.is_empty());
+        assert_eq!(cleanup.summary.reaped_processes, 2);
+        for (pid, mut child) in children {
+            let status = child.wait().await.expect("wait for killed child");
+            assert!(!status.success());
+            assert!(!Path::new(&format!("/proc/{pid}")).exists());
+        }
     }
 
     #[test]

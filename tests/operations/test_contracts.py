@@ -19,9 +19,9 @@ def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
-def make_dry_run_commands(target: str) -> list[str]:
+def make_dry_run_commands(target: str, *variables: str) -> list[str]:
     result = subprocess.run(
-        ["make", "--no-print-directory", "-n", target],
+        ["make", "--no-print-directory", "-n", target, *variables],
         cwd=ROOT,
         check=True,
         text=True,
@@ -1570,6 +1570,10 @@ assert.equal(context.ACT_TIMER, null);
             point for point in catalog["points"] if point["id"] == "cluster.auth"
         )
         self.assertIn("hiqlite-vendor-clippy", cluster_point["checks"])
+        self.assertIn(
+            "benchmarks/cluster-transport-recovery-role.schema.json",
+            cluster_point["paths"],
+        )
         self.assertIn("run: make apple-build", effort)
         self.assertIn("run: make android", effort)
         self.assertIn("run: make web-check", effort)
@@ -2482,7 +2486,7 @@ assert.equal(context.ACT_TIMER, null);
 
         self.assertEqual(len(contract_commands), 14)
         self.assertEqual(contract_commands[0], 'test "$(uname -s)" = Linux')
-        self.assertIn("PLURX_EXPECT_TEST_COUNT=60", contract_commands[1])
+        self.assertIn("PLURX_EXPECT_TEST_COUNT=67", contract_commands[1])
         self.assertIn("scripts/require-test-count", contract_commands[1])
         self.assertIn("transport_recovery --lib", contract_commands[1])
         exact_regressions = (
@@ -2524,6 +2528,35 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("--role learner --cycles 20", full_commands[-1])
         self.assertIn("transport-recovery-assemble", full_commands[-1])
         self.assertIn("target/validation/cluster-transport-recovery.json", full_commands[-1])
+
+        self.assertIn("cargo build --locked", voter_commands[1])
+        self.assertIn("PLURX_BUILD_SHA=", voter_commands[1])
+        external_binary_commands = make_dry_run_commands(
+            "cluster-transport-recovery-voter-check", "RECOVERY_BINARY=/bin/true"
+        )
+        self.assertIn('test -x "/bin/true"', external_binary_commands[1])
+        self.assertNotIn("cargo build", external_binary_commands[1])
+        self.assertIn('option_env!("PLURX_BUILD_SHA")', read("crates/plurx-cluster-check/src/topology.rs"))
+        self.assertIn(
+            "qualification runner omitted its embedded PLURX_BUILD_SHA",
+            read("crates/plurx-cluster-check/src/topology.rs"),
+        )
+        self.assertIn(
+            'cargo:rerun-if-env-changed=PLURX_BUILD_SHA',
+            read("crates/plurx-cluster-check/build.rs"),
+        )
+
+        for commands in (smoke_commands, full_commands):
+            expanded = " ".join(commands)
+            execution_ids = re.findall(
+                r'--execution-id "(local-[^"]+)"', expanded
+            )
+            output_roots = re.findall(
+                r'target/validation/transport-recovery/(local-[^/"]+)', expanded
+            )
+            self.assertGreaterEqual(len(execution_ids), 2)
+            self.assertGreaterEqual(len(output_roots), 4)
+            self.assertEqual(len(set((*execution_ids, *output_roots))), 1)
 
         for job in (contracts, voter, learner, recovery):
             self.assertIn("needs.scope.outputs.cluster_auth == 'true'", job)
