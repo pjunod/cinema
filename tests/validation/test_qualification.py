@@ -22,6 +22,8 @@ class QualificationReceiptCase(unittest.TestCase):
             "PLURX_PULL_REQUEST": "42",
             "PLURX_HEAD_SHA": "b" * 40,
             "PLURX_BASE_SHA": "c" * 40,
+            "PLURX_CURRENT_HEAD_SHA": "b" * 40,
+            "PLURX_CURRENT_BASE_SHA": "c" * 40,
         }
 
     def results(self) -> dict[str, str]:
@@ -45,6 +47,24 @@ class QualificationReceiptCase(unittest.TestCase):
 
         with self.assertRaisesRegex(
             QualificationError, "must come from workflow run attempt 1"
+        ):
+            build_receipt(environment, self.results(), "a" * 40, "d" * 40)
+
+    def test_receipt_refuses_a_head_that_moved_during_qualification(self):
+        environment = self.environment()
+        environment["PLURX_CURRENT_HEAD_SHA"] = "e" * 40
+
+        with self.assertRaisesRegex(
+            QualificationError, "head moved after workflow start"
+        ):
+            build_receipt(environment, self.results(), "a" * 40, "d" * 40)
+
+    def test_receipt_refuses_a_base_that_moved_during_qualification(self):
+        environment = self.environment()
+        environment["PLURX_CURRENT_BASE_SHA"] = "e" * 40
+
+        with self.assertRaisesRegex(
+            QualificationError, "base moved after workflow start"
         ):
             build_receipt(environment, self.results(), "a" * 40, "d" * 40)
 

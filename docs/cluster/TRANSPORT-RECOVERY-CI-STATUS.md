@@ -1,6 +1,6 @@
 # Transport recovery CI — implementation status and evidence
 
-**Status:** building M4 · **Owner:** Codex · **Updated:** 2026-09-08
+**Status:** building M5 · **Owner:** Codex · **Updated:** 2026-09-08
 
 Companion to
 [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md) (how this effort reaches
@@ -10,7 +10,7 @@ Companion to
 been built, reviewed, and proved. It is updated with each milestone so a green
 checkbox means retained evidence, not intent.
 
-## Current position — M3 is complete and split qualification is staged
+## Current position — M4 is complete and split qualification is staged
 
 The effort begins at remote `main`
 `9fcd151c98485707d2dc28195adf9c0c1e4a6d4c`, the same source reviewed by the
@@ -46,7 +46,7 @@ frozen.
   cancellation, and owned-child cleanup evidence.
 - [x] **M3 — split CI.** Independent voter and learner jobs, retained aggregate
   job ID, current-run artifacts, and exact receipt integration.
-- [ ] **M4 — frozen candidate semantics.** Promotion runs survive unrelated
+- [x] **M4 — frozen candidate semantics.** Promotion runs survive unrelated
   superseding events and stale candidates cannot issue a receipt.
 - [ ] **M5 — measured optimization.** Three-cycle, same-runner comparisons
   decide whether any profile or hashing change is retained.
@@ -176,6 +176,38 @@ but not asserted below ten closing samples, and no canonical artifact or
 receipt was issued. The former combined campaign remains suppressed; the
 split 20-plus-20 lane is the implementation that will run once on the frozen
 M6 promotion candidate.
+
+## M4 evidence — retained runs cannot qualify stale refs
+
+Commit `ee3f2241` makes workflow cancellation conditional from pull-request
+event context, the only context available before jobs exist. Superseded effort
+task PRs, ordinary main-bound PRs, and `main` pushes still cancel. Final
+`effort/**` and nonempty `integration/*-into-main` promotion PRs do not, and
+immutable tags remain uncancelled. The policy matches Forgejo's documented
+workflow-level concurrency behavior; job-level settings cannot rescue a
+cancelled parent workflow.
+
+Immediately before writing a promotion receipt, the gate force-fetches the
+live head and base refs into fixed internal refs. The receipt builder now
+requires those current SHAs and refuses either one when it differs from the
+event-time head or base. The existing exact checked-out SHA, complete fan-out,
+and workflow-attempt-1 requirements remain unchanged. Nine focused receipt
+tests cover moved head and moved base; the 56-test operations suite pins all
+six cancellation cases and the fixed-ref fetch.
+
+The conditional cancellation mechanism was exercised on installed Forgejo
+16.0.3 with a temporary workflow isolated to two `codex/m4-concurrency-probe-*`
+branches:
+
+| Policy | First run | Superseding run | Observed result |
+|---|---|---|---|
+| `cancel-in-progress: false` | [#1194](http://192.168.4.7:3000/noirr/plurx/actions/runs/1194) | [#1195](http://192.168.4.7:3000/noirr/plurx/actions/runs/1195) | Both passed; the second waited for the first's 30-second hold |
+| `cancel-in-progress: true` | [#1196](http://192.168.4.7:3000/noirr/plurx/actions/runs/1196) | [#1198](http://192.168.4.7:3000/noirr/plurx/actions/runs/1198) | The first was cancelled when the second started; the second passed |
+
+The exact temporary branches were deleted after the results were retained;
+no real user run or repository workflow was cancelled for this test. The
+integration freeze remains an operator convention rather than a YAML merge
+queue: moved refs fail closed instead of being locked.
 
 ## Guardrails — this effort changes observability, not production transport
 

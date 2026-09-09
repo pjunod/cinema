@@ -16,9 +16,20 @@ env:
 
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
-  # A later main push contains every earlier main push, so one exhaustive
-  # post-merge run is enough. Tags remain immutable evidence.
-  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+  # A final promotion candidate must survive a newer event long enough to
+  # retain a diagnostic result. Ordinary PRs and main pushes still supersede
+  # their older work; tags remain immutable evidence. Workflow concurrency is
+  # evaluated before jobs, so this intentionally uses event context only.
+  cancel-in-progress: >-
+    ${{
+      (github.event_name == 'pull_request' &&
+        !(github.event.pull_request.base.ref == 'main' &&
+          (startsWith(github.event.pull_request.head.ref, 'effort/') ||
+            (startsWith(github.event.pull_request.head.ref, 'integration/') &&
+              endsWith(github.event.pull_request.head.ref, '-into-main') &&
+              github.event.pull_request.head.ref != 'integration/-into-main')))) ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    }}
 
 jobs:
   # Resolve the PR diff once. Expensive jobs consume these outputs in parallel;
@@ -1441,6 +1452,20 @@ jobs:
         if: needs.scope.outputs.qualification == 'true'
         with:
           fetch-depth: 0
+      - name: Resolve the current qualification refs
+        if: needs.scope.outputs.qualification == 'true'
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --force origin \
+            "+refs/heads/$HEAD_REF:refs/plurx/current-head" \
+            "+refs/heads/$BASE_REF:refs/plurx/current-base"
+          {
+            echo "PLURX_CURRENT_HEAD_SHA=$(git rev-parse --verify 'refs/plurx/current-head^{commit}')"
+            echo "PLURX_CURRENT_BASE_SHA=$(git rev-parse --verify 'refs/plurx/current-base^{commit}')"
+          } >> "$GITHUB_ENV"
       - name: Write the exact-tree effort qualification record
         if: needs.scope.outputs.qualification == 'true'
         env:
