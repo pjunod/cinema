@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["124f6b06"]
+reason = "This metadata-only commit records the retained transport-recovery adversarial-review checks in its own regressions.d fragment; it does not change runtime behavior."
+ignore = true
