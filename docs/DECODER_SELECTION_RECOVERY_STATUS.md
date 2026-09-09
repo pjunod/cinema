@@ -59,7 +59,7 @@ unreachable on that path rather than falsely certified.
 | Milestone | Isolate scoped Apple test transports after finalization recovery |
 | Task base | Effort head `990bf334` was the final milestone base; the active follow-up starts from current `main` `2e77e2e1` |
 | Task branch | `codex/apple-session-urlsession-recovery` in the agent-owned clone at `/private/tmp/codex-plurx-decoder.RRcx8j/repo` |
-| Task PR | #189 and Apple reporter repair #195 are merged; the scoped-URLSession cleanup PR is being prepared from post-merge run 1266 |
+| Task PR | #189 and Apple reporter repair #195 are merged; scoped-URLSession cleanup [#197](http://192.168.4.7:3000/noirr/plurx/pulls/197) is open in draft from post-merge run 1266 |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
 | Audit scope | Apple playback-control teardown ordering, retry bound, and async XCTest scheduling; post-merge infrastructure failures are tracked separately from code failures |
 | Current finding | #195 fixed the real finalization retry defect. Its full-suite run then proved the session fixture invalidated an ephemeral `URLSession` before the detached final exchange's three-second ownership bound expired; CFNetwork treats the next task as a fatal API misuse. Test cleanup now retains the scoped session through that exact production bound and never invalidates it underneath the reporter |
@@ -67,7 +67,7 @@ unreachable on that path rather than falsely certified.
 | Focused evidence | Main run 1266 passed `PlaybackControlReporterTests` 56/56. The exact later session failure and the complete `PlaybackControlSessionTests` class now pass locally, 22/22, on iPhone 17 Pro simulator with Xcode 26.6 |
 | Fast lane | Clean main rerun 1266 passed policy preflight and Android JVM; the Apple reporter class is green and the remaining Apple class exposed the scoped-session cleanup bug above. Cluster-daemon and web were rejected at 23 GiB free against the 25 GiB runner floor before tests, so they need an infrastructure rerun rather than a code patch |
 | Validation order | Task PRs into the effort do not run the full unit suite. After M7: functionality smoke evidence and a green fast lane before promotion; after they pass, merge and continue watching the remaining promotion and broader suites. The owner explicitly approved watching the remaining promotion jobs on `main`; a code failure gets a new PR |
-| Next | Commit and open the scoped-session follow-up PR · merge after its focused lane passes · rerun disk-blocked jobs on a healthy runner · continue M8 fleet evidence |
+| Next | Merge scoped-session follow-up #197 after its focused lane passes · rerun disk-blocked jobs on a healthy runner · continue M8 fleet evidence |
 | External blocker | None for M7 or promotion. A qualifying hardware host is still required for post-merge M8 fleet evidence; absence remains visible and advisory rather than an enable gate |
 
 ## Milestones
