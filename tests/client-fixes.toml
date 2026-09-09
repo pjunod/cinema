@@ -1001,11 +1001,11 @@ test_anchor = "private func tearDownTransport("
 
 [[fixes]]
 # Promotion compares counters to the current merge target. This anchor keeps
-# the Android 76 claim tied to the collision regression that rejects reusing
+# the Android build claim tied to the collision regression that rejects reusing
 # the build number already present on main.
 id = "android.streaming-promotion-build-counter"
 commits = ["fdbed69e"]
 source = "clients/android/app/build.gradle.kts"
-source_anchor = "versionCode = 77"
+source_anchor = "versionCode = 78"
 test = "tests/validation/test_mobile_versions.py"
 test_anchor = "test_android_counter_the_target_already_ships_fails_against_the_target"
