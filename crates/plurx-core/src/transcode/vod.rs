@@ -130,14 +130,7 @@ pub fn vod_pipe_args(
     // Explicit film-clock trim below owns the accurate landing. Letting the
     // input seek also trim audio can discard a different partial packet on
     // each restart before its sample-clock correction sees the frame.
-    args.splice(
-        0..0,
-        [
-            "-copyts".to_owned(),
-            "-start_at_zero".to_owned(),
-            "-noaccurate_seek".to_owned(),
-        ],
-    );
+    args.splice(0..0, ["-copyts".to_owned(), "-noaccurate_seek".to_owned()]);
     let has_audio = !source.audio_streams.is_empty();
     if has_audio {
         let before_map = args
@@ -165,15 +158,11 @@ pub fn vod_pipe_args(
                 .expect("video map");
             // A subtitle-only sidecar is cheap to read from zero and retains
             // display state whose cue started before the video's fast seek.
-            // isync cancels start_at_zero's per-input start-time difference.
+            // Both inputs retain their film timestamps under copyts, so no
+            // per-input zero rebasing or synthetic sync offset is permitted.
             args.splice(
                 before_map..before_map,
-                [
-                    "-isync".into(),
-                    "0".into(),
-                    "-i".into(),
-                    subtitle.to_string_lossy().into_owned(),
-                ],
+                ["-i".into(), subtitle.to_string_lossy().into_owned()],
             );
         }
     }

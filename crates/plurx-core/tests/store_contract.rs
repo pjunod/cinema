@@ -15941,9 +15941,10 @@ fn contract_inventory_matches_every_store_method() {
     .collect::<BTreeSet<_>>();
 
     // 290 at the shared base, plus six credential methods from cluster
-    // recovery and five desired/settings/pointer methods from current main.
-    // Both independently reviewed method sets survive this integration.
-    assert_eq!(declared.len(), 301, "review the Store method count");
+    // recovery, five desired/settings/pointer methods from current main, and
+    // the prepared-successor platform census. Both independently reviewed
+    // method sets survive this integration.
+    assert_eq!(declared.len(), 302, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
