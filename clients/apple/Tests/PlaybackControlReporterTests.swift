@@ -91,7 +91,6 @@ private final class Harness: @unchecked Sendable {
     private var _deadlineFires = false
     private var _sleeps: [(Int, PlaybackControlReporter.SleepKind)] = []
     private var _holds = false
-    private let gate = DispatchSemaphore(value: 0)
 
     var requests: [ControlRequest] { lock.withLock { _requests } }
     var exchanges: [PlaybackControlReporter.Exchange] { lock.withLock { _exchanges } }
@@ -175,32 +174,30 @@ private final class Harness: @unchecked Sendable {
                 return after
             }
             after?()
-            gate.signal()
         }
     }
 
-    /// Wait for `count` exchange outcomes rather than sleeping a guessed
-    /// interval, so a slow machine cannot turn a passing test into a flake.
-    ///
-    /// The gate counts every exchange the reporter has ever made, so this is
-    /// only sound for "at least this many have happened by now". A test that
-    /// needs "something happened *after* this moment" must poll a predicate
-    /// instead — see `waitUntil`.
-    func awaitExchanges(_ count: Int, timeout: TimeInterval = 5) -> Bool {
-        for _ in 0..<count where gate.wait(timeout: .now() + timeout) == .timedOut {
-            return false
+    /// Wait for `count` exchange outcomes without blocking Swift's cooperative
+    /// executor. The reporter pump is an actor task; blocking every parallel
+    /// XCTest worker on a semaphore can starve that task until the assertion
+    /// times out, then make direct request indexing crash the whole test host.
+    func awaitExchanges(_ count: Int, timeout: TimeInterval = 5) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if lock.withLock({ _exchanges.count >= count }) { return true }
+            try? await Task.sleep(nanoseconds: 5_000_000)
         }
-        return true
+        return lock.withLock { _exchanges.count >= count }
     }
 
     /// Poll until the reporter has done something a test can name, rather than
     /// counting exchanges it did not ask for. Bounded, so a genuine failure
     /// fails rather than hanging.
-    func waitUntil(timeout: TimeInterval = 5, _ condition: () -> Bool) -> Bool {
+    func waitUntil(timeout: TimeInterval = 5, _ condition: () -> Bool) async -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if condition() { return true }
-            usleep(5_000)
+            try? await Task.sleep(nanoseconds: 5_000_000)
         }
         return condition()
     }
@@ -212,6 +209,17 @@ private extension NSLock {
         defer { unlock() }
         return body()
     }
+}
+
+/// XCTest's assertion parameters are autoclosures and cannot contain `await`.
+/// Evaluate the asynchronous observation first, then hand the value to XCTest.
+private func assertAsyncResult(
+    _ value: Bool,
+    _ message: String = "",
+    file: StaticString = #filePath,
+    line: UInt = #line
+) {
+    XCTAssertTrue(value, message, file: file, line: line)
 }
 
 private func makeReporter(
@@ -254,7 +262,7 @@ final class PlaybackControlReporterTests: XCTestCase {
             }
             let reporter = try XCTUnwrap(makeReporter(harness))
             await reporter.start()
-            XCTAssertTrue(harness.awaitExchanges(1))
+            assertAsyncResult(await harness.awaitExchanges(1))
             if transition != "callback" {
                 var stopped = await reporter.stopped
                 XCTAssertTrue(stopped)
@@ -267,7 +275,7 @@ final class PlaybackControlReporterTests: XCTestCase {
                 else { await reporter.notifyUrgently() }
             }
             let permanent = ["explicit", "end", "protocol"].contains(transition)
-            if !permanent { XCTAssertTrue(harness.waitUntil { harness.requests.count >= 2 }, transition) }
+            if !permanent { assertAsyncResult(await harness.waitUntil { harness.requests.count >= 2 }, transition) }
             let stopped = await reporter.stopped
             XCTAssertEqual(stopped, permanent, transition)
             await reporter.stop()
@@ -285,7 +293,7 @@ final class PlaybackControlReporterTests: XCTestCase {
             harness.enqueue([.failure(ControlTransportError(status: 409, code: "owner_changed",
                 generation: nextGeneration, controlEpoch: 8))])
             await reporter.start()
-            XCTAssertTrue(harness.awaitExchanges(1))
+            assertAsyncResult(await harness.awaitExchanges(1))
             let stopped = await reporter.stopped
             XCTAssertFalse(stopped, "a source publication gap is not a terminal protocol error")
             XCTAssertEqual(harness.requests.count, 1)
@@ -299,7 +307,7 @@ final class PlaybackControlReporterTests: XCTestCase {
                 XCTAssertEqual(harness.requests.count, 1, "old reporter cannot borrow B's body")
             } else {
                 XCTAssertNotNil(floor)
-                XCTAssertTrue(harness.waitUntil { harness.requests.count >= 2 })
+                assertAsyncResult(await harness.waitUntil { harness.requests.count >= 2 })
                 XCTAssertEqual(harness.requests[1].generation, nextGeneration)
                 XCTAssertEqual(harness.requests[1].controlEpoch, 8)
                 XCTAssertEqual(harness.requests[1].sequence, 1)
@@ -321,7 +329,7 @@ final class PlaybackControlReporterTests: XCTestCase {
             await reporter.notify(captured)
             await reporter.notify(older) // delayed actor hop from the earlier source turn
             await reporter.start()
-            XCTAssertTrue(harness.awaitExchanges(1))
+            assertAsyncResult(await harness.awaitExchanges(1))
             await reporter.stop()
             XCTAssertEqual(harness.requests.first?.positionMs, 9_000)
             XCTAssertEqual(harness.exchanges.first?.capture, captured)
@@ -358,7 +366,7 @@ final class PlaybackControlReporterTests: XCTestCase {
         // Source changes after first failure, before the exact retry.
         await reporter.notify(captured)
         await reporter.start()
-        XCTAssertTrue(harness.awaitExchanges(2))
+        assertAsyncResult(await harness.awaitExchanges(2))
         await reporter.stop()
         XCTAssertEqual(harness.requests[0], harness.requests[1])
         XCTAssertEqual(harness.exchanges[0].capture, captured)
@@ -380,7 +388,7 @@ final class PlaybackControlReporterTests: XCTestCase {
         ))])
         await reporter.notify(captured)
         await reporter.start()
-        XCTAssertTrue(harness.awaitExchanges(1))
+        assertAsyncResult(await harness.awaitExchanges(1))
         let stopped = await reporter.stopped
         XCTAssertFalse(stopped)
         await reporter.stop()
@@ -484,7 +492,7 @@ final class PlaybackControlReporterTests: XCTestCase {
         )))])
         let reporter = try XCTUnwrap(makeReporter(harness))
         await reporter.start()
-        XCTAssertTrue(harness.awaitExchanges(1))
+        assertAsyncResult(await harness.awaitExchanges(1))
         await reporter.stop()
 
         let request = try XCTUnwrap(harness.requests.first)
@@ -514,7 +522,7 @@ final class PlaybackControlReporterTests: XCTestCase {
         harness.holdExchanges()
         let reporter = try XCTUnwrap(makeReporter(harness))
         await reporter.start()
-        XCTAssertTrue(harness.waitUntil { harness.requests.count == 1 })
+        assertAsyncResult(await harness.waitUntil { harness.requests.count == 1 })
 
         harness.setSnapshot(snapshot(position: 9_000, render: .seeking))
         let floor = await reporter.notifyUrgently()
@@ -527,11 +535,11 @@ final class PlaybackControlReporterTests: XCTestCase {
         let harness = Harness()
         let reporter = try XCTUnwrap(makeReporter(harness))
         await reporter.start()
-        XCTAssertTrue(harness.waitUntil { harness.requests.count >= 4 })
+        assertAsyncResult(await harness.waitUntil { harness.requests.count >= 4 })
         let beforeChange = harness.requests
         harness.setSnapshot(snapshot(position: 3_000, maxHeight: 1_080))
         await reporter.notify()
-        let resent = harness.waitUntil {
+        let resent = await harness.waitUntil {
             harness.requests.contains { $0.capabilities == capabilities(maxHeight: 1_080) }
         }
         await reporter.stop()
@@ -561,11 +569,11 @@ final class PlaybackControlReporterTests: XCTestCase {
         let reporter = try XCTUnwrap(makeReporter(harness))
         await reporter.start()
         for position in [2_000, 3_000, 4_000] {
-            XCTAssertTrue(harness.awaitExchanges(1))
+            assertAsyncResult(await harness.awaitExchanges(1))
             harness.setSnapshot(snapshot(position: position))
             await reporter.notify()
         }
-        XCTAssertTrue(harness.awaitExchanges(1))
+        assertAsyncResult(await harness.awaitExchanges(1))
         await reporter.stop()
 
         let sequences = harness.requests.map(\.sequence)
@@ -601,7 +609,7 @@ final class PlaybackControlReporterTests: XCTestCase {
         ))])
         let reporter = try XCTUnwrap(makeReporter(harness))
         await reporter.start()
-        XCTAssertTrue(harness.awaitExchanges(1))
+        assertAsyncResult(await harness.awaitExchanges(1))
         try await Task.sleep(nanoseconds: 150_000_000)
         let stopped = await reporter.stopped
         XCTAssertTrue(stopped)
@@ -725,7 +733,7 @@ final class PlaybackControlReporterTests: XCTestCase {
         ))])
         let reporter = try XCTUnwrap(makeReporter(harness))
         await reporter.start()
-        XCTAssertTrue(harness.awaitExchanges(1))
+        assertAsyncResult(await harness.awaitExchanges(1))
         let stopped = await reporter.stopped
         XCTAssertFalse(stopped, "a whole prepare is not a protocol violation")
         let action = try XCTUnwrap(harness.exchanges.first?.response?.action)
@@ -755,7 +763,7 @@ final class PlaybackControlReporterTests: XCTestCase {
         harness.setSnapshot(carrying)
         let reporter = try XCTUnwrap(makeReporter(harness))
         await reporter.start()
-        XCTAssertTrue(harness.awaitExchanges(1))
+        assertAsyncResult(await harness.awaitExchanges(1))
         let body = try XCTUnwrap(
             try JSONSerialization.jsonObject(
                 with: PlaybackControl.encoder.encode(try XCTUnwrap(harness.requests.first))
@@ -774,7 +782,7 @@ final class PlaybackControlReporterTests: XCTestCase {
         moved.acknowledgement = owed
         harness.setSnapshot(moved)
         await reporter.notify()
-        XCTAssertTrue(harness.waitUntil { harness.requests.contains { $0.positionMs == 9_000 } })
+        assertAsyncResult(await harness.waitUntil { harness.requests.contains { $0.positionMs == 9_000 } })
         await reporter.stop()
         // Every request, not just the next one: the pump's own cadence sends
         // more than the test asks for, and a settlement that survived only the
@@ -811,16 +819,21 @@ final class PlaybackControlReporterTests: XCTestCase {
             ),
             sourceRevision: 1
         ))
-        XCTAssertTrue(harness.awaitExchanges(3))
-        XCTAssertEqual(harness.requests[0].demand, .active)
+        assertAsyncResult(await harness.awaitExchanges(3))
+        let requests = harness.requests
+        guard requests.count >= 3 else {
+            XCTFail("finalization did not send commit, retry, and end")
+            return
+        }
+        XCTAssertEqual(requests[0].demand, .active)
         XCTAssertGreaterThanOrEqual(
-            harness.requests[0].playbackRate,
+            requests[0].playbackRate,
             PlaybackControlMapping.minimumActiveRate
         )
-        XCTAssertEqual(harness.requests[0].acknowledgement, committed)
-        XCTAssertEqual(harness.requests[1], harness.requests[0], "a dropped commit retries exactly")
-        XCTAssertEqual(harness.requests[2].demand, .end)
-        XCTAssertNil(harness.requests[2].acknowledgement)
+        XCTAssertEqual(requests[0].acknowledgement, committed)
+        XCTAssertEqual(requests[1], requests[0], "a dropped commit retries exactly")
+        XCTAssertEqual(requests[2].demand, .end)
+        XCTAssertNil(requests[2].acknowledgement)
         // An abort may end the session in the same breath.
         let harness2 = Harness()
         var aborting = snapshot(demand: .end)
@@ -831,7 +844,7 @@ final class PlaybackControlReporterTests: XCTestCase {
         harness2.setSnapshot(aborting)
         let reporter2 = try XCTUnwrap(makeReporter(harness2))
         await reporter2.start()
-        XCTAssertTrue(harness2.awaitExchanges(1))
+        assertAsyncResult(await harness2.awaitExchanges(1))
         XCTAssertEqual(harness2.requests.first?.acknowledgement, aborted)
         await reporter2.stop()
     }
@@ -845,7 +858,8 @@ final class PlaybackControlReporterTests: XCTestCase {
             committedMediaOriginMs: 0,
             firstFrameUnixMs: 1_788_000_000_000
         )
-        harness.enqueue((0..<8).map { _ in
+        let failuresBeyondDeadline = 32
+        harness.enqueue((0..<failuresBeyondDeadline).map { _ in
             .failure(ControlTransportError(status: nil, code: nil))
         })
         let reporter = try XCTUnwrap(makeReporter(harness))
@@ -857,8 +871,8 @@ final class PlaybackControlReporterTests: XCTestCase {
             ),
             sourceRevision: 1
         ))
-        XCTAssertTrue(harness.waitUntil { !harness.requests.isEmpty })
-        XCTAssertTrue(harness.waitUntil {
+        assertAsyncResult(await harness.waitUntil { !harness.requests.isEmpty })
+        assertAsyncResult(await harness.waitUntil {
             harness.pacingSleeps.reduce(0, +)
                 >= PlaybackControlReporter.finalizationDeadlineMs
         })
@@ -867,7 +881,11 @@ final class PlaybackControlReporterTests: XCTestCase {
         XCTAssertEqual(status["in_flight"], 0)
         XCTAssertEqual(status["pending"], 0)
         XCTAssertEqual(status["retrying"], 0)
-        XCTAssertLessThan(harness.requests.count, 8, "the bounded finisher stops retrying")
+        XCTAssertLessThan(
+            harness.requests.count,
+            failuresBeyondDeadline,
+            "the bounded finisher stops retrying"
+        )
     }
 
     func testATerminalVerdictEndsReportingWithoutAProtocolError() async throws {
@@ -881,7 +899,7 @@ final class PlaybackControlReporterTests: XCTestCase {
         ))])
         let reporter = try XCTUnwrap(makeReporter(harness))
         await reporter.start()
-        XCTAssertTrue(harness.awaitExchanges(1))
+        assertAsyncResult(await harness.awaitExchanges(1))
         try await Task.sleep(nanoseconds: 150_000_000)
         let stopped = await reporter.stopped
         XCTAssertTrue(stopped, "a terminal verdict ends reporting")
@@ -921,7 +939,7 @@ final class PlaybackControlReporterTests: XCTestCase {
         ))])
         let reporter = try XCTUnwrap(makeReporter(harness))
         await reporter.start()
-        XCTAssertTrue(harness.awaitExchanges(1))
+        assertAsyncResult(await harness.awaitExchanges(1))
         try await Task.sleep(nanoseconds: 150_000_000)
         let stopped = await reporter.stopped
         XCTAssertFalse(stopped, "a retry is not a reason to stop reporting")
@@ -954,7 +972,7 @@ final class PlaybackControlReporterTests: XCTestCase {
         ))])
         let reporter = try XCTUnwrap(makeReporter(harness))
         await reporter.start()
-        XCTAssertTrue(harness.awaitExchanges(1))
+        assertAsyncResult(await harness.awaitExchanges(1))
         try await Task.sleep(nanoseconds: 150_000_000)
         let stopped = await reporter.stopped
         XCTAssertFalse(stopped, "a hold is not a reason to stop reporting")
@@ -975,7 +993,7 @@ final class PlaybackControlReporterTests: XCTestCase {
         ))])
         let reporter = try XCTUnwrap(makeReporter(harness))
         await reporter.start()
-        XCTAssertTrue(harness.awaitExchanges(1))
+        assertAsyncResult(await harness.awaitExchanges(1))
         try await Task.sleep(nanoseconds: 150_000_000)
         let stopped = await reporter.stopped
         XCTAssertFalse(stopped)
@@ -987,7 +1005,7 @@ final class PlaybackControlReporterTests: XCTestCase {
         harness.enqueue([.success(response)])
         let reporter = try XCTUnwrap(makeReporter(harness))
         await reporter.start()
-        XCTAssertTrue(harness.awaitExchanges(1))
+        assertAsyncResult(await harness.awaitExchanges(1))
         try await Task.sleep(nanoseconds: 150_000_000)
         let stopped = await reporter.stopped
         XCTAssertTrue(stopped, "an unbindable response stops the reporter")
@@ -1011,7 +1029,7 @@ final class PlaybackControlReporterTests: XCTestCase {
         ])
         let reporter = try XCTUnwrap(makeReporter(harness))
         await reporter.start()
-        XCTAssertTrue(harness.awaitExchanges(2))
+        assertAsyncResult(await harness.awaitExchanges(2))
         await reporter.stop()
 
         let requests = harness.requests
@@ -1035,7 +1053,7 @@ final class PlaybackControlReporterTests: XCTestCase {
         ])
         let reporter = try XCTUnwrap(makeReporter(harness))
         await reporter.start()
-        XCTAssertTrue(harness.awaitExchanges(2))
+        assertAsyncResult(await harness.awaitExchanges(2))
         let stopped = await reporter.stopped
         XCTAssertFalse(stopped)
         await reporter.stop()
@@ -1050,7 +1068,7 @@ final class PlaybackControlReporterTests: XCTestCase {
         harness.enqueue([.failure(ControlTransportError(status: 403, code: "forbidden"))])
         let reporter = try XCTUnwrap(makeReporter(harness))
         await reporter.start()
-        XCTAssertTrue(harness.awaitExchanges(1))
+        assertAsyncResult(await harness.awaitExchanges(1))
         try await Task.sleep(nanoseconds: 150_000_000)
         let stopped = await reporter.stopped
         XCTAssertTrue(stopped)
@@ -1073,7 +1091,7 @@ final class PlaybackControlReporterTests: XCTestCase {
         ])
         let reporter = try XCTUnwrap(makeReporter(harness))
         await reporter.start()
-        XCTAssertTrue(harness.awaitExchanges(2))
+        assertAsyncResult(await harness.awaitExchanges(2))
         await reporter.stop()
         XCTAssertTrue(
             harness.pacingSleeps.contains(4_000),
@@ -1095,7 +1113,7 @@ final class PlaybackControlReporterTests: XCTestCase {
         ])
         let reporter = try XCTUnwrap(makeReporter(harness))
         await reporter.start()
-        XCTAssertTrue(harness.awaitExchanges(2))
+        assertAsyncResult(await harness.awaitExchanges(2))
         await reporter.stop()
         XCTAssertTrue(harness.pacingSleeps.contains(500), "\(harness.pacingSleeps)")
     }
@@ -1116,7 +1134,7 @@ final class PlaybackControlReporterTests: XCTestCase {
         ])
         let reporter = try XCTUnwrap(makeReporter(harness))
         await reporter.start()
-        XCTAssertTrue(harness.awaitExchanges(2))
+        assertAsyncResult(await harness.awaitExchanges(2))
         await reporter.stop()
         XCTAssertFalse(harness.pacingSleeps.contains(999_999))
         XCTAssertTrue(harness.pacingSleeps.contains(500), "\(harness.pacingSleeps)")
@@ -1128,7 +1146,7 @@ final class PlaybackControlReporterTests: XCTestCase {
         harness.fireDeadlines()
         let reporter = try XCTUnwrap(makeReporter(harness))
         await reporter.start()
-        XCTAssertTrue(harness.awaitExchanges(2))
+        assertAsyncResult(await harness.awaitExchanges(2))
         await reporter.stop()
         XCTAssertEqual(harness.exchanges.first?.failure, "transport:408:exchange_deadline")
         XCTAssertGreaterThanOrEqual(
@@ -1163,7 +1181,7 @@ final class PlaybackControlReporterTests: XCTestCase {
         ])
         let reporter = try XCTUnwrap(makeReporter(harness))
         await reporter.start()
-        XCTAssertTrue(harness.awaitExchanges(2))
+        assertAsyncResult(await harness.awaitExchanges(2))
         await reporter.stop()
 
         let requests = harness.requests
@@ -1190,7 +1208,7 @@ final class PlaybackControlReporterTests: XCTestCase {
         ])
         let reporter = try XCTUnwrap(makeReporter(harness))
         await reporter.start()
-        XCTAssertTrue(harness.awaitExchanges(1))
+        assertAsyncResult(await harness.awaitExchanges(1))
         try await Task.sleep(nanoseconds: 150_000_000)
         let stopped = await reporter.stopped
         XCTAssertTrue(stopped, "a 409 that names the current owner is not a handoff")
@@ -1208,7 +1226,7 @@ final class PlaybackControlReporterTests: XCTestCase {
         ])
         let reporter = try XCTUnwrap(makeReporter(harness))
         await reporter.start()
-        XCTAssertTrue(harness.awaitExchanges(1))
+        assertAsyncResult(await harness.awaitExchanges(1))
         try await Task.sleep(nanoseconds: 150_000_000)
         let current = await reporter.bootstrap
         XCTAssertEqual(current.generation, bootstrap().generation)

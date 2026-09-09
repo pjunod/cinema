@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 import tempfile
@@ -387,9 +388,21 @@ class HistoryAuditCase(unittest.TestCase):
 
     @staticmethod
     def git(root: Path, *args: str) -> str:
+        env = os.environ.copy()
+        for name in (
+            "GIT_COMMON_DIR",
+            "GIT_DIR",
+            "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_PREFIX",
+            "GIT_SHALLOW_FILE",
+            "GIT_WORK_TREE",
+        ):
+            env.pop(name, None)
         return subprocess.run(
             ["git", *args], cwd=root, check=True, text=True,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=env,
         ).stdout.strip()
 
     def pending_merge(self, root: Path, *, client: bool = False):
