@@ -926,13 +926,11 @@ Path(sys.argv[2]).write_text("survived", encoding="utf-8")
                         leader_identity = validation_runner._ProcessIdentity(
                             int(leader_pid), f"linux-start-ticks:{leader_started}"
                         )
-                        # killpg(SIGKILL) queues an unmaskable signal but Linux
-                        # may still report the task as runnable until the
-                        # scheduler delivers it. Give that already-signalled
-                        # identity a bounded settlement window; a genuinely
-                        # abandoned child remains live long enough to write
-                        # `marker` and fail the assertions below.
-                        settlement_deadline = time.monotonic() + 2
+                        # Reaping the owned shell does not synchronously prove
+                        # that the scheduler has delivered the group SIGKILL
+                        # to every child. Observe that bounded delivery before
+                        # asserting the fallback left no runnable identity.
+                        observation_deadline = time.monotonic() + 2
                         while True:
                             observed_child = (
                                 validation_runner._read_linux_process_record(
@@ -943,7 +941,7 @@ Path(sys.argv[2]).write_text("survived", encoding="utf-8")
                                 observed_child is None
                                 or observed_child.identity != child_identity
                                 or observed_child.state.startswith("Z")
-                                or time.monotonic() >= settlement_deadline
+                                or time.monotonic() >= observation_deadline
                             ):
                                 break
                             time.sleep(0.01)

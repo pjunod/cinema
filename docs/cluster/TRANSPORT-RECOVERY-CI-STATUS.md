@@ -1,6 +1,6 @@
 # Transport recovery CI — implementation status and evidence
 
-**Status:** M6 qualification active; daemon timing failure isolated and hardened · **Owner:** Codex · **Updated:** 2026-09-09
+**Status:** M6 fixed candidate locally verified; final qualification next · **Owner:** Codex · **Updated:** 2026-09-09
 
 Companion to
 [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md) (how this effort reaches
@@ -120,7 +120,7 @@ repository-owned bounded pruner reduced the exact cache root from 35 GB to
 24 GB and restored 32 GB free without deleting a source checkout or touching
 an active runner job.
 
-Merge `f16381f8` integrates that current `main` into the reviewed effort.
+Merge `f16381f8` integrated the then-current `main` into the reviewed effort.
 The conflict resolution takes main's newer Apple finalization ownership,
 Store-fixture downgrade helpers, and VOD fixture sampling intact; the effort's
 transport recovery implementation and production trim-before-grid seek fix
@@ -148,6 +148,21 @@ then correctly rejected the old structural golden. The intended drift is
 limited to the new Developer settings readiness and advisory-enable cards
 across three layouts and two viewports; the portable golden has been regenerated
 from the exact candidate.
+
+The fixed promotion candidate now also integrates current `main`
+`01a8976c`. That base contributes the independently merged Fontconfig probe
+budget, scheduler-safe validation cleanup assertion, and prepared-handoff web
+golden. The web golden is byte-for-byte identical to the one regenerated from
+this effort's exact candidate. The single validation-test merge conflict was
+wording and variable naming around the same two-second bounded observation;
+the resolution takes current main's version while retaining the effort's
+cleanup implementation and coverage. Exact merged-tree verification is in
+complete: Rust 1.97.1 formatting, the `plurxd` all-target check, Clippy with
+warnings denied, the hardened two-voter Activity regression, and both
+Fontconfig regressions pass from a credential-free archive. The focused local
+validation and web-contract suite passes 145 tests with one platform skip, and
+all 67 validation-runner tests pass on Linux. This is the candidate for the
+final full qualification push.
 
 ## Milestones — evidence closes the checkbox
 
