@@ -1,6 +1,6 @@
 # Transport recovery CI — implementation status and evidence
 
-**Status:** M6 current `main` integrated and focused-verified; full PR qualification next · **Owner:** Codex · **Updated:** 2026-09-09
+**Status:** M6 qualification active; daemon timing failure isolated and hardened · **Owner:** Codex · **Updated:** 2026-09-09
 
 Companion to
 [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md) (how this effort reaches
@@ -120,15 +120,29 @@ repository-owned bounded pruner reduced the exact cache root from 35 GB to
 24 GB and restored 32 GB free without deleting a source checkout or touching
 an active runner job.
 
-Merge `e9e40c8f` now integrates that current `main` into the reviewed effort.
+Merge `f16381f8` integrates that current `main` into the reviewed effort.
 The conflict resolution takes main's newer Apple finalization ownership,
 Store-fixture downgrade helpers, and VOD fixture sampling intact; the effort's
 transport recovery implementation and production trim-before-grid seek fix
 remain. Exact archived source on Rust 1.97.1 passes formatting, the `plurxd`
 all-target check, both Store migrations that failed on the stale base, and the
-real-FFmpeg VFR and bitmap restart regressions. The next push is the frozen
-candidate for the one current-tree PR qualification; no second adversarial
-review is planned or required.
+real-FFmpeg VFR and bitmap restart regressions. The same integrated tree passes
+all 198 validation and 294 operations tests. Run
+[#1317](http://192.168.4.7:3000/noirr/plurx/actions/runs/1317) reached the full
+matrix after its one-line history-anchor correction. One daemon contract then
+missed node B's exact two-second Activity deadline during a shared-runner load
+spike; the unchanged binary passed immediately on the same now-idle runner.
+The regression now retries a whole expired privacy wave inside a bounded
+window while requiring exactly one physical peer request and both caller-
+specific privacy projections on every attempt. It does not change the product
+deadline or accept a partial response. An exact-source focused rerun then
+exposed the earlier prerequisite: a newly joined voter can correctly refuse
+HLS for several seconds while its serving-authority fence refreshes. The test
+now retries only that explicit refusal inside a bounded window; every other
+HLS error still fails immediately. Its outer setup-client ceiling is now 30
+seconds so a recovering replicated Store cannot pre-empt those more specific
+contracts; the exact two-second peer deadline and five-second hung-peer wall
+ceiling remain unchanged. No second adversarial review is planned or required.
 
 ## Milestones — evidence closes the checkbox
 

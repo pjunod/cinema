@@ -600,7 +600,10 @@ async fn node_a_coalesces_activity_reads_and_reports_peer_failures_truthfully() 
 
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(2))
-        .timeout(Duration::from_secs(8))
+        // This is only the harness ceiling for setup and outer API calls. The
+        // product's peer fetch remains exactly two seconds, and the explicit
+        // hung-peer assertion below still requires the response inside five.
+        .timeout(Duration::from_secs(30))
         .build()
         .expect("test client");
     let a_http_port = a_http.port;
@@ -736,24 +739,38 @@ async fn node_a_coalesces_activity_reads_and_reports_peer_failures_truthfully() 
     // waiting on node B alone makes scheduler timing decide the test verdict.
     wait_for_fragment_index(&mut node_a, &mut node_b).await;
 
-    let hls = client
-        .post(format!("{b_base}/api/v1/files/{file_id}/hls/sessions"))
-        .bearer_auth(&token)
-        .json(&json!({"playback_id":"cluster-activity-proof","copy":true}))
-        .send()
-        .await
-        .expect("start node B HLS session");
-    let hls_status = hls.status();
-    let hls_body = hls
-        .text()
-        .await
-        .unwrap_or_else(|error| format!("<cannot read response body: {error}>"));
-    assert!(
-        hls_status.is_success(),
-        "HLS start failed: {hls_status}: {hls_body}\nnode A log:\n{}\nnode B log:\n{}",
-        node_a.diagnostics(),
-        node_b.diagnostics(),
-    );
+    // The joined voter has proved its replicated file row and index, but its
+    // short-lived serving fence may still be refreshing after quorum startup.
+    // That explicit refusal is correct product behavior, so wait for the
+    // prerequisite instead of making scheduler timing decide this transport
+    // test. Any other response still fails immediately.
+    let hls_deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let hls = client
+            .post(format!("{b_base}/api/v1/files/{file_id}/hls/sessions"))
+            .bearer_auth(&token)
+            .json(&json!({"playback_id":"cluster-activity-proof","copy":true}))
+            .send()
+            .await
+            .expect("start node B HLS session");
+        let hls_status = hls.status();
+        let hls_body = hls
+            .text()
+            .await
+            .unwrap_or_else(|error| format!("<cannot read response body: {error}>"));
+        if hls_status.is_success() {
+            break;
+        }
+        let waiting_for_authority = hls_status == StatusCode::SERVICE_UNAVAILABLE
+            && hls_body.contains("local media worker has no serving authority");
+        assert!(
+            waiting_for_authority && Instant::now() < hls_deadline,
+            "HLS start failed: {hls_status}: {hls_body}\nnode A log:\n{}\nnode B log:\n{}",
+            node_a.diagnostics(),
+            node_b.diagnostics(),
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 
     let direct = client
         .get(format!(
@@ -877,27 +894,52 @@ async fn node_a_coalesces_activity_reads_and_reports_peer_failures_truthfully() 
         .to_owned();
     // Admin and household reads share one peer wave. The roster projection is
     // still made per caller, so sharing peer data cannot leak machine names.
-    tokio::time::sleep(Duration::from_millis(1_500)).await;
-    let before_privacy_wave = proxy.request_count();
-    let (admin_view, household_view) = tokio::join!(
-        activity_detail(&client, &a_base, &token),
-        activity_detail(&client, &a_base, &household),
-    );
-    assert_eq!(
-        proxy.request_count() - before_privacy_wave,
-        1,
-        "admin and household readers did not share one physical peer wave"
-    );
-    assert!(
-        admin_view.get("node_hostnames").is_some(),
-        "a clustered admin read always carries its per-request hostname projection"
-    );
-    // The field is present for every clustered admin read even when the roster
-    // named nobody, so its absence here is the gate and not an empty roster.
-    assert!(
-        household_view.get("node_hostnames").is_none(),
-        "a household member was sent the fleet's machine names"
-    );
+    // A healthy two-voter cluster can still miss one exact two-second peer
+    // deadline when a shared CI host is saturated. Retry the whole expired
+    // cache wave, never an individual response: every attempt must still make
+    // exactly one physical request and preserve the per-caller privacy gate.
+    let privacy_deadline = Instant::now() + Duration::from_secs(12);
+    let (admin_view, household_view) = loop {
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        let before_privacy_wave = proxy.request_count();
+        let (admin_view, household_view) = tokio::join!(
+            activity_detail(&client, &a_base, &token),
+            activity_detail(&client, &a_base, &household),
+        );
+        assert_eq!(
+            proxy.request_count() - before_privacy_wave,
+            1,
+            "admin and household readers did not share one physical peer wave"
+        );
+        assert!(
+            admin_view.get("node_hostnames").is_some(),
+            "a clustered admin read always carries its per-request hostname projection"
+        );
+        // The field is present for every clustered admin read even when the
+        // roster named nobody, so its absence here is the gate and not an
+        // empty roster.
+        assert!(
+            household_view.get("node_hostnames").is_none(),
+            "a household member was sent the fleet's machine names"
+        );
+        let has_remote_delivery = |detail: &Value| {
+            detail["deliveries"]
+                .as_array()
+                .expect("deliveries")
+                .iter()
+                .any(|delivery| delivery["node_id"] == remote_node)
+        };
+        if has_remote_delivery(&admin_view) && has_remote_delivery(&household_view) {
+            break (admin_view, household_view);
+        }
+        assert!(
+            Instant::now() < privacy_deadline,
+            "node B did not answer a bounded coalesced privacy wave:\nadmin: {admin_view}\n\
+             household: {household_view}\nnode A log:\n{}\nnode B log:\n{}",
+            node_a.diagnostics(),
+            node_b.diagnostics(),
+        );
+    };
     // …and both callers still see the streams themselves, so the gate narrows
     // one field rather than changing the shared peer snapshot.
     for (reader, detail) in [("admin", &admin_view), ("household", &household_view)] {
