@@ -1,6 +1,6 @@
 # Transport recovery CI — implementation status and evidence
 
-**Status:** M6 fixed candidate locally verified; final qualification next · **Owner:** Codex · **Updated:** 2026-09-09
+**Status:** M6 web fullscreen race fixed; exact browser verification active · **Owner:** Codex · **Updated:** 2026-09-09
 
 Companion to
 [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md) (how this effort reaches
@@ -163,6 +163,20 @@ Fontconfig regressions pass from a credential-free archive. The focused local
 validation and web-contract suite passes 145 tests with one platform skip, and
 all 67 validation-runner tests pass on Linux. This is the candidate for the
 final full qualification push.
+
+Final-candidate run
+[#1330](http://192.168.4.7:3000/noirr/plurx/actions/runs/1330) passed
+preflight, the 2,149-test Rust gate, the daemon regression, WAL recovery, both
+Android lanes, and both package architectures. Its web lane matched all 7,650
+golden facts across 78 captures with no console or page errors, then reproduced
+a loaded-browser race in the separate Live TV acceptance: Stop hid the
+fullscreen host while Chromium's asynchronous fullscreen-exit request was
+still unsettled. `stopLiveTv` now awaits presentation exit before detaching
+media or hiding the host, and the retained shipped-function test holds that
+promise open to prove teardown cannot overtake it. The failed candidate was
+cancelled before either 20-cycle recovery role started. Focused Live TV and
+web-contract tests pass; exact browser verification is active before the
+replacement qualification push.
 
 ## Milestones — evidence closes the checkbox
 
