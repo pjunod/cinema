@@ -371,11 +371,11 @@ class PlaybackControlMappingThroughputTest {
 
 class PlaybackControlPreparedCapabilityTest {
     @Test
-    fun `prepared replacement stays disabled on measured Android evidence`() {
+    fun `prepared replacement defaults on while Android evidence stays advisory`() {
         val capabilities = controlCapabilities(
             mapOf("vcodec" to "hevc,h264", "hdr" to "1", "dv" to "1"),
         )
-        assertFalse(capabilities.dualPlayerPreparation)
+        assertTrue(capabilities.dualPlayerPreparation)
     }
 }
 
@@ -424,43 +424,37 @@ class PlaybackControlMappingTotalityTest {
  */
 class ControlCapabilitiesPreparationTest {
     @Test
-    fun `a device that was never asked reports no dual player preparation`() {
-        // The default is the whole protection. M5.5 measured the capability per
-        // *device class*, not per platform: both phones passed same-codec dual
-        // preparation 20 of 20, and the tunneled Google TV failed that same
-        // case 0 of 3 — and same-codec is the only kind of change the server
-        // ever prepares. Protocol v1 has no way to say "yes on phones, no on
-        // tunneled televisions", so nothing may turn this on for a whole
-        // platform at once, and a default that drifted to `true` would
-        // authorise the server to prime a second pipeline on the one device
-        // with a measured hard failure. Changing it needs a deliberate edit to
-        // this test and a reason written next to it.
-        assertFalse(controlCapabilities(mapOf("vcodec" to "h264,hevc")).dualPlayerPreparation)
-        assertFalse(controlCapabilities(emptyMap()).dualPlayerPreparation)
+    fun `a device that was never asked defaults to dual player preparation`() {
+        // Default-on is a product choice, not a claim that final physical
+        // qualification is complete. The Developer screen keeps the measured
+        // device-class evidence visible and advisory, and explicit off below
+        // remains authoritative.
+        assertTrue(controlCapabilities(mapOf("vcodec" to "h264,hevc")).dualPlayerPreparation)
+        assertTrue(controlCapabilities(emptyMap()).dualPlayerPreparation)
     }
 
     @Test
-    fun `only the operator's own switch turns it on`() {
+    fun `the operator's own switch can turn it off`() {
         // Settings -> Developer, advisory and never gated: the person holding
         // the device can read what was measured and decide for their own
         // hardware, which is the narrowest true statement protocol v1 leaves
         // available. Nothing derives this from the device itself.
-        assertTrue(
+        assertFalse(
             controlCapabilities(
                 query = mapOf("vcodec" to "h264"),
-                preparedReplacementEnabled = true,
+                preparedReplacementEnabled = false,
             ).dualPlayerPreparation,
         )
     }
 
     @Test
     fun `the rest of the document is untouched by the switch`() {
-        val off = controlCapabilities(mapOf("vcodec" to "h264,av1", "hdr" to "1"))
-        val on = controlCapabilities(
+        val on = controlCapabilities(mapOf("vcodec" to "h264,av1", "hdr" to "1"))
+        val off = controlCapabilities(
             query = mapOf("vcodec" to "h264,av1", "hdr" to "1"),
-            preparedReplacementEnabled = true,
+            preparedReplacementEnabled = false,
         )
-        assertEquals(off.copy(dualPlayerPreparation = true), on)
+        assertEquals(on.copy(dualPlayerPreparation = false), off)
         assertTrue(off.isValid)
     }
 }

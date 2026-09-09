@@ -1947,13 +1947,15 @@ pub async fn create(
         incarnation_id.clone(),
     );
 
-    let advertise_control = state
-        .store
-        .get_setting(plurx_core::store::keys::PLAYBACK_CONTROL_PROTOCOL_V1)
-        .await
-        .map_err(|error| session_store_error("reading the control protocol gate", error))?
-        .as_deref()
-        == Some("1");
+    let advertise_control = plurx_core::store::stored_switch(
+        state
+            .store
+            .get_setting(plurx_core::store::keys::PLAYBACK_CONTROL_PROTOCOL_V1)
+            .await
+            .map_err(|error| session_store_error("reading the control protocol setting", error))?
+            .as_deref(),
+        true,
+    );
 
     let mut worker_request = request.clone();
     worker_request.request_id = Some(incarnation_id.clone());
@@ -21295,13 +21297,18 @@ mod tests {
     async fn overlapping_creates_with_control_off_settle_on_one_ask() {
         use plurx_core::playback::DesiredQuality;
         let (state, user, file_id) = servable_state().await;
+        state
+            .store
+            .put_setting(plurx_core::store::keys::PLAYBACK_CONTROL_PROTOCOL_V1, "0")
+            .await
+            .expect("turning the default-on control protocol off");
         assert_eq!(
             state
                 .store
                 .get_setting(plurx_core::store::keys::PLAYBACK_CONTROL_PROTOCOL_V1)
                 .await
                 .expect("reading the control setting"),
-            None,
+            Some("0".to_owned()),
             "the control protocol is off, which is the case under test"
         );
         let playback = "overlapping-player";

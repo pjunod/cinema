@@ -132,9 +132,10 @@ data class ViewerPreferences(
      * tells the server it can hold two live decode pipelines, which is what
      * lets a quality change hand over without an interruption.
      *
-     * Off by default, because the measurement behind it is per device class and
-     * the protocol field is per platform. The Developer screen lists what was
-     * measured and whether this device meets it; none of it blocks the switch.
+     * On by default. The measurement behind it is still per device class and
+     * the protocol field is per platform, so the Developer screen lists what
+     * was measured and whether this device meets it; none of it blocks or
+     * overrides the switch.
      */
-    val preparedReplacement: Boolean = false,
+    val preparedReplacement: Boolean = true,
 )

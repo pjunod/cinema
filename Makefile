@@ -39,6 +39,7 @@ fmt: ## Auto-format all code
 .PHONY: unit test test-full
 unit: spike-lock-check ## Run the fast Rust unit and SQLite contract lane
 	$(CARGO) test --workspace --exclude plurx-cluster-check --no-fail-fast
+	$(MAKE) vodencode-restart-check CARGO="$(CARGO_RAW)"
 
 test: unit ## Run the fast Rust test lane
 
@@ -46,6 +47,16 @@ test-full: ## Run every Rust test, including replicated and daemon contracts
 	$(CARGO) test --workspace \
 	  --features plurx-core/hiqlite-contract-tests,plurxd/cluster-integration-tests \
 	  --no-fail-fast
+	$(MAKE) vodencode-restart-check CARGO="$(CARGO_RAW)"
+
+.PHONY: vodencode-restart-check
+vodencode-restart-check: ## Run resource-heavy real-FFmpeg restart regressions serially
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  vodserve::tests::encoded_vod_vfr_input_is_sampled_on_the_declared_rational_grid \
+	  -- --exact --ignored --test-threads=1
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  vodserve::tests::encoded_vod_bitmap_burn_restores_cues_that_predate_video_seek_landing \
+	  -- --exact --ignored --test-threads=1
 
 ## ---- baseline gates ----------------------------------------------------
 
@@ -74,6 +85,7 @@ rust-check: fmt-check lint test ## Rust format, lint, and workspace tests
 .PHONY: ci-rust-gate
 ci-rust-gate: fmt-check spike-lock-check lint ## CI Rust gate: format, Clippy, and fast workspace tests
 	$(CARGO) test --workspace --locked --exclude plurx-cluster-check --no-fail-fast
+	$(MAKE) vodencode-restart-check CARGO="$(CARGO_RAW)"
 
 # The real mount-namespace exercises for scratch aliasing and mount points
 # inside scratch. They call `mount --bind`, so they need CAP_SYS_ADMIN and are

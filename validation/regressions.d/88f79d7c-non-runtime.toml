@@ -1,0 +1,8 @@
+version = 1
+
+[[coverage]]
+commits = ["88f79d7c"]
+points = []
+checks = []
+reason = "This commit only records the previous Live TV commit's validation mapping; it changes no runtime behavior. The audit classifies its subject as corrective because it contains the word evidence, so this entry records that the mapping itself is intentionally non-runtime work."
+ignore = true

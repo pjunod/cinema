@@ -3244,39 +3244,44 @@ fn spawn_live_ffmpeg(
 /// | 2048 KiB  | 5.55 s        |
 /// |  512 KiB  | 5.54 s        |
 ///
-/// The curve flattens at 2 MiB, so that is the value: below it there is
-/// nothing left to win, above it every byte is latency a viewer waits through.
-/// On that antenna's ~2.8 Mbps ATSC 3.0 mux the old 8 MiB was about 23 s of
-/// wall time on its own -- longer than the whole startup budget.
-///
-/// `-analyzeduration` stays as it was. It bounds the probe by STREAM time
-/// rather than by bytes, which is the bound that keeps meaning the same thing
-/// at any bitrate, and it is what still protects detection on a mux that
-/// genuinely needs looking at.
+/// With the one-second startup HLS cadence in place, a second production
+/// measurement at 1080p showed the remaining bounds were additive: 2 MiB / 5 s
+/// took 3.33 s on ATSC 1.0 and 9.99 s on ATSC 3.0, while 512 KiB / 1 s took
+/// 1.92 s and 6.47 s respectively. Both sources published a fetchable first
+/// playlist, so use the smaller pair already covered by the original sweep.
 fn live_probe_args() -> [&'static str; 4] {
-    ["-probesize", "2097152", "-analyzeduration", "5000000"]
+    ["-probesize", "524288", "-analyzeduration", "1000000"]
 }
 
 fn live_video_filter(encoder: Encoder, height: u16) -> String {
     let mut filter =
         format!("bwdif=mode=send_frame:parity=auto:deint=interlaced,scale=-2:{height}");
-    match encoder.filter_suffix() {
-        // VAAPI uploads as nv12 and QSV as a qsv surface, so both already pin
-        // a pixel format the encoder accepts.
-        Some(suffix) => {
-            filter.push(',');
-            filter.push_str(suffix);
+    match encoder {
+        // ATSC 3.0 HEVC Main 10 reaches this graph as P010. Uploading it
+        // unchanged creates a 10-bit QSV surface, which h264_qsv refuses.
+        // Convert to the live H.264 contract's 8-bit format before upload.
+        Encoder::Qsv => {
+            filter.push_str(",format=nv12,");
+            filter.push_str(
+                encoder
+                    .filter_suffix()
+                    .expect("QSV always has a hardware-upload suffix"),
+            );
         }
-        // Nothing else pins one, and the source's own format survives the
-        // chain. Live TV's output is SDR 8-bit H.264 by contract -- the
-        // software encoder pins `-profile:v high` -- so a 10-bit broadcast
-        // reaching libx264 as yuv420p10le makes x264 refuse the profile
-        // outright ("high profile doesn't support a bit depth of 10") and
-        // FFmpeg exit before it publishes anything. Measured against a real
-        // HDHomeRun FLEX 4K: every ATSC 3.0 HEVC Main 10 channel died this
-        // way. Converting here rather than widening the profile keeps one
-        // output contract for every client.
-        None => filter.push_str(",format=yuv420p"),
+        _ => match encoder.filter_suffix() {
+            // VAAPI already converts to nv12 before its hardware upload.
+            Some(suffix) => {
+                filter.push(',');
+                filter.push_str(suffix);
+            }
+            // Nothing else pins one, and the source's own format survives the
+            // chain. Live TV's output is SDR 8-bit H.264 by contract -- the
+            // software encoder pins `-profile:v high` -- so a 10-bit broadcast
+            // reaching libx264 as yuv420p10le makes x264 refuse the profile
+            // outright. Converting here keeps one output contract for every
+            // client.
+            None => filter.push_str(",format=yuv420p"),
+        },
     }
     filter
 }
@@ -5152,25 +5157,23 @@ exec /bin/cat >/dev/null
     /// publishes anything, so those channels were listed playable and never
     /// started.
     ///
-    /// The conversion belongs only on the paths that do not already pin a
-    /// format: VAAPI uploads nv12 and QSV uploads a qsv surface, and appending
-    /// a system-memory format conversion after a hardware upload would be a
-    /// different bug.
+    /// The conversion must happen before a hardware upload: VAAPI's suffix
+    /// already does that, while QSV needs the same nv12 conversion inserted
+    /// ahead of its qsv-surface upload.
     /// The probe budget is a measurement, so it does not get to drift back.
     ///
     /// A byte budget spent on a stream arriving at the broadcaster's rate is a
     /// time budget, and the old 8 MiB was about 23 s of wall time on a
-    /// 2.8 Mbps mux -- longer than the entire startup budget. 2 MiB is where
-    /// the measured curve flattened on a real FLEX 4K (7.06 s -> 5.55 s, with
-    /// 512 KiB no better at 5.54 s). The stream-time bound is asserted
-    /// alongside it because lowering the byte bound is only safe while the
-    /// bound that does not depend on bitrate is still there.
+    /// 2.8 Mbps mux -- longer than the entire startup budget. The first sweep
+    /// established 512 KiB as the smallest exercised byte bound; the later
+    /// 1080p sweep paired it with a one-second stream-time bound and published
+    /// both ATSC 1.0 and AC-4 ATSC 3.0 successfully.
     #[test]
     fn the_live_probe_budget_is_the_measured_one() {
         let args = live_probe_args();
         assert_eq!(
             args,
-            ["-probesize", "2097152", "-analyzeduration", "5000000"],
+            ["-probesize", "524288", "-analyzeduration", "1000000"],
             "the live probe budget was measured, not guessed: {args:?}"
         );
         let probesize: u64 = args[1].parse().expect("probesize is a byte count");
@@ -5220,11 +5223,18 @@ exec /bin/cat >/dev/null
             let suffix = encoder
                 .filter_suffix()
                 .expect("a hardware upload path pins its own format");
-            assert!(
-                filter.ends_with(suffix),
-                "{encoder:?} already uploads in its own format; a trailing \
-                 system-memory conversion would break the upload: {filter}"
-            );
+            if encoder == Encoder::Qsv {
+                assert!(
+                    filter.ends_with(&format!("format=nv12,{suffix}")),
+                    "QSV must convert 10-bit ATSC 3.0 to the 8-bit H.264 contract: {filter}"
+                );
+            } else {
+                assert!(
+                    filter.ends_with(suffix),
+                    "{encoder:?} already uploads in its own format; a trailing \
+                     system-memory conversion would break the upload: {filter}"
+                );
+            }
             assert!(
                 !filter.ends_with(",format=yuv420p"),
                 "{encoder:?} must not get the software conversion: {filter}"

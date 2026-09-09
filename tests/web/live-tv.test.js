@@ -33,14 +33,27 @@ function memoryStorage() {
 }
 
 async function main() {
-  await test("both guide views put the full-width player above a player-height guide", () => {
+  await test("both guide views put the compact player above a full-width player-height guide", () => {
     const list = shipped("liveTvListMarkup"), grid = shipped("liveTvGridMarkup");
-    assert.ok(list.indexOf('class="lt-stage"') < list.indexOf('class="lt-list"'));
-    assert.ok(grid.indexOf('class="lt-stage"') < grid.indexOf('class="lt-gridwrap"'));
+    const stage = shipped("liveTvStageMarkup"), now = shipped("liveTvNowBar");
+    assert.ok(list.indexOf("liveTvStageMarkup") < list.indexOf('class="lt-list"'));
+    assert.ok(grid.indexOf("liveTvStageMarkup") < grid.indexOf('class="lt-gridwrap"'));
     assert.doesNotMatch(grid, /grid-template-columns:minmax\(0,1fr\) 400px/);
+    assert.match(shell, /\.lt-stage-top\{[^}]*grid-template-columns:minmax\(0,2fr\) minmax\(240px,1fr\)/s);
+    assert.match(stage, /lt-showinfo|liveTvShowInfo/);
+    assert.match(stage, /lt-stage\$\{wide\?" wide":""\}/);
+    assert.match(now, /Larger/);
+    assert.match(now, /Smaller/);
+    for(const control of ["pauseLiveTv", "muteLiveTv", "toggleLiveTvPip", "fullscreenLiveTv", "stopLiveTv"])
+      assert.match(now, new RegExp(control));
     assert.match(shell, /\.lt-list\{[^}]*overflow:auto[^}]*height:var\(--live-tv-slot-height,64vh\)/s);
     assert.match(shell, /\.lt-gridwrap\{[^}]*height:var\(--live-tv-slot-height,64vh\)/s);
     assert.match(shipped("liveTvTrackSlot"), /--live-tv-slot-height/);
+  });
+
+  await test("an explicit stream failure is not rewritten as a lost start response", () => {
+    assert.match(shell, /LIVE_TV_DEFINITIVE_REFUSALS=new Set\(\[[^\]]*"stream_failed"/);
+    assert.match(shell, /LIVE_TV_DEFINITIVE_REFUSALS=new Set\(\[[^\]]*"codec_unsupported"/);
   });
 
   await test("mute stays an icon while its accessible action follows player state", () => {
