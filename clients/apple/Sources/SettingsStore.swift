@@ -162,10 +162,11 @@ struct SettingsStore {
         }
         nonmutating set { defaults.set(newValue.rawValue, forKey: Key.offlineNetwork) }
     }
-    /// Operator opt-in for the measured two-player handoff. Readiness shown in
-    /// Developer settings is advisory: none of it disables this preference.
+    /// Operator control for the measured two-player handoff. New installs
+    /// default on; readiness shown in Developer settings is advisory and none
+    /// of it disables or overrides this preference.
     var preparedHandoffEnabled: Bool {
-        get { defaults.object(forKey: Key.preparedHandoff) as? Bool ?? false }
+        get { defaults.object(forKey: Key.preparedHandoff) as? Bool ?? true }
         nonmutating set { defaults.set(newValue, forKey: Key.preparedHandoff) }
     }
 

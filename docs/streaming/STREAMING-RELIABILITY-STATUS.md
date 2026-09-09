@@ -11,8 +11,10 @@ with bounded finalizers and ordering/evidence regressions; per maintainer
 direction, that was the final review pass. Apple build 122 and Android build 76
 preserve release ordering over the Live TV build already on `main`.
 Post-merge CI is running on the merge commit; any source failure receives a
-new corrective pull request. Physical two-player evidence remains advisory and
-does not gate the enable control · **Updated:**
+new corrective pull request. The follow-up candidate defaults the server and
+all three clients on while preserving explicit opt-outs and the complete
+Developer requirements list. Physical two-player evidence remains advisory and
+does not gate or override the enabled default · **Updated:**
 2026-09-08 · **Effort:** `effort/streaming-reliability` (merged) · **Started:** 2026-09-04 ·
 **Effort fork:** `48615baf` · **Continuation merged to main:** `1f6d6645` via
 [#178](http://192.168.4.7:3000/noirr/plurx/pulls/178) on 2026-09-08 ·

@@ -644,8 +644,8 @@ async function main() {
     "PLAY_CAPS", "screen", "window", "playQuality", "selectedAudioIndex",
     "PERSISTENT_STALL_MS", "ENDED_SLACK_SEC", "Hls", "document",
     [
-      // `preparedHandoffEnabled` reads storage this scope does not have, and
-      // answers "off" when it cannot — which is what a private window does too.
+      // `preparedHandoffEnabled` reads storage this scope does not have and
+      // therefore uses the default-on value.
       shippedSource("streamHasVideo"),
       shippedSource("preparedHandoffEnabled"), shippedSource("preparedHandoffOffered"),
       shippedSource("pendingPlaybackControlAcknowledgement"),
@@ -3533,11 +3533,16 @@ async function main() {
       { innerHeight: 1080, devicePixelRatio: 1 },
       { getElementById: () => capabilityVideo },
     );
+    capabilities.player({ source: { video_codec: "h264" } });
+    assert.equal(capabilities.capabilities().dual_player_preparation, true,
+      "on by default for a fresh browser with presentation evidence");
+    capabilities.enable(false);
+    assert.equal(capabilities.enabled(), false,
+      "an explicit browser opt-out persists and remains authoritative");
     assert.equal(capabilities.capabilities().dual_player_preparation, false,
-      "off until an operator turns it on: the server stages nothing for a false");
+      "the explicit opt-out reaches the protocol capability");
     capabilities.enable(true);
     assert.equal(capabilities.enabled(), true);
-    capabilities.player({ source: { video_codec: "h264" } });
     assert.equal(capabilities.capabilities().dual_player_preparation, true,
       "an enabled video player with real presentation evidence offers preparation");
     delete capabilityVideo.requestVideoFrameCallback;

@@ -252,7 +252,7 @@ data class PlayerControlObservation(
  */
 fun controlCapabilities(
     query: Map<String, String>,
-    preparedReplacementEnabled: Boolean = false,
+    preparedReplacementEnabled: Boolean = true,
 ): DynamicCapabilities {
     val codecs = query["vcodec"].orEmpty().split(",")
         .mapNotNull { name ->
@@ -290,8 +290,7 @@ fun controlCapabilities(
         maxHeight = PlaybackControl.MAX_HEIGHT,
         codecs = codecs,
         dynamicRanges = ranges,
-        // Off unless the viewer turned it on in Settings → Developer, and off
-        // is what every device that touches nothing reports.
+        // On unless the viewer turns it off in Settings → Developer.
         //
         // This is a hardware claim — "this platform can hold two live decode
         // pipelines" — and M5.5 measured it per device class, not per platform.
@@ -309,8 +308,8 @@ fun controlCapabilities(
         // The Developer screen lists what M5.5 found and whether this device
         // meets it, advisory and never blocking, so an operator on a phone can
         // have the feature and an operator on a television can see exactly what
-        // they are taking on. The default is unchanged, which is what the
-        // frozen literal was protecting.
+        // they are taking on. The default is deliberately on; the evidence
+        // remains advisory, and an explicit operator choice still wins.
         dualPlayerPreparation = preparedReplacementEnabled,
     )
 }

@@ -291,7 +291,8 @@ test("Developer is where the switches that cost something live", () => {
   assert.match(html, /What must be true first, and whether it is/);
   assert.match(html, /The server primes the successor it stages/);
   assert.match(html, /503 media_owner_transition/);
-  assert.match(html, /nothing on this card prevents you enabling it now/);
+  assert.match(html, /no row on this card gates the enabled default/);
+  assert.match(html, /Enabled by default; the checks remain advisory/);
   // The card is advisory AND it carries the switch. Those are not in tension:
   // the list says what enabling costs and whether each part is true, and
   // nothing in it disables the control. A page that refuses to let an operator
@@ -320,7 +321,7 @@ test("Developer is where the switches that cost something live", () => {
   // The switch has to be wired to something. A control that renders and does
   // nothing is worse than no control: it reports a capability to the operator
   // that the server never hears about.
-  assert.match(html, /TOG:pdp\|[^|]*\|[^|]*\|checked=false\|onchange="setPreparedHandoff\(this\.checked\)"/,
+  assert.match(html, /TOG:pdp\|[^|]*\|[^|]*\|checked=true\|onchange="setPreparedHandoff\(this\.checked\)"/,
     "the prepared-handoff switch reflects the stored state and sets it");
   assert.match(html, /dual_player_preparation/,
     "…and says which field it sets, because that is the whole of Gate A");

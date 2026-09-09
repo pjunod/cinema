@@ -5687,12 +5687,14 @@ final class AppleClientTests: XCTestCase {
         }
     }
 
-    func testPreparedHandoffEnablementDefaultsOffAndPersists() throws {
+    func testPreparedHandoffEnablementDefaultsOnAndPersistsExplicitOff() throws {
         let suite = "plurx-prepared-handoff-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
         let fresh = SettingsStore(defaults: defaults)
-        XCTAssertFalse(fresh.preparedHandoffEnabled)
+        XCTAssertTrue(fresh.preparedHandoffEnabled)
+        fresh.preparedHandoffEnabled = false
+        XCTAssertFalse(SettingsStore(defaults: defaults).preparedHandoffEnabled)
         fresh.preparedHandoffEnabled = true
         XCTAssertTrue(SettingsStore(defaults: defaults).preparedHandoffEnabled)
     }

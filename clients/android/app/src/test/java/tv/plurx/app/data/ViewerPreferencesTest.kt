@@ -39,5 +39,6 @@ class ViewerPreferencesTest {
         assertEquals(SubtitleReadiness.OnDemand, defaults.subtitleReadiness)
         assertEquals(OfflineQuality.Standard, defaults.offlineQuality)
         assertEquals(OfflineNetwork.WifiOnly, defaults.offlineNetwork)
+        assertTrue(defaults.preparedReplacement)
     }
 }
