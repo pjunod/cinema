@@ -1132,7 +1132,12 @@ actor PlaybackControlReporter {
             return
         }
         retryRequest = pendingRequest
-        let fallback = retryableControl ? 500 : bootstrap.nextExchangeMs
+        // Ordinary transport loss follows the advertised cadence. Teardown is
+        // different: its immutable commit must retry before the bounded
+        // finalization deadline, which may be shorter than that cadence.
+        let fallback = retryableControl
+            ? 500
+            : (finishing ? PlaybackControl.minimumExchangeMs : bootstrap.nextExchangeMs)
         nextAllowedAt = now() + retryDelay(transport, fallback)
     }
 

@@ -6,6 +6,7 @@ import argparse
 from collections import Counter
 import dataclasses
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -292,6 +293,20 @@ def load_client_fixes(path: Path) -> ClientFixLedger:
 
 
 def _git(root: Path, *args: str) -> str:
+    env = os.environ.copy()
+    # Hooks export repository-local paths for the outer checkout. History may
+    # intentionally inspect a linked worktree or a fixture repository, where
+    # inheriting those paths makes Git read the outer index or object store.
+    for name in (
+        "GIT_COMMON_DIR",
+        "GIT_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_PREFIX",
+        "GIT_SHALLOW_FILE",
+        "GIT_WORK_TREE",
+    ):
+        env.pop(name, None)
     try:
         return subprocess.run(
             ("git", *args),
@@ -301,6 +316,7 @@ def _git(root: Path, *args: str) -> str:
             errors="replace",
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env=env,
         ).stdout
     except (OSError, subprocess.CalledProcessError) as exc:
         raise HistoryError(f"cannot inspect git history: {exc}") from exc
