@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["70b52826", "9d13445d", "07c9005a"]
+points = ["core.media", "persistence.upgrades", "cluster.auth"]
+checks = ["rust-gate", "rust-gate-ci", "database-upgrades", "cluster-auth"]
+reason = "The replicated migration tests bootstrap today's Hiqlite schema and then rewind it to the literal historical marker named by each case. `remove_hiqlite_schema_after_v27`, `remove_hiqlite_schema_after_v31`, and `remove_hiqlite_schema_after_v32` remove later triggers, columns, and tables in dependency-safe reverse order so an old marker never disguises a current shape. `replicated_v5_store_migrates_atomically_through_v11_on_daemon_open` retains the long-chain boundary, `replicated_analysis_schema_bootstrap_and_stale_marker_retries_are_idempotent` retains stale-marker replay, and `replicated_v32_store_migrates_the_producer_recovery_ledger_on_daemon_open` preserves the deliberate idempotent v32 table replay while removing only non-idempotent v33-v34 additions. The current-import fixtures write complete cache locations with explicit storage identity and publication generation, then increment that generation when changing identity; `populated_current_sqlite_import_preserves_new_durable_rows_only` therefore exercises import parity without relying on the legacy identity trigger to perform an update that the current publication fence correctly rejects."
