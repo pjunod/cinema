@@ -107,7 +107,7 @@ const HIQLITE_ELECTION_TIMEOUT_MIN_MS: u64 = 2_400;
 #[cfg(feature = "hiqlite-store")]
 const HIQLITE_ELECTION_TIMEOUT_MAX_MS: u64 = 4_000;
 /// Accepted end-to-end window for an exact-state write to survive leader loss.
-#[cfg(all(feature = "hiqlite-store", test))]
+#[cfg(feature = "hiqlite-store")]
 pub(crate) const REPLICATED_LEADER_RECOVERY_BUDGET: Duration = Duration::from_secs(16);
 /// Hiqlite Raft WAL segment size used by every plurx voter.
 ///
@@ -576,7 +576,7 @@ async fn join_fresh_store(config: &Config, daemon_lock: File) -> Result<Selected
         false,
     )
     .await?;
-    let store = HiqliteAuthStore::open(client.clone(), &active.join("telemetry.db")).await?;
+    let store = open_joined_store(client.clone(), &active.join("telemetry.db")).await?;
     verify_store_identity(&store, payload.cluster_id()).await?;
     let mut activation_marker = payload.activation_marker().clone();
     activation_marker.admitted_role = Some(role);
@@ -638,6 +638,66 @@ async fn join_fresh_store(config: &Config, daemon_lock: File) -> Result<Selected
     };
     finalize_pending_join_best_effort(config, &selected).await;
     Ok(selected)
+}
+
+/// Finish opening an admitted voter across the brief no-quorum window that
+/// adding the second vote can create.
+///
+/// `start_voter` has already proved committed membership and target-local
+/// catch-up. On a two-voter cluster, however, the coordinator and joiner must
+/// both be scheduled for the authority read in `HiqliteAuthStore::open` to
+/// succeed. A loaded shared runner can pause the coordinator past the store's
+/// ordinary five-second read-recovery budget. Keep the process and its caught-
+/// up Raft state alive, retry only that explicit quorum error, and retain the
+/// existing sixteen-second leader-recovery ceiling. Every compatibility,
+/// identity, schema, transport, and timeout failure remains terminal.
+#[cfg(feature = "hiqlite-store")]
+async fn open_joined_store(
+    client: Client,
+    telemetry_path: &Path,
+) -> Result<HiqliteAuthStore, StoreError> {
+    let deadline = tokio::time::Instant::now() + REPLICATED_LEADER_RECOVERY_BUDGET;
+    let mut attempt = 0_u32;
+    loop {
+        attempt += 1;
+        let opened = tokio::time::timeout_at(
+            deadline,
+            HiqliteAuthStore::open(client.clone(), telemetry_path),
+        )
+        .await;
+        match opened {
+            Ok(Ok(store)) => return Ok(store),
+            Ok(Err(error)) if join_store_open_quorum_unavailable(&error) => {
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(error);
+                }
+                tracing::warn!(
+                    attempt,
+                    budget_seconds = REPLICATED_LEADER_RECOVERY_BUDGET.as_secs(),
+                    %error,
+                    "joined voter lost startup quorum while opening the replicated store; retrying"
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Ok(Err(error)) => return Err(error),
+            Err(_) => {
+                return Err(StoreError::Database(format!(
+                    "joined voter did not regain startup quorum within {:?}",
+                    REPLICATED_LEADER_RECOVERY_BUDGET
+                )))
+            }
+        }
+    }
+}
+
+#[cfg(feature = "hiqlite-store")]
+fn join_store_open_quorum_unavailable(error: &StoreError) -> bool {
+    matches!(
+        error,
+        StoreError::Database(message)
+            if message.starts_with("CheckIsLeaderError:")
+                && message.contains("not enough for a quorum")
+    )
 }
 
 /// Publish a joined node's local role before making its active store
@@ -3456,6 +3516,27 @@ fn migration_io(action: &str, path: &Path, error: std::io::Error) -> StoreError 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "hiqlite-store")]
+    #[test]
+    fn joined_store_open_retries_only_the_explicit_quorum_gap() {
+        assert_eq!(REPLICATED_LEADER_RECOVERY_BUDGET, Duration::from_secs(16));
+        assert!(join_store_open_quorum_unavailable(&StoreError::Database(
+            "CheckIsLeaderError: not enough for a quorum; got:{1}".to_owned(),
+        )));
+
+        for terminal in [
+            StoreError::Database("replicated store operation timed out".to_owned()),
+            StoreError::Database("CheckIsLeaderError: leader changed".to_owned()),
+            StoreError::Database("not enough for a quorum".to_owned()),
+            StoreError::Migration("cluster compatibility marker is missing".to_owned()),
+        ] {
+            assert!(
+                !join_store_open_quorum_unavailable(&terminal),
+                "unexpected retry for {terminal}"
+            );
+        }
+    }
 
     #[cfg(feature = "hiqlite-store")]
     #[test]
