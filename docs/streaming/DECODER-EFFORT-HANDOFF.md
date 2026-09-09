@@ -171,8 +171,8 @@ These came from the original commission and hold for the rest of the effort.
   onto a head while that exact head is being qualified.
 - **Establish the pinned compile loop before Rust edits. Do not use CI as a
   compiler.** `rustup run 1.97.1 cargo …`, always.
-- Use `PLURX_EFFORT_COMMIT=1 git commit …` for effort task commits. Never use
-  that override for an ordinary direct-to-`main` change.
+- Commit normally on every branch. The hook runs lint and syntax only; run the
+  pinned compile loop and smallest focused regression before pushing.
 - If Paul is absent for a decision, choose the best engineering option and
   record the assumption in the status document and the handoff.
 

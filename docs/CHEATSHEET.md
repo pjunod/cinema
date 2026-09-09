@@ -41,6 +41,7 @@ make run        # serve http://localhost:32400
 make check      # history + operations + catalog + Rust gate (mandatory baseline)
 make history-check # every corrective commit has current evidence
 make operations-check # deploy, CI, container, and ship contracts
+make precommit-check # catalog/Rust lint + embedded JavaScript syntax; no tests
 make validate-help # explain profiles, normal workflow, and the UI golden
 make validate-plan # show what the staged diff selects without running checks
 make validate-staged # validate only the staged change (normal local loop)
@@ -54,11 +55,12 @@ make docker     # build the container image
 ```
 
 `make check` is the mandatory baseline inside every standard validation run.
-`make hooks` wires `make validate-staged` into pre-commit, so affected non-Rust
-surfaces receive their own checks too (bypass one commit with
-`git commit --no-verify`). [VALIDATION.md](VALIDATION.md) explains point
-selection, evidence, and why the UI “golden” is a reviewed structural answer
-key rather than a screenshot. Pushing a version tag
+`make hooks` wires `make precommit-check` into pre-commit. It runs catalog and
+Rust lint plus embedded JavaScript syntax, but no tests; run
+`make validate-staged` explicitly for affected behavior evidence. Bypass one
+hook run with `git commit --no-verify`. [VALIDATION.md](VALIDATION.md) explains
+point selection, evidence, and why the UI “golden” is a reviewed structural
+answer key rather than a screenshot. Pushing a version tag
 (`git tag v0.1.0 && git push --tags`) builds and publishes a multi-arch image
 to `192.168.4.7:3000/noirr/plurxd`.
 
@@ -70,7 +72,7 @@ in [DEVELOPMENT_PIPELINE.md](DEVELOPMENT_PIPELINE.md).
 git switch -c effort/<project>             # create the project's integration line
 git push -u origin effort/<project>         # task PRs use this as their base
 gh pr create --base effort/<project>        # compile-only Effort development gate
-PLURX_EFFORT_COMMIT=1 git commit             # compile-only local hook for an effort task
+git commit                                  # lint/syntax hook; no tests or effort compile
 gh pr create --base main                    # from effort/**: complete qualification
 # Promotion runs are retained; a moved effort head or main base cannot issue a receipt.
 # Freeze both refs, then inspect the exact receipt before merging.

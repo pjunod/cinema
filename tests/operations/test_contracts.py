@@ -1618,13 +1618,20 @@ assert.equal(context.ACT_TIMER, null);
         self.assertNotIn("playback-lab", effort)
         self.assertNotIn("docker/build-push-action", effort)
         self.assertIn("$(CARGO) check --workspace --locked --all-targets", makefile)
-        self.assertIn('"${PLURX_EFFORT_COMMIT:-}" = "1"', precommit)
         self.assertIn("ROOT=$(git rev-parse --show-toplevel)", precommit)
+        self.assertIn("make precommit-check", precommit)
+        self.assertNotIn("PLURX_EFFORT_COMMIT", precommit)
+        self.assertNotIn("history-check", precommit)
+        self.assertNotIn("operations-check", precommit)
+        self.assertNotIn("scripts/validate run", precommit)
+        precommit_gate = makefile.split(".PHONY: precommit-check", 1)[1].split(
+            ".PHONY:", 1
+        )[0]
         self.assertIn(
-            "make history-check validation-lint operations-check effort-rust-check",
-            precommit,
+            "precommit-check: validation-lint fmt-check lint",
+            precommit_gate,
         )
-        self.assertIn("scripts/validate run --profile commit --staged", precommit)
+        self.assertIn("scripts/js-check", precommit_gate)
 
         # Five stable Rust verdicts own the PR: the fast gate plus Store,
         # topology, WAL, and daemon. Store can internally select legacy or

@@ -770,9 +770,11 @@ Install the pre-commit hook once:
 make hooks        # copies scripts/pre-commit into .git/hooks/pre-commit
 ```
 
-The hook uses the staged diff, not unstaged experiments beside it. It still
-runs the mandatory baseline on every commit, then adds any point-specific
-commit checks.
+The hook deliberately runs only `make precommit-check`: validation-catalog
+lint, Rust formatting and Clippy, and embedded JavaScript syntax. It does not
+run tests, history or operations audits, or point-specific checks. Run
+`make validate-staged` explicitly when you need evidence selected from the
+staged diff.
 
 ## Behavior fixes — prove the test distinguishes the correction
 

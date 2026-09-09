@@ -994,15 +994,15 @@ rustup run 1.97.1 cargo check --workspace --locked --all-targets
 rustup run 1.97.1 cargo clippy --workspace --all-targets -- -D warnings
 rustup run 1.97.1 cargo fmt --all -- --check
 # Run the smallest production-linked regression for the change before pushing.
-PLURX_EFFORT_COMMIT=1 CARGO='rustup run 1.97.1 cargo' git commit
+CARGO='rustup run 1.97.1 cargo' git commit
 ```
 
-The common clone's installed `.git/hooks/pre-commit` is the tracked effort
-hook even with `core.hooksPath` unset. It runs history, catalog, operations,
-formatting and all-target compilation. Historical anchors must be remapped
-to their real renamed helpers in the code commit. A new hash-based regression
-bridge belongs in a subsequent commit; a client code hash has one bridge row,
-not three platform duplicates. Never use `--no-verify`.
+The common clone's installed `.git/hooks/pre-commit` is the tracked hook even
+with `core.hooksPath` unset. It runs catalog and Rust lint plus embedded
+JavaScript syntax, but no tests or effort compile. Historical anchors must be
+remapped to their real renamed helpers in the code commit. A new hash-based
+regression bridge belongs in a subsequent commit; a client code hash has one
+bridge row, not three platform duplicates. Never use `--no-verify`.
 Run `make history-check` again **after** a commit before pushing: the pre-commit
 hook cannot classify its not-yet-created hash. Corrective-worded documentation
 commits also need the established explicit non-runtime ledger entry (with a
