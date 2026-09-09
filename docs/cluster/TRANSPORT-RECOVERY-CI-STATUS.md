@@ -1,6 +1,6 @@
 # Transport recovery CI — implementation status and evidence
 
-**Status:** M6 final candidate unit correction verified; full PR qualification next · **Owner:** Codex · **Updated:** 2026-09-09
+**Status:** M6 corrected final candidate verified; full PR qualification next · **Owner:** Codex · **Updated:** 2026-09-09
 
 Companion to
 [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md) (how this effort reaches
@@ -88,9 +88,17 @@ Main10/PQ file was handed to the strict resolver with an 8-bit SDR decode-facts
 snapshot. Commit `20c047ec` makes that test helper describe the file it actually
 generated. The exact HDR10 restart regression, all-target `plurxd` check, and
 Clippy with warnings denied pass on archived Rust 1.97.1 source. Neither
-20-cycle role started in either rejected run. The next push is the frozen
-candidate for the one full PR qualification run; no second adversarial review
-is planned or required.
+20-cycle role started in either rejected run. Run
+[#1293](http://192.168.4.7:3000/noirr/plurx/actions/runs/1293) passed the
+2,142-test Rust suite, then the separately serialized VFR restart regression
+proved that `fps:start_time` could relabel decoded preroll before `trim`
+discarded it. The run was cancelled before either recovery role started. The
+corrected filter graph trims film-clock preroll before sampling the declared
+output grid. On the exact source with Rust 1.97.1, the VFR and bitmap restart
+regressions pass, the full fast workspace unit suite passes, formatting is
+clean, and workspace Clippy passes with warnings denied. The next push is the
+frozen candidate for the one full PR qualification run; no second adversarial
+review is planned or required.
 
 ## Milestones — evidence closes the checkbox
 

@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["3fed341e"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "The serialized real-FFmpeg VFR restart regression generates visibly distinct red, green, and blue source regions, performs forward and backward seek regenerations, fetches the actual init and media objects, and rejects a destination whose first decoded pixels came from preroll. Running fps before trim lets start_time relabel the first pre-target frame so the backward seek serves red content at the green timestamp; the retained regression fails on that ordering and passes only when film-clock trim discards preroll before grid sampling. The companion bitmap restart regression keeps the shared subtitle film-time path covered."
