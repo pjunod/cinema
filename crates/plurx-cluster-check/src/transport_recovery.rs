@@ -948,12 +948,12 @@ pub async fn run_transport_recovery_role(
                     }
                     _ = &mut timeout => {
                         let (phase, cycle) = diagnostics.active_phase()?;
-                        bail!(
+                        Err(anyhow::anyhow!(
                             "{} transport-recovery role exceeded its {seconds}-second orchestration limit in phase {} cycle {}",
                             role.label(),
                             phase.as_deref().unwrap_or("between_phases"),
                             cycle.unwrap_or(0)
-                        )
+                        ))
                     }
                 }
             }
