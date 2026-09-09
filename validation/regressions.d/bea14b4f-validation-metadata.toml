@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["bea14b4f"]
+reason = "This commit only maps the preceding decoder-test and CI-workflow repairs and updates their exact streaming-reliability status; it changes no runtime, test, or workflow behavior."
+ignore = true
