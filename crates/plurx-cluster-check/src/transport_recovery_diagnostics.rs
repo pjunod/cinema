@@ -1176,9 +1176,9 @@ mod tests {
         let diagnostics =
             RecoveryDiagnostics::create(&plan, &"a".repeat(40), "debug", contracts(), 1)
                 .expect("create diagnostics");
-        let mut children = Vec::new();
+        let mut waits = Vec::new();
         for node_id in 1..=2 {
-            let child = tokio::process::Command::new("sleep")
+            let mut child = tokio::process::Command::new("sleep")
                 .arg("30")
                 .kill_on_drop(false)
                 .spawn()
@@ -1187,7 +1187,10 @@ mod tests {
             diagnostics
                 .register_process(pid, "node", Some(node_id))
                 .expect("register child identity");
-            children.push((pid, child));
+            waits.push((
+                pid,
+                tokio::spawn(async move { child.wait().await.expect("wait for killed child") }),
+            ));
         }
         let mut injected = false;
         let cleanup = diagnostics
@@ -1206,8 +1209,8 @@ mod tests {
         assert!(cleanup.error.is_some());
         assert!(cleanup.summary.surviving_processes.is_empty());
         assert_eq!(cleanup.summary.reaped_processes, 2);
-        for (pid, mut child) in children {
-            let status = child.wait().await.expect("wait for killed child");
+        for (pid, wait) in waits {
+            let status = wait.await.expect("join child wait");
             assert!(!status.success());
             assert!(!Path::new(&format!("/proc/{pid}")).exists());
         }
