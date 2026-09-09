@@ -177,8 +177,8 @@ pub struct Sample {
     ///
     /// Recorded so a rewrite that changes a sample's length can correct the
     /// declaration in place. `None` means the run used `default_sample_size`
-    /// from the `tfhd`, which no per-sample rewrite can express — such a
-    /// fragment is refused rather than silently mis-sized.
+    /// from the `tfhd`; the rewrite materializes an explicit field before it
+    /// changes the sample.
     pub size_at: Option<usize>,
     pub flags: u32,
     /// Composition offset (pts − dts). Signed here even though ffmpeg writes
@@ -896,17 +896,16 @@ impl PromotionInputs {
 ///   it;
 /// - the `mdat` box size.
 ///
-/// The `moof` never changes size, which is what makes this a patch rather than
-/// a rebuild: only fixed-width fields inside it are written, so no box that
-/// contains it has to grow, and no offset outside the fragment moves.
+/// Ordinarily the `moof` never changes size, which makes this a patch rather
+/// than a rebuild. A legal `trun` may instead take every sample size from its
+/// `tfhd`; in that case this first materializes one size field per sample,
+/// grows the containing boxes, and moves every declared media-data offset.
 ///
-/// **Refuses rather than guessing.** A `trun` without per-sample sizes, or a
-/// later run without its own `data_offset`, cannot express a per-sample
-/// rewrite: the first has one size for every sample and the second's position
-/// is implied by bytes this function is changing. Either one is an
-/// `Unsupported`, and so is an `mdat` whose size cannot be corrected in place.
-/// Audio and any other track's samples are untouched and their runs still
-/// move, which is why their offsets are corrected too.
+/// **Refuses rather than guessing.** A later run without its own `data_offset`
+/// cannot express a per-sample rewrite: its position is implied by bytes this
+/// function is changing. So is an `mdat` whose size cannot be corrected in
+/// place. Audio and any other track's samples are untouched and their runs
+/// still move, which is why their offsets are corrected too.
 ///
 /// **A refusal leaves the fragment exactly as it was**, at every step, not
 /// only while the edits are being collected: every fallible decision is made
@@ -921,6 +920,35 @@ pub fn rewrite_video_samples<F>(
     tracks: &[Track],
     video_track: u32,
     mut rewrite: F,
+) -> Result<bool, Fmp4Error>
+where
+    F: FnMut(&[u8]) -> Result<Vec<u8>, Fmp4Error>,
+{
+    let has_default_sizes = fragment
+        .track(video_track)
+        .is_some_and(|track| track.samples().any(|sample| sample.size_at.is_none()));
+    if has_default_sizes {
+        // Work on a clone so materializing the trun fields remains part of the
+        // rewrite's all-or-nothing promise. A later closure error must not
+        // leave the caller with a structurally changed fragment.
+        let mut candidate = fragment.clone();
+        materialize_video_sample_sizes(&mut candidate, tracks, video_track)?;
+        let changed =
+            rewrite_video_samples_explicit(&mut candidate, tracks, video_track, &mut rewrite)?;
+        if changed {
+            *fragment = candidate;
+        }
+        return Ok(changed);
+    }
+
+    rewrite_video_samples_explicit(fragment, tracks, video_track, &mut rewrite)
+}
+
+fn rewrite_video_samples_explicit<F>(
+    fragment: &mut Fragment,
+    tracks: &[Track],
+    video_track: u32,
+    rewrite: &mut F,
 ) -> Result<bool, Fmp4Error>
 where
     F: FnMut(&[u8]) -> Result<Vec<u8>, Fmp4Error>,
@@ -953,9 +981,7 @@ where
                 };
                 let Some(size_at) = sample.size_at else {
                     return Err(Fmp4Error::Unsupported(
-                        "this trun sizes its samples from the tfhd default, which cannot \
-                         express a per-sample rewrite"
-                            .into(),
+                        "a video sample size was not materialized before rewrite".into(),
                     ));
                 };
                 let replacement = rewrite(&fragment.bytes[at..end])?;
@@ -1133,6 +1159,279 @@ where
     fragment.mdat_payload = fragment.mdat_payload.start..payload_end;
     fragment.tracks = parsed;
     Ok(true)
+}
+
+/// Give a video `trun` that relies on `tfhd.default_sample_size` an explicit
+/// size for every sample.
+///
+/// The inserted fields grow `trun`, `traf`, and `moof`; because media offsets
+/// are relative to the beginning of `moof`, every explicit `data_offset` in
+/// every track moves by the same amount. Unknown sibling boxes are copied
+/// byte-for-byte so auxiliary metadata is not lost merely because the video
+/// run used a compact legal encoding.
+fn materialize_video_sample_sizes(
+    fragment: &mut Fragment,
+    tracks: &[Track],
+    video_track: u32,
+) -> Result<bool, Fmp4Error> {
+    let Some(video) = fragment.track(video_track) else {
+        return Ok(false);
+    };
+    let missing = video
+        .runs
+        .iter()
+        .flat_map(|run| &run.samples)
+        .filter(|sample| sample.size_at.is_none())
+        .count();
+    if missing == 0 {
+        return Ok(false);
+    }
+    let growth = missing.checked_mul(4).ok_or_else(|| {
+        Fmp4Error::Unsupported("explicit video sample sizes make the moof too large".into())
+    })?;
+
+    let moof_header = peek_box(&fragment.bytes, 0)?
+        .ok_or_else(|| Fmp4Error::Unsupported("a fragment with no complete moof".into()))?;
+    if moof_header.kind() != b"moof" {
+        return Err(Fmp4Error::Unsupported(
+            "a fragment that does not begin with a moof".into(),
+        ));
+    }
+    let old_moof_len = moof_header.size;
+    let moof_payload = fragment
+        .bytes
+        .get(moof_header.header_len..old_moof_len)
+        .ok_or_else(|| Fmp4Error::Malformed("moof runs past its fragment".into()))?;
+
+    let mut rebuilt_payload = Vec::with_capacity(moof_payload.len() + growth);
+    let mut copied = 0usize;
+    for (header, start, end) in children(moof_payload)? {
+        let box_start = start - header.header_len;
+        rebuilt_payload.extend_from_slice(&moof_payload[copied..box_start]);
+        if header.kind() == b"traf" {
+            let payload = &moof_payload[start..end];
+            let track_id = traf_track_id(payload)?;
+            let runs = fragment
+                .track(track_id)
+                .map(|track| track.runs.as_slice())
+                .unwrap_or(&[]);
+            let rebuilt = rebuild_traf_with_sample_sizes(
+                header,
+                payload,
+                runs,
+                track_id == video_track,
+                growth,
+            )?;
+            rebuilt_payload.extend_from_slice(&rebuilt);
+        } else {
+            rebuilt_payload.extend_from_slice(&moof_payload[box_start..end]);
+        }
+        copied = end;
+    }
+    rebuilt_payload.extend_from_slice(&moof_payload[copied..]);
+    let rebuilt_moof = wrap_box(moof_header, &rebuilt_payload)?;
+    if rebuilt_moof.len() != old_moof_len + growth {
+        return Err(Fmp4Error::Unsupported(
+            "materialized video sample sizes changed the moof by an unexpected amount".into(),
+        ));
+    }
+
+    let mut bytes = Vec::with_capacity(fragment.bytes.len() + growth);
+    bytes.extend_from_slice(&rebuilt_moof);
+    bytes.extend_from_slice(&fragment.bytes[old_moof_len..]);
+    let payload_start = fragment
+        .mdat_payload
+        .start
+        .checked_add(growth)
+        .ok_or_else(|| Fmp4Error::Unsupported("moved mdat start does not fit".into()))?;
+    let payload_end = fragment
+        .mdat_payload
+        .end
+        .checked_add(growth)
+        .ok_or_else(|| Fmp4Error::Unsupported("moved mdat end does not fit".into()))?;
+    let header_len = moof_header_len(&bytes)?;
+    let parsed = parse_moof(&bytes[..rebuilt_moof.len()], header_len, tracks)?;
+
+    fragment.bytes = bytes;
+    fragment.mdat_payload = payload_start..payload_end;
+    fragment.tracks = parsed;
+    Ok(true)
+}
+
+fn traf_track_id(payload: &[u8]) -> Result<u32, Fmp4Error> {
+    for (header, start, end) in children(payload)? {
+        if header.kind() != b"tfhd" {
+            continue;
+        }
+        let body = &payload[start..end];
+        if body.len() < 8 {
+            return malformed("tfhd too short");
+        }
+        return Ok(be_u32(body, 4));
+    }
+    malformed("traf has no tfhd track_id")
+}
+
+fn rebuild_traf_with_sample_sizes(
+    header: BoxHeader,
+    payload: &[u8],
+    runs: &[Run],
+    materialize: bool,
+    moof_growth: usize,
+) -> Result<Vec<u8>, Fmp4Error> {
+    let mut rebuilt = Vec::new();
+    let mut copied = 0usize;
+    let mut run_index = 0usize;
+    for (child, start, end) in children(payload)? {
+        let box_start = start - child.header_len;
+        rebuilt.extend_from_slice(&payload[copied..box_start]);
+        if child.kind() == b"trun" {
+            let run = runs
+                .get(run_index)
+                .ok_or_else(|| Fmp4Error::Malformed("parsed traf and trun list disagree".into()))?;
+            let trun = rebuild_trun_with_sample_sizes(
+                child,
+                &payload[start..end],
+                run,
+                materialize,
+                moof_growth,
+            )?;
+            rebuilt.extend_from_slice(&trun);
+            run_index += 1;
+        } else {
+            rebuilt.extend_from_slice(&payload[box_start..end]);
+        }
+        copied = end;
+    }
+    rebuilt.extend_from_slice(&payload[copied..]);
+    if run_index != runs.len() {
+        return Err(Fmp4Error::Malformed(
+            "parsed traf and trun list disagree".into(),
+        ));
+    }
+    wrap_box(header, &rebuilt)
+}
+
+fn rebuild_trun_with_sample_sizes(
+    header: BoxHeader,
+    payload: &[u8],
+    run: &Run,
+    materialize: bool,
+    moof_growth: usize,
+) -> Result<Vec<u8>, Fmp4Error> {
+    if payload.len() < 8 {
+        return malformed("trun too short");
+    }
+    let flags = be_u32(payload, 0) & 0x00ff_ffff;
+    let count = be_u32(payload, 4) as usize;
+    if count != run.samples.len() {
+        return Err(Fmp4Error::Malformed(
+            "parsed run and trun sample counts disagree".into(),
+        ));
+    }
+    let has_sizes = flags & 0x00_0200 != 0;
+    let should_materialize = materialize && !has_sizes;
+    if materialize
+        && run
+            .samples
+            .iter()
+            .any(|sample| sample.size_at.is_none() == has_sizes)
+    {
+        return Err(Fmp4Error::Malformed(
+            "parsed sample-size fields disagree with their trun".into(),
+        ));
+    }
+
+    let mut source = payload.to_vec();
+    let mut p = 8usize;
+    if flags & 0x00_0001 != 0 {
+        if source.len() < p + 4 {
+            return malformed("trun truncated at data_offset");
+        }
+        let old = be_u32(&source, p) as i32;
+        if old < 0 {
+            return Err(Fmp4Error::Unsupported(
+                "trun with a negative data_offset".into(),
+            ));
+        }
+        let moved = i64::from(old)
+            .checked_add(moof_growth as i64)
+            .and_then(|value| i32::try_from(value).ok())
+            .ok_or_else(|| {
+                Fmp4Error::Unsupported("a moved trun data_offset does not fit".into())
+            })?;
+        source[p..p + 4].copy_from_slice(&moved.to_be_bytes());
+        p += 4;
+    }
+    if flags & 0x00_0004 != 0 {
+        p += 4;
+    }
+    if source.len() < p {
+        return malformed("trun truncated before its samples");
+    }
+    if !should_materialize {
+        return wrap_box(header, &source);
+    }
+
+    let per = 4 * usize::from(flags & 0x00_0100 != 0)
+        + 4 * usize::from(flags & 0x00_0200 != 0)
+        + 4 * usize::from(flags & 0x00_0400 != 0)
+        + 4 * usize::from(flags & 0x00_0800 != 0);
+    let samples_end = p
+        .checked_add(count.saturating_mul(per))
+        .filter(|end| *end <= source.len())
+        .ok_or_else(|| Fmp4Error::Malformed("trun samples run past their box".into()))?;
+    let mut rebuilt = Vec::with_capacity(source.len() + count * 4);
+    rebuilt.extend_from_slice(&source[..p]);
+    let full_flags = be_u32(&rebuilt, 0) | 0x0000_0200;
+    rebuilt[0..4].copy_from_slice(&full_flags.to_be_bytes());
+    let mut at = p;
+    for sample in &run.samples {
+        if flags & 0x00_0100 != 0 {
+            rebuilt.extend_from_slice(&source[at..at + 4]);
+            at += 4;
+        }
+        rebuilt.extend_from_slice(&sample.size.to_be_bytes());
+        if flags & 0x00_0400 != 0 {
+            rebuilt.extend_from_slice(&source[at..at + 4]);
+            at += 4;
+        }
+        if flags & 0x00_0800 != 0 {
+            rebuilt.extend_from_slice(&source[at..at + 4]);
+            at += 4;
+        }
+    }
+    debug_assert_eq!(at, samples_end);
+    rebuilt.extend_from_slice(&source[samples_end..]);
+    wrap_box(header, &rebuilt)
+}
+
+fn wrap_box(header: BoxHeader, payload: &[u8]) -> Result<Vec<u8>, Fmp4Error> {
+    let size = header
+        .header_len
+        .checked_add(payload.len())
+        .ok_or_else(|| Fmp4Error::Unsupported("rebuilt box size does not fit".into()))?;
+    let mut bytes = Vec::with_capacity(size);
+    match header.header_len {
+        8 => {
+            let size = u32::try_from(size)
+                .map_err(|_| Fmp4Error::Unsupported("rebuilt box is too large".into()))?;
+            bytes.extend_from_slice(&size.to_be_bytes());
+            bytes.extend_from_slice(header.kind());
+        }
+        16 => {
+            bytes.extend_from_slice(&1u32.to_be_bytes());
+            bytes.extend_from_slice(header.kind());
+            bytes.extend_from_slice(&(size as u64).to_be_bytes());
+        }
+        width => {
+            return Err(Fmp4Error::Unsupported(format!(
+                "cannot rebuild a box with a {width}-byte header"
+            )));
+        }
+    }
+    bytes.extend_from_slice(payload);
+    Ok(bytes)
 }
 
 /// The `mdat` box header width implied by where its payload begins.
@@ -4715,42 +5014,84 @@ mod tests {
         );
     }
 
-    /// The shapes this rewrite refuses, and what accepting each would do.
+    /// The compact shape this rewrite expands, followed by the shapes it must
+    /// still refuse and what accepting each would do.
     ///
-    /// Each refusal is the only thing standing between the code and a
-    /// corruption that still parses, so each is asserted with the corruption
-    /// named. The shapes are built by hand because ffmpeg does not emit them
-    /// for a video track today — which is exactly why nothing would catch the
-    /// guard going missing.
+    /// Each remaining refusal is the only thing standing between the code and
+    /// a corruption that still parses, so each is asserted with the corruption
+    /// named. The compact shape is built as real bytes because mutating only
+    /// the parsed model never exercises the box growth that failed in service.
     #[test]
-    fn the_shapes_a_per_sample_rewrite_cannot_express_are_refused() {
+    fn default_sized_truns_are_expanded_and_unrepresentable_shapes_are_refused() {
         let feed = pipe("closed-gop");
         let (init, frags, _) = read_all(&feed);
         let video = init.video().expect("video").id;
 
-        // A `trun` that sizes its samples from the `tfhd` default has one size
-        // for every sample and no field to correct. Without the refusal the
-        // size is written at offset zero — over the `moof` box's own length —
-        // and the re-parse still succeeds, because it reads the `moof`'s
-        // extent from the `mdat` payload rather than from that field. A
-        // corrupt fragment, returned as a success.
-        let mut defaulted = frags[0].clone();
-        for track in &mut defaulted.tracks {
-            if track.track_id == video {
-                for run in &mut track.runs {
-                    for sample in &mut run.samples {
-                        sample.size_at = None;
-                    }
-                }
-            }
-        }
-        let before = defaulted.bytes.clone();
-        let error = rewrite_video_samples(&mut defaulted, &init.tracks, video, |sample| {
+        // A `trun` may legally take every sample size from `tfhd`. This is the
+        // exact shape a later GOP of a real P7 source used after earlier GOPs
+        // had explicit sizes: the old converter killed the live P8 producer,
+        // and Safari recovered by laddering down to a 1080p SDR transcode.
+        // Build the compact bytes themselves rather than only mutating the
+        // parsed model, so this proves the boxes grow and offsets move.
+        let source_run = &frags[0].track(video).expect("video traf").runs[0];
+        let source_sample = source_run.samples[0];
+        let source_bytes = &frags[0].bytes
+            [source_run.data_offset..source_run.data_offset + source_sample.size as usize];
+        let mut tfhd = Vec::new();
+        tfhd.extend_from_slice(&28u32.to_be_bytes());
+        tfhd.extend_from_slice(b"tfhd");
+        tfhd.extend_from_slice(&0x0002_0038u32.to_be_bytes());
+        tfhd.extend_from_slice(&video.to_be_bytes());
+        tfhd.extend_from_slice(&source_sample.duration.to_be_bytes());
+        tfhd.extend_from_slice(&source_sample.size.to_be_bytes());
+        tfhd.extend_from_slice(&source_sample.flags.to_be_bytes());
+        let mut trun = Vec::new();
+        trun.extend_from_slice(&20u32.to_be_bytes());
+        trun.extend_from_slice(b"trun");
+        trun.extend_from_slice(&0x0000_0001u32.to_be_bytes());
+        trun.extend_from_slice(&1u32.to_be_bytes());
+        trun.extend_from_slice(&72u32.to_be_bytes()); // moof (64) + mdat header (8)
+        let mut compact = Vec::new();
+        compact.extend_from_slice(&64u32.to_be_bytes());
+        compact.extend_from_slice(b"moof");
+        compact.extend_from_slice(&56u32.to_be_bytes());
+        compact.extend_from_slice(b"traf");
+        compact.extend_from_slice(&tfhd);
+        compact.extend_from_slice(&trun);
+        compact.extend_from_slice(&(source_sample.size + 8).to_be_bytes());
+        compact.extend_from_slice(b"mdat");
+        compact.extend_from_slice(source_bytes);
+
+        let mut reader = FragmentReader::new();
+        reader.push(&init.bytes);
+        assert!(matches!(reader.next_unit(), Ok(Some(Unit::Init(_)))));
+        reader.push(&compact);
+        let Ok(Some(Unit::Fragment(mut defaulted))) = reader.next_unit() else {
+            panic!("the tfhd-defaulted fragment did not parse");
+        };
+        assert!(
+            defaulted
+                .track(video)
+                .expect("video")
+                .samples()
+                .all(|sample| sample.size_at.is_none()),
+            "fixture accidentally carried an explicit sample size"
+        );
+        let old_payload_start = defaulted.mdat_payload.start;
+        let changed = rewrite_video_samples(&mut defaulted, &init.tracks, video, |sample| {
             Ok(sample[..sample.len() - 4].to_vec())
         })
-        .expect_err("a tfhd-defaulted trun cannot express a per-sample rewrite");
-        assert!(error.to_string().contains("tfhd default"), "{error}");
-        assert_eq!(defaulted.bytes, before);
+        .expect("a tfhd-defaulted trun is expanded before rewrite");
+        assert!(changed);
+        let rewritten_run = &defaulted.track(video).expect("video").runs[0];
+        assert_eq!(defaulted.mdat_payload.start, old_payload_start + 4);
+        assert_eq!(rewritten_run.data_offset, defaulted.mdat_payload.start);
+        assert_eq!(rewritten_run.samples[0].size, source_sample.size - 4);
+        assert!(rewritten_run.samples[0].size_at.is_some());
+        assert_eq!(
+            &defaulted.bytes[defaulted.mdat_payload.clone()],
+            &source_bytes[..source_bytes.len() - 4]
+        );
 
         // A second `trun` that inherits its position from the run before it
         // follows bytes this rewrite moves. Accepting it leaves that run
