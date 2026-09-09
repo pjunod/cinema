@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["8268d048"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "Main run #1312 passed 2,141 ordinary Rust tests before the text_renderer_attests_active_font_rules_and_files regression refused an otherwise complete Fontconfig closure on a saturated runner. The same test passed in isolation and took 5.84 seconds; with concurrent validation load it took 10.25 seconds, proving the generic five-second executable-probe budget was below a valid whole-font-closure inventory. The retained real-inventory regression still requires usable active rules and font files, while font_inventory_keeps_a_load_tolerant_probe_budget deterministically requires the dedicated bounded budget to remain at least thirty seconds and longer than lightweight probes."

@@ -379,6 +379,10 @@ static FRAGMENT_INDEX_ENGINE: tokio::sync::OnceCell<FragmentIndexEngine> =
 static ENCODED_PROCESS_IDENTITY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 const ENGINE_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+// Fontconfig walks the complete active rules and font-file closure. On a
+// saturated transcoding or CI host that bounded inventory can legitimately
+// take longer than the lightweight executable capability probes above.
+const FONT_ENGINE_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Runaway guard for what a probe subprocess may hand back, not a correctness
 /// gate: exceeding it turns a real answer into "this build has no features",
 /// so it has to sit far above anything a healthy ffmpeg can legitimately say.
@@ -656,7 +660,7 @@ async fn font_render_engine_inner() -> FragmentIndexEngine {
 
     let mut font_list = tokio::process::Command::new("fc-list");
     font_list.arg("--format=%{file}\n");
-    match bounded_command_output(font_list).await {
+    match bounded_command_output_with_timeout(font_list, FONT_ENGINE_PROBE_TIMEOUT).await {
         Ok(output) => {
             digest.update((output.stdout.len() as u64).to_be_bytes());
             digest.update(&output.stdout);
@@ -675,7 +679,7 @@ async fn font_render_engine_inner() -> FragmentIndexEngine {
     }
 
     let configuration = tokio::process::Command::new("fc-conflist");
-    match bounded_command_output(configuration).await {
+    match bounded_command_output_with_timeout(configuration, FONT_ENGINE_PROBE_TIMEOUT).await {
         Ok(output) => {
             digest.update((output.stdout.len() as u64).to_be_bytes());
             digest.update(&output.stdout);
@@ -737,8 +741,13 @@ struct BoundedOutput {
     stderr: Vec<u8>,
 }
 
-async fn bounded_command_output(
+async fn bounded_command_output(command: tokio::process::Command) -> Result<BoundedOutput, String> {
+    bounded_command_output_with_timeout(command, ENGINE_PROBE_TIMEOUT).await
+}
+
+async fn bounded_command_output_with_timeout(
     mut command: tokio::process::Command,
+    timeout: Duration,
 ) -> Result<BoundedOutput, String> {
     command
         .stdin(std::process::Stdio::null())
@@ -766,9 +775,9 @@ async fn bounded_command_output(
             stderr: stderr?,
         })
     };
-    tokio::time::timeout(ENGINE_PROBE_TIMEOUT, collect)
+    tokio::time::timeout(timeout, collect)
         .await
-        .map_err(|_| "engine probe timed out".to_owned())?
+        .map_err(|_| format!("engine probe timed out after {} seconds", timeout.as_secs()))?
 }
 
 async fn read_bounded(input: impl AsyncRead + Unpin) -> Result<Vec<u8>, String> {
@@ -1695,6 +1704,12 @@ mod tests {
 
         assert!(font_closure_is_current("font-closure-a", &captured));
         assert!(!font_closure_is_current("font-closure-a", &added_font));
+    }
+
+    #[test]
+    fn font_inventory_keeps_a_load_tolerant_probe_budget() {
+        assert!(FONT_ENGINE_PROBE_TIMEOUT >= Duration::from_secs(30));
+        assert!(FONT_ENGINE_PROBE_TIMEOUT > ENGINE_PROBE_TIMEOUT);
     }
 
     #[tokio::test]
