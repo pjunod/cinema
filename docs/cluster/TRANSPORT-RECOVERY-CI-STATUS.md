@@ -143,6 +143,11 @@ HLS error still fails immediately. Its outer setup-client ceiling is now 30
 seconds so a recovering replicated Store cannot pre-empt those more specific
 contracts; the exact two-second peer deadline and five-second hung-peer wall
 ceiling remain unchanged. No second adversarial review is planned or required.
+The same run completed all 78 web captures with no console or page errors and
+then correctly rejected the old structural golden. The intended drift is
+limited to the new Developer settings readiness and advisory-enable cards
+across three layouts and two viewports; the portable golden has been regenerated
+from the exact candidate.
 
 ## Milestones — evidence closes the checkbox
 
