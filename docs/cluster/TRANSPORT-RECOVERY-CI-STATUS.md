@@ -1,6 +1,6 @@
 # Transport recovery CI — implementation status and evidence
 
-**Status:** M6 final candidate verified locally; one full PR qualification next · **Owner:** Codex · **Updated:** 2026-09-09
+**Status:** M6 final candidate build claim verified; one full PR qualification next · **Owner:** Codex · **Updated:** 2026-09-09
 
 Companion to
 [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md) (how this effort reaches
@@ -72,8 +72,13 @@ On exact archived commit `ac9b6ffc`, all four focused Store regressions pass on
 Rust 1.97.1: the v5 migration chain, v32 producer-recovery migration and replay,
 analysis stale-marker replay, and current SQLite import. The same source passes
 the all-target `plurx-core` check and Clippy with warnings denied. Formatting and
-whitespace checks are clean. The next push is the frozen candidate for the one
-full PR qualification run; no second adversarial review is planned or required.
+whitespace checks are clean. Final-candidate run
+[#1281](http://192.168.4.7:3000/noirr/plurx/actions/runs/1281) stopped in the
+mobile-version preflight because the Apple source correction still claimed
+current `main` build 124. No transport role started. The repository-owned build
+tool has now claimed build 125 across every generated release surface. The next
+push is the frozen candidate for the one full PR qualification run; no second
+adversarial review is planned or required.
 
 ## Milestones — evidence closes the checkbox
 
