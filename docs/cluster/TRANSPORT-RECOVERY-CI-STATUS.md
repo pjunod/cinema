@@ -1,6 +1,6 @@
 # Transport recovery CI — implementation status and evidence
 
-**Status:** M6 final candidate build claim verified; one full PR qualification next · **Owner:** Codex · **Updated:** 2026-09-09
+**Status:** M6 final candidate unit correction verified; full PR qualification next · **Owner:** Codex · **Updated:** 2026-09-09
 
 Companion to
 [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md) (how this effort reaches
@@ -77,8 +77,20 @@ whitespace checks are clean. Final-candidate run
 mobile-version preflight because the Apple source correction still claimed
 current `main` build 124. No transport role started. The repository-owned build
 tool has now claimed build 125 across every generated release surface. The next
-push is the frozen candidate for the one full PR qualification run; no second
-adversarial review is planned or required.
+run
+[#1286](http://192.168.4.7:3000/noirr/plurx/actions/runs/1286) passed mobile
+versioning, preflight, WAL, Android JVM and instrumented UI, and both package
+architectures before it was cancelled. Its cluster-daemon job never executed a
+test because a second runner sat below the 25 GB disk floor; restarting its idle
+Docker daemon released deleted data and restored 43.4 GB. Its Rust gate passed
+2,141 tests and exposed one current-main fixture contradiction: a generated
+Main10/PQ file was handed to the strict resolver with an 8-bit SDR decode-facts
+snapshot. Commit `20c047ec` makes that test helper describe the file it actually
+generated. The exact HDR10 restart regression, all-target `plurxd` check, and
+Clippy with warnings denied pass on archived Rust 1.97.1 source. Neither
+20-cycle role started in either rejected run. The next push is the frozen
+candidate for the one full PR qualification run; no second adversarial review
+is planned or required.
 
 ## Milestones — evidence closes the checkbox
 

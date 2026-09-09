@@ -13,17 +13,29 @@ fn encoded_plan(
     };
 
     let codec = file.video_codec.as_deref().unwrap_or("h264");
+    let ten_bit = file.bit_depth.is_some_and(|depth| depth >= 10);
+    let hdr10 = matches!(file.hdr.as_deref(), Some("hdr10" | "hdr10plus"));
+    let pixel_format = if ten_bit { "yuv420p10le" } else { "yuv420p" };
+    let profile = (codec == "hevc" && ten_bit).then_some("Main 10");
+    let color_space = hdr10.then_some("bt2020nc");
+    let color_transfer = hdr10.then_some("smpte2084");
+    let color_primaries = hdr10.then_some("bt2020");
     let facts = DecodeFacts::from_ffprobe_json(
         &serde_json::json!({
             "streams": [{
                 "index": 0,
                 "codec_type": "video",
                 "codec_name": codec,
+                "profile": profile,
                 "width": file.width.unwrap_or(320),
                 "height": file.height.unwrap_or(180),
-                "pix_fmt": "yuv420p",
+                "pix_fmt": pixel_format,
                 "avg_frame_rate": "24000/1001",
                 "r_frame_rate": "24000/1001",
+                "color_range": "tv",
+                "color_space": color_space,
+                "color_transfer": color_transfer,
+                "color_primaries": color_primaries,
                 "disposition": {"attached_pic": 0}
             }]
         }),
