@@ -57,8 +57,14 @@ reviewed structural golden. A clean isolated sweep records all 7,650 facts from
 78 captures with no console or page errors, and a second complete sweep matches
 the answer key exactly. [#198](http://192.168.4.7:3000/noirr/plurx/pulls/198)
 then passed its policy and fast-Rust lanes, left draft/WIP, and merged as
-`c66268e4`. Its remaining web lane and the new main workflows are being watched
-to completion · **Updated:** 2026-09-09 · **Effort:**
+`c66268e4`. Follow-up [#200](http://192.168.4.7:3000/noirr/plurx/pulls/200)
+repaired the remaining CI and fullscreen-teardown failures and merged as
+`75744fea`. Its post-merge policy, mobile-version, static-Rust, Store-shard,
+and package gates are green; Apple, Android, web, Rust, Store, WAL, topology,
+and daemon jobs remain under active observation. One decoder test-only
+follow-up gives two contention-sensitive probe tests the production probe
+budget instead of an unrelated three-second fixture budget · **Updated:**
+2026-09-09 · **Effort:**
 `effort/streaming-reliability` (merged) · **Started:** 2026-09-04 ·
 **Effort fork:** `48615baf` · **Continuation merged to main:** `1f6d6645` via
 [#178](http://192.168.4.7:3000/noirr/plurx/pulls/178) on 2026-09-08 ·
