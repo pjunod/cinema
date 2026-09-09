@@ -3,9 +3,18 @@
 **Status:** M0–M5 complete · M6 server/client implementation landed · M7
 complete · frozen promotion candidate integrated with current `main` ·
 broader fleet qualification continues after merge · final adversarial review
-repaired · **Updated:** 2026-09-09 · **Integration branch:**
-`effort/decoder-selection-recovery` at `d84aa500` · **Active promotion branch:**
-`codex/decoder-final-promotion`, latest-main merge `b8840634`
+repaired · promoted to `main` as `374e97ed` · post-merge Apple repair in
+progress · **Updated:** 2026-09-09 · **Promoted effort head:** `3e5fe843` ·
+**Active follow-up branch:** `codex/apple-postmerge-recovery`
+
+**Live post-merge checkpoint:** [Forgejo #189](http://192.168.4.7:3000/noirr/plurx/pulls/189)
+merged at `374e97ed`. Run 1268 has ten green jobs. The fast Rust, cluster-daemon,
+and web jobs stopped before tests because `gha-nuc4-general-01` had 24 GiB free
+against the repository's 25 GiB floor. The Apple job exposed a real teardown
+defect: its three-second finalization window used the ordinary five-second
+transport retry cadence, so an owed commit could expire without one retry. The
+follow-up uses the protocol's 250 ms minimum cadence only during finalization;
+the exact regression and all 56 reporter tests pass locally on Xcode 26.6.
 
 The effort was created from Forgejo `main` at
 `4a6a0268bd314ad5587cb3037f12ebd992c0074e`. The original M0 research baseline was `main` at
@@ -27,33 +36,32 @@ An unchecked item is not implied by a nearby passing check.
 | M7a · advisory Developer settings | Done | Keep the prerequisites accurate as hardware contracts land; the controls advise and never gate enablement |
 | M7b · hardware diagnostic path | Merged | [Forgejo #174](http://192.168.4.7:3000/noirr/plurx/pulls/174) merged approved head `0a685526` into the effort at `0c831b88` after the complete Effort development gate. Backend-aware measurement, path-scoped qualification, same-codec recovery pairing, compatible v2 reporting, and advisory Developer readiness are implemented. A real hardware contract is separate M8 fleet evidence |
 | M7 remainder · offline durability and handoff enforcement | Merged | [Forgejo #179](http://192.168.4.7:3000/noirr/plurx/pulls/179) fast-forwarded approved head `990bf334` into the effort after its adversarial findings were fixed and the Effort development gate passed; the repair includes one replicated cluster-wide kill-switch transaction |
-| Promotion to `main` | Draft PR open; review repairs pass focused tests | Current `main` `0985ac19` is merged at `b8840634`; the one final adversarial review is complete and its three findings are repaired. The failures from #189's first unit run reproduce as stale migration/publication fixtures, two timing-sensitive probes, and one immutable-VOD filter-graph defect; their focused tests now pass. Remaining: push repaired head · smoke/fast lane · merge · watch post-merge tests |
+| Promotion to `main` | Merged | #189 merged as `374e97ed`; post-merge run 1268 is being watched and its one code failure is repaired on `codex/apple-postmerge-recovery` |
 | M8 · broader fleet qualification | Post-merge continuation | Hardware diagnostic capture · workload matrix · false-positive classification · startup/concurrency/recovered-latency evidence · three-client replacement runs; any code failure gets a new PR |
 
-**Shortest reading:** M7 and the one final effort-PR review are done. Push the
-repaired candidate, run functionality smoke evidence and the fast lane, then
-merge. The owner explicitly approved
-watching the remaining promotion jobs and broader fleet/client qualification
-against `main`; any code failure opens a follow-up PR. Until a real node supplies the first
+**Shortest reading:** M7, the one final effort-PR review, and promotion are done.
+The remaining work is to merge the Apple finalization follow-up, rerun the
+failed post-merge lanes after runner disk is restored, and continue broader
+fleet/client qualification against `main`. Until a real node supplies the first
 hardware contract, automatic decode recovery remains deliberately unreachable
 on that path rather than falsely certified.
 
-## Current checkpoint — final effort promotion
+## Current checkpoint — post-merge recovery
 
 | Field | Current value |
 |---|---|
-| Milestone | Freeze and promote the completed decoder-selection/recovery effort |
-| Task base | Effort head `990bf334`; current candidate additionally integrates `main` `0985ac19` |
-| Task branch | `codex/decoder-final-promotion` in the agent-owned clone at `/private/tmp/codex-plurx-decoder.RRcx8j/repo`; latest-main merge `b8840634` |
-| Task PR | Final effort→`main` [Forgejo #189](http://192.168.4.7:3000/noirr/plurx/pulls/189) is open as WIP/draft; it stays draft until the repaired head is ready for the fast lane |
+| Milestone | Repair and qualify post-merge Apple finalization |
+| Task base | Effort head `990bf334` was the final milestone base; the active follow-up starts from promoted `main` `374e97ed` |
+| Task branch | `codex/apple-postmerge-recovery` in the agent-owned clone at `/private/tmp/codex-plurx-decoder.RRcx8j/repo` |
+| Task PR | #189 is merged; the Apple follow-up PR is the only code repair opened from post-merge run 1268 |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
-| Audit scope | Job-scoped budget persistence · alternate result references · part and final-assembly receipt verification · versioned worker capabilities · owner-handoff inheritance · default and no-live-recovery shipping-path exercise without introducing a code gate |
-| Current finding | Exact-head review showed `recipe_hash` cannot safely serve as both node-local result reference and owner-independent recovery ledger. The repaired tree adds explicit `primary -> recovery_pending -> alternate` state, preserves either consumed boundary through rehome, refuses software-primary budget creation, and gives every claim and worker mutation a monotonically increasing generation |
+| Audit scope | Apple playback-control teardown ordering, retry bound, and async XCTest scheduling; post-merge infrastructure failures are tracked separately from code failures |
+| Current finding | A commit colliding with player teardown had three seconds to finish but a transport failure deferred its retry for five seconds. Finalization now retries at the 250 ms protocol floor while ordinary reporting retains the server-advertised cadence. Async test observations no longer block the actor executor or crash the test host after a failed wait |
 | Adversarial review | Complete. Einstein found three promotion blockers: immutable VOD bypassed the resolved decoder plan, the v50 Hiqlite import projected `drain_deadline_ms` one version too early, and the cache-location projection test stopped at v53 despite v54's publication generation. VOD now retains one descriptor-bound plan and uses it for arguments, identity, and mixed admission; real v50/v51 import fixtures and v25/v53/v54 cache projections pin the schema boundaries. Per owner direction, there is no additional task-review loop |
-| Focused evidence | Pinned all-target daemon compile passes. The formerly failing transaction census, cache storage-class, v26 repair, v51 stale-marker, schema-count, decoder-inventory, decode-fact deadline/revalidation, Live TV arguments, offline publication, and VFR/bitmap immutable-VOD restart tests pass. Hiqlite-enabled v25/v53/v54 projection and real v50/v51 media-session import tests also pass |
-| Fast lane | M7's Forgejo Effort development gate passed at `990bf334`. On source integration `990d8069`, pinned Rust 1.97.1 compile and denied-warning Clippy pass; exact SQLite v54 and Hiqlite v34 chain/import/downgrade contracts plus web/settings and validation contracts pass. `f234427e` adds only already-present main lineage. The promotion fast lane runs on the pushed review-repair head |
+| Focused evidence | Exact finalization regression passes; the complete `PlaybackControlReporterTests` class passes 56/56 on iPhone 17 Pro simulator with Xcode 26.6 |
+| Fast lane | Post-merge policy preflight, Android JVM/device, replicated WAL, and amd64/arm64 package smoke passed. Fast Rust, cluster-daemon, and web were rejected by the runner disk floor before their test commands; they need an infrastructure rerun, not a code patch |
 | Validation order | Task PRs into the effort do not run the full unit suite. After M7: functionality smoke evidence and a green fast lane before promotion; after they pass, merge and continue watching the remaining promotion and broader suites. The owner explicitly approved watching the remaining promotion jobs on `main`; a code failure gets a new PR |
-| Next | Commit and push the review repairs · run functionality smoke and the fast lane · mark #189 ready and merge · monitor the remaining suites; any persistent code failure gets a follow-up PR |
+| Next | Commit and open the Apple follow-up PR · merge after its focused lane passes · rerun disk-blocked jobs on a healthy runner · continue M8 fleet evidence |
 | External blocker | None for M7 or promotion. A qualifying hardware host is still required for post-merge M8 fleet evidence; absence remains visible and advisory rather than an enable gate |
 
 ## Milestones

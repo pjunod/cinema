@@ -696,11 +696,6 @@ actor PlaybackControlReporter {
 
     /// Teardown is best-effort after this bound; the server owns durable reap.
     static let finalizationDeadlineMs = 3_000
-    /// A normal cadence can be longer than the entire teardown window. A
-    /// transport failure during finalization therefore gets a short bounded
-    /// retry; server-provided retry delays remain authoritative.
-    static let finalizationTransportRetryMs = 500
-
     /// Why the reporter is waiting. Pacing waits are the exchange cadence and
     /// the retry backoff; the deadline wait races one in-flight exchange. They
     /// are named rather than merged so a test can hold one still while it
@@ -1150,9 +1145,12 @@ actor PlaybackControlReporter {
             return
         }
         retryRequest = pendingRequest
+        // Ordinary transport loss follows the advertised cadence. Teardown is
+        // different: its immutable commit must retry before the bounded
+        // finalization deadline, which may be shorter than that cadence.
         let fallback = retryableControl
             ? 500
-            : (finishing ? Self.finalizationTransportRetryMs : bootstrap.nextExchangeMs)
+            : (finishing ? PlaybackControl.minimumExchangeMs : bootstrap.nextExchangeMs)
         nextAllowedAt = now() + retryDelay(transport, fallback)
     }
 
