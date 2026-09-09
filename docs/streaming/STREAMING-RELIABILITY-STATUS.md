@@ -23,10 +23,18 @@ tests as Apple build 125 in draft
 fixtures instead of leaving current v28–v34 objects under old schema markers,
 and advances the shared-cache fixture's publication generation; the complete
 backend-neutral inventory passes 153 tests with its two process helpers ignored.
-Both fixes are on `codex/prepared-handoff-postmerge`; no additional review pass is planned.
+Both fixes are on `codex/prepared-handoff-postmerge`; no additional review
+pass is planned.
 Three other failed jobs stopped before testing when the same runner
 reported 24 GB free against a 25 GB floor; its installed janitor restored 34 GB
-without manual deletion · **Updated:** 2026-09-09 · **Effort:**
+without manual deletion. The replacement
+[#1291](http://192.168.4.7:3000/noirr/plurx/actions/runs/1291) passed Apple,
+cluster-daemon, and replicated-WAL testing, then its fast Rust lane exposed a
+test-fixture defect: after generating a 10-bit PQ source, the fixture rebuilt
+its immutable decode recipe with hard-coded 8-bit SDR facts. The correction
+derives bit depth and transfer from the same media row as production; its exact
+source archive passes the rejected HDR restart regression on Rust 1.97.1 and
+will receive a fresh fast-lane run before merge · **Updated:** 2026-09-09 · **Effort:**
 `effort/streaming-reliability` (merged) · **Started:** 2026-09-04 ·
 **Effort fork:** `48615baf` · **Continuation merged to main:** `1f6d6645` via
 [#178](http://192.168.4.7:3000/noirr/plurx/pulls/178) on 2026-09-08 ·
