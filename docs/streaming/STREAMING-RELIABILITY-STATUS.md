@@ -81,8 +81,9 @@ then normalizes that Docker evidence as `d9e8d7d4`. [#208](http://192.168.4.7:30
 removes the duplicate offline-fixture line and records its Developer golden as
 `633a32ad`; [#213](http://192.168.4.7:3000/noirr/plurx/pulls/213) then closes
 the decoder status document as `894fd3da`. [#216](http://192.168.4.7:3000/noirr/plurx/pulls/216)
-lands Dolby Vision recovery and tvOS Live TV starts on current `main` at
-`b36397cf`. Draft follow-up
+lands Dolby Vision recovery and tvOS Live TV starts as `b36397cf`; [#217](http://192.168.4.7:3000/noirr/plurx/pulls/217)
+adds the remaining decoder M8 evidence handoff on current `main` at `3915c1d1`.
+Draft follow-up
 [#211](http://192.168.4.7:3000/noirr/plurx/pulls/211) gives the remaining fact
 probe its production budget and separates the compile-only fast Rust verdict
 from the continuing unit/SQLite job. Its exact current-main app passes the
