@@ -697,8 +697,10 @@ mod tests {
             .with_conn(|conn| {
                 conn.execute(
                     "INSERT INTO transcode_cache_locations
-                         (recipe_hash, node_id, storage_class, relative_dir, complete, bytes)
-                     VALUES ('scoped', ?1, 'shared', 'shared/scoped', 1, 20)",
+                         (recipe_hash, node_id, storage_class, relative_dir, complete, bytes,
+                          storage_id, generation_id)
+                     VALUES ('scoped', ?1, 'shared', 'shared/scoped', 1, 20,
+                             'shared-storage', 'shared-generation')",
                     [NODE],
                 )?;
                 Ok(())

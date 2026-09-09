@@ -252,6 +252,13 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
     },
     SqliteTransactionSite {
         module: "offline.rs",
+        method: "disable_offline_packages",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::VerbatimBatch,
+    },
+    SqliteTransactionSite {
+        module: "offline.rs",
         method: "claim_next_offline_package",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
@@ -920,7 +927,7 @@ mod tests {
         methods.sort_unstable();
         methods.dedup();
         assert_eq!(methods.len(), original_len);
-        // 71 on the merge. Both parents moved this counter from a shared 66
+        // 72 on the merge. Both parents moved this counter from a shared 66
         // and neither parent's total describes the merged tree, so it is read
         // off the merge rather than added up — but every boundary each of them
         // classified is retained, and the arithmetic happens to agree:
@@ -943,7 +950,7 @@ mod tests {
         // transaction boundary has to be a deliberate edit here. That is the
         // point of the assertion: two of the sites above reached main without
         // one.
-        assert_eq!(methods.len(), 71);
+        assert_eq!(methods.len(), 72);
     }
 
     #[test]

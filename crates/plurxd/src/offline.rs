@@ -1629,6 +1629,16 @@ mod tests {
     async fn complete_video_publication_moves_preparing_to_ready_with_verified_state() {
         let fixture = seeded_fixture().await;
         let package = claimed_package(&fixture, "ready-video", "none", None).await;
+        assert!(fixture
+            .store
+            .set_offline_package_recipe(
+                &package.id,
+                "test-node",
+                package.claim_generation,
+                "recipe-under-test",
+            )
+            .await
+            .expect("bind ready-video recipe"));
 
         fixture
             .manager
@@ -1708,6 +1718,16 @@ mod tests {
     async fn native_subtitle_publication_counts_the_complete_rendition() {
         let fixture = seeded_fixture().await;
         let package = claimed_package(&fixture, "native-ready", "native", Some(4)).await;
+        assert!(fixture
+            .store
+            .set_offline_package_recipe(
+                &package.id,
+                "test-node",
+                package.claim_generation,
+                "recipe-under-test",
+            )
+            .await
+            .expect("bind native-ready recipe"));
         let sidecar = crate::subtitles::vtt_path_for_identity(
             fixture.manager.transcode.subtitle_cache_dir(),
             package.file_id,

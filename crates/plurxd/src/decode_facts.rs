@@ -4725,7 +4725,7 @@ printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","
             r###"#!/bin/sh
 if test "$1" = "-version"; then printf '%s\n' 'ffprobe version source-fence'; exit 0; fi
 touch "$PLURX_TEST_PROBE_PATH.started"
-sleep 1
+while ! test -f "$PLURX_TEST_PROBE_PATH.release"; do sleep 0.01; done
 printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","profile":"High","pix_fmt":"yuv420p","width":1920,"height":1080,"avg_frame_rate":"24/1","r_frame_rate":"24/1","color_transfer":"bt709","disposition":{"attached_pic":0}}]}'
 touch "$PLURX_TEST_PROBE_PATH.done"
 "###,
@@ -4749,7 +4749,7 @@ touch "$PLURX_TEST_PROBE_PATH.done"
                 )
                 .await
         });
-        for _ in 0..100 {
+        for _ in 0..500 {
             if probe.with_extension("started").exists() {
                 break;
             }
@@ -4760,6 +4760,7 @@ touch "$PLURX_TEST_PROBE_PATH.done"
             .acquire_owned()
             .await
             .expect("identity gate");
+        std::fs::write(probe.with_extension("release"), b"").expect("release probe output");
         for _ in 0..150 {
             if probe.with_extension("done").exists() {
                 break;
@@ -5114,18 +5115,18 @@ printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","
             DecodeFactSource::new(source, offset_gate),
             None,
             ProbeStreamSelection::FirstPlayable,
-            Duration::from_millis(600),
+            Duration::from_secs(2),
             None,
         );
         tokio::pin!(collection);
         tokio::select! {
             result = &mut collection => panic!("collector returned while source lease was held: {result:?}"),
-            _ = tokio::time::sleep(Duration::from_millis(450)) => {}
+            _ = tokio::time::sleep(Duration::from_millis(500)) => {}
         }
         drop(held);
         assert_eq!(collection.await, Err(DecodeFactError::Deadline));
         assert!(
-            started.elapsed() < Duration::from_millis(900),
+            started.elapsed() < Duration::from_millis(2_400),
             "waiting for the source lease must not restart the full probe budget"
         );
         assert!(

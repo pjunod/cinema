@@ -2235,7 +2235,7 @@ fn value_projection(table: TablePlan, schema_version: i64, qualify: bool) -> Str
                 "0".to_owned()
             } else if table.name == "media_sessions"
                 && *column == "drain_deadline_ms"
-                && schema_version < 50
+                && schema_version < 51
             {
                 // A source from before the column has no draining session to
                 // describe, and null is what "not draining" is spelled as
@@ -2771,9 +2771,17 @@ mod tests {
             .copied()
             .expect("cache location table plan");
         let v25 = value_projection(table, 25, false);
+        let v53 = value_projection(table, 53, false);
         let current = value_projection(table, SQLITE_SCHEMA_VERSION, false);
-        assert!(v25.ends_with("'node:' || node_id || ':cache', relative_dir"));
-        assert!(current.ends_with("storage_id, generation_id"));
+        assert!(
+            v25.ends_with("'node:' || node_id || ':cache', relative_dir, 0"),
+            "{v25}"
+        );
+        assert!(v53.ends_with("storage_id, generation_id, 0"), "{v53}");
+        assert!(
+            current.ends_with("storage_id, generation_id, publication_generation"),
+            "{current}"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2783,7 +2791,7 @@ mod tests {
             .find(|table| table.name == "media_sessions")
             .copied()
             .expect("media session table plan");
-        for schema_version in [33_i64, 34, 35] {
+        for schema_version in [33_i64, 34, 35, 50, 51] {
             let data = tempfile::tempdir().expect("source dir");
             let path = data.path().join("legacy.db");
             {
@@ -2824,6 +2832,24 @@ mod tests {
                            media_origin_ms, media_sequence, discontinuity_sequence,
                            updated_at_ms"
                     }
+                    50 => {
+                        "incarnation_id, session_id, user_id, playback_id,
+                           request_fingerprint, owner_node_id, owner_epoch,
+                           lease_expires_at_ms, state, terminal_reason,
+                           publication_ready_at_ms, recipe_json, response_json,
+                           produced_playable_through_ms, fetched_through_ms,
+                           media_origin_ms, media_sequence, discontinuity_sequence,
+                           updated_at_ms"
+                    }
+                    51 => {
+                        "incarnation_id, session_id, user_id, playback_id,
+                           request_fingerprint, owner_node_id, owner_epoch,
+                           lease_expires_at_ms, state, terminal_reason,
+                           publication_ready_at_ms, recipe_json, response_json,
+                           produced_playable_through_ms, fetched_through_ms,
+                           media_origin_ms, media_sequence, discontinuity_sequence,
+                           updated_at_ms, drain_deadline_ms"
+                    }
                     _ => unreachable!(),
                 };
                 let values = match schema_version {
@@ -2838,6 +2864,14 @@ mod tests {
                     35 => {
                         "?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
                            ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19"
+                    }
+                    50 => {
+                        "?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                           ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19"
+                    }
+                    51 => {
+                        "?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                           ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20"
                     }
                     _ => unreachable!(),
                 };
@@ -2889,7 +2923,7 @@ mod tests {
                             9_000_i64,
                         ],
                     ),
-                    35 => conn.execute(
+                    35 | 50 => conn.execute(
                         &insert_sql,
                         rusqlite::params![
                             "incarnation",
@@ -2911,6 +2945,31 @@ mod tests {
                             4_i64,
                             5_i64,
                             9_000_i64,
+                        ],
+                    ),
+                    51 => conn.execute(
+                        &insert_sql,
+                        rusqlite::params![
+                            "incarnation",
+                            "session",
+                            42_i64,
+                            "playback",
+                            "fingerprint",
+                            "owner",
+                            7_i64,
+                            8_000_i64,
+                            "ended",
+                            "superseded",
+                            8_765_i64,
+                            "{\"recipe\":true}",
+                            "{\"response\":true}",
+                            1_000_i64,
+                            2_000_i64,
+                            3_000_i64,
+                            4_i64,
+                            5_i64,
+                            9_000_i64,
+                            9_876_i64,
                         ],
                     ),
                     _ => unreachable!(),
@@ -2962,11 +3021,11 @@ mod tests {
                     Param::Integer(4),
                     Param::Integer(5),
                     Param::Integer(9_000),
-                    // v51's drain deadline. No legacy source has the column,
-                    // and null is what "not draining" means on every row it
-                    // migrates onto, so the import projects it rather than
-                    // inventing a deadline in 1970.
-                    Param::Null,
+                    if schema_version < 51 {
+                        Param::Null
+                    } else {
+                        Param::Integer(9_876)
+                    },
                 ],
                 "schema v{schema_version} import row",
             );

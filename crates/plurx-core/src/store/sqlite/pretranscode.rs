@@ -646,10 +646,13 @@ impl PretranscodeJobStore for SqliteStore {
                 "INSERT INTO transcode_cache_locations
                     (recipe_hash, node_id, storage_class, relative_dir, bytes, complete,
                      manifest_digest, scrub_object_index, publication_generation,
-                     last_used_at, last_seen_at)
-                 VALUES (?1, ?2, 'local', ?3, ?4, 1, ?6, 0, 1, ?5, ?5)
+                     last_used_at, last_seen_at, storage_id, generation_id)
+                 VALUES (?1, ?2, 'local', ?3, ?4, 1, ?6, 0, 1, ?5, ?5,
+                         'node:' || ?2 || ':cache', ?3)
                  ON CONFLICT(recipe_hash, node_id, storage_class) DO UPDATE SET
                     relative_dir = excluded.relative_dir,
+                    storage_id = excluded.storage_id,
+                    generation_id = excluded.generation_id,
                     bytes = excluded.bytes,
                     complete = 1,
                     publication_generation = transcode_cache_locations.publication_generation + 1,

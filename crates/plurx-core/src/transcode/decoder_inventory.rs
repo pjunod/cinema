@@ -894,25 +894,25 @@ esac\n",
         // measures. A build that prints none — everything before FFmpeg 7 —
         // measures nothing, and that is the correct answer for it rather than
         // a test failure.
-        let prints_context = tokio::process::Command::new(&ffmpeg)
-            .args([
-                "-hide_banner",
-                "-loglevel",
-                "verbose",
-                "-f",
-                "lavfi",
-                "-i",
-                "testsrc=size=160x120:rate=10:duration=0.2",
-                "-f",
-                "null",
-                "-",
-            ])
-            .kill_on_drop(true)
-            .output()
-            .await
-            .is_ok_and(|output| String::from_utf8_lossy(&output.stderr).contains("[vist#"));
-
         let scratch = tempfile::tempdir().expect("scratch");
+        let context_clip = scratch.path().join("context-probe.mkv");
+        let prints_context = if probe_clip(&ffmpeg, "mpeg2video", &context_clip).await {
+            tokio::process::Command::new(&ffmpeg)
+                .args(["-hide_banner", "-loglevel", "verbose", "-i"])
+                .arg(&context_clip)
+                .args(["-frames:v", "1", "-f", "null", "-"])
+                .kill_on_drop(true)
+                .output()
+                .await
+                .is_ok_and(|output| {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    stderr.contains("[vist#") && stderr.contains("[dec:")
+                })
+        } else {
+            false
+        };
+        let _ = tokio::fs::remove_file(&context_clip).await;
+
         let measured =
             measure_selected_decoders(&ffmpeg, &["mpeg2video".to_owned()], scratch.path()).await;
 

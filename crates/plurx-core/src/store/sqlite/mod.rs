@@ -2500,7 +2500,7 @@ mod tests {
             .expect("version");
         assert_eq!(version, MIGRATIONS.len() as i64);
         assert_eq!(
-            version, 51,
+            version, 54,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );
@@ -3320,10 +3320,10 @@ mod tests {
                 (recipe_hash, node_id, storage_class, relative_dir, bytes, complete,
                  manifest_digest, scrub_object_index, last_used_at, last_seen_at)
              VALUES ('rolling-recipe', 'node-b', 'local', 'rolling-generation',
-                     200, 1, NULL, 0, 40, 40)",
+                     0, 0, NULL, 0, 40, 40)",
             [],
         )
-        .expect("legacy binary write on v26 schema");
+        .expect("legacy incomplete write on v26 schema");
         assert_eq!(
             conn.query_row(
                 "SELECT storage_id, generation_id FROM transcode_cache_locations
@@ -3944,30 +3944,10 @@ mod tests {
             .expect("seed a v50 session");
         }
 
-        SqliteStore::open(&db).expect("migrate v50 to current");
         {
             let conn = Connection::open(&db).expect("raw reopen");
-            assert_eq!(
-                conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
-                    .expect("version"),
-                SQLITE_SCHEMA_VERSION
-            );
-            let (state, deadline) = conn
-                .query_row(
-                    "SELECT state, drain_deadline_ms FROM media_sessions
-                      WHERE incarnation_id = 'inc-v50'",
-                    [],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?)),
-                )
-                .expect("the v50 session survives");
-            assert_eq!(state, "active", "the migration is additive");
-            assert_eq!(
-                deadline, None,
-                "a session that existed before the column is not draining, and \
-                 null is how this schema says so"
-            );
-            conn.pragma_update(None, "user_version", 50)
-                .expect("simulate interruption after the v51 schema commit");
+            conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", MIGRATIONS[50]))
+                .expect("commit the v51 shape without advancing its marker");
         }
 
         SqliteStore::open(&db).expect("settle the committed v51 migration");
@@ -3979,6 +3959,19 @@ mod tests {
         );
         assert!(SqliteStore::drain_deadline_column_exists(&conn)
             .expect("inspect the drain deadline column"));
+        let (state, deadline) = conn
+            .query_row(
+                "SELECT state, drain_deadline_ms FROM media_sessions
+                  WHERE incarnation_id = 'inc-v50'",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?)),
+            )
+            .expect("the v50 session survives");
+        assert_eq!(state, "active", "the migration is additive");
+        assert_eq!(
+            deadline, None,
+            "a session that existed before the column is not draining, and null is how this schema says so"
+        );
     }
 
     /// A binary that predates the drain cannot take a draining session over.

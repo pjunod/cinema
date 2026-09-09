@@ -12545,15 +12545,38 @@ impl TranscodeManager {
         deadline: Instant,
         cancelled: Option<&tokio_util::sync::CancellationToken>,
     ) -> Result<ResolvedTranscode, String> {
+        self.resolve_held_movie_plan(
+            file,
+            options,
+            encoder,
+            crate::decode_facts::DecodeFactSource::new(
+                Arc::clone(&source.handle),
+                Arc::clone(&source.offset_gate),
+            ),
+            deadline,
+            cancelled,
+        )
+        .await
+    }
+
+    /// Resolve decoder facts through the exact source description the caller
+    /// already owns. Both background artifacts and immutable VOD use this
+    /// seam; neither is allowed to derive its key from scanner-time facts and
+    /// later run a different object opened by name.
+    async fn resolve_held_movie_plan(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        options: &TranscodeOptions,
+        encoder: Encoder,
+        fact_source: crate::decode_facts::DecodeFactSource,
+        deadline: Instant,
+        cancelled: Option<&tokio_util::sync::CancellationToken>,
+    ) -> Result<ResolvedTranscode, String> {
         let Some(probe) = self.decode_probe_identity.as_ref() else {
             return self.resolve_movie_plan(file, options, encoder).await;
         };
         let catalog = DecodeCatalogMetadata::from_media_file(file)
             .map_err(|error| format!("decoder catalog facts are invalid: {error}"))?;
-        let fact_source = crate::decode_facts::DecodeFactSource::new(
-            Arc::clone(&source.handle),
-            Arc::clone(&source.offset_gate),
-        );
         #[cfg(test)]
         let fact_source =
             fact_source.with_final_identity_delay(self.decode_source_final_identity_delay);
@@ -16587,6 +16610,27 @@ impl TranscodeManager {
         } else {
             None
         };
+        let held_plan_handle = source.handle.try_clone().map(Arc::new).map_err(|error| {
+            vod_refusal_error(
+                "vod_decoder_plan_refused",
+                format!("the held source could not be retained for decoder planning: {error}"),
+            )
+        })?;
+        let plan = self
+            .resolve_held_movie_plan(
+                file,
+                &options,
+                encoder,
+                crate::decode_facts::DecodeFactSource::new(
+                    held_plan_handle,
+                    Arc::new(tokio::sync::Semaphore::new(1)),
+                ),
+                Instant::now() + DECODE_PLAN_PROBE_BUDGET,
+                None,
+            )
+            .await
+            .map_err(|error| vod_refusal_error("vod_decoder_plan_refused", error))?;
+        let resources = TranscodeResourceEstimate::of(&plan, &Workload::of(file, target_height));
         if !source.unchanged() {
             return Err(vod_refusal_error(
                 "vod_source_rescan_required",
@@ -16618,7 +16662,8 @@ impl TranscodeManager {
         }
         Ok(Some(Arc::new(crate::vodencode::Encoding {
             source_object_version,
-            encoder,
+            plan,
+            resources,
             options,
             grid,
             subtitle,
@@ -16698,7 +16743,7 @@ impl TranscodeManager {
             });
         let encoder = encoding
             .as_ref()
-            .map_or("vod", |encoding| encoding.encoder.label());
+            .map_or("vod", |encoding| encoding.plan.encoder().label());
         let prepared = crate::vodserve::VodRecipeRequest {
             request: req,
             encoding,

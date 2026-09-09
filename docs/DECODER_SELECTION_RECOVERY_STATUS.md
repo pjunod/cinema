@@ -2,7 +2,8 @@
 
 **Status:** M0–M5 complete · M6 server/client implementation landed · M7
 complete · frozen promotion candidate integrated with current `main` ·
-broader fleet qualification continues after merge · **Updated:** 2026-09-08 · **Integration branch:**
+final adversarial review repaired · broader fleet qualification continues after
+merge · **Updated:** 2026-09-09 · **Integration branch:**
 `effort/decoder-selection-recovery` at `d84aa500` · **Active promotion branch:**
 `codex/decoder-final-promotion`, latest-main merge `f234427e`
 
@@ -26,12 +27,12 @@ An unchecked item is not implied by a nearby passing check.
 | M7a · advisory Developer settings | Done | Keep the prerequisites accurate as hardware contracts land; the controls advise and never gate enablement |
 | M7b · hardware diagnostic path | Merged | [Forgejo #174](http://192.168.4.7:3000/noirr/plurx/pulls/174) merged approved head `0a685526` into the effort at `0c831b88` after the complete Effort development gate. Backend-aware measurement, path-scoped qualification, same-codec recovery pairing, compatible v2 reporting, and advisory Developer readiness are implemented. A real hardware contract is separate M8 fleet evidence |
 | M7 remainder · offline durability and handoff enforcement | Merged | [Forgejo #179](http://192.168.4.7:3000/noirr/plurx/pulls/179) fast-forwarded approved head `990bf334` into the effort after its adversarial findings were fixed and the Effort development gate passed; the repair includes one replicated cluster-wide kill-switch transaction |
-| Promotion to `main` | Draft PR open; final review next | Current `main` `e1780a15` is merged at `f234427e`; the last merge changed lineage only because its Raft repair was already in the effort tree. Pinned Rust compile/Clippy and exact SQLite v54, Hiqlite v34, web, ownership, and status contracts pass. Remaining: push refreshed head · one final adversarial review · fixes if any · smoke/fast lane · merge · watch post-merge tests |
+| Promotion to `main` | Draft PR open; review repairs pass focused tests | Current `main` `e1780a15` is merged at `f234427e`; the one final adversarial review is complete and its three findings are repaired. The failures from #189's first unit run reproduce as stale migration/publication fixtures, two timing-sensitive probes, and one immutable-VOD filter-graph defect; their focused tests now pass. Remaining: push repaired head · smoke/fast lane · merge · watch post-merge tests |
 | M8 · broader fleet qualification | Post-merge continuation | Hardware diagnostic capture · workload matrix · false-positive classification · startup/concurrency/recovered-latency evidence · three-client replacement runs; any code failure gets a new PR |
 
-**Shortest reading:** M7 is done. Push the frozen candidate, perform exactly
-one final effort-PR review, fix its findings, run functionality smoke evidence
-and the fast lane, then merge. The owner explicitly approved
+**Shortest reading:** M7 and the one final effort-PR review are done. Push the
+repaired candidate, run functionality smoke evidence and the fast lane, then
+merge. The owner explicitly approved
 watching the remaining promotion jobs and broader fleet/client qualification
 against `main`; any code failure opens a follow-up PR. Until a real node supplies the first
 hardware contract, automatic decode recovery remains deliberately unreachable
@@ -44,15 +45,15 @@ on that path rather than falsely certified.
 | Milestone | Freeze and promote the completed decoder-selection/recovery effort |
 | Task base | Effort head `990bf334` plus current `main` `e1780a15` |
 | Task branch | `codex/decoder-final-promotion` in the agent-owned clone at `/private/tmp/codex-plurx-decoder.RRcx8j/repo`; latest-main merge `f234427e` |
-| Task PR | Final effort→`main` [Forgejo #189](http://192.168.4.7:3000/noirr/plurx/pulls/189) is open as WIP/draft and stays there through the one final review and repair pass |
+| Task PR | Final effort→`main` [Forgejo #189](http://192.168.4.7:3000/noirr/plurx/pulls/189) is open as WIP/draft; it stays draft until the repaired head is ready for the fast lane |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
 | Audit scope | Job-scoped budget persistence · alternate result references · part and final-assembly receipt verification · versioned worker capabilities · owner-handoff inheritance · default and no-live-recovery shipping-path exercise without introducing a code gate |
 | Current finding | Exact-head review showed `recipe_hash` cannot safely serve as both node-local result reference and owner-independent recovery ledger. The repaired tree adds explicit `primary -> recovery_pending -> alternate` state, preserves either consumed boundary through rehome, refuses software-primary budget creation, and gives every claim and worker mutation a monotonically increasing generation |
-| Adversarial review | Complete. Einstein found two remaining P1 boundaries: disabling fenced only the local manager, and compatible pre-v32 workers could write generation-less state/cache settlements. The working tree moves disable and every claim fence into one replicated Store transaction, predicates claims on the durable setting, and adds lifecycle/cache-publication triggers that reject legacy writers. Both findings have focused passing regressions; per owner direction there is no additional task-review loop |
-| Focused evidence | Exact review-fix commit `35f0069f`: pinned all-target core/daemon compile and denied-warning Clippy pass; SQLite offline units pass 10/10; the v51→v52 migrated-schema regression rejects legacy claim, requeue, failure, Ready, cache completion, and complete-row rewrite shapes; the cluster-wide disable contract passes on SQLite and real three-voter Hiqlite, proving a remote claim cannot publish cache or Ready after disable and cannot claim again until re-enabled. Earlier `23274c3c` direct recovery, membership, software-survivor, and error-path evidence remains unchanged |
-| Fast lane | M7's Forgejo Effort development gate passed at `990bf334`. On source integration `990d8069`, pinned Rust 1.97.1 compile and denied-warning Clippy pass; exact SQLite v54 and Hiqlite v34 chain/import/downgrade contracts plus web/settings and validation contracts pass. `f234427e` adds only already-present main lineage. The promotion fast lane runs after final review repairs |
+| Adversarial review | Complete; no second review is planned. Einstein found three promotion blockers: immutable VOD bypassed the resolved decoder plan, the v50 Hiqlite import projected `drain_deadline_ms` one version too early, and the cache-location projection test stopped at v53 despite v54's publication generation. VOD now retains one descriptor-bound plan and uses it for arguments, identity, and mixed admission; real v50/v51 import fixtures and v25/v53/v54 cache projections pin the schema boundaries |
+| Focused evidence | Pinned all-target daemon compile passes. The formerly failing transaction census, cache storage-class, v26 repair, v51 stale-marker, schema-count, decoder-inventory, decode-fact deadline/revalidation, Live TV arguments, offline publication, and VFR/bitmap immutable-VOD restart tests pass. Hiqlite-enabled v25/v53/v54 projection and real v50/v51 media-session import tests also pass |
+| Fast lane | M7's Forgejo Effort development gate passed at `990bf334`. On source integration `990d8069`, pinned Rust 1.97.1 compile and denied-warning Clippy pass; exact SQLite v54 and Hiqlite v34 chain/import/downgrade contracts plus web/settings and validation contracts pass. `f234427e` adds only already-present main lineage. The promotion fast lane runs on the pushed review-repair head |
 | Validation order | Task PRs into the effort do not run the full unit suite. After M7: targeted functionality smoke tests and the fast lane run on the frozen exact tree; after they pass, merge and continue watching the remaining promotion and broader suites. A code failure gets a new PR |
-| Next | Push `f234427e` to the open draft PR · perform exactly one adversarial review · fix findings · run functionality smoke and the fast lane · merge · monitor the remainder |
+| Next | Commit and push the review repairs · run functionality smoke and the fast lane · mark #189 ready and merge · monitor the remaining suites; any persistent code failure gets a follow-up PR |
 | External blocker | None for M7 or promotion. A qualifying hardware host is still required for post-merge M8 fleet evidence; absence remains visible and advisory rather than an enable gate |
 
 ## Milestones
@@ -67,7 +68,7 @@ on that path rather than falsely certified.
 | M5 · durable budget and prepublication recovery | Complete | The M5a census landed at `b2dcf458`; `media_session_producer_recovery` exists on both backends, a server-owned `recovery_epoch` follows one playback across continuations, and the producer reserves, settles and refuses a second recovery. M5c1–M5c3 are merged through [#156](http://192.168.4.7:3000/noirr/plurx/pulls/156) |
 | M6 · postpublication replacement and client intent | Server and three client implementations landed; fleet acceptance open | The server half predated this effort. Apple, Android and web client halves are on `main`; only Apple currently reaches a viewer because Android's `dual_player_preparation` remains deliberately false. The three-client measured receipt belongs to M8 |
 | M7 · offline, shared cache, and handoff enforcement | Complete | M7a and M7b are merged through `0c831b88`; M7 remainder [#179](http://192.168.4.7:3000/noirr/plurx/pulls/179) closes durable offline one-shot recovery/result identity, exact-claim and cache publication, crash-before-install rehome, software-survivor binding, replicated disable, and legacy-worker fencing at `990bf334` |
-| M8 · fleet qualification and promotion | Promotion freeze active | Current `main` is integrated; final review, smoke/fast lane, merge, and post-merge monitoring remain |
+| M8 · fleet qualification and promotion | Promotion freeze active | Current `main` is integrated and the final review is repaired; smoke/fast lane, merge, and post-merge monitoring remain |
 
 ## M2 working tree — one plan names and builds the attempt
 

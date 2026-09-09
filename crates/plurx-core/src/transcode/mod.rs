@@ -1367,6 +1367,7 @@ pub fn hls_args_for_plan(plan: &ResolvedTranscode, execution: &TranscodeExecutio
     )
 }
 
+#[cfg(test)]
 fn hls_args_with_compatibility(
     source: &MediaFile,
     encoder: Encoder,
@@ -1697,17 +1698,15 @@ fn hls_args_inner(
     args
 }
 
-/// Shared legacy source selection, decode, filters, and encoder recipe used by
-/// immutable VOD while its caller is migrated to the resolved-plan interface.
-/// Presentation builders append their own timestamp, keyframe, and muxer
-/// contracts.
-fn encode_input_args(
-    source: &MediaFile,
-    encoder: Encoder,
-    opts: &TranscodeOptions,
-    pacing: Pacing,
+/// Shared resolved source selection, decode, filters, and encoder recipe used
+/// by immutable VOD before it appends its own timestamp, keyframe, and muxer
+/// contracts. Semantic choices come only from `plan`; the execution carries
+/// attempt-local paths, offsets, thread caps, and diagnostics.
+fn encode_input_args_for_plan(
+    plan: &ResolvedTranscode,
+    execution: &TranscodeExecution,
 ) -> Vec<String> {
-    let mut args = hls_args_with_compatibility(source, encoder, opts, pacing, "", false);
+    let mut args = hls_args_for_plan(plan, execution);
     let presentation = args
         .iter()
         .position(|argument| argument == "-muxdelay")
