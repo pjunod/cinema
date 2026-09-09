@@ -4268,11 +4268,34 @@ mod tests {
 
     #[cfg(feature = "hiqlite-store")]
     fn free_test_port() -> u16 {
-        std::net::TcpListener::bind("127.0.0.1:0")
-            .expect("bind test port")
-            .local_addr()
-            .expect("test port address")
-            .port()
+        static USED_PORTS: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<u16>>> =
+            std::sync::OnceLock::new();
+
+        loop {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test port");
+            let port = listener.local_addr().expect("test port address").port();
+            let inserted = USED_PORTS
+                .get_or_init(|| std::sync::Mutex::new(std::collections::BTreeSet::new()))
+                .lock()
+                .expect("test port registry")
+                .insert(port);
+            if inserted {
+                return port;
+            }
+        }
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    #[test]
+    fn membership_test_configs_do_not_reuse_released_ephemeral_ports() {
+        let dir = tempfile::tempdir().expect("unique membership port dir");
+        let mut ports = std::collections::BTreeSet::new();
+        for _ in 0..64 {
+            let config = membership_test_config(dir.path());
+            assert!(ports.insert(config.cluster.raft_bind.port()));
+            assert!(ports.insert(config.cluster.api_bind.port()));
+        }
+        assert_eq!(ports.len(), 128);
     }
 
     #[cfg(feature = "hiqlite-store")]
