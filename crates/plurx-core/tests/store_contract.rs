@@ -10336,7 +10336,7 @@ async fn api_key_activity_refresh_is_bounded_and_disabled_keys_do_not_touch() {
 }
 
 #[cfg(feature = "hiqlite-contract-tests")]
-async fn remove_hiqlite_schema_after_v31(client: &Client) {
+async fn remove_hiqlite_schema_after_v32(client: &Client) {
     let results = client
         .txn([
             (
@@ -10371,17 +10371,25 @@ async fn remove_hiqlite_schema_after_v31(client: &Client) {
                 "ALTER TABLE media_sessions DROP COLUMN recovery_epoch",
                 hiqlite::params!(),
             ),
-            (
-                "DROP TABLE IF EXISTS media_session_producer_recovery",
-                hiqlite::params!(),
-            ),
         ])
         .await
-        .expect("remove schema tail newer than v31");
+        .expect("remove schema tail newer than v32");
     results
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
         .expect("commit schema-tail removal");
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn remove_hiqlite_schema_after_v31(client: &Client) {
+    remove_hiqlite_schema_after_v32(client).await;
+    client
+        .execute(
+            "DROP TABLE IF EXISTS media_session_producer_recovery",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("remove v32 producer-recovery ledger");
 }
 
 #[cfg(feature = "hiqlite-contract-tests")]
@@ -11048,6 +11056,7 @@ async fn replicated_v32_store_migrates_the_producer_recovery_ledger_on_daemon_op
     // refuse and this one must not: `CREATE TABLE IF NOT EXISTS` is idempotent,
     // so the loser of a two-voter race simply finds the work done. Refusing
     // here would leave a cluster interrupted mid-migration unable to open.
+    remove_hiqlite_schema_after_v32(&client).await;
     client
         .execute(
             "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
@@ -11232,8 +11241,6 @@ const V24_SCHEMA_VERSION: i64 = 24;
 const V25_SCHEMA_VERSION: i64 = 25;
 #[cfg(feature = "hiqlite-contract-tests")]
 const V26_SCHEMA_VERSION: i64 = 26;
-#[cfg(feature = "hiqlite-contract-tests")]
-const V27_SCHEMA_VERSION: i64 = 27;
 #[cfg(feature = "hiqlite-contract-tests")]
 const V31_SCHEMA_VERSION: i64 = 31;
 
