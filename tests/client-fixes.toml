@@ -979,6 +979,16 @@ test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "testLiveTvOwnsThePlaybackAudioSessionForItsSeparatePlayer"
 
 [[fixes]]
+# Teardown has a shorter bound than the ordinary server cadence. A failed
+# settlement must retry inside that bound before the acknowledgement-free end.
+id = "apple.final-settlement-retries-inside-deadline"
+commits = ["14da464d"]
+source = "clients/apple/Sources/PlaybackControlReporter.swift"
+source_anchor = "finishing ? PlaybackControl.minimumExchangeMs : bootstrap.nextExchangeMs"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testAnEndingCommitIsSettledBeforeTheEndExchange"
+
+[[fixes]]
 # Promotion compares counters to the current merge target. This anchor keeps
 # the Android 76 claim tied to the collision regression that rejects reusing
 # the build number already present on main.
