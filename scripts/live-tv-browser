@@ -247,7 +247,7 @@ def main(argv: list[str]) -> int:
             stop()
             try:
                 page.wait_for_function("!document.fullscreenElement && document.querySelector('#live-tv-host').hidden")
-            except Exception:
+            except Exception as error:
                 state = page.evaluate("""() => ({
                     fullscreen: document.fullscreenElement?.id || null,
                     webkitFullscreen: document.webkitFullscreenElement?.id || null,
@@ -255,18 +255,17 @@ def main(argv: list[str]) -> int:
                     webkitDisplayingFullscreen: document.querySelector('#live-tv-video')?.webkitDisplayingFullscreen || false,
                     webkitPresentationMode: document.querySelector('#live-tv-video')?.webkitPresentationMode || null,
                     hidden: document.querySelector('#live-tv-host')?.hidden,
-                    active: document.querySelector('#live-tv-host')?.dataset.mode || null,
+                    mode: document.querySelector('#live-tv-host')?.dataset.mode || null,
                     serial: LIVE_TV.serial,
                     stopSource: stopLiveTv.toString(),
                     exitSource: exitLiveTvPresentation.toString(),
                     detachError: window.__liveTvDetachError || null,
                     message: document.querySelector('#live-tv-message')?.textContent || null,
                 })""")
-                print(
-                    f"live-tv-browser: fullscreen stop state: {state!r}; sessions={active()!r}",
-                    file=sys.stderr,
-                )
-                raise
+                raise AssertionError(
+                    f"fullscreen stop did not settle: state={state!r}, "
+                    f"active={active()!r}, page_errors={errors!r}"
+                ) from error
             until(lambda: not active(), "fullscreen stop did not release")
 
             watch()

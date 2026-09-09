@@ -277,6 +277,15 @@ class CatalogCase(unittest.TestCase):
         )
         self.assertTrue(topology_schema["cluster_auth"])
 
+        role_schema_selection = select_points(
+            catalog, ("benchmarks/cluster-transport-recovery-role.schema.json",)
+        )
+        role_schema_checks = {
+            check.id
+            for check in selected_checks(catalog, role_schema_selection, profile="full")
+        }
+        self.assertIn("cluster-transport-recovery", role_schema_checks)
+
         # A membership change is only exercised against real voters in the
         # replicated lane, so it must select it.
         membership = scope_for_paths(

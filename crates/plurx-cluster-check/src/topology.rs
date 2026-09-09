@@ -1235,6 +1235,12 @@ pub(super) fn resolve_build_sha() -> Result<String> {
     normalize_build_sha(&String::from_utf8(output.stdout)?, "git rev-parse HEAD")
 }
 
+pub(super) fn resolve_embedded_build_sha() -> Result<String> {
+    let value = option_env!("PLURX_BUILD_SHA")
+        .context("qualification runner omitted its embedded PLURX_BUILD_SHA")?;
+    normalize_build_sha(value, "embedded PLURX_BUILD_SHA")
+}
+
 fn normalize_build_sha(value: &str, source: &str) -> Result<String> {
     let value = value.trim().to_ascii_lowercase();
     if value.len() != 40 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {

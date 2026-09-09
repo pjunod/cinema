@@ -97,6 +97,7 @@ mod named_runner;
 mod storage_evidence;
 mod topology;
 mod transport_recovery;
+mod transport_recovery_diagnostics;
 pub use failure_drills::{
     validate_failure_drill_artifact, ClusterFailureDrillArtifact,
     FAILURE_DRILL_ARTIFACT_SCHEMA_VERSION,
@@ -114,15 +115,19 @@ pub use topology::{
     TOPOLOGY_ARTIFACT_SCHEMA_VERSION, TOPOLOGY_WRITE_OPERATIONS,
 };
 pub use transport_recovery::{
+    assemble_transport_recovery_reports, run_transport_recovery_role,
     validate_transport_recovery_artifact, validate_transport_recovery_bytes,
+    validate_transport_recovery_role_bytes, validate_transport_recovery_role_report,
     AcknowledgedRecoveryWrite, ClusterTransportRecoveryArtifact, NodeResourceEnvelope,
-    ProcessResourceCount, RecoveryCycleEvidence, RecoveryImageEvidence,
+    ProcessResourceCount, RecoveryAssemblePlan, RecoveryCycleEvidence, RecoveryImageEvidence,
     RecoveryNodeResourceEvidence, RecoveryResourceEnvelopes, RecoveryResourceNodeKind,
-    RecoveryRole, RecoveryRoleCampaign, RecoveryRuntimeStatus, RecoveryWriteDigest, ResourceBand,
-    SnapshotFileEvidence, SourceOutboundTransportEvidence, TargetInboundTransportEvidence,
+    RecoveryRole, RecoveryRoleCampaign, RecoveryRolePlan, RecoveryRoleReportScope,
+    RecoveryRuntimeStatus, RecoveryWriteDigest, ResourceBand, SnapshotFileEvidence,
+    SourceOutboundTransportEvidence, TargetInboundTransportEvidence, TransportRecoveryRoleReport,
     TransportRecoveryWorstDurations, TRANSPORT_RECOVERY_ARTIFACT_SCHEMA_VERSION,
-    TRANSPORT_RECOVERY_CYCLES_PER_ROLE, TRANSPORT_RECOVERY_DEFAULT_VOTER_SMOKE_CYCLES,
-    TRANSPORT_RECOVERY_LARGE_IMAGE_BYTES, TRANSPORT_RECOVERY_SMALL_IMAGE_BYTES,
+    TRANSPORT_RECOVERY_CYCLES_PER_ROLE, TRANSPORT_RECOVERY_DEFAULT_LEARNER_SMOKE_CYCLES,
+    TRANSPORT_RECOVERY_DEFAULT_VOTER_SMOKE_CYCLES, TRANSPORT_RECOVERY_LARGE_IMAGE_BYTES,
+    TRANSPORT_RECOVERY_ROLE_REPORT_SCHEMA_VERSION, TRANSPORT_RECOVERY_SMALL_IMAGE_BYTES,
 };
 
 const RAFT_SECRET: &str = "plurx-m1b-raft-secret";
@@ -347,9 +352,35 @@ pub async fn run(args: Vec<String>) -> Result<()> {
                 .context("read transport-recovery evidence from stdin")?;
             transport_recovery::validate_transport_recovery_bytes(&bytes)
         }
+        Some("validate-transport-recovery-role-stdin") => {
+            if args.get(2).is_some() {
+                bail!("validate-transport-recovery-role-stdin accepts no arguments");
+            }
+            let mut bytes = Vec::new();
+            std::io::stdin()
+                .read_to_end(&mut bytes)
+                .context("read transport-recovery role report from stdin")?;
+            transport_recovery::validate_transport_recovery_role_bytes(&bytes)
+        }
+        Some("transport-recovery-role") => {
+            let plan = transport_recovery::parse_recovery_role_plan(&args[2..])?;
+            transport_recovery::run_transport_recovery_role(plan)
+                .await
+                .map(|_| ())
+        }
+        Some("transport-recovery-assemble") => {
+            let plan = transport_recovery::parse_recovery_assemble_plan(&args[2..])?;
+            transport_recovery::assemble_transport_recovery_reports(plan)
+        }
         Some("transport-recovery-voter-smoke") => {
-            let plan = transport_recovery::voter_smoke_plan(&args[2..])?;
-            transport_recovery::run_transport_recovery_voter_smoke(plan).await
+            let cycles = transport_recovery::smoke_cycles(&args[2..], RecoveryRole::Voter)?;
+            transport_recovery::run_transport_recovery_smoke_alias(RecoveryRole::Voter, cycles)
+                .await
+        }
+        Some("transport-recovery-learner-smoke") => {
+            let cycles = transport_recovery::smoke_cycles(&args[2..], RecoveryRole::Learner)?;
+            transport_recovery::run_transport_recovery_smoke_alias(RecoveryRole::Learner, cycles)
+                .await
         }
         Some("transport-recovery-writer") => {
             let config = args
@@ -8397,6 +8428,12 @@ impl NodeProcess {
             input,
             output,
         })
+    }
+
+    pub(crate) fn pid(&self) -> Result<u32> {
+        self.child
+            .id()
+            .with_context(|| format!("voter {} has no process id", self.id))
     }
 
     pub async fn wait_ready(&mut self) -> Result<()> {

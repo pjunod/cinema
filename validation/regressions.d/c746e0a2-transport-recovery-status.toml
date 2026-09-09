@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["c746e0a2", "6e11faf9"]
+reason = "Status and regression-ledger checkpoints for the observed Live TV fullscreen teardown race; they change no executable behavior."
+ignore = true

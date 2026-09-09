@@ -1,0 +1,21 @@
+version = 1
+
+[[coverage]]
+commits = [
+  "6a638f88",
+  "b9547a2b",
+]
+points = [
+  "cluster.auth",
+  "operations.packaging",
+  "validation.framework",
+]
+checks = [
+  "rust-gate",
+  "rust-gate-ci",
+  "cluster-transport-recovery",
+  "operations-contract",
+  "catalog-contract",
+  "history-regressions",
+]
+reason = "The transport-recovery runner now executes voter and learner campaigns independently, validates bounded role evidence through one semantic path, and assembles only two complete 20-cycle reports from the same exact source execution. Parser, schema, scope, orchestration, stale-output, assembly, snapshot-purge, and timestamp-boundary regressions cover the new seams; pinned Rust checks and real Linux warmup-plus-one runs for both roles prove the common runner reaches and validates the production TLS recovery path without allowing smoke evidence to qualify."

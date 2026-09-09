@@ -198,6 +198,7 @@ failures.
 | [CLUSTER_TRANSPORT_RECOVERY_IMPLEMENTATION.md](cluster/CLUSTER_TRANSPORT_RECOVERY_IMPLEMENTATION.md) | Fixing buffered writes and bounding recovery end to end. | open |
 | [CLUSTER_TRANSPORT_RECOVERY_STATUS.md](cluster/CLUSTER_TRANSPORT_RECOVERY_STATUS.md) | Live implementation status of that effort. | open |
 | [CLUSTER-TRANSPORT-RECOVERY-POST-MERGE-HANDOFF.md](cluster/CLUSTER-TRANSPORT-RECOVERY-POST-MERGE-HANDOFF.md) | Finishing qualification and rollout after the merge. | open |
+| [TRANSPORT-RECOVERY-CI-STATUS.md](cluster/TRANSPORT-RECOVERY-CI-STATUS.md) | Which independent-role CI milestone is built, reviewed, and proved. | open |
 | [TRANSPORT-RECOVERY-RESOURCE-BASELINE.md](cluster/TRANSPORT-RECOVERY-RESOURCE-BASELINE.md) | Why that lane never passed under the per-cycle ceiling: the measurement. | done |
 | [TRANSPORT-RECOVERY-RESOURCE-CONTRACT-DECISION.md](cluster/TRANSPORT-RECOVERY-RESOURCE-CONTRACT-DECISION.md) | The campaign-floor contract that replaced it, and the two options not taken. | built |
 | [CLUSTER_PAGE_LATENCY_REVIEW.md](cluster/CLUSTER_PAGE_LATENCY_REVIEW.md) | Evidence for why Home, Activity and Settings were slow in a cluster. | done |

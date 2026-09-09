@@ -19,9 +19,9 @@ def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
-def make_dry_run_commands(target: str) -> list[str]:
+def make_dry_run_commands(target: str, *variables: str) -> list[str]:
     result = subprocess.run(
-        ["make", "--no-print-directory", "-n", target],
+        ["make", "--no-print-directory", "-n", target, *variables],
         cwd=ROOT,
         check=True,
         text=True,
@@ -1576,6 +1576,10 @@ assert.equal(context.ACT_TIMER, null);
             point for point in catalog["points"] if point["id"] == "cluster.auth"
         )
         self.assertIn("hiqlite-vendor-clippy", cluster_point["checks"])
+        self.assertIn(
+            "benchmarks/cluster-transport-recovery-role.schema.json",
+            cluster_point["paths"],
+        )
         self.assertIn("run: make apple-build", effort)
         self.assertIn("run: make android", effort)
         self.assertIn("run: make web-check", effort)
@@ -2478,14 +2482,19 @@ assert.equal(context.ACT_TIMER, null);
     def test_transport_recovery_campaign_is_a_persistent_affected_linux_gate(self):
         workflow = read(".github/workflows/ci.yml")
         jobs = workflow_job_blocks(".github/workflows/ci.yml")
+        contracts = jobs["cluster_transport_recovery_contracts"]
+        voter = jobs["cluster_transport_recovery_voter"]
+        learner = jobs["cluster_transport_recovery_learner"]
         recovery = jobs["cluster_transport_recovery"]
-        make_commands = make_dry_run_commands("cluster-transport-recovery-check")
+        contract_commands = make_dry_run_commands(
+            "cluster-transport-recovery-contracts"
+        )
 
-        self.assertEqual(len(make_commands), 15)
-        self.assertEqual(make_commands[0], 'test "$(uname -s)" = Linux')
-        self.assertIn("PLURX_EXPECT_TEST_COUNT=40", make_commands[1])
-        self.assertIn("scripts/require-test-count", make_commands[1])
-        self.assertIn("transport_recovery::tests --lib", make_commands[1])
+        self.assertEqual(len(contract_commands), 14)
+        self.assertEqual(contract_commands[0], 'test "$(uname -s)" = Linux')
+        self.assertIn("PLURX_EXPECT_TEST_COUNT=67", contract_commands[1])
+        self.assertIn("scripts/require-test-count", contract_commands[1])
+        self.assertIn("transport_recovery --lib", contract_commands[1])
         exact_regressions = (
             "writer_exit_after_readiness_fails_the_recovery_promptly",
             "two_early_acknowledgements_cannot_hide_a_long_recovery_gap",
@@ -2501,41 +2510,128 @@ assert.equal(context.ACT_TIMER, null);
             "production_snapshot_executor_worker_is_counted_until_joined",
         )
         for offset, regression in enumerate(exact_regressions, start=2):
-            self.assertIn(regression, make_commands[offset])
-            self.assertIn("scripts/require-test-count", make_commands[offset])
-            self.assertIn("--lib -- --exact", make_commands[offset])
-        self.assertIn("vendor/hiqlite/Cargo.toml", make_commands[9])
-        self.assertIn("vendor/hiqlite/Cargo.toml", make_commands[10])
-        self.assertIn("vendor/hiqlite/Cargo.toml", make_commands[11])
-        self.assertIn("vendor/hiqlite/Cargo.toml", make_commands[12])
-        self.assertIn("vendor/hiqlite/Cargo.toml", make_commands[13])
+            self.assertIn(regression, contract_commands[offset])
+            self.assertIn("scripts/require-test-count", contract_commands[offset])
+            self.assertIn("--lib -- --exact", contract_commands[offset])
+        for offset in range(9, 14):
+            self.assertIn("vendor/hiqlite/Cargo.toml", contract_commands[offset])
+
+        voter_commands = make_dry_run_commands(
+            "cluster-transport-recovery-voter-check"
+        )
+        learner_commands = make_dry_run_commands(
+            "cluster-transport-recovery-learner-check"
+        )
+        smoke_commands = make_dry_run_commands("cluster-transport-recovery-smoke")
+        full_commands = make_dry_run_commands("cluster-transport-recovery-check")
+        self.assertIn("--role voter --cycles 20", voter_commands[1])
+        self.assertIn("--role learner --cycles 20", learner_commands[1])
+        self.assertIn("voter_status=0; learner_status=0", smoke_commands[1])
+        self.assertIn("--cycles \"3\"", smoke_commands[1])
+        self.assertIn("|| voter_status=$?", smoke_commands[1])
+        self.assertIn("|| learner_status=$?", smoke_commands[1])
+        self.assertIn("--role voter --cycles 20", full_commands[-1])
+        self.assertIn("--role learner --cycles 20", full_commands[-1])
+        self.assertIn("transport-recovery-assemble", full_commands[-1])
+        self.assertIn("target/validation/cluster-transport-recovery.json", full_commands[-1])
+
+        self.assertIn("cargo build --locked", voter_commands[1])
+        self.assertIn("PLURX_BUILD_SHA=", voter_commands[1])
+        external_binary_commands = make_dry_run_commands(
+            "cluster-transport-recovery-voter-check", "RECOVERY_BINARY=/bin/true"
+        )
+        self.assertIn('test -x "/bin/true"', external_binary_commands[1])
+        self.assertNotIn("cargo build", external_binary_commands[1])
+        self.assertIn('option_env!("PLURX_BUILD_SHA")', read("crates/plurx-cluster-check/src/topology.rs"))
         self.assertIn(
-            "transport-recovery target/validation/cluster-transport-recovery.json",
-            make_commands[14],
+            "qualification runner omitted its embedded PLURX_BUILD_SHA",
+            read("crates/plurx-cluster-check/src/topology.rs"),
+        )
+        self.assertIn(
+            'cargo:rerun-if-env-changed=PLURX_BUILD_SHA',
+            read("crates/plurx-cluster-check/build.rs"),
         )
 
-        self.assertIn("needs.scope.outputs.cluster_auth == 'true'", recovery)
-        self.assertIn("runs-on: [self-hosted, Linux, X64, lab, ci-topology]", recovery)
-        self.assertIn("rust-toolchain@1.97.1", recovery)
+        for commands in (smoke_commands, full_commands):
+            expanded = " ".join(commands)
+            execution_ids = re.findall(
+                r'--execution-id "(local-[^"]+)"', expanded
+            )
+            output_roots = re.findall(
+                r'target/validation/transport-recovery/(local-[^/"]+)', expanded
+            )
+            self.assertGreaterEqual(len(execution_ids), 2)
+            self.assertGreaterEqual(len(output_roots), 4)
+            self.assertEqual(len(set((*execution_ids, *output_roots))), 1)
+
+        for job in (contracts, voter, learner, recovery):
+            self.assertIn("needs.scope.outputs.cluster_auth == 'true'", job)
+            self.assertIn(
+                "runs-on: [self-hosted, Linux, X64, lab, ci-topology]", job
+            )
+            self.assertIn("rust-toolchain@1.97.1", job)
+            self.assertNotIn("persistent-eligible", job)
+            self.assertIn("uses: ./.github/actions/cargo-cache-finalize", job)
+        self.assertEqual(
+            workflow_job_needs(voter),
+            ("scope", "preflight", "cluster_transport_recovery_contracts"),
+        )
+        self.assertEqual(
+            workflow_job_needs(learner),
+            ("scope", "preflight", "cluster_transport_recovery_contracts"),
+        )
+        self.assertNotIn("cluster_transport_recovery_learner", voter)
+        self.assertNotIn("cluster_transport_recovery_voter", learner)
+        recovery_needs = workflow_job_needs(recovery)
+        self.assertIn("cluster_transport_recovery_contracts", recovery_needs)
+        self.assertIn("cluster_transport_recovery_voter", recovery_needs)
+        self.assertIn("cluster_transport_recovery_learner", recovery_needs)
+        self.assertIn("if: always()", recovery)
+        self.assertIn("CONTRACTS_RESULT", recovery)
+        self.assertIn("VOTER_RESULT", recovery)
+        self.assertIn("LEARNER_RESULT", recovery)
+        self.assertIn("test \"$VOTER_RESULT\" = success", recovery)
+        self.assertIn("test \"$LEARNER_RESULT\" = success", recovery)
+        self.assertIn("name: cluster-transport-recovery-voter", recovery)
+        self.assertIn("name: cluster-transport-recovery-learner", recovery)
+        self.assertNotIn("run-id:", recovery)
+        self.assertIn("ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}", recovery)
+        self.assertIn("make cluster-transport-recovery-voter-check", voter)
+        self.assertIn("make cluster-transport-recovery-learner-check", learner)
+        self.assertIn("--profile transport-recovery", voter)
+        self.assertIn("--profile transport-recovery", learner)
+        self.assertIn("RECOVERY_CARGO_PROFILE=transport-recovery", voter)
+        self.assertIn("RECOVERY_CARGO_PROFILE=transport-recovery", learner)
+        self.assertIn("role_budget=$(( 13800 - elapsed ))", voter)
+        self.assertIn("role_budget=$(( 13800 - elapsed ))", learner)
+        self.assertIn("voter-diagnostics", voter)
+        self.assertIn("learner-diagnostics", learner)
+        self.assertIn("retention-days: 14", voter)
+        self.assertIn("retention-days: 14", learner)
         self.assertIn("lane: cluster-transport-recovery", recovery)
-        self.assertNotIn("persistent-eligible", recovery)
-        self.assertIn("uses: ./.github/actions/cargo-cache-finalize", recovery)
-        self.assertIn("make cluster-transport-recovery-check", recovery)
-        self.assertIn("PLURX_BUILD_SHA: ${{ github.sha }}", recovery)
         self.assertIn("cluster-transport-recovery-receipt.json", recovery)
         self.assertIn("target/validation/cluster-transport-recovery.json", recovery)
         self.assertIn(
             "--evidence target/validation/cluster-transport-recovery.json", recovery
         )
         self.assertIn(
-            "EVIDENCE_VALIDATOR: ${{ steps.cargo-cache.outputs.target-dir }}/debug/plurx-cluster-check",
+            "EVIDENCE_VALIDATOR: ${{ steps.cargo-cache.outputs.target-dir }}/transport-recovery/plurx-cluster-check",
             recovery,
         )
+        cargo = read("Cargo.toml")
+        profile = cargo.split("[profile.transport-recovery]", 1)[1].split("[", 1)[0]
+        self.assertRegex(profile, r'(?m)^inherits = "dev"$')
+        self.assertRegex(profile, r"(?m)^opt-level = 2$")
+        self.assertRegex(profile, r"(?m)^debug = 1$")
+        self.assertRegex(profile, r"(?m)^debug-assertions = true$")
+        self.assertRegex(profile, r"(?m)^overflow-checks = true$")
+        build_script = read("crates/plurx-cluster-check/build.rs")
+        self.assertIn('env::var("PROFILE")', build_script)
+        self.assertIn('env::var("OPT_LEVEL")', build_script)
+        self.assertIn('env::var("DEBUG")', build_script)
         self.assertIn('--evidence-validator "$EVIDENCE_VALIDATOR"', recovery)
         self.assertIn("if-no-files-found: error", recovery)
-        self.assertIn(
-            "steps.transport_recovery.outcome != 'success'", recovery
-        )
+        self.assertIn("steps.transport_recovery.outcome != 'success'", recovery)
         receipt_contract = runpy.run_path(
             str(ROOT / "validation/ci_lane_receipt.py")
         )
@@ -2573,10 +2669,65 @@ assert.equal(context.ACT_TIMER, null);
         self.assertEqual(campaign["command"], "make cluster-transport-recovery-check")
         self.assertEqual(campaign["profiles"], ["full", "nightly"])
         self.assertEqual(campaign["platforms"], ["linux"])
-        self.assertEqual(campaign["timeout_seconds"], 7200)
+        self.assertEqual(campaign["timeout_seconds"], 28800)
         points = {entry["id"]: entry for entry in catalog["points"]}
         for point in ("cluster.auth", "cluster.membership", "cluster.operations"):
             self.assertIn("cluster-transport-recovery", points[point]["checks"])
+
+    def test_workflow_cancellation_preserves_only_frozen_qualification(self):
+        workflow = read(".github/workflows/ci.yml")
+        effort_workflow = read(".github/workflows/effort-ci.yml")
+
+        for contract in (
+            "github.event.pull_request.base.ref == 'main'",
+            "startsWith(github.event.pull_request.head.ref, 'effort/')",
+            "startsWith(github.event.pull_request.head.ref, 'integration/')",
+            "endsWith(github.event.pull_request.head.ref, '-into-main')",
+            "github.event.pull_request.head.ref != 'integration/-into-main'",
+            "github.event_name == 'push' && github.ref == 'refs/heads/main'",
+        ):
+            self.assertIn(contract, workflow)
+        self.assertIn("group: ci-${{ github.ref }}", workflow)
+        self.assertNotIn("github.event.pull_request.number || github.ref", workflow)
+        self.assertIn("cancel-in-progress: true", effort_workflow)
+
+        def cancels(
+            event: str, *, ref: str = "", head: str = "", base: str = ""
+        ) -> bool:
+            promotion = base == "main" and (
+                head.startswith("effort/")
+                or (
+                    head.startswith("integration/")
+                    and head.endswith("-into-main")
+                    and head != "integration/-into-main"
+                )
+            )
+            return (event == "pull_request" and not promotion) or (
+                event == "push" and ref == "refs/heads/main"
+            )
+
+        event_table = (
+            ("effort task PR", "pull_request", "codex/task", "effort/project", "", True),
+            ("ordinary main PR", "pull_request", "codex/task", "main", "", True),
+            ("effort promotion", "pull_request", "effort/project", "main", "", False),
+            ("integration promotion", "pull_request", "integration/project-into-main", "main", "", False),
+            ("main push", "push", "", "", "refs/heads/main", True),
+            ("release tag", "push", "", "", "refs/tags/v1.2.3", False),
+        )
+        for name, event, head, base, ref, expected in event_table:
+            with self.subTest(name=name):
+                self.assertEqual(
+                    cancels(event, ref=ref, head=head, base=base), expected
+                )
+
+        pr_gate = workflow_job_blocks(".github/workflows/ci.yml")["pr_gate"]
+        resolve_refs = workflow_step_blocks(pr_gate)[
+            "Resolve the current qualification refs"
+        ]
+        self.assertIn("refs/plurx/current-head", resolve_refs)
+        self.assertIn("refs/plurx/current-base", resolve_refs)
+        self.assertIn("PLURX_CURRENT_HEAD_SHA", resolve_refs)
+        self.assertIn("PLURX_CURRENT_BASE_SHA", resolve_refs)
 
         # Hosted smoke keeps scoped GHA state; an eligible self-hosted smoke
         # uses the one named host builder and enforces its postcondition.
@@ -2855,6 +3006,9 @@ assert.equal(context.ACT_TIMER, null);
                     expected = ci_store
                 elif path == ".github/workflows/ci.yml" and name in {
                     "cluster_topology",
+                    "cluster_transport_recovery_contracts",
+                    "cluster_transport_recovery_voter",
+                    "cluster_transport_recovery_learner",
                     "cluster_transport_recovery",
                 }:
                     expected = ci_topology

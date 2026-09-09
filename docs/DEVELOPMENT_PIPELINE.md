@@ -237,6 +237,13 @@ When the project is complete:
    If resolving the final merge requires a separate branch, name it
    `integration/<project>-into-main`; the workflow treats that narrowly named
    branch as the same qualification candidate.
+   Forgejo does not auto-cancel these promotion runs when a newer event arrives;
+   it retains the older result for diagnosis. Compile-only effort PRs, ordinary
+   main-bound PRs, and superseded `main` pushes still cancel obsolete work, and
+   immutable tags do not. This is an explicit event-context expression because
+   workflow concurrency is evaluated before the scope job exists. The behavior
+   follows Forgejo's
+   [workflow concurrency contract](https://forgejo.org/docs/latest/user/actions/reference/#concurrency).
 4. **Require `Main promotion gate` to pass.** For a qualification, skipped is
    not success: Rust, cluster, browser, Apple, Android, cross-build, and
    container jobs must all report `success`.
@@ -244,9 +251,11 @@ When the project is complete:
    tested merge SHA, exact Git tree, workflow ref, job results, and run identity
    for 14 days. Cross-built binaries and their SHA-256 sidecars remain
    available for one day.
-6. **Merge only while the candidate is current.** If `main` moved after the
-   run, merge it into the effort and qualify again. Otherwise merge the PR and
-   let the ordinary main/tag process continue.
+6. **Merge only while the candidate is current.** Immediately before writing
+   the receipt, the gate fetches the live head and base refs and requires both
+   tips to equal the pull-request event. A moved effort head or `main` base
+   leaves the completed run available for diagnosis but prevents a success
+   receipt. Merge current `main` into the effort and qualify the new tree.
 
 ```bash
 git fetch origin main
@@ -268,6 +277,11 @@ gate is pending, red, or stale. If repository protections become available,
 configure `Main promotion gate` on `main` and `Effort development gate` on the
 `effort/**` branch pattern; the conditional jobs remain implementation details
 behind those two aggregates.
+
+The freeze is still an operator convention: do not merge another task into the
+effort or merge a different pull request into `main` while qualification is
+running. The workflow refuses stale evidence; it cannot reserve either branch
+or implement a merge queue.
 
 ## 6. A failed qualification returns to development
 

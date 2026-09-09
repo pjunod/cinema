@@ -1,0 +1,21 @@
+version = 1
+
+[[coverage]]
+commits = [
+  "b5aeaee4",
+  "19f79624",
+]
+points = [
+  "cluster.auth",
+  "operations.packaging",
+  "validation.framework",
+]
+checks = [
+  "rust-gate",
+  "rust-gate-ci",
+  "cluster-transport-recovery",
+  "operations-contract",
+  "catalog-contract",
+  "history-regressions",
+]
+reason = "The transport-recovery qualification now has a fast Linux contract job, independent voter and learner jobs with separate cache lanes and bounded evidence reserves, and a retained aggregate job that accepts only successful role jobs and exact current-run artifacts sharing the execution ID. The compatible local target also attempts both roles independently and assembles only after both pass. Operations contracts pin the focused test count, dependency graph, artifact retention, aggregate identity, execution identity, receipt commands, runner isolation label, and enlarged full-lane budget."

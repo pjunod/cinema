@@ -178,8 +178,12 @@ pub fn vod_pipe_args(
     let remaining = (duration_seconds - target).max(0.0);
     let frames =
         (remaining * f64::from(grid.numerator) / f64::from(grid.denominator)).round() as u64;
+    // Discard decoded preroll before sampling the source clock. If fps runs
+    // first, its start_time may stamp the first pre-target frame at `target`,
+    // after which trim cannot distinguish relabelled old content from the
+    // requested picture (most visible on a backward seek into VFR media).
     let first = format!(
-        "fps={}:start_time={target:.9},trim=start={target:.9},",
+        "trim=start={target:.9},fps={}:start_time={target:.9},",
         grid.frame_rate()
     );
     let last = format!(

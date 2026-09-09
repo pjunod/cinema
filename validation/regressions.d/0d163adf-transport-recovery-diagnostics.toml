@@ -1,0 +1,21 @@
+version = 1
+
+[[coverage]]
+commits = [
+  "0d163adf",
+  "df8b324f",
+]
+points = [
+  "cluster.auth",
+  "operations.packaging",
+  "validation.framework",
+]
+checks = [
+  "rust-gate",
+  "rust-gate-ci",
+  "cluster-transport-recovery",
+  "operations-contract",
+  "catalog-contract",
+  "history-regressions",
+]
+reason = "Transport-recovery role execution now retains create-new event and cycle journals plus an atomic terminal summary outside the temporary cluster root, including phase timings, synchronized checkpoints, resource samples, failure classification, and exact owned-process identities. Cancellation and timeouts enter bounded cleanup and cannot publish passing role evidence. Pinned checks, 58 macOS focused tests, 59 Linux focused tests including a real SIGTERM child-reap case, exact-source three-cycle voter and learner runs, and a deliberate one-second failure prove both success and failure paths remain diagnosable without weakening the qualification contract."

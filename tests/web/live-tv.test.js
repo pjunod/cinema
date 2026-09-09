@@ -559,7 +559,7 @@ async function main() {
   });
 
   await test("Live TV awaits fullscreen exit before hiding, with iPhone entry fallback", async () => {
-    const events = [], panel = { hidden: false, contains: () => false };
+    const events = [], panel = { hidden: false, dataset: { mode: "full" }, contains: () => false };
     const video = { webkitEnterFullscreen: () => events.push("iphone-enter") };
     const exited = deferred(), neverSettles = deferred(), listeners = new Map();
     const document = { getElementById: id => id === "live-tv-host" ? panel : video,
@@ -572,13 +572,14 @@ async function main() {
         return neverSettles.promise;
       } };
     const state = { serial: 0 };
-    const control = new Function("document", "LIVE_TV", "LIVE_TV_LEASE", "detachLiveTvMedia",
+    const control = new Function("document", "location", "LIVE_TV", "LIVE_TV_LEASE", "detachLiveTvMedia",
       `${shipped("exitLiveTvPresentation")}${shipped("stopLiveTv")}${shipped("fullscreenLiveTv")}
-       return {stopLiveTv,fullscreenLiveTv};`)(document, state, { stop: async () => events.push("release") }, () => events.push("detach"));
+       return {stopLiveTv,fullscreenLiveTv};`)(document, { hash: "#/live-tv" }, state, { stop: async () => events.push("release") }, () => events.push("detach"));
     const closing = control.stopLiveTv();
     await Promise.resolve();
     assert.deepEqual(events, ["exit", "release"]);
     assert.equal(panel.hidden, false, "the fullscreen subtree must remain mounted until exit settles");
+    assert.equal(panel.dataset.mode, "slot", "a late fullscreenchange cannot reveal a stopped host");
     exited.resolve();
     await closing;
     assert.deepEqual(events, ["exit", "release", "detach"]);

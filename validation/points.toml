@@ -269,7 +269,7 @@ profiles = ["full", "nightly"]
 platforms = ["linux"]
 requires = ["cargo", "make"]
 missing = "fail"
-timeout_seconds = 7200
+timeout_seconds = 28800
 
 [[checks]]
 id = "offline-contract"
@@ -441,6 +441,7 @@ paths = [
   "benchmarks/cluster-instrumentation-campaign.schema.json",
   "benchmarks/cluster-topology-campaign.schema.json",
   "benchmarks/cluster-topology.schema.json",
+  "benchmarks/cluster-transport-recovery-role.schema.json",
   "benchmarks/cluster-transport-recovery.schema.json",
   "crates/plurx-cluster-check/**",
   "crates/plurx-core/src/cluster/coordination.rs",

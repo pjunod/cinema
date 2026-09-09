@@ -53,6 +53,8 @@ def build_receipt(
         "GITHUB_RUN_ATTEMPT",
         "PLURX_HEAD_SHA",
         "PLURX_BASE_SHA",
+        "PLURX_CURRENT_HEAD_SHA",
+        "PLURX_CURRENT_BASE_SHA",
     )
     missing_metadata = [
         name for name in required_metadata if not environment.get(name, "")
@@ -68,6 +70,15 @@ def build_receipt(
             f"{FIRST_WORKFLOW_RUN_ATTEMPT}; found "
             f"{environment['GITHUB_RUN_ATTEMPT']!r}"
         )
+
+    for label in ("HEAD", "BASE"):
+        event_sha = environment[f"PLURX_{label}_SHA"]
+        current_sha = environment[f"PLURX_CURRENT_{label}_SHA"]
+        if current_sha != event_sha:
+            raise QualificationError(
+                f"qualification {label.lower()} moved after workflow start: "
+                f"event {event_sha}, current {current_sha}"
+            )
 
     head_ref = environment.get("GITHUB_HEAD_REF", "")
     base_ref = environment.get("GITHUB_BASE_REF", "")

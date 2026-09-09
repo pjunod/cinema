@@ -15251,6 +15251,11 @@ function detachLiveTvMedia(){
 }
 async function stopLiveTv(){
   ++LIVE_TV.serial;
+  const host=document.getElementById("live-tv-host");
+  // `document.exitFullscreen()` resolves before Chromium dispatches its
+  // fullscreenchange event. Move out of `full` first so that late event cannot
+  // interpret this stop as an ordinary Exit and reveal the host again.
+  if(host&&host.dataset&&host.dataset.mode==="full") host.dataset.mode=location.hash==="#/live-tv"?"slot":"dock";
   // Releasing the physical tuner must start immediately, but removing the
   // fullscreen element before the browser clears fullscreenElement can strand
   // Chromium in fullscreen indefinitely. Keep those operations concurrent,
@@ -15258,7 +15263,7 @@ async function stopLiveTv(){
   const exiting=exitLiveTvPresentation();
   const stopping=LIVE_TV_LEASE.stop().then(value=>({ok:true,value}),error=>({ok:false,error}));
   await exiting; detachLiveTvMedia();
-  const host=document.getElementById("live-tv-host"); if(host) host.hidden=true;
+  if(host) host.hidden=true;
   const stopped=await stopping; if(!stopped.ok) throw stopped.error;
   return stopped.value;
 }
