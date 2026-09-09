@@ -2,8 +2,8 @@
 
 **Status:** M0–M5 complete · M6 server/client implementation landed · M7
 complete · frozen promotion candidate integrated with current `main` ·
-final adversarial review repaired · broader fleet qualification continues after
-merge · **Updated:** 2026-09-09 · **Integration branch:**
+broader fleet qualification continues after merge · final adversarial review
+repaired · **Updated:** 2026-09-09 · **Integration branch:**
 `effort/decoder-selection-recovery` at `d84aa500` · **Active promotion branch:**
 `codex/decoder-final-promotion`, latest-main merge `b8840634`
 
@@ -43,16 +43,16 @@ on that path rather than falsely certified.
 | Field | Current value |
 |---|---|
 | Milestone | Freeze and promote the completed decoder-selection/recovery effort |
-| Task base | Effort head `3ce34c30` plus current `main` `0985ac19` |
+| Task base | Effort head `990bf334`; current candidate additionally integrates `main` `0985ac19` |
 | Task branch | `codex/decoder-final-promotion` in the agent-owned clone at `/private/tmp/codex-plurx-decoder.RRcx8j/repo`; latest-main merge `b8840634` |
 | Task PR | Final effort→`main` [Forgejo #189](http://192.168.4.7:3000/noirr/plurx/pulls/189) is open as WIP/draft; it stays draft until the repaired head is ready for the fast lane |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
 | Audit scope | Job-scoped budget persistence · alternate result references · part and final-assembly receipt verification · versioned worker capabilities · owner-handoff inheritance · default and no-live-recovery shipping-path exercise without introducing a code gate |
 | Current finding | Exact-head review showed `recipe_hash` cannot safely serve as both node-local result reference and owner-independent recovery ledger. The repaired tree adds explicit `primary -> recovery_pending -> alternate` state, preserves either consumed boundary through rehome, refuses software-primary budget creation, and gives every claim and worker mutation a monotonically increasing generation |
-| Adversarial review | Complete; no second review is planned. Einstein found three promotion blockers: immutable VOD bypassed the resolved decoder plan, the v50 Hiqlite import projected `drain_deadline_ms` one version too early, and the cache-location projection test stopped at v53 despite v54's publication generation. VOD now retains one descriptor-bound plan and uses it for arguments, identity, and mixed admission; real v50/v51 import fixtures and v25/v53/v54 cache projections pin the schema boundaries |
+| Adversarial review | Complete. Einstein found three promotion blockers: immutable VOD bypassed the resolved decoder plan, the v50 Hiqlite import projected `drain_deadline_ms` one version too early, and the cache-location projection test stopped at v53 despite v54's publication generation. VOD now retains one descriptor-bound plan and uses it for arguments, identity, and mixed admission; real v50/v51 import fixtures and v25/v53/v54 cache projections pin the schema boundaries. Per owner direction, there is no additional task-review loop |
 | Focused evidence | Pinned all-target daemon compile passes. The formerly failing transaction census, cache storage-class, v26 repair, v51 stale-marker, schema-count, decoder-inventory, decode-fact deadline/revalidation, Live TV arguments, offline publication, and VFR/bitmap immutable-VOD restart tests pass. Hiqlite-enabled v25/v53/v54 projection and real v50/v51 media-session import tests also pass |
 | Fast lane | M7's Forgejo Effort development gate passed at `990bf334`. On source integration `990d8069`, pinned Rust 1.97.1 compile and denied-warning Clippy pass; exact SQLite v54 and Hiqlite v34 chain/import/downgrade contracts plus web/settings and validation contracts pass. `f234427e` adds only already-present main lineage. The promotion fast lane runs on the pushed review-repair head |
-| Validation order | Task PRs into the effort do not run the full unit suite. After M7: targeted functionality smoke tests and the fast lane run on the frozen exact tree; after they pass, merge and continue watching the remaining promotion and broader suites. A code failure gets a new PR |
+| Validation order | Task PRs into the effort do not run the full unit suite. After M7: functionality smoke evidence and a green fast lane before promotion; after they pass, merge and continue watching the remaining promotion and broader suites. The owner explicitly approved watching the remaining promotion jobs on `main`; a code failure gets a new PR |
 | Next | Commit and push the review repairs · run functionality smoke and the fast lane · mark #189 ready and merge · monitor the remaining suites; any persistent code failure gets a follow-up PR |
 | External blocker | None for M7 or promotion. A qualifying hardware host is still required for post-merge M8 fleet evidence; absence remains visible and advisory rather than an enable gate |
 
