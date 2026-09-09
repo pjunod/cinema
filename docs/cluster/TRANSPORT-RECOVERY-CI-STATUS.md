@@ -1,6 +1,6 @@
 # Transport recovery CI — implementation status and evidence
 
-**Status:** M6 second-voter startup correction in exact-source verification · **Owner:** Codex · **Updated:** 2026-09-09
+**Status:** M6 Forgejo concurrency correction verified; final qualification next · **Owner:** Codex · **Updated:** 2026-09-09
 
 Companion to
 [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md) (how this effort reaches
@@ -206,6 +206,19 @@ remain terminal. Exact committed source `f33249f8` passes Rust 1.97.1 all-
 target compilation, Clippy with warnings denied, the strict retry-classifier
 unit, and the real two-daemon activity regression. No additional review was
 requested: the one adversarial review remains the only review for this PR.
+
+The exact corrected candidate then started Forgejo run
+[#1348](http://192.168.4.7:3000/noirr/plurx/actions/runs/1348). Preflight,
+Android JVM, arm64 packaging, and the audit workflow passed with no failed job,
+but synchronization of unrelated PR #200 cancelled every unfinished #191 job
+after eight minutes. The measured cause is workflow identity, not test logic:
+Forgejo 16 coerced the `pull_request.number || github.ref` concurrency-group
+expression to its boolean truth value, so distinct PRs shared `ci-true`. The
+workflow now keys directly on `github.ref`, which is stable across repeated
+events for one PR and distinct across PR, main, and tag refs. The retained
+operations contract rejects restoration of the expression-level fallback.
+Run #1348 is recorded only as cancellation evidence; no recovery role started
+and no pass is inferred from it.
 
 ## Milestones — evidence closes the checkbox
 

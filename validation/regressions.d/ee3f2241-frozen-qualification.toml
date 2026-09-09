@@ -3,6 +3,7 @@ version = 1
 [[coverage]]
 commits = [
   "ee3f2241",
+  "c8b584b7",
 ]
 points = [
   "operations.packaging",
@@ -13,4 +14,4 @@ checks = [
   "catalog-contract",
   "history-regressions",
 ]
-reason = "Workflow-level event-context cancellation now preserves final effort and integration promotion runs while retaining superseding cancellation for ordinary pull requests and main pushes and leaving tags immutable. The qualification receipt force-fetches both live refs immediately before publication and refuses a moved head or base. Unit and operations tests cover the six-event table and both stale-ref cases, while isolated Forgejo 16.0.3 runs prove cancel-in-progress false queues both invocations to success and true cancels only the superseded probe."
+reason = "Workflow-level event-context cancellation now preserves final effort and integration promotion runs while retaining superseding cancellation for ordinary pull requests and main pushes and leaving tags immutable. Forgejo 16 coerced the `pull_request.number || github.ref` concurrency expression to a boolean and collapsed unrelated PRs into one `ci-true` group despite the correct cancellation verdict; the workflow now keys directly on the stable, PR-distinct `github.ref`. The qualification receipt force-fetches both live refs immediately before publication and refuses a moved head or base. Unit and operations tests cover the ref-only group, the six-event cancellation table, and both stale-ref cases, while isolated Forgejo 16.0.3 runs prove cancel-in-progress false queues both invocations to success and true cancels only the superseded probe."
