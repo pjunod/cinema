@@ -14200,10 +14200,12 @@ fn populated_current_import_fixture(data_dir: &std::path::Path) -> PathBuf {
                  VALUES ('fixture-recipe', 30, 1, 123);
              INSERT INTO transcode_cache_locations
                  (recipe_hash, node_id, storage_class, relative_dir, bytes, complete,
-                  manifest_digest, last_used_at, last_seen_at)
+                  manifest_digest, storage_id, generation_id,
+                  publication_generation, last_used_at, last_seen_at)
                  VALUES ('fixture-recipe', 'fixture-node', 'local', 'fixture-recipe',
                          2048, 1,
                          'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                         'node:fixture-node:cache', 'fixture-recipe', 1,
                          124, 125);
              INSERT INTO pretranscode_jobs
                  (id, dedupe_key, file_id, source_size, source_mtime, target_height,
@@ -14273,8 +14275,10 @@ fn populated_current_import_fixture(data_dir: &std::path::Path) -> PathBuf {
                 .execute(
                     "INSERT INTO transcode_cache_locations
                          (recipe_hash, node_id, storage_class, relative_dir, bytes, complete,
+                          storage_id, generation_id, publication_generation,
                           last_used_at, last_seen_at)
-                     VALUES ('fixture-recipe', ?1, ?2, ?3, ?4, 1, ?5, ?6)",
+                     VALUES ('fixture-recipe', ?1, ?2, ?3, ?4, 1,
+                             'node:' || ?1 || ':cache', ?3, 1, ?5, ?6)",
                     rusqlite::params![
                         format!("fixture-page-node-{ordinal:03}"),
                         storage_class,
