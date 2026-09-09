@@ -10336,6 +10336,87 @@ async fn api_key_activity_refresh_is_bounded_and_disabled_keys_do_not_touch() {
 }
 
 #[cfg(feature = "hiqlite-contract-tests")]
+async fn remove_hiqlite_schema_after_v27(client: &Client) {
+    // These fixtures begin from the current install schema, then wind it back
+    // to the literal version each test names. Keep the shared tail removal in
+    // one reverse-chronological list: otherwise every schema addition makes a
+    // dozen older fixtures current-shaped under an old marker.
+    let results = client
+        .txn([
+            (
+                "DROP TRIGGER IF EXISTS cache_publication_generation_guard",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TRIGGER IF EXISTS offline_claim_lifecycle_guard",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TRIGGER IF EXISTS offline_recovery_guard",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE transcode_cache_locations DROP COLUMN publication_generation",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE offline_packages DROP COLUMN alternate_recipe_hash",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE offline_packages DROP COLUMN decoder_recovery_state",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE offline_packages DROP COLUMN claim_generation",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE media_sessions DROP COLUMN recovery_epoch",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TABLE IF EXISTS media_session_producer_recovery",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TRIGGER IF EXISTS media_sessions_drain_ownership_fence_au",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE media_sessions DROP COLUMN drain_deadline_ms",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS analysis_requests_terminal_identity",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TRIGGER IF EXISTS media_playback_pointers_desired_fence_ai",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TRIGGER IF EXISTS media_playback_pointers_desired_fence_au",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE media_playback_pointers DROP COLUMN desired_revision",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TABLE IF EXISTS media_playback_desired",
+                hiqlite::params!(),
+            ),
+        ])
+        .await
+        .expect("remove schema tail newer than v27");
+    results
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("commit schema-tail removal");
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replicated_v5_store_migrates_atomically_through_v11_on_daemon_open() {
     let _case = HIQLITE_CASE.lock().await;
@@ -10363,6 +10444,7 @@ async fn replicated_v5_store_migrates_atomically_through_v11_on_daemon_open() {
         .await
         .expect("seed unrelated replicated row");
     drop(current);
+    remove_hiqlite_schema_after_v27(&client).await;
 
     let results = client
         .txn([
@@ -10594,6 +10676,7 @@ async fn replicated_v23_store_migrates_the_conversion_ledger_on_daemon_open() {
         .await
         .expect("seed unrelated replicated row");
     drop(current);
+    remove_hiqlite_schema_after_v27(&client).await;
 
     let results = client
         .txn([
@@ -10720,6 +10803,7 @@ async fn replicated_v27_store_migrates_the_request_identity_on_daemon_open() {
         .await
         .expect("seed unrelated replicated row");
     drop(current);
+    remove_hiqlite_schema_after_v27(&client).await;
 
     // Rewind to v26: the identity column gone, a request row already in the
     // table, and the meta version pinned to the literal it is named for. The
@@ -10871,6 +10955,7 @@ async fn replicated_v28_store_migrates_the_producer_recovery_ledger_on_daemon_op
         .await
         .expect("seed unrelated replicated row");
     drop(current);
+    remove_hiqlite_schema_after_v27(&client).await;
 
     // Rewind to v27: no ledger, marker pinned to the literal it is named for.
     client
@@ -11008,6 +11093,7 @@ async fn replicated_v26_store_migrates_attempt_errors_on_daemon_open() {
         .await
         .expect("seed unrelated replicated row");
     drop(current);
+    remove_hiqlite_schema_after_v27(&client).await;
 
     // Rewind to v25: the attempt-history column gone, a job row already in the
     // table, and the meta version pinned to the literal it is named for.
@@ -11162,6 +11248,7 @@ async fn replicated_v24_store_migrates_recovery_guards_and_rejects_malformed_sha
         .await
         .expect("seed unrelated replicated row");
     drop(current);
+    remove_hiqlite_schema_after_v27(&client).await;
 
     let results = client
         .txn([
@@ -11541,6 +11628,7 @@ async fn replicated_v6_store_migrates_atomically_to_v11_on_daemon_open() {
         .await
         .expect("seed unrelated replicated row");
     drop(current);
+    remove_hiqlite_schema_after_v27(&client).await;
 
     let results = client
         .txn([
@@ -11759,6 +11847,7 @@ async fn replicated_v7_store_migrates_atomically_to_v11_on_daemon_open() {
         .await
         .expect("seed unrelated replicated row");
     drop(current);
+    remove_hiqlite_schema_after_v27(&client).await;
 
     client
         .txn([
@@ -11947,6 +12036,7 @@ async fn replicated_v8_store_migrates_exactly_to_v11_on_daemon_open() {
         .await
         .expect("seed unrelated replicated row");
     drop(current);
+    remove_hiqlite_schema_after_v27(&client).await;
 
     client
         .txn([
@@ -12167,6 +12257,7 @@ async fn replicated_v9_store_migrates_exactly_to_v11_on_daemon_open() {
         .await
         .expect("seed unrelated replicated row");
     drop(current);
+    remove_hiqlite_schema_after_v27(&client).await;
 
     client
         .txn([
@@ -12333,6 +12424,7 @@ async fn replicated_v10_store_migrates_exactly_to_current_on_daemon_open() {
         .await
         .expect("seed unrelated replicated row");
     drop(current);
+    remove_hiqlite_schema_after_v27(&client).await;
 
     client
         .txn([
@@ -12607,6 +12699,7 @@ async fn replicated_v11_and_v12_migrations_are_atomic_restartable_and_stepwise()
         .await
         .expect("seed unrelated replicated row");
     drop(current);
+    remove_hiqlite_schema_after_v27(&client).await;
 
     client
         .txn([
@@ -13165,6 +13258,7 @@ async fn replicated_analysis_schema_bootstrap_and_stale_marker_retries_are_idemp
         CONTRACT_INSTANCE_ID
     );
     drop(retried);
+    remove_hiqlite_schema_after_v27(&client).await;
 
     // Model a committed v22 shape whose marker acknowledgement was lost. The
     // daemon must advance only the marker instead of replaying ALTER/rename
@@ -14173,7 +14267,8 @@ fn populated_current_import_fixture(data_dir: &std::path::Path) -> PathBuf {
     connection
         .execute_batch(
             "UPDATE transcode_cache_locations
-                SET storage_id = 'shared:fixture', generation_id = 'fixture-generation'
+                SET storage_id = 'shared:fixture', generation_id = 'fixture-generation',
+                    publication_generation = publication_generation + 1
               WHERE recipe_hash = 'fixture-recipe'
                 AND node_id = 'fixture-page-node-000' AND storage_class = 'shared';
              INSERT INTO cache_storage_members
