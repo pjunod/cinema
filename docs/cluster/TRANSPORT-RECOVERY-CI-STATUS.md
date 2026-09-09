@@ -1,6 +1,6 @@
 # Transport recovery CI — implementation status and evidence
 
-**Status:** M6 reviewed candidate; closing current-base integration failures · **Owner:** Codex · **Updated:** 2026-09-09
+**Status:** M6 final candidate verified locally; one full PR qualification next · **Owner:** Codex · **Updated:** 2026-09-09
 
 Companion to
 [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md) (how this effort reaches
@@ -65,8 +65,15 @@ after boot, and one cluster-daemon case failed once before passing an exact
 focused rerun on pinned Rust 1.97.1. The affected runner reclaimed 10.62 GB of
 builder cache. Apple finalization now has a completion boundary before an
 injected transport is invalidated, and all 78 affected reporter and session
-tests pass on the exact merged tree. Store migration diagnosis is the remaining
-integration repair before the final candidate is pushed.
+tests pass on the exact merged tree. Store migration fixtures now remove every
+post-marker schema object in reverse migration order, preserve the v32
+idempotence boundary, and seed current cache-publication identity explicitly.
+On exact archived commit `ac9b6ffc`, all four focused Store regressions pass on
+Rust 1.97.1: the v5 migration chain, v32 producer-recovery migration and replay,
+analysis stale-marker replay, and current SQLite import. The same source passes
+the all-target `plurx-core` check and Clippy with warnings denied. Formatting and
+whitespace checks are clean. The next push is the frozen candidate for the one
+full PR qualification run; no second adversarial review is planned or required.
 
 ## Milestones — evidence closes the checkbox
 
