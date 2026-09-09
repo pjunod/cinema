@@ -917,9 +917,25 @@ Path(sys.argv[2]).write_text("survived", encoding="utf-8")
                         leader_identity = validation_runner._ProcessIdentity(
                             int(leader_pid), f"linux-start-ticks:{leader_started}"
                         )
-                        observed_child = validation_runner._read_linux_process_record(
-                            child_identity.pid
-                        )
+                        # Reaping the owned shell does not synchronously prove
+                        # that the scheduler has delivered the group SIGKILL
+                        # to every child. Observe that bounded delivery before
+                        # asserting the fallback left no runnable identity.
+                        observation_deadline = time.monotonic() + 2
+                        while True:
+                            observed_child = (
+                                validation_runner._read_linux_process_record(
+                                    child_identity.pid
+                                )
+                            )
+                            if (
+                                observed_child is None
+                                or observed_child.identity != child_identity
+                                or observed_child.state.startswith("Z")
+                                or time.monotonic() >= observation_deadline
+                            ):
+                                break
+                            time.sleep(0.01)
                         for identity in (child_identity, leader_identity):
                             record = validation_runner._read_linux_process_record(
                                 identity.pid

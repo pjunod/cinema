@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["c6afcd77"]
+reason = "Status-only checkpoint for the observed Linux cleanup-test race and its verification; it changed no executable behavior."
+ignore = true
