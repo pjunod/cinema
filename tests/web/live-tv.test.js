@@ -558,16 +558,22 @@ async function main() {
     assert.equal(storage.length, 0);
   });
 
-  await test("Live TV exits its own fullscreen before hiding, with iPhone entry fallback", async () => {
+  await test("Live TV awaits its own fullscreen exit before hiding, with iPhone entry fallback", async () => {
     const events = [], panel = { hidden: false, contains: () => false };
     const video = { webkitEnterFullscreen: () => events.push("iphone-enter") };
+    let finishExit;
     const document = { getElementById: id => id === "live-tv-host" ? panel : video,
-      fullscreenElement: panel, exitFullscreen: () => { events.push("exit"); document.fullscreenElement = null; return Promise.resolve(); } };
+      fullscreenElement: panel, exitFullscreen: () => { events.push("exit"); return new Promise(resolve => { finishExit = () => { document.fullscreenElement = null; resolve(); }; }); } };
     const state = { serial: 0 };
     const control = new Function("document", "LIVE_TV", "LIVE_TV_LEASE", "detachLiveTvMedia",
       `${shipped("exitLiveTvPresentation")}${shipped("stopLiveTv")}${shipped("fullscreenLiveTv")}
        return {stopLiveTv,fullscreenLiveTv};`)(document, state, { stop: async () => events.push("release") }, () => events.push("detach"));
-    await control.stopLiveTv();
+    const stopping = control.stopLiveTv();
+    await Promise.resolve();
+    assert.deepEqual(events, ["exit"]);
+    assert.equal(panel.hidden, false);
+    finishExit();
+    await stopping;
     assert.deepEqual(events, ["exit", "detach", "release"]);
     assert.equal(panel.hidden, true);
     control.fullscreenLiveTv();

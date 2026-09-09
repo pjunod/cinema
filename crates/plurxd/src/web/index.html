@@ -15250,7 +15250,7 @@ function detachLiveTvMedia(){
   if(video){ video.onerror=null; video.onended=null; video.pause(); video.removeAttribute("src"); video.load(); }
 }
 async function stopLiveTv(){
-  ++LIVE_TV.serial; exitLiveTvPresentation(); detachLiveTvMedia();
+  ++LIVE_TV.serial; await exitLiveTvPresentation(); detachLiveTvMedia();
   const host=document.getElementById("live-tv-host"); if(host) host.hidden=true;
   return LIVE_TV_LEASE.stop();
 }
@@ -15365,16 +15365,16 @@ function fullscreenLiveTv(){
     else if(video&&video.webkitEnterFullscreen) video.webkitEnterFullscreen();
   }catch(e){}
 }
-function exitLiveTvPresentation(){
+async function exitLiveTvPresentation(){
   const panel=document.getElementById("live-tv-host"), video=document.getElementById("live-tv-video");
   try{
     const full=document.fullscreenElement||document.webkitFullscreenElement;
     if(panel&&full&&(full===panel||panel.contains(full))){
       const exit=document.exitFullscreen||document.webkitExitFullscreen;
-      if(exit){ const r=exit.call(document); if(r&&r.catch) r.catch(()=>{}); }
+      if(exit){ const r=exit.call(document); if(r&&r.catch) await r.catch(()=>{}); }
     }
     if(video&&video.webkitDisplayingFullscreen&&video.webkitExitFullscreen) video.webkitExitFullscreen();
-    if(video&&document.pictureInPictureElement===video&&document.exitPictureInPicture){ const r=document.exitPictureInPicture(); if(r&&r.catch) r.catch(()=>{}); }
+    if(video&&document.pictureInPictureElement===video&&document.exitPictureInPicture){ const r=document.exitPictureInPicture(); if(r&&r.catch) await r.catch(()=>{}); }
     if(video&&video.webkitPresentationMode==="picture-in-picture"&&video.webkitSetPresentationMode) video.webkitSetPresentationMode("inline");
   }catch(e){}
 }
