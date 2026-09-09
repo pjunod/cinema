@@ -171,16 +171,47 @@ class OperationsContractCase(unittest.TestCase):
     def test_ui_baseline_starts_poll_observation_after_route_settles(self):
         script = read("scripts/ui-baseline")
 
-        self.assertIn(
-            'if name in {"home", "activity", "analysis", "settings", "settings-developer", "live-tv"}:', script
+        # The contract is that every route publishing a settled phase is waited
+        # on before the polling observation window opens — not that the set is
+        # spelled on one line. Pinning the literal made adding a route a
+        # two-file edit whose second file had nothing to do with the change.
+        settled_gate = re.search(
+            r"if name in \{([^}]*)\}:\s*\n\s*page\.wait_for_selector\(", script
         )
+        self.assertIsNotNone(settled_gate, "ui-baseline no longer gates on the settled phase")
+        waited = set(re.findall(r'"([^"]+)"', settled_gate.group(1)))
+        for route in ("home", "activity", "analysis", "settings", "settings-developer",
+                      "live-tv", "live-tv-grid"):
+            self.assertIn(route, waited, f"{route} publishes a settled phase but is not waited on")
         self.assertIn('[data-phase="settled"]', script)
         self.assertIn('wait_until="domcontentloaded"', script)
         self.assertIn("activity_poll_paused = pause_activity_polling", script)
         self.assertIn('page.wait_for_load_state("networkidle"', script)
         self.assertIn("resume_activity_polling(page)", script)
-        self.assertIn('api_calls.count("GET /api/v1/scan/status") < 3', script)
-        self.assertIn('api_calls.count("GET /api/v1/activity") < 2', script)
+        # The settings tick budget is enforced inside the page, not by counting
+        # requests from Python. A count read over a round trip cannot bound a
+        # 2s timer: on a starved runner it is handed the total only after the
+        # interval has fired again, and the golden then fails on
+        # `GET /api/v1/scan/status 3 -> 4` with nothing about the page changed.
+        # So what this pins is the clamp and the boundary the capture waits on.
+        self.assertIn("window.__plurxSettingsScanTicks >= 2", script)
+        self.assertIn("window.__plurxSettingsScanCaptureTick = true", script)
+        self.assertIn(
+            '"() => window.__plurxSettingsScanCaptureTick === true"', script
+        )
+        self.assertNotIn(
+            'api_calls.count("GET /api/v1/scan/status") <', script,
+            "the settings poll budget must not go back to a Python-side count",
+        )
+        # Settings waits for the activity fetch to finish like every other
+        # route. It used to be excluded, so the recorders could run while the
+        # response was in flight and re-render the page under the tab walk.
+        self.assertIn("if activity_poll_paused:", script)
+        self.assertIn(
+            "window.__plurxGlobalActivityCaptureTick === true && !ACT_POLLING",
+            script,
+        )
+        self.assertNotIn('if activity_poll_paused and name != "settings":', script)
         self.assertIn('if name == "analysis":', script)
         self.assertIn("if (PAGE_TIMER) clearInterval(PAGE_TIMER);", script)
         self.assertIn("if (ACT_TIMER) clearInterval(ACT_TIMER);", script)
@@ -2446,7 +2477,7 @@ assert.equal(context.ACT_TIMER, null);
 
         self.assertEqual(len(make_commands), 15)
         self.assertEqual(make_commands[0], 'test "$(uname -s)" = Linux')
-        self.assertIn("PLURX_EXPECT_TEST_COUNT=31", make_commands[1])
+        self.assertIn("PLURX_EXPECT_TEST_COUNT=40", make_commands[1])
         self.assertIn("scripts/require-test-count", make_commands[1])
         self.assertIn("transport_recovery::tests --lib", make_commands[1])
         exact_regressions = (

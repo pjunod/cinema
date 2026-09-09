@@ -990,7 +990,12 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     // nothing fenced a process that was already running when the schema moved,
     // because compatibility is checked at open and never again.
     crate::store::MEDIA_PLAYBACK_POINTER_DESIRED_FENCE_SCHEMA,
-    // v50: the decoder-recovery budget, as a durable ledger rather than a
+    // v50: the terminal analysis-history retention trigger runs inside the
+    // durable writer transaction. Once the retained window fills, its
+    // correlated newer-generation lookup must be an indexed identity search
+    // rather than a scan for every terminal candidate.
+    crate::store::fragment_index_cluster::ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA,
+    // v51: the decoder-recovery budget, as a durable ledger rather than a
     // counter in a process. An automatic recovery has to survive the thing it
     // is recovering from — the producer dying, the session ending, the node
     // handing the playback to another node — and an in-memory allowance
@@ -998,8 +1003,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     // request id, a new client session, or a different node cannot present
     // themselves as a fresh playback and be granted a second attempt.
     super::MEDIA_SESSION_PRODUCER_RECOVERY_SCHEMA,
-    // v51: the epoch that names a recovery budget, on the session row that
-    // owns it. v50 gave the budget a durable ledger keyed by the epoch and
+    // v52: the epoch that names a recovery budget, on the session row that
+    // owns it. v51 gave the budget a durable ledger keyed by the epoch and
     // nothing could say what a session's epoch was, so the ledger had a key
     // nobody could present. A deliberate new play mints one; every
     // continuation — reopen, seek, track change, handoff — inherits its
@@ -1007,7 +1012,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     // allowance. Empty means a session that predates the column, which had no
     // epoch and therefore no budget.
     super::MEDIA_SESSION_RECOVERY_EPOCH_SCHEMA,
-    // v52: an offline producer claim is a real incarnation fence, and its
+    // v53: an offline producer claim is a real incarnation fence, and its
     // one automatic decoder recovery is consumed before fallible alternate
     // planning. The trigger keeps already-running older workers from
     // replenishing or replacing a consumed alternate during a rolling
@@ -2478,7 +2483,7 @@ mod tests {
             .expect("version");
         assert_eq!(version, MIGRATIONS.len() as i64);
         assert_eq!(
-            version, 49,
+            version, 50,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );
@@ -3209,7 +3214,7 @@ mod tests {
             // 5 since v49 added `desired_revision`, the ask a pointer write
             // was decided against.
             ("media_playback_pointers", 5),
-            // 19 columns through v35, plus v51's `recovery_epoch`.
+            // 19 columns through v35, plus v52's `recovery_epoch`.
             ("media_sessions", 20),
         ] {
             assert_eq!(
@@ -3542,17 +3547,17 @@ mod tests {
     }
 
     #[test]
-    fn v52_migration_rejects_legacy_offline_claim_and_publication_sql() {
+    fn v53_migration_rejects_legacy_offline_claim_and_publication_sql() {
         let dir = tempfile::tempdir().expect("tempdir");
         let db = dir.path().join("plurx.db");
         {
-            let conn = Connection::open(&db).expect("raw v51 open");
-            for (index, sql) in MIGRATIONS.iter().enumerate().take(51) {
+            let conn = Connection::open(&db).expect("raw v52 open");
+            for (index, sql) in MIGRATIONS.iter().enumerate().take(52) {
                 conn.execute_batch(&format!("BEGIN;\n{sql}\nCOMMIT;"))
                     .unwrap_or_else(|error| panic!("v{}: {error}", index + 1));
             }
-            conn.pragma_update(None, "user_version", 51)
-                .expect("v51 marker");
+            conn.pragma_update(None, "user_version", 52)
+                .expect("v52 marker");
             conn.execute(
                 "INSERT INTO users (id, username, password_hash, is_admin)
                  VALUES (1, 'legacy-offline', 'hash', 1)",
@@ -3578,7 +3583,7 @@ mod tests {
                          'waiting_for_encoder', 50, 50, 999999)",
                 [],
             )
-            .expect("seed v51 package");
+            .expect("seed v52 package");
             conn.execute(
                 "INSERT INTO transcode_cache_recipes (recipe_hash, file_id, recipe_version)
                  VALUES ('legacy-recipe', 42, 1)",
@@ -3594,7 +3599,7 @@ mod tests {
             .expect("seed incomplete cache location");
         }
 
-        SqliteStore::open(&db).expect("migrate v51 through offline fences");
+        SqliteStore::open(&db).expect("migrate v52 through offline fences");
         let conn = Connection::open(&db).expect("raw current reopen");
         assert!(conn
             .execute(
@@ -3982,5 +3987,38 @@ mod tests {
         assert!(columns
             .iter()
             .any(|column| column == "publication_ready_at_ms"));
+    }
+
+    #[test]
+    fn v49_adds_the_terminal_analysis_identity_index() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("plurx.db");
+        {
+            let conn = Connection::open(&db).expect("raw open");
+            for (index, sql) in MIGRATIONS.iter().enumerate().take(49) {
+                conn.execute_batch(&format!("BEGIN;\n{sql}\nCOMMIT;"))
+                    .unwrap_or_else(|error| panic!("v{}: {error}", index + 1));
+            }
+            conn.pragma_update(None, "user_version", 49)
+                .expect("v49 marker");
+        }
+
+        SqliteStore::open(&db).expect("migrate v49 to current");
+        let conn = Connection::open(&db).expect("raw reopen");
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .expect("version"),
+            SQLITE_SCHEMA_VERSION
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                  WHERE type = 'index' AND name = 'analysis_requests_terminal_identity'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("terminal identity index"),
+            1
+        );
     }
 }

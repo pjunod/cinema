@@ -1132,12 +1132,11 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         self.assertRegex(sqlite_store, r"version, \d+,")
         self.assertRegex(hiqlite, r"AUTH_SCHEMA_MIGRATION_SOURCE \+ \d+,")
         self.assertRegex(hiqlite, r"every additive v5→v\d+ step")
-        self.assertIn(
-            # The recovery pair sits behind main's desired-selection pair after the
-            # merge, so its source is the pointer fence rather than the request
-            # identity. What is pinned is that the chain is contiguous.
-            "PRODUCER_RECOVERY_SCHEMA_MIGRATION_SOURCE, POINTER_DESIRED_FENCE_SCHEMA_VERSION",
+        self.assertRegex(
+            # The recovery pair now sits behind main's terminal-identity index.
+            # What is pinned is that the final chain remains contiguous.
             hiqlite,
+            r"PRODUCER_RECOVERY_SCHEMA_MIGRATION_SOURCE: i64 =\s+ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA_VERSION",
         )
 
         # Both hand-written downgrade fixtures give the v48 table back.
@@ -1489,10 +1488,9 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             SQLITE_STORE.read_text(encoding="utf-8"),
         )
         self.assertIn(
-            # v30 after main merged in: both efforts appended a v28 and a v29
-            # to this chain independently, and the pair already on main is the
-            # one that could not move.
-            "RECOVERY_EPOCH_SCHEMA_MIGRATION_SOURCE, 30,",
+            # v31 after the final main freeze: main's terminal-identity index
+            # now owns v30, so the recovery ledger and epoch follow it.
+            "RECOVERY_EPOCH_SCHEMA_MIGRATION_SOURCE, 31,",
             HIQLITE.read_text(encoding="utf-8"),
         )
 

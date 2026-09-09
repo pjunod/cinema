@@ -259,6 +259,7 @@ test("Developer is where the switches that cost something live", () => {
     [
       shippedSource("preparedHandoffEnabled"), shippedSource("liveTvSettingsCard"),
       shippedSource("verifiedDecodeCard"), shippedSource("decodeRecoveryCard"),
+      shippedSource("liveTvGuideCard"),
       shippedSource("developerPanel"), "return developerPanel;",
     ].join("\n"),
   )(
@@ -273,7 +274,12 @@ test("Developer is where the switches that cost something live", () => {
     (fn) => `FOOT:${fn}`,
     esc,
   );
-  const html = panel({ playback_control_protocol_v1: true, hls_typeless_sliding: false });
+  const html = panel({
+    playback_control_protocol_v1: true,
+    hls_typeless_sliding: false,
+    live_tv_guide_source: "hdhomerun",
+    live_tv_guide_hours: 24,
+  });
   for (const id of ["pcpv1", "phs", "dhqa"]) {
     assert.match(html, new RegExp(`TOG:${id}\\|`), `Developer is missing the ${id} switch`);
   }
@@ -348,6 +354,117 @@ test("Developer is where the switches that cost something live", () => {
   assert.match(html, /qualify diagnostic contracts against this node's measured hardware decoders/);
   assert.match(html, /HDHomeRun Live TV/);
   assert.match(html, /Save the configuration, check readiness, then enable/);
+  // Readiness is advice, not a gate (2026-09-07). The card has to say so where
+  // the operator is standing, or the next person reads a red row as a refusal.
+  assert.match(html, /Readiness is advice, not a gate/);
+  // The programme guide has its own enable section beside the tuner card, and
+  // it names the credential it sends and the one host it sends it to.
+  assert.match(html, /Programme guide/);
+  assert.match(html, /What must be true to enable it safely/);
+  assert.match(html, /api\.hdhomerun\.com/);
+  assert.match(html, /never stores, logs or relays that credential/);
+  assert.match(html, /FOOT:saveLiveTvGuide/);
+  // Nothing here may imply the guide is a code-level gate or a build variant.
+  assert.doesNotMatch(html, /program-guide scheduling are not supported/);
+});
+
+test("the guide's readiness rows are advisory and never disable the save", () => {
+  const view = new Function(
+    "esc",
+    `${shippedSource("liveTvGuideReadyView")} return liveTvGuideReadyView;`,
+  )(esc);
+  const html = view({
+    source: "xmltv",
+    freshness: "unavailable",
+    age_seconds: 0,
+    matched_channels: 0,
+    lineup_channels: 12,
+    programmes: 0,
+    refresh_interval_seconds: 1200,
+    refresh_error: "the XMLTV host refused the connection",
+    checks: [
+      { id: "live_tv_enabled", ready: false, message: "Live TV is off." },
+      { id: "outbound_host", ready: true, message: "The owner can reach the URL." },
+    ],
+  });
+  assert.match(html, /Not met yet/);
+  assert.match(html, /Met/);
+  assert.match(html, /None of this blocks the switch/);
+  assert.match(html, /matched 0 of 12 lineup channels/);
+  assert.match(html, /Last refresh failed/);
+  assert.doesNotMatch(html, /disabled/, "an advisory panel must not render a disabled control");
+});
+
+test("changing the guide source dirties the replacement card after its repaint", () => {
+  let rendered = false;
+  const save = { disabled: true };
+  const state = { textContent: "Saved" };
+  const classes = new Set();
+  const card = {
+    classList: {
+      contains: (name) => classes.has(name),
+      add: (name) => classes.add(name),
+    },
+    querySelector: (selector) => selector.includes("button.primary") ? save : state,
+  };
+  const replacement = { closest: () => card };
+  const oldUrl = { value: "https://guide.example/listings.xml" };
+  const oldHours = { value: "48" };
+  const document = {
+    getElementById(id) {
+      if (id === "ltgurl") return rendered ? null : oldUrl;
+      if (id === "ltghours") return rendered ? null : oldHours;
+      if (id === "ltgsrc") return rendered ? replacement : null;
+      return null;
+    },
+  };
+  const guide = new Function(
+    "document", "renderSettings",
+    `${shippedConst("LIVE_TV_GUIDE_DRAFT")}
+     ${shippedSource("markSetCard")}
+     ${shippedSource("liveTvGuideSourceDraft")}
+     return {change:liveTvGuideSourceDraft,draft:LIVE_TV_GUIDE_DRAFT};`,
+  )(document, () => { rendered = true; });
+
+  guide.draft.checked = 42;
+  guide.change("hdhomerun");
+
+  assert.equal(guide.draft.source, "hdhomerun");
+  assert.equal(guide.draft.url, oldUrl.value);
+  assert.equal(guide.draft.hours, 48);
+  assert.equal(guide.draft.checked, null, "the replacement readiness panel runs a current check");
+  assert.ok(classes.has("dirty"), "the repainted card carries the unsaved state");
+  assert.equal(save.disabled, false, "the repainted card's Save is enabled");
+  assert.equal(state.textContent, "Unsaved changes");
+});
+
+test("saving the guide rechecks the saved source and retires its draft", async () => {
+  let written;
+  const fields = {
+    ltgsrc: { value: "hdhomerun" },
+    ltgurl: null,
+    ltghours: { value: "24" },
+  };
+  const guide = new Function(
+    "document", "liveTvSettingsWrite", "SETTINGS",
+    `${shippedConst("LIVE_TV_GUIDE_DRAFT")}
+     ${shippedSource("saveLiveTvGuide")}
+     return {save:saveLiveTvGuide,draft:LIVE_TV_GUIDE_DRAFT};`,
+  )(
+    { getElementById: (id) => fields[id] },
+    async (body) => { written = body; return true; },
+    { live_tv_config_generation: 7, live_tv_xmltv_url: "" },
+  );
+  Object.assign(guide.draft, { source: "hdhomerun", url: "old", hours: 48, checked: 42 });
+
+  assert.equal(await guide.save({}), true);
+  assert.deepEqual(written, {
+    live_tv_config_generation: 7,
+    live_tv_guide_source: "hdhomerun",
+    live_tv_xmltv_url: "",
+    live_tv_guide_hours: 24,
+  });
+  assert.deepEqual(guide.draft, { source: null, url: null, hours: null, checked: null });
 });
 
 test("Verified decode states its cost, its prerequisites, and what this node measured", () => {

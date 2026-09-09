@@ -1,0 +1,591 @@
+{
+  "schema_version": 1,
+  "title": "Live TV guide cases \u2014 one truth for the web, Apple and Android renderers",
+  "documented_in": "docs/features/LIVE-TV-GUIDE-AND-UI-PLAN.md",
+  "ruled": "2026-09-07",
+  "notes": [
+    "Every client answers now/next/progress, grid layout, filtering and channel adjacency from these cases. Three reducers, one fixture \u2014 the way tests/playback/player-input-contract.json already works.",
+    "Times are unix seconds. The base instant 1789000800 is the plan's 8:00 PM; every offset is a whole number of half-hours from it unless a case says otherwise.",
+    "`progress` is (now - start) / (end - start), and is null exactly when no programme is on."
+  ],
+  "lineup": [
+    {
+      "id": "2.1",
+      "guide_number": "2.1",
+      "guide_name": "WCBS",
+      "support": "ready",
+      "drm": false,
+      "favorite": true
+    },
+    {
+      "id": "4.1",
+      "guide_number": "4.1",
+      "guide_name": "WNBC",
+      "support": "ready",
+      "drm": false,
+      "favorite": false
+    },
+    {
+      "id": "7.1",
+      "guide_number": "7.1",
+      "guide_name": "WABC",
+      "support": "ready",
+      "drm": false,
+      "favorite": true
+    },
+    {
+      "id": "11.1",
+      "guide_number": "11.1",
+      "guide_name": "WPIX",
+      "support": "ready",
+      "drm": false,
+      "favorite": false
+    },
+    {
+      "id": "68.1",
+      "guide_number": "68.1",
+      "guide_name": "WFUT",
+      "support": "drm_unsupported",
+      "drm": true,
+      "favorite": false
+    }
+  ],
+  "guide": {
+    "source": "hdhomerun",
+    "freshness": "fresh",
+    "age_seconds": 412,
+    "fetched_at": 1789000388,
+    "window": {
+      "start": 1788999000,
+      "end": 1789009800
+    },
+    "refresh_error": null,
+    "channels": [
+      {
+        "id": "2.1",
+        "guide_number": "2.1",
+        "affiliate": "CBS",
+        "image_url": "https://example.invalid/cbs.png",
+        "programmes": [
+          {
+            "start": 1788999000,
+            "end": 1789000800,
+            "title": "Local News",
+            "filters": [
+              "News"
+            ]
+          },
+          {
+            "start": 1789000800,
+            "end": 1789002600,
+            "title": "Evening Edition",
+            "episode": "E812",
+            "synopsis": "The evening edition.",
+            "filters": [
+              "News"
+            ]
+          },
+          {
+            "start": 1789002600,
+            "end": 1789006200,
+            "title": "Harbor Lights",
+            "episode_title": "Slack Water",
+            "episode": "S2E03",
+            "filters": [
+              "Series",
+              "Drama"
+            ]
+          },
+          {
+            "start": 1789006200,
+            "end": 1789009800,
+            "title": "The Precinct",
+            "episode": "S5E11",
+            "filters": [
+              "Series"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "4.1",
+        "guide_number": "4.1",
+        "affiliate": "NBC",
+        "programmes": [
+          {
+            "start": 1789000800,
+            "end": 1789004400,
+            "title": "The Long Game",
+            "filters": [
+              "Sports"
+            ]
+          },
+          {
+            "start": 1789004400,
+            "end": 1789008000,
+            "title": "Studio Sessions",
+            "filters": [
+              "Music"
+            ]
+          },
+          {
+            "start": 1789008000,
+            "end": 1789009800,
+            "title": "Late Local News",
+            "filters": [
+              "News"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "7.1",
+        "guide_number": "7.1",
+        "affiliate": "ABC",
+        "image_url": "https://example.invalid/abc.png",
+        "programmes": [
+          {
+            "start": 1788999000,
+            "end": 1789000800,
+            "title": "Local News",
+            "filters": [
+              "News"
+            ]
+          },
+          {
+            "start": 1789000800,
+            "end": 1789002600,
+            "title": "City Beat",
+            "episode_title": "Pier 40",
+            "episode": "S3E14",
+            "synopsis": "A waterfront rebuild divides the board.",
+            "original_air_date": "2026-09-07",
+            "filters": [
+              "News",
+              "Series"
+            ]
+          },
+          {
+            "start": 1789002600,
+            "end": 1789004400,
+            "title": "Kitchen Table",
+            "episode": "S1E02",
+            "filters": [
+              "Cooking"
+            ]
+          },
+          {
+            "start": 1789004400,
+            "end": 1789008000,
+            "title": "The Precinct",
+            "episode": "S5E11",
+            "filters": [
+              "Series"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "11.1",
+        "guide_number": "11.1",
+        "affiliate": "CW",
+        "programmes": [
+          {
+            "start": 1789000800,
+            "end": 1789002600,
+            "title": "Morning Repeat"
+          },
+          {
+            "start": 1789004400,
+            "end": 1789006200,
+            "title": "Night Court"
+          }
+        ]
+      }
+    ]
+  },
+  "programme_at": [
+    {
+      "name": "mid-programme",
+      "channel": "7.1",
+      "now": 1789001520,
+      "expect": {
+        "now_title": "City Beat",
+        "next_title": "Kitchen Table",
+        "progress": 0.4
+      },
+      "note": "12 minutes into a 30-minute programme: 720/1800."
+    },
+    {
+      "name": "exactly at the start",
+      "channel": "7.1",
+      "now": 1789000800,
+      "expect": {
+        "now_title": "City Beat",
+        "next_title": "Kitchen Table",
+        "progress": 0.0
+      },
+      "note": "The start instant belongs to the programme that starts."
+    },
+    {
+      "name": "exactly at the end",
+      "channel": "7.1",
+      "now": 1789002600,
+      "expect": {
+        "now_title": "Kitchen Table",
+        "next_title": "The Precinct",
+        "progress": 0.0
+      },
+      "note": "End-exclusive: at 20:30 the 20:00 programme is over, not still airing."
+    },
+    {
+      "name": "one second before the end",
+      "channel": "7.1",
+      "now": 1789002599,
+      "expect": {
+        "now_title": "City Beat",
+        "next_title": "Kitchen Table",
+        "progress": 0.9994444444444445
+      }
+    },
+    {
+      "name": "before the first row",
+      "channel": "4.1",
+      "now": 1788997200,
+      "expect": {
+        "now_title": null,
+        "next_title": "The Long Game",
+        "progress": null
+      },
+      "note": "No programme is on. `next` is still answerable and the row still renders."
+    },
+    {
+      "name": "inside a gap between rows",
+      "channel": "11.1",
+      "now": 1789003500,
+      "expect": {
+        "now_title": null,
+        "next_title": "Night Court",
+        "progress": null
+      },
+      "note": "A real hole in the guide, not a missing fetch: nothing is on right now."
+    },
+    {
+      "name": "after the last row",
+      "channel": "4.1",
+      "now": 1789011600,
+      "expect": {
+        "now_title": null,
+        "next_title": null,
+        "progress": null
+      },
+      "note": "Past the end of the cache. Both answers are null and the row degrades to number and callsign."
+    },
+    {
+      "name": "a channel with no guide rows at all",
+      "channel": "68.1",
+      "now": 1789001520,
+      "expect": {
+        "now_title": null,
+        "next_title": null,
+        "progress": null
+      },
+      "note": "68.1 is in the lineup and absent from the guide. Absent is not an error."
+    },
+    {
+      "name": "a channel id that is not in the lineup",
+      "channel": "99.9",
+      "now": 1789001520,
+      "expect": {
+        "now_title": null,
+        "next_title": null,
+        "progress": null
+      }
+    },
+    {
+      "name": "a long programme part-way through",
+      "channel": "4.1",
+      "now": 1789006200,
+      "expect": {
+        "now_title": "Studio Sessions",
+        "next_title": "Late Local News",
+        "progress": 0.5
+      },
+      "note": "A two-slot programme is half done one slot in."
+    }
+  ],
+  "grid": {
+    "window": {
+      "start": 1789000800,
+      "end": 1789008000
+    },
+    "now": 1789001520,
+    "slot_seconds": 1800,
+    "px_per_slot": 240,
+    "expect": {
+      "now_line_x": 96.0,
+      "total_width": 960.0,
+      "rows": [
+        {
+          "channel": "2.1",
+          "cells": [
+            {
+              "title": "Evening Edition",
+              "left": 0.0,
+              "width": 240.0,
+              "airing": true,
+              "clipped": false
+            },
+            {
+              "title": "Harbor Lights",
+              "left": 240.0,
+              "width": 480.0,
+              "airing": false,
+              "clipped": false
+            },
+            {
+              "title": "The Precinct",
+              "left": 720.0,
+              "width": 240.0,
+              "airing": false,
+              "clipped": true
+            }
+          ]
+        },
+        {
+          "channel": "4.1",
+          "cells": [
+            {
+              "title": "The Long Game",
+              "left": 0.0,
+              "width": 480.0,
+              "airing": true,
+              "clipped": false
+            },
+            {
+              "title": "Studio Sessions",
+              "left": 480.0,
+              "width": 480.0,
+              "airing": false,
+              "clipped": false
+            }
+          ]
+        },
+        {
+          "channel": "7.1",
+          "cells": [
+            {
+              "title": "City Beat",
+              "left": 0.0,
+              "width": 240.0,
+              "airing": true,
+              "clipped": false
+            },
+            {
+              "title": "Kitchen Table",
+              "left": 240.0,
+              "width": 240.0,
+              "airing": false,
+              "clipped": false
+            },
+            {
+              "title": "The Precinct",
+              "left": 480.0,
+              "width": 480.0,
+              "airing": false,
+              "clipped": false
+            }
+          ]
+        },
+        {
+          "channel": "11.1",
+          "cells": [
+            {
+              "title": "Morning Repeat",
+              "left": 0.0,
+              "width": 240.0,
+              "airing": true,
+              "clipped": false
+            },
+            {
+              "title": "Night Court",
+              "left": 480.0,
+              "width": 240.0,
+              "airing": false,
+              "clipped": false
+            }
+          ]
+        },
+        {
+          "channel": "68.1",
+          "cells": []
+        }
+      ]
+    },
+    "notes": [
+      "Cells are clipped to the window, never overlapping: the 19:30 row starts before the window and contributes nothing, and a programme running past 22:00 is cut at the edge.",
+      "68.1 is in the lineup with no guide rows, so its row is present and empty. A channel never disappears because the guide is thin.",
+      "11.1's 20:30-21:00 hole leaves a real gap between cells. Do not stretch the neighbours across it."
+    ]
+  },
+  "filters": [
+    {
+      "name": "everything visible by default",
+      "opts": {
+        "query": "",
+        "filter": "all",
+        "hide_protected": false
+      },
+      "expect": [
+        "2.1",
+        "4.1",
+        "7.1",
+        "11.1",
+        "68.1"
+      ],
+      "note": "A protected channel is dimmed, never hidden by default."
+    },
+    {
+      "name": "hide protected",
+      "opts": {
+        "query": "",
+        "filter": "all",
+        "hide_protected": true
+      },
+      "expect": [
+        "2.1",
+        "4.1",
+        "7.1",
+        "11.1"
+      ]
+    },
+    {
+      "name": "favorites only",
+      "opts": {
+        "query": "",
+        "filter": "favorites",
+        "hide_protected": false
+      },
+      "expect": [
+        "2.1",
+        "7.1"
+      ]
+    },
+    {
+      "name": "search by number",
+      "opts": {
+        "query": "7.",
+        "filter": "all",
+        "hide_protected": false
+      },
+      "expect": [
+        "7.1"
+      ]
+    },
+    {
+      "name": "search by callsign, case-insensitively",
+      "opts": {
+        "query": "wnbc",
+        "filter": "all",
+        "hide_protected": false
+      },
+      "expect": [
+        "4.1"
+      ]
+    },
+    {
+      "name": "search matches the programme on now",
+      "opts": {
+        "query": "city beat",
+        "filter": "all",
+        "hide_protected": false
+      },
+      "expect": [
+        "7.1"
+      ],
+      "note": "The guide is searchable: typing what is on finds the channel showing it."
+    },
+    {
+      "name": "search matches nothing",
+      "opts": {
+        "query": "zzz",
+        "filter": "all",
+        "hide_protected": false
+      },
+      "expect": []
+    }
+  ],
+  "adjacent": [
+    {
+      "name": "next channel",
+      "visible": [
+        "2.1",
+        "4.1",
+        "7.1"
+      ],
+      "current": "4.1",
+      "delta": 1,
+      "expect": "7.1"
+    },
+    {
+      "name": "previous channel",
+      "visible": [
+        "2.1",
+        "4.1",
+        "7.1"
+      ],
+      "current": "4.1",
+      "delta": -1,
+      "expect": "2.1"
+    },
+    {
+      "name": "wraps forward off the end",
+      "visible": [
+        "2.1",
+        "4.1",
+        "7.1"
+      ],
+      "current": "7.1",
+      "delta": 1,
+      "expect": "2.1"
+    },
+    {
+      "name": "wraps backward off the start",
+      "visible": [
+        "2.1",
+        "4.1",
+        "7.1"
+      ],
+      "current": "2.1",
+      "delta": -1,
+      "expect": "7.1"
+    },
+    {
+      "name": "an unknown current lands on the first",
+      "visible": [
+        "2.1",
+        "4.1",
+        "7.1"
+      ],
+      "current": "99.9",
+      "delta": 1,
+      "expect": "2.1"
+    },
+    {
+      "name": "a single visible channel is its own neighbour",
+      "visible": [
+        "7.1"
+      ],
+      "current": "7.1",
+      "delta": 1,
+      "expect": "7.1"
+    },
+    {
+      "name": "nothing visible has no neighbour",
+      "visible": [],
+      "current": "7.1",
+      "delta": 1,
+      "expect": null
+    }
+  ]
+}

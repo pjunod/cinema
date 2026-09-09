@@ -12,10 +12,10 @@ use super::error::ApiError;
 use super::extract::{AdminUser, AuthUser};
 use super::peer_transport::{deadline_after, PeerAuthMode, PeerTransport, PeerTransportError};
 use crate::live_tv::{
-    capability_owner, LiveTvActivateRequest, LiveTvActivated, LiveTvConfig, LiveTvDrainAck,
-    LiveTvError, LiveTvResourceRequest, LiveTvSnapshot, LiveTvStartRequest, LiveTvStopRequest,
-    SnapshotFreshness, SnapshotRequest, ACTIVATE_PATH, MAX_SNAPSHOT_BYTES, RESOURCE_PATH,
-    SNAPSHOT_PATH, START_PATH, STOP_PATH,
+    capability_owner, guide, GuideWindow, LiveTvActivateRequest, LiveTvActivated, LiveTvConfig,
+    LiveTvDrainAck, LiveTvError, LiveTvGuide, LiveTvResourceRequest, LiveTvSnapshot,
+    LiveTvStartRequest, LiveTvStopRequest, SnapshotFreshness, SnapshotRequest, ACTIVATE_PATH,
+    GUIDE_PATH, MAX_SNAPSHOT_BYTES, RESOURCE_PATH, SNAPSHOT_PATH, START_PATH, STOP_PATH,
 };
 use crate::state::AppState;
 
@@ -26,6 +26,8 @@ const CONTROL_EXCHANGE_DEADLINE: Duration = Duration::from_secs(5);
 const DRAIN_EXCHANGE_DEADLINE: Duration = Duration::from_secs(20);
 const RESOURCE_EXCHANGE_DEADLINE: Duration = Duration::from_secs(12);
 const MAX_START_RESPONSE_BYTES: usize = 32 * 1024;
+const GUIDE_EXCHANGE_DEADLINE: Duration = Duration::from_secs(25);
+const MAX_GUIDE_REQUEST_HOURS: u8 = 72;
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct LiveTvReadinessCheck {
@@ -53,6 +55,266 @@ pub(crate) struct LiveTvChannelsResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) refresh_error: Option<String>,
     pub(crate) channels: Vec<crate::live_tv::LiveTvChannel>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct GuideQuery {
+    from: Option<i64>,
+    hours: Option<u8>,
+}
+
+/// The public guide read. It serves the owner's cache clipped to the requested
+/// window and never triggers a fetch, so it is always fast and always answers
+/// — including with `unavailable`, which is a rendered state and not an error.
+/// Every failure mode here is one a client draws rather than one it retries.
+pub(crate) async fn guide_document(
+    _user: AuthUser,
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<GuideQuery>,
+) -> Result<Json<LiveTvGuide>, ApiError> {
+    let config = state.live_tv.config().await.map_err(api_error)?;
+    if !config.enabled {
+        return Err(ApiError::typed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "live_tv_disabled",
+            "Live TV is disabled; an administrator can enable it in Settings → Developer",
+        ));
+    }
+    let window = requested_window(&config, query);
+    Ok(Json(owner_guide(&state, &config, window).await))
+}
+
+fn requested_window(config: &LiveTvConfig, query: GuideQuery) -> GuideWindow {
+    // An hour back by default so the programme that started before the page
+    // opened is present: a grid whose first cell is always cut off reads as
+    // broken rather than as correct.
+    let start = query
+        .from
+        .unwrap_or_else(|| crate::live_tv::unix_seconds() - 3600);
+    let hours = query
+        .hours
+        .unwrap_or(config.guide_hours)
+        .clamp(1, MAX_GUIDE_REQUEST_HOURS);
+    GuideWindow {
+        start,
+        end: start.saturating_add(i64::from(hours) * 3600),
+    }
+}
+
+/// Owner-side read, or a relay of the owner's public answer.
+///
+/// Deliberately **not** gated on the Live TV protocol capability. An owner
+/// that predates the guide answers 404 to the internal path, and the honest
+/// rendering of that is `unavailable` with a sentence saying so — not
+/// `live_tv_protocol_unready`, which would take the whole feature down across
+/// a mixed fleet mid-rollout over a read-only extra.
+pub(crate) async fn owner_guide(
+    state: &AppState,
+    config: &LiveTvConfig,
+    window: GuideWindow,
+) -> LiveTvGuide {
+    if config.owner_node_id == state.node_id {
+        return state.live_tv.local_guide(config, window).await;
+    }
+    if let Some(cached) = state.live_tv.relayed_guide(config.generation).await {
+        return cached.clipped(&window);
+    }
+    let relayed = relay_guide(state, config).await;
+    match relayed {
+        Ok(guide) => {
+            state
+                .live_tv
+                .remember_relayed_guide(config.generation, guide.clone())
+                .await;
+            guide.clipped(&window)
+        }
+        Err(message) => LiveTvGuide::unavailable(config.guide_source, window, Some(message)),
+    }
+}
+
+async fn relay_guide(state: &AppState, config: &LiveTvConfig) -> Result<LiveTvGuide, String> {
+    if !state.membership.is_replicated() {
+        return Err("the selected owner is not this single-node server".to_owned());
+    }
+    let peer = state
+        .membership
+        .activity_peers()
+        .await
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|peer| peer.node_id == config.owner_node_id)
+        .filter(|peer| peer.reachable)
+        .and_then(|peer| peer.http_base.map(|base| (peer.node_id, base)))
+        .ok_or_else(|| "the tuner owner is not a reachable committed voter".to_owned())?;
+    let body = serde_json::to_vec(&SnapshotRequest {
+        generation: config.generation,
+        force: false,
+        probe_graph: false,
+    })
+    .map_err(|error| error.to_string())?;
+    let response = PeerTransport::new(state.membership.clone())
+        .request(
+            &peer.0,
+            &peer.1,
+            reqwest::Method::POST,
+            GUIDE_PATH,
+            body,
+            deadline_after(GUIDE_EXCHANGE_DEADLINE),
+            MAX_SNAPSHOT_BYTES,
+            PeerAuthMode::ExactRequestAndResponse,
+        )
+        .await
+        .map_err(|error| sanitize_public_error(&peer_error(error).to_string()))?;
+    if response.status == StatusCode::NOT_FOUND {
+        return Err("the tuner owner does not serve a programme guide yet".to_owned());
+    }
+    if !response.status.is_success() {
+        return Err(format!(
+            "the tuner owner returned HTTP {}",
+            response.status.as_u16()
+        ));
+    }
+    serde_json::from_slice::<LiveTvGuide>(&response.body)
+        .map_err(|_| "the tuner owner returned an invalid guide".to_owned())
+}
+
+/// Admin: force a refresh now rather than waiting for the loop. Bounded by the
+/// same admission semaphore the lineup's forced refresh uses.
+pub(crate) async fn refresh_guide(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+) -> Result<Json<LiveTvGuide>, ApiError> {
+    let config = state.live_tv.config().await.map_err(api_error)?;
+    if config.owner_node_id != state.node_id {
+        return Err(ApiError::typed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "owner_unavailable",
+            "a guide refresh runs on the tuner owner; ask that node",
+        ));
+    }
+    let guide = state
+        .live_tv
+        .refresh_guide(&config, true)
+        .await
+        .map_err(api_error)?;
+    let window = guide.window.clone();
+    Ok(Json(guide.clipped(&window)))
+}
+
+/// Advisory only. Every row here says what would have to be true for the guide
+/// to work, and whether it is true right now — and none of them refuse a
+/// change. `guide_source` is a save like any other save.
+pub(crate) async fn guide_readiness(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+) -> Result<Json<LiveTvGuideReadiness>, ApiError> {
+    let config = state.live_tv.config().await.map_err(api_error)?;
+    let owner_is_local = config.owner_node_id == state.node_id;
+    let mut checks = Vec::new();
+    checks.push(LiveTvReadinessCheck {
+        id: "live_tv_enabled",
+        ready: config.enabled,
+        message: if config.enabled {
+            "Live TV is enabled, so the owner is running a refresh loop.".to_owned()
+        } else {
+            "Live TV is off. The guide is saved but nothing fetches it until Live TV is on."
+                .to_owned()
+        },
+    });
+    checks.push(LiveTvReadinessCheck {
+        id: "guide_source",
+        ready: config.guide_source != crate::live_tv::GuideSource::Off,
+        message: match config.guide_source {
+            crate::live_tv::GuideSource::Off => {
+                "No source is selected, so channel rows show number and callsign only.".to_owned()
+            }
+            crate::live_tv::GuideSource::HdHomeRun => {
+                "The HDHomeRun guide service is selected.".to_owned()
+            }
+            crate::live_tv::GuideSource::Xmltv => "An XMLTV document is selected.".to_owned(),
+        },
+    });
+    checks.push(match config.guide_source {
+        crate::live_tv::GuideSource::HdHomeRun => LiveTvReadinessCheck {
+            id: "outbound_host",
+            ready: config.device_ipv4.is_some(),
+            message: "The owner node needs outbound HTTPS to api.hdhomerun.com and a tuner address to read DeviceAuth from. plurx sends that credential over TLS and never stores it."
+                .to_owned(),
+        },
+        crate::live_tv::GuideSource::Xmltv => LiveTvReadinessCheck {
+            id: "outbound_host",
+            ready: crate::live_tv::validate_xmltv_url(&config.xmltv_url).is_ok(),
+            message: "The owner node needs to be able to fetch the XMLTV URL you gave. Nothing else is contacted."
+                .to_owned(),
+        },
+        crate::live_tv::GuideSource::Off => LiveTvReadinessCheck {
+            id: "outbound_host",
+            ready: true,
+            message: "No outbound request is made while the source is off.".to_owned(),
+        },
+    });
+    checks.push(LiveTvReadinessCheck {
+        id: "owner_node",
+        ready: owner_is_local || state.membership.is_replicated(),
+        message: if owner_is_local {
+            "This node owns the tuner, so it fetches the guide and other nodes relay its answer."
+                .to_owned()
+        } else {
+            format!(
+                "Node {} owns the tuner and fetches the guide; this node relays its answer.",
+                config.owner_node_id
+            )
+        },
+    });
+    // The same horizon a client asks for, so `programmes` is the depth the
+    // guide actually has. A zero-width window here counted only what is on air
+    // this second, which reads as roughly one row per channel however deep the
+    // guide is — the opposite of what an operator opens this panel to learn.
+    let now = crate::live_tv::unix_seconds();
+    let guide = owner_guide(
+        &state,
+        &config,
+        GuideWindow {
+            start: now - 3600,
+            end: now.saturating_add(i64::from(config.guide_hours) * 3600),
+        },
+    )
+    .await;
+    let programmes = guide.total_programmes();
+    Ok(Json(LiveTvGuideReadiness {
+        // Advisory: this is what the operator is told, never what they are
+        // held to. Nothing consults it before a save.
+        advisory: true,
+        source: config.guide_source.as_str().to_owned(),
+        guide_hours: config.guide_hours,
+        freshness: guide.freshness,
+        age_seconds: guide.age_seconds,
+        fetched_at: guide.fetched_at,
+        refresh_error: guide.refresh_error,
+        matched_channels: guide.matched_channels,
+        lineup_channels: guide.lineup_channels,
+        programmes,
+        refresh_interval_seconds: guide::GUIDE_REFRESH_INTERVAL.as_secs(),
+        checks,
+    }))
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct LiveTvGuideReadiness {
+    pub(crate) advisory: bool,
+    pub(crate) source: String,
+    pub(crate) guide_hours: u8,
+    pub(crate) freshness: crate::live_tv::GuideFreshness,
+    pub(crate) age_seconds: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) fetched_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) refresh_error: Option<String>,
+    pub(crate) matched_channels: usize,
+    pub(crate) lineup_channels: usize,
+    pub(crate) programmes: usize,
+    pub(crate) refresh_interval_seconds: u64,
+    pub(crate) checks: Vec<LiveTvReadinessCheck>,
 }
 
 #[derive(Deserialize)]

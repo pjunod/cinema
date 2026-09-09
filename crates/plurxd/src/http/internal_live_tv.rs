@@ -9,7 +9,7 @@ use axum::Json;
 use super::peer_transport::exact_auth_from_headers;
 use crate::live_tv::{
     LiveTvActivateRequest, LiveTvDrainAck, LiveTvDrainRequest, LiveTvResourceRequest,
-    LiveTvStartRequest, LiveTvStopRequest, SnapshotRequest, ACTIVATE_PATH, DRAIN_PATH,
+    LiveTvStartRequest, LiveTvStopRequest, SnapshotRequest, ACTIVATE_PATH, DRAIN_PATH, GUIDE_PATH,
     RESOURCE_PATH, SNAPSHOT_PATH, START_PATH, STOP_PATH,
 };
 use crate::state::AppState;
@@ -50,6 +50,40 @@ pub(crate) async fn snapshot(
         .await
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     signed_json_response(&state, &headers, SNAPSHOT_PATH, StatusCode::OK, &snapshot)
+}
+
+/// The owner's guide, relayed to an ingress node verbatim.
+///
+/// Two deliberate differences from `snapshot`. It is **not** gated on the
+/// Live TV protocol capability: a mixed fleet mid-rollout must keep playing,
+/// and an old owner that 404s this path is rendered as "no guide yet" rather
+/// than taking Live TV down across the cluster. And it never fetches — it
+/// answers from the owner's cache, so an ingress cannot make the owner talk to
+/// a guide host by asking often.
+pub(crate) async fn guide(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, StatusCode> {
+    if !state.serving.is_ready() {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    authorize(&state, &headers, &body, GUIDE_PATH).await?;
+    let request =
+        serde_json::from_slice::<SnapshotRequest>(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let config = state
+        .live_tv
+        .config()
+        .await
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    if config.generation != request.generation || config.owner_node_id != state.node_id {
+        return Err(StatusCode::CONFLICT);
+    }
+    // The owner's own full window: the ingress clips it to whatever its caller
+    // asked for, so one relayed body serves every window a page can request.
+    let window = crate::live_tv::guide::refresh_window(config.guide_hours);
+    let guide = state.live_tv.local_guide(&config, window).await;
+    signed_json_response(&state, &headers, GUIDE_PATH, StatusCode::OK, &guide)
 }
 
 pub(crate) async fn start(

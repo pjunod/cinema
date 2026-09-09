@@ -2955,6 +2955,84 @@ mod tests {
             .expect("seed files");
     }
 
+    async fn explain(store: &SqliteStore, sql: String) -> Vec<String> {
+        store
+            .with_read(move |conn| {
+                let mut statement = conn.prepare(&sql)?;
+                let details = statement
+                    .query_map([], |row| row.get::<_, String>(3))?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(Into::into);
+                details
+            })
+            .await
+            .expect("query plan")
+    }
+
+    #[tokio::test]
+    async fn analysis_projections_use_the_result_key_history_index() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        for (name, cte, relation) in [
+            ("history", ANALYSIS_CANONICAL_CTE, "classified"),
+            ("summary", ANALYSIS_SUMMARY_CTE, "summary_classified"),
+        ] {
+            let details = explain(
+                &store,
+                format!("EXPLAIN QUERY PLAN {cte} SELECT COUNT(*) FROM {relation}"),
+            )
+            .await;
+            assert!(
+                details.iter().any(|detail| {
+                    detail.contains("analysis_requests_result_history")
+                        && detail.contains("result_cache_key=?")
+                }),
+                "{name} must probe standalone jobs by result cache key: {details:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_retention_uses_the_terminal_identity_index() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        let details = explain(
+            &store,
+            "EXPLAIN QUERY PLAN
+             SELECT candidate.request_id FROM analysis_requests candidate
+              WHERE candidate.state IN ('ready', 'failed', 'cancelled')
+                AND candidate.request_id <> 'new-request'
+                AND (candidate.force_rebuild = 1
+                  OR NOT EXISTS (SELECT 1 FROM files
+                       WHERE files.id = candidate.file_id
+                         AND files.size = candidate.source_size
+                         AND files.mtime = candidate.source_mtime)
+                  OR EXISTS (SELECT 1 FROM analysis_requests newer
+                       WHERE newer.state IN ('ready', 'failed', 'cancelled')
+                         AND newer.force_rebuild = 0
+                         AND newer.file_id = candidate.file_id
+                         AND newer.source_size = candidate.source_size
+                         AND newer.source_mtime = candidate.source_mtime
+                         AND newer.component = candidate.component
+                         AND newer.pipeline_version = candidate.pipeline_version
+                         AND newer.requested_generation = candidate.requested_generation
+                         AND newer.target_node_id = candidate.target_node_id
+                         AND (newer.updated_at_ms > candidate.updated_at_ms
+                           OR (newer.updated_at_ms = candidate.updated_at_ms
+                             AND newer.request_id > candidate.request_id))))
+              ORDER BY candidate.updated_at_ms, candidate.request_id
+              LIMIT MAX((SELECT COUNT(*) FROM analysis_requests
+                          WHERE state IN ('ready', 'failed', 'cancelled')) - 8192, 0)"
+                .to_owned(),
+        )
+        .await;
+        assert!(
+            details.iter().any(|detail| {
+                detail.contains("analysis_requests_terminal_identity")
+                    && detail.contains("file_id=?")
+            }),
+            "terminal retention must probe newer generations by identity: {details:?}"
+        );
+    }
+
     fn job(file_id: i64, source_mtime: i64, created_at_ms: i64) -> NewClusterFragmentIndexJob {
         let source_sha256 = "a".repeat(64);
         let pipeline_sha256 = "b".repeat(64);

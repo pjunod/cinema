@@ -127,6 +127,110 @@ test("the preview acceleration ladder only ever gets coarser", () => {
   }
 });
 
+// ---- Live TV: the sibling table (docs/clients/PLAYER-INPUT-CONTRACT.md §4a) ----
+// Live television is the same contract with every timeline row removed and a
+// channel added. It is a second table in the same fixture rather than a fourth
+// surface, because the well-formedness test above requires all seven finite
+// states and a live stream can enter none of them.
+
+test("the live table routes every surface, state and input to a defined live outcome", () => {
+  const live = contract.live;
+  assert.ok(live, "the fixture lost its live section");
+  const states = Object.keys(live.states);
+  const outcomes = new Set(Object.keys(live.outcomes));
+  assert.deepEqual(Object.keys(live.routing).sort(), Object.keys(live.surfaces).sort(), "a live routing table has no surface description");
+  for (const surface of Object.keys(live.surfaces)) {
+    const routing = live.routing[surface];
+    assert.ok(routing, `live surface ${surface} has no routing table`);
+    assert.deepEqual(Object.keys(routing).sort(), [...states].sort(), `live ${surface}: state set`);
+    for (const state of states) {
+      const row = routing[state];
+      assert.deepEqual(Object.keys(row).sort(), [...live.inputs].sort(), `live ${surface}/${state}: input set`);
+      for (const input of live.inputs) {
+        assert.ok(outcomes.has(row[input]), `live ${surface}/${state}/${input} -> ${row[input]} is not a defined live outcome`);
+      }
+    }
+  }
+});
+
+test("nothing in the live table seeks, scrubs or opens a timeline", () => {
+  const live = contract.live;
+  // Structural, not incidental: the seek outcomes are not defined for this
+  // surface at all, so no row can name one even by accident.
+  for (const banned of ["skip", "preview", "commit", "cancel", "commit_then_toggle_play"]) {
+    assert.ok(!(banned in live.outcomes), `live outcome ${banned} exists — a live stream has no timeline`);
+  }
+  for (const banned of ["timeline", "scrub", "menu", "info", "failed", "transport"]) {
+    assert.ok(!(banned in live.states), `live state ${banned} exists — that is a finite-player state`);
+  }
+  for (const banned of ["skip_back", "skip_forward"]) {
+    assert.ok(!live.inputs.includes(banned), `live input ${banned} exists — nothing to skip`);
+  }
+});
+
+test("the 2026-09-02 rulings survive on the live surface", () => {
+  const live = contract.live.routing;
+  // Ruling 1, unchanged: a direction on a hidden ten-foot overlay only reveals.
+  for (const d of ["left", "right", "up", "down", "select"]) {
+    assert.equal(live["ten-foot"].hidden[d], "reveal", `ten-foot/hidden/${d} does something other than reveal`);
+  }
+  // Nothing on a hidden ten-foot overlay changes channel.
+  for (const input of contract.live.inputs) {
+    assert.ok(
+      !["tune", "channel_up", "channel_down", "strip_prev", "strip_next"].includes(live["ten-foot"].hidden[input]),
+      `ten-foot/hidden/${input} changes channel behind a hidden overlay`,
+    );
+  }
+  // Ruling 2 applied to channels: the ten-foot list is preview-then-commit.
+  for (const d of ["up", "down"]) assert.equal(live["ten-foot"].overlay[d], "focus_row");
+  assert.equal(live["ten-foot"].overlay.select, "activate");
+  assert.equal(live["ten-foot"].overlay.back, "hide");
+  assert.equal(contract.live.timings.preview_auto_commit_ms, null);
+  // The deliberate divergence: a desktop keyboard has no focus ring, so
+  // vertical tunes directly. Recorded here so it cannot be "fixed" silently.
+  assert.equal(live.desktop.hidden.up, "channel_up");
+  assert.equal(live.desktop.hidden.down, "channel_down");
+  assert.equal(live.desktop.overlay.select, "tune");
+});
+
+test("the live overlay hides only from a visible overlay, and a held channel key is one tuner start", () => {
+  const live = contract.live;
+  for (const surface of Object.keys(live.routing)) {
+    assert.equal(live.routing[surface].hidden.idle, "ignore", `${surface}: a hidden overlay auto-hides again`);
+    assert.equal(live.routing[surface].page.idle, "ignore", `${surface}: the inline page auto-hides`);
+  }
+  assert.equal(live.routing["ten-foot"].overlay.idle, "hide");
+  assert.equal(live.routing.desktop.overlay.idle, "hide");
+  assert.equal(live.routing.touch.overlay.idle, "hide");
+  // The same numbers as the finite player, deliberately.
+  assert.equal(live.timings.hide_after_ms, contract.timings.hide_after_ms);
+  assert.equal(live.timings.hidden_only_while_playing, contract.timings.hidden_only_while_playing);
+  // One tuner GET per held key: the coalescing window is the guardrail.
+  assert.ok(live.timings.channel_coalesce_ms >= 350, "channel coalescing is shorter than one held-key repeat");
+});
+
+test("the inline live page owns only the transport key", () => {
+  // Browsing owns the keyboard while the player is inline; a stray arrow must
+  // not tune a channel out from under someone scrolling a list.
+  for (const surface of Object.keys(contract.live.routing)) {
+    const page = contract.live.routing[surface].page;
+    for (const input of contract.live.inputs) {
+      if (input === "play_pause") continue;
+      assert.equal(page[input], "ignore", `live ${surface}/page/${input} acts while the player is inline`);
+    }
+  }
+  assert.equal(contract.live.routing.desktop.page.play_pause, "toggle_play");
+});
+
+test("the served web live routing table is the fixture live table", () => {
+  assert.deepEqual(webPolicy.LIVE_INPUT_ROUTING, contract.live.routing);
+  assert.equal(webPolicy.routeLiveInput("desktop", "overlay", "select"), "tune");
+  assert.equal(webPolicy.liveContractTiming("hide_after_ms"), contract.live.timings.hide_after_ms);
+  assert.equal(webPolicy.liveHotkey("G"), "guide_sheet");
+  assert.equal(webPolicy.liveHotkey("q"), null);
+  assert.throws(() => webPolicy.routeLiveInput("desktop", "scrub", "left"), /no live route/);
+});
+
 const fields = JSON.parse(fs.readFileSync(table.FIELDS, "utf8"));
 
 test("the served web playback-info field list is the fixture field list", () => {
@@ -177,6 +281,7 @@ test("docs/clients/PLAYER-INPUT-CONTRACT.md embeds every generated block verbati
     [table.OUTCOMES_BEGIN, table.OUTCOMES_END, table.renderOutcomesBlock(contract), "outcomes"],
     [table.ROWS_BEGIN, table.ROWS_END, table.renderRowsBlock(contract), "rows"],
     [table.TIMINGS_BEGIN, table.TIMINGS_END, table.renderTimingsBlock(contract), "timings"],
+    [table.LIVE_BEGIN, table.LIVE_END, table.renderLiveBlock(contract), "live"],
     [table.INFO_BEGIN, table.INFO_END, table.renderInfoBlock(fields), "info"],
   ]) {
     const start = doc.indexOf(begin);

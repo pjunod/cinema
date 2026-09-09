@@ -51,9 +51,14 @@ use crate::error::StoreError;
 // analysis queue; v23 adds the staged-generation ledger, which is what lets a
 // successor session exist without being current; v24 adds the permanent
 // Profile 7 conversion ledger; v25 adds its non-cascading, attempt-identified
-// permanent recovery guard; v32 adds an incarnation fence and monotone
-// decoder-recovery state to offline package claims. Every additive step is
-// applied through Raft before the daemon opens the store. v5 remains a
+// permanent recovery guard; v26 retains per-attempt failure history; v27
+// records the requested video identity; v28 stores desired playback
+// selection; v29 fences pointer writes against that selection; v30 indexes
+// terminal analysis identity lookups so retention cannot stall Raft; v31
+// persists the decoder-recovery budget; v32 gives sessions a durable recovery
+// epoch; v33 adds an incarnation fence and monotone decoder-recovery state to
+// offline package claims. Every additive step is applied through Raft before
+// the daemon opens the store. v5 remains a
 // supported direct-upgrade source so an offline node is
 // not forced to install every intermediate Cinema release; older or future
 // schemas still fail closed. Version-step targets are named independently of
@@ -77,9 +82,10 @@ const ATTEMPT_ERRORS_SCHEMA_VERSION: i64 = 26;
 const REQUEST_IDENTITY_SCHEMA_VERSION: i64 = 27;
 const DESIRED_SELECTION_SCHEMA_VERSION: i64 = 28;
 const POINTER_DESIRED_FENCE_SCHEMA_VERSION: i64 = 29;
-const PRODUCER_RECOVERY_SCHEMA_VERSION: i64 = 30;
-const RECOVERY_EPOCH_SCHEMA_VERSION: i64 = 31;
-const OFFLINE_RECOVERY_CLAIM_SCHEMA_VERSION: i64 = 32;
+const ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA_VERSION: i64 = 30;
+const PRODUCER_RECOVERY_SCHEMA_VERSION: i64 = 31;
+const RECOVERY_EPOCH_SCHEMA_VERSION: i64 = 32;
+const OFFLINE_RECOVERY_CLAIM_SCHEMA_VERSION: i64 = 33;
 pub const AUTH_SCHEMA_VERSION: i64 = OFFLINE_RECOVERY_CLAIM_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
@@ -108,10 +114,12 @@ const REQUEST_IDENTITY_SCHEMA_MIGRATION_SOURCE: i64 = ATTEMPT_ERRORS_SCHEMA_VERS
 const DESIRED_SELECTION_SCHEMA_MIGRATION_SOURCE: i64 = REQUEST_IDENTITY_SCHEMA_VERSION;
 const POINTER_DESIRED_FENCE_SCHEMA_MIGRATION_SOURCE: i64 = DESIRED_SELECTION_SCHEMA_VERSION;
 // The decoder-recovery pair moved behind the desired-selection pair in the
-// merge: both efforts appended a v28 and a v29 to this chain independently,
-// and the one already on main is the one that cannot move. The chain is
-// positional, so a source is whichever version now precedes the step.
-const PRODUCER_RECOVERY_SCHEMA_MIGRATION_SOURCE: i64 = POINTER_DESIRED_FENCE_SCHEMA_VERSION;
+// first merge, then behind main's terminal-identity index in this freeze. The
+// chain is positional, so a source is whichever version now precedes the step.
+const ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA_MIGRATION_SOURCE: i64 =
+    POINTER_DESIRED_FENCE_SCHEMA_VERSION;
+const PRODUCER_RECOVERY_SCHEMA_MIGRATION_SOURCE: i64 =
+    ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA_VERSION;
 const RECOVERY_EPOCH_SCHEMA_MIGRATION_SOURCE: i64 = PRODUCER_RECOVERY_SCHEMA_VERSION;
 const OFFLINE_RECOVERY_CLAIM_SCHEMA_MIGRATION_SOURCE: i64 = RECOVERY_EPOCH_SCHEMA_VERSION;
 // Session routing and shared-cache identity are additive durable state and use
@@ -2185,6 +2193,29 @@ impl HiqliteAuthStore {
                     )
                     .await?;
                 }
+                SchemaMigrationAction::MigrateFrom(
+                    ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA_MIGRATION_SOURCE,
+                ) => {
+                    let now = self.now()?;
+                    let mut statements = super::hiqlite_fragment_index_cluster::
+                        analysis_terminal_identity_index_migration_statements()?;
+                    statements.push((
+                        "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                         WHERE singleton = 1 AND schema_version = $3"
+                            .to_owned(),
+                        params!(
+                            ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA_VERSION,
+                            now,
+                            ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA_MIGRATION_SOURCE
+                        ),
+                    ));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(
+                        ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
                 SchemaMigrationAction::MigrateFrom(PRODUCER_RECOVERY_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
                     // `CREATE TABLE IF NOT EXISTS` is idempotent, so unlike the
@@ -4005,6 +4036,7 @@ fn schema_migration_action(
         | REQUEST_IDENTITY_SCHEMA_MIGRATION_SOURCE
         | DESIRED_SELECTION_SCHEMA_MIGRATION_SOURCE
         | POINTER_DESIRED_FENCE_SCHEMA_MIGRATION_SOURCE
+        | ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA_MIGRATION_SOURCE
         | PRODUCER_RECOVERY_SCHEMA_MIGRATION_SOURCE
         | RECOVERY_EPOCH_SCHEMA_MIGRATION_SOURCE
         | OFFLINE_RECOVERY_CLAIM_SCHEMA_MIGRATION_SOURCE => {
@@ -5810,17 +5842,28 @@ mod tests {
             "v28 must advance exactly one step to the pointer fence schema"
         );
         assert_eq!(
-            PRODUCER_RECOVERY_SCHEMA_MIGRATION_SOURCE, POINTER_DESIRED_FENCE_SCHEMA_VERSION,
-            "the producer-recovery migration must start from the exact v29 shape"
+            ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA_MIGRATION_SOURCE,
+            POINTER_DESIRED_FENCE_SCHEMA_VERSION,
+            "the terminal-identity index migration must start from the exact v29 shape"
+        );
+        assert_eq!(
+            ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA_MIGRATION_SOURCE + 1,
+            ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA_VERSION,
+            "v29 must advance exactly one step to the terminal-identity index schema"
+        );
+        assert_eq!(
+            PRODUCER_RECOVERY_SCHEMA_MIGRATION_SOURCE,
+            ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA_VERSION,
+            "the producer-recovery migration must start from the exact v30 shape"
         );
         assert_eq!(
             PRODUCER_RECOVERY_SCHEMA_MIGRATION_SOURCE + 1,
             PRODUCER_RECOVERY_SCHEMA_VERSION,
-            "v29 must advance exactly one step to the producer-recovery schema"
+            "v30 must advance exactly one step to the producer-recovery schema"
         );
         assert_eq!(
-            RECOVERY_EPOCH_SCHEMA_MIGRATION_SOURCE, 30,
-            "the recovery-epoch migration must start from the exact v30 shape. \
+            RECOVERY_EPOCH_SCHEMA_MIGRATION_SOURCE, 31,
+            "the recovery-epoch migration must start from the exact v31 shape. \
              The literal is the point: every other step in this chain asserts \
              its source against the constant it is defined as, which cannot \
              fail, so it guards the version bump and not the source"
@@ -5828,21 +5871,21 @@ mod tests {
         assert_eq!(
             RECOVERY_EPOCH_SCHEMA_MIGRATION_SOURCE + 1,
             RECOVERY_EPOCH_SCHEMA_VERSION,
-            "v30 must advance exactly one step to the recovery-epoch schema"
+            "v31 must advance exactly one step to the recovery-epoch schema"
         );
         assert_eq!(
             OFFLINE_RECOVERY_CLAIM_SCHEMA_MIGRATION_SOURCE, RECOVERY_EPOCH_SCHEMA_VERSION,
-            "the offline recovery-claim migration must start from the exact v31 shape"
+            "the offline recovery-claim migration must start from the exact v32 shape"
         );
         assert_eq!(
             OFFLINE_RECOVERY_CLAIM_SCHEMA_MIGRATION_SOURCE + 1,
             OFFLINE_RECOVERY_CLAIM_SCHEMA_VERSION,
-            "v31 must advance exactly one step to the offline recovery-claim schema"
+            "v32 must advance exactly one step to the offline recovery-claim schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 27,
+            AUTH_SCHEMA_MIGRATION_SOURCE + 28,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v32 step"
+            "this implementation contains every additive v5→v33 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,
@@ -6013,6 +6056,18 @@ mod tests {
             )
             .expect("recovery-guard predecessor"),
             SchemaMigrationAction::MigrateFrom(DV_RECOVERY_GUARDS_SCHEMA_MIGRATION_SOURCE)
+        );
+        assert_eq!(
+            schema_migration_action(
+                &[row(
+                    ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA_MIGRATION_SOURCE
+                )],
+                ClusterCompatibility::CURRENT,
+            )
+            .expect("terminal-identity index predecessor"),
+            SchemaMigrationAction::MigrateFrom(
+                ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA_MIGRATION_SOURCE
+            )
         );
 
         for rows in [Vec::new(), vec![row(4)], vec![row(7), row(7)]] {

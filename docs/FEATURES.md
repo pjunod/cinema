@@ -431,6 +431,31 @@ on the same screens that play the library — the web app, iOS, tvOS, and
 Android. It is off until an administrator turns it on, and it is a *viewer*,
 not a DVR: nothing is recorded, nothing is scheduled, and nothing is kept.
 
+- **The page says what is on.** A channel row carries the network chip, the
+  number and callsign, the programme on now with a bar running to its end,
+  and what is next. Two views of the same page share every piece of state
+  behind one switch: a dense **list** beside the player for surfing, and the
+  classic half-hour **grid** with a red now line for planning. Switching views
+  never stops the stream and never refetches — it is a re-render of the browse
+  region. A protected channel is dimmed rather than hidden, with a
+  `Hide protected` filter for a lineup that is mostly DRM.
+- **The programme data is a feed, not a dependency.** It comes from the
+  HDHomeRun's own guide service by default, or from an XMLTV document an
+  administrator configures. It is read-only: a future programme has a details
+  popover and nothing else, because there is no DVR behind it. Every failure
+  mode is *rendered* — off, empty, stale or erroring all leave a working page
+  and a tunable channel, because the channel list and session start never
+  consult guide state and never wait on a guide fetch.
+- **The player follows you.** Leaving the Live TV page with a channel playing
+  moves the picture into a dock rather than tearing it down; the lease, the
+  keepalive and the watchdogs continue exactly as on the page. Fullscreen is a
+  surface rather than a bare video element — channel and programme in the
+  corner, a strip of neighbouring channels along the bottom, a progress bar,
+  all auto-hiding after four seconds. Native picture-in-picture hands the same
+  element to the browser, and the "stop when the page hides" rule is narrowed
+  to *hidden and not in picture-in-picture*, because a PiP window is playing
+  and its tuner is in use.
+
 - **One device, named by hand.** An administrator types the tuner's private
   IPv4 into Settings → Developer. There is no broadcast discovery: a server
   inside a Docker or VLAN network namespace cannot promise it will hear a
@@ -847,7 +872,10 @@ Listed so the inventory above is unambiguous — these are deliberate, with reas
   monarr for its calendar if you paired one. plurx never tells another
   application to do something. Pushing watch state back to monarr is on the
   roadmap and is not built.
-- **Does not record television.** Live TV (§4a) plays one HDHomeRun tuner
+- **Does not record television, or schedule anything.** The programme guide in
+  §4a is information: it says what is on and what is next, and offers no
+  recording, no reminders and no "tune at 9", because there is nothing behind
+  those. Live TV (§4a) plays one HDHomeRun tuner
   and keeps nothing: no recording, no scheduling, no retention, no series
   rules, no conflict resolution. It is also not a channel aggregator — no
   streaming services, no discovery feed. DRM-flagged channels are listed and

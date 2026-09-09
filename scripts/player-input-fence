@@ -36,6 +36,9 @@ TEST_TREE_MARKERS = ("/androidTest/", "/src/test/", "clients/apple/Tests/")
 WHOLE_FILE_ALLOWLIST = {
     Path("clients/android/app/src/main/java/tv/plurx/app/player/PlayerKeyAdapter.kt"):
         "Android player key codes are decoded into contract inputs here.",
+    Path("clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvKeyAdapter.kt"):
+        "Live TV key codes are decoded into contract inputs here, and nowhere else; "
+        "what each one does is LiveTvInputPolicy's answer, from the fixture.",
     Path("clients/android/app/src/main/java/tv/plurx/app/ui/AuthScreens.kt"):
         "The sign-in form uses Select/Enter to begin editing; it is not a player.",
     Path("clients/apple/Sources/PlayerRemoteAdapter.swift"):
@@ -77,6 +80,12 @@ INDEX_REGIONS = (
         "// nav-keyboard-adapter:begin",
         "// nav-keyboard-adapter:end",
         "Card and episode-row activation (Enter/Space) outside playback, shared by every layout.",
+    ),
+    (
+        "// live-tv-input-adapter:begin",
+        "// live-tv-input-adapter:end",
+        "Live TV owns the channel keys while its host is fullscreen or focused; "
+        "it routes them through the fixture's `live` table, not its own opinions.",
     ),
     (
         "function catalogWireOnce(){",

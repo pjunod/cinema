@@ -1549,6 +1549,9 @@ pub struct SettingsDto {
     pub live_tv_config_generation: i64,
     pub live_tv_transition_from_owner_node_id: String,
     pub live_tv_transition_drain_before: i64,
+    pub live_tv_guide_source: String,
+    pub live_tv_xmltv_url: String,
+    pub live_tv_guide_hours: u8,
     pub tmdb_configured: bool,
     /// The stored TMDB key itself. This endpoint is admin-only and the key is
     /// low-sensitivity (read-only metadata), so the admin who set it can see
@@ -1874,6 +1877,9 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         live_tv_config_generation: live_tv.generation,
         live_tv_transition_from_owner_node_id: live_tv.transition_from_owner_node_id,
         live_tv_transition_drain_before: live_tv.transition_drain_before,
+        live_tv_guide_source: live_tv.guide_source.as_str().to_owned(),
+        live_tv_xmltv_url: live_tv.xmltv_url,
+        live_tv_guide_hours: live_tv.guide_hours,
         tmdb_configured: !tmdb_api_key.is_empty(),
         tmdb_api_key,
         omdb_configured: !omdb_api_key.is_empty(),
@@ -2072,6 +2078,12 @@ pub struct UpdateSettings {
     pub live_tv_max_sessions: Option<u8>,
     pub live_tv_output_height: Option<u16>,
     pub live_tv_config_generation: Option<i64>,
+    /// Programme-guide selection. Information settings, not tuner settings:
+    /// they ride the same generation CAS but stay editable while Live TV is
+    /// enabled, because turning a read-only feed on must not drain viewers.
+    pub live_tv_guide_source: Option<String>,
+    pub live_tv_xmltv_url: Option<String>,
+    pub live_tv_guide_hours: Option<u8>,
     /// Explicit admin attestation, never an automatic timeout override.
     pub live_tv_fenced_owner: Option<LiveTvFencedOwner>,
     /// Set the TMDB API key. Empty string clears it. Absent leaves it as-is.
@@ -2197,6 +2209,12 @@ fn live_tv_setting_values(config: &crate::live_tv::LiveTvConfig) -> Vec<(&'stati
             keys::LIVE_TV_CONFIG_GENERATION,
             config.generation.to_string(),
         ),
+        (
+            keys::LIVE_TV_GUIDE_SOURCE,
+            config.guide_source.as_str().to_owned(),
+        ),
+        (keys::LIVE_TV_XMLTV_URL, config.xmltv_url.clone()),
+        (keys::LIVE_TV_GUIDE_HOURS, config.guide_hours.to_string()),
     ]
 }
 
@@ -2288,6 +2306,9 @@ pub async fn update_settings(
         || req.live_tv_owner_node_id.is_some()
         || req.live_tv_max_sessions.is_some()
         || req.live_tv_output_height.is_some()
+        || req.live_tv_guide_source.is_some()
+        || req.live_tv_xmltv_url.is_some()
+        || req.live_tv_guide_hours.is_some()
         || req.live_tv_fenced_owner.is_some();
     if live_tv_requested && req.has_non_live_tv_update() {
         return Err(ApiError::BadRequest(
@@ -2329,6 +2350,18 @@ pub async fn update_settings(
             .as_deref()
             .map(str::trim)
             .unwrap_or(&current.owner_node_id)
+            .to_owned();
+        let guide_source = match req.live_tv_guide_source.as_deref() {
+            Some(value) => crate::live_tv::GuideSource::parse(value).ok_or_else(|| {
+                ApiError::BadRequest("guide source must be off, hdhomerun, or xmltv".into())
+            })?,
+            None => current.guide_source,
+        };
+        let xmltv_url = req
+            .live_tv_xmltv_url
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or(&current.xmltv_url)
             .to_owned();
         let mut transition_from_owner_node_id = current.transition_from_owner_node_id.clone();
         let mut transition_drain_before = current.transition_drain_before;
@@ -2372,8 +2405,17 @@ pub async fn update_settings(
             transition_drain_before = 0;
         }
         if current.enabled && req.live_tv_enabled == Some(false) {
-            transition_from_owner_node_id = current.owner_node_id.clone();
-            transition_drain_before = next_generation;
+            // Never overwrite a barrier that is still standing. The drain
+            // above clears it on success; if it is still here, an *earlier*
+            // owner was never drained and may still be holding the tuner.
+            // Replacing that record with the current owner erases the only
+            // evidence of it, and the recovery proof then names the wrong
+            // node. Keep the older, unresolved one — it is the one that
+            // matters.
+            if transition_from_owner_node_id.is_empty() {
+                transition_from_owner_node_id = current.owner_node_id.clone();
+                transition_drain_before = next_generation;
+            }
         }
 
         let candidate = crate::live_tv::LiveTvConfig {
@@ -2382,6 +2424,9 @@ pub async fn update_settings(
             owner_node_id,
             max_sessions: req.live_tv_max_sessions.unwrap_or(current.max_sessions),
             output_height: req.live_tv_output_height.unwrap_or(current.output_height),
+            guide_source,
+            xmltv_url,
+            guide_hours: req.live_tv_guide_hours.unwrap_or(current.guide_hours),
             // Readiness runs against the still-current owner tuple. The CAS
             // publishes the increment only after every precondition passes.
             generation: current.generation,
@@ -2391,14 +2436,45 @@ pub async fn update_settings(
         candidate
             .validate_static()
             .map_err(super::live_tv::api_error)?;
-        if req.live_tv_enabled == Some(true) {
-            let readiness = super::live_tv::readiness_for_config(&state, &candidate, true).await;
-            if !readiness.ready {
-                return Err(ApiError::Conflict(
-                    "Live TV cannot be enabled until every Developer readiness check is green"
-                        .into(),
-                ));
-            }
+        // The one enable-time refusal that is structural rather than
+        // advisory. `validate_static` checks the barrier is *well-formed*,
+        // never that it is *resolved* — so with readiness demoted to advice,
+        // nothing else stood between an operator and enabling a tuner a
+        // previous owner may still be holding. Two nodes ingesting the same
+        // physical tuner is not "the feature does not work"; it is the system
+        // being wrong, which is exactly the line advisory readiness draws.
+        if candidate.enabled && !candidate.transition_from_owner_node_id.is_empty() {
+            return Err(ApiError::Conflict(format!(
+                "Live TV cannot be enabled while node {} is still fenced: it was never confirmed drained and may still hold the tuner. Recover it first (a separate request while disabled, carrying the current barrier and confirmation that the old process is stopped).",
+                candidate.transition_from_owner_node_id
+            )));
+        }
+        // Readiness is advisory, not a gate (2026-09-07). A structural
+        // invariant — an address that is not private, a barrier that is not
+        // resolved, a generation that lost its CAS — still refuses above and
+        // below this point, because those make the *system* wrong. Whether the
+        // tuner answers right now does not: it makes the feature not work, and
+        // an operator who cannot turn a feature on cannot find out why it does
+        // not work. So the checks still run and their result is carried back
+        // for the Developer card to show; enabling proceeds either way.
+        let readiness_advisory = if req.live_tv_enabled == Some(true) {
+            Some(super::live_tv::readiness_for_config(&state, &candidate, true).await)
+        } else {
+            None
+        };
+        if let Some(readiness) = readiness_advisory.as_ref().filter(|r| !r.ready) {
+            tracing::warn!(
+                admin_user_id = admin.0.id,
+                generation = next_generation,
+                unmet = readiness
+                    .checks
+                    .iter()
+                    .filter(|check| !check.ready)
+                    .map(|check| check.id)
+                    .collect::<Vec<_>>()
+                    .join(","),
+                "Live TV enabled with unmet readiness checks; the operator was shown them and chose to proceed"
+            );
         }
         let mut candidate = candidate;
         candidate.generation = next_generation;
@@ -4760,6 +4836,7 @@ mod tests {
                                 age_seconds: 1,
                                 output_height: 720,
                                 state: "active".into(),
+                                programme_title: Some("City Beat".into()),
                             }],
                         },
                     ),

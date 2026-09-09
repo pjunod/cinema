@@ -80,6 +80,25 @@ def main(argv: list[str]) -> int:
                 if path == "channels":
                     route.fulfill(json={"channels": channels, "freshness": "fresh", "age_seconds": 0})
                     return
+                if path == "guide":
+                    # The guide is a second, independent read. The page must be
+                    # usable before it answers and must stay usable if it never
+                    # does, so this fixture answers the honest degraded shape: a
+                    # configured source with nothing cached. Every assertion in
+                    # this script is about the tuner, and none of them may come
+                    # to depend on a programme line existing.
+                    route.fulfill(json={"source": "hdhomerun", "freshness": "unavailable",
+                                        "age_seconds": 0, "window": {"start": 0, "end": 0},
+                                        "matched_channels": 0, "lineup_channels": len(channels),
+                                        "channels": []})
+                    return
+                if path == "guide/readiness":
+                    route.fulfill(json={"advisory": True, "source": "hdhomerun", "guide_hours": 24,
+                                        "freshness": "unavailable", "age_seconds": 0,
+                                        "matched_channels": 0, "lineup_channels": len(channels),
+                                        "programmes": 0, "refresh_interval_seconds": 1200,
+                                        "checks": []})
+                    return
                 start = re.fullmatch(r"channels/(one|two)/sessions", path)
                 if start and method == "POST":
                     if request.headers.get("authorization") != "Bearer " + host.token:
@@ -165,57 +184,114 @@ def main(argv: list[str]) -> int:
                         && video.currentTime > sample.time + 1 && frames > sample.frames + 12;
                 }""", arg=sample, timeout=30000)
 
-            def watch():
-                page.get_by_role("button", name="Watch live", exact=True).nth(0).click()
+            # The rebuilt page is a list of channel rows, not a wall of cards
+            # with their own Watch buttons: the row is the click target.
+            rows = page.locator("#live-tv-body button.lt-row:not([disabled])")
+
+            def watch(index=0):
+                rows.nth(index).click()
+                # The picture lives in a fixed host outside `#main` now, so
+                # wait for it to be shown rather than assuming the click's own
+                # re-render put a video on screen.
+                page.wait_for_function(
+                    "!document.querySelector('#live-tv-host').hidden"
+                    " && document.querySelector('#live-tv-video')")
                 frames_advance()
 
+            def stop():
+                page.locator("#live-tv-host").get_by_label("Stop Live TV", exact=True).click()
+
             page.goto(host.base_url + "/#/live-tv")
-            page.get_by_role("button", name="DRM unsupported", exact=True).wait_for()
-            assert page.get_by_role("button", name="DRM unsupported", exact=True).is_disabled()
+            # A protected channel is drawn, dimmed and unclickable — never
+            # hidden, and never quietly playable.
+            locked = page.locator("#live-tv-body button.lt-row.locked")
+            locked.first.wait_for()
+            assert locked.first.is_disabled()
+
+            # Everything past this point plays the fixture's H.264/AAC media.
+            # A Chromium built without the proprietary decoders cannot, and
+            # Hls.js reports it as `bufferAddCodecError` — which the page then
+            # renders, correctly, as "channel format unsupported". Failing here
+            # would blame the page for the browser, so say what is true instead
+            # and let the runner that has the codecs prove the rest.
+            playable = page.evaluate("""() => MediaSource.isTypeSupported('video/mp4; codecs="avc1.42E01E"')
+                && MediaSource.isTypeSupported('audio/mp4; codecs="mp4a.40.2"')""")
+            if not playable:
+                print(
+                    "live-tv-browser: this Chromium has no H.264/AAC decoder, so the tuner-lease "
+                    "half of this acceptance is NOT EXERCISED here. The channel list, the "
+                    "protected-channel refusal and the degraded-guide rendering above did run. "
+                    "Run this on a browser with the proprietary codecs to prove the rest."
+                )
+                assert not errors, "browser page errors: " + repr(errors)
+                assert not forbidden, "Live TV wrote VOD/account state: " + repr(forbidden)
+                return 0
+
             watch()
             page.screenshot(path=str(out / "live-tv-playing.png"), full_page=True)
-            page.get_by_role("button", name="Pause", exact=True).click()
+            page.get_by_label("Pause", exact=True).click()
             assert page.locator("#live-tv-video").evaluate("video => video.paused")
-            page.get_by_role("button", name="Play live", exact=True).click()
+            page.locator("#live-tv-video").evaluate("video => video.play()")
             frames_advance()
-            page.get_by_role("button", name="Fullscreen", exact=True).click()
-            page.wait_for_function("document.fullscreenElement?.id === 'live-tv-player'")
-            page.get_by_role("button", name="Stop", exact=True).click()
-            page.wait_for_function("!document.fullscreenElement && document.querySelector('#live-tv-player').hidden")
+            # Fullscreen takes the host, not the bare video: the overlay has to
+            # be inside the fullscreen tree or there is no channel strip.
+            page.locator("#live-tv-body").get_by_label("Fullscreen", exact=True).click()
+            page.wait_for_function("document.fullscreenElement?.id === 'live-tv-host'")
+            stop()
+            page.wait_for_function("!document.fullscreenElement && document.querySelector('#live-tv-host').hidden")
             until(lambda: not active(), "fullscreen stop did not release")
 
             watch()
-            page.get_by_role("button", name="Watch live", exact=True).nth(1).click()
-            page.wait_for_function("document.querySelector('#live-tv-title').textContent.includes('10.2')")
+            first = active()[0]
+            watch(1)
+            page.wait_for_function("document.querySelector('#live-tv-host')?.dataset.mode === 'slot'")
+            assert active() and active()[0] != first, "switching channels reused the old capability"
+
+            # The behaviour this milestone exists for, and the inverse of what
+            # this script asserted before it: leaving the route DOCKS the
+            # picture rather than tearing it down. The lease is still held, the
+            # media element still exists, and the poll that owns the tuner is
+            # still running -- so the dock's own Stop is what releases it.
+            docked = active()[0]
             page.evaluate("location.hash = '#/settings'")
-            page.wait_for_function("location.hash.startsWith('#/settings') && !document.querySelector('#live-tv-video')")
-            until(lambda: not active(), "navigation did not release")
+            page.wait_for_function("location.hash.startsWith('#/settings')")
+            page.wait_for_function("document.querySelector('#live-tv-host')?.dataset.mode === 'dock'")
+            assert page.locator("#live-tv-video").count() == 1, "docking destroyed the media element"
+            assert active() == [docked], "docking released a tuner the viewer is still watching"
+            page.get_by_label("Stop from the dock", exact=True).click()
+            until(lambda: not active(), "the dock's stop did not release")
 
             page.goto(host.base_url + "/#/live-tv")
-            page.get_by_role("button", name="Watch live", exact=True).nth(0).wait_for()
+            rows.first.wait_for()
             mode["next"] = "capacity"
-            page.get_by_role("button", name="Watch live", exact=True).nth(0).click()
+            rows.nth(0).click()
             page.get_by_text("All Live TV slots are busy.", exact=False).wait_for()
             mode["next"] = "late"
-            page.get_by_role("button", name="Watch live", exact=True).nth(0).click()
+            rows.nth(0).click()
             until(lambda: len(pending) == 1, "late start never reached the tuner")
+            # Navigating during the start now docks rather than abandoning the
+            # reply: a capability granted after the viewer left must arrive
+            # somewhere it can be seen and stopped, not be held invisibly.
             page.evaluate("location.hash = '#/settings'")
-            page.wait_for_function("location.hash.startsWith('#/settings') && !document.querySelector('#live-tv-video')")
+            page.wait_for_function("location.hash.startsWith('#/settings')")
             late_route, late_result = pending.pop()
             late_route.fulfill(json=late_result)
-            until(lambda: not active(), "late start after navigation was not released")
+            until(lambda: len(active()) == 1, "the late start was not adopted by the dock")
+            page.wait_for_function("document.querySelector('#live-tv-host')?.dataset.mode === 'dock'")
+            page.get_by_label("Stop from the dock", exact=True).click()
+            until(lambda: not active(), "a late start adopted by the dock could not be stopped")
 
             page.goto(host.base_url + "/#/live-tv")
             for failure in ("owner_unavailable", "stream_failed", "capability_expired"):
                 watch()
                 sessions[active()[0]]["failure"] = failure
                 until(lambda: not active(), "active " + failure + " did not release", timeout=25)
-                page.wait_for_function("document.querySelector('#live-tv-player').hidden")
+                page.wait_for_function("document.querySelector('#live-tv-host').hidden")
 
             watch()
-            page.get_by_role("button", name="Pause", exact=True).click()
+            page.get_by_label("Pause", exact=True).click()
             until(lambda: not active(), "paused tuner was renewed instead of released", timeout=42)
-            page.wait_for_function("document.querySelector('#live-tv-player').hidden")
+            page.wait_for_function("document.querySelector('#live-tv-host').hidden")
 
             watch()
             # Exercise the shipped visibility handler. Headless Chromium does
@@ -238,7 +314,7 @@ def main(argv: list[str]) -> int:
             orphan = active()[0]
             attempted = len(deletes)
             mode["drop_delete"] = True
-            page.get_by_role("button", name="Pause", exact=True).click()
+            page.get_by_label("Pause", exact=True).click()
             until(
                 lambda: len(deletes) > attempted,
                 "the client never tried to release the orphan",
@@ -251,7 +327,7 @@ def main(argv: list[str]) -> int:
             page.goto("about:blank")
             page.goto(host.base_url + "/#/live-tv")
             assert page.evaluate("Object.keys(localStorage).some(key => key.startsWith('plurx_live_tv_pending_v1:'))")
-            page.get_by_role("button", name="Watch live", exact=True).nth(0).click()
+            rows.nth(0).click()
             page.get_by_text("90 seconds", exact=False).wait_for()
             # Nothing new was allocated: the replacement document adopted the
             # outstanding capability rather than opening an eleventh tuner.

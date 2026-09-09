@@ -1251,8 +1251,9 @@ mod tests {
                 // migration meets its own leftovers instead of a v43 database:
                 // v44's recovery guards, v45's negative index, v46's attempt
                 // history, v47's request identity, v48's desired-selection
-                // row, v49's pointer fence, v50's producer-recovery ledger,
-                // v51's recovery epoch.
+                // row, v49's pointer fence, v50's terminal-identity index,
+                // v51's producer-recovery ledger, v52's recovery epoch, and
+                // v53's offline recovery fences.
                 //
                 // Leaving a *column* behind makes the replay fail outright on
                 // an `ADD COLUMN` against a table that already has it.
@@ -1268,13 +1269,21 @@ mod tests {
                 // `media_playback_desired` is dropped, any write to
                 // `media_playback_pointers` fails with "no such table" rather
                 // than with anything about this fixture.
-                "ALTER TABLE media_sessions DROP COLUMN recovery_epoch;
+                "DROP TRIGGER IF EXISTS cache_publication_generation_guard;
+                 DROP TRIGGER IF EXISTS offline_claim_lifecycle_guard;
+                 DROP TRIGGER IF EXISTS offline_recovery_guard;
+                 ALTER TABLE transcode_cache_locations DROP COLUMN publication_generation;
+                 ALTER TABLE offline_packages DROP COLUMN alternate_recipe_hash;
+                 ALTER TABLE offline_packages DROP COLUMN decoder_recovery_state;
+                 ALTER TABLE offline_packages DROP COLUMN claim_generation;
+                 ALTER TABLE media_sessions DROP COLUMN recovery_epoch;
                  DROP TABLE IF EXISTS media_session_producer_recovery;
                  DROP TRIGGER IF EXISTS media_playback_pointers_desired_fence_ai;
                  DROP TRIGGER IF EXISTS media_playback_pointers_desired_fence_au;
                  ALTER TABLE media_playback_pointers DROP COLUMN desired_revision;
                  DROP TABLE IF EXISTS media_playback_desired;
                  DROP INDEX dv_conversions_recovery_guard;
+                 DROP INDEX IF EXISTS analysis_requests_terminal_identity;
                  DROP TABLE dv_recovery_guards;
                  DROP TABLE IF EXISTS fragment_index_outcomes;
                  ALTER TABLE dv_conversions DROP COLUMN recovery_guard_id;
@@ -1365,18 +1374,20 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 7] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 9] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
             "media_playback_desired",
             "desired_revision",
+            "analysis_requests_terminal_identity",
             "media_session_producer_recovery",
             // Not the bare column name: `recovery_epoch` is also a column of
-            // v50's ledger table, so the guard's "some migration after the
-            // guard creates this" check would pass for it whether or not v51
-            // existed. The `ADD COLUMN` text belongs to v51 alone.
+            // v51's ledger table, so the guard's "some migration after the
+            // guard creates this" check would pass for it whether or not v52
+            // existed. The `ADD COLUMN` text belongs to v52 alone.
             "ADD COLUMN recovery_epoch",
+            "ADD COLUMN claim_generation",
         ];
 
         assert!(

@@ -14255,7 +14255,9 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
     connection
         .execute_batch(
             "PRAGMA foreign_keys = OFF;
-             -- v50's durable decoder-recovery ledger first, then v49's
+             -- v53's offline recovery fences, v52's recovery epoch, v51's
+             -- durable decoder-recovery ledger, and v50's terminal-identity
+             -- index first, then v49's
              -- pointer fence: both of its triggers name
              -- `media_playback_desired`, so once that table is gone every
              -- write to `media_playback_pointers` fails with \"no such
@@ -14263,6 +14265,14 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
              -- v48's desired-selection row, then v45's negative fragment
              -- index, then v44's permanent recovery-guard ledger, then v43's
              -- conversion ledger.
+             DROP TRIGGER IF EXISTS cache_publication_generation_guard;
+             DROP TRIGGER IF EXISTS offline_claim_lifecycle_guard;
+             DROP TRIGGER IF EXISTS offline_recovery_guard;
+             ALTER TABLE transcode_cache_locations DROP COLUMN publication_generation;
+             ALTER TABLE offline_packages DROP COLUMN alternate_recipe_hash;
+             ALTER TABLE offline_packages DROP COLUMN decoder_recovery_state;
+             ALTER TABLE offline_packages DROP COLUMN claim_generation;
+             ALTER TABLE media_sessions DROP COLUMN recovery_epoch;
              DROP TABLE media_session_producer_recovery;
              DROP TRIGGER IF EXISTS media_playback_pointers_desired_fence_ai;
              DROP TRIGGER IF EXISTS media_playback_pointers_desired_fence_au;
@@ -14281,6 +14291,7 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
              DROP TRIGGER IF EXISTS analysis_requests_supersede_source;
              DROP TRIGGER IF EXISTS analysis_requests_cancel_source;
              DROP TRIGGER IF EXISTS cluster_fragment_indexes_cancel_source;
+             DROP INDEX IF EXISTS analysis_requests_terminal_identity;
              DROP TABLE IF EXISTS analysis_attempts;
              DROP TABLE IF EXISTS cluster_fragment_index_heads;
              DROP TABLE IF EXISTS analysis_lifecycle_counters;
