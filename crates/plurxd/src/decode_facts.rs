@@ -4453,7 +4453,7 @@ printf '%s\n' '{"streams":[{"index":4,"codec_type":"video","codec_name":"h264","
                 DecodeFactSource::isolated(Arc::clone(&source)),
                 None,
                 ProbeStreamSelection::Absolute(4),
-                Duration::from_secs(2),
+                PROBE_DEADLINE,
                 None,
             )
             .await
@@ -4471,7 +4471,7 @@ printf '%s\n' '{"streams":[{"index":4,"codec_type":"video","codec_name":"h264","
                 DecodeFactSource::isolated(source),
                 None,
                 ProbeStreamSelection::Absolute(4),
-                Duration::from_secs(2),
+                PROBE_DEADLINE,
                 None,
             )
             .await
