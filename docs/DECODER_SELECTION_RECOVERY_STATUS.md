@@ -1,10 +1,9 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M0–M7 code complete · effort and M6 reserve-and-prime follow-up
-merged · one post-merge unit-fixture repair in progress · broader fleet
-qualification remains post-merge evidence · **Updated:** 2026-09-09 ·
-**Repair base:** `9258f36b` · **Repair branch:**
-`codex/decoder-effort-postmerge`
+**Status:** M0–M7 implementation complete and merged · post-merge Rust core
+and daemon suites green · broader fleet qualification remains optional
+post-merge evidence · **Updated:** 2026-09-09 · **Current `main`:**
+`633a32ad`
 
 **Live checkpoint:** [Forgejo #203](http://192.168.4.7:3000/noirr/plurx/pulls/203)
 merged at `9a765bff`. Promotion
@@ -23,8 +22,14 @@ reported as advisory facts and do not override that choice; best-effort
 observations can drive the one-shot recovery but can never qualify an artifact
 for cache reuse. The post-merge fast Rust gate found one test fixture that
 still assumed recovery was on by default. The repair opts that recovery-only
-fixture into the switch; it does not change production behavior. The repair is
-tracked by [Forgejo #209](http://192.168.4.7:3000/noirr/plurx/pulls/209).
+fixture into the switch; it does not change production behavior. The repair
+[Forgejo #209](http://192.168.4.7:3000/noirr/plurx/pulls/209) merged as
+`bde7d8b3`. On the current `main`, 1,063 `plurx-core` tests and 2,147 `plurxd`
+tests pass with zero failures, including all 53 decoder-selection integration
+tests and the repaired offline recovery path. Cleanup
+[Forgejo #208](http://192.168.4.7:3000/noirr/plurx/pulls/208) then removed the
+redundant second fixture opt-in and merged as `633a32ad` after its fast policy,
+Fast Rust and web lanes passed.
 
 The effort was created from Forgejo `main` at
 `4a6a0268bd314ad5587cb3037f12ebd992c0074e`. The original M0 research baseline was `main` at
@@ -53,33 +58,34 @@ An unchecked item is not implied by a nearby passing check.
 | M7b · hardware diagnostic path | Merged | [Forgejo #174](http://192.168.4.7:3000/noirr/plurx/pulls/174) merged approved head `0a685526` into the effort at `0c831b88` after the complete Effort development gate. Backend-aware measurement, path-scoped qualification, same-codec recovery pairing, compatible v2 reporting, and advisory Developer readiness are implemented. A real hardware contract is separate M8 fleet evidence |
 | M7 remainder · offline durability and handoff enforcement | Merged | [Forgejo #179](http://192.168.4.7:3000/noirr/plurx/pulls/179) fast-forwarded approved head `990bf334` into the effort after its adversarial findings were fixed and the Effort development gate passed; the repair includes one replicated cluster-wide kill-switch transaction |
 | Promotion to `main` | Merged | #189, the post-merge repairs, and #203 are present in `main`; #203 merged as `9a765bff` |
-| Post-merge CI | Focused repair passes | One recovery-specific fixture now opts into the new default-off switch; all other completed lanes are green |
+| Post-merge CI | Decoder suites green | The current `main` passed 1,063 core tests, 53 decoder-selection integration tests and 2,147 daemon tests with zero failures. Remaining jobs are broader CI observation, not decoder implementation work |
 | M8 · broader fleet qualification | Post-merge continuation | Hardware diagnostic capture · workload matrix · false-positive classification · startup/concurrency/recovered-latency evidence · three-client replacement runs; any code failure gets a new PR |
 
 **Shortest reading:** the original effort, its one final review, promotion,
 post-merge repairs, direct switches, and M6 server prime are done. One unit
-fixture must explicitly enable the now-default-off recovery switch, then its
-follow-up can take the fast lane and merge. Hardware decoder contracts and
-physical client qualification remain evidence work; neither blocks prepared
-handoff or automatic decoder recovery.
+fixture needed to explicitly enable the now-default-off recovery switch; that
+repair is merged and the current core and daemon suites are green. No decoder
+implementation work remains. Hardware decoder contracts and physical client
+qualification are optional evidence work; neither blocks prepared handoff or
+automatic decoder recovery.
 
-## Current checkpoint — post-merge unit repair
+## Current checkpoint — post-merge verification
 
 | Field | Current value |
 |---|---|
-| Milestone | Restore the one recovery-specific offline manager test after the automatic-recovery switch became default-off |
-| Task base | Effort head `990bf334` was the historical promotion candidate; it is not the post-merge repair base |
-| Repair base | Forgejo `main` at `9258f36b`, which contains #203 at `9a765bff` |
-| Task branch | `codex/decoder-effort-postmerge` in the agent-owned clone at `/private/tmp/codex-plurx-decoder.RRcx8j/repo` |
-| Task PR | Draft [Forgejo #209](http://192.168.4.7:3000/noirr/plurx/pulls/209) |
+| Milestone | Verify the merged decoder selection, prepared handoff and automatic recovery implementation on current `main` |
+| Task base | Effort head `990bf334` was the historical promotion candidate; current evidence is against Forgejo `main` at `633a32ad` |
+| Repair | [Forgejo #209](http://192.168.4.7:3000/noirr/plurx/pulls/209) merged as `bde7d8b3`; it is present in current `main` |
+| Status branch | `codex/decoder-effort-final-status` in the agent-owned clone at `/private/tmp/codex-plurx-decoder.RRcx8j/repo` |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
-| Audit scope | The failing offline manager test, its switch setup, and the exact focused regression |
-| Current finding | The production default is intentionally off, but `seeded_recovery_fixture` did not opt in before expecting an automatic alternate. The fixture must enable the switch; changing the expected terminal failure would erase the recovery contract the test exists to retain |
+| Audit scope | The repaired offline manager path, decoder-selection integration contracts, and current post-merge core and daemon suites |
+| Finding and resolution | The production default is intentionally off, but `seeded_recovery_fixture` did not opt in before expecting an automatic alternate. The fixture now enables the switch; production behavior remains unchanged |
 | Adversarial review | Complete. Einstein found three promotion blockers: immutable VOD bypassed the resolved decoder plan, the v50 Hiqlite import projected `drain_deadline_ms` one version too early, and the cache-location projection test stopped at v53 despite v54's publication generation. VOD now retains one descriptor-bound plan and uses it for arguments, identity, and mixed admission; real v50/v51 import fixtures and v25/v53/v54 cache projections pin the schema boundaries. Per owner direction, there is no additional task-review loop |
 | Focused evidence | The exact test first reproduced the failure on pinned Rust 1.97.1: expected `queued`, found terminal `decode_unhealthy`. After the fixture opted in, the same exact test passed 1/1; the status and docs-index contracts passed 25/25 |
-| Fast lane | The focused regression passes locally; the follow-up merges as soon as its fast lane passes, while broader jobs continue on `main` |
+| Current `main` evidence | `plurx-core`: 1,063 passed, 0 failed; decoder-selection integration: 53 passed, 0 failed; `plurxd`: 2,147 passed, 0 failed, 6 ignored; format, strict Clippy, Android JVM/lint, Android instrumented UI, Apple iOS/tvOS and both package/smoke architectures also passed |
+| Fast lane | #209 passed its fast policy and Fast Rust gate, then merged. Cleanup #208 passed fast policy, Fast Rust and web, then merged. Broader jobs continue on `main` as directed |
 | Validation order | Task PRs into the effort do not run the full unit suite. After M7: functionality smoke evidence and a green fast lane before promotion; after they pass, merge and continue watching the remaining promotion and broader suites. The owner explicitly approved watching the remaining promotion jobs on `main`; a code failure gets a new PR |
-| Next | Open the draft follow-up · pass its fast lane · mark it ready and merge · continue watching broader suites on `main` |
+| Next | Finish observing the remaining current-`main` jobs · collect M8 physical hardware and three-client evidence if desired · open a new PR only for a genuine code failure |
 | External blocker | None. Physical hardware is useful for smoke/qualification after merge but does not gate enabling or merging this implementation |
 
 ## Milestones
