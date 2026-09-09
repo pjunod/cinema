@@ -713,11 +713,11 @@ fn fixed_transport_contract() -> RecoveryTransportContract {
 }
 
 fn build_profile_descriptor() -> String {
-    if cfg!(debug_assertions) {
-        "debug_assertions_on".to_owned()
-    } else {
-        "debug_assertions_off".to_owned()
-    }
+    format!(
+        "{};debug-assertions={}",
+        env!("PLURX_BUILD_PROFILE"),
+        if cfg!(debug_assertions) { "on" } else { "off" }
+    )
 }
 
 fn local_execution_id() -> Result<String> {
@@ -4308,6 +4308,19 @@ mod tests {
             resource_stable_samples: RESOURCE_STABLE_SAMPLES,
             campaign,
         }
+    }
+
+    #[test]
+    fn build_profile_descriptor_names_the_compiled_profile_and_assertions() {
+        let descriptor = build_profile_descriptor();
+        assert!(descriptor.starts_with("profile="), "{descriptor}");
+        assert!(descriptor.contains(";opt-level="), "{descriptor}");
+        assert!(descriptor.contains(";debug="), "{descriptor}");
+        let assertion = if cfg!(debug_assertions) { "on" } else { "off" };
+        assert!(
+            descriptor.ends_with(&format!(";debug-assertions={assertion}")),
+            "{descriptor}"
+        );
     }
 
     fn role_plan(role: RecoveryRole, root: &Path) -> RecoveryRolePlan {

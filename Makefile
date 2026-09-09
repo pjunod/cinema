@@ -1067,7 +1067,7 @@ cluster-harness-check: ## Run replicated growth and topology harness contracts
 .PHONY: cluster-transport-recovery-contracts
 cluster-transport-recovery-contracts: ## Run transport recovery schemas, validators, and focused regressions
 	test "$$(uname -s)" = Linux
-	PLURX_EXPECT_TEST_COUNT=59 scripts/require-test-count $(CARGO) test --locked \
+	PLURX_EXPECT_TEST_COUNT=60 scripts/require-test-count $(CARGO) test --locked \
 	  -p plurx-cluster-check transport_recovery --lib
 	scripts/require-test-count $(CARGO) test --locked -p plurx-cluster-check \
 	  transport_recovery::tests::writer_exit_after_readiness_fails_the_recovery_promptly \
@@ -1115,12 +1115,14 @@ RECOVERY_EXECUTION_ID ?= local-$(shell date +%s)-$(shell sh -c 'echo $$$$')
 RECOVERY_OUTPUT_DIR ?= target/validation/transport-recovery/$(RECOVERY_EXECUTION_ID)
 RECOVERY_SMOKE_CYCLES ?= 3
 RECOVERY_MAX_RUN_SECONDS ?=
-RECOVERY_BINARY ?= $(shell $(CARGO) metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"] + "/debug/plurx-cluster-check")')
+RECOVERY_CARGO_PROFILE ?= transport-recovery
+RECOVERY_PROFILE_DIR ?= $(if $(filter dev,$(RECOVERY_CARGO_PROFILE)),debug,$(RECOVERY_CARGO_PROFILE))
+RECOVERY_BINARY ?= $(shell $(CARGO) metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"] + "/$(RECOVERY_PROFILE_DIR)/plurx-cluster-check")')
 
 .PHONY: cluster-transport-recovery-voter-check
 cluster-transport-recovery-voter-check: ## Run one full 20-cycle voter role with diagnostics
 	test "$$(uname -s)" = Linux
-	test -x "$(RECOVERY_BINARY)" || $(CARGO) build --locked -p plurx-cluster-check; \
+	test -x "$(RECOVERY_BINARY)" || $(CARGO) build --locked --profile "$(RECOVERY_CARGO_PROFILE)" -p plurx-cluster-check; \
 	  max_runtime=""; if test -n "$(RECOVERY_MAX_RUN_SECONDS)"; then max_runtime="--max-runtime-seconds $(RECOVERY_MAX_RUN_SECONDS)"; fi; \
 	  "$(RECOVERY_BINARY)" transport-recovery-role \
 	  --role voter --cycles 20 --execution-id "$(RECOVERY_EXECUTION_ID)" \
@@ -1130,7 +1132,7 @@ cluster-transport-recovery-voter-check: ## Run one full 20-cycle voter role with
 .PHONY: cluster-transport-recovery-learner-check
 cluster-transport-recovery-learner-check: ## Run one full 20-cycle learner role with diagnostics
 	test "$$(uname -s)" = Linux
-	test -x "$(RECOVERY_BINARY)" || $(CARGO) build --locked -p plurx-cluster-check; \
+	test -x "$(RECOVERY_BINARY)" || $(CARGO) build --locked --profile "$(RECOVERY_CARGO_PROFILE)" -p plurx-cluster-check; \
 	  max_runtime=""; if test -n "$(RECOVERY_MAX_RUN_SECONDS)"; then max_runtime="--max-runtime-seconds $(RECOVERY_MAX_RUN_SECONDS)"; fi; \
 	  "$(RECOVERY_BINARY)" transport-recovery-role \
 	  --role learner --cycles 20 --execution-id "$(RECOVERY_EXECUTION_ID)" \
@@ -1140,7 +1142,7 @@ cluster-transport-recovery-learner-check: ## Run one full 20-cycle learner role 
 .PHONY: cluster-transport-recovery-smoke
 cluster-transport-recovery-smoke: ## Run independent three-cycle voter and learner smokes by default
 	test "$$(uname -s)" = Linux
-	test -x "$(RECOVERY_BINARY)" || $(CARGO) build --locked -p plurx-cluster-check; \
+	test -x "$(RECOVERY_BINARY)" || $(CARGO) build --locked --profile "$(RECOVERY_CARGO_PROFILE)" -p plurx-cluster-check; \
 	  max_runtime=""; if test -n "$(RECOVERY_MAX_RUN_SECONDS)"; then max_runtime="--max-runtime-seconds $(RECOVERY_MAX_RUN_SECONDS)"; fi; \
 	  voter_status=0; learner_status=0; \
 	  "$(RECOVERY_BINARY)" transport-recovery-role \
@@ -1163,7 +1165,7 @@ cluster-transport-recovery-smoke: ## Run independent three-cycle voter and learn
 cluster-transport-recovery-check: cluster-transport-recovery-contracts ## Run full local 20+20 qualification and assemble canonical evidence
 	test "$$(uname -s)" = Linux
 	$(RM) target/validation/cluster-transport-recovery.json
-	test -x "$(RECOVERY_BINARY)" || $(CARGO) build --locked -p plurx-cluster-check; \
+	test -x "$(RECOVERY_BINARY)" || $(CARGO) build --locked --profile "$(RECOVERY_CARGO_PROFILE)" -p plurx-cluster-check; \
 	  max_runtime=""; if test -n "$(RECOVERY_MAX_RUN_SECONDS)"; then max_runtime="--max-runtime-seconds $(RECOVERY_MAX_RUN_SECONDS)"; fi; \
 	  voter_status=0; learner_status=0; \
 	  "$(RECOVERY_BINARY)" transport-recovery-role \

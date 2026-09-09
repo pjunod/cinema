@@ -1,6 +1,6 @@
 # Transport recovery CI — implementation status and evidence
 
-**Status:** building M5 · **Owner:** Codex · **Updated:** 2026-09-08
+**Status:** preparing M6 promotion · **Owner:** Codex · **Updated:** 2026-09-08
 
 Companion to
 [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md) (how this effort reaches
@@ -10,7 +10,7 @@ Companion to
 been built, reviewed, and proved. It is updated with each milestone so a green
 checkbox means retained evidence, not intent.
 
-## Current position — M4 is complete and split qualification is staged
+## Current position — M5 is complete and split qualification is staged
 
 The effort begins at remote `main`
 `9fcd151c98485707d2dc28195adf9c0c1e4a6d4c`, the same source reviewed by the
@@ -48,7 +48,7 @@ frozen.
   job ID, current-run artifacts, and exact receipt integration.
 - [x] **M4 — frozen candidate semantics.** Promotion runs survive unrelated
   superseding events and stale candidates cannot issue a receipt.
-- [ ] **M5 — measured optimization.** Three-cycle, same-runner comparisons
+- [x] **M5 — measured optimization.** Three-cycle, same-runner comparisons
   decide whether any profile or hashing change is retained.
 - [ ] **M6 — current-tree qualification.** One attempt produces both 20-cycle
   role reports, the canonical artifact, and the transport and promotion
@@ -208,6 +208,43 @@ The exact temporary branches were deleted after the results were retained;
 no real user run or repository workflow was cancelled for this test. The
 integration freeze remains an operator convention rather than a YAML merge
 queue: moved refs fail closed instead of being locked.
+
+## M5 evidence — measured code is fast enough to qualify
+
+Commit `948a14c5` adds a dedicated `transport-recovery` Cargo profile with
+optimization level 2, debug information, overflow checks, and debug assertions.
+The exact archived source built with Rust 1.97.1 in 197.862 seconds on the same
+local 16-vCPU Linux ARM64 Docker runner used for the M2 baseline. The runner
+had 8,318,709,760 bytes of memory, used the `overlay2` storage driver, and had
+no competing Docker containers when the comparison evidence was collected.
+The binary stamps its actual build settings into every role report; Cargo
+exposes the custom profile to build scripts as the `debug` family, so the
+closed descriptor is
+`profile=debug;opt-level=2;debug=true;debug-assertions=on`.
+
+One shared execution ID, `m5-opt-948a14c5`, then completed a warmup and three
+measured cycles for each role. Both reports passed the closed schema and
+semantic validators, including snapshot digest, installed-state, write-path,
+process-identity, cleanup, and report-integrity assertions:
+
+| Role | Total wall | Change from M2 | Snapshot purge median | Source hash median | Role SHA-256 | Summary SHA-256 |
+|---|---:|---:|---:|---:|---|---|
+| Voter | 70,995 ms | -86.8% | 449 ms | 445 ms | `f94bcb520703939a8daadf8710294dcf0861be96060573fdca6f1702c788d1c2` | `88ff76a996d10dee7bf0a94bea798c5fbd76f7a77c30017afc130f76e5df9427` |
+| Learner | 415,169 ms | -44.9% | 83,610 ms | 235 ms | `fb6cdb2e1ac8fe9b211454c52eea413d8901f38ed90ceb06a4d67a9c23310c99` | `29a1daf91119436f2c855b55c8e43125385c68c2b5cb7863a003477766855811` |
+
+Installed-state verification fell from 21,870 to 3,088 ms for the voter and
+from 11,866 to 2,024 ms for the learner. Source hashing is now below half a
+second for both roles, so no hashing implementation change is justified or
+retained. Learner snapshot purge remains the dominant phase and is preserved
+as observable timing rather than hidden by a looser assertion. The resource
+envelope was recorded but not asserted for this three-cycle comparison, as
+required by the existing minimum-sample contract.
+
+The pinned macOS loop passed formatting, package check, Clippy with warnings
+denied, and 59 focused tests. The exact Linux source passed all 60 focused
+tests plus the vendored Hiqlite transport and snapshot-worker regressions. The
+optimized profile is therefore retained for both independent CI role jobs and
+the aggregate validator; the 20-plus-20 M6 run remains the only qualification.
 
 ## Guardrails — this effort changes observability, not production transport
 

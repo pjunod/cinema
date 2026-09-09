@@ -2482,7 +2482,7 @@ assert.equal(context.ACT_TIMER, null);
 
         self.assertEqual(len(contract_commands), 14)
         self.assertEqual(contract_commands[0], 'test "$(uname -s)" = Linux')
-        self.assertIn("PLURX_EXPECT_TEST_COUNT=59", contract_commands[1])
+        self.assertIn("PLURX_EXPECT_TEST_COUNT=60", contract_commands[1])
         self.assertIn("scripts/require-test-count", contract_commands[1])
         self.assertIn("transport_recovery --lib", contract_commands[1])
         exact_regressions = (
@@ -2559,6 +2559,10 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}", recovery)
         self.assertIn("make cluster-transport-recovery-voter-check", voter)
         self.assertIn("make cluster-transport-recovery-learner-check", learner)
+        self.assertIn("--profile transport-recovery", voter)
+        self.assertIn("--profile transport-recovery", learner)
+        self.assertIn("RECOVERY_CARGO_PROFILE=transport-recovery", voter)
+        self.assertIn("RECOVERY_CARGO_PROFILE=transport-recovery", learner)
         self.assertIn("role_budget=$(( 13800 - elapsed ))", voter)
         self.assertIn("role_budget=$(( 13800 - elapsed ))", learner)
         self.assertIn("voter-diagnostics", voter)
@@ -2572,9 +2576,20 @@ assert.equal(context.ACT_TIMER, null);
             "--evidence target/validation/cluster-transport-recovery.json", recovery
         )
         self.assertIn(
-            "EVIDENCE_VALIDATOR: ${{ steps.cargo-cache.outputs.target-dir }}/debug/plurx-cluster-check",
+            "EVIDENCE_VALIDATOR: ${{ steps.cargo-cache.outputs.target-dir }}/transport-recovery/plurx-cluster-check",
             recovery,
         )
+        cargo = read("Cargo.toml")
+        profile = cargo.split("[profile.transport-recovery]", 1)[1].split("[", 1)[0]
+        self.assertRegex(profile, r'(?m)^inherits = "dev"$')
+        self.assertRegex(profile, r"(?m)^opt-level = 2$")
+        self.assertRegex(profile, r"(?m)^debug = 1$")
+        self.assertRegex(profile, r"(?m)^debug-assertions = true$")
+        self.assertRegex(profile, r"(?m)^overflow-checks = true$")
+        build_script = read("crates/plurx-cluster-check/build.rs")
+        self.assertIn('env::var("PROFILE")', build_script)
+        self.assertIn('env::var("OPT_LEVEL")', build_script)
+        self.assertIn('env::var("DEBUG")', build_script)
         self.assertIn('--evidence-validator "$EVIDENCE_VALIDATOR"', recovery)
         self.assertIn("if-no-files-found: error", recovery)
         self.assertIn("steps.transport_recovery.outcome != 'success'", recovery)
