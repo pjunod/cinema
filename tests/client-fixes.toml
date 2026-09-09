@@ -989,6 +989,16 @@ test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
 test_anchor = "testAnEndingCommitIsSettledBeforeTheEndExchange"
 
 [[fixes]]
+# Session end owns a bounded detached exchange. Scoped test transports must
+# remain alive through that bound or CFNetwork traps on the next task.
+id = "apple.scoped-control-session-finalization"
+commits = ["6d664147"]
+source = "clients/apple/Sources/PlaybackControlSession.swift"
+source_anchor = "Task { await reporter.finish(final) }"
+test = "clients/apple/Tests/PlaybackControlSessionTests.swift"
+test_anchor = "Retain the delegate-free ephemeral session"
+
+[[fixes]]
 # Promotion compares counters to the current merge target. This anchor keeps
 # the Android 76 claim tied to the collision regression that rejects reusing
 # the build number already present on main.
