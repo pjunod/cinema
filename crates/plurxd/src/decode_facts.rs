@@ -4888,7 +4888,7 @@ printf '%s\n' '{"streams":[{"index":4,"codec_type":"video","codec_name":"h264","
                     DecodeFactSource::isolated(first_source),
                     None,
                     ProbeStreamSelection::Absolute(4),
-                    Duration::from_secs(3),
+                    PROBE_DEADLINE,
                     None,
                 )
                 .await
@@ -4898,7 +4898,7 @@ printf '%s\n' '{"streams":[{"index":4,"codec_type":"video","codec_name":"h264","
             DecodeFactSource::isolated(source),
             None,
             ProbeStreamSelection::Absolute(4),
-            Duration::from_secs(3),
+            PROBE_DEADLINE,
             None,
         );
         let (first, second) = tokio::join!(first, second);
@@ -4940,12 +4940,12 @@ printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","
                     )),
                     None,
                     ProbeStreamSelection::FirstPlayable,
-                    Duration::from_secs(3),
+                    PROBE_DEADLINE,
                     None,
                 )
                 .await
         });
-        for _ in 0..100 {
+        for _ in 0..(PROBE_DEADLINE.as_millis() / 10) {
             if probe.with_extension("started").exists() {
                 break;
             }
@@ -4953,7 +4953,7 @@ printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","
         }
         assert!(
             probe.with_extension("started").exists(),
-            "first probe started"
+            "first probe started within the production deadline"
         );
         let cancellation = tokio_util::sync::CancellationToken::new();
         let waiter = cache.get_or_probe(
@@ -4963,7 +4963,7 @@ printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","
             )),
             None,
             ProbeStreamSelection::FirstPlayable,
-            Duration::from_secs(3),
+            PROBE_DEADLINE,
             Some(&cancellation),
         );
         tokio::pin!(waiter);
