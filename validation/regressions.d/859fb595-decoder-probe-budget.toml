@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["859fb595"]
+points = ["playback.pipeline"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "Merged PR #207 fast-Rust run #1419 passed 2,145 tests before `facts_are_collected_from_the_held_descriptor_and_cached_by_build` exhausted its unrelated two-second fixture budget under full-suite contention. The focused held-descriptor/cache regression now uses the same ten-second `PROBE_DEADLINE` as production fact collection; it still fails on an actual production deadline or any incorrect descriptor, stream-selection, offset-restoration, or cache behavior."

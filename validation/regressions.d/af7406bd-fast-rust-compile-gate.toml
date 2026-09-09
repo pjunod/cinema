@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["af7406bd"]
+points = ["validation.framework"]
+checks = ["operations-contract", "catalog-contract", "history-regressions"]
+reason = "The main-bound workflow now reports compilation independently from the long-running unit suite. `fast Rust gate` runs the pinned toolchain's `make effort-rust-check`, which formats and checks the whole workspace with every target without executing tests; `Rust unit and SQLite contracts` retains `make ci-rust-gate`, FFmpeg 6, and full test execution. The operations contract requires both jobs, pins the compile lane to the high-CPU trust boundary without FFmpeg, and keeps FFmpeg ahead of the unit command."

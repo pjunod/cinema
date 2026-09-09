@@ -69,13 +69,19 @@ WAL, daemon, and both package builds in rerun
 stopped before testing on the 45 GB disk floor; verified-idle cleanup restored
 that exact runner to 58 GB. Fast Rust exposed one remaining fixture defect:
 the real HEVC argv regression synchronously launched unrestricted libx265 with
-no deadline and occupied the rest of the 30-minute job. Current `main` at
-`3ce2ea0d` includes M6 prepared-successor priming and the newer Live TV signal
-quality/mobile-version work.
-The narrow correction in draft
-[#207](http://192.168.4.7:3000/noirr/plurx/pulls/207) integrates that tree and
-gives the subprocess a 30-second kill-on-drop deadline and one worker; no
-production behavior changes · **Updated:**
+no deadline and occupied the rest of the 30-minute job. The narrow correction
+[#207](http://192.168.4.7:3000/noirr/plurx/pulls/207) merged as `9258f36b` and
+gives the subprocess a 30-second kill-on-drop deadline and one worker. Its Rust
+lane passed 2,145 tests before exposing a second contention-sensitive fact
+probe and an offline recovery fixture that had not enabled the behavior it
+tests. [#209](http://192.168.4.7:3000/noirr/plurx/pulls/209) and
+[#210](http://192.168.4.7:3000/noirr/plurx/pulls/210) repair that offline
+fixture and Docker packaging on current `main` at `aff2dc12`. Draft follow-up
+[#211](http://192.168.4.7:3000/noirr/plurx/pulls/211) gives the remaining fact
+probe its production budget, separates the compile-only fast Rust verdict from
+the continuing unit/SQLite job, and refreshes the intentional Developer-tab
+structural golden exposed by the post-merge web lane. No production behavior
+changes · **Updated:**
 2026-09-09 · **Effort:**
 `effort/streaming-reliability` (merged) · **Started:** 2026-09-04 ·
 **Effort fork:** `48615baf` · **Continuation merged to main:** `1f6d6645` via
