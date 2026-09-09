@@ -391,6 +391,10 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             "functionality smoke evidence and a green fast lane before promotion",
             self.flat_status,
         )
+        self.assertIn(
+            "owner explicitly approved watching the remaining promotion jobs",
+            self.flat_status,
+        )
 
     def test_one_artifact_name_per_source_however_it_was_measured(self) -> None:
         """The producer and the player must compute one name for one title.
