@@ -111,10 +111,12 @@ pub(crate) async fn readiness(
     // would render as "the switch is off", which is a reading this route did
     // not take — the same dishonesty it exists to remove, one layer down.
     let settings = state.store.settings_snapshot().await?;
-    let control_advertised = settings
-        .get(plurx_core::store::keys::PLAYBACK_CONTROL_PROTOCOL_V1)
-        .map(String::as_str)
-        == Some("1");
+    let control_advertised = plurx_core::store::stored_switch(
+        settings
+            .get(plurx_core::store::keys::PLAYBACK_CONTROL_PROTOCOL_V1)
+            .map(String::as_str),
+        true,
+    );
 
     // Parsed exactly the way the engine parses it. That was the point when all
     // three sites compared the raw value — a row that trimmed on its own would

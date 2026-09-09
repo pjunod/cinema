@@ -1254,8 +1254,9 @@ pub mod keys {
     /// retained growing-HLS engine; `0` makes the VOD refusal final again.
     pub const VOD_LIVE_RECOVERY: &str = "playback.vod_live_recovery";
     /// Advertise the additive v1 playback-control endpoint on newly created
-    /// HLS sessions. Explicit opt-in until every client has a passive reporter
-    /// and mixed-fleet behavior has been measured.
+    /// HLS sessions. Absent/on advertises it now that every client has a
+    /// reporter and prepared-switch adapter; explicit `0` remains an operator
+    /// override.
     pub const PLAYBACK_CONTROL_PROTOCOL_V1: &str = "playback.control_protocol_v1";
     /// Serve PGS subtitle tracks through the authenticated `pgs-v1` overlay
     /// API instead of hiding them.

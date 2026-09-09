@@ -83,7 +83,7 @@ class SettingsStore(private val context: Context) {
                 playbackInfoMode = p[Keys.PLAYBACK_INFO_MODE] ?: "standard",
                 offlineQuality = OfflineQuality.fromStorage(p[Keys.OFFLINE_QUALITY]),
                 offlineNetwork = OfflineNetwork.fromStorage(p[Keys.OFFLINE_NETWORK]),
-                preparedReplacement = p[Keys.PREPARED_REPLACEMENT] ?: false,
+                preparedReplacement = p[Keys.PREPARED_REPLACEMENT] ?: true,
             ),
         )
     }
