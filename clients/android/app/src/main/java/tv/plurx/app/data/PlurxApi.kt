@@ -36,7 +36,7 @@ interface PlurxApi {
     @GET("libraries")
     suspend fun libraries(): List<Library>
 
-    @GET("library-channels/")
+    @GET("library-channels")
     suspend fun libraryChannels(
         @Query("management") management: Boolean = false,
         @Query("after") after: String? = null,
@@ -57,7 +57,7 @@ interface PlurxApi {
     @POST("library-channels/preview")
     suspend fun previewLibraryChannel(@Body body: LibraryChannelPreviewRequest): LibraryChannelPreview
 
-    @POST("library-channels/")
+    @POST("library-channels")
     suspend fun createLibraryChannel(@Body body: LibraryChannelDefinition): LibraryChannelMutation
 
     @PUT("library-channels/{id}")

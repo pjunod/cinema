@@ -396,7 +396,7 @@ struct PlurxAPI {
             var query = [URLQueryItem(name: "limit", value: "100")]
             if management { query.append(URLQueryItem(name: "management", value: "true")) }
             if let after { query.append(URLQueryItem(name: "after", value: after)) }
-            let page: [LibraryChannel] = try await get("library-channels/", query: query)
+            let page: [LibraryChannel] = try await get("library-channels", query: query)
             result += page
             after = page.count == 100 ? page.last?.id : nil
         } while after != nil
@@ -438,7 +438,7 @@ struct PlurxAPI {
     }
 
     func createLibraryChannel(_ definition: LibraryChannelDefinition) async throws -> LibraryChannelMutation {
-        try await post("library-channels/", body: definition)
+        try await post("library-channels", body: definition)
     }
 
     func updateLibraryChannel(_ channel: LibraryChannel, definition: LibraryChannelDefinition) async throws -> LibraryChannelMutation {

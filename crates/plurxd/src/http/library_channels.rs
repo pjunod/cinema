@@ -51,6 +51,15 @@ pub(crate) fn router() -> Router<AppState> {
         .layer(middleware::from_fn(private_no_store))
 }
 
+/// Accept the collection spelling shipped by the first native clients while
+/// they roll forward to the canonical no-trailing-slash endpoint. Axum 0.8
+/// does not treat the two paths as equivalent when a router is nested.
+pub(crate) fn trailing_slash_compatibility_router() -> Router<AppState> {
+    Router::new()
+        .route("/library-channels/", get(list).post(create))
+        .layer(middleware::from_fn(private_no_store))
+}
+
 async fn private_no_store(request: Request<axum::body::Body>, next: Next) -> Response {
     let mut response = next.run(request).await;
     response.headers_mut().insert(

@@ -112,7 +112,9 @@
   }
 
   function errorView(error) {
-    const code = String(error && error.code || "channel_store_unavailable");
+    const status = Number(error && error.status || 0);
+    const code = String(error && error.code ||
+      (status === 404 ? "channel_route_unavailable" : "channel_request_failed"));
     const known = {
       channel_occurrence_changed: ["The programme changed", "Resolving the channel again is safe."],
       channel_unavailable: ["Channel unavailable", "It may be disabled or deleted."],
@@ -121,8 +123,10 @@
       channel_revision_changed: ["Channel changed elsewhere", "Keep this form and compare it with the latest definition."],
       channel_build_busy: ["Schedule builder busy", "Retry shortly; the previous schedule remains active."],
       channel_store_unavailable: ["Library channels unavailable", "The server cannot establish authoritative channel state."],
+      channel_route_unavailable: ["Library channels unavailable", "This server does not expose the Library channels API."],
+      channel_request_failed: ["Library channels unavailable", "The request failed before channel state could be read."],
     };
-    const selected = known[code] || known.channel_store_unavailable;
+    const selected = known[code] || known.channel_request_failed;
     return {code, title: selected[0], detail: selected[1]};
   }
 

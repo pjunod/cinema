@@ -94,6 +94,10 @@ pub fn router(state: AppState) -> Router {
         // process can currently observe. Nothing reads it to decide
         // whether a switch may be flipped.
         .route("/developer/readiness", get(developer::readiness))
+        .merge(
+            library_channels::trailing_slash_compatibility_router()
+                .layer(DefaultBodyLimit::max(64 * 1024)),
+        )
         .nest(
             "/library-channels",
             library_channels::router().layer(DefaultBodyLimit::max(64 * 1024)),

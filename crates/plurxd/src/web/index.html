@@ -19393,7 +19393,7 @@ async function loadLibraryChannels(){
   do{
     const query=new URLSearchParams({limit:"100"});
     if(LIBRARY_CHANNELS.management)query.set("management","true");if(after)query.set("after",after);
-    const page=await api(`/library-channels/?${query}`);result.push(...page);
+    const page=await api(`/library-channels?${query}`);result.push(...page);
     after=page.length===100?page[page.length-1].id:null;
   }while(after);
   return result;
@@ -19583,7 +19583,7 @@ async function saveLibraryChannel(){
   const body={request_id:newRequestId(),name:draft.name.trim(),description:draft.description.trim(),visibility:draft.visibility,enabled:draft.enabled,recipe:draft.recipe,preview_seed:draft.preview&&draft.preview.preview_seed||null};
   try{
     if(draft.id)await api(`/library-channels/${encodeURIComponent(draft.id)}`,{method:"PUT",body:Object.assign({expected_revision:draft.expected_revision},body)});
-    else await api("/library-channels/",{method:"POST",body});
+    else await api("/library-channels",{method:"POST",body});
     clearLibraryChannelDraft();LIBRARY_CHANNELS.editor=false;LIBRARY_CHANNELS.draft=null;toast(draft.id?"Channel saved":"Channel created");await viewLibraryChannels(PAGE_RENDER_GENERATION);
   }catch(error){const node=document.getElementById("lc-error");if(node)node.textContent=error.message;}
 }

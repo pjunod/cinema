@@ -2013,9 +2013,9 @@ them, and only an administrator may publish shared visibility.
 
 | Method | Path | Auth | What it does |
 |---|---|---|---|
-| GET | `/api/v1/library-channels/` | bearer | Visible channel summaries with private favourite state and derived now/next; `management=true` is admin-only |
+| GET | `/api/v1/library-channels` | bearer | Visible channel summaries with private favourite state and derived now/next; `management=true` is admin-only |
 | POST | `/api/v1/library-channels/preview` | bearer | Bounded recipe evaluation without file I/O or publication; accepts an opaque `cursor` plus reusable `preview_seed`, and returns `next_cursor`, `first_ten`, diagnostics and the effective seed |
-| POST | `/api/v1/library-channels/` | bearer | Idempotent definition creation and initial immutable generation publication |
+| POST | `/api/v1/library-channels` | bearer | Idempotent definition creation and initial immutable generation publication |
 | GET | `/api/v1/library-channels/{id}` | bearer | Definition, revision, generation pointers, and mutation capabilities |
 | PUT | `/api/v1/library-channels/{id}` | bearer | Full expected-revision replacement; the working schedule stays active until the next rotation |
 | DELETE | `/api/v1/library-channels/{id}` | bearer | Idempotent deletion with mandatory `expected_revision` and `request_id` query parameters; media is never deleted |
@@ -2025,6 +2025,10 @@ them, and only an administrator may publish shared visibility.
 | GET | `/api/v1/library-channels/guide` | bearer | At most 20 channels and 24 hours, capped at 1,000 derived occurrences; continue with the opaque cursor in `X-Plurx-Next-Cursor` |
 | POST | `/api/v1/library-channels/{id}/resolve` | bearer | Resolve server-now only; opens no file and creates no session |
 | POST | `/api/v1/library-channels/{id}/sessions` | bearer | Revalidate an occurrence and create one following finite-HLS session |
+
+The collection's canonical spelling has no trailing slash. The server also
+accepts `/api/v1/library-channels/` for list and create during the first native
+client rollout; new clients must use the canonical route.
 
 `resolve` returns the channel and definition revision, generation, cycle and
 ordinal, server time, half-open start/end boundaries, pinned item/file, source
