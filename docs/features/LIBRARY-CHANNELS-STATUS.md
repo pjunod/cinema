@@ -15,8 +15,8 @@ proved, and what remains?*
 |---|---|---|
 | M0 isolated base and compiler | complete | clean independent clone at `4cef0da7`; Rust 1.97.1 baseline `cargo check -p plurxd --all-targets` passed in 1m14s |
 | M1 recipes, schedules, and durable storage | built; integration compile passed | one normalized evaluator and deterministic clock/order implementation; SQLite v55 and Hiqlite v35 entities, authorization-at-write, idempotent definitions, bounded staging, guarded publication, catalogue projection, and import census |
-| M2 API and playback purpose | queued | authenticated routes, occurrence resolution, following sessions, and history isolation |
-| M3 web | queued | browse, guide, creator, tune/restart/return, and Developer enablement advice |
+| M2 API and playback purpose | built; integration compile passed | bounded authenticated CRUD/preview/guide/resolve routes, pinned-occurrence finite-HLS starts, durable purpose binding, and following-mode start/history isolation |
+| M3 web | in progress | browse, guide, creator, tune/restart/return, and Developer enablement advice; server setting/readiness contract is built |
 | M4 Apple | queued | iPhone/iPad authoring plus Apple TV layouts and following playback |
 | M5 Android | queued | phone/tablet authoring plus Google TV layouts and following playback |
 | M6 promotion | queued | documentation, one adversarial review, review fixes, fast lane, and merge |
@@ -39,6 +39,11 @@ gets an enable control in Settings → Developer together with live readiness
 facts: authoritative store availability, catalogue media with a successful
 video probe, and client/server compatibility. Those facts explain likely
 failure; they never override the administrator's choice or hide the feature.
+
+The switch controls new resolve/session admission, not discovery or authoring.
+This keeps the empty page and editor available while an administrator inspects
+or repairs readiness, and it preserves a disabled channel definition without
+pretending the readiness verdict has authority over the explicit switch.
 
 ## Promotion rule — review once, qualify once
 

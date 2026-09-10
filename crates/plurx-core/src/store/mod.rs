@@ -1336,6 +1336,9 @@ pub(crate) fn persistable_credential(value: &SealedSecret) -> Result<String, Sto
 /// Well-known settings keys. Keys are dotted, lowercase, and owned by the
 /// module that writes them.
 pub mod keys {
+    /// Runtime Library-channel playback switch. The feature is always compiled;
+    /// absence is off so an upgrade never starts scheduled playback implicitly.
+    pub const LIBRARY_CHANNELS_ENABLED: &str = "library_channels.enabled";
     /// Runtime-only HDHomeRun live-TV configuration. The values are read
     /// as one snapshot and written with a generation CAS; the enable bit is
     /// deliberately absent/off on upgrade.

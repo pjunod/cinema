@@ -1593,6 +1593,36 @@ pub async fn create(
     super::network::RemoteAddress(remote): super::network::RemoteAddress,
     Json(req): Json<CreateSession>,
 ) -> Result<Json<StartResponse>, ApiError> {
+    create_with_purpose(user, state, id, headers, remote, req, None).await
+}
+
+/// The finite-session application service used by Library channels after it
+/// has authoritatively resolved an occurrence. The purpose is not a public
+/// field on ordinary VOD creation: old servers must reject the dedicated
+/// route instead of silently turning a channel tune into history-writing VOD.
+pub(crate) async fn create_for_library_channel(
+    user: plurx_core::domain::User,
+    state: AppState,
+    file_id: i64,
+    headers: HeaderMap,
+    remote: Option<std::net::SocketAddr>,
+    req: CreateSession,
+    purpose: crate::http::library_channels::LibraryChannelPlaybackPurpose,
+) -> Result<StartResponse, ApiError> {
+    create_with_purpose(user, state, file_id, headers, remote, req, Some(purpose))
+        .await
+        .map(|Json(response)| response)
+}
+
+async fn create_with_purpose(
+    user: plurx_core::domain::User,
+    state: AppState,
+    id: i64,
+    headers: HeaderMap,
+    remote: Option<std::net::SocketAddr>,
+    req: CreateSession,
+    library_channel: Option<crate::http::library_channels::LibraryChannelPlaybackPurpose>,
+) -> Result<Json<StartResponse>, ApiError> {
     if !valid_playback_id(&req.playback_id) {
         return Err(ApiError::BadRequest(
             "playback_id must contain 1 to 128 safe characters".into(),
@@ -1758,7 +1788,10 @@ pub async fn create(
     .await?;
     let request = resolved.request;
     let height = resolved.height;
-    let fingerprint = resolved.intent_fingerprint;
+    let fingerprint = match library_channel.as_ref() {
+        Some(purpose) => purpose.bind_session_fingerprint(&resolved.intent_fingerprint),
+        None => resolved.intent_fingerprint,
+    };
     let plan_notes = resolved.plan_notes;
     let native_subtitles = resolved.native_subtitles;
     let native_subtitle = resolved.native_subtitle;
@@ -2411,7 +2444,20 @@ pub async fn create(
         }),
         plan_notes,
     };
-    let response_json = serde_json::to_string(&response)?;
+    // `response_json` is the canonical durable session recipe/response. Keep
+    // channel purpose in that row so restart and owner takeover cannot turn a
+    // following session into ordinary VOD. `StartResponse` deliberately
+    // ignores additive fields, preserving every existing recovery reader.
+    let response_json = if let Some(purpose) = library_channel.as_ref() {
+        let mut value = serde_json::to_value(&response)?;
+        value
+            .as_object_mut()
+            .expect("StartResponse serializes as an object")
+            .insert("library_channel".to_owned(), serde_json::to_value(purpose)?);
+        serde_json::to_string(&value)?
+    } else {
+        serde_json::to_string(&response)?
+    };
     let activation_now_ms = unix_ms();
     let activation = MediaSessionActivation {
         // The one mint for this start, from the local bound above placement.
@@ -2629,14 +2675,16 @@ pub async fn create(
             .seed_owned_lease(&published_route)
             .await;
     }
-    crate::playstart::note_playback_started(
-        &state,
-        user.id,
-        &user.username,
-        id,
-        method,
-        Some(&request.playback_id),
-    );
+    if library_channel.is_none() {
+        crate::playstart::note_playback_started(
+            &state,
+            user.id,
+            &user.username,
+            id,
+            method,
+            Some(&request.playback_id),
+        );
+    }
     publication_guard.disarm();
     Ok(Json(response))
 }

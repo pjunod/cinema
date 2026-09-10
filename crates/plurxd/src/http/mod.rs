@@ -28,6 +28,7 @@ pub(crate) mod internal_media_sessions;
 mod items;
 mod keys;
 mod libraries;
+pub(crate) mod library_channels;
 mod live_tv;
 mod network;
 mod offline;
@@ -93,6 +94,10 @@ pub fn router(state: AppState) -> Router {
         // process can currently observe. Nothing reads it to decide
         // whether a switch may be flipped.
         .route("/developer/readiness", get(developer::readiness))
+        .nest(
+            "/library-channels",
+            library_channels::router().layer(DefaultBodyLimit::max(64 * 1024)),
+        )
         .route("/live-tv/readiness", get(live_tv::readiness))
         .route(
             "/live-tv/readiness/refresh",

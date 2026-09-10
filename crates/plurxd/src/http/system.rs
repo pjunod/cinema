@@ -1539,6 +1539,9 @@ const DELIVERY_FAILURE_EVENTS: [&str; 3] = ["stream_rejected", "playback_failed"
 pub struct SettingsDto {
     /// Replicated logical name shared by every voter.
     pub server_name: String,
+    /// Always-compiled Library channels. Readiness is advisory and never
+    /// vetoes this explicit runtime choice.
+    pub library_channels_enabled: bool,
     /// Always-compiled HDHomeRun integration. The switch is runtime-only and
     /// remains off until the separate readiness endpoint is green.
     pub live_tv_enabled: bool,
@@ -1917,6 +1920,10 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
     );
     Ok(SettingsDto {
         server_name,
+        library_channels_enabled: plurx_core::store::stored_switch(
+            setting(keys::LIBRARY_CHANNELS_ENABLED).as_deref(),
+            false,
+        ),
         live_tv_enabled: live_tv.enabled,
         live_tv_device_ipv4: live_tv
             .device_ipv4
@@ -2144,6 +2151,7 @@ pub struct UpdateSettings {
     /// Rename the logical server on every voter. Configuration is only the
     /// bootstrap seed and is not edited by this operation.
     pub server_name: Option<String>,
+    pub library_channels_enabled: Option<bool>,
     /// HDHomeRun settings are a generation-CAS tuple. Save the address/owner
     /// while disabled, run readiness, then enable in a separate request.
     pub live_tv_enabled: Option<bool>,
@@ -3143,6 +3151,14 @@ pub async fn update_settings(
         state
             .store
             .put_setting(keys::VOD_PRESENTATION, if on { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(on) = req.library_channels_enabled {
+        // Deliberately no readiness lookup here. The Developer card is advice;
+        // an administrator's explicit choice is the authority.
+        state
+            .store
+            .put_setting(keys::LIBRARY_CHANNELS_ENABLED, if on { "1" } else { "0" })
             .await?;
     }
     if let Some(on) = req.vod_live_recovery {

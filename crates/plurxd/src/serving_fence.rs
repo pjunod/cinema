@@ -271,6 +271,7 @@ impl ServingFence {
                 || path.ends_with("/offline-packages")
                 || path.ends_with("/publication")
                 || (path.contains("/live-tv/channels/") && path.ends_with("/sessions"))
+                || (path.contains("/library-channels/") && path.ends_with("/sessions"))
                 || path == "/_internal/v1/live-tv/start"
                 || path == "/_internal/v1/live-tv/activate"))
             || (method == "GET"

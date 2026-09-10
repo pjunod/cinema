@@ -1994,6 +1994,50 @@ Error codes: `invalid_request` (400), `channel_not_found` (404),
 
 ---
 
+### 17.5 Library channels — a deterministic schedule over finite media
+
+Library channels use the same finite HLS session service as ordinary VOD, but
+only through the dedicated session route below. The server resolves the
+effective immutable generation from its UTC clock, verifies the pinned file
+fingerprint, supplies the source offset, and persists the typed occurrence
+purpose in the media-session response before producer publication. Following
+sessions do not consume the normal playback-start/history notification; an
+ordinary session for the same user and item remains ordinary VOD.
+
+Every response under this prefix is `Cache-Control: private, no-store`.
+Personal-channel IDs that are not the caller's are 404. Shared definitions are
+visible to signed-in users; only their owner or an administrator may mutate
+them, and only an administrator may publish shared visibility.
+
+| Method | Path | Auth | What it does |
+|---|---|---|---|
+| GET | `/api/v1/library-channels/` | bearer | Visible channel summaries with private favourite state and derived now/next; `management=true` is admin-only |
+| POST | `/api/v1/library-channels/preview` | bearer | Bounded recipe evaluation without file I/O or publication |
+| POST | `/api/v1/library-channels/` | bearer | Idempotent definition creation and initial immutable generation publication |
+| GET | `/api/v1/library-channels/{id}` | bearer | Definition, revision, generation pointers, and mutation capabilities |
+| PUT | `/api/v1/library-channels/{id}` | bearer | Full expected-revision replacement; the working schedule stays active until the next rotation |
+| DELETE | `/api/v1/library-channels/{id}` | bearer | Expected-revision deletion; media is never deleted |
+| POST | `/api/v1/library-channels/{id}/rebuild` | bearer | Rebuild with next-rotation or next-programme activation and optional reshuffle |
+| GET | `/api/v1/library-channels/{id}/build` | bearer | Active/pending build projection and activation time |
+| PUT | `/api/v1/library-channels/{id}/favourite` | bearer | Idempotently set the caller's private favourite |
+| GET | `/api/v1/library-channels/guide` | bearer | At most 20 channels and 24 hours, capped at 1,000 derived occurrences |
+| POST | `/api/v1/library-channels/{id}/resolve` | bearer | Resolve server-now only; opens no file and creates no session |
+| POST | `/api/v1/library-channels/{id}/sessions` | bearer | Revalidate an occurrence and create one following finite-HLS session |
+
+`resolve` returns the channel and definition revision, generation, cycle and
+ordinal, server time, half-open start/end boundaries, pinned item/file, source
+position, and explicit capabilities. The session call repeats the generation
+and occurrence plus a monotone client `tune_sequence`; it nests the existing
+finite-HLS create body under `playback`. Its response is
+`{playback: <StartResponse>, library_channel: <accepted purpose>}`. A slot that
+changed between the two calls is 409 `channel_occurrence_changed`, and the
+client resolves once more rather than starting stale media.
+
+The runtime switch `library_channels_enabled` is always compiled and affects
+resolve/session admission only. Listing, preview, authoring, empty-state help,
+and existing schedules stay inspectable while it is off. Its Developer
+readiness rows are advisory and cannot veto an administrator's explicit save.
+
 ## 18. Trakt and the monarr seam
 
 | Method | Path | Auth | What it does |

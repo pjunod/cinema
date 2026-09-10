@@ -111,6 +111,12 @@ pub(crate) async fn readiness(
     // would render as "the switch is off", which is a reading this route did
     // not take — the same dishonesty it exists to remove, one layer down.
     let settings = state.store.settings_snapshot().await?;
+    let library_channels_on = plurx_core::store::stored_switch(
+        settings
+            .get(plurx_core::store::keys::LIBRARY_CHANNELS_ENABLED)
+            .map(String::as_str),
+        false,
+    );
     let control_advertised = plurx_core::store::stored_switch(
         settings
             .get(plurx_core::store::keys::PLAYBACK_CONTROL_PROTOCOL_V1)
@@ -155,6 +161,7 @@ pub(crate) async fn readiness(
 
     Ok(Json(DeveloperReadiness {
         items: vec![
+            library_channels(&state, library_channels_on).await,
             cluster_transport_recovery(&state).await,
             playback_control_protocol(control_advertised),
             prepared_quality_handoff(prepared_handoff_on),
@@ -163,6 +170,65 @@ pub(crate) async fn readiness(
             dolby_vision_convert(convert_on),
         ],
     }))
+}
+
+/// Scheduled playback made entirely from the already-probed local catalogue.
+/// These are diagnostic facts, never admission predicates: the settings write
+/// does not call this function and therefore cannot accidentally grow a gate.
+async fn library_channels(state: &AppState, enabled: bool) -> DeveloperEnableItem {
+    let catalogue = state.store.library_channel_catalog_page(0, 1).await;
+    let (store_status, store_evidence, media_status, media_evidence) = match catalogue {
+        Ok(page) if page.is_empty() => (
+            RequirementStatus::Met,
+            "The authoritative Store accepted a bounded Library-channel catalogue read."
+                .to_owned(),
+            RequirementStatus::Unmet,
+            "No eligible probed movie or episode with positive video duration is currently in the catalogue. Definitions and empty drafts still work."
+                .to_owned(),
+        ),
+        Ok(_) => (
+            RequirementStatus::Met,
+            "The authoritative Store accepted a bounded Library-channel catalogue read."
+                .to_owned(),
+            RequirementStatus::Met,
+            "At least one eligible probed movie or episode with a video stream and positive duration is available."
+                .to_owned(),
+        ),
+        Err(error) => (
+            RequirementStatus::Unmet,
+            format!("The authoritative Library-channel catalogue read failed: {error}."),
+            RequirementStatus::Unobservable,
+            "Media eligibility cannot be observed until the authoritative Store read succeeds."
+                .to_owned(),
+        ),
+    };
+    DeveloperEnableItem {
+        id: "library_channels",
+        title: "Enable Library channels",
+        enabled: Some(enabled),
+        setting: Some("library_channels_enabled"),
+        requirements: vec![
+            DeveloperRequirement {
+                id: "authoritative_store",
+                title: "The authoritative channel Store is readable",
+                status: store_status,
+                evidence: store_evidence,
+            },
+            DeveloperRequirement {
+                id: "eligible_video",
+                title: "At least one schedulable video exists",
+                status: media_status,
+                evidence: media_evidence,
+            },
+            DeveloperRequirement {
+                id: "compatible_clients",
+                title: "Deployed clients understand following playback",
+                status: RequirementStatus::Unobservable,
+                evidence: "This server implements the dedicated Library-channel session contract, but it cannot prove that every installed web, Apple, Android, or TV client has been upgraded. Older clients retain ordinary VOD and Live TV."
+                    .to_owned(),
+            },
+        ],
+    }
 }
 
 /// Profile 7 titles converted to 8.1 rather than delivered as HDR10.
