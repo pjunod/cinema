@@ -35,7 +35,7 @@ function shippedConst(name) {
 function fullOpenHarness() {
   const policy = require("../../crates/plurxd/src/web/playback-policy.js");
   return new Function("PlaybackPolicy", [
-    "let PLAYER=null,PENDING_ATTEMPT_REASON=null,PENDING_DEFAULT_SUB_OFF=false,STATS_TIMER=null; const decisions=[],sessions=[],released=[],media=[];",
+    "let PLAYER=null,PENDING_ATTEMPT_REASON=null,PENDING_DEFAULT_SUB_OFF=false,PENDING_LIBRARY_CHANNEL_PLAYBACK=null,STATS_TIMER=null; const decisions=[],sessions=[],released=[],media=[];",
     "let quality='auto';const localStorage={getItem:()=>quality,setItem:(key,value)=>{quality=value;}}; const DECODE_LIMIT_TTL_MS=1,DECODE_LIMIT_RETEST_MS=1;",
     "let modalOpen=true; const node={classList:{contains:()=>modalOpen,add(){modalOpen=true;},toggle(){},remove(...names){if(names.includes('open'))modalOpen=false;}},style:{},dataset:{},focus(){},setAttribute(){}};",
     "const video={paused:false,ended:false,seeking:false,currentTime:10,playbackRate:1,textTracks:[{mode:'disabled'}],querySelectorAll:()=>[],addEventListener(){},removeEventListener(){},removeAttribute(){},load(){},play(){this.paused=false;media.push('play');return Promise.resolve();},pause(){this.paused=true;media.push('pause');}};",
@@ -1231,7 +1231,7 @@ async function main() {
       "let PLAYER={method:'transcode',probeUrl:'/index.m3u8',started:false},timer;const requests=[],loading=[];const TOKEN=null;",
       "const document={getElementById:()=>({classList:{add(){}},currentTime:0})};const console={warn(){}};",
       "function setTimeout(fn){timer=fn;return 1;}function clearTimeout(){}function fetch(url){return new Promise(resolve=>requests.push({url,resolve}));}",
-      "function pbPosSec(){return 0;}function notifyPlaybackControl(){}function finishStallRecovery(){}function clientLog(){}function toast(){}function setLoading(...args){loading.push(args);}",
+      "function pbPosSec(){return 0;}function currentStreamFailureOverlay(){return null;}function notifyPlaybackControl(){}function finishStallRecovery(){}function clientLog(){}function toast(){}function setLoading(...args){loading.push(args);}",
       shippedSource("probePlaybackSource"),shippedSource("stallDiagnose"),
       shippedSource("hasPendingPlaybackOpen"),shippedSource("playbackOwnsAttachedMedia"),
       "return {requests,loading,start:stallDiagnose,timeout:()=>timer(),replace(){PLAYER={started:false,method:'remux'};}};",
@@ -1265,7 +1265,7 @@ async function main() {
     const h=new Function([
       "let PLAYER={method:'remux',probeUrl:'/stream.mp4',started:false},resolve;const loading=[];const TOKEN=null;",
       "const document={getElementById:()=>({})};const console={warn(){}};function fetch(){return new Promise(done=>resolve=done);}",
-      "function pbPosSec(){return 0;}function notifyPlaybackControl(){}function finishStallRecovery(){throw Error('stale recovery');}function clientLog(){}function toast(){}function setLoading(...args){loading.push(args);}",
+      "function pbPosSec(){return 0;}function currentStreamFailureOverlay(){return null;}function notifyPlaybackControl(){}function finishStallRecovery(){throw Error('stale recovery');}function clientLog(){}function toast(){}function setLoading(...args){loading.push(args);}",
       shippedSource("probePlaybackSource"),shippedSource("stallDiagnose"),
       shippedSource("hasPendingPlaybackOpen"),shippedSource("playbackOwnsAttachedMedia"),
       "return {loading,start:stallDiagnose,resolve:()=>resolve({status:500}),replace(kind){if(kind==='close')PLAYER=null;else if(kind==='seek')PLAYER.controlIntentGeneration=1;else PLAYER={started:false,method:'transcode'};}};",
