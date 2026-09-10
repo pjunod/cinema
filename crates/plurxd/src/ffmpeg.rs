@@ -353,6 +353,14 @@ fn ignore_optional_stream_field_omissions(
     held: &mut serde_json::Value,
 ) {
     const OPTIONAL_CODEC_REPORT_FIELDS: [&str; 3] = ["closed_captions", "film_grain", "refs"];
+    const OPTIONAL_AUDIO_REPORT_FIELDS: [&str; 6] = [
+        "dmix_mode",
+        "loro_cmixlev",
+        "loro_surmixlev",
+        "ltrt_cmixlev",
+        "ltrt_surmixlev",
+        "mime_codec_string",
+    ];
     let (Some(stored_streams), Some(held_streams)) = (
         stored
             .get_mut("streams")
@@ -376,6 +384,23 @@ fn ignore_optional_stream_field_omissions(
             if !stored_stream.contains_key(field) || !held_stream.contains_key(field) {
                 stored_stream.remove(field);
                 held_stream.remove(field);
+            }
+        }
+        let matching_audio_stream = stored_stream.get("index") == held_stream.get("index")
+            && stored_stream
+                .get("codec_type")
+                .and_then(serde_json::Value::as_str)
+                == Some("audio")
+            && held_stream
+                .get("codec_type")
+                .and_then(serde_json::Value::as_str)
+                == Some("audio");
+        if matching_audio_stream {
+            for field in OPTIONAL_AUDIO_REPORT_FIELDS {
+                if !stored_stream.contains_key(field) || !held_stream.contains_key(field) {
+                    stored_stream.remove(field);
+                    held_stream.remove(field);
+                }
             }
         }
     }
@@ -1767,6 +1792,46 @@ mod tests {
         let reported_change = scanned.replace("\"refs\":1", "\"refs\":2");
         assert!(!probes_describe_same_input(scanned, &reported_change)
             .expect("compare reported codec facts"));
+    }
+
+    #[test]
+    fn channel_playback_repair_ignores_measured_optional_audio_report_omissions() {
+        let scanned = r#"{
+          "streams":[
+            {"index":0,"codec_type":"video","codec_name":"hevc","width":3840,"height":2160},
+            {"index":1,"codec_type":"audio","codec_name":"eac3","channels":6,
+             "dmix_mode":"ltrt","loro_cmixlev":"-3.000000","loro_surmixlev":"-3.000000",
+             "ltrt_cmixlev":"-3.000000","ltrt_surmixlev":"-3.000000",
+             "mime_codec_string":"ec-3"}
+          ],
+          "format":{"filename":"/media/leave-the-world-behind.mkv","duration":"8460.000000"}
+        }"#;
+        let held = r#"{
+          "streams":[
+            {"index":0,"codec_type":"video","codec_name":"hevc","width":3840,"height":2160},
+            {"index":1,"codec_type":"audio","codec_name":"eac3","channels":6}
+          ],
+          "format":{"filename":"/dev/fd/3","duration":"8460.000000"}
+        }"#;
+
+        assert!(
+            probes_describe_same_input(scanned, held).expect("compare the measured schema drift"),
+            "optional FFmpeg report availability is not a source replacement"
+        );
+        assert!(
+            !probes_describe_same_input(scanned, &held.replace("3840", "1920"))
+                .expect("changed geometry remains significant")
+        );
+        assert!(
+            !probes_describe_same_input(scanned, &held.replace("\"index\":1", "\"index\":2"))
+                .expect("changed stream identity remains significant")
+        );
+        let video_report = scanned.replace(
+            "\"height\":2160",
+            "\"height\":2160,\"mime_codec_string\":\"hvc1.2.4.L153.B0\"",
+        );
+        assert!(!probes_describe_same_input(&video_report, held)
+            .expect("video report fields are not covered by the audio exception"));
     }
 
     #[tokio::test]

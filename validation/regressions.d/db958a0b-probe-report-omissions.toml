@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["db958a0b"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "The retained probe comparison reproduces the six optional FFmpeg audio-report fields omitted for file 5310 while proving changed video geometry and stream identity still reject the held source."

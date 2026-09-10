@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["35b9d4b4"]
+points = ["playback.pipeline"]
+checks = ["rust-gate", "playback-recovery"]
+reason = "Review-driven regressions require the first HEVC fragment's trex or tfhd description index to select a complete declared entry, reject a missing promised video track, use a second encoder-produced PPS, drive the actor from Unsupported to the exact frozen retry, and keep the measured probe omission exception on matching audio streams only."

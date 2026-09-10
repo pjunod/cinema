@@ -4281,6 +4281,28 @@ mod index_pipe_tests {
     }
 
     #[test]
+    fn channel_playback_repair_native_hls_keeps_parameter_set_promotion() {
+        let file = hevc_dv();
+        let args = hls_copy_args_with_dolby_vision(
+            &file,
+            6275.560,
+            None,
+            true,
+            Pacing::unpaced(),
+            CopyVideoOptions::new(false, false).with_parameter_set_promotion(true),
+            "/tmp/channel-repair",
+        );
+        let joined = args.join(" ");
+
+        assert!(
+            joined.contains("-bsf:v hevc_mp4toannexb,extract_extradata"),
+            "native HLS retry lost the normalization that rebuilds hvcC: {joined}"
+        );
+        assert!(joined.contains("-hls_segment_type fmp4"), "{joined}");
+        assert!(!joined.contains("remove_types=32-34"), "{joined}");
+    }
+
+    #[test]
     fn populated_or_non_hevc_configuration_does_not_request_promotion() {
         let file = hevc_dv();
         let populated = r#"{"streams":[{"codec_type":"video","extradata_size":97}]}"#;

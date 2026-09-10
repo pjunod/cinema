@@ -2601,6 +2601,24 @@ impl PrepublicationCopyRetry {
     }
 }
 
+/// Freeze the native-HLS successor that the actor may select after the copy
+/// reader reports a structurally unsupported input.
+///
+/// The direct muxer accepts the same parameter-set promotion filter as the
+/// initial pipe. Dolby Vision conversion remains excluded because that route
+/// depends on Plurx's in-process RPU rewrite after muxing.
+fn build_prepublication_copy_retry(
+    segmenting: bool,
+    video_options: transcode::CopyVideoOptions,
+    args: Vec<String>,
+    presentation_contract_fingerprint: &str,
+    runtime_cache: PathBuf,
+) -> Option<PrepublicationCopyRetry> {
+    (segmenting && !video_options.converts_dolby_vision()).then(|| {
+        PrepublicationCopyRetry::build(args, presentation_contract_fingerprint, runtime_cache)
+    })
+}
+
 async fn terminate_exact_prepublication_child(
     session: &Session,
     producer_attempt: u64,
@@ -8745,6 +8763,159 @@ pub(crate) struct SessionTakeoverStart {
     pub media_sequence: i64,
     pub discontinuity_sequence: i64,
     pub owner_epoch: i64,
+}
+
+#[derive(Debug)]
+enum CopyInitValidationError {
+    StateChanged,
+    Invalid(String),
+}
+
+fn copy_init_attempt_is_current(session: &Session, producer_attempt: u64) -> bool {
+    session.actor_prepublication_producer.load(Acquire)
+        && !session.replacing_child.load(Acquire)
+        && !session.control.is_retired()
+        && session.control.current_producer_attempt() == producer_attempt
+}
+
+async fn read_bounded_copy_object(
+    session: &Session,
+    producer_attempt: u64,
+    name: &str,
+    deadline: tokio::time::Instant,
+) -> Result<Vec<u8>, CopyInitValidationError> {
+    let path = session.dir.join(name);
+    let metadata = loop {
+        if !copy_init_attempt_is_current(session, producer_attempt) {
+            return Err(CopyInitValidationError::StateChanged);
+        }
+        match tokio::time::timeout_at(deadline, tokio::fs::metadata(&path)).await {
+            Err(_) => return Err(CopyInitValidationError::StateChanged),
+            Ok(Ok(metadata)) => break metadata,
+            Ok(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                if tokio::time::timeout_at(deadline, tokio::time::sleep(Duration::from_millis(10)))
+                    .await
+                    .is_err()
+                {
+                    return Err(CopyInitValidationError::StateChanged);
+                }
+            }
+            Ok(Err(error)) => {
+                return Err(CopyInitValidationError::Invalid(format!(
+                    "could not inspect emitted object {name}: {error}"
+                )));
+            }
+        }
+    };
+    if !metadata.file_type().is_file()
+        || metadata.len() > plurx_core::transcode::manifest::MAX_OBJECT_BYTES
+    {
+        return Err(CopyInitValidationError::Invalid(format!(
+            "emitted object {name} is not a bounded regular file"
+        )));
+    }
+    let bytes = tokio::time::timeout_at(deadline, tokio::fs::read(&path))
+        .await
+        .map_err(|_| CopyInitValidationError::StateChanged)?
+        .map_err(|error| {
+            CopyInitValidationError::Invalid(format!(
+                "could not read emitted object {name}: {error}"
+            ))
+        })?;
+    if bytes.len() as u64 != metadata.len()
+        || bytes.len() as u64 > plurx_core::transcode::manifest::MAX_OBJECT_BYTES
+    {
+        return Err(CopyInitValidationError::Invalid(format!(
+            "emitted object {name} changed during validation"
+        )));
+    }
+    if !copy_init_attempt_is_current(session, producer_attempt) {
+        return Err(CopyInitValidationError::StateChanged);
+    }
+    Ok(bytes)
+}
+
+/// Read and validate the immutable init object immediately before the actor's
+/// first-media handoff. FFmpeg publishes the file through `temp_file`, so a
+/// successful rename makes this bounded read a stable view of the exact bytes
+/// that the response path is about to authorize.
+async fn validate_copy_init_before_publication(
+    session: &Session,
+    producer_attempt: u64,
+    deadline: Instant,
+) -> Result<plurx_core::fmp4::HevcSampleEntryLayout, CopyInitValidationError> {
+    if !copy_init_attempt_is_current(session, producer_attempt) {
+        return Err(CopyInitValidationError::StateChanged);
+    }
+    let init_name = init_object_name(
+        session
+            .takeover
+            .as_ref()
+            .map(|takeover| takeover.owner_epoch),
+    );
+    let deadline = tokio::time::Instant::from_std(deadline);
+    let bytes = read_bounded_copy_object(session, producer_attempt, &init_name, deadline).await?;
+
+    let mut reader = plurx_core::fmp4::FragmentReader::new();
+    reader.push(&bytes);
+    let init = match reader.next_unit().map_err(|error| {
+        CopyInitValidationError::Invalid(format!("emitted init {init_name} is malformed: {error}"))
+    })? {
+        Some(plurx_core::fmp4::Unit::Init(init)) => init,
+        Some(_) | None => {
+            return Err(CopyInitValidationError::Invalid(format!(
+                "emitted init {init_name} does not contain a complete initialization segment"
+            )));
+        }
+    };
+    let layout = plurx_core::fmp4::validate_hevc_sample_entries(&init).map_err(|error| {
+        CopyInitValidationError::Invalid(format!(
+            "emitted init {init_name} has an unusable decoder configuration: {error}"
+        ))
+    })?;
+    let expects_hevc = session
+        .frozen_presentation
+        .as_ref()
+        .and_then(|presentation| presentation.file.video_codec.as_deref())
+        == Some("hevc");
+    if expects_hevc && layout == plurx_core::fmp4::HevcSampleEntryLayout::NotHevc {
+        return Err(CopyInitValidationError::Invalid(
+            "emitted init omitted the frozen HEVC video track".into(),
+        ));
+    }
+    if expects_hevc {
+        let first_index = session
+            .takeover
+            .as_ref()
+            .map_or(0, |takeover| takeover.media_sequence);
+        let first_index = u64::try_from(first_index).map_err(|_| {
+            CopyInitValidationError::Invalid("negative first media sequence".into())
+        })?;
+        let segment_name = plurx_core::fmp4::segment_name(first_index);
+        let segment =
+            read_bounded_copy_object(session, producer_attempt, &segment_name, deadline).await?;
+        reader.push(&segment);
+        let first = match reader.next_unit().map_err(|error| {
+            CopyInitValidationError::Invalid(format!(
+                "first media segment {segment_name} is malformed: {error}"
+            ))
+        })? {
+            Some(plurx_core::fmp4::Unit::Fragment(fragment)) => fragment,
+            Some(_) | None => {
+                return Err(CopyInitValidationError::Invalid(format!(
+                    "first media segment {segment_name} has no complete fragment"
+                )));
+            }
+        };
+        plurx_core::fmp4::validate_hevc_sample_description_reference(&init, &first).map_err(
+            |error| {
+                CopyInitValidationError::Invalid(format!(
+                    "first media segment {segment_name} has an unusable decoder reference: {error}"
+                ))
+            },
+        )?;
+    }
+    Ok(layout)
 }
 
 /// The fMP4 init object a given ownership generation publishes.
@@ -19441,30 +19612,27 @@ impl TranscodeManager {
         let typeless_sliding = self
             .stable_playlist_shape(replacement_deadline.is_some(), takeover.is_some())
             .await;
-        let legacy_args = || {
-            let dolby_vision = transcode::DolbyVisionCopyOptions::new(have_dovi, preserve);
-            match takeover.as_ref() {
-                Some(takeover) => transcode::hls_copy_args_with_sequence(
-                    &file,
-                    start_seconds,
-                    audio_index,
-                    options.transcode_audio,
-                    pacing,
-                    dolby_vision,
-                    takeover.media_sequence,
-                    &init_object_name(Some(takeover.owner_epoch)),
-                    &dir.to_string_lossy(),
-                ),
-                None => transcode::hls_copy_args_with_dolby_vision(
-                    &file,
-                    start_seconds,
-                    audio_index,
-                    options.transcode_audio,
-                    pacing,
-                    dolby_vision,
-                    &dir.to_string_lossy(),
-                ),
-            }
+        let legacy_args = || match takeover.as_ref() {
+            Some(takeover) => transcode::hls_copy_args_with_sequence(
+                &file,
+                start_seconds,
+                audio_index,
+                options.transcode_audio,
+                pacing,
+                video_options,
+                takeover.media_sequence,
+                &init_object_name(Some(takeover.owner_epoch)),
+                &dir.to_string_lossy(),
+            ),
+            None => transcode::hls_copy_args_with_dolby_vision(
+                &file,
+                start_seconds,
+                audio_index,
+                options.transcode_audio,
+                pacing,
+                video_options,
+                &dir.to_string_lossy(),
+            ),
         };
         // Take over the cutting when the source is one whose keyframes can be
         // read (docs/streaming/SEGMENTER-PLAN.md). ffmpeg then writes one continuous
@@ -19523,16 +19691,13 @@ impl TranscodeManager {
             &copy_kind,
         );
         let presentation_contract_fingerprint = frozen_presentation.contract_fingerprint.clone();
-        let retry = (segmenting
-            && !video_options.promotes_parameter_sets()
-            && !video_options.converts_dolby_vision())
-        .then(|| {
-            PrepublicationCopyRetry::build(
-                legacy_args(),
-                &presentation_contract_fingerprint,
-                self.runtime_cache.clone(),
-            )
-        });
+        let retry = build_prepublication_copy_retry(
+            segmenting,
+            video_options,
+            legacy_args(),
+            &presentation_contract_fingerprint,
+            self.runtime_cache.clone(),
+        );
         let expected_remaining_ms =
             file.duration_ms
                 .filter(|duration_ms| *duration_ms > 0)
@@ -21645,6 +21810,40 @@ impl TranscodeManager {
                 &actor_publication.binding,
                 crate::playback_control::RollingResponsePublicationBinding::AttemptMedia { .. }
             );
+            if attempt_media_publication
+                && session.actor_prepublication_producer.load(Acquire)
+                && matches!(&session.kind, SessionKind::Copy { .. })
+            {
+                match validate_copy_init_before_publication(session, *producer_attempt, deadline)
+                    .await
+                {
+                    Ok(layout) => {
+                        let description_count = match layout {
+                            plurx_core::fmp4::HevcSampleEntryLayout::NotHevc => 0,
+                            plurx_core::fmp4::HevcSampleEntryLayout::Single => 1,
+                            plurx_core::fmp4::HevcSampleEntryLayout::Multiple { count } => count,
+                        };
+                        tracing::info!(
+                            session = %session_log_id(session_id),
+                            file_id = session.file_id,
+                            start_seconds = session.start_seconds,
+                            producer_attempt,
+                            description_count,
+                            build = crate::version::BUILD,
+                            "validated copy init before first media handoff"
+                        );
+                    }
+                    Err(CopyInitValidationError::StateChanged) => {
+                        return Err(MediaResponsePublicationRejection::StateChanged);
+                    }
+                    Err(CopyInitValidationError::Invalid(reason)) => {
+                        let failure = format!("copy output validation failed: {reason}");
+                        fail_prepublication_transaction(session, failure.clone()).await;
+                        return Err(MediaResponsePublicationRejection::ProducerEnded(failure));
+                    }
+                }
+                require_publication_authority!();
+            }
             let (actor_handoff, first_media_applied) = if attempt_media_publication
                 && session.actor_prepublication_producer.load(Acquire)
             {
@@ -25200,6 +25399,173 @@ fn test_session(dir: PathBuf) -> Session {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn channel_playback_repair_installs_normalized_native_hls_retry() {
+        let file = execution_file_for_retry();
+        let video_options =
+            transcode::CopyVideoOptions::new(false, false).with_parameter_set_promotion(true);
+        let args = transcode::hls_copy_args_with_dolby_vision(
+            &file,
+            6275.560,
+            None,
+            true,
+            Pacing::unpaced(),
+            video_options,
+            "/tmp/channel-repair",
+        );
+        let retry = build_prepublication_copy_retry(
+            true,
+            video_options,
+            args,
+            "frozen-presentation",
+            PathBuf::from("/tmp/runtime-cache"),
+        )
+        .expect("parameter-set promotion is supported by the native HLS retry");
+        let joined = retry.args.join(" ");
+        assert!(
+            joined.contains("-bsf:v hevc_mp4toannexb,extract_extradata"),
+            "production retry lost required normalization: {joined}"
+        );
+        assert!(!joined.contains("remove_types=32-34"), "{joined}");
+
+        let (control, mut registration) =
+            crate::playback_control::RollingControlHandle::spawn_prepublication_producer(
+                "channel-repair-test",
+            );
+        registration
+            .register()
+            .await
+            .expect("register production executor");
+        control
+            .bind_response_publication_contract(
+                "frozen-presentation".into(),
+                Arc::new(AtomicBool::new(false)),
+            )
+            .await
+            .expect("bind frozen presentation");
+        let attempt = control
+            .begin_initial_producer_attempt(crate::playback_control::InitialProducerPolicy::copy(
+                "frozen-presentation".into(),
+                PROGRESS_STALL,
+                Some(retry.actor_recipe.clone()),
+            ))
+            .await
+            .expect("install initial production policy");
+        control
+            .classify_copy_producer_exit_before(
+                attempt,
+                crate::playback_control::CopyProducerExitClassification::Unsupported,
+                Instant::now() + Duration::from_secs(5),
+            )
+            .await
+            .expect("classify realistic unsupported copy shape");
+        let decision = registration.next_decision().await;
+        let crate::playback_control::RollingProducerExecutorPoll::Decision(decision) = decision
+        else {
+            panic!("unsupported production copy did not select the frozen retry");
+        };
+        let crate::playback_control::ProducerDecision::Retry {
+            failed_attempt,
+            recipe,
+            reason,
+            ..
+        } = decision.as_ref()
+        else {
+            panic!("unsupported production copy became terminal");
+        };
+        assert_eq!(*failed_attempt, attempt);
+        assert_eq!(
+            *reason,
+            crate::playback_control::ProducerDecisionReason::Unsupported
+        );
+        assert_eq!(recipe, &retry.actor_recipe);
+
+        let conversion = video_options.with_dolby_vision_conversion(true);
+        assert!(
+            build_prepublication_copy_retry(
+                true,
+                conversion,
+                Vec::new(),
+                "frozen-presentation",
+                PathBuf::from("/tmp/runtime-cache"),
+            )
+            .is_none(),
+            "the native muxer cannot replace Plurx's in-process RPU conversion"
+        );
+    }
+
+    #[tokio::test]
+    async fn channel_playback_repair_validates_distinct_init_before_publication() {
+        let dir = crate::test_tempdir().expect("copy init directory");
+        let feed = plurx_core::testfixtures::pipe_with_distinct_hevc_sample_entries("closed-gop");
+        let mut reader = plurx_core::fmp4::FragmentReader::new();
+        reader.push(&feed);
+        let Some(plurx_core::fmp4::Unit::Init(init)) = reader
+            .next_unit()
+            .expect("parse distinct-description fixture")
+        else {
+            panic!("fixture must begin with init");
+        };
+        let Some(plurx_core::fmp4::Unit::Fragment(first)) =
+            reader.next_unit().expect("parse first fixture fragment")
+        else {
+            panic!("fixture init must be followed by media");
+        };
+        tokio::fs::write(dir.path().join("init.mp4"), &init.bytes)
+            .await
+            .expect("write emitted init");
+        tokio::fs::write(
+            dir.path().join(plurx_core::fmp4::segment_name(0)),
+            &first.bytes,
+        )
+        .await
+        .expect("write first emitted media segment");
+
+        let mut session = test_session(dir.path().to_path_buf());
+        session.kind = SessionKind::Copy {
+            aac: true,
+            preserve_dolby_vision: false,
+            convert_dolby_vision: false,
+        };
+        session.frozen_presentation = Some(FrozenHlsPresentation::new(
+            execution_file_for_retry(),
+            HlsContext {
+                file_id: 91,
+                start_seconds: 6275.560,
+                media_origin_seconds: 6275.560,
+                codecs: "hvc1.2.4.L153.B0,mp4a.40.2".into(),
+                supplemental_codecs: None,
+                frame_rate: Some(24.0),
+            },
+            &session.kind,
+        ));
+        session.actor_prepublication_producer.store(true, Release);
+        let producer_attempt = session.control.current_producer_attempt();
+        let layout = validate_copy_init_before_publication(
+            &session,
+            producer_attempt,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .expect("two complete, distinct configurations are publishable");
+        assert_eq!(
+            layout,
+            plurx_core::fmp4::HevcSampleEntryLayout::Multiple { count: 2 }
+        );
+
+        tokio::fs::write(dir.path().join("init.mp4"), b"not an init")
+            .await
+            .expect("replace init with malformed bytes");
+        let error = validate_copy_init_before_publication(
+            &session,
+            producer_attempt,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .expect_err("malformed init cannot reach the first-media handoff");
+        assert!(matches!(error, CopyInitValidationError::Invalid(_)));
+    }
 
     #[cfg(unix)]
     #[tokio::test]
