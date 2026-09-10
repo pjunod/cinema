@@ -1,7 +1,0 @@
-version = 1
-
-[[coverage]]
-commits = ["9bfef968"]
-points = ["server.api", "apple.client"]
-checks = ["operations-contract", "apple-simulators", "history-regressions"]
-reason = "The Library-channel API uses an Axum subrouter so its no-store and body-limit middleware remain scoped to the family, but the documentation inventory only parsed route calls in http/mod.rs and treated every nested endpoint as invented. The inventory now expands named module routers under their literal nest prefix and pins all nine paths plus the aggregate count. The Apple Developer toggle also inherited a transient busy-state disable even though its readiness facts are advisory; the operations contract now keeps the enable section free of disabled controls, while the client build proves the edited Swift surface compiles. Generated Apple build claims are synchronized at build 130 so the release counter and every current-source document remain one value."

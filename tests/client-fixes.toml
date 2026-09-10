@@ -1052,3 +1052,13 @@ source = "clients/apple/Sources/LiveTvView.swift"
 source_anchor = "private struct LiveTvChannelButtonStyle: ButtonStyle"
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "testTheTenFootSurfaceKeepsSomethingFocusableWhileTheOverlayIsHidden"
+
+[[fixes]]
+# Readiness facts explain risk but never own the administrator's enable choice.
+# A transient settings request may not disable the Library-channel switch.
+id = "apple.library-channel-enablement-remains-advisory"
+commits = ["9bfef968"]
+source = "clients/apple/Sources/LiveTvDeveloperView.swift"
+source_anchor = "Toggle(\"Enable Library channels\""
+test = "tests/operations/test_evidence_workflows.py"
+test_anchor = "test_apple_prepared_enablement_is_visible_and_advisory"
