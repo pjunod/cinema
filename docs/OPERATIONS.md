@@ -4142,6 +4142,8 @@ setting back off. Explicit administrator intent owns the enabled state.
 | `channel_occurrence_changed` | A programme or pending generation crossed its boundary during startup. Resolve server-now once and retry with the new identity. |
 | `channel_unavailable` | The definition was disabled/deleted or is no longer visible. Following ends on its next control exchange. |
 | `channel_store_unavailable` | This node cannot establish authoritative state. An already-rendered guide may remain visible, but do not mint a new tune. |
+| `channel_route_unavailable` | The contacted server does not expose the Library-channel API. Confirm its build and finish the server rollout; this is not evidence of a Store outage. |
+| `channel_request_failed` | The client did not receive a typed channel response. Inspect the HTTP status and transport before diagnosing replicated state. |
 
 Structured channel logs may name channel/session IDs but never recipes, raw
 keywords, absolute media paths, or credential-bearing URLs. Following uses

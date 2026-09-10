@@ -214,6 +214,49 @@ class EvidenceWorkflowCase(unittest.TestCase):
         self.assertIn("OfflineDownloads.removeProfile(instance, user)", logout)
         self.assertNotIn("error.code() == 401 || error.code() == 403", logout)
 
+    def test_library_channel_collection_urls_match_router_and_fail_truthfully(self) -> None:
+        http = self.read("crates/plurxd/src/http/mod.rs")
+        routes = self.read("crates/plurxd/src/http/library_channels.rs")
+        web = self.read("crates/plurxd/src/web/index.html")
+        web_errors = self.read("crates/plurxd/src/web/library-channels.js")
+        apple = self.read("clients/apple/Sources/PlurxAPI.swift")
+        android = self.read(
+            "clients/android/app/src/main/java/tv/plurx/app/data/PlurxApi.kt"
+        )
+
+        self.assertIn("library_channels::collection_router()", http)
+        self.assertIn(
+            "library_channel_collection_routes_accept_rollout_spellings_with_same_guards",
+            http,
+        )
+        self.assertIn(
+            '.route("/library-channels", get(list).post(create))', routes
+        )
+        self.assertIn(
+            '.route("/library-channels/", get(list).post(create))', routes
+        )
+        self.assertEqual(routes.count("DefaultBodyLimit::max(64 * 1024)"), 2)
+        self.assertIn('api(`/library-channels?${query}`)', web)
+        self.assertIn('api("/library-channels",{method:"POST"', web)
+        self.assertNotIn("/library-channels/?", web)
+        self.assertIn('get("library-channels", query: query)', apple)
+        self.assertIn('post("library-channels", body: definition)', apple)
+        self.assertIn('@GET("library-channels")', android)
+        self.assertIn('@POST("library-channels")', android)
+
+        error_view = web_errors.split("function errorView(error, context)", 1)[1].split(
+            "return {code, title: selected[0], detail: selected[1]};", 1
+        )[0]
+        self.assertIn(
+            'status === 404 && collectionRoute ? "channel_route_unavailable"',
+            error_view,
+        )
+        self.assertIn("known[code] || known.channel_request_failed", error_view)
+        self.assertIn("channel_store_unavailable", error_view)
+        self.assertIn(
+            "LibraryChannelCore.errorView(error,{collection:true})", web
+        )
+
     def test_android_final_alignment_completes_before_surface_transfer(self) -> None:
         controller = self.read(
             "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
