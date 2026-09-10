@@ -1,8 +1,6 @@
 name: validation nightly
 
 on:
-  schedule:
-    - cron: "17 3 * * *"
   workflow_dispatch:
     inputs:
       seed_pgs_crash:

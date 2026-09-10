@@ -11,9 +11,25 @@ class EvidenceWorkflowCase(unittest.TestCase):
     def read(self, path: str) -> str:
         return (ROOT / path).read_text(encoding="utf-8")
 
-    def test_fix_evidence_is_label_opt_in_and_report_only(self) -> None:
+    def test_runtime_sweeps_do_not_trigger_on_prs_or_main_pushes(self) -> None:
+        for name in ("ci", "effort-ci", "lint", "cluster-store-backstop",
+                     "release-readiness", "validation-nightly"):
+            workflow = self.read(f".github/workflows/{name}.yml")
+            triggers = workflow.split("on:\n", 1)[1].split("\njobs:", 1)[0]
+            self.assertIn("workflow_dispatch:", triggers)
+            self.assertNotIn("  pull_request:", triggers)
+            self.assertNotIn("branches: [main]", triggers)
+            self.assertNotIn("  schedule:", triggers)
+        fast = self.read(".github/workflows/main-fast-lane.yml")
+        self.assertIn("types: [opened, synchronize, reopened, labeled, unlabeled]", fast)
+        self.assertIn("github.event.pull_request.draft == false", fast)
+        self.assertIn("contains(github.event.pull_request.labels.*.name, 'fast-lane')", fast)
+
+    def test_fix_evidence_is_manual_and_report_only(self) -> None:
         workflow = self.read(".github/workflows/fix-evidence.yml")
-        self.assertIn("'fixes-behavior'", workflow)
+        self.assertIn("workflow_dispatch:", workflow)
+        self.assertNotIn("  pull_request:", workflow)
+        self.assertIn("inputs.base_sha", workflow)
         self.assertIn("scripts/prove-fix", workflow)
         self.assertIn("continue-on-error: true", workflow)
         self.assertIn("This is report-only", workflow)

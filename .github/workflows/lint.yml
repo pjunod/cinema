@@ -2,7 +2,6 @@ name: lint
 
 on:
   push:
-    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
 
@@ -13,8 +12,8 @@ concurrency:
   group: lint-${{ github.ref }}
   cancel-in-progress: false
 
-# Post-merge and manual badge workflow. Pull requests and merge groups run
-# Clippy once inside ci.yml's fast Rust gate, where the aggregate gate owns it.
+# Release-tag and manual badge workflow. Main pull requests run Clippy in
+# main-fast-lane.yml after the one adversarial review.
 jobs:
   lint:
     name: rustfmt + clippy

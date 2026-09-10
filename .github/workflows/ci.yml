@@ -1,15 +1,12 @@
 name: ci
 
+# Full runtime sweep: manual or an explicit release tag only. Main pull
+# requests use main-fast-lane.yml after their one review; merging allocates no
+# second sweep and deployment remains explicit.
 on:
   push:
-    branches: [main]
     tags: ["v*"]
-  # Task pull requests aimed at effort/** use effort-ci.yml's compile-only
-  # development gate. A final effort/** -> main pull request, or its
-  # integration/*-into-main conflict-resolution branch, lands here and
-  # deliberately expands to the complete fan-out below.
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
