@@ -58,6 +58,25 @@ CSS px viewport exercises the same responsive width as a 1280 px window at
 200%; the evidence names this limitation instead of claiming a native zoom
 gesture was performed.
 
+## Promotion-lane corrections
+
+The main-bound lane began only after the sole adversarial review was addressed.
+Its current-head attempts found and closed three branch-owned evidence gaps;
+one unrelated test flake and one runner-capacity refusal were handled without
+changing product behavior.
+
+| Signal | Disposition |
+|---|---|
+| Retained decoder copy and history evidence | Restored the concrete producer-health explanation and recorded explicit `regressions.d` coverage |
+| Intended settings DOM drift | Regenerated the portable golden: 78 captures and 7,536 structural facts with no console or page errors |
+| Host-dependent decoder path counts | Render each measured path set inside one stable code container; the golden now records the same evidence shape on macOS and Linux |
+| Rust deadline test | One unrelated timing assertion failed after 2,147 passes; the unchanged Rust suite passed on the next current-head attempt |
+| VOD browser runner capacity | Job stopped before test execution at its 45 GiB disk preflight; idle `gha-nuc4-general-02` was pruned with Docker's unused-data cleanup and the repository's bounded Cargo-cache pruner, leaving 48 GiB free |
+
+PR #228 remains the authority for the final current-head Main promotion gate
+and merge result; this document records causes and repairs without predicting a
+result that does not yet exist.
+
 ## Sole adversarial review
 
 The draft pull request received exactly one adversarial agent review. The
@@ -98,5 +117,5 @@ requested.
   prove that a particular stream, client, or network has enough throughput.
 - Guide readiness describes saved configuration. It must not be presented as
   validation of an unsaved XMLTV draft.
-- Current-head fast-lane results will be added only when they exist;
-  historical prototype observations are not evidence for this branch.
+- The final current-head gate and merge result remain on PR #228; historical
+  prototype observations are not evidence for this branch.
