@@ -120,6 +120,43 @@ pub enum Outcome {
     Cancelled(SegmentCounts),
 }
 
+/// Turn a failed HEVC-init promotion into the copy reader's policy-bearing
+/// outcome.
+///
+/// Promotion and validation can both stop at the same legal-but-unsupported
+/// container shape before either can inspect a decoder configuration. A
+/// multi-entry `stsd` is the production example: there is no evidence that
+/// either entry is invalid, only that this reader cannot safely choose one.
+/// Keep that exact shared `Unsupported` result eligible for the actor's one
+/// frozen legacy-muxer retry. A different validation failure is affirmative
+/// evidence that the init would not satisfy its HEVC sample-entry promise and
+/// remains terminal.
+fn hevc_promotion_failure(
+    promotion: fmp4::Fmp4Error,
+    validation: Result<(), fmp4::Fmp4Error>,
+) -> Outcome {
+    let shared_structural_refusal = matches!(&promotion, fmp4::Fmp4Error::Unsupported(_))
+        && validation
+            .as_ref()
+            .is_err_and(|configuration| configuration == &promotion);
+    let reason = format!("preparing the HLS init segment: {promotion}");
+    if shared_structural_refusal {
+        return Outcome::Unsupported(reason);
+    }
+    match validation {
+        Ok(()) => match promotion {
+            fmp4::Fmp4Error::Unsupported(_) => Outcome::Unsupported(reason),
+            fmp4::Fmp4Error::Malformed(_) => Outcome::ReaderFailed {
+                reason,
+                counts: SegmentCounts::default(),
+            },
+        },
+        Err(configuration) => {
+            Outcome::InvalidHevcConfiguration(format!("{reason}; {configuration}"))
+        }
+    }
+}
+
 /// Everything a session writes, and the playlist it keeps in step.
 ///
 /// The playlist is rewritten whole on every segment rather than appended to,
@@ -490,22 +527,11 @@ pub async fn run<R: AsyncRead + Unpin>(
                                 "promoted in-band HEVC parameter sets into the HLS init segment"
                             ),
                             Ok(false) => {}
-                            Err(e) => {
-                                let reason = format!("preparing the HLS init segment: {e}");
-                                return match fmp4::validate_hevc_decoder_configuration(&init) {
-                                    Ok(()) => match e {
-                                        fmp4::Fmp4Error::Unsupported(_) => {
-                                            Outcome::Unsupported(reason)
-                                        }
-                                        fmp4::Fmp4Error::Malformed(_) => Outcome::ReaderFailed {
-                                            reason,
-                                            counts: SegmentCounts::default(),
-                                        },
-                                    },
-                                    Err(configuration) => Outcome::InvalidHevcConfiguration(
-                                        format!("{reason}; {configuration}"),
-                                    ),
-                                };
+                            Err(error) => {
+                                return hevc_promotion_failure(
+                                    error,
+                                    fmp4::validate_hevc_decoder_configuration(&init),
+                                );
                             }
                         }
                         match fmp4::promote_hdr10_static_metadata(&mut init, &fragment) {
@@ -842,6 +868,23 @@ mod tests {
         )
         .await;
         (dir, outcome)
+    }
+
+    #[test]
+    fn shared_structural_hevc_refusal_uses_the_bounded_legacy_retry() {
+        let multi_entry = fmp4::Fmp4Error::Unsupported(
+            "this stsd has 2 HEVC sample entries; the writer cannot choose one".into(),
+        );
+        let outcome = hevc_promotion_failure(multi_entry.clone(), Err(multi_entry));
+        assert!(matches!(outcome, Outcome::Unsupported(_)));
+
+        let promotion =
+            fmp4::Fmp4Error::Unsupported("the first sample has no complete VPS/SPS/PPS set".into());
+        let invalid = fmp4::Fmp4Error::Unsupported(
+            "the out-of-band HEVC decoder configuration has no complete VPS/SPS/PPS set".into(),
+        );
+        let outcome = hevc_promotion_failure(promotion, Err(invalid));
+        assert!(matches!(outcome, Outcome::InvalidHevcConfiguration(_)));
     }
 
     fn replace_hvcc_array_type(bytes: &mut [u8], from: u8, to: u8) {

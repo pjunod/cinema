@@ -4679,6 +4679,30 @@ mod tests {
         init
     }
 
+    fn duplicate_hevc_sample_entry(init: &mut Init) {
+        let location = locate_hvcc(&init.bytes)
+            .expect("locating the original hvcC")
+            .expect("HEVC sample entry");
+        let entry = location.ancestors[1];
+        let stsd = location.ancestors[2];
+        let entry_size = peek_box(&init.bytes, entry.start)
+            .expect("reading the HEVC sample entry")
+            .expect("complete HEVC sample entry")
+            .size;
+        let entry_end = entry.start + entry_size;
+        let duplicate = init.bytes[entry.start..entry_end].to_vec();
+        let delta = duplicate.len();
+        init.bytes.splice(entry_end..entry_end, duplicate);
+
+        let entry_count_at = stsd.start + stsd.header_len + 4;
+        let entry_count = be_u32(&init.bytes, entry_count_at);
+        init.bytes[entry_count_at..entry_count_at + 4]
+            .copy_from_slice(&(entry_count + 1).to_be_bytes());
+        for &ancestor in &location.ancestors[2..] {
+            grow_box(&mut init.bytes, ancestor, delta).expect("growing sample-entry ancestors");
+        }
+    }
+
     /// The two Dolby Vision configuration records ffmpeg itself wrote, captured
     /// from nuc4 on 2026-08-30 (`docs/streaming/PLAYBACK-CAPS-V2-M0.md` §8).
     ///
@@ -5997,6 +6021,29 @@ mod tests {
             error.to_string().contains("complete VPS/SPS/PPS"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn multi_entry_hevc_is_one_shared_structural_refusal_not_invalid_configuration() {
+        let mut init = minimal_hvcc_dv_init();
+        duplicate_hevc_sample_entry(&mut init);
+        let video = init.video().expect("video track");
+        let vps = [0x40, 0x01, 0x0c];
+        let sps = [0x42, 0x01, 0x01];
+        let pps = [0x44, 0x01, 0xc0];
+        let fragment = fragment_with_first_video_sample(
+            video.id,
+            length_prefixed_hevc_nals(&[&vps, &sps, &pps]),
+        );
+
+        let promotion = promote_hevc_parameter_sets(&mut init, &fragment)
+            .expect_err("the writer cannot choose one of two sample descriptions");
+        let validation = validate_hevc_decoder_configuration(&init)
+            .expect_err("validation cannot choose one description either");
+
+        assert_eq!(promotion, validation);
+        assert!(matches!(promotion, Fmp4Error::Unsupported(_)));
+        assert!(promotion.to_string().contains("2 HEVC sample entries"));
     }
 
     #[test]
