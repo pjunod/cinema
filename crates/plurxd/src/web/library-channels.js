@@ -111,10 +111,11 @@
     return grouped;
   }
 
-  function errorView(error) {
+  function errorView(error, context) {
     const status = Number(error && error.status || 0);
+    const collectionRoute = Boolean(context && context.collection);
     const code = String(error && error.code ||
-      (status === 404 ? "channel_route_unavailable" : "channel_request_failed"));
+      (status === 404 && collectionRoute ? "channel_route_unavailable" : "channel_request_failed"));
     const known = {
       channel_occurrence_changed: ["The programme changed", "Resolving the channel again is safe."],
       channel_unavailable: ["Channel unavailable", "It may be disabled or deleted."],

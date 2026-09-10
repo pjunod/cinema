@@ -94,14 +94,8 @@ pub fn router(state: AppState) -> Router {
         // process can currently observe. Nothing reads it to decide
         // whether a switch may be flipped.
         .route("/developer/readiness", get(developer::readiness))
-        .merge(
-            library_channels::trailing_slash_compatibility_router()
-                .layer(DefaultBodyLimit::max(64 * 1024)),
-        )
-        .nest(
-            "/library-channels",
-            library_channels::router().layer(DefaultBodyLimit::max(64 * 1024)),
-        )
+        .merge(library_channels::trailing_slash_compatibility_router())
+        .nest("/library-channels", library_channels::router())
         .route("/live-tv/readiness", get(live_tv::readiness))
         .route(
             "/live-tv/readiness/refresh",
@@ -1734,6 +1728,74 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "setup failed: {body}");
         body["token"].as_str().expect("token").to_owned()
+    }
+
+    #[tokio::test]
+    async fn library_channel_collection_routes_accept_rollout_spellings_with_same_guards() {
+        // Constructing the complete application is part of the regression:
+        // Axum rejects overlapping merged routes by panicking here.
+        let app = test_app();
+        let paths = ["/api/v1/library-channels", "/api/v1/library-channels/"];
+
+        for path in paths {
+            let response = app
+                .clone()
+                .oneshot(get(path, None))
+                .await
+                .expect("unauthenticated collection response");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
+            assert_eq!(
+                response.headers().get(header::CACHE_CONTROL),
+                Some(&HeaderValue::from_static("private, no-store")),
+                "{path}"
+            );
+        }
+
+        let token = setup_admin(&app).await;
+        for path in paths {
+            let response = app
+                .clone()
+                .oneshot(get(path, Some(&token)))
+                .await
+                .expect("authenticated collection response");
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            assert_eq!(
+                response.headers().get(header::CACHE_CONTROL),
+                Some(&HeaderValue::from_static("private, no-store")),
+                "{path}"
+            );
+
+            let invalid = app
+                .clone()
+                .oneshot(post(path, Some(&token), json!({})))
+                .await
+                .expect("authenticated create response");
+            assert_eq!(invalid.status(), StatusCode::UNPROCESSABLE_ENTITY, "{path}");
+            assert_eq!(
+                invalid.headers().get(header::CACHE_CONTROL),
+                Some(&HeaderValue::from_static("private, no-store")),
+                "{path}"
+            );
+
+            let oversized = Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(vec![b'x'; 64 * 1024 + 1]))
+                .expect("oversized create request");
+            let response = app
+                .clone()
+                .oneshot(oversized)
+                .await
+                .expect("oversized create response");
+            assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE, "{path}");
+            assert_eq!(
+                response.headers().get(header::CACHE_CONTROL),
+                Some(&HeaderValue::from_static("private, no-store")),
+                "{path}"
+            );
+        }
     }
 
     /// Encoder capacity is settable, and the number the page saves is the

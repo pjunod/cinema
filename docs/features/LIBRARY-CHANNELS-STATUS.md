@@ -21,7 +21,7 @@ proved, and what remains?*
 | M4 Apple | built; iOS and tvOS compile passed | native paginated guide, three persisted tvOS layouts, iPhone/iPad resumable preview/authoring from navigation or title detail, finite playback control, server-monotonic following, and ordinary watch-from-start/return; build 132 |
 | M5 Android | built; Android APK compile passed | native paginated guide, phone/tablet resumable authoring from navigation or title detail, three Google TV layouts, finite playback control, server-monotonic following, and ordinary watch-from-start/return; versionCode 81 |
 | M6 promotion | complete | PR #231 merged as `cb76cc8a` after exactly one adversarial review and a green current-head Main promotion gate |
-| M7 production collection route | implemented; promotion state is linked from issue #233 | deployed clients request `/api/v1/library-channels/`, which Axum 0.8 returns as 404 while the canonical no-slash collection route authenticates normally; the Store schema and list query are healthy; server compatibility plus corrected web, Apple build 133, and Android versionCode 82 are in the candidate |
+| M7 production collection route | single review addressed; promotion state is linked from issue #233 | deployed clients request `/api/v1/library-channels/`, which Axum 0.8 returns as 404 while the canonical no-slash collection route authenticates normally; the Store schema and list query are healthy; server compatibility plus corrected web, Apple build 133, and Android versionCode 82 are in the candidate; the review's scoped-404 and executable-router findings are addressed |
 
 ## Production correction — route failure, not Store failure
 
@@ -39,6 +39,13 @@ first client spelling as a server compatibility alias during rollout, and
 distinguishes route/transport failures from typed Store failures in the web
 empty state. The compatibility alias changes no enablement or authorization
 rule.
+
+The correction received exactly one adversarial review. Its two P2 findings
+are addressed without a second pass: only collection-page loading may classify
+an untyped 404 as a missing route, and a router-level regression constructs the
+complete application and exercises both spellings with unauthenticated and
+authenticated GETs, rejected creates, the 64 KiB body ceiling, and
+`private, no-store` responses.
 
 ## Current decision — the merged Live TV guide is the UI seam
 

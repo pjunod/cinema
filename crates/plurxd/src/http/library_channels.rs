@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::Response;
@@ -48,6 +48,7 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/{id}/favourite", put(favourite))
         .route("/{id}/resolve", post(resolve_now))
         .route("/{id}/sessions", post(start_session))
+        .layer(DefaultBodyLimit::max(64 * 1024))
         .layer(middleware::from_fn(private_no_store))
 }
 
@@ -57,6 +58,7 @@ pub(crate) fn router() -> Router<AppState> {
 pub(crate) fn trailing_slash_compatibility_router() -> Router<AppState> {
     Router::new()
         .route("/library-channels/", get(list).post(create))
+        .layer(DefaultBodyLimit::max(64 * 1024))
         .layer(middleware::from_fn(private_no_store))
 }
 

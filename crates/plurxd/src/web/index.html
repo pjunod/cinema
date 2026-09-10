@@ -19451,7 +19451,7 @@ async function viewLibraryChannels(generation=PAGE_RENDER_GENERATION){
     setPagePhase("#/library-channels",generation,"settled");
   }catch(error){
     if(generation!==PAGE_RENDER_GENERATION)return;
-    const view=LibraryChannelCore.errorView(error);
+    const view=LibraryChannelCore.errorView(error,{collection:true});
     layoutChrome("library-channels",`<div class="empty"><b>${esc(view.title)}</b><br>${esc(view.detail)}<div class="lc-actions"><button onclick="viewLibraryChannels()">Retry</button></div></div>`);
     setPageFailure("#/library-channels",generation,view.code);
   }

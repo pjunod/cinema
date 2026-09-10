@@ -226,8 +226,13 @@ class EvidenceWorkflowCase(unittest.TestCase):
 
         self.assertIn("library_channels::trailing_slash_compatibility_router()", http)
         self.assertIn(
+            "library_channel_collection_routes_accept_rollout_spellings_with_same_guards",
+            http,
+        )
+        self.assertIn(
             '.route("/library-channels/", get(list).post(create))', routes
         )
+        self.assertEqual(routes.count("DefaultBodyLimit::max(64 * 1024)"), 2)
         self.assertIn('api(`/library-channels?${query}`)', web)
         self.assertIn('api("/library-channels",{method:"POST"', web)
         self.assertNotIn("/library-channels/?", web)
@@ -239,9 +244,15 @@ class EvidenceWorkflowCase(unittest.TestCase):
         error_view = web_errors.split("function errorView(error)", 1)[1].split(
             "return {code, title: selected[0], detail: selected[1]};", 1
         )[0]
-        self.assertIn('status === 404 ? "channel_route_unavailable"', error_view)
+        self.assertIn(
+            'status === 404 && collectionRoute ? "channel_route_unavailable"',
+            error_view,
+        )
         self.assertIn("known[code] || known.channel_request_failed", error_view)
         self.assertIn("channel_store_unavailable", error_view)
+        self.assertIn(
+            "LibraryChannelCore.errorView(error,{collection:true})", web
+        )
 
     def test_android_final_alignment_completes_before_surface_transfer(self) -> None:
         controller = self.read(
