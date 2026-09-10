@@ -12,7 +12,7 @@ anything it can't (MKV, DTS/TrueHD, …) is delivered as the server's on-the-fly
 HDR display at runtime and sends that to `/decision`, so the server transcodes
 only what this hardware genuinely can't play.
 
-> Status: **v0.3.0**, build `128` in [`project.yml`](project.yml) — working
+> Status: **v0.3.0**, build `129` in [`project.yml`](project.yml) — working
 > development client. Browse, resume, discover, and play on both iOS and tvOS.
 > Both targets compile against the iOS/tvOS 26.5 SDKs and share the same
 > regression suite.
@@ -148,7 +148,9 @@ only what this hardware genuinely can't play.
 ## Build and install on your own devices
 
 TestFlight delivery is automated through the macOS Ansible controller; it
-tests both schemes, then archives and uploads each platform. See
+archives and uploads both platforms without rerunning test suites. The
+promotion lane supplies static and compilation evidence, while complete unit
+and simulator suites belong to the separate test sweep. See
 [`docs/PUBLISHING.md`](../../docs/PUBLISHING.md#ansible-owns-the-repeatable-mobile-deploy).
 
 ```bash
@@ -158,9 +160,11 @@ open plurx.xcodeproj
 ```
 
 In Xcode, select the project, select each app target, and confirm **Signing &
-Capabilities → Team** is your developer team. The committed project currently
-uses Paul's team ID; another developer should replace it in `project.yml` and
-regenerate.
+Capabilities → Team** is your developer team. The repository does not store a
+team ID: select it locally after generating the project, or supply
+`PLURX_DEVELOPMENT_TEAM` when using `scripts/ship-physical --apple`. Keeping the
+value in the signing environment prevents a personal identifier from entering
+the shipped source tree.
 
 ### Pair an Apple TV
 

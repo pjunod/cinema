@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["8d99f0c1"]
+reason = "This metadata-only commit records the prior documentation correction in the historical regression ledger. It changes no runtime behavior, and a ledger entry cannot carry coverage for the commit that creates it."
+ignore = true

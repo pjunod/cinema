@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["021513b8"]
+reason = "This documentation-only commit restores the generated Apple build sentence on the maintained status page and moves the signing-environment note into ordinary body prose. It changes no runtime behavior."
+ignore = true
