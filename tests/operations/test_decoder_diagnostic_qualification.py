@@ -447,7 +447,7 @@ class DecoderSelectionInventoryTests(unittest.TestCase):
         identifiers = [surface["id"] for surface in surfaces]
         self.assertEqual(len(identifiers), len(set(identifiers)))
         self.assertEqual(set(identifiers), EXPECTED_INVENTORY_IDS)
-        self.assertEqual(len(surfaces), 73)
+        self.assertEqual(len(surfaces), 74)
         for surface in surfaces:
             with self.subTest(surface=surface["id"]):
                 source = ROOT / surface["source"]
