@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["c79abcdd"]
+points = ["playback.pipeline", "library.channels"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "Production Library-channel session s-99a265 on nynuc reproduced a legal seeked ffmpeg init with two hvc1 entries in one stsd. `multi_entry_hevc_is_one_shared_structural_refusal_not_invalid_configuration` constructs that shape and requires promotion and validation to return the same Unsupported fact. `shared_structural_hevc_refusal_uses_the_bounded_legacy_retry` requires that shared fact to remain Unsupported so the existing single prepublication legacy-HLS retry can run, while a distinct incomplete VPS/SPS/PPS validation result remains InvalidHevcConfiguration and terminal."
