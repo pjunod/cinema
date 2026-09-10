@@ -243,6 +243,54 @@ class RipwireTest(unittest.TestCase):
         self.assertEqual(0, self.invoke('map').returncode)
         self.assertEqual({old.name, self.key}, {p.name for p in parent.iterdir()})
 
+    def test_version_and_flag_mismatches_are_refused(self):
+        binary = self.install()
+        for body in ('print("ripwire 9.9.9")',
+                     'import sys; print("ripwire 0.5.0" if "--version" in sys.argv else "--for=TASK")'):
+            binary.write_text(f'#!{sys.executable}\n' + body + '\n')
+            binary.chmod(0o700)
+            with self.assertRaises(API['Refusal']) as error:
+                API['compatible'](binary, self.root, self.lock)
+            self.assertEqual(2, error.exception.code)
+
+    def test_binary_size_refusal_does_not_publish(self):
+        archive, entry = self.archive([('release/ripwire', tarfile.REGTYPE, b'12345')])
+        extract = API['extract_binary']
+        with patch.dict(extract.__globals__, MAX_BINARY=4):
+            with self.assertRaises(API['Refusal']):
+                extract(archive, self.root / 'too-large', entry)
+        self.assertFalse((self.root / 'too-large').exists())
+
+    def test_dual_pipe_pressure_does_not_deadlock(self):
+        self.install('sys.stdout.write("o" * 100000); sys.stdout.flush(); '
+                     'sys.stderr.write("e" * 60000); sys.stderr.flush()')
+        result = self.invoke('map', '--timeout', '3')
+        self.assertEqual(0, result.returncode, result.stderr[:1000])
+        self.assertEqual(b'o' * 100000, result.stdout)
+        self.assertTrue(result.stderr.endswith(b'e' * 60000))
+
+    def test_setup_is_idempotent_and_publishes_metadata_with_binary(self):
+        directory = self.root / 'target/ripwire/tools/0.5.0' / self.key
+        fake = self.install()
+        contents = fake.read_bytes()
+        shutil.rmtree(directory)
+        member = self.lock['platforms'][self.key]['binary_member']
+        archive, entry = self.archive([(member, tarfile.REGTYPE, contents)])
+        lock = json.loads(json.dumps(self.lock))
+        lock['platforms'][self.key]['archive_sha256'] = entry['archive_sha256']
+        setup = API['setup']
+        def local_download(url, target):
+            shutil.copy2(archive, target)
+        with patch.dict(setup.__globals__, download=local_download):
+            first = setup(self.root, lock, self.key)
+        self.assertEqual('installed', first['outcome'])
+        self.assertTrue(directory.is_symlink())
+        installed, metadata = API['installed'](self.root, lock, self.key, check_cli=True)
+        self.assertEqual(hashlib.sha256(contents).hexdigest(), metadata['binary_sha256'])
+        with patch.dict(setup.__globals__, download=lambda *_: self.fail('idempotent setup downloaded')):
+            self.assertEqual('already-installed', setup(self.root, lock, self.key)['outcome'])
+        self.assertEqual(contents, installed.read_bytes())
+
     def test_unsupported_host_and_invalid_lock(self):
         with patch('platform.system', return_value='Unsupported'):
             with self.assertRaises(API['Refusal']):

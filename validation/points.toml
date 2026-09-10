@@ -905,6 +905,7 @@ paths = [
   "tests/fixtures/ripwire/**",
   "docs/ci/RIPWIRE-STATUS.md",
   "docs/ci/RIPWIRE.md",
+  "docs/ci/RIPWIRE-PILOT.md",
   "scripts/history-audit",
   "scripts/prove-fix",
   "scripts/prove-tombstone-offline-fence",

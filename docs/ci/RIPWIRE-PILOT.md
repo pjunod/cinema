@@ -1,0 +1,242 @@
+# Ripwire pilot — measured speed, graph omissions, and unfinished adoption evidence
+
+**Status:** incomplete; agent capacity blocked · **Verdict:** defer ·
+**Measured:** 2026-09-10 · **Owner:** validation.framework
+
+Companion to [the usage guide](RIPWIRE.md) and
+[implementation status](RIPWIRE-STATUS.md). The adapter is implemented on
+`effort/ripwire`; this report does not authorize main promotion or default
+agent adoption. Three of sixteen navigation sessions returned results before
+agents hit the account usage limit. The independent adversarial review has
+not been requested. Do not count the benchmark sessions as that review.
+
+## Fixed source and environment
+
+| Field | Measured value |
+|---|---|
+| Plurx source | `da51ffb7d9fefe518f5746b63e0c5eedf3a7f7ff` (adapter integrated into effort) |
+| Original main | `4519f87aa17def278dc4ad6c08a411e7829c2ec4` |
+| Ripwire | v0.5.0, upstream source `bacfa3b7b3ad13648ce3892de06af05b6b55a2ac` |
+| macOS ARM archive SHA-256 | `f9b4d638f0f0efeac602fa6fc5037eb2871f933deccffc3b932b0c9c5dc1fe88` |
+| Executable SHA-256 | `ec57f8c73c78219914c9bdcf75fd755695612f425611989dd65476fc2e0cbab7` |
+| Release version output | `ripwire 0.5.0 (Release, AppleClang 15.0.0.15000309, built_from=bacfa3b7b)` |
+| Host | macOS 26.6.2, ARM64; Python 3.14.7 |
+| Agents | Fresh sessions inheriting this task's model/reasoning settings; exact model identifier/settings were not returned by the collaboration API and are unverified. |
+| Compiler/indexer | No Rust compilation or SCIP generation needed for the adapter; no precise index supplied to either arm. |
+| Harness M2/M5 | Not implemented in the benchmark tree: hotspot tests remain inline; catalog has no subsystem `guide` field. No residual-cost claim is possible. |
+| Profile | `default`; normal Git ignores and upstream denylist; seven exclusions listed in the usage guide |
+| Limits | 4 MiB source; 3000 requested tokens; 60 s deadline; 128 KiB stdout; 64 KiB stderr |
+| Cache | Clone-local, explicit rich cache for find; lean for other exposed verbs |
+
+All task clones were detached at the fixed commit. No session received
+another arm's transcript or expected answers. The coordinator froze expected
+contracts before dispatch. Navigation agents were limited to five minutes
+and sixteen shell navigation calls, with no source edits, tests, network,
+installation, or further agents. They used `rg`, bounded reads, Git and
+catalog plans; candidate sessions additionally used the installed wrapper.
+Exact model metadata and full-session timing must be captured when the
+paired trial is resumed. Current measurements cannot satisfy a strict
+model/settings-controlled adoption claim.
+
+## Query cost — all 24 completed samples
+
+Each fresh sample began after deleting only the measured clone's cache
+folder. The five warm samples immediately followed the third fresh sample.
+Commands were `find 'SQL placeholder validation'`,
+`callers 'hiqlite.rs:validate_parameter_order'`, and `coverage`.
+Wall time includes adapter startup, Git checks, integrity hashing, and the
+query. RSS is `/usr/bin/time -l` maximum resident set size, converted from
+macOS bytes to MiB; it is not an estimate of total model memory or billing.
+
+| Verb | Cache | Elapsed ms, in order | Median ms | Stdout bytes each | Peak RSS MiB, in order |
+|---|---|---|---|---|---|
+| find | fresh | 1386, 1287, 1428 | 1386 | 3472 | 644.0, 580.5, 652.1 |
+| find | warm | 492, 485, 494, 496, 515 | 494 | 3472 | 301.2, 299.7, 301.2, 301.2, 301.2 |
+| callers | fresh | 952, 947, 956 | 952 | 3467 | 454.4, 487.9, 512.0 |
+| callers | warm | 324, 324, 328, 325, 328 | 325 | 3467 | 223.7, 224.4, 227.4, 220.0, 219.7 |
+| coverage | fresh | 946, 890, 945 | 945 | 32142 | 500.3, 526.2, 457.0 |
+| coverage | warm | 318, 317, 312, 327, 319 | 318 | 32142 | 228.2, 231.1, 221.9, 223.6, 226.1 |
+
+All 24 wrapper and instrument exits were zero; warm medians meet the two
+second target and all samples meet the configured deadline. This is one
+host and corpus, not a cross-platform performance claim.
+
+**Retained measurement failure:** the first 24 instrumentation attempts
+successfully ran the queries, but sandboxed `/usr/bin/time -l` could not read
+`kern.clockrate` and exited 1 without RSS. These are retained separately as
+instrument failures. The table above is the subsequent run with resource
+counter access, not a silent replacement of failed queries. An exploratory
+query also returned 75 when started during the fixture smoke's lock; it was
+retried once after smoke completed.
+
+The cost sample's short wording did not locate the SQL validator: it ranked
+an Apple `placeholder` variable, a `SQL` constant, and validation prose.
+The longer navigation task used by candidate agents did locate the validator.
+Latency is not answer quality. Large upstream explanatory comments account
+for much of a caller result's output size; stdout remains intact.
+
+## Real-source coverage — source is the reference
+
+The frozen default coverage run reported 1401 indexed files, zero oversize
+files, 202 unsupported-extension files, four explicitly excluded subtrees,
+four upstream-pruned subtrees, 21 degraded parses, three minification
+suspects, and ten indexed-but-unmeasured files. There were no source-ceiling
+omissions to name. A subtree count does not enumerate its missing contents.
+Language file counts are symbol-bearing floors, not complete file totals.
+
+| Surface | Source-backed probe and observation | Required fallback |
+|---|---|---|
+| Rust direct | `hiqlite.rs:3992` validator has one known direct caller, `validate_sql` at 3981; graph returned 1/1. | Read validation and binding semantics. |
+| Rust cross-module | `hiqlite.rs:validate_sql` returned 121 caller symbols, paged to 40. The page includes `hiqlite_catalog.rs:178` `install_schema` as well as local TimedClient accessors. Complete denominator was not established. | Inspect the Store slices and catalog; do not equate a page to all callers. |
+| Rust decode | `transcode.rs:2391` definition returned four caller symbols, including production `start_with_audio_offset` at 18747 and three tests. Literal search finds eight call sites; symbols and sites are different denominators. | Inspect calls around 19057 and tests around 35273–35671. |
+| Rust traits | `playback_control.rs:stage_preparation_for_owner` resolves four definitions and returns six caller symbols, including `activate_reserved` at 5406. The trait call at 5412 is visible, but dispatch identity remains ambiguous. | Read trait, implementations and `.control` wiring. |
+| Rust macros | `hiqlite.rs:4487` `dump_row` returned zero callers despite twelve top-level invocations beginning at 4500. These are macro invocation sites, not twelve ordinary function callers. | Inspect macro expansion and invocation sites. |
+| Rust closures | Fixture closure consumer is returned; real SQL sessions located a renewal closure in `state.rs` through source reads. A complete real closure-edge set was not measured. | Direct reads/reference tooling. |
+| Swift direct | Snapshot mapper `demand` at 138 returned its `snapshot` consumer at 93 (1/1 selected consumer). | Read mapper and transport. |
+| Swift callbacks | Reporter closure field `capture` at 726, invoked at 1188: selector resolves three definitions and returns zero callers. | Read closure injection and `currentCapture` wiring. |
+| Standalone JS | `playback-control.js:208` `makeRequest` returned `drain` at 356 (1/1 selected consumer). | Inspect transport and serialization. |
+| HTML JS | `index.html:7144` `playbackControlSnapshot` exists and is called in the player; selector was refused (exit 1, no stdout). | `rg -n` and reads of the original HTML. |
+| Kotlin | Android snapshot mapper `demand` at 86 exists and maps pause to `HOLD`; selector was refused (exit 1). | Kotlin/source navigation. |
+| Python / shell / config | `validation/runner.py:133` `load_catalog` returned 20 callers including runner main at 1639. A broad prove-fix query missed `scripts/prove-fix` and ranked filesystem symbols. | Read extensionless scripts and actual catalog command mappings. |
+| Documentation | Both profiles locate `docs/performance/PERF-REVIEW-ASSESSMENT.md`. A query naming its archived duplicate returns no archive row under default and ranks `docs/archive/PERF-REVIEW-RESPONSE-ASSESSMENT.md` first under history. | Read status headers; directory placement is not proof that prose remains authoritative. |
+
+Global graph counters in the fixed source were 8250 ambiguous and 18525
+unresolved edges. These gauges are upstream heuristics, not a complete error
+rate or a correctness verdict. The precision/recall denominators above are
+explicit selected consumers only. No repository-wide precision or recall
+is claimed. SCIP remains deferred.
+
+Map, body, outline, impact, and PR context also completed on the frozen
+source. An explicit PR context against the original main used 7571 stdout
+bytes and reported an upstream estimated 3028 tokens for a requested 3000,
+with `budget-floor-exceeded`. Its structural floor can exceed the requested
+shaping budget; the adapter's independent byte cap remains hard.
+
+## Fixtures and freshness — parser checks are distinct from Plurx evidence
+
+[The explicit smoke helper](../../scripts/ripwire-smoke) copies
+[the fixture corpus](../../tests/fixtures/ripwire/) into a disposable Git
+repository under ignored state. It checks every exposed verb and saves its
+captures. The release rejected Kotlin and HTML-JS selectors, found standalone
+JS and Python direct callers, found a Swift direct caller but omitted the
+callback, and omitted the Rust qualified cross-module caller. A duplicate
+Rust name resolves two definitions; qualify the path and still inspect source.
+
+The smoke was tightened after its first successful run to compare complete
+path/name/line/id tuples and exercise both cache families. The second run
+passed all twelve comparisons:
+
+| Mutation | Rich find warm versus cold | Lean map warm versus cold |
+|---|---|---|
+| Initial source | equal, 12 rows | equal, 9 file rows |
+| Definition edit | equal, 12 rows | equal, 9 file rows |
+| Rename | equal, 12 rows | equal, 9 file rows |
+| Deletion | equal, 12 rows | equal, 8 file rows |
+| Branch switch | equal, 12 rows | equal, 9 file rows |
+| Corrupt cache | equal, 12 rows | equal, 9 file rows |
+
+Corrupt caches were overwritten with `corrupt-cache`; upstream reported
+`truncated` and source rebuild. A warm/cold agreement does not prove parsing
+correctness; the separately observed graph omissions remain.
+
+Eighteen focused adapter tests pass without network or a real executable.
+They cover argv data, nested invocation, profiles, cache families, missing
+and disabled tools, corrupt installation, invalid refs/unrelated histories,
+dirty PR context, preserved exits, bounded output, both pipes, process-group
+timeout, lock contention, archive members/checksums/size, version/flags,
+failed-setup preservation, atomic publication, and idempotence.
+
+## Paired navigation — three completed sessions, no adoption inference
+
+Freeze these tasks and expected contracts before either arm runs:
+
+| Task wording | Expected source/consumer set |
+|---|---|
+| Trace SQL placeholder validation: locate validate_parameter_order, its execution wrapper, regression coverage, and separate SQLite/Hiqlite responsibilities. | Hiqlite validator and TimedClient, placeholder census and regressions, SQLite binding difference, Store boundary, ownership/proposed proof. |
+| Trace a viewer pause through playback-control hold demand across server, web, Apple, Android, and transport/serialization consumers; distinguish demand from buffering. | Server hold and serialized snapshots; web mapper plus transport; Apple mapper/reporter/session; Android equivalents; generation/sequence fencing and demand versus observed buffering. |
+| Investigate decode fallback: locate prepare_decode_restricted, its callers/tests, and documented recovery constraints. | Restricted prepare definition, production caller, retained tests, same-encoder/software-decode and prepublication/budget rules, current decoder guides and ownership. |
+| Plan the historical correction for prove-fix Cargo-target contamination, including implementation/test/ownership paths and focused proof. | Historical `ea899568`, target-directory selection and child environment, retained Python regression, validation.framework, pre-fix proof. |
+
+Two paired repetitions per task are required (sixteen fresh sessions).
+Dispatch order for SQL was baseline-1, candidate-1, candidate-2, baseline-2.
+Playback-1 began baseline then candidate. Trials were concurrent on separate
+clones; do not use their elapsed time as an isolated latency benchmark.
+
+| Session | Outcome | Required groups located | Read operations | Shell calls | Recorded elapsed s | Wrapper queries / refusals | Fallback |
+|---|---|---|---|---|---|---|---|
+| SQL baseline 1 | returned | 5/5 | 32 | 12 | 105.045, partial | 0 / 0 | ordinary source tools |
+| SQL candidate 1 | returned | 5/5 | 24 | 11 | 114, after instructions | 2 / 0 | source reads and catalog |
+| SQL candidate 2 | returned | 5/5 | 20 | 9 | 67.453, partial | 2 / 0 | source reads and catalog |
+| SQL baseline 2 | account usage limit | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable |
+| Playback baseline 1 | account usage limit | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable |
+| Playback candidate 1 | account usage limit | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable |
+| Remaining ten navigation sessions | not dispatched | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable |
+
+Read operations are agent-reported explicit cat/sed file inspections;
+search scans are excluded. Instruction inclusion and timing start points
+were not fully consistent, so these are descriptive counts rather than a
+valid median comparison. Returned shell-output character counts were
+135533, 154575, and 112470 respectively, with one/two/two truncated tool
+outputs. Those are not UTF-8 byte or model-token measurements. Both completed
+candidate sessions measured 9029 total Ripwire stdout bytes from two queries.
+Actual model tokens and billing are unavailable. No coordinator intervention
+was needed in the three completed sessions; both candidate sessions used
+source fallback and reported graph limitations. The fixed five required SQL
+contract groups had no observed omission in these returned answers.
+
+The first pair's read count is lower with Ripwire, but the second baseline
+never returned and other tasks remain incomplete. Do not compute an adoption
+threshold from that partial sample or treat agent self-scoring as a review.
+
+## Historical correction — retained proof is ready, blind replay is not
+
+Selected correction: `ea89956823bf61f68091ee025b9f6a3fa1992316`, which isolates
+prove-fix's `CARGO_TARGET_DIR` from the normal gate's target. Pre-fix source
+is `aae5ba9a230e54e3973dfdb6a390f29c4bdd7621`. Scratch repositories were
+initialized from that source archive with no later Git history; both received
+the same adapter source overlay and only the candidate has it installed.
+No implementation session was dispatched before capacity was exhausted.
+
+The coordinator loaded the retained four Python tests from the correction
+commit, pointed them at the historical pre-fix script, and observed the two
+isolation tests fail while the two existing proof-protocol tests passed.
+The same tests all pass against the known corrected script (1.819 s).
+Its Git blob is `29838b3a9f93736fe61926fa7cceadab4abfb9a6`, identical to the
+original correction's script. An initial harness attempt used a relative
+executable path and produced setup errors; it was corrected before the
+reported red/green runs. No Rust compilation or product edit was involved.
+This establishes retained regression sensitivity, not blind implementation
+success. Keep the correction diff and held tests hidden from both replay
+agents until their patches are complete.
+
+## Reproduce and resume
+
+Use a new clone at the frozen source, explicit setup, and the settings above.
+For every command, capture stdout and stderr separately and retain failures.
+Run `scripts/ripwire-smoke` explicitly. For timing, clear only that clone's
+`target/ripwire/cache/` before each of three fresh samples, then take five
+warm samples without clearing it. Use `/usr/bin/time -l` on macOS and record
+its exit separately from the wrapper provenance. Use equivalent documented
+resource instrumentation on other hosts.
+
+The current local evidence root is `target/ripwire/evidence/` in the own clone
+`/private/tmp/plurx-ripwire`. It contains `smoke-20260910-193051/`, the first
+smoke capture, and `pilot/` with `latency.json`, the separately retained
+instrument failures, per-command captures, `coverage.json`, extra coverage
+and documentation-profile captures, frozen expected contracts, session
+summaries, and retained exercise proof. These are ignored local records;
+this report contains durable summaries, not copied source or transcripts.
+
+Resume with a capacity-enabled fresh session, capture exact model/reasoning
+identities and consistent full-session metrics, and complete the missing
+navigation pairs plus blind historical replay. Preserve the failed sessions.
+Only repeat already-completed sessions if needed to repair the declared
+measurement inconsistency, and keep their original observations.
+
+Default adoption requires no worse correctness on all four tasks, at least
+three tasks improving median reads or measured context by 20%, and no worse
+correction exercise. Those conditions have not been established. Verdict is
+**defer**: keep the implementation and report on the effort; no default
+worker prompt addition and no main promotion yet. The complete trial may
+support `opt-in only` even if performance is useful. No feature gate or
+product enablement UI is introduced by this development-tool experiment.
