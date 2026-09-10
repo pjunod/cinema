@@ -53,6 +53,15 @@ CREATE TABLE IF NOT EXISTS library_channels (
     active_epoch_ms       INTEGER,
     pending_generation_id TEXT,
     pending_epoch_ms      INTEGER,
+    build_state           TEXT NOT NULL DEFAULT 'draft'
+                          CHECK (build_state IN ('draft','queued','building','ready','failed')),
+    build_error_code      TEXT,
+    build_error_message   TEXT,
+    build_candidate_count INTEGER NOT NULL DEFAULT 0 CHECK (build_candidate_count >= 0),
+    build_entry_count     INTEGER NOT NULL DEFAULT 0 CHECK (build_entry_count >= 0),
+    build_last_attempt_ms INTEGER,
+    build_last_success_ms INTEGER,
+    last_auto_build_ms    INTEGER,
     created_at_ms         INTEGER NOT NULL,
     updated_at_ms         INTEGER NOT NULL
 ) STRICT;
@@ -60,6 +69,8 @@ CREATE INDEX IF NOT EXISTS library_channels_owner
     ON library_channels(owner_user_id, id);
 CREATE INDEX IF NOT EXISTS library_channels_shared
     ON library_channels(visibility, enabled, id);
+CREATE INDEX IF NOT EXISTS library_channels_build_state
+    ON library_channels(build_state, build_last_attempt_ms, id);
 
 CREATE TABLE IF NOT EXISTS library_channel_generations (
     id                     TEXT PRIMARY KEY,
@@ -67,7 +78,7 @@ CREATE TABLE IF NOT EXISTS library_channel_generations (
     definition_revision    INTEGER NOT NULL CHECK (definition_revision > 0),
     algorithm_version      INTEGER NOT NULL CHECK (algorithm_version > 0),
     content_digest         TEXT NOT NULL CHECK (length(content_digest) = 64),
-    state                  TEXT NOT NULL CHECK (state IN ('building','ready')),
+    state                  TEXT NOT NULL CHECK (state IN ('building','ready','failed')),
     entry_count            INTEGER NOT NULL DEFAULT 0 CHECK (entry_count >= 0),
     loop_duration_ms       INTEGER NOT NULL DEFAULT 0 CHECK (loop_duration_ms >= 0),
     build_claim_id         TEXT,
@@ -110,6 +121,32 @@ CREATE TABLE IF NOT EXISTS library_channel_requests (
 ) STRICT;
 CREATE INDEX IF NOT EXISTS library_channel_requests_expiry
     ON library_channel_requests(expires_at_ms, user_id);
+
+-- Persist the canonical finite-session recipe before producer placement.
+-- The request-ledger delete trigger gives this row the same bounded lifetime.
+CREATE TABLE IF NOT EXISTS library_channel_session_recipes (
+    user_id         INTEGER NOT NULL,
+    request_id      TEXT NOT NULL,
+    incarnation_id  TEXT NOT NULL UNIQUE,
+    recipe_json     TEXT NOT NULL CHECK (length(recipe_json) BETWEEN 2 AND 32768),
+    created_at_ms   INTEGER NOT NULL,
+    PRIMARY KEY (user_id, request_id)
+) STRICT;
+CREATE TRIGGER IF NOT EXISTS library_channel_session_recipes_request_delete
+    AFTER DELETE ON media_session_requests
+BEGIN
+    DELETE FROM library_channel_session_recipes
+     WHERE user_id = OLD.user_id AND request_id = OLD.request_id;
+END;
+"#;
+
+/// Follow-up schema step for durable build acknowledgement lookups. The fields
+/// themselves ship atomically with the first Library-channel table creation;
+/// this index is a separate version so cluster protocol activation can fence
+/// every node onto the build-state-aware implementation.
+pub(crate) const LIBRARY_CHANNEL_BUILD_STATE_SCHEMA: &str = r#"
+CREATE INDEX IF NOT EXISTS library_channels_build_state
+    ON library_channels(build_state, build_last_attempt_ms, id);
 "#;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -190,6 +227,14 @@ pub struct LibraryChannel {
     pub active_epoch_ms: Option<i64>,
     pub pending_generation_id: Option<String>,
     pub pending_epoch_ms: Option<i64>,
+    pub build_state: String,
+    pub build_error_code: Option<String>,
+    pub build_error_message: Option<String>,
+    pub build_candidate_count: i64,
+    pub build_entry_count: i64,
+    pub build_last_attempt_ms: Option<i64>,
+    pub build_last_success_ms: Option<i64>,
+    pub last_auto_build_ms: Option<i64>,
     pub favourite: bool,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
@@ -284,10 +329,37 @@ pub struct LibraryChannelPublication {
     pub expected_revision: i64,
     pub claim_id: String,
     pub content_digest: String,
+    pub seed: [u8; 32],
     pub entry_count: i64,
     pub loop_duration_ms: i64,
     pub activation_epoch_ms: i64,
     pub pending: bool,
+    pub automatic: bool,
+    pub now_ms: i64,
+}
+
+/// Digest only the facts that define a rotation. Operational recipe fields
+/// (for example auto-refresh) do not create a new schedule, while a deliberate
+/// reshuffle seed always does even when a one-item rotation happens to retain
+/// the same visible order.
+pub fn generation_content_digest(seed: [u8; 32], entries: &[ChannelGenerationEntry]) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"plurx.library-channel.generation.v2\0");
+    digest.update(1_i64.to_be_bytes());
+    digest.update(seed);
+    digest.update(serde_json::to_vec(entries).expect("bounded generation entries serialize"));
+    hex::encode(digest.finalize())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibraryChannelBuildFailure {
+    pub channel_id: String,
+    pub generation_id: Option<String>,
+    pub claim_id: Option<String>,
+    pub expected_revision: i64,
+    pub error_code: String,
+    pub error_message: String,
+    pub candidate_count: i64,
     pub now_ms: i64,
 }
 
@@ -480,8 +552,14 @@ pub struct ChannelCandidate {
     pub kind: ChannelItemKind,
     pub title: String,
     pub overview: String,
+    #[serde(default)]
+    pub show_overview: String,
     pub genres: Vec<String>,
     pub tags: Vec<String>,
+    #[serde(default)]
+    pub show_genres: Vec<String>,
+    #[serde(default)]
+    pub show_tags: Vec<String>,
     pub year: Option<i32>,
     pub show_id: Option<i64>,
     pub show_title: Option<String>,
@@ -579,29 +657,49 @@ pub fn evaluate_recipe(
                 else {
                     continue;
                 };
-                reasons.push(format!("genre: {value}"));
+                let inherited = candidate
+                    .show_genres
+                    .iter()
+                    .any(|actual| actual.eq_ignore_ascii_case(value));
+                reasons.push(format!(
+                    "{}genre: {value}",
+                    if inherited { "show." } else { "" }
+                ));
             }
             if !recipe.tags_any.is_empty() {
                 let Some(value) = first_normalized_match(&recipe.tags_any, &candidate.tags) else {
                     continue;
                 };
-                reasons.push(format!("tag: {value}"));
+                let inherited = candidate
+                    .show_tags
+                    .iter()
+                    .any(|actual| actual.eq_ignore_ascii_case(value));
+                reasons.push(format!(
+                    "{}tag: {value}",
+                    if inherited { "show." } else { "" }
+                ));
             }
             if !recipe.keywords_any.is_empty() {
-                let text = normalized_text(&format!(
-                    "{}\n{}\n{}",
-                    candidate.title,
-                    candidate.overview,
-                    candidate.show_title.as_deref().unwrap_or_default()
+                let item_text =
+                    normalized_text(&format!("{}\n{}", candidate.title, candidate.overview));
+                let show_text = normalized_text(&format!(
+                    "{}\n{}",
+                    candidate.show_title.as_deref().unwrap_or_default(),
+                    candidate.show_overview
                 ));
-                let Some(value) = recipe
-                    .keywords_any
-                    .iter()
-                    .find(|keyword| text.contains(&normalized_text(keyword)))
-                else {
+                let Some((value, inherited)) = recipe.keywords_any.iter().find_map(|keyword| {
+                    let normalized = normalized_text(keyword);
+                    item_text
+                        .contains(&normalized)
+                        .then_some((keyword, false))
+                        .or_else(|| show_text.contains(&normalized).then_some((keyword, true)))
+                }) else {
                     continue;
                 };
-                reasons.push(format!("keyword: {value}"));
+                reasons.push(format!(
+                    "{}keyword: {value}",
+                    if inherited { "show." } else { "" }
+                ));
             }
             if let Some(minimum) = recipe.year_min {
                 if !candidate.year.is_some_and(|year| year >= minimum) {
@@ -889,8 +987,11 @@ mod tests {
             },
             title: format!("Title {item_id}"),
             overview: String::new(),
+            show_overview: String::new(),
             genres: vec!["Documentary".to_owned()],
             tags: Vec::new(),
+            show_genres: Vec::new(),
+            show_tags: Vec::new(),
             year: Some(2000 + episode),
             show_id,
             show_title: show_id.map(|id| format!("Show {id}")),

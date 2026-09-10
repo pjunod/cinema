@@ -1367,6 +1367,45 @@ impl MediaSessionStore for HiqliteAuthStore {
         Ok(MediaSessionRequestClaim::Overloaded)
     }
 
+    async fn record_library_channel_session_recipe(
+        &self,
+        user_id: i64,
+        request_id: &str,
+        incarnation_id: &str,
+        recipe_json: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        if user_id <= 0
+            || request_id.is_empty()
+            || request_id.len() > 128
+            || !valid_uuid(incarnation_id)
+            || !(2..=32 * 1024).contains(&recipe_json.len())
+            || now_ms <= 0
+        {
+            return Err(StoreError::Task(
+                "invalid Library-channel session recipe".to_owned(),
+            ));
+        }
+        Ok(self
+            .client()
+            .execute(
+                "INSERT INTO library_channel_session_recipes
+                    (user_id, request_id, incarnation_id, recipe_json, created_at_ms)
+                 SELECT $1, $2, $3, $4, $5
+                  WHERE EXISTS (SELECT 1 FROM media_session_requests
+                    WHERE user_id = $1 AND request_id = $2 AND incarnation_id = $3
+                      AND state = 'starting' AND claim_expires_at_ms > $5)
+                 ON CONFLICT(user_id, request_id) DO UPDATE SET
+                    incarnation_id = excluded.incarnation_id,
+                    recipe_json = excluded.recipe_json,
+                    created_at_ms = excluded.created_at_ms
+                 WHERE library_channel_session_recipes.incarnation_id = excluded.incarnation_id",
+                params!(user_id, request_id, incarnation_id, recipe_json, now_ms),
+            )
+            .await?
+            == 1)
+    }
+
     async fn assign_media_session_request_owner(
         &self,
         user_id: i64,
@@ -1510,7 +1549,11 @@ impl MediaSessionStore for HiqliteAuthStore {
                          AND request_fingerprint = $5 AND playback_id = $4
                          AND owner_node_id = $6
                          AND ((state = 'starting' AND claim_expires_at_ms > $11)
-                           OR (state = 'resolved' AND response_json = $9))))
+                           OR (state = 'resolved' AND response_json = $9))
+                         AND (json_type($8, '$.library_channel') IS NULL OR EXISTS (
+                           SELECT 1 FROM library_channel_session_recipes
+                            WHERE user_id = $3 AND request_id = $15 AND incarnation_id = $1
+                              AND recipe_json = $8))))
                     AND EXISTS (SELECT 1 FROM job_leases
                       WHERE resource = $16 AND owner_node_id = $6 AND fence = 1
                         AND expires_at_ms = $7 AND expires_at_ms > $11

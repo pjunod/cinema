@@ -113,6 +113,9 @@ struct HomeView: View {
             guard phase == .active, model.phase == .ready else { return }
             Task { await model.loadHome() }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .makeLibraryChannelFromItem)) { _ in
+            selectedTab = .libraryChannels
+        }
     }
     #else
     private var tvTabs: some View {

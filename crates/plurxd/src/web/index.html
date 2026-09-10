@@ -19169,8 +19169,34 @@ window.addEventListener("beforeunload",()=>{ if(READER){ readerFlushKeepalive(RE
 // intent; the existing player continues to own HLS lifecycle and controls.
 const LIBRARY_CHANNEL_TUNE=new LibraryChannelCore.TuneFence();
 const LIBRARY_CHANNEL_CLOCK=new LibraryChannelCore.ServerClock();
-let LIBRARY_CHANNELS={channels:[],guide:[],draft:null,libs:[],search:[],editor:false,error:null};
-let LIBRARY_CHANNEL_TRANSITION=false;
+let LIBRARY_CHANNELS={channels:[],guide:[],draft:null,libs:[],search:[],editor:false,error:null,management:false};
+let LIBRARY_CHANNEL_TRANSITIONS=0;
+let LIBRARY_CHANNEL_BOUNDARY_TIMER=null;
+
+async function loadLibraryChannelGuide(ids,from=null,to=null){
+  const rows=[];
+  for(let offset=0;offset<ids.length;offset+=20){
+    const group=ids.slice(offset,offset+20);let cursor=null;
+    do{
+      const query=new URLSearchParams({channel_ids:group.join(",")});
+      if(from!==null)query.set("start_ms",String(from));if(to!==null)query.set("end_ms",String(to));
+      if(cursor)query.set("cursor",cursor);
+      const response=await api(`/library-channels/guide?${query}`,{raw:true});
+      rows.push(...await response.json());cursor=response.headers.get("x-plurx-next-cursor");
+    }while(cursor);
+  }
+  return rows.sort((a,b)=>a.starts_at_ms-b.starts_at_ms||String(a.channel_id).localeCompare(String(b.channel_id)));
+}
+async function loadLibraryChannels(){
+  const result=[];let after=null;
+  do{
+    const query=new URLSearchParams({limit:"100"});
+    if(LIBRARY_CHANNELS.management)query.set("management","true");if(after)query.set("after",after);
+    const page=await api(`/library-channels/?${query}`);result.push(...page);
+    after=page.length===100?page[page.length-1].id:null;
+  }while(after);
+  return result;
+}
 
 function libraryChannelDraftKey(){
   const server=(SERVER&&SERVER.instance_id)||location.origin;
@@ -19207,13 +19233,11 @@ async function viewLibraryChannels(generation=PAGE_RENDER_GENERATION){
   layoutChrome("library-channels",`<div class="empty">Loading Library channels…</div>`);
   setPagePhase("#/library-channels",generation,"shell");
   try{
-    const channels=await api("/library-channels/");
+    const channels=await loadLibraryChannels();
     if(generation!==PAGE_RENDER_GENERATION)return;
     LIBRARY_CHANNELS.channels=channels||[];
     const ids=LIBRARY_CHANNELS.channels.map(channel=>channel.id);
-    LIBRARY_CHANNELS.guide=ids.length
-      ? await api(`/library-channels/guide?channel_ids=${encodeURIComponent(ids.slice(0,20).join(","))}`)
-      : [];
+    LIBRARY_CHANNELS.guide=ids.length?await loadLibraryChannelGuide(ids):[];
     if(generation!==PAGE_RENDER_GENERATION)return;
     if(LIBRARY_CHANNELS.openEditorOnLoad){
       LIBRARY_CHANNELS.openEditorOnLoad=false;
@@ -19234,9 +19258,9 @@ async function viewLibraryChannels(generation=PAGE_RENDER_GENERATION){
 async function refreshLibraryChannels(generation){
   if(location.hash!=="#/library-channels"||generation!==PAGE_RENDER_GENERATION||LIBRARY_CHANNELS.editor)return;
   try{
-    LIBRARY_CHANNELS.channels=await api("/library-channels/");
-    const ids=LIBRARY_CHANNELS.channels.map(channel=>channel.id).slice(0,20);
-    LIBRARY_CHANNELS.guide=ids.length?await api(`/library-channels/guide?channel_ids=${encodeURIComponent(ids.join(","))}`):[];
+    LIBRARY_CHANNELS.channels=await loadLibraryChannels();
+    const ids=LIBRARY_CHANNELS.channels.map(channel=>channel.id);
+    LIBRARY_CHANNELS.guide=ids.length?await loadLibraryChannelGuide(ids):[];
     if(location.hash==="#/library-channels"&&generation===PAGE_RENDER_GENERATION)libraryChannelsPaint();
   }catch(error){LIBRARY_CHANNELS.error=error;}
 }
@@ -19244,7 +19268,7 @@ function libraryChannelsPaint(){
   const main=document.getElementById("main");if(!main)return;
   if(LIBRARY_CHANNELS.editor){main.innerHTML=libraryChannelEditorHtml();return;}
   const channels=LIBRARY_CHANNELS.channels||[];
-  const tools=`<button class="primary" onclick="openLibraryChannelEditor()">Create channel</button>`;
+  const tools=`<button class="primary" onclick="openLibraryChannelEditor()">Create channel</button>${ME&&ME.is_admin?`<button class="ghost" onclick="toggleLibraryChannelManagement()">${LIBRARY_CHANNELS.management?'Leave management':'Manage all channels'}</button>`:""}`;
   if(!channels.length){
     main.innerHTML=`${setHead("Library channels","Turn movies and episodes into a shared, always-on schedule.",tools)}<div class="empty">No Library channels yet.<br>Create one from a subject, a library, or selected titles. No tuner, metadata key, or AI service is required.</div>`;
     return;
@@ -19260,6 +19284,7 @@ function libraryChannelsPaint(){
   const guide=(LIBRARY_CHANNELS.guide||[]).map(programme=>`<div class="lc-programme"><time>${lcTime(programme.starts_at_ms)}</time><span><b>${esc(programme.title)}</b><small>${esc((channels.find(channel=>channel.id===programme.channel_id)||{}).name||"")}</small></span><button class="ghost sm" onclick="libraryChannelWatchProgramme('${esc(programme.channel_id)}',${programme.file_id},${programme.item_id})">Watch from start</button></div>`).join("");
   main.innerHTML=`${setHead("Library channels","What is on now and what follows. Channel viewing does not change watch history.",tools)}<div class="lc-grid">${cards}</div><h2 class="section">Guide</h2><div class="card lc-guide">${guide||'<div class="empty">No scheduled programmes.</div>'}</div>`;
 }
+async function toggleLibraryChannelManagement(){LIBRARY_CHANNELS.management=!LIBRARY_CHANNELS.management;await viewLibraryChannels(PAGE_RENDER_GENERATION);}
 
 async function openLibraryChannelEditor(id=null){
   let draft=id?null:loadLibraryChannelDraft();
@@ -19306,7 +19331,7 @@ function lcReadEditor(){
 function lcStep(step){lcReadEditor();LIBRARY_CHANNELS.draft.step=step;saveLibraryChannelDraft();libraryChannelsPaint();}
 async function previewLibraryChannel(paint=true){
   lcReadEditor();const draft=LIBRARY_CHANNELS.draft;if(!draft)return;
-  try{draft.preview=await api("/library-channels/preview",{method:"POST",body:{recipe:draft.recipe,limit:50}});draft.previewError=null;}
+  try{draft.preview=await api("/library-channels/preview",{method:"POST",body:{recipe:draft.recipe,limit:50,preview_seed:draft.preview&&draft.preview.preview_seed}});draft.previewError=null;}
   catch(error){draft.previewError=error.message;}
   saveLibraryChannelDraft();if(paint)libraryChannelsPaint();
 }
@@ -19347,14 +19372,14 @@ function libraryChannelEditorHtml(){
   else if(step==="playback")fields=`<div class="formgrid"><div><label>Order</label><select id="lc-order"><option value="balanced_shuffle" ${recipe.ordering==='balanced_shuffle'?'selected':''}>Balanced shuffle</option><option value="release_order" ${recipe.ordering==='release_order'?'selected':''}>Release year; keep episodes in order</option></select></div></div><div class="lc-checks"><label><input id="lc-specials" type="checkbox" ${recipe.include_specials?'checked':''}>Include specials</label><label><input id="lc-refresh" type="checkbox" ${recipe.auto_refresh?'checked':''}>Refresh automatically</label></div><div class="hint">Normal changes begin at the next full rotation. “Apply after this programme” is available after saving.</div>`;
   else fields=`<div class="formgrid"><div><label>Name</label><input id="lc-name" maxlength="80" value="${esc(draft.name)}"></div><div><label>Visibility</label><select id="lc-visibility"><option value="personal">Personal</option>${ME&&ME.is_admin?'<option value="shared" '+(draft.visibility==='shared'?'selected':'')+'>Shared</option>':''}</select></div><div class="wide"><label>Description</label><textarea id="lc-description" maxlength="500">${esc(draft.description)}</textarea></div></div><label><input id="lc-enabled" type="checkbox" ${draft.enabled?'checked':''}> Enable channel</label><div class="hint">Enablement is your explicit choice. Settings → Developer shows advisory Store, media, and client readiness without blocking it.</div>`;
   const preview=draft.preview;
-  const previewHtml=preview?`<h2>${preview.eligible_count} eligible title${preview.eligible_count===1?'':'s'}</h2><p>${esc(preview.repeat_description)}</p>${(preview.matches||[]).slice(0,10).map(match=>`<div class="lc-programme"><span>${esc(match.candidate.title)}</span><small>${esc((match.reasons||[]).join(' · '))}</small></div>`).join('')}`:`<div class="empty">${esc(draft.previewError||'Preview the recipe to see its schedule.')}</div>`;
+  const previewHtml=preview?`<h2>${preview.eligible_count} eligible title${preview.eligible_count===1?'':'s'}</h2><p>${esc(preview.repeat_description)}</p>${preview.excluded_count?`<p class="hint">${preview.excluded_count} candidates excluded by eligibility or recipe rules.</p>`:""}${(preview.first_ten||[]).map(entry=>{const match=(preview.matches||[]).find(row=>Number(row.candidate.item_id)===Number(entry.item_id));return `<div class="lc-programme"><span>${esc(match&&match.candidate.title||`Title ${entry.item_id}`)}</span><small>${esc(match?(match.reasons||[]).join(' · '):'scheduled')}</small></div>`}).join('')}`:`<div class="empty">${esc(draft.previewError||'Preview the recipe to see its schedule.')}</div>`;
   const errors=LibraryChannelCore.validateDraft(draft),errorHtml=Object.entries(errors).map(([field,message])=>`<div class="err">${esc(field)}: ${esc(message)}</div>`).join('');
   return `${setHead(draft.id?"Edit channel":"Create channel","Three resumable steps; your draft is scoped to this server and account.",'<button class="ghost" onclick="closeLibraryChannelEditor()">Close</button>')}<div class="lc-editor"><section class="card"><div class="lc-steps">${steps}</div>${fields}${errorHtml}<div class="lc-actions"><button class="ghost" onclick="previewLibraryChannel()">Refresh preview</button>${step!=="content"?`<button class="ghost" onclick="lcStep('${LibraryChannelCore.nextStep(step,-1)}')">Back</button>`:''}${step!=="channel"?`<button onclick="lcStep('${LibraryChannelCore.nextStep(step,1)}')">Next</button>`:`<button class="primary" onclick="saveLibraryChannel()">${draft.id?'Save':'Create'}</button>`}${draft.id?'<button class="ghost" onclick="deleteLibraryChannel()">Delete</button>':''}</div><div class="err" id="lc-error"></div></section><aside class="card lc-preview"><span class="pill">PREVIEW</span>${previewHtml}</aside></div>`;
 }
 async function saveLibraryChannel(){
   lcReadEditor();const draft=LIBRARY_CHANNELS.draft,fields=LibraryChannelCore.validateDraft(draft);
   if(Object.keys(fields).length){libraryChannelsPaint();return;}
-  const body={request_id:newRequestId(),name:draft.name.trim(),description:draft.description.trim(),visibility:draft.visibility,enabled:draft.enabled,recipe:draft.recipe};
+  const body={request_id:newRequestId(),name:draft.name.trim(),description:draft.description.trim(),visibility:draft.visibility,enabled:draft.enabled,recipe:draft.recipe,preview_seed:draft.preview&&draft.preview.preview_seed||null};
   try{
     if(draft.id)await api(`/library-channels/${encodeURIComponent(draft.id)}`,{method:"PUT",body:Object.assign({expected_revision:draft.expected_revision},body)});
     else await api("/library-channels/",{method:"POST",body});
@@ -19379,16 +19404,15 @@ async function rebuildLibraryChannel(id,expectedRevision,activation,reshuffle){
 }
 
 async function libraryChannelTune(channelId){
-  if(LIBRARY_CHANNEL_TRANSITION)return;
-  LIBRARY_CHANNEL_TRANSITION=true;
-  const current=PLAYER&&PLAYER.libraryChannel;
-  if(current){PLAYER.libraryChannelReplacing=true;closePlayer();}
-  else if(document.getElementById("modal")?.classList.contains("open"))closePlayer();
   const intent=LIBRARY_CHANNEL_TUNE.begin(channelId),sent=performance.now();
+  LIBRARY_CHANNEL_TRANSITIONS++;
   try{
     const resolved=await api(`/library-channels/${encodeURIComponent(channelId)}/resolve`,{method:"POST",signal:intent.signal});
     const received=performance.now();LIBRARY_CHANNEL_CLOCK.observe(resolved.server_now_ms,sent,received);
     if(!LIBRARY_CHANNEL_TUNE.current(intent))return;
+    const current=PLAYER&&PLAYER.libraryChannel;
+    if(current){PLAYER.libraryChannelReplacing=true;closePlayer();}
+    else if(document.getElementById("modal")?.classList.contains("open"))closePlayer();
     const channel=LIBRARY_CHANNELS.channels.find(row=>row.id===channelId)||{};
     const programme=(LIBRARY_CHANNELS.guide||[]).find(row=>row.channel_id===channelId&&row.generation_id===resolved.generation_id&&row.ordinal===resolved.occurrence.ordinal)||{};
     const tune={channel_id:channelId,generation_id:resolved.generation_id,occurrence:resolved.occurrence,
@@ -19398,16 +19422,34 @@ async function libraryChannelTune(channelId){
     ITEM_FOR_FILE[resolved.file_id]=resolved.item_id;
     await play(resolved.file_id,tune.title,resolved.position_ms,resolved.ends_at_ms-resolved.starts_at_ms,
       {title:tune.title,overview:`Following ${channel.name||'Library channel'}. Channel viewing doesn't change your watch history.`,runtime_ms:resolved.ends_at_ms-resolved.starts_at_ms});
+    if(!LIBRARY_CHANNEL_TUNE.current(intent)){
+      if(PLAYER&&PLAYER.libraryChannel&&PLAYER.libraryChannel.tune_sequence===intent.sequence)closePlayer();
+      return;
+    }
+    setTimeout(()=>libraryChannelReconcile(intent).catch(()=>{}),30000);
   }catch(error){if(error.name!=="AbortError"){const view=LibraryChannelCore.errorView(error);toast(`${view.title}: ${view.detail}`);}}
-  finally{LIBRARY_CHANNEL_TRANSITION=false;}
+  finally{LIBRARY_CHANNEL_TRANSITIONS=Math.max(0,LIBRARY_CHANNEL_TRANSITIONS-1);}
 }
 function libraryChannelTick(){
-  if(!PLAYER||!PLAYER.libraryChannel||LIBRARY_CHANNEL_TRANSITION)return;
+  if(!PLAYER||!PLAYER.libraryChannel||LIBRARY_CHANNEL_TRANSITIONS||document.getElementById("video")?.paused)return;
   if(LIBRARY_CHANNEL_CLOCK.now()>=Number(PLAYER.libraryChannel.ends_at_ms||0))libraryChannelBoundary().catch(()=>{});
 }
 async function libraryChannelBoundary(){
-  const channelId=PLAYER&&PLAYER.libraryChannel&&PLAYER.libraryChannel.channel_id;
-  if(channelId)await libraryChannelTune(channelId);
+  const context=PLAYER&&PLAYER.libraryChannel;if(!context)return;
+  const remaining=Number(context.ends_at_ms||0)-LIBRARY_CHANNEL_CLOCK.now();
+  if(remaining>0){clearTimeout(LIBRARY_CHANNEL_BOUNDARY_TIMER);LIBRARY_CHANNEL_BOUNDARY_TIMER=setTimeout(()=>libraryChannelBoundary().catch(()=>{}),remaining);return;}
+  if(!document.getElementById("video")?.paused)await libraryChannelTune(context.channel_id);
+}
+async function libraryChannelReconcile(intent){
+  if(!LIBRARY_CHANNEL_TUNE.current(intent)||!PLAYER||!PLAYER.libraryChannel||document.getElementById("video")?.paused)return;
+  const context=PLAYER.libraryChannel,sent=performance.now();
+  const fresh=await api(`/library-channels/${encodeURIComponent(context.channel_id)}/resolve`,{method:"POST"});
+  LIBRARY_CHANNEL_CLOCK.observe(fresh.server_now_ms,sent,performance.now());
+  if(!LIBRARY_CHANNEL_TUNE.current(intent)||!PLAYER||!PLAYER.libraryChannel)return;
+  if(fresh.generation_id!==context.generation_id||fresh.occurrence.cycle!==context.occurrence.cycle||fresh.occurrence.ordinal!==context.occurrence.ordinal){
+    await libraryChannelTune(context.channel_id);return;
+  }
+  context.ends_at_ms=fresh.ends_at_ms;setTimeout(()=>libraryChannelReconcile(intent).catch(()=>{}),30000);
 }
 function libraryChannelWatchProgramme(channelId,fileId,itemId,titleOverride){
   const scheduled=(LIBRARY_CHANNELS.guide||[]).find(row=>row.channel_id===channelId&&Number(row.file_id)===Number(fileId));

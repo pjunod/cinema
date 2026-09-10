@@ -367,9 +367,17 @@ struct PlurxAPI {
     // MARK: - Library channels
 
     func libraryChannels(management: Bool = false) async throws -> [LibraryChannel] {
-        try await get("library-channels/", query: management
-            ? [URLQueryItem(name: "management", value: "true")]
-            : [])
+        var result: [LibraryChannel] = []
+        var after: String?
+        repeat {
+            var query = [URLQueryItem(name: "limit", value: "100")]
+            if management { query.append(URLQueryItem(name: "management", value: "true")) }
+            if let after { query.append(URLQueryItem(name: "after", value: after)) }
+            let page: [LibraryChannel] = try await get("library-channels/", query: query)
+            result += page
+            after = page.count == 100 ? page.last?.id : nil
+        } while after != nil
+        return result
     }
 
     func libraryChannel(_ id: String) async throws -> LibraryChannel {
@@ -377,15 +385,33 @@ struct PlurxAPI {
     }
 
     func libraryChannelGuide(ids: [String], from: Int64, to: Int64) async throws -> [LibraryChannelProgramme] {
-        try await get("library-channels/guide", query: [
-            URLQueryItem(name: "channel_ids", value: ids.joined(separator: ",")),
-            URLQueryItem(name: "start_ms", value: String(from)),
-            URLQueryItem(name: "end_ms", value: String(to)),
-        ])
+        var programmes: [LibraryChannelProgramme] = []
+        for start in stride(from: 0, to: ids.count, by: 20) {
+            let group = Array(ids[start..<min(ids.count, start + 20)])
+            var cursor: String?
+            repeat {
+                var query = [
+                    URLQueryItem(name: "channel_ids", value: group.joined(separator: ",")),
+                    URLQueryItem(name: "start_ms", value: String(from)),
+                    URLQueryItem(name: "end_ms", value: String(to)),
+                ]
+                if let cursor { query.append(URLQueryItem(name: "cursor", value: cursor)) }
+                guard let url = makeURL("library-channels/guide", query: query) else { throw APIError.badURL }
+                var request = URLRequest(url: url)
+                Session.shared.authorize(&request)
+                let (data, response) = try await session.data(for: request)
+                try Self.check(response)
+                programmes += try Self.decoder.decode([LibraryChannelProgramme].self, from: data)
+                cursor = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "X-Plurx-Next-Cursor")
+            } while cursor != nil
+        }
+        return programmes.sorted {
+            ($0.startsAtMs, $0.channelId) < ($1.startsAtMs, $1.channelId)
+        }
     }
 
-    func previewLibraryChannel(_ recipe: LibraryChannelRecipe) async throws -> LibraryChannelPreview {
-        try await post("library-channels/preview", body: LibraryChannelPreviewRequest(recipe: recipe, limit: 50))
+    func previewLibraryChannel(_ recipe: LibraryChannelRecipe, seed: String?) async throws -> LibraryChannelPreview {
+        try await post("library-channels/preview", body: LibraryChannelPreviewRequest(recipe: recipe, limit: 50, previewSeed: seed))
     }
 
     func createLibraryChannel(_ definition: LibraryChannelDefinition) async throws -> LibraryChannelMutation {
@@ -400,7 +426,8 @@ struct PlurxAPI {
             description: definition.description,
             visibility: definition.visibility,
             enabled: definition.enabled,
-            recipe: definition.recipe
+            recipe: definition.recipe,
+            previewSeed: definition.previewSeed
         ))
     }
 

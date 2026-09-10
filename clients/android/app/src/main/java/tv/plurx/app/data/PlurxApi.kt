@@ -34,17 +34,22 @@ interface PlurxApi {
     suspend fun libraries(): List<Library>
 
     @GET("library-channels/")
-    suspend fun libraryChannels(@Query("management") management: Boolean = false): List<LibraryChannel>
+    suspend fun libraryChannels(
+        @Query("management") management: Boolean = false,
+        @Query("after") after: String? = null,
+        @Query("limit") limit: Int = 100,
+    ): List<LibraryChannel>
 
     @GET("library-channels/{id}")
     suspend fun libraryChannel(@Path("id") id: String): LibraryChannel
 
     @GET("library-channels/guide")
-    suspend fun libraryChannelGuide(
+    suspend fun libraryChannelGuidePage(
         @Query("channel_ids") channelIds: String,
         @Query("start_ms") startMs: Long,
         @Query("end_ms") endMs: Long,
-    ): List<LibraryChannelProgramme>
+        @Query("cursor") cursor: String? = null,
+    ): Response<List<LibraryChannelProgramme>>
 
     @POST("library-channels/preview")
     suspend fun previewLibraryChannel(@Body body: LibraryChannelPreviewRequest): LibraryChannelPreview

@@ -8,12 +8,13 @@ use super::hiqlite::{database_error, validate_sql, HiqliteAuthStore};
 use super::LibraryChannelStore;
 use crate::error::StoreError;
 use crate::library_channels::{
-    ChannelBuildMutation, ChannelCandidate, ChannelGenerationEntry, ChannelItemKind,
-    ChannelMutation, ChannelVisibility, LibraryChannel, LibraryChannelBuildClaim,
-    LibraryChannelDelete, LibraryChannelGeneration, LibraryChannelPublication,
-    LibraryChannelUpdate, NewLibraryChannel, CHANNELS_PER_USER_MAX, CHANNELS_SERVER_MAX,
-    CHANNEL_ABANDONED_BUILD_RETENTION_MS, CHANNEL_GENERATION_STAGE_MAX, CHANNEL_PRUNE_BATCH_MAX,
-    CHANNEL_REQUESTS_PER_USER_MAX, CHANNEL_SUPERSEDED_RETENTION_MS, LIBRARY_CHANNELS_SCHEMA,
+    generation_content_digest, ChannelBuildMutation, ChannelCandidate, ChannelGenerationEntry,
+    ChannelItemKind, ChannelMutation, ChannelVisibility, LibraryChannel, LibraryChannelBuildClaim,
+    LibraryChannelBuildFailure, LibraryChannelDelete, LibraryChannelGeneration,
+    LibraryChannelPublication, LibraryChannelUpdate, NewLibraryChannel, CHANNELS_PER_USER_MAX,
+    CHANNELS_SERVER_MAX, CHANNEL_ABANDONED_BUILD_RETENTION_MS, CHANNEL_GENERATION_STAGE_MAX,
+    CHANNEL_PRUNE_BATCH_MAX, CHANNEL_REQUESTS_PER_USER_MAX, CHANNEL_SUPERSEDED_RETENTION_MS,
+    LIBRARY_CHANNELS_SCHEMA, LIBRARY_CHANNEL_BUILD_STATE_SCHEMA,
 };
 
 pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), StoreError> {
@@ -40,9 +41,24 @@ pub(super) fn migration_statements() -> Result<Vec<(String, hiqlite::Params)>, S
         .collect()
 }
 
+pub(super) fn build_state_migration_statements(
+) -> Result<Vec<(String, hiqlite::Params)>, StoreError> {
+    LIBRARY_CHANNEL_BUILD_STATE_SCHEMA
+        .split(';')
+        .map(str::trim)
+        .filter(|statement| !statement.is_empty())
+        .map(|statement| {
+            validate_sql(statement)?;
+            Ok((statement.to_owned(), params!()))
+        })
+        .collect()
+}
+
 const CHANNEL_COLS: &str = "c.id, c.owner_user_id, c.name, c.description, c.visibility, \
     c.enabled, c.definition_revision, c.recipe_json, c.seed, c.active_generation_id, \
-    c.active_epoch_ms, c.pending_generation_id, c.pending_epoch_ms, c.created_at_ms, \
+    c.active_epoch_ms, c.pending_generation_id, c.pending_epoch_ms, c.build_state, \
+    c.build_error_code, c.build_error_message, c.build_candidate_count, c.build_entry_count, \
+    c.build_last_attempt_ms, c.build_last_success_ms, c.last_auto_build_ms, c.created_at_ms, \
     c.updated_at_ms";
 
 struct ChannelRow {
@@ -59,6 +75,14 @@ struct ChannelRow {
     active_epoch_ms: Option<i64>,
     pending_generation_id: Option<String>,
     pending_epoch_ms: Option<i64>,
+    build_state: String,
+    build_error_code: Option<String>,
+    build_error_message: Option<String>,
+    build_candidate_count: i64,
+    build_entry_count: i64,
+    build_last_attempt_ms: Option<i64>,
+    build_last_success_ms: Option<i64>,
+    last_auto_build_ms: Option<i64>,
     created_at_ms: i64,
     updated_at_ms: i64,
     favourite: i64,
@@ -80,6 +104,14 @@ impl From<&mut Row<'_>> for ChannelRow {
             active_epoch_ms: row.get("active_epoch_ms"),
             pending_generation_id: row.get("pending_generation_id"),
             pending_epoch_ms: row.get("pending_epoch_ms"),
+            build_state: row.get("build_state"),
+            build_error_code: row.get("build_error_code"),
+            build_error_message: row.get("build_error_message"),
+            build_candidate_count: row.get("build_candidate_count"),
+            build_entry_count: row.get("build_entry_count"),
+            build_last_attempt_ms: row.get("build_last_attempt_ms"),
+            build_last_success_ms: row.get("build_last_success_ms"),
+            last_auto_build_ms: row.get("last_auto_build_ms"),
             created_at_ms: row.get("created_at_ms"),
             updated_at_ms: row.get("updated_at_ms"),
             favourite: row.get("favourite"),
@@ -111,6 +143,14 @@ impl TryFrom<ChannelRow> for LibraryChannel {
             active_epoch_ms: row.active_epoch_ms,
             pending_generation_id: row.pending_generation_id,
             pending_epoch_ms: row.pending_epoch_ms,
+            build_state: row.build_state,
+            build_error_code: row.build_error_code,
+            build_error_message: row.build_error_message,
+            build_candidate_count: row.build_candidate_count,
+            build_entry_count: row.build_entry_count,
+            build_last_attempt_ms: row.build_last_attempt_ms,
+            build_last_success_ms: row.build_last_success_ms,
+            last_auto_build_ms: row.last_auto_build_ms,
             favourite: row.favourite != 0,
             created_at_ms: row.created_at_ms,
             updated_at_ms: row.updated_at_ms,
@@ -180,6 +220,7 @@ struct CatalogRow {
     kind: String,
     title: String,
     overview: String,
+    show_overview: String,
     genres: String,
     tags: String,
     year: Option<i64>,
@@ -204,6 +245,7 @@ impl From<&mut Row<'_>> for CatalogRow {
             kind: row.get("kind"),
             title: row.get("title"),
             overview: row.get("overview"),
+            show_overview: row.get("show_overview"),
             genres: row.get("genres"),
             tags: row.get("tags"),
             year: row.get("year"),
@@ -299,10 +341,10 @@ async fn query_channel(
     rows.into_iter().next().map(TryInto::try_into).transpose()
 }
 
-fn visible(channel: &LibraryChannel, actor_user_id: i64, actor_is_admin: bool) -> bool {
+fn visible(channel: &LibraryChannel, actor_user_id: i64, management: bool) -> bool {
     channel.owner_user_id == actor_user_id
-        || channel.visibility == ChannelVisibility::Shared
-        || actor_is_admin
+        || (channel.visibility == ChannelVisibility::Shared && channel.enabled)
+        || management
 }
 
 fn decode_list(value: &str) -> Result<Vec<String>, StoreError> {
@@ -394,8 +436,8 @@ impl LibraryChannelStore for HiqliteAuthStore {
                 (
                     "INSERT INTO library_channels \
                      (id, owner_user_id, name, description, visibility, enabled, \
-                      definition_revision, recipe_json, seed, created_at_ms, updated_at_ms) \
-                     SELECT $1, $2, $3, $4, $5, $6, 1, $7, $8, $9, $9 \
+                      definition_revision, recipe_json, seed, build_state, created_at_ms, updated_at_ms) \
+                     SELECT $1, $2, $3, $4, $5, $6, 1, $7, $8, 'queued', $9, $9 \
                      WHERE (SELECT COUNT(*) FROM library_channels WHERE owner_user_id = $2) < $10 \
                        AND (SELECT COUNT(*) FROM library_channels) < $11 \
                        AND (SELECT COUNT(*) FROM library_channel_requests WHERE user_id = $2) < $12",
@@ -500,7 +542,8 @@ impl LibraryChannelStore for HiqliteAuthStore {
                 (
                     "UPDATE library_channels SET name = $1, description = $2, visibility = $3, \
                      enabled = $4, definition_revision = definition_revision + 1, recipe_json = $5, \
-                     seed = $6, updated_at_ms = $7 WHERE id = $8 AND definition_revision = $9 \
+                     seed = $6, build_state = 'queued', build_error_code = NULL, \
+                     build_error_message = NULL, updated_at_ms = $7 WHERE id = $8 AND definition_revision = $9 \
                      AND (owner_user_id = $10 OR $11) \
                      AND (SELECT COUNT(*) FROM library_channel_requests WHERE user_id = $10) < $12",
                     params!(
@@ -674,7 +717,7 @@ impl LibraryChannelStore for HiqliteAuthStore {
                 "SELECT i.id AS item_id, f.id AS file_id, f.size AS file_size, \
                     f.mtime AS file_mtime, f.duration_ms AS duration_ms, \
                     i.library_id, i.kind, i.title, \
-                    COALESCE(i.overview, '') || '\n' || COALESCE(sh.overview, '') AS overview, \
+                    COALESCE(i.overview, '') AS overview, COALESCE(sh.overview, '') AS show_overview, \
                     i.genres, i.tags, \
                     COALESCE(CAST(substr(i.air_date, 1, 4) AS INTEGER), i.year, sh.year) AS year, \
                     sh.id AS show_id, sh.title AS show_title, s.season_number, i.episode_number, \
@@ -700,12 +743,14 @@ impl LibraryChannelStore for HiqliteAuthStore {
                         )))
                     }
                 };
+                let show_genres = decode_list(&row.show_genres)?;
                 let mut genres = decode_list(&row.genres)?;
-                genres.extend(decode_list(&row.show_genres)?);
+                genres.extend(show_genres.clone());
                 genres.sort_by_key(|value| value.to_lowercase());
                 genres.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+                let show_tags = decode_list(&row.show_tags)?;
                 let mut tags = decode_list(&row.tags)?;
-                tags.extend(decode_list(&row.show_tags)?);
+                tags.extend(show_tags.clone());
                 tags.sort_by_key(|value| value.to_lowercase());
                 tags.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
                 Ok(ChannelCandidate {
@@ -718,8 +763,11 @@ impl LibraryChannelStore for HiqliteAuthStore {
                     kind,
                     title: row.title,
                     overview: row.overview,
+                    show_overview: row.show_overview,
                     genres,
                     tags,
+                    show_genres,
+                    show_tags,
                     year: row.year.and_then(|value| i32::try_from(value).ok()),
                     show_id: row.show_id,
                     show_title: row.show_title,
@@ -740,6 +788,7 @@ impl LibraryChannelStore for HiqliteAuthStore {
         &self,
         after_id: Option<&str>,
         limit: i64,
+        now_ms: i64,
     ) -> Result<Vec<LibraryChannel>, StoreError> {
         self.client()
             .query_consistent_map::<ChannelRow, _>(
@@ -747,9 +796,15 @@ impl LibraryChannelStore for HiqliteAuthStore {
                     "SELECT {CHANNEL_COLS}, 0 AS favourite FROM library_channels c \
                      WHERE c.id > $1 AND c.enabled = 1 \
                        AND COALESCE(json_extract(c.recipe_json, '$.auto_refresh'), 1) = 1 \
+                       AND (COALESCE(c.last_auto_build_ms, c.build_last_attempt_ms) IS NULL \
+                         OR COALESCE(c.last_auto_build_ms, c.build_last_attempt_ms) <= $3) \
                      ORDER BY c.id LIMIT $2"
                 ),
-                params!(after_id.unwrap_or_default(), limit.clamp(1, 200)),
+                params!(
+                    after_id.unwrap_or_default(),
+                    limit.clamp(1, 200),
+                    now_ms.saturating_sub(15 * 60 * 1_000)
+                ),
             )
             .await?
             .into_iter()
@@ -806,8 +861,8 @@ impl LibraryChannelStore for HiqliteAuthStore {
         &self,
         claim: &LibraryChannelBuildClaim,
     ) -> Result<ChannelBuildMutation, StoreError> {
-        let changed = self.execute(
-            "INSERT INTO library_channel_generations \
+        let results = self.client().txn([
+            ("INSERT INTO library_channel_generations \
              (id, channel_id, definition_revision, algorithm_version, content_digest, state, \
               build_claim_id, build_claim_expires_ms, created_at_ms) \
              SELECT $1, $2, $3, 1, $4, 'building', $5, $6, $7 \
@@ -816,8 +871,15 @@ impl LibraryChannelStore for HiqliteAuthStore {
                  AND state = 'building' AND build_claim_expires_ms > $7)",
             params!(claim.generation_id.as_str(), claim.channel_id.as_str(), claim.expected_revision,
                 claim.content_digest.as_str(), claim.claim_id.as_str(), claim.expires_at_ms, claim.now_ms)
-        ).await?;
-        Ok(if changed == 1 {
+            ),
+            ("UPDATE library_channels SET build_state = 'building', build_error_code = NULL, \
+              build_error_message = NULL, build_last_attempt_ms = $1 WHERE id = $2 \
+              AND definition_revision = $3 AND EXISTS(SELECT 1 FROM library_channel_generations \
+                WHERE id = $4 AND build_claim_id = $5)",
+             params!(claim.now_ms, claim.channel_id.as_str(), claim.expected_revision,
+                claim.generation_id.as_str(), claim.claim_id.as_str()))
+        ]).await?.into_iter().collect::<Result<Vec<_>, _>>().map_err(database_error)?;
+        Ok(if results == [1, 1] {
             ChannelBuildMutation::Applied
         } else {
             ChannelBuildMutation::Busy
@@ -904,8 +966,49 @@ impl LibraryChannelStore for HiqliteAuthStore {
         &self,
         publication: &LibraryChannelPublication,
     ) -> Result<ChannelBuildMutation, StoreError> {
+        let staged = self
+            .client()
+            .query_consistent_map::<EntryRow, _>(
+                "SELECT ordinal, item_id, file_id, file_size, file_mtime, duration_ms, \
+             cumulative_start_ms, show_id FROM library_channel_entries WHERE generation_id = $1 \
+             ORDER BY ordinal",
+                params!(publication.generation_id.as_str()),
+            )
+            .await?
+            .into_iter()
+            .map(|entry| {
+                Ok(ChannelGenerationEntry {
+                    ordinal: u32::try_from(entry.ordinal).map_err(|_| {
+                        StoreError::Database("channel ordinal is out of range".to_owned())
+                    })?,
+                    item_id: entry.item_id,
+                    file_id: entry.file_id,
+                    file_size: entry.file_size,
+                    file_mtime: entry.file_mtime,
+                    duration_ms: entry.duration_ms,
+                    cumulative_start_ms: entry.cumulative_start_ms,
+                    show_id: entry.show_id,
+                })
+            })
+            .collect::<Result<Vec<_>, StoreError>>()?;
+        let continuous = staged
+            .iter()
+            .enumerate()
+            .scan(0_i64, |offset, (index, entry)| {
+                let valid = entry.ordinal as usize == index && entry.cumulative_start_ms == *offset;
+                *offset = offset.saturating_add(entry.duration_ms);
+                Some(valid)
+            })
+            .all(|valid| valid);
+        if !continuous
+            || generation_content_digest(publication.seed, &staged) != publication.content_digest
+        {
+            return Ok(ChannelBuildMutation::Invalid);
+        }
         let pointer_sql = if publication.pending {
             "UPDATE library_channels SET pending_generation_id = $1, pending_epoch_ms = $2, \
+             build_state = 'ready', build_candidate_count = $8, build_entry_count = $8, \
+             build_last_success_ms = $3, last_auto_build_ms = CASE WHEN $10 THEN $3 ELSE last_auto_build_ms END, \
              updated_at_ms = $3 WHERE id = $4 AND definition_revision = $5 \
              AND active_generation_id IS NOT NULL AND EXISTS(SELECT 1 FROM library_channel_generations g \
                WHERE g.id = $1 AND g.channel_id = $4 AND g.state = 'building' \
@@ -915,7 +1018,9 @@ impl LibraryChannelStore for HiqliteAuthStore {
                    FROM library_channel_entries e WHERE e.generation_id = g.id) = $9)"
         } else {
             "UPDATE library_channels SET active_generation_id = $1, active_epoch_ms = $2, \
-             pending_generation_id = NULL, pending_epoch_ms = NULL, updated_at_ms = $3 \
+             pending_generation_id = NULL, pending_epoch_ms = NULL, build_state = 'ready', \
+             build_candidate_count = $8, build_entry_count = $8, build_last_success_ms = $3, \
+             last_auto_build_ms = CASE WHEN $10 THEN $3 ELSE last_auto_build_ms END, updated_at_ms = $3 \
              WHERE id = $4 AND definition_revision = $5 AND EXISTS(SELECT 1 FROM library_channel_generations g \
                WHERE g.id = $1 AND g.channel_id = $4 AND g.state = 'building' \
                  AND g.build_claim_id = $6 AND g.build_claim_expires_ms > $3 \
@@ -944,7 +1049,8 @@ impl LibraryChannelStore for HiqliteAuthStore {
                         publication.claim_id.as_str(),
                         publication.content_digest.as_str(),
                         publication.entry_count,
-                        publication.loop_duration_ms
+                        publication.loop_duration_ms,
+                        publication.automatic
                     ),
                 ),
                 (
@@ -966,6 +1072,73 @@ impl LibraryChannelStore for HiqliteAuthStore {
             .collect::<Result<Vec<_>, _>>()
             .map_err(database_error)?;
         Ok(if counts.len() == 3 && counts[1..] == [1, 1] {
+            ChannelBuildMutation::Applied
+        } else {
+            ChannelBuildMutation::Stale
+        })
+    }
+
+    async fn fail_library_channel_build(
+        &self,
+        failure: &LibraryChannelBuildFailure,
+    ) -> Result<ChannelBuildMutation, StoreError> {
+        if let (Some(generation_id), Some(claim_id)) = (
+            failure.generation_id.as_deref(),
+            failure.claim_id.as_deref(),
+        ) {
+            self.execute(
+                "UPDATE library_channel_generations SET build_claim_expires_ms = $1 \
+                 WHERE id = $2 AND channel_id = $3 AND build_claim_id = $4",
+                params!(
+                    failure.now_ms,
+                    generation_id,
+                    failure.channel_id.as_str(),
+                    claim_id
+                ),
+            )
+            .await?;
+        }
+        let changed = self
+            .execute(
+                "UPDATE library_channels SET build_state = 'failed', build_error_code = $1, \
+             build_error_message = $2, build_candidate_count = $3, build_last_attempt_ms = $4, \
+             updated_at_ms = $4 WHERE id = $5 AND definition_revision = $6",
+                params!(
+                    failure.error_code.as_str(),
+                    failure.error_message.as_str(),
+                    failure.candidate_count,
+                    failure.now_ms,
+                    failure.channel_id.as_str(),
+                    failure.expected_revision
+                ),
+            )
+            .await?;
+        Ok(if changed == 1 {
+            ChannelBuildMutation::Applied
+        } else {
+            ChannelBuildMutation::Stale
+        })
+    }
+
+    async fn complete_library_channel_build_without_publication(
+        &self,
+        channel_id: &str,
+        expected_revision: i64,
+        candidate_count: i64,
+        automatic: bool,
+        now_ms: i64,
+    ) -> Result<ChannelBuildMutation, StoreError> {
+        let changed = self.execute(
+            "UPDATE library_channels SET build_state = 'ready', build_error_code = NULL, \
+             build_error_message = NULL, build_candidate_count = $1, \
+             build_entry_count = COALESCE((SELECT entry_count FROM library_channel_generations \
+               WHERE id = COALESCE(pending_generation_id, active_generation_id)), 0), \
+             build_last_attempt_ms = $2, build_last_success_ms = $2, \
+             last_auto_build_ms = CASE WHEN $3 THEN $2 ELSE last_auto_build_ms END, updated_at_ms = $2 \
+             WHERE id = $4 AND definition_revision = $5",
+            params!(candidate_count, now_ms, automatic, channel_id, expected_revision),
+        ).await?;
+        Ok(if changed == 1 {
             ChannelBuildMutation::Applied
         } else {
             ChannelBuildMutation::Stale

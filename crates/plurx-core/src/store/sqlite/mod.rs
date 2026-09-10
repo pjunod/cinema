@@ -1102,6 +1102,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     // foreign keys in generation entries: a rescan may remove their current
     // rows, but it must not rewrite the clock viewers on other devices see.
     crate::library_channels::LIBRARY_CHANNELS_SCHEMA,
+    // v56: durable build acknowledgement/state for replay-safe channel saves.
+    crate::library_channels::LIBRARY_CHANNEL_BUILD_STATE_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.

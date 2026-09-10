@@ -2,6 +2,16 @@ import AVKit
 import Foundation
 import SwiftUI
 
+extension Notification.Name {
+    static let makeLibraryChannelFromItem = Notification.Name("plurx.makeLibraryChannelFromItem")
+}
+
+struct LibraryChannelCreationSeed {
+    let itemId: Int
+    let kind: String
+    let title: String
+}
+
 // MARK: - Wire contract
 
 enum LibraryChannelVisibility: String, Codable, CaseIterable, Identifiable {
@@ -91,6 +101,7 @@ struct LibraryChannelDefinition: Codable {
     let visibility: LibraryChannelVisibility
     let enabled: Bool
     let recipe: LibraryChannelRecipe
+    let previewSeed: String?
 }
 
 struct LibraryChannelUpdateRequest: Codable {
@@ -101,6 +112,7 @@ struct LibraryChannelUpdateRequest: Codable {
     let visibility: LibraryChannelVisibility
     let enabled: Bool
     let recipe: LibraryChannelRecipe
+    let previewSeed: String?
 }
 
 struct LibraryChannelMutation: Codable {
@@ -111,6 +123,7 @@ struct LibraryChannelMutation: Codable {
 struct LibraryChannelPreviewRequest: Codable {
     let recipe: LibraryChannelRecipe
     let limit: Int
+    let previewSeed: String?
 }
 
 struct LibraryChannelPreview: Codable {
@@ -127,11 +140,22 @@ struct LibraryChannelPreview: Codable {
         let durationMs: Int64
     }
 
+    struct Entry: Codable, Identifiable {
+        let ordinal: UInt32
+        let itemId: Int
+        let fileId: Int
+        let durationMs: Int64
+        var id: UInt32 { ordinal }
+    }
+
     let eligibleCount: Int
     let uniqueDurationMs: Int64
     let repeatDescription: String
     let contentDigest: String
     let matches: [Match]
+    let firstTen: [Entry]
+    let previewSeed: String
+    let excludedCount: Int
 }
 
 struct LibraryChannelFavouriteRequest: Codable { let favourite: Bool }
@@ -240,6 +264,9 @@ final class LibraryChannelPlayerController: ObservableObject {
     private var serverBaseMs: Int64 = 0
     private var monotonicBaseMs: Int64 = 0
     private var endObserver: NSObjectProtocol?
+    private let playbackControl = PlaybackControlSession()
+    private var mediaOriginMs: Int64 = 0
+    private var mediaDurationMs: Int = 0
 
     deinit {
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
@@ -264,7 +291,7 @@ final class LibraryChannelPlayerController: ObservableObject {
                 if $0.favourite != $1.favourite { return $0.favourite }
                 return $0.name.localizedStandardCompare($1.name) == .orderedAscending
             }
-            let ids = Array(channels.prefix(20).map(\.id))
+            let ids = channels.map(\.id)
             if !ids.isEmpty {
                 let now = Int64(Date().timeIntervalSince1970 * 1_000)
                 programmes = try await api.libraryChannelGuide(ids: ids, from: now, to: now + 4 * 60 * 60 * 1_000)
@@ -328,6 +355,20 @@ final class LibraryChannelPlayerController: ObservableObject {
             player.replaceCurrentItem(with: item)
             observeEnd(item, channel: channel, sequence: expected)
             player.play()
+            mediaOriginMs = Int64(started.playback.mediaOriginMs ?? Int(occurrence.positionMs))
+            mediaDurationMs = started.playback.durationMs ?? 0
+            if let bootstrap = started.playback.control, bootstrap.isValid {
+                playbackControl.begin(
+                    bootstrap: bootstrap,
+                    transport: PlaybackControlTransport(
+                        origin: model.origin,
+                        authorize: { request in Session.shared.authorize(&request) }
+                    ),
+                    observe: { [weak self] in self?.controlObservation() }
+                )
+            } else {
+                playbackControl.end()
+            }
             message = "Following live · seeking and watch history are off"
             scheduleBoundary(channel: channel, occurrence: occurrence, sequence: expected)
             scheduleClockRefresh(channel: channel, sequence: expected)
@@ -364,6 +405,7 @@ final class LibraryChannelPlayerController: ObservableObject {
             player.pause()
             message = "Paused. Resume rejoins server-now if the programme changes."
         }
+        playbackControl.playerChanged()
     }
 
     func stop() async {
@@ -375,6 +417,7 @@ final class LibraryChannelPlayerController: ObservableObject {
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
         endObserver = nil
         player.pause()
+        playbackControl.end()
         player.replaceCurrentItem(with: nil)
         if let sessionId, let model { await model.endHlsSession(sessionId) }
         sessionId = nil
@@ -383,6 +426,8 @@ final class LibraryChannelPlayerController: ObservableObject {
         title = nil
         paused = false
         busy = false
+        mediaOriginMs = 0
+        mediaDurationMs = 0
     }
 
     func setFavourite(_ channel: LibraryChannel) async {
@@ -451,6 +496,7 @@ final class LibraryChannelPlayerController: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor in
                 guard let self, self.tuneSequence == sequence, !self.paused else { return }
+                self.playbackControl.playerChanged()
                 if let resolved = self.resolved, resolved.endsAtMs > self.serverNowMs() {
                     self.message = "This programme ended early. Waiting for its scheduled boundary."
                 } else {
@@ -458,6 +504,38 @@ final class LibraryChannelPlayerController: ObservableObject {
                 }
             }
         }
+    }
+
+    private func controlObservation() -> PlayerControlObservation? {
+        guard let item = player.currentItem else { return nil }
+        let local = player.currentTime().seconds
+        let position = mediaOriginMs + Int64((local.isFinite ? max(0, local) : 0) * 1_000)
+        return PlayerControlObservation(
+            positionMs: Int(min(Int64(Int.max), max(0, position))),
+            durationMs: mediaDurationMs,
+            bufferedFromMs: nil,
+            bufferedThroughMs: nil,
+            rate: Double(player.rate),
+            isPaused: paused || player.rate == 0,
+            isEnded: item.status == .failed || (resolved?.endsAtMs ?? Int64.max) <= serverNowMs(),
+            isSeeking: false,
+            hasStarted: player.timeControlStatus == .playing,
+            waitingForMs: nil,
+            isLikelyToKeepUp: item.isPlaybackLikelyToKeepUp,
+            errorCode: item.error == nil ? nil : .media,
+            errorDetail: item.error == nil ? nil : "library_channel_media_failed",
+            droppedFrames: nil,
+            observedDownloadBps: nil,
+            selection: ClientSelection(
+                quality: .auto,
+                audioTrack: nil,
+                subtitle: SubtitleSelection(mode: .off, track: nil),
+                audioOffsetMs: 0,
+                codec: .auto,
+                dynamicRange: .auto
+            ),
+            capabilities: Caps.controlCapabilities()
+        )
     }
 }
 
@@ -468,6 +546,10 @@ struct LibraryChannelsView: View {
     @StateObject private var controller = LibraryChannelPlayerController.shared
     @State private var editing: LibraryChannel?
     @State private var creating = false
+    @State private var creationSeed: LibraryChannelCreationSeed?
+    @State private var personalPlayback: PlayContext?
+    @State private var returnChannel: LibraryChannel?
+    @State private var focusedProgrammeId: String?
     @AppStorage("libraryChannelTVLayout") private var tvLayout = "guide_preview"
 
     var body: some View {
@@ -524,11 +606,37 @@ struct LibraryChannelsView: View {
             }
             #endif
         }
-        .sheet(isPresented: $creating) {
-            NavigationStack { LibraryChannelEditor(channel: nil) { Task { await controller.refresh() } } }
+        .sheet(isPresented: $creating, onDismiss: { creationSeed = nil }) {
+            NavigationStack { LibraryChannelEditor(channel: nil, seed: creationSeed) { Task { await controller.refresh() } } }
         }
         .sheet(item: $editing) { channel in
-            NavigationStack { LibraryChannelEditor(channel: channel) { Task { await controller.refresh() } } }
+            NavigationStack { LibraryChannelEditor(channel: channel, seed: nil) { Task { await controller.refresh() } } }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .makeLibraryChannelFromItem)) { note in
+            guard let itemId = note.userInfo?["itemId"] as? Int,
+                  let kind = note.userInfo?["kind"] as? String,
+                  let title = note.userInfo?["title"] as? String else { return }
+            creationSeed = LibraryChannelCreationSeed(itemId: itemId, kind: kind, title: title)
+            creating = true
+        }
+        .fullScreenCover(item: $personalPlayback, onDismiss: {
+            if let channel = returnChannel {
+                returnChannel = nil
+                Task { await controller.tune(channel) }
+            }
+        }) { context in
+            ZStack(alignment: .topTrailing) {
+                PlayerView(
+                    itemId: context.itemId, fileId: context.fileId, startMs: 0,
+                    durationMs: context.durationMs, title: context.title,
+                    progressOffsetMs: 0, itemDurationMs: nil,
+                    subtitle: nil, year: nil, airDate: nil, overview: context.overview,
+                    selection: .none, onPlayNext: { personalPlayback = $0 },
+                    onPlaybackStopped: { _ in }
+                ).environmentObject(model)
+                Button("Return to channel") { personalPlayback = nil }
+                    .buttonStyle(.borderedProminent).padding()
+            }
         }
         .task {
             await controller.load(model: model)
@@ -565,7 +673,18 @@ struct LibraryChannelsView: View {
                 Text(controller.title ?? "On now").font(.headline)
                 HStack {
                     Button(controller.paused ? "Resume live" : "Pause") { Task { await controller.togglePause() } }
-                    NavigationLink("Watch from start", value: Route.item(resolved.itemId))
+                    Button("Watch from start") {
+                        returnChannel = channel
+                        personalPlayback = PlayContext(
+                            itemId: resolved.itemId,
+                            fileId: resolved.fileId,
+                            startMs: 0,
+                            durationMs: Int(resolved.endsAtMs - resolved.startsAtMs),
+                            title: controller.title ?? channel.name,
+                            overview: "Started from \(channel.name)."
+                        )
+                        Task { await controller.stop() }
+                    }
                     Button("Stop") { Task { await controller.stop() } }
                 }
             }
@@ -589,12 +708,32 @@ struct LibraryChannelsView: View {
                                 Image(systemName: channel.favourite ? "star.fill" : "star")
                             }
                         }
-                        ForEach(guide.prefix(4)) { programme in
-                            HStack {
-                                Text(programme.title).lineLimit(1)
-                                Spacer()
-                                Text(Date(timeIntervalSince1970: Double(programme.startsAtMs) / 1_000), style: .time)
-                                    .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                        ScrollView(.horizontal) {
+                            HStack(spacing: 6) {
+                                ForEach(guide) { programme in
+                                    let isPlaying = controller.watching?.id == channel.id
+                                        && controller.resolved?.generationId == programme.generationId
+                                        && controller.resolved?.occurrence.ordinal == programme.ordinal
+                                        && controller.resolved?.occurrence.cycle == programme.cycle
+                                    Button {
+                                        focusedProgrammeId = programme.id
+                                        if programme.startsAtMs <= Int64(Date().timeIntervalSince1970 * 1_000)
+                                            && programme.endsAtMs > Int64(Date().timeIntervalSince1970 * 1_000) {
+                                            Task { await controller.tune(channel) }
+                                        }
+                                    } label: {
+                                        VStack(alignment: .leading) {
+                                            Text(programme.title).lineLimit(1)
+                                            Text(Date(timeIntervalSince1970: Double(programme.startsAtMs) / 1_000), style: .time)
+                                                .font(.caption.monospacedDigit())
+                                            if isPlaying { Label("Watching", systemImage: "play.fill").font(.caption2) }
+                                        }
+                                        .frame(width: min(360, max(120, CGFloat(programme.endsAtMs - programme.startsAtMs) / 300_000 * 80)), alignment: .leading)
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .tint(isPlaying ? Palette.accent : nil)
+                                    .accessibilityValue(focusedProgrammeId == programme.id ? "Focused programme" : "")
+                                }
                             }
                         }
                         HStack {
@@ -618,7 +757,9 @@ struct LibraryChannelsView: View {
 private struct LibraryChannelEditor: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
     let channel: LibraryChannel?
+    let seed: LibraryChannelCreationSeed?
     let saved: () -> Void
 
     @State private var name = ""
@@ -635,6 +776,7 @@ private struct LibraryChannelEditor: View {
     @State private var ordering: LibraryChannelOrdering = .balancedShuffle
     @State private var includeSpecials = false
     @State private var autoRefresh = true
+    @State private var matchAllInScope = false
     @State private var libraryIds: [Int] = []
     @State private var includeItemIds: [Int] = []
     @State private var includeShowIds: [Int] = []
@@ -643,6 +785,7 @@ private struct LibraryChannelEditor: View {
     @State private var searchText = ""
     @State private var searchResults: [Item] = []
     @State private var preview: LibraryChannelPreview?
+    @State private var previewSeed: String?
     @State private var busy = false
     @State private var message: String?
     @State private var canShare = false
@@ -651,6 +794,12 @@ private struct LibraryChannelEditor: View {
     var body: some View {
         Form {
             if step == 0 { Section("1 · Content") {
+                HStack {
+                    Button("Space docs") { genres = "Documentary"; keywords = "space, astronomy, mars"; matchAllInScope = false }
+                    Button("’90s comedy") { genres = "Comedy"; yearMin = "1990"; yearMax = "1999"; matchAllInScope = false }
+                    Button("Film noir") { genres = "Film Noir, Crime"; keywords = "noir"; matchAllInScope = false }
+                    Button("All in scope") { genres = ""; tags = ""; keywords = ""; yearMin = ""; yearMax = ""; matchAllInScope = true }
+                }
                 Toggle("Movies", isOn: $movies)
                 Toggle("Episodes", isOn: $episodes)
                 ForEach(model.libraries.filter { $0.kind == "movies" || $0.kind == "shows" }) { library in
@@ -682,14 +831,19 @@ private struct LibraryChannelEditor: View {
                         .font(.caption).foregroundStyle(.secondary)
                     Text("Excluded items \(excludeItemIds.map(String.init).joined(separator: ", ")) · series \(excludeShowIds.map(String.init).joined(separator: ", "))")
                         .font(.caption).foregroundStyle(.secondary)
+                    ForEach(includeItemIds, id: \.self) { id in Button("Remove included item \(id)") { includeItemIds.removeAll { $0 == id } } }
+                    ForEach(includeShowIds, id: \.self) { id in Button("Remove included series \(id)") { includeShowIds.removeAll { $0 == id } } }
+                    ForEach(excludeItemIds, id: \.self) { id in Button("Remove excluded item \(id)") { excludeItemIds.removeAll { $0 == id } } }
+                    ForEach(excludeShowIds, id: \.self) { id in Button("Remove excluded series \(id)") { excludeShowIds.removeAll { $0 == id } } }
                 }
                 Button("Preview matches") { Task { await loadPreview() } }.disabled(busy || (!movies && !episodes))
                 if let preview {
                     Text("\(preview.eligibleCount) titles · \(preview.repeatDescription)")
-                    ForEach(preview.matches.prefix(10)) { match in
+                    ForEach(preview.firstTen) { entry in
+                        let match = preview.matches.first { $0.candidate.itemId == entry.itemId }
                         VStack(alignment: .leading) {
-                            Text(match.candidate.title)
-                            Text(match.reasons.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary)
+                            Text(match?.candidate.title ?? "Title \(entry.itemId)")
+                            Text(match?.reasons.joined(separator: " · ") ?? "scheduled").font(.caption).foregroundStyle(.secondary)
                         }
                     }
                 }
@@ -727,14 +881,15 @@ private struct LibraryChannelEditor: View {
         .navigationTitle(channel == nil ? "Make a channel" : "Edit channel")
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
-                Button(step == 0 ? "Cancel" : "Back") { if step == 0 { dismiss() } else { step -= 1 } }
+                Button(step == 0 ? "Cancel" : "Back") { if step == 0 { persistDraft(); dismiss() } else { step -= 1 } }
             }
             ToolbarItem(placement: .confirmationAction) {
                 if step < 2 { Button("Next") { step += 1 }.disabled(busy || (step == 0 && !movies && !episodes)) }
                 else { Button("Save") { Task { await save() } }.disabled(busy || !valid) }
             }
         }
-        .onAppear { loadChannel() }
+        .onAppear { loadChannel(); restoreDraft(); applySeed() }
+        .onChange(of: scenePhase) { _, phase in if phase != .active { persistDraft() } }
         .task {
             if let user = try? await model.requireAPI().me() {
                 canShare = user.isAdmin == true
@@ -774,7 +929,7 @@ private struct LibraryChannelEditor: View {
         value.excludeShowIds = excludeShowIds
         // Empty criteria remain an editable draft. Only a previously explicit
         // all-in-scope preset retains that affirmative selection.
-        value.matchAllInScope = channel?.recipe.matchAllInScope ?? false
+        value.matchAllInScope = matchAllInScope
         return value
     }
 
@@ -785,8 +940,49 @@ private struct LibraryChannelEditor: View {
             description: description.trimmingCharacters(in: .whitespacesAndNewlines),
             visibility: canShare ? visibility : .personal,
             enabled: enabled,
-            recipe: recipe
+            recipe: recipe,
+            previewSeed: previewSeed
         )
+    }
+
+    private struct StoredDraft: Codable {
+        let channelId: String?
+        let expectedRevision: Int64?
+        let step: Int
+        let definition: LibraryChannelDefinition
+    }
+
+    private var draftKey: String {
+        "library-channel-draft-v2:\(model.origin):\(model.userId ?? 0):\(channel?.id ?? "new")"
+    }
+
+    private func persistDraft() {
+        guard dirty, let data = try? JSONEncoder().encode(StoredDraft(
+            channelId: channel?.id, expectedRevision: channel?.revision,
+            step: step, definition: definition
+        )) else { return }
+        UserDefaults.standard.set(data, forKey: draftKey)
+    }
+
+    private func clearDraft() { UserDefaults.standard.removeObject(forKey: draftKey) }
+
+    private func restoreDraft() {
+        guard let data = UserDefaults.standard.data(forKey: draftKey),
+              let stored = try? JSONDecoder().decode(StoredDraft.self, from: data),
+              stored.channelId == channel?.id,
+              stored.expectedRevision == channel?.revision
+        else { return }
+        let value = stored.definition
+        name = value.name; description = value.description; visibility = value.visibility
+        enabled = value.enabled; movies = value.recipe.kinds.contains("movie")
+        episodes = value.recipe.kinds.contains("episode"); genres = value.recipe.genresAny.joined(separator: ", ")
+        tags = value.recipe.tagsAny.joined(separator: ", "); keywords = value.recipe.keywordsAny.joined(separator: ", ")
+        yearMin = value.recipe.yearMin.map(String.init) ?? ""; yearMax = value.recipe.yearMax.map(String.init) ?? ""
+        ordering = value.recipe.ordering; includeSpecials = value.recipe.includeSpecials
+        autoRefresh = value.recipe.autoRefresh; matchAllInScope = value.recipe.matchAllInScope
+        libraryIds = value.recipe.libraryIds; includeItemIds = value.recipe.includeItemIds
+        includeShowIds = value.recipe.includeShowIds; excludeItemIds = value.recipe.excludeItemIds
+        excludeShowIds = value.recipe.excludeShowIds; previewSeed = value.previewSeed; step = stored.step
     }
 
     private func list(_ value: String) -> [String] {
@@ -809,11 +1005,23 @@ private struct LibraryChannelEditor: View {
         ordering = channel.recipe.ordering
         includeSpecials = channel.recipe.includeSpecials
         autoRefresh = channel.recipe.autoRefresh
+        matchAllInScope = channel.recipe.matchAllInScope
         libraryIds = channel.recipe.libraryIds
         includeItemIds = channel.recipe.includeItemIds
         includeShowIds = channel.recipe.includeShowIds
         excludeItemIds = channel.recipe.excludeItemIds
         excludeShowIds = channel.recipe.excludeShowIds
+        previewSeed = channel.seed.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func applySeed() {
+        guard channel == nil, let seed else { return }
+        if name.isEmpty { name = "\(seed.title) channel" }
+        if seed.kind == "show" {
+            includeShowIds = Array(Set(includeShowIds + [seed.itemId])).sorted()
+        } else {
+            includeItemIds = Array(Set(includeItemIds + [seed.itemId])).sorted()
+        }
     }
 
     private func searchTitles() async {
@@ -838,7 +1046,11 @@ private struct LibraryChannelEditor: View {
 
     private func loadPreview() async {
         busy = true
-        do { preview = try await model.requireAPI().previewLibraryChannel(recipe); message = nil }
+        do {
+            preview = try await model.requireAPI().previewLibraryChannel(recipe, seed: previewSeed)
+            previewSeed = preview?.previewSeed
+            message = nil
+        }
         catch { message = error.localizedDescription }
         busy = false
     }
@@ -848,7 +1060,7 @@ private struct LibraryChannelEditor: View {
         do {
             if let channel { _ = try await model.requireAPI().updateLibraryChannel(channel, definition: definition) }
             else { _ = try await model.requireAPI().createLibraryChannel(definition) }
-            saved(); dismiss()
+            clearDraft(); saved(); dismiss()
         } catch { message = error.localizedDescription }
         busy = false
     }
@@ -870,7 +1082,7 @@ private struct LibraryChannelEditor: View {
     private func deleteChannel() async {
         guard let channel else { return }
         busy = true
-        do { try await model.requireAPI().deleteLibraryChannel(channel); saved(); dismiss() }
+        do { try await model.requireAPI().deleteLibraryChannel(channel); clearDraft(); saved(); dismiss() }
         catch { message = error.localizedDescription; busy = false }
     }
 }

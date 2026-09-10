@@ -656,6 +656,21 @@ const TABLES: &[TablePlan] = &[
         parent_first: false,
     },
     TablePlan {
+        name: "library_channel_session_recipes",
+        columns: &[
+            "user_id",
+            "request_id",
+            "incarnation_id",
+            "recipe_json",
+            "created_at_ms",
+        ],
+        order_by: "user_id, request_id",
+        minimum_schema: 55,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
         name: "media_playback_pointers",
         columns: &[
             "user_id",

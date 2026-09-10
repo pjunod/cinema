@@ -1967,6 +1967,7 @@ pub trait LibraryChannelStore: Send + Sync + 'static {
         &self,
         after_id: Option<&str>,
         limit: i64,
+        now_ms: i64,
     ) -> Result<Vec<crate::library_channels::LibraryChannel>, StoreError>;
 
     async fn prune_library_channel_state(&self, now_ms: i64, limit: i64)
@@ -1998,6 +1999,20 @@ pub trait LibraryChannelStore: Send + Sync + 'static {
     async fn publish_library_channel_generation(
         &self,
         publication: &crate::library_channels::LibraryChannelPublication,
+    ) -> Result<crate::library_channels::ChannelBuildMutation, StoreError>;
+
+    async fn fail_library_channel_build(
+        &self,
+        failure: &crate::library_channels::LibraryChannelBuildFailure,
+    ) -> Result<crate::library_channels::ChannelBuildMutation, StoreError>;
+
+    async fn complete_library_channel_build_without_publication(
+        &self,
+        channel_id: &str,
+        expected_revision: i64,
+        candidate_count: i64,
+        automatic: bool,
+        now_ms: i64,
     ) -> Result<crate::library_channels::ChannelBuildMutation, StoreError>;
 
     async fn read_library_channel_generation(
@@ -3707,6 +3722,17 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         now_ms: i64,
         claim_expires_at_ms: i64,
     ) -> Result<MediaSessionRequestClaim, StoreError>;
+
+    /// Bind a Library-channel start's canonical worker recipe to its claimed
+    /// durable identity before producer placement.
+    async fn record_library_channel_session_recipe(
+        &self,
+        user_id: i64,
+        request_id: &str,
+        incarnation_id: &str,
+        recipe_json: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
 
     async fn assign_media_session_request_owner(
         &self,

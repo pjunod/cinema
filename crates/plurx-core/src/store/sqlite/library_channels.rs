@@ -6,18 +6,21 @@ use rusqlite::{params, OptionalExtension, Row};
 use super::{conversion_err, SqliteStore};
 use crate::error::StoreError;
 use crate::library_channels::{
-    ChannelBuildMutation, ChannelCandidate, ChannelGenerationEntry, ChannelItemKind,
-    ChannelMutation, ChannelVisibility, LibraryChannel, LibraryChannelBuildClaim,
-    LibraryChannelDelete, LibraryChannelGeneration, LibraryChannelPublication,
-    LibraryChannelRecipe, LibraryChannelUpdate, NewLibraryChannel, CHANNELS_PER_USER_MAX,
-    CHANNELS_SERVER_MAX, CHANNEL_ABANDONED_BUILD_RETENTION_MS, CHANNEL_GENERATION_STAGE_MAX,
-    CHANNEL_PRUNE_BATCH_MAX, CHANNEL_REQUESTS_PER_USER_MAX, CHANNEL_SUPERSEDED_RETENTION_MS,
+    generation_content_digest, ChannelBuildMutation, ChannelCandidate, ChannelGenerationEntry,
+    ChannelItemKind, ChannelMutation, ChannelVisibility, LibraryChannel, LibraryChannelBuildClaim,
+    LibraryChannelBuildFailure, LibraryChannelDelete, LibraryChannelGeneration,
+    LibraryChannelPublication, LibraryChannelRecipe, LibraryChannelUpdate, NewLibraryChannel,
+    CHANNELS_PER_USER_MAX, CHANNELS_SERVER_MAX, CHANNEL_ABANDONED_BUILD_RETENTION_MS,
+    CHANNEL_GENERATION_STAGE_MAX, CHANNEL_PRUNE_BATCH_MAX, CHANNEL_REQUESTS_PER_USER_MAX,
+    CHANNEL_SUPERSEDED_RETENTION_MS,
 };
 use crate::store::LibraryChannelStore;
 
 const CHANNEL_COLS: &str = "c.id, c.owner_user_id, c.name, c.description, c.visibility, \
     c.enabled, c.definition_revision, c.recipe_json, c.seed, c.active_generation_id, \
-    c.active_epoch_ms, c.pending_generation_id, c.pending_epoch_ms, c.created_at_ms, \
+    c.active_epoch_ms, c.pending_generation_id, c.pending_epoch_ms, c.build_state, \
+    c.build_error_code, c.build_error_message, c.build_candidate_count, c.build_entry_count, \
+    c.build_last_attempt_ms, c.build_last_success_ms, c.last_auto_build_ms, c.created_at_ms, \
     c.updated_at_ms";
 
 fn channel_from_row(row: &Row<'_>) -> rusqlite::Result<LibraryChannel> {
@@ -45,9 +48,17 @@ fn channel_from_row(row: &Row<'_>) -> rusqlite::Result<LibraryChannel> {
         active_epoch_ms: row.get(10)?,
         pending_generation_id: row.get(11)?,
         pending_epoch_ms: row.get(12)?,
-        favourite: row.get::<_, i64>(15)? != 0,
-        created_at_ms: row.get(13)?,
-        updated_at_ms: row.get(14)?,
+        build_state: row.get(13)?,
+        build_error_code: row.get(14)?,
+        build_error_message: row.get(15)?,
+        build_candidate_count: row.get(16)?,
+        build_entry_count: row.get(17)?,
+        build_last_attempt_ms: row.get(18)?,
+        build_last_success_ms: row.get(19)?,
+        last_auto_build_ms: row.get(20)?,
+        favourite: row.get::<_, i64>(23)? != 0,
+        created_at_ms: row.get(21)?,
+        updated_at_ms: row.get(22)?,
     })
 }
 
@@ -94,10 +105,10 @@ fn request_slot_available(
     Ok(live < CHANNEL_REQUESTS_PER_USER_MAX)
 }
 
-fn visible(channel: &LibraryChannel, actor_user_id: i64, actor_is_admin: bool) -> bool {
+fn visible(channel: &LibraryChannel, actor_user_id: i64, management: bool) -> bool {
     channel.owner_user_id == actor_user_id
-        || channel.visibility == ChannelVisibility::Shared
-        || actor_is_admin
+        || (channel.visibility == ChannelVisibility::Shared && channel.enabled)
+        || management
 }
 
 fn parse_string_list(column: usize, value: String) -> rusqlite::Result<Vec<String>> {
@@ -197,8 +208,8 @@ impl LibraryChannelStore for SqliteStore {
             tx.execute(
                 "INSERT INTO library_channels \
                  (id, owner_user_id, name, description, visibility, enabled, \
-                  definition_revision, recipe_json, seed, created_at_ms, updated_at_ms) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, ?8, ?9, ?9)",
+                  definition_revision, recipe_json, seed, build_state, created_at_ms, updated_at_ms) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, ?8, 'queued', ?9, ?9)",
                 params![
                     channel.id,
                     channel.owner_user_id,
@@ -276,7 +287,8 @@ impl LibraryChannelStore for SqliteStore {
             let changed = tx.execute(
                 "UPDATE library_channels SET name = ?1, description = ?2, \
                  visibility = ?3, enabled = ?4, definition_revision = definition_revision + 1, \
-                 recipe_json = ?5, seed = ?6, updated_at_ms = ?7 \
+                 recipe_json = ?5, seed = ?6, build_state = 'queued', \
+                 build_error_code = NULL, build_error_message = NULL, updated_at_ms = ?7 \
                  WHERE id = ?8 AND definition_revision = ?9 \
                    AND (owner_user_id = ?10 OR ?11)",
                 params![
@@ -427,7 +439,7 @@ impl LibraryChannelStore for SqliteStore {
         self.with_read(move |conn| {
             let mut statement = conn.prepare(
                 "SELECT i.id, f.id, f.size, f.mtime, f.duration_ms, i.library_id, i.kind, \
-                        i.title, COALESCE(i.overview, '') || '\n' || COALESCE(sh.overview, ''), \
+                        i.title, COALESCE(i.overview, ''), COALESCE(sh.overview, ''), \
                         i.genres, i.tags, \
                         COALESCE(CAST(substr(i.air_date, 1, 4) AS INTEGER), i.year, sh.year), \
                         sh.id, sh.title, s.season_number, i.episode_number, \
@@ -449,12 +461,14 @@ impl LibraryChannelStore for SqliteStore {
                     "episode" => ChannelItemKind::Episode,
                     _ => return Err(conversion_err(6, format!("unsupported channel kind `{kind_raw}`"))),
                 };
-                let mut genres = parse_string_list(9, row.get(9)?)?;
-                genres.extend(parse_string_list(17, row.get(17)?)?);
+                let show_genres = parse_string_list(18, row.get(18)?)?;
+                let mut genres = parse_string_list(10, row.get(10)?)?;
+                genres.extend(show_genres.clone());
                 genres.sort_by_key(|value| value.to_lowercase());
                 genres.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
-                let mut tags = parse_string_list(10, row.get(10)?)?;
-                tags.extend(parse_string_list(18, row.get(18)?)?);
+                let show_tags = parse_string_list(19, row.get(19)?)?;
+                let mut tags = parse_string_list(11, row.get(11)?)?;
+                tags.extend(show_tags.clone());
                 tags.sort_by_key(|value| value.to_lowercase());
                 tags.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
                 Ok(ChannelCandidate {
@@ -467,14 +481,17 @@ impl LibraryChannelStore for SqliteStore {
                     kind,
                     title: row.get(7)?,
                     overview: row.get(8)?,
+                    show_overview: row.get(9)?,
                     genres,
                     tags,
-                    year: row.get(11)?,
-                    show_id: row.get(12)?,
-                    show_title: row.get(13)?,
-                    season_number: row.get(14)?,
-                    episode_number: row.get(15)?,
-                    special: row.get::<_, i64>(16)? != 0,
+                    show_genres,
+                    show_tags,
+                    year: row.get(12)?,
+                    show_id: row.get(13)?,
+                    show_title: row.get(14)?,
+                    season_number: row.get(15)?,
+                    episode_number: row.get(16)?,
+                    special: row.get::<_, i64>(17)? != 0,
                     explicitly_included: false,
                 })
             })?;
@@ -487,6 +504,7 @@ impl LibraryChannelStore for SqliteStore {
         &self,
         after_id: Option<&str>,
         limit: i64,
+        now_ms: i64,
     ) -> Result<Vec<LibraryChannel>, StoreError> {
         let after_id = after_id.unwrap_or_default().to_owned();
         self.with_read(move |conn| {
@@ -494,11 +512,19 @@ impl LibraryChannelStore for SqliteStore {
                 "SELECT {CHANNEL_COLS}, 0 AS favourite FROM library_channels c \
                  WHERE c.id > ?1 AND c.enabled = 1 \
                    AND COALESCE(json_extract(c.recipe_json, '$.auto_refresh'), 1) = 1 \
+                   AND (COALESCE(c.last_auto_build_ms, c.build_last_attempt_ms) IS NULL \
+                     OR COALESCE(c.last_auto_build_ms, c.build_last_attempt_ms) <= ?3) \
                  ORDER BY c.id LIMIT ?2"
             );
             let mut statement = conn.prepare(&sql)?;
-            let rows =
-                statement.query_map(params![after_id, limit.clamp(1, 200)], channel_from_row)?;
+            let rows = statement.query_map(
+                params![
+                    after_id,
+                    limit.clamp(1, 200),
+                    now_ms.saturating_sub(15 * 60 * 1_000)
+                ],
+                channel_from_row,
+            )?;
             Ok(rows.collect::<Result<Vec<_>, _>>()?)
         })
         .await
@@ -578,11 +604,6 @@ impl LibraryChannelStore for SqliteStore {
                 return Ok(ChannelBuildMutation::Busy);
             }
             tx.execute(
-                "DELETE FROM library_channel_generations WHERE channel_id = ?1 \
-                 AND state = 'building' AND build_claim_expires_ms <= ?2",
-                params![claim.channel_id, claim.now_ms],
-            )?;
-            tx.execute(
                 "INSERT INTO library_channel_generations \
                  (id, channel_id, definition_revision, algorithm_version, content_digest, state, \
                   build_claim_id, build_claim_expires_ms, created_at_ms) \
@@ -596,6 +617,12 @@ impl LibraryChannelStore for SqliteStore {
                     claim.expires_at_ms,
                     claim.now_ms,
                 ],
+            )?;
+            tx.execute(
+                "UPDATE library_channels SET build_state = 'building', \
+                 build_error_code = NULL, build_error_message = NULL, \
+                 build_last_attempt_ms = ?1 WHERE id = ?2 AND definition_revision = ?3",
+                params![claim.now_ms, claim.channel_id, claim.expected_revision],
             )?;
             tx.commit()?;
             Ok(ChannelBuildMutation::Applied)
@@ -729,6 +756,29 @@ impl LibraryChannelStore for SqliteStore {
             {
                 return Ok(ChannelBuildMutation::Invalid);
             }
+            let mut statement = tx.prepare(
+                "SELECT ordinal, item_id, file_id, file_size, file_mtime, duration_ms, \
+                 cumulative_start_ms, show_id FROM library_channel_entries \
+                 WHERE generation_id = ?1 ORDER BY ordinal",
+            )?;
+            let staged = statement
+                .query_map([publication.generation_id.as_str()], |row| {
+                    Ok(ChannelGenerationEntry {
+                        ordinal: row.get(0)?, item_id: row.get(1)?, file_id: row.get(2)?,
+                        file_size: row.get(3)?, file_mtime: row.get(4)?, duration_ms: row.get(5)?,
+                        cumulative_start_ms: row.get(6)?, show_id: row.get(7)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            drop(statement);
+            let continuous = staged.iter().enumerate().scan(0_i64, |offset, (index, entry)| {
+                let valid = entry.ordinal as usize == index && entry.cumulative_start_ms == *offset;
+                *offset = offset.saturating_add(entry.duration_ms);
+                Some(valid)
+            }).all(|valid| valid);
+            if !continuous || generation_content_digest(publication.seed, &staged) != publication.content_digest {
+                return Ok(ChannelBuildMutation::Invalid);
+            }
             tx.execute(
                 "UPDATE library_channel_generations SET state = 'ready', entry_count = ?1, \
                  loop_duration_ms = ?2, build_claim_id = NULL, build_claim_expires_ms = NULL \
@@ -744,6 +794,8 @@ impl LibraryChannelStore for SqliteStore {
             let changed = if pending {
                 tx.execute(
                     "UPDATE library_channels SET pending_generation_id = ?1, pending_epoch_ms = ?2, \
+                     build_state = 'ready', build_candidate_count = ?6, build_entry_count = ?6, \
+                     build_last_success_ms = ?3, last_auto_build_ms = CASE WHEN ?7 THEN ?3 ELSE last_auto_build_ms END, \
                      updated_at_ms = ?3 WHERE id = ?4 AND definition_revision = ?5",
                     params![
                         publication.generation_id,
@@ -751,12 +803,16 @@ impl LibraryChannelStore for SqliteStore {
                         publication.now_ms,
                         publication.channel_id,
                         publication.expected_revision,
+                        publication.entry_count,
+                        publication.automatic,
                     ],
                 )?
             } else {
                 tx.execute(
                     "UPDATE library_channels SET active_generation_id = ?1, active_epoch_ms = ?2, \
-                     pending_generation_id = NULL, pending_epoch_ms = NULL, updated_at_ms = ?3 \
+                     pending_generation_id = NULL, pending_epoch_ms = NULL, build_state = 'ready', \
+                     build_candidate_count = ?6, build_entry_count = ?6, build_last_success_ms = ?3, \
+                     last_auto_build_ms = CASE WHEN ?7 THEN ?3 ELSE last_auto_build_ms END, updated_at_ms = ?3 \
                      WHERE id = ?4 AND definition_revision = ?5",
                     params![
                         publication.generation_id,
@@ -764,6 +820,8 @@ impl LibraryChannelStore for SqliteStore {
                         publication.now_ms,
                         publication.channel_id,
                         publication.expected_revision,
+                        publication.entry_count,
+                        publication.automatic,
                     ],
                 )?
             };
@@ -774,6 +832,70 @@ impl LibraryChannelStore for SqliteStore {
             Ok(ChannelBuildMutation::Applied)
         })
         .await
+    }
+
+    async fn fail_library_channel_build(
+        &self,
+        failure: &LibraryChannelBuildFailure,
+    ) -> Result<ChannelBuildMutation, StoreError> {
+        let failure = failure.clone();
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            if let (Some(generation_id), Some(claim_id)) = (
+                failure.generation_id.as_deref(),
+                failure.claim_id.as_deref(),
+            ) {
+                tx.execute(
+                    "UPDATE library_channel_generations SET build_claim_expires_ms = ?1 \
+                     WHERE id = ?2 AND channel_id = ?3 AND build_claim_id = ?4",
+                    params![failure.now_ms, generation_id, failure.channel_id, claim_id],
+                )?;
+            }
+            let changed = tx.execute(
+                "UPDATE library_channels SET build_state = 'failed', build_error_code = ?1, \
+                 build_error_message = ?2, build_candidate_count = ?3, build_last_attempt_ms = ?4, \
+                 updated_at_ms = ?4 WHERE id = ?5 AND definition_revision = ?6",
+                params![
+                    failure.error_code,
+                    failure.error_message,
+                    failure.candidate_count,
+                    failure.now_ms,
+                    failure.channel_id,
+                    failure.expected_revision
+                ],
+            )?;
+            tx.commit()?;
+            Ok(if changed == 1 {
+                ChannelBuildMutation::Applied
+            } else {
+                ChannelBuildMutation::Stale
+            })
+        })
+        .await
+    }
+
+    async fn complete_library_channel_build_without_publication(
+        &self,
+        channel_id: &str,
+        expected_revision: i64,
+        candidate_count: i64,
+        automatic: bool,
+        now_ms: i64,
+    ) -> Result<ChannelBuildMutation, StoreError> {
+        let channel_id = channel_id.to_owned();
+        self.with_conn(move |conn| {
+            let changed = conn.execute(
+                "UPDATE library_channels SET build_state = 'ready', build_error_code = NULL, \
+                 build_error_message = NULL, build_candidate_count = ?1, \
+                 build_entry_count = COALESCE((SELECT entry_count FROM library_channel_generations \
+                   WHERE id = COALESCE(pending_generation_id, active_generation_id)), 0), \
+                 build_last_attempt_ms = ?2, build_last_success_ms = ?2, \
+                 last_auto_build_ms = CASE WHEN ?3 THEN ?2 ELSE last_auto_build_ms END, updated_at_ms = ?2 \
+                 WHERE id = ?4 AND definition_revision = ?5",
+                params![candidate_count, now_ms, automatic, channel_id, expected_revision],
+            )?;
+            Ok(if changed == 1 { ChannelBuildMutation::Applied } else { ChannelBuildMutation::Stale })
+        }).await
     }
 
     async fn read_library_channel_generation(

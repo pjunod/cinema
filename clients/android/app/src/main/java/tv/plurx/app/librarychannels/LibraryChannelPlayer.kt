@@ -30,6 +30,16 @@ import tv.plurx.app.data.LibraryChannelResolved
 import tv.plurx.app.data.LibraryChannelSessionRequest
 import tv.plurx.app.data.Net
 import tv.plurx.app.data.PlurxApi
+import tv.plurx.app.player.ClientSelection
+import tv.plurx.app.player.CodecPolicy
+import tv.plurx.app.player.DynamicCapabilities
+import tv.plurx.app.player.DynamicRangePolicy
+import tv.plurx.app.player.PlaybackControlSession
+import tv.plurx.app.player.PlayerControlObservation
+import tv.plurx.app.player.QualitySelection
+import tv.plurx.app.player.SubtitleMode
+import tv.plurx.app.player.SubtitleSelection
+import tv.plurx.app.player.controlCapabilities
 import java.util.UUID
 
 data class LibraryChannelPlayerState(
@@ -65,10 +75,15 @@ class LibraryChannelPlayer private constructor(context: Context) {
     private var clockRefresh: Job? = null
     private var serverBaseMs = 0L
     private var monotonicBaseMs = 0L
+    private val playbackControl = PlaybackControlSession(scope)
+    private var controlCaps: DynamicCapabilities? = null
+    private var mediaOriginMs = 0L
+    private var mediaDurationMs = 0L
 
     init {
         player.addListener(object : Player.Listener {
             override fun onPlaybackStateChanged(playbackState: Int) {
+                playbackControl.playerChanged()
                 if (playbackState != Player.STATE_ENDED) return
                 val current = mutableState.value
                 val channel = current.watching ?: return
@@ -82,6 +97,7 @@ class LibraryChannelPlayer private constructor(context: Context) {
             }
 
             override fun onPlayerError(error: PlaybackException) {
+                playbackControl.playerChanged()
                 mutableState.value = mutableState.value.copy(
                     busy = false,
                     message = "This scheduled programme could not continue. Rejoin the channel to try again.",
@@ -104,15 +120,18 @@ class LibraryChannelPlayer private constructor(context: Context) {
         val client = api ?: return
         scope.launch {
             try {
-                val channels = client.libraryChannels().sortedWith(
+                val allChannels = mutableListOf<LibraryChannel>()
+                var after: String? = null
+                do {
+                    val page = client.libraryChannels(after = after)
+                    allChannels += page
+                    after = if (page.size == 100) page.lastOrNull()?.id else null
+                } while (after != null)
+                val channels = allChannels.sortedWith(
                     compareByDescending<LibraryChannel> { it.favourite }.thenBy { it.name.lowercase() },
                 )
                 val now = System.currentTimeMillis()
-                val guide = if (channels.isEmpty()) emptyList() else client.libraryChannelGuide(
-                    channels.take(20).joinToString(",") { it.id },
-                    now,
-                    now + 4 * 60 * 60 * 1_000,
-                )
+                val guide = loadGuide(client, channels.map { it.id }, now, now + 4 * 60 * 60 * 1_000)
                 mutableState.value = mutableState.value.copy(
                     channels = channels,
                     programmes = guide,
@@ -120,11 +139,31 @@ class LibraryChannelPlayer private constructor(context: Context) {
                     else if (channels.isEmpty()) "No Library channels yet. An administrator can make the first one."
                     else "${channels.size} scheduled channels · guide times come from the server",
                 )
+                pendingReturnChannelId?.let { pending ->
+                    channels.firstOrNull { it.id == pending && it.enabled }?.let { channel ->
+                        pendingReturnChannelId = null
+                        tune(channel)
+                    }
+                }
             } catch (_: kotlinx.coroutines.CancellationException) {
             } catch (error: Exception) {
                 mutableState.value = mutableState.value.copy(message = error.message ?: "Library channels are unavailable.")
             }
         }
+    }
+
+    private suspend fun loadGuide(client: PlurxApi, ids: List<String>, startMs: Long, endMs: Long): List<LibraryChannelProgramme> {
+        val rows = mutableListOf<LibraryChannelProgramme>()
+        ids.chunked(20).forEach { group ->
+            var cursor: String? = null
+            do {
+                val response = client.libraryChannelGuidePage(group.joinToString(","), startMs, endMs, cursor)
+                if (!response.isSuccessful) error("Guide request failed (${response.code()})")
+                rows += response.body().orEmpty()
+                cursor = response.headers()["X-Plurx-Next-Cursor"]
+            } while (cursor != null)
+        }
+        return rows.sortedWith(compareBy<LibraryChannelProgramme> { it.starts_at_ms }.thenBy { it.channel_id })
     }
 
     fun tune(channel: LibraryChannel) {
@@ -139,7 +178,9 @@ class LibraryChannelPlayer private constructor(context: Context) {
                 val resolved = client.resolveLibraryChannel(channel.id)
                 recordServerClock(resolved.server_now_ms, resolveStarted)
                 if (expected != tuneSequence) return@launch
-                val caps = Caps.snapshot(appContext).document
+                val capabilitySnapshot = Caps.snapshot(appContext)
+                val caps = capabilitySnapshot.document
+                controlCaps = controlCapabilities(capabilitySnapshot.legacyQuery)
                 val started = client.createLibraryChannelSession(
                     channel.id,
                     LibraryChannelSessionRequest(
@@ -179,6 +220,11 @@ class LibraryChannelPlayer private constructor(context: Context) {
                 )
                 player.prepare()
                 player.playWhenReady = true
+                mediaOriginMs = started.playback.media_origin_ms ?: resolved.position_ms
+                mediaDurationMs = started.playback.duration_ms ?: 0L
+                started.playback.control?.takeIf { it.isValid }?.let { bootstrap ->
+                    playbackControl.begin(bootstrap = bootstrap, observe = ::controlObservation)
+                } ?: playbackControl.end()
                 scheduleBoundary(channel, resolved, expected)
                 scheduleClockRefresh(channel, expected)
                 scope.launch {
@@ -223,6 +269,7 @@ class LibraryChannelPlayer private constructor(context: Context) {
                 message = "Paused. Resume rejoins server-now if the programme changes.",
             )
         }
+        playbackControl.playerChanged()
     }
 
     fun setFavourite(channel: LibraryChannel) {
@@ -244,6 +291,7 @@ class LibraryChannelPlayer private constructor(context: Context) {
         clockRefresh?.cancel()
         clockRefresh = null
         player.stop()
+        playbackControl.end()
         player.clearMediaItems()
         val retiring = sessionId
         sessionId = null
@@ -256,6 +304,34 @@ class LibraryChannelPlayer private constructor(context: Context) {
             api = null
             profileOrigin = null
         }
+    }
+
+    private fun controlObservation(): PlayerControlObservation? {
+        val capabilities = controlCaps ?: return null
+        val duration = mediaDurationMs
+        val position = (mediaOriginMs + player.currentPosition).coerceAtLeast(0L)
+        return PlayerControlObservation(
+            positionMs = position,
+            durationMs = duration,
+            bufferedFromMs = position,
+            bufferedThroughMs = mediaOriginMs + player.bufferedPosition,
+            rate = player.playbackParameters.speed.toDouble(),
+            isPaused = !player.playWhenReady || mutableState.value.paused,
+            isEnded = player.playbackState == Player.STATE_ENDED,
+            isSeeking = false,
+            hasStarted = player.playbackState == Player.STATE_READY,
+            isLikelyToKeepUp = player.playbackState == Player.STATE_READY,
+            errorCode = null,
+            errorDetail = null,
+            selection = ClientSelection(
+                quality = QualitySelection.Auto,
+                subtitle = SubtitleSelection(SubtitleMode.OFF),
+                audioOffsetMs = 0,
+                codec = CodecPolicy.AUTO,
+                dynamicRange = DynamicRangePolicy.AUTO,
+            ),
+            capabilities = capabilities,
+        )
     }
 
     private fun scheduleBoundary(channel: LibraryChannel, resolved: LibraryChannelResolved, expected: Long) {
@@ -302,6 +378,8 @@ class LibraryChannelPlayer private constructor(context: Context) {
     }
 
     companion object {
+        @Volatile private var pendingReturnChannelId: String? = null
+        fun returnToChannel(id: String) { pendingReturnChannelId = id }
         @Volatile private var instance: LibraryChannelPlayer? = null
         fun get(context: Context): LibraryChannelPlayer = instance ?: synchronized(this) {
             instance ?: LibraryChannelPlayer(context).also { instance = it }

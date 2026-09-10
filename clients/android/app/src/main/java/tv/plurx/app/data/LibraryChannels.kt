@@ -86,6 +86,7 @@ data class LibraryChannelDefinition(
     val visibility: LibraryChannelVisibility,
     val enabled: Boolean,
     val recipe: LibraryChannelRecipe,
+    val preview_seed: String? = null,
 )
 
 @Serializable
@@ -97,13 +98,18 @@ data class LibraryChannelUpdate(
     val visibility: LibraryChannelVisibility,
     val enabled: Boolean,
     val recipe: LibraryChannelRecipe,
+    val preview_seed: String? = null,
 )
 
 @Serializable
 data class LibraryChannelMutation(val channel: LibraryChannel, val build_state: String)
 
 @Serializable
-data class LibraryChannelPreviewRequest(val recipe: LibraryChannelRecipe, val limit: Int = 50)
+data class LibraryChannelPreviewRequest(
+    val recipe: LibraryChannelRecipe,
+    val limit: Int = 50,
+    val preview_seed: String? = null,
+)
 
 @Serializable
 data class LibraryChannelPreviewCandidate(
@@ -120,12 +126,23 @@ data class LibraryChannelMatch(
 )
 
 @Serializable
+data class LibraryChannelPreviewEntry(
+    val ordinal: Int,
+    val item_id: Long,
+    val file_id: Long,
+    val duration_ms: Long,
+)
+
+@Serializable
 data class LibraryChannelPreview(
     val eligible_count: Int,
     val unique_duration_ms: Long,
     val repeat_description: String,
     val content_digest: String,
     val matches: List<LibraryChannelMatch> = emptyList(),
+    val first_ten: List<LibraryChannelPreviewEntry> = emptyList(),
+    val preview_seed: String,
+    val excluded_count: Int = 0,
 )
 
 @Serializable

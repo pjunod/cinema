@@ -3833,6 +3833,16 @@ pub async fn activity(
     // retaining the established scan -> stream -> background-work ordering.
     activities.retain(|activity| activity.kind != "stream");
     if streams > 0 {
+        let channel_context = crate::http::library_channels::active_contexts(
+            &state.transcode.active_session_ids().await,
+        );
+        let stream_detail = (!channel_context.is_empty()).then(|| {
+            channel_context
+                .into_iter()
+                .map(|(channel, programme)| format!("{channel} — {programme}"))
+                .collect::<Vec<_>>()
+                .join(" · ")
+        });
         let insert_at = activities
             .iter()
             .take_while(|activity| matches!(activity.kind, "scan" | "enrich"))
@@ -3846,7 +3856,7 @@ pub async fn activity(
                 } else {
                     format!("{streams} active streams")
                 },
-                detail: None,
+                detail: stream_detail,
                 percent: None,
             },
         );
@@ -3926,6 +3936,20 @@ async fn local_activity(state: &AppState) -> Result<Vec<Activity>, ApiError> {
 
     let streams = state.transcode.active_sessions().await;
     if streams > 0 {
+        let channel_context = crate::http::library_channels::active_contexts(
+            &state.transcode.active_session_ids().await,
+        );
+        let detail = if channel_context.is_empty() {
+            None
+        } else {
+            Some(
+                channel_context
+                    .into_iter()
+                    .map(|(channel, programme)| format!("{channel} — {programme}"))
+                    .collect::<Vec<_>>()
+                    .join(" · "),
+            )
+        };
         activities.push(Activity {
             kind: "stream",
             label: if streams == 1 {
@@ -3933,7 +3957,7 @@ async fn local_activity(state: &AppState) -> Result<Vec<Activity>, ApiError> {
             } else {
                 format!("{streams} active streams")
             },
-            detail: None,
+            detail,
             percent: None,
         });
     }
@@ -4815,7 +4839,7 @@ pub(crate) async fn metrics(
          # HELP plurx_transcode_sessions_active Live transcode sessions.\n\
          # TYPE plurx_transcode_sessions_active gauge\n\
          plurx_transcode_sessions_active {sessions}\n\
-         {scans}{store_metrics}{analysis_runtime_metrics}{membership_metrics}{raft_metrics}{process_metrics}{live_tv_metrics}{takeover_metrics}{control_metrics}{playback_metrics}{blocked_get_metrics}{live_recovery_metrics}",
+        {scans}{store_metrics}{analysis_runtime_metrics}{membership_metrics}{raft_metrics}{process_metrics}{live_tv_metrics}{library_channel_metrics}{takeover_metrics}{control_metrics}{playback_metrics}{blocked_get_metrics}{live_recovery_metrics}",
         version = crate::version::SEMVER,
         build = crate::version::BUILD,
         takeover_metrics = crate::media_sessions::prometheus(),
@@ -4829,6 +4853,7 @@ pub(crate) async fn metrics(
         // hold and no `VodServe` handle that a cluster boot may have replaced.
         blocked_get_metrics = state.blocked_gets.prometheus(),
         live_tv_metrics = live_tv_metrics,
+        library_channel_metrics = crate::http::library_channels::prometheus(),
     );
     (
         [(

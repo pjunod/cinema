@@ -6,6 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, Request, StatusCode};
@@ -14,9 +15,10 @@ use axum::response::Response;
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use plurx_core::library_channels::{
-    build_rotation, evaluate_recipe, generation_loop_duration, resolve_occurrence,
-    ChannelBuildMutation, ChannelGenerationEntry, ChannelMatch, ChannelMutation, ChannelVisibility,
-    LibraryChannel, LibraryChannelBuildClaim, LibraryChannelDelete, LibraryChannelPublication,
+    build_rotation, evaluate_recipe, generation_content_digest, generation_loop_duration,
+    resolve_occurrence, ChannelBuildMutation, ChannelGenerationEntry, ChannelMatch,
+    ChannelMutation, ChannelVisibility, LibraryChannel, LibraryChannelBuildClaim,
+    LibraryChannelBuildFailure, LibraryChannelDelete, LibraryChannelPublication,
     LibraryChannelRecipe, LibraryChannelUpdate, NewLibraryChannel, ResolvedOccurrence,
     CHANNEL_ACTIVATION_LEAD_MS, CHANNEL_BUILD_CLAIM_MS, CHANNEL_BUILD_RENEW_MS,
     CHANNEL_CANDIDATE_ROWS_MAX, CHANNEL_DESCRIPTION_MAX, CHANNEL_GENERATION_STAGE_MAX,
@@ -115,19 +117,14 @@ async fn list(
             query.after.as_deref(),
             limit,
         )
-        .await?;
+        .await
+        .map_err(channel_store_error)?;
     let now_ms = crate::media_sessions::unix_ms();
     let mut response = Vec::with_capacity(channels.len());
     for channel in channels {
-        let now = programme_at(&state, &user, &channel, now_ms)
-            .await
-            .ok()
-            .flatten();
+        let now = programme_at(&state, &user, &channel, now_ms).await?;
         let next = match now.as_ref() {
-            Some(current) => programme_at(&state, &user, &channel, current.ends_at_ms)
-                .await
-                .ok()
-                .flatten(),
+            Some(current) => programme_at(&state, &user, &channel, current.ends_at_ms).await?,
             None => None,
         };
         response.push(ChannelSummary {
@@ -146,7 +143,11 @@ async fn list(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    let titles = state.store.item_titles(&item_ids).await?;
+    let titles = state
+        .store
+        .item_titles(&item_ids)
+        .await
+        .map_err(channel_store_error)?;
     for summary in &mut response {
         for programme in [&mut summary.now, &mut summary.next]
             .into_iter()
@@ -172,6 +173,10 @@ struct DefinitionBody {
     #[serde(default)]
     enabled: bool,
     recipe: LibraryChannelRecipe,
+    /// Hex seed returned by preview. Omitting it creates a fresh schedule;
+    /// supplying it makes the saved rotation exactly the previewed rotation.
+    #[serde(default)]
+    preview_seed: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -194,7 +199,7 @@ async fn create(
 ) -> Result<(StatusCode, Json<MutationResponse>), ApiError> {
     let (name, description, recipe, visibility) = normalized_definition(&body, user.is_admin)?;
     let candidates = matching_catalogue(&state, &recipe, None).await?;
-    if body.enabled && candidates.is_empty() {
+    if body.enabled && candidates.matches.is_empty() {
         return Err(channel_error(
             StatusCode::UNPROCESSABLE_ENTITY,
             "channel_empty",
@@ -212,33 +217,53 @@ async fn create(
         visibility,
         enabled: body.enabled,
         recipe,
-        seed: new_seed(),
+        seed: body
+            .preview_seed
+            .as_deref()
+            .map(parse_seed)
+            .transpose()?
+            .unwrap_or_else(new_seed),
         now_ms,
     };
     let (stored, replay) = match state
         .store
         .create_library_channel(user.is_admin, &channel)
-        .await?
+        .await
+        .map_err(channel_store_error)?
     {
         ChannelMutation::Applied(channel) => (channel, false),
         ChannelMutation::Replay(channel) => (channel, true),
         other => return Err(mutation_error(other)),
     };
-    let build_state = if replay || candidates.is_empty() {
-        if stored.active_generation_id.is_some() {
-            "ready"
-        } else {
-            "draft"
-        }
-    } else {
-        build_channel(&state, &user, &stored, candidates, Activation::Initial).await?;
-        "ready"
-    };
+    if !candidates.matches.is_empty() && (replay || stored.build_state != "ready") {
+        build_channel(
+            &state,
+            &user,
+            &stored,
+            candidates,
+            Activation::Initial,
+            false,
+        )
+        .await?;
+    } else if candidates.matches.is_empty() {
+        record_build_failure(
+            &state,
+            &stored,
+            None,
+            None,
+            "channel_empty",
+            "the current recipe has no eligible titles",
+            0,
+        )
+        .await?;
+    }
     let refreshed = state
         .store
         .get_library_channel(user.id, user.is_admin, &stored.id)
-        .await?
+        .await
+        .map_err(channel_store_error)?
         .ok_or(ApiError::NotFound("library channel"))?;
+    let build_state = build_state_label(&refreshed);
     Ok((
         if replay {
             StatusCode::OK
@@ -257,7 +282,7 @@ async fn get_one(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<ChannelDetail>, ApiError> {
-    let channel = visible_channel(&state, &user, &id).await?;
+    let channel = editable_channel(&state, &user, &id).await?;
     Ok(Json(ChannelDetail::new(channel, user.id, user.is_admin)))
 }
 
@@ -290,12 +315,12 @@ async fn update(
     Path(id): Path<String>,
     Json(body): Json<UpdateBody>,
 ) -> Result<(StatusCode, Json<MutationResponse>), ApiError> {
-    let previous = visible_channel(&state, &user, &id).await?;
+    let previous = editable_channel(&state, &user, &id).await?;
     let (name, description, recipe, visibility) =
         normalized_definition(&body.definition, user.is_admin)?;
     let preferred_files = preferred_generation_files(&state, &user, &previous).await?;
     let candidates = matching_catalogue(&state, &recipe, Some(&preferred_files)).await?;
-    if body.definition.enabled && candidates.is_empty() {
+    if body.definition.enabled && candidates.matches.is_empty() {
         return Err(channel_error(
             StatusCode::UNPROCESSABLE_ENTITY,
             "channel_empty",
@@ -317,21 +342,46 @@ async fn update(
         seed: previous.seed,
         now_ms: crate::media_sessions::unix_ms(),
     };
-    let (stored, replay) = match state.store.update_library_channel(&update).await? {
+    let (stored, replay) = match state
+        .store
+        .update_library_channel(&update)
+        .await
+        .map_err(channel_store_error)?
+    {
         ChannelMutation::Applied(channel) => (channel, false),
         ChannelMutation::Replay(channel) => (channel, true),
         other => return Err(mutation_error(other)),
     };
-    let has_candidates = !candidates.is_empty();
-    if !replay && has_candidates {
-        build_channel(&state, &user, &stored, candidates, Activation::NextRotation).await?;
+    let has_candidates = !candidates.matches.is_empty();
+    if has_candidates && (!replay || stored.build_state != "ready") {
+        build_channel(
+            &state,
+            &user,
+            &stored,
+            candidates,
+            Activation::NextRotation,
+            false,
+        )
+        .await?;
+    } else if !has_candidates {
+        record_build_failure(
+            &state,
+            &stored,
+            None,
+            None,
+            "channel_empty",
+            "the current recipe has no eligible titles; the old schedule was retained",
+            0,
+        )
+        .await?;
     }
     let refreshed = visible_channel(&state, &user, &stored.id).await?;
+    let build_state = build_state_label(&refreshed);
     Ok((
         StatusCode::ACCEPTED,
         Json(MutationResponse {
             channel: refreshed,
-            build_state: if has_candidates { "ready" } else { "draft" },
+            build_state,
         }),
     ))
 }
@@ -357,7 +407,12 @@ async fn delete_one(
         request_hash: body_digest(&(id, &query)),
         now_ms: crate::media_sessions::unix_ms(),
     };
-    match state.store.delete_library_channel(&deletion).await? {
+    match state
+        .store
+        .delete_library_channel(&deletion)
+        .await
+        .map_err(channel_store_error)?
+    {
         ChannelMutation::Applied(()) | ChannelMutation::Replay(()) => Ok(StatusCode::NO_CONTENT),
         other => Err(mutation_error(other)),
     }
@@ -383,7 +438,8 @@ async fn favourite(
             body.favourite,
             crate::media_sessions::unix_ms(),
         )
-        .await?
+        .await
+        .map_err(channel_store_error)?
     {
         Ok(StatusCode::NO_CONTENT)
     } else {
@@ -396,6 +452,8 @@ struct PreviewBody {
     recipe: LibraryChannelRecipe,
     limit: Option<usize>,
     cursor: Option<String>,
+    #[serde(default)]
+    preview_seed: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -404,9 +462,19 @@ struct PreviewResponse {
     unique_duration_ms: i64,
     repeat_description: String,
     content_digest: String,
+    preview_seed: String,
+    excluded_count: usize,
+    diagnostics: Vec<PreviewDiagnostic>,
     matches: Vec<ChannelMatch>,
     first_ten: Vec<ChannelGenerationEntry>,
     next_cursor: Option<String>,
+}
+
+#[derive(Serialize)]
+struct PreviewDiagnostic {
+    code: &'static str,
+    count: usize,
+    examples: Vec<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -423,21 +491,28 @@ async fn preview(
     Json(body): Json<PreviewBody>,
 ) -> Result<Json<PreviewResponse>, ApiError> {
     let recipe = body.recipe.normalize().map_err(invalid_recipe)?;
-    let matches = matching_catalogue(&state, &recipe, None).await?;
-    let candidates = matches
+    let evaluation = matching_catalogue(&state, &recipe, None).await?;
+    let seed = body
+        .preview_seed
+        .as_deref()
+        .map(parse_seed)
+        .transpose()?
+        .unwrap_or_else(new_seed);
+    let candidates = evaluation
+        .matches
         .iter()
         .map(|matched| matched.candidate.clone())
         .collect::<Vec<_>>();
     let rotation = if candidates.is_empty() {
         Vec::new()
     } else {
-        build_rotation(candidates, recipe.ordering, [0; 32]).map_err(schedule_error)?
+        build_rotation(candidates, recipe.ordering, seed).map_err(schedule_error)?
     };
     let duration = rotation
         .last()
         .map(|entry| entry.cumulative_start_ms + entry.duration_ms)
         .unwrap_or(0);
-    let content_digest = content_digest(&recipe, &rotation);
+    let content_digest = generation_content_digest(seed, &rotation);
     let recipe_digest = body_digest(&recipe);
     let limit = body
         .limit
@@ -448,7 +523,7 @@ async fn preview(
         if cursor.actor_user_id != user.id
             || cursor.recipe_digest != recipe_digest
             || cursor.content_digest != content_digest
-            || cursor.offset > matches.len()
+            || cursor.offset > evaluation.matches.len()
         {
             return Err(channel_error(
                 StatusCode::CONFLICT,
@@ -460,8 +535,8 @@ async fn preview(
     } else {
         0
     };
-    let end = offset.saturating_add(limit).min(matches.len());
-    let next_cursor = (end < matches.len()).then(|| {
+    let end = offset.saturating_add(limit).min(evaluation.matches.len());
+    let next_cursor = (end < evaluation.matches.len()).then(|| {
         encode_preview_cursor(&PreviewCursor {
             actor_user_id: user.id,
             recipe_digest,
@@ -470,11 +545,16 @@ async fn preview(
         })
     });
     Ok(Json(PreviewResponse {
-        eligible_count: matches.len(),
+        eligible_count: evaluation.matches.len(),
         unique_duration_ms: duration,
         repeat_description: repeat_description(duration),
         content_digest,
-        matches: matches[offset..end].to_vec(),
+        preview_seed: hex::encode(seed),
+        excluded_count: evaluation
+            .candidate_count
+            .saturating_sub(evaluation.matches.len()),
+        diagnostics: preview_diagnostics(&evaluation),
+        matches: evaluation.matches[offset..end].to_vec(),
         first_ten: rotation.into_iter().take(10).collect(),
         next_cursor,
     }))
@@ -548,7 +628,12 @@ async fn rebuild(
         },
         now_ms: crate::media_sessions::unix_ms(),
     };
-    let (channel, replay) = match state.store.update_library_channel(&update).await? {
+    let (channel, replay) = match state
+        .store
+        .update_library_channel(&update)
+        .await
+        .map_err(channel_store_error)?
+    {
         ChannelMutation::Applied(channel) => (channel, false),
         ChannelMutation::Replay(channel) => (channel, true),
         other => return Err(mutation_error(other)),
@@ -558,21 +643,37 @@ async fn rebuild(
     }
     let preferred_files = preferred_generation_files(&state, &user, &channel).await?;
     let matches = matching_catalogue(&state, &channel.recipe, Some(&preferred_files)).await?;
-    if matches.is_empty() {
+    if matches.matches.is_empty() {
+        record_build_failure(
+            &state,
+            &channel,
+            None,
+            None,
+            "channel_empty",
+            "the current recipe has no eligible titles; the old schedule was retained",
+            0,
+        )
+        .await?;
         return Err(channel_error(
             StatusCode::UNPROCESSABLE_ENTITY,
             "channel_empty",
             "the current recipe has no eligible titles; the old schedule was retained",
         ));
     }
-    build_channel(&state, &user, &channel, matches, body.activation).await?;
-    let channel = visible_channel(&state, &user, &id).await?;
+    build_channel(&state, &user, &channel, matches, body.activation, false).await?;
+    let channel = editable_channel(&state, &user, &id).await?;
     Ok((StatusCode::ACCEPTED, Json(BuildDto::from(&channel))))
 }
 
 #[derive(Serialize)]
 struct BuildDto {
-    state: &'static str,
+    state: String,
+    error_code: Option<String>,
+    error_message: Option<String>,
+    candidate_count: i64,
+    entry_count: i64,
+    last_attempt_ms: Option<i64>,
+    last_success_ms: Option<i64>,
     active_generation_id: Option<String>,
     pending_generation_id: Option<String>,
     pending_activation_ms: Option<i64>,
@@ -581,13 +682,13 @@ struct BuildDto {
 impl From<&LibraryChannel> for BuildDto {
     fn from(channel: &LibraryChannel) -> Self {
         Self {
-            state: if channel.pending_generation_id.is_some()
-                || channel.active_generation_id.is_some()
-            {
-                "ready"
-            } else {
-                "draft"
-            },
+            state: channel.build_state.clone(),
+            error_code: channel.build_error_code.clone(),
+            error_message: channel.build_error_message.clone(),
+            candidate_count: channel.build_candidate_count,
+            entry_count: channel.build_entry_count,
+            last_attempt_ms: channel.build_last_attempt_ms,
+            last_success_ms: channel.build_last_success_ms,
             active_generation_id: channel.active_generation_id.clone(),
             pending_generation_id: channel.pending_generation_id.clone(),
             pending_activation_ms: channel.pending_epoch_ms,
@@ -763,7 +864,11 @@ async fn guide(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    let titles = state.store.item_titles(&item_ids).await?;
+    let titles = state
+        .store
+        .item_titles(&item_ids)
+        .await
+        .map_err(channel_store_error)?;
     for programme in &mut programmes {
         programme.title = titles
             .get(&programme.item_id)
@@ -844,6 +949,8 @@ async fn resolve_now(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<ResolveResponse>, ApiError> {
+    RESOLVE_TOTAL.fetch_add(1, Ordering::Relaxed);
+    let _latency = ResolveLatency(Instant::now());
     require_runtime_enabled(&state).await?;
     let channel = visible_channel(&state, &user, &id).await?;
     if !channel.enabled {
@@ -907,6 +1014,7 @@ async fn start_session(
         || occurrence.cycle != body.occurrence.cycle
         || occurrence.ordinal != body.occurrence.ordinal
     {
+        OCCURRENCE_CHANGES.fetch_add(1, Ordering::Relaxed);
         return Err(channel_error(
             StatusCode::CONFLICT,
             "channel_occurrence_changed",
@@ -927,7 +1035,7 @@ async fn start_session(
     };
     let playback = hls::create_for_library_channel(
         user,
-        state,
+        state.clone(),
         occurrence.entry.file_id,
         headers,
         remote,
@@ -935,6 +1043,23 @@ async fn start_session(
         purpose.clone(),
     )
     .await?;
+    let programme = state
+        .store
+        .item_titles(&[occurrence.entry.item_id])
+        .await
+        .map_err(channel_store_error)?
+        .remove(&occurrence.entry.item_id)
+        .unwrap_or_else(|| "Unavailable programme".to_owned());
+    activity_registry()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(
+            playback.session_id.clone(),
+            ChannelActivityContext {
+                channel: channel.name,
+                programme,
+            },
+        );
     Ok(Json(ChannelSessionResponse {
         playback,
         library_channel: purpose,
@@ -1086,7 +1211,8 @@ async fn cached_generation(
     let generation = state
         .store
         .read_library_channel_generation(user.id, user.is_admin, &channel.id, generation_id)
-        .await?
+        .await
+        .map_err(channel_store_error)?
         .ok_or(ApiError::NotFound("library channel generation"))?;
     if generation.state != "ready" {
         return Err(ApiError::NotFound("library channel generation"));
@@ -1129,19 +1255,112 @@ async fn cached_generation(
 
 static GENERATION_CACHE_HITS: AtomicUsize = AtomicUsize::new(0);
 static GENERATION_CACHE_MISSES: AtomicUsize = AtomicUsize::new(0);
+static BUILD_SUCCEEDED: AtomicUsize = AtomicUsize::new(0);
+static BUILD_FAILED: AtomicUsize = AtomicUsize::new(0);
+static BUILD_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+static RESOLVE_TOTAL: AtomicUsize = AtomicUsize::new(0);
+static RESOLVE_LATENCY_US: AtomicUsize = AtomicUsize::new(0);
+static PUBLICATION_CONFLICTS: AtomicUsize = AtomicUsize::new(0);
+static BUILD_QUEUED: AtomicUsize = AtomicUsize::new(0);
+static CANDIDATE_ROWS: AtomicUsize = AtomicUsize::new(0);
+static OCCURRENCE_CHANGES: AtomicUsize = AtomicUsize::new(0);
+static UNAVAILABLE_SLOTS: AtomicUsize = AtomicUsize::new(0);
+
+struct ResolveLatency(Instant);
+
+impl Drop for ResolveLatency {
+    fn drop(&mut self) {
+        RESOLVE_LATENCY_US.fetch_add(
+            usize::try_from(self.0.elapsed().as_micros()).unwrap_or(usize::MAX),
+            Ordering::Relaxed,
+        );
+    }
+}
+
+#[derive(Clone)]
+struct ChannelActivityContext {
+    channel: String,
+    programme: String,
+}
+
+fn activity_registry() -> &'static std::sync::Mutex<BTreeMap<String, ChannelActivityContext>> {
+    static REGISTRY: OnceLock<std::sync::Mutex<BTreeMap<String, ChannelActivityContext>>> =
+        OnceLock::new();
+    REGISTRY.get_or_init(|| std::sync::Mutex::new(BTreeMap::new()))
+}
+
+pub(crate) fn active_contexts(active_session_ids: &[String]) -> Vec<(String, String)> {
+    let active = active_session_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let mut registry = activity_registry()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    registry.retain(|session, _| active.contains(session.as_str()));
+    registry
+        .values()
+        .map(|context| (context.channel.clone(), context.programme.clone()))
+        .collect()
+}
+
+pub(crate) fn prometheus() -> String {
+    format!(
+        "# HELP plurx_library_channel_build_total Library-channel build outcomes.\n\
+         # TYPE plurx_library_channel_build_total counter\n\
+         plurx_library_channel_build_total{{outcome=\"attempt\"}} {}\n\
+         plurx_library_channel_build_total{{outcome=\"ready\"}} {}\n\
+         plurx_library_channel_build_total{{outcome=\"failed\"}} {}\n\
+         # HELP plurx_library_channel_build_queue_depth Coalesced channel builds waiting for a worker.\n\
+         # TYPE plurx_library_channel_build_queue_depth gauge\n\
+         plurx_library_channel_build_queue_depth {}\n\
+         # HELP plurx_library_channel_resolve_total Authoritative channel resolves.\n\
+         # TYPE plurx_library_channel_resolve_total counter\n\
+         plurx_library_channel_resolve_total {}\n\
+         # TYPE plurx_library_channel_resolve_latency_seconds summary\n\
+         plurx_library_channel_resolve_latency_seconds_count {}\n\
+         plurx_library_channel_resolve_latency_seconds_sum {:.6}\n\
+         # TYPE plurx_library_channel_candidate_rows_total counter\n\
+         plurx_library_channel_candidate_rows_total {}\n\
+         # TYPE plurx_library_channel_occurrence_change_total counter\n\
+         plurx_library_channel_occurrence_change_total {}\n\
+         # TYPE plurx_library_channel_unavailable_slot_total counter\n\
+         plurx_library_channel_unavailable_slot_total {}\n\
+         # HELP plurx_library_channel_publication_conflict_total Catalogue or definition fences that refused publication.\n\
+         # TYPE plurx_library_channel_publication_conflict_total counter\n\
+         plurx_library_channel_publication_conflict_total {}\n\
+         plurx_library_channel_generation_cache_total{{outcome=\"hit\"}} {}\n\
+         plurx_library_channel_generation_cache_total{{outcome=\"miss\"}} {}\n",
+        BUILD_ATTEMPTS.load(Ordering::Relaxed), BUILD_SUCCEEDED.load(Ordering::Relaxed),
+        BUILD_FAILED.load(Ordering::Relaxed), BUILD_QUEUED.load(Ordering::Relaxed),
+        RESOLVE_TOTAL.load(Ordering::Relaxed), RESOLVE_TOTAL.load(Ordering::Relaxed),
+        RESOLVE_LATENCY_US.load(Ordering::Relaxed) as f64 / 1_000_000.0,
+        CANDIDATE_ROWS.load(Ordering::Relaxed), OCCURRENCE_CHANGES.load(Ordering::Relaxed),
+        UNAVAILABLE_SLOTS.load(Ordering::Relaxed), PUBLICATION_CONFLICTS.load(Ordering::Relaxed),
+        GENERATION_CACHE_HITS.load(Ordering::Relaxed), GENERATION_CACHE_MISSES.load(Ordering::Relaxed),
+    )
+}
+
+#[derive(Clone)]
+struct CatalogueEvaluation {
+    matches: Vec<ChannelMatch>,
+    snapshot_digest: String,
+    candidate_count: usize,
+}
 
 async fn matching_catalogue(
     state: &AppState,
     recipe: &LibraryChannelRecipe,
     preferred_files: Option<&BTreeMap<i64, i64>>,
-) -> Result<Vec<ChannelMatch>, ApiError> {
+) -> Result<CatalogueEvaluation, ApiError> {
     // One bounded Store query is one coherent SQLite snapshot / Hiqlite
     // consistent read. Separate page calls can straddle catalogue mutations
     // and produce a rotation which never existed at any instant.
     let mut candidates = state
         .store
         .library_channel_catalog_snapshot((CHANNEL_CANDIDATE_ROWS_MAX + 1) as i64)
-        .await?;
+        .await
+        .map_err(channel_store_error)?;
     if candidates.len() > CHANNEL_CANDIDATE_ROWS_MAX {
         return Err(channel_error(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -1149,6 +1368,9 @@ async fn matching_catalogue(
             "candidate evaluation exceeds 100,000 rows; narrow the recipe",
         ));
     }
+    let snapshot_digest = body_digest(&candidates);
+    let candidate_count = candidates.len();
+    CANDIDATE_ROWS.fetch_add(candidate_count, Ordering::Relaxed);
     candidates.sort_by_key(|candidate| {
         (
             candidate.item_id,
@@ -1160,7 +1382,7 @@ async fn matching_catalogue(
             candidate.file_id,
         )
     });
-    evaluate_recipe(recipe, candidates).map_err(|error| {
+    let matches = evaluate_recipe(recipe, candidates).map_err(|error| {
         if error.message.contains("eligible pool exceeds") {
             channel_error(
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -1170,6 +1392,11 @@ async fn matching_catalogue(
         } else {
             invalid_recipe(error)
         }
+    })?;
+    Ok(CatalogueEvaluation {
+        matches,
+        snapshot_digest,
+        candidate_count,
     })
 }
 
@@ -1202,108 +1429,232 @@ async fn build_channel(
     state: &AppState,
     user: &plurx_core::domain::User,
     channel: &LibraryChannel,
-    matches: Vec<ChannelMatch>,
+    evaluation: CatalogueEvaluation,
     activation: Activation,
+    automatic: bool,
 ) -> Result<(), ApiError> {
+    BUILD_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+    let candidate_count = evaluation.candidate_count as i64;
+    let result = build_channel_inner(state, user, channel, evaluation, activation, automatic).await;
+    if let Err(error) = result {
+        // The definition mutation remains successful and replayable; its
+        // independently durable build verdict explains what needs retrying.
+        let message = format!("{error:?}");
+        let _ = record_build_failure(
+            state,
+            channel,
+            None,
+            None,
+            "channel_build_failed",
+            &message,
+            candidate_count,
+        )
+        .await;
+        return Err(error);
+    }
+    Ok(())
+}
+
+async fn build_channel_inner(
+    state: &AppState,
+    user: &plurx_core::domain::User,
+    channel: &LibraryChannel,
+    mut evaluation: CatalogueEvaluation,
+    activation: Activation,
+    automatic: bool,
+) -> Result<(), ApiError> {
+    let channel_lock = channel_build_lock(&channel.id);
+    let _channel_guard = channel_lock.lock().await;
     let _build_permit = acquire_build_slot().await?;
-    let entries = build_rotation(
-        matches
-            .into_iter()
-            .map(|matched| matched.candidate)
-            .collect(),
-        channel.recipe.ordering,
-        channel.seed,
-    )
-    .map_err(schedule_error)?;
-    let loop_duration_ms = generation_loop_duration(&entries).map_err(schedule_error)?;
-    let digest = content_digest(&channel.recipe, &entries);
-    for generation_id in [
-        channel.pending_generation_id.as_deref(),
-        channel.active_generation_id.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
+    let current = editable_channel(state, user, &channel.id).await?;
+    if current.revision != channel.revision {
+        return Err(build_error(ChannelBuildMutation::Stale));
+    }
+    if automatic
+        && current.last_auto_build_ms.is_some_and(|last| {
+            crate::media_sessions::unix_ms().saturating_sub(last) < 15 * 60 * 1_000
+        })
     {
-        if state
-            .store
-            .read_library_channel_generation(user.id, user.is_admin, &channel.id, generation_id)
-            .await?
-            .is_some_and(|generation| generation.content_digest == digest)
+        return Ok(());
+    }
+    for attempt in 0..=2 {
+        let entries = build_rotation(
+            evaluation
+                .matches
+                .iter()
+                .map(|matched| matched.candidate.clone())
+                .collect(),
+            channel.recipe.ordering,
+            channel.seed,
+        )
+        .map_err(schedule_error)?;
+        let loop_duration_ms = generation_loop_duration(&entries).map_err(schedule_error)?;
+        let digest = generation_content_digest(channel.seed, &entries);
+        for generation_id in [
+            current.pending_generation_id.as_deref(),
+            current.active_generation_id.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
         {
-            return Ok(());
-        }
-    }
-    let now_ms = crate::media_sessions::unix_ms();
-    let generation_id = uuid::Uuid::new_v4().to_string();
-    let claim_id = uuid::Uuid::new_v4().to_string();
-    let claim = LibraryChannelBuildClaim {
-        channel_id: channel.id.clone(),
-        generation_id: generation_id.clone(),
-        expected_revision: channel.revision,
-        claim_id: claim_id.clone(),
-        content_digest: digest.clone(),
-        now_ms,
-        expires_at_ms: now_ms.saturating_add(CHANNEL_BUILD_CLAIM_MS),
-    };
-    match state.store.claim_library_channel_build(&claim).await? {
-        ChannelBuildMutation::Applied => {}
-        other => return Err(build_error(other)),
-    }
-    let mut last_renewed_ms = now_ms;
-    for batch in entries.chunks(CHANNEL_GENERATION_STAGE_MAX) {
-        let batch_now_ms = crate::media_sessions::unix_ms();
-        if batch_now_ms.saturating_sub(last_renewed_ms) >= CHANNEL_BUILD_RENEW_MS {
-            match state
+            if state
                 .store
-                .renew_library_channel_build(
-                    &channel.id,
-                    &generation_id,
-                    &claim_id,
-                    batch_now_ms,
-                    batch_now_ms.saturating_add(CHANNEL_BUILD_CLAIM_MS),
-                )
-                .await?
+                .read_library_channel_generation(user.id, true, &channel.id, generation_id)
+                .await
+                .map_err(channel_store_error)?
+                .is_some_and(|generation| generation.content_digest == digest)
             {
-                ChannelBuildMutation::Applied => last_renewed_ms = batch_now_ms,
-                other => return Err(build_error(other)),
+                match state
+                    .store
+                    .complete_library_channel_build_without_publication(
+                        &channel.id,
+                        channel.revision,
+                        evaluation.matches.len() as i64,
+                        automatic,
+                        crate::media_sessions::unix_ms(),
+                    )
+                    .await
+                    .map_err(channel_store_error)?
+                {
+                    ChannelBuildMutation::Applied => {
+                        BUILD_SUCCEEDED.fetch_add(1, Ordering::Relaxed);
+                        return Ok(());
+                    }
+                    other => return Err(build_error(other)),
+                }
             }
         }
+        let now_ms = crate::media_sessions::unix_ms();
+        let generation_id = uuid::Uuid::new_v4().to_string();
+        let claim_id = uuid::Uuid::new_v4().to_string();
+        let claim = LibraryChannelBuildClaim {
+            channel_id: channel.id.clone(),
+            generation_id: generation_id.clone(),
+            expected_revision: channel.revision,
+            claim_id: claim_id.clone(),
+            content_digest: digest.clone(),
+            now_ms,
+            expires_at_ms: now_ms.saturating_add(CHANNEL_BUILD_CLAIM_MS),
+        };
         match state
             .store
-            .stage_library_channel_entries(
-                &channel.id,
-                &generation_id,
-                &claim_id,
-                batch,
-                batch_now_ms,
-            )
-            .await?
+            .claim_library_channel_build(&claim)
+            .await
+            .map_err(channel_store_error)?
         {
             ChannelBuildMutation::Applied => {}
             other => return Err(build_error(other)),
         }
+        let mut last_renewed_ms = now_ms;
+        for batch in entries.chunks(CHANNEL_GENERATION_STAGE_MAX) {
+            let batch_now_ms = crate::media_sessions::unix_ms();
+            if batch_now_ms.saturating_sub(last_renewed_ms) >= CHANNEL_BUILD_RENEW_MS {
+                match state
+                    .store
+                    .renew_library_channel_build(
+                        &channel.id,
+                        &generation_id,
+                        &claim_id,
+                        batch_now_ms,
+                        batch_now_ms.saturating_add(CHANNEL_BUILD_CLAIM_MS),
+                    )
+                    .await
+                    .map_err(channel_store_error)?
+                {
+                    ChannelBuildMutation::Applied => last_renewed_ms = batch_now_ms,
+                    other => return Err(build_error(other)),
+                }
+            }
+            match state
+                .store
+                .stage_library_channel_entries(
+                    &channel.id,
+                    &generation_id,
+                    &claim_id,
+                    batch,
+                    batch_now_ms,
+                )
+                .await
+                .map_err(channel_store_error)?
+            {
+                ChannelBuildMutation::Applied => {}
+                other => return Err(build_error(other)),
+            }
+        }
+        let preferred = entries
+            .iter()
+            .map(|entry| (entry.item_id, entry.file_id))
+            .collect();
+        let fenced = matching_catalogue(state, &channel.recipe, Some(&preferred)).await?;
+        if fenced.snapshot_digest != evaluation.snapshot_digest {
+            PUBLICATION_CONFLICTS.fetch_add(1, Ordering::Relaxed);
+            record_build_failure(
+                state,
+                channel,
+                Some(&generation_id),
+                Some(&claim_id),
+                "catalogue_changed",
+                "the catalogue changed during staging; retrying from a coherent snapshot",
+                evaluation.matches.len() as i64,
+            )
+            .await?;
+            if attempt == 2 {
+                return Err(channel_error(
+                    StatusCode::CONFLICT,
+                    "catalogue_changed",
+                    "the catalogue kept changing during publication; retry shortly",
+                ));
+            }
+            evaluation = fenced;
+            continue;
+        }
+        // Publication time is sampled only after staging and the catalogue
+        // fence. Replacement lead time therefore cannot be consumed by work.
+        let publication_now_ms = crate::media_sessions::unix_ms();
+        let pointer = editable_channel(state, user, &channel.id).await?;
+        let epoch = activation_epoch(state, user, &pointer, activation, publication_now_ms).await?;
+        let publication = LibraryChannelPublication {
+            channel_id: channel.id.clone(),
+            generation_id,
+            expected_revision: channel.revision,
+            claim_id,
+            content_digest: digest,
+            seed: channel.seed,
+            entry_count: entries.len() as i64,
+            loop_duration_ms,
+            activation_epoch_ms: epoch,
+            pending: pointer.active_generation_id.is_some(),
+            automatic,
+            now_ms: publication_now_ms,
+        };
+        return match state
+            .store
+            .publish_library_channel_generation(&publication)
+            .await
+            .map_err(channel_store_error)?
+        {
+            ChannelBuildMutation::Applied => {
+                BUILD_SUCCEEDED.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+            other => Err(build_error(other)),
+        };
     }
-    let epoch = activation_epoch(state, user, channel, activation, now_ms).await?;
-    let publication = LibraryChannelPublication {
-        channel_id: channel.id.clone(),
-        generation_id,
-        expected_revision: channel.revision,
-        claim_id,
-        content_digest: digest,
-        entry_count: entries.len() as i64,
-        loop_duration_ms,
-        activation_epoch_ms: epoch,
-        pending: channel.active_generation_id.is_some(),
-        now_ms: crate::media_sessions::unix_ms(),
-    };
-    match state
-        .store
-        .publish_library_channel_generation(&publication)
-        .await?
-    {
-        ChannelBuildMutation::Applied => Ok(()),
-        other => Err(build_error(other)),
-    }
+    unreachable!("bounded publication loop always returns")
+}
+
+fn channel_build_lock(id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: OnceLock<std::sync::Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+        OnceLock::new();
+    let mut locks = LOCKS
+        .get_or_init(|| std::sync::Mutex::new(BTreeMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    Arc::clone(
+        locks
+            .entry(id.to_owned())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+    )
 }
 
 /// Recover catalogue mutation notifications that were coalesced or missed.
@@ -1317,13 +1668,33 @@ pub(crate) async fn reconcile_loop(state: AppState, shutdown: tokio_util::sync::
         _ = shutdown.cancelled() => return,
         _ = tokio::time::sleep(INITIAL_DEBOUNCE) => {}
     }
+    reconcile_once(&state).await;
     loop {
-        reconcile_once(&state).await;
-        tokio::select! {
+        let mutation = tokio::select! {
             _ = shutdown.cancelled() => return,
-            _ = tokio::time::sleep(RECONCILE) => {}
+            _ = catalogue_mutations().notified() => true,
+            _ = tokio::time::sleep(RECONCILE) => false,
+        };
+        if mutation {
+            tokio::select! {
+                _ = shutdown.cancelled() => return,
+                _ = tokio::time::sleep(INITIAL_DEBOUNCE) => {}
+            }
         }
+        reconcile_once(&state).await;
     }
+}
+
+fn catalogue_mutations() -> &'static tokio::sync::Notify {
+    static NOTIFY: OnceLock<tokio::sync::Notify> = OnceLock::new();
+    NOTIFY.get_or_init(tokio::sync::Notify::new)
+}
+
+/// Catalogue writers emit one cheap edge; the reconciler coalesces all edges
+/// for 30 seconds and the durable per-channel timestamp enforces the 15-minute
+/// floor across process restarts.
+pub(crate) fn notify_catalogue_mutation() {
+    catalogue_mutations().notify_one();
 }
 
 async fn reconcile_once(state: &AppState) {
@@ -1342,7 +1713,11 @@ async fn reconcile_once(state: &AppState) {
     loop {
         let channels = match state
             .store
-            .list_library_channel_refresh_candidates(after.as_deref(), 100)
+            .list_library_channel_refresh_candidates(
+                after.as_deref(),
+                100,
+                crate::media_sessions::unix_ms(),
+            )
             .await
         {
             Ok(channels) => channels,
@@ -1369,10 +1744,18 @@ async fn reconcile_once(state: &AppState) {
                 let preferred_files = preferred_generation_files(state, &user, &channel).await?;
                 let matches =
                     matching_catalogue(state, &channel.recipe, Some(&preferred_files)).await?;
-                if matches.is_empty() {
+                if matches.matches.is_empty() {
                     return Ok::<(), ApiError>(());
                 }
-                build_channel(state, &user, &channel, matches, Activation::NextRotation).await
+                build_channel(
+                    state,
+                    &user,
+                    &channel,
+                    matches,
+                    Activation::NextRotation,
+                    true,
+                )
+                .await
             }
             .await;
             if let Err(error) = result {
@@ -1391,24 +1774,24 @@ fn build_slots() -> Arc<tokio::sync::Semaphore> {
 }
 
 async fn acquire_build_slot() -> Result<tokio::sync::OwnedSemaphorePermit, ApiError> {
-    static QUEUED: AtomicUsize = AtomicUsize::new(0);
     let slots = build_slots();
     if let Ok(permit) = Arc::clone(&slots).try_acquire_owned() {
         return Ok(permit);
     }
-    let queued_before = QUEUED.fetch_add(1, Ordering::AcqRel);
+    let queued_before = BUILD_QUEUED.fetch_add(1, Ordering::AcqRel);
     if queued_before >= plurx_core::library_channels::CHANNEL_BUILD_QUEUE_MAX {
-        QUEUED.fetch_sub(1, Ordering::AcqRel);
-        return Err(channel_error(
-            StatusCode::TOO_MANY_REQUESTS,
-            "channel_build_busy",
-            "the bounded Library-channel build queue is full; retry shortly",
-        ));
+        BUILD_QUEUED.fetch_sub(1, Ordering::AcqRel);
+        return Err(ApiError::TypedRetry {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "channel_build_busy",
+            message: "the bounded Library-channel build queue is full; retry shortly".to_owned(),
+            retry_after_seconds: 2,
+        });
     }
     let permit = slots.acquire_owned().await.map_err(|_| {
         ApiError::ServiceUnavailable("the Library-channel builder is shutting down".to_owned())
     });
-    QUEUED.fetch_sub(1, Ordering::AcqRel);
+    BUILD_QUEUED.fetch_sub(1, Ordering::AcqRel);
     permit
 }
 
@@ -1422,7 +1805,7 @@ async fn activation_epoch(
     if channel.active_generation_id.is_none() || matches!(activation, Activation::Initial) {
         return Ok(now_ms);
     }
-    let (_, occurrence) = occurrence_at(state, user, channel, now_ms).await?;
+    let (effective_generation_id, occurrence) = occurrence_at(state, user, channel, now_ms).await?;
     let minimum = now_ms.saturating_add(CHANNEL_ACTIVATION_LEAD_MS);
     match activation {
         Activation::NextProgramme => {
@@ -1434,14 +1817,17 @@ async fn activation_epoch(
             }
         }
         Activation::Initial | Activation::NextRotation => {
-            let generation_id = channel
-                .active_generation_id
-                .as_ref()
-                .ok_or_else(|| ApiError::Internal("active generation disappeared".into()))?;
-            let generation = cached_generation(state, user, channel, generation_id).await?;
+            let generation =
+                cached_generation(state, user, channel, &effective_generation_id).await?;
             let loop_ms = generation_loop_duration(&generation.entries).map_err(schedule_error)?;
-            let mut boundary = channel
-                .active_epoch_ms
+            let effective_epoch = if channel.pending_generation_id.as_deref()
+                == Some(effective_generation_id.as_str())
+            {
+                channel.pending_epoch_ms
+            } else {
+                channel.active_epoch_ms
+            };
+            let mut boundary = effective_epoch
                 .and_then(|epoch| {
                     occurrence
                         .cycle
@@ -1467,16 +1853,36 @@ async fn visible_channel(
 ) -> Result<LibraryChannel, ApiError> {
     state
         .store
-        .get_library_channel(user.id, user.is_admin, id)
-        .await?
+        .get_library_channel(user.id, false, id)
+        .await
+        .map_err(channel_store_error)?
         .ok_or(ApiError::NotFound("library channel"))
+}
+
+async fn editable_channel(
+    state: &AppState,
+    user: &plurx_core::domain::User,
+    id: &str,
+) -> Result<LibraryChannel, ApiError> {
+    let channel = state
+        .store
+        .get_library_channel(user.id, user.is_admin, id)
+        .await
+        .map_err(channel_store_error)?
+        .ok_or(ApiError::NotFound("library channel"))?;
+    if channel.owner_user_id == user.id || user.is_admin {
+        Ok(channel)
+    } else {
+        Err(ApiError::Forbidden)
+    }
 }
 
 async fn require_runtime_enabled(state: &AppState) -> Result<(), ApiError> {
     let enabled = state
         .store
         .get_setting(plurx_core::store::keys::LIBRARY_CHANNELS_ENABLED)
-        .await?
+        .await
+        .map_err(channel_store_error)?
         .is_some_and(|value| plurx_core::store::stored_switch(Some(&value), false));
     if enabled {
         Ok(())
@@ -1490,7 +1896,11 @@ async fn require_runtime_enabled(state: &AppState) -> Result<(), ApiError> {
 }
 
 async fn validate_file(state: &AppState, entry: &ChannelGenerationEntry) -> Result<(), ApiError> {
-    let file = state.store.get_file(entry.file_id).await?;
+    let file = state
+        .store
+        .get_file(entry.file_id)
+        .await
+        .map_err(channel_store_error)?;
     let valid = file.is_some_and(|file| {
         file.item_id == entry.item_id
             && file.probed
@@ -1502,6 +1912,7 @@ async fn validate_file(state: &AppState, entry: &ChannelGenerationEntry) -> Resu
     if valid {
         Ok(())
     } else {
+        UNAVAILABLE_SLOTS.fetch_add(1, Ordering::Relaxed);
         Err(channel_error(
             StatusCode::UNPROCESSABLE_ENTITY,
             "scheduled_media_unavailable",
@@ -1551,18 +1962,110 @@ fn new_seed() -> [u8; 32] {
     digest.finalize().into()
 }
 
+fn parse_seed(value: &str) -> Result<[u8; 32], ApiError> {
+    let bytes =
+        hex::decode(value).map_err(|_| invalid_recipe_message("preview_seed is invalid"))?;
+    <[u8; 32]>::try_from(bytes)
+        .map_err(|_| invalid_recipe_message("preview_seed must encode 32 bytes"))
+}
+
 fn body_digest(body: &impl Serialize) -> String {
     let mut digest = Sha256::new();
     digest.update(serde_json::to_vec(body).expect("bounded definition serializes"));
     hex::encode(digest.finalize())
 }
 
-fn content_digest(recipe: &LibraryChannelRecipe, entries: &[ChannelGenerationEntry]) -> String {
-    let mut digest = Sha256::new();
-    digest.update(b"plurx.library-channel.generation.v1\0");
-    digest.update(serde_json::to_vec(recipe).expect("bounded recipe serializes"));
-    digest.update(serde_json::to_vec(entries).expect("bounded entries serialize"));
-    hex::encode(digest.finalize())
+fn build_state_label(channel: &LibraryChannel) -> &'static str {
+    match channel.build_state.as_str() {
+        "queued" => "queued",
+        "building" => "building",
+        "ready" => "ready",
+        "failed" => "failed",
+        _ => "draft",
+    }
+}
+
+fn preview_diagnostics(evaluation: &CatalogueEvaluation) -> Vec<PreviewDiagnostic> {
+    let mut diagnostics = Vec::new();
+    let inherited = evaluation
+        .matches
+        .iter()
+        .filter(|matched| {
+            matched
+                .reasons
+                .iter()
+                .any(|reason| reason.starts_with("show."))
+        })
+        .count();
+    if inherited > 0 {
+        diagnostics.push(PreviewDiagnostic {
+            code: "inherited_show_metadata",
+            count: inherited,
+            examples: evaluation
+                .matches
+                .iter()
+                .filter(|matched| {
+                    matched
+                        .reasons
+                        .iter()
+                        .any(|reason| reason.starts_with("show."))
+                })
+                .take(3)
+                .map(|matched| matched.candidate.title.clone())
+                .collect(),
+        });
+    }
+    let excluded = evaluation
+        .candidate_count
+        .saturating_sub(evaluation.matches.len());
+    if excluded > 0 {
+        diagnostics.push(PreviewDiagnostic {
+            code: "recipe_excluded",
+            count: excluded,
+            examples: Vec::new(),
+        });
+    }
+    diagnostics
+}
+
+async fn record_build_failure(
+    state: &AppState,
+    channel: &LibraryChannel,
+    generation_id: Option<&str>,
+    claim_id: Option<&str>,
+    code: &str,
+    message: &str,
+    candidate_count: i64,
+) -> Result<(), ApiError> {
+    let failure = LibraryChannelBuildFailure {
+        channel_id: channel.id.clone(),
+        generation_id: generation_id.map(str::to_owned),
+        claim_id: claim_id.map(str::to_owned),
+        expected_revision: channel.revision,
+        error_code: code.to_owned(),
+        error_message: message.to_owned(),
+        candidate_count,
+        now_ms: crate::media_sessions::unix_ms(),
+    };
+    BUILD_FAILED.fetch_add(1, Ordering::Relaxed);
+    match state
+        .store
+        .fail_library_channel_build(&failure)
+        .await
+        .map_err(channel_store_error)?
+    {
+        ChannelBuildMutation::Applied => Ok(()),
+        other => Err(build_error(other)),
+    }
+}
+
+fn channel_store_error(error: plurx_core::error::StoreError) -> ApiError {
+    tracing::warn!(error = ?error, "Library-channel store operation failed");
+    channel_error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "channel_store_unavailable",
+        "Library-channel state is temporarily unavailable",
+    )
 }
 
 fn repeat_description(duration_ms: i64) -> String {
@@ -1604,11 +2107,12 @@ fn mutation_error<T>(mutation: ChannelMutation<T>) -> ApiError {
             "request_id_reused",
             "request_id was already used for a different mutation",
         ),
-        ChannelMutation::RequestLedgerFull => channel_error(
-            StatusCode::TOO_MANY_REQUESTS,
-            "channel_build_busy",
-            "the request replay ledger is full; retry after older keys expire",
-        ),
+        ChannelMutation::RequestLedgerFull => ApiError::TypedRetry {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "channel_build_busy",
+            message: "the request replay ledger is full; retry after older keys expire".to_owned(),
+            retry_after_seconds: 60,
+        },
         ChannelMutation::LimitExceeded => channel_error(
             StatusCode::UNPROCESSABLE_ENTITY,
             "channel_limit_exceeded",
@@ -1629,11 +2133,12 @@ fn build_error(mutation: ChannelBuildMutation) -> ApiError {
             "channel_revision_changed",
             "a newer channel definition superseded this build",
         ),
-        ChannelBuildMutation::Busy => channel_error(
-            StatusCode::TOO_MANY_REQUESTS,
-            "channel_build_busy",
-            "a channel build is already in progress; retry shortly",
-        ),
+        ChannelBuildMutation::Busy => ApiError::TypedRetry {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "channel_build_busy",
+            message: "a channel build is already in progress; retry shortly".to_owned(),
+            retry_after_seconds: 2,
+        },
         ChannelBuildMutation::Invalid => {
             ApiError::Internal("the staged generation failed its publication invariants".into())
         }

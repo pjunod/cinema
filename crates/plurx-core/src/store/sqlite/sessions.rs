@@ -828,6 +828,47 @@ impl MediaSessionStore for SqliteStore {
         .await
     }
 
+    async fn record_library_channel_session_recipe(
+        &self,
+        user_id: i64,
+        request_id: &str,
+        incarnation_id: &str,
+        recipe_json: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        if user_id <= 0
+            || request_id.is_empty()
+            || request_id.len() > 128
+            || !valid_uuid(incarnation_id)
+            || !(2..=32 * 1024).contains(&recipe_json.len())
+            || now_ms <= 0
+        {
+            return Err(StoreError::Task(
+                "invalid Library-channel session recipe".to_owned(),
+            ));
+        }
+        let request_id = request_id.to_owned();
+        let incarnation_id = incarnation_id.to_owned();
+        let recipe_json = recipe_json.to_owned();
+        self.with_conn(move |conn| {
+            Ok(conn.execute(
+                "INSERT INTO library_channel_session_recipes
+                    (user_id, request_id, incarnation_id, recipe_json, created_at_ms)
+                 SELECT ?1, ?2, ?3, ?4, ?5
+                  WHERE EXISTS (SELECT 1 FROM media_session_requests
+                    WHERE user_id = ?1 AND request_id = ?2 AND incarnation_id = ?3
+                      AND state = 'starting' AND claim_expires_at_ms > ?5)
+                 ON CONFLICT(user_id, request_id) DO UPDATE SET
+                    incarnation_id = excluded.incarnation_id,
+                    recipe_json = excluded.recipe_json,
+                    created_at_ms = excluded.created_at_ms
+                 WHERE library_channel_session_recipes.incarnation_id = excluded.incarnation_id",
+                params![user_id, request_id, incarnation_id, recipe_json, now_ms],
+            )? == 1)
+        })
+        .await
+    }
+
     async fn assign_media_session_request_owner(
         &self,
         user_id: i64,
@@ -919,7 +960,11 @@ impl MediaSessionStore for SqliteStore {
                         AND request_fingerprint = ?4 AND playback_id = ?5
                         AND owner_node_id = ?6
                         AND ((state = 'starting' AND claim_expires_at_ms > ?7)
-                          OR (state = 'resolved' AND response_json = ?8))",
+                          OR (state = 'resolved' AND response_json = ?8))
+                        AND (json_type(?9, '$.library_channel') IS NULL OR EXISTS (
+                          SELECT 1 FROM library_channel_session_recipes
+                           WHERE user_id = ?1 AND request_id = ?2 AND incarnation_id = ?3
+                             AND recipe_json = ?9))",
                     params![
                         activation.user_id,
                         request_id,
@@ -929,6 +974,7 @@ impl MediaSessionStore for SqliteStore {
                         activation.owner_node_id,
                         activation.now_ms,
                         activation.response_json,
+                        activation.recipe_json,
                     ],
                     |row| row.get(0),
                 )?;

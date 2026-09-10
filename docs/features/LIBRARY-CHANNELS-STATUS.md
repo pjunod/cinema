@@ -1,7 +1,7 @@
 # Library channels status — what is built and what remains
 
-**Status:** implementation complete · promotion pending · **Effort:**
-`effort/library-channels` · **Updated:** 2026-09-10 · **Base:** `4cef0da7`
+**Status:** single review addressed · fast lane pending · **Effort:**
+`effort/library-channels` · **Updated:** 2026-09-10 · **Base:** `20057416`
 
 Companion to [FEATURES.md](../FEATURES.md) (what Plurx supports),
 [PLAYBACK.md](../PLAYBACK.md) (finite-media delivery), and
@@ -13,13 +13,13 @@ proved, and what remains?*
 
 | Milestone | State | Evidence |
 |---|---|---|
-| M0 isolated base and compiler | complete | clean independent clone at `4cef0da7`; Rust 1.97.1 baseline `cargo check -p plurxd --all-targets` passed in 1m14s |
+| M0 isolated base and compiler | complete | clean independent clone; current `main` merged at `20057416`; Rust 1.97.1 compiler loop established before Rust edits |
 | M1 recipes, schedules, and durable storage | built; pinned workspace compile passed | one normalized evaluator and deterministic clock/order implementation; SQLite v55 and Hiqlite v35 entities, authorization-at-write, 24-hour bounded idempotency, coherent catalogue snapshots, renewable claims, guarded publication, immutable-vector LRU, bounded pruning, and import census |
 | M2 API and playback purpose | built; pinned workspace compile passed | bounded authenticated CRUD/opaque-preview/guide/resolve routes, idempotent rebuild/delete, pinned-occurrence finite-HLS starts, durable purpose binding, control-time authorization, and following-mode start/history isolation |
-| M3 web | built; integration compile passed | responsive browse/guide, three-step resumable editor, preview and management actions, fenced following playback, watch-from-start/return, and advisory Developer enablement |
-| M4 Apple | built; iOS and tvOS compile passed | native now/next guide, three persisted tvOS layouts, iPhone/iPad stepped preview/authoring with catalogue selection, server-monotonic boundary following, and ordinary watch-from-start; build 129 |
-| M5 Android | built; Android APK compile passed | native now/next guide, phone/tablet stepped authoring with catalogue selection, three Google TV layouts, server-monotonic boundary following, and ordinary watch-from-start; versionCode 79 |
-| M6 promotion | queued | documentation is current; next is exactly one adversarial review, owned fixes, the main-only fast lane, and merge |
+| M3 web | built; integration compile passed | responsive paginated browse/guide, three-step resumable editor, stable preview seed, admin management, fenced following playback, watch-from-start/return, and advisory Developer enablement |
+| M4 Apple | built; iOS and tvOS compile passed | native paginated guide, three persisted tvOS layouts, iPhone/iPad resumable preview/authoring from navigation or title detail, finite playback control, server-monotonic following, and ordinary watch-from-start/return; build 129 |
+| M5 Android | built; Android APK compile passed | native paginated guide, phone/tablet resumable authoring from navigation or title detail, three Google TV layouts, finite playback control, server-monotonic following, and ordinary watch-from-start/return; versionCode 79 |
+| M6 promotion | review addressed | exactly one adversarial review completed; author fixes compile; next is the current-head main-only fast lane and merge |
 
 ## Current decision — the merged Live TV guide is the UI seam
 
@@ -53,6 +53,27 @@ addresses that review without requesting a second pass, marks the pull request
 ready, applies `fast-lane`, and merges only when the current head has a green
 Main promotion gate. Full unit and device sweeps remain owned by the separate
 test-maintenance process.
+
+## Review closure — one pass, owned by the author
+
+The one adversarial review was completed against the frozen draft. Its
+findings were addressed in one author-owned repair pass: ordinary visibility
+no longer inherits administrator management access; builds have durable
+queued/building/ready/failed acknowledgement; catalogue and activation fences
+are retried without publishing stale work; generation identity includes the
+seed but excludes operational recipe fields; preview seeds and first-ten rows
+are stable; Store outages and queue pressure have typed responses; and guide
+clients consume every bounded page.
+
+Following playback now binds its complete canonical worker recipe to the
+durable request identity before producer placement, carries that purpose
+through version-fenced ownership transfer, and rejects activation when the
+pre-placement record is absent or different. Web, Apple, and Android use
+finite playback control, pause safely at boundaries, expose ordinary
+watch-from-start and return, preserve editor drafts, and separate guide focus
+from the playing occurrence. The diagnostic surface adds channel/programme
+activity plus bounded build, queue, catalogue, conflict, resolve, cache, and
+unavailable-slot metrics.
 
 ## Evidence limits — compilation is not a device claim
 

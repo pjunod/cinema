@@ -2006,9 +2006,29 @@ async fn create_with_purpose(
         // takeover can tell whether this URL was ever serving a shape a
         // successor is allowed to continue.
         typeless_playlist: state.transcode.cluster_playlist_is_typeless().await,
+        library_channel: library_channel.as_ref().map(|purpose| {
+            serde_json::to_value(purpose).expect("bounded Library-channel purpose serializes")
+        }),
         request: worker_request,
     };
     let recipe_json = serde_json::to_string(&remote_request)?;
+    if library_channel.is_some()
+        && !state
+            .store
+            .record_library_channel_session_recipe(
+                user.id,
+                &request_claim_id,
+                &incarnation_id,
+                &recipe_json,
+                unix_ms(),
+            )
+            .await
+            .map_err(|error| session_store_error("recording the channel session purpose", error))?
+    {
+        return Err(ApiError::ServiceUnavailable(
+            "the channel session purpose could not be recorded; retry shortly".to_owned(),
+        ));
+    }
     let placement_deadline = super::peer_transport::deadline_after(START_DEADLINE);
 
     // Every activation is a predecessor CAS, including an ordinary start.
@@ -5868,7 +5888,7 @@ async fn library_channel_control_refusal(
     };
     match state
         .store
-        .get_library_channel(user.id, user.is_admin, &purpose.channel_id)
+        .get_library_channel(user.id, false, &purpose.channel_id)
         .await
     {
         Ok(Some(channel)) if channel.enabled => None,
@@ -7414,6 +7434,7 @@ async fn stage_prepared_successor_with_prime(
         // Read from the predecessor rather than assumed: this decides whether
         // anything may ever take the successor over.
         typeless_playlist: predecessor.typeless_playlist,
+        library_channel: predecessor.library_channel.clone(),
         request: staged_request.clone(),
     }) else {
         return;
@@ -12689,6 +12710,7 @@ mod tests {
             source_size: 1,
             source_mtime: 1,
             typeless_playlist: true,
+            library_channel: None,
             request: crate::transcode::SessionRequest {
                 control_sequence: None,
                 file_id: 1,
@@ -13598,6 +13620,7 @@ mod tests {
             source_size: 1,
             source_mtime: 1,
             typeless_playlist: true,
+            library_channel: None,
             request: crate::transcode::SessionRequest {
                 control_sequence: None,
                 file_id: fixture.file_id(),
@@ -13832,6 +13855,7 @@ mod tests {
                 source_size: 1,
                 source_mtime: 1,
                 typeless_playlist: true,
+                library_channel: None,
                 request: crate::transcode::SessionRequest {
                     control_sequence: None,
                     file_id: fixture.file_id(),
@@ -16174,6 +16198,7 @@ mod tests {
             source_size: 1,
             source_mtime: 1,
             typeless_playlist: false,
+            library_channel: None,
             request: predecessor_request.clone(),
         };
         let predecessor_start = StartResponse {
@@ -16513,6 +16538,7 @@ mod tests {
                 source_size: 1,
                 source_mtime: 1,
                 typeless_playlist: false,
+                library_channel: None,
                 request: staged_request,
             })
             .expect("recipe"),
@@ -16763,6 +16789,7 @@ mod tests {
                     source_size: 0,
                     source_mtime: 0,
                     typeless_playlist: false,
+                    library_channel: None,
                     request: recipe,
                 },
                 selection: crate::playback_control::ClientSelection {
@@ -18935,6 +18962,7 @@ mod tests {
             source_size: 4_096,
             source_mtime: 1_700_000_000,
             typeless_playlist: false,
+            library_channel: None,
             request: staged_candidate_request(),
         }
     }
