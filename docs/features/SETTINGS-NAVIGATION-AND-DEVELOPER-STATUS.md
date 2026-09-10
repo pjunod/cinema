@@ -15,8 +15,8 @@ the settings navigation and Developer-page redesign.
 |---|---|---|
 | Isolated implementation branch | complete | `codex/settings-navigation-developer`, based on Forgejo `main` at `4cef0da7` |
 | Navigation and control ownership | complete | Live TV owns tuner and guide cards · Playback owns quality switching · Cluster owns transport guidance · Developer owns compatibility and experiments |
-| Readiness layout and responsive treatment | building | Shared nonshrinking rows, closed native disclosures, and narrow-header stacking are implemented; decoder detail compaction remains |
-| Interaction and stale-response correctness | queued | Independent saves and draft preservation remain to be committed |
+| Readiness layout and responsive treatment | complete | Shared nonshrinking rows · neutral static throughput support · closed native disclosures · deliberate stacking below 360 CSS px |
+| Interaction and stale-response correctness | complete | Independent save payloads · returned-value badges · Live TV route fencing · card-local repaint and sibling-draft preservation |
 | Current-reference documentation | queued | `FEATURES.md` and `API.md` remain to be updated with final behavior |
 | Actual-app visual evidence | queued | Desktop, narrow, zoomed, and expanded-readiness captures remain to be recorded |
 | Adversarial review | queued | Exactly one review will run only after the branch is ready to merge |

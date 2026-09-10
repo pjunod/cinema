@@ -15660,9 +15660,10 @@ function decodeRecoveryCard(s){
   const state=enabled
     ? `<span class="pill" style="color:var(--good);border-color:var(--good)">enabled</span>`
     : `<span class="pill">disabled</span>`;
-  return setCard(`${cardHead("Automatic decode recovery","A producer that says out loud it could not decode the source is answered once — by a successor that decodes in software behind the same hardware encoder — instead of being answered with the command that just failed. Every timing verdict tells a client to try again, so without this a file that cannot be decoded is a reopen loop.",state)}
+  return setCard(`${cardHead("Automatic decode recovery","Retry a failed hardware decode in software while keeping the hardware encoder. Recovery increases CPU use and prevents a reopen loop.",state)}
       ${togRow("adr",`Enable automatic decoder recovery <span class="pill warn">experimental</span>`,`Applies immediately to new producer attempts. This checkbox is authoritative: missing measurements or retained contracts never turn it back off.`,enabled)}
       <div class="hint"><b>This checkbox is the enable path.</b> The checks below are advisory only. With incomplete coverage, the server uses its bounded selected-stream diagnostic matcher and never treats that best-effort observation as permission to reuse an artifact.</div>
+      <details class="setdetails"><summary>Recovery limits and diagnostic evidence</summary><div class="setdetails-body">
       <h2 class="section">Safety evidence and current state</h2>
       <div class="tog"><span>${ok(!!q.measured_build)} This node measured its own FFmpeg<small>${q.measured_build?`<code>${esc(q.measured_build)}</code>`:"Not measured. Recovery can still be enabled; diagnostics use the selected input and stream without claiming build-qualified evidence."}</small></span></div>
       <div class="tog"><span>${ok(software.length>0)} A retained contract covers this build's software decoders<small>${list(software.map(path=>path.value))}<br>A covered software path increases confidence in the successor; absence is advisory and does not block the switch.</small></span></div>
@@ -15671,7 +15672,8 @@ function decodeRecoveryCard(s){
       <h2 class="section">What it costs when it does fire</h2>
       <div class="hint"><b>One recovery per playback, and it is never given back.</b> The budget is durable and keyed by the playback, so a reopen, a seek or a track change does not buy another. A playback that has spent it is told its source did not decode — a permanent answer the client shows once, rather than an impermanent one it will follow forever. Two paths give a budget up without using it, both on purpose: an executor cancelled mid-install, and a node that cannot read the budget. Each costs that playback its automatic recovery and nothing else.</div>
       <div class="hint">The successor keeps the hardware encoder and its slot; what grows is the CPU the pipeline spends decoding. That difference has to be available on the node at the moment of the recovery, and a recovery that cannot get it fails rather than waiting on a viewer's behalf indefinitely.</div>
-      <div class="err" id="adrerr"></div>
+      </div></details>
+      <div class="err" id="adrerr" role="alert"></div>
       ${setCardFoot("saveAutomaticDecoderRecovery")}`,{id:"drcard"});
 }
 // Verified decode artifacts.
@@ -15712,33 +15714,40 @@ function verifiedDecodeCard(s){
   const applies=q.pending_restart
     ? `<div class="hint"><b>Saved, and not yet in force.</b> This node applies the request when it next starts. Qualification is part of each covered path's cache key, so applying it while sessions are running could move an affected key space under work already in flight.</div>`
     : `<div class="hint">The request takes effect when this node next starts and is stored regardless of readiness. Each exact decode path uses it only when that path has one unique covering contract; uncovered or ambiguous paths keep serving under their present identity.</div>`;
-  return setCard(`${cardHead("Verified decode artifacts","A transcode may only be reused when the producer that made it left a receipt saying its decode was clean. FFmpeg can drop every frame of a file and still exit successfully; without this, that result is cached and served forever.",pill)}
-      ${cost}
-      ${checks}
-      ${refusal}
-      ${togRow("dhqa",`Require a producer health receipt <span class="pill">preview</span>`,"Enables the path-scoped verified policy on the next start. The checks above are advisory and never disable this control.",s.decoder_health_qualified_artifacts)}
-      ${applies}
-      <div class="err" id="dhqerr"></div>
+  return setCard(`${cardHead("Verified decode artifacts","Require evidence of a clean decode before reusing transcodes on covered paths.",pill)}
+      ${togRow("dhqa",`Require a producer health receipt <span class="pill">preview</span>`,"Enables the path-scoped verified policy on the next start. Readiness is advisory and never disables this control.",s.decoder_health_qualified_artifacts)}
+      <div class="hint">Applies after a server restart. Covered paths use a new cache identity, so affected titles may need transcoding again.</div>
+      <details class="setdetails"><summary>Cache impact and diagnostic evidence</summary><div class="setdetails-body">
+      ${cost}${checks}${refusal}${applies}
+      </div></details>
+      <div class="err" id="dhqerr" role="alert"></div>
       ${setCardFoot("saveVerifiedDecode")}`,{id:"vdcard"});
 }
 // The unsaved state of the guide panel. `null` means "no edit yet, show what
 // is saved"; a value means the operator has chosen something the server has
 // not been told about.
-const LIVE_TV_GUIDE_DRAFT={source:null,url:null,hours:null,checked:null};
-function liveTvGuideSourceDraft(value){
+const LIVE_TV_GUIDE_DRAFT={source:null,url:null,hours:null,checked:null,revision:0};
+function liveTvGuideFieldDraft(){
   const url=document.getElementById("ltgurl");
   const hours=document.getElementById("ltghours");
   if(url) LIVE_TV_GUIDE_DRAFT.url=url.value;
   if(hours) LIVE_TV_GUIDE_DRAFT.hours=Number(hours.value);
+  LIVE_TV_GUIDE_DRAFT.revision+=1;
+}
+function liveTvGuideSourceDraft(value){
+  liveTvGuideFieldDraft();
   LIVE_TV_GUIDE_DRAFT.source=value;
-  // The repaint replaces the readiness mount too. Let the replacement run
+  // The card repaint replaces the readiness mount too. Let the replacement run
   // one current check instead of leaving its fresh "Checking…" row forever.
   LIVE_TV_GUIDE_DRAFT.checked=null;
-  renderSettings();
+  const card=document.getElementById("live-tv-guide-settings");
+  if(card&&card.isConnected) card.outerHTML=liveTvGuideCard(SETTINGS);
   // `setCard`'s delegated change handler belongs to the card that the repaint
   // just removed. Mark the replacement card explicitly, or its Save remains
   // disabled even though the newly selected source is still visible.
-  markSetCard(document.getElementById("ltgsrc"));
+  const replacement=document.getElementById("ltgsrc");
+  markSetCard(replacement);
+  if(replacement) replacement.focus();
 }
 function liveTvGuideCard(s){
   // The guide's own enable section. Everything here is advisory: it says what
@@ -15749,7 +15758,7 @@ function liveTvGuideCard(s){
   // more. (Keep this comment inside the body: a leading comment lands in the
   // previous function's slice in tests/web/settings-sections.test.js.)
   // The dropdown edits a draft, not the saved settings. `onchange` repaints
-  // this panel from `SETTINGS_DATA`, so reading the saved value here snapped
+  // this card from the draft, so reading the saved value here would snap
   // the control straight back and the XMLTV URL field — which only exists
   // while the draft says xmltv — could never be reached at all.
   const source=(LIVE_TV_GUIDE_DRAFT.source!==null?LIVE_TV_GUIDE_DRAFT.source:s.live_tv_guide_source)||"off";
@@ -15765,13 +15774,14 @@ function liveTvGuideCard(s){
     queueMicrotask(()=>{ const mount=document.getElementById("ltgready"); if(mount&&mount.isConnected) checkLiveTvGuide(); });
   }
   return setCard(`${cardHead("Programme guide","What is on each channel now and next. Read-only: no recording, no reminders, no scheduling.",pill)}
-    <div class="hint"><b>This is the first outbound internet request the tuner owner makes on your behalf</b>, which is why it is off until you turn it on. The HDHomeRun guide reads your device's <code>DeviceAuth</code> fresh at each refresh, sends it to <code>api.hdhomerun.com</code> over TLS, and forgets it — plurx never stores, logs or relays that credential, and only the owner node ever holds it. XMLTV fetches the one URL you give and nothing else.</div>
+    <p class="hint">The guide is optional and off by default. Enabling it lets the tuner owner contact the selected guide source.</p>
+    <details class="setdetails"><summary>Guide sources and privacy</summary><div class="setdetails-body"><div class="hint"><b>Guide requests are sent by the tuner owner.</b> The HDHomeRun guide reads your device's <code>DeviceAuth</code> fresh at each refresh, sends it to <code>api.hdhomerun.com</code> over TLS, and forgets it — plurx never stores, logs or relays that credential, and only the owner node ever holds it. XMLTV fetches the one URL you give and nothing else.</div></div></details>
     <div class="setfields">
       <div><label for="ltgsrc">Source</label><select id="ltgsrc" onchange="liveTvGuideSourceDraft(this.value)">${opt("off","Off")}${opt("hdhomerun","HDHomeRun guide")}${opt("xmltv","XMLTV")}</select></div>
-      ${source==="xmltv"?`<div style="flex:1 1 340px"><label for="ltgurl">XMLTV URL</label><input id="ltgurl" value="${esc(LIVE_TV_GUIDE_DRAFT.url!==null?LIVE_TV_GUIDE_DRAFT.url:(s.live_tv_xmltv_url||""))}" placeholder="https://example/guide.xml.gz" maxlength="1024"><div class="hint">Plain or gzipped. Matched to your lineup by display name, then LCN, then callsign.</div></div>`:""}
-      <div><label for="ltghours">Look ahead</label><select id="ltghours">${[4,8,12,24,48,72].map(n=>`<option value="${n}"${n===Number(LIVE_TV_GUIDE_DRAFT.hours!==null?LIVE_TV_GUIDE_DRAFT.hours:s.live_tv_guide_hours)?' selected':''}>${n} hours</option>`).join("")}</select></div>
+      ${source==="xmltv"?`<div style="flex:1 1 340px"><label for="ltgurl">XMLTV URL</label><input id="ltgurl" value="${esc(LIVE_TV_GUIDE_DRAFT.url!==null?LIVE_TV_GUIDE_DRAFT.url:(s.live_tv_xmltv_url||""))}" placeholder="https://example/guide.xml.gz" maxlength="1024" oninput="liveTvGuideFieldDraft()"><div class="hint">Plain or gzipped. Matched to your lineup by display name, then LCN, then callsign.</div></div>`:""}
+      <div><label for="ltghours">Look ahead</label><select id="ltghours" onchange="liveTvGuideFieldDraft()">${[4,8,12,24,48,72].map(n=>`<option value="${n}"${n===Number(LIVE_TV_GUIDE_DRAFT.hours!==null?LIVE_TV_GUIDE_DRAFT.hours:s.live_tv_guide_hours)?' selected':''}>${n} hours</option>`).join("")}</select></div>
     </div>
-    <h2 class="section">What must be true to enable it safely</h2>
+    <h2 class="section">Guide status</h2>
     <div id="ltgready" aria-live="polite"><p class="muted">Checking…</p></div>
     <div class="err" id="ltgerr" role="alert"></div>
 
@@ -15779,6 +15789,8 @@ function liveTvGuideCard(s){
     <div class="row"><button class="ghost sm" onclick="checkLiveTvGuide(this)">Check the guide</button><button class="ghost sm" onclick="refreshLiveTvGuide(this)">Refresh now</button><a href="#/live-tv">Browse channels</a></div>`,{id:"live-tv-guide-settings"});
 }
 async function saveLiveTvGuide(button){
+  liveTvGuideFieldDraft();
+  const revision=LIVE_TV_GUIDE_DRAFT.revision;
   const source=document.getElementById("ltgsrc").value;
   const url=document.getElementById("ltgurl");
   // A successful write repaints with the server's new source. Arm that paint
@@ -15790,12 +15802,13 @@ async function saveLiveTvGuide(button){
     live_tv_guide_hours:Number(document.getElementById("ltghours").value)},button,"ltgerr");
   // Only a save that landed retires the draft; a refused one keeps what the
   // operator typed so they can correct it rather than retype it.
-  if(saved){
+  if(saved&&LIVE_TV_GUIDE_DRAFT.revision===revision){
     LIVE_TV_GUIDE_DRAFT.source=null;
     LIVE_TV_GUIDE_DRAFT.url=null;
     LIVE_TV_GUIDE_DRAFT.hours=null;
+    if(typeof saved==="object") replaceLiveTvCard("live-tv-guide-settings",liveTvGuideCard(saved),"ltgsrc");
   }
-  return saved;
+  return !!saved;
 }
 function liveTvGuideReadyView(r){
   // Advisory rendering: a red row is a sentence, never a disabled Save.
@@ -15850,6 +15863,13 @@ function liveTvSettingsCard(s){
     <div class="row"><button class="ghost sm" onclick="checkLiveTvReadiness(this)">Check saved configuration</button><button id="ltenable" class="${enabled?'ghost':'primary'} sm" onclick="setLiveTvEnabled(${!enabled},this)">${enabled?"Disable Live TV":"Enable Live TV"}</button><a href="#/live-tv">Browse channels</a></div>
     ${barrier?`<div class="card"><h3>Previous owner cleanup required</h3><p>Owner <strong>${esc(s.live_tv_transition_from_owner_node_id)}</strong> has not confirmed cleanup before generation ${esc(s.live_tv_transition_drain_before)}. Save again to retry authenticated cleanup. An unreachable node is not proof that its tuner streams stopped.</p><label class="tog" for="ltfenced"><span>I have stopped or powered off the previous owner and prevented it from restarting until it can synchronize the current configuration.</span><input id="ltfenced" type="checkbox"></label><button class="ghost sm" onclick="recoverLiveTvOwner(this)">Confirm physical fencing — keep Live TV disabled</button></div>`:""}`,{id:"live-tv-settings"});
 }
+function replaceLiveTvCard(cardId,html,focusId){
+  const card=document.getElementById(cardId);
+  if(!card||!card.isConnected) return;
+  card.outerHTML=html;
+  const focus=document.getElementById(focusId);
+  if(focus) focus.focus();
+}
 async function liveTvSettingsWrite(body,button,errorId){
   if(!ME||!ME.is_admin) return false;
   const generation=PAGE_RENDER_GENERATION;
@@ -15860,10 +15880,9 @@ async function liveTvSettingsWrite(body,button,errorId){
   const error=document.getElementById(errorId||"lterr"); if(error) error.textContent="";
   try{
     const result=await api("/settings",{method:"PUT",body,signal:AbortSignal.timeout(45000)});
-    if(settingsCurrent(generation,"livetv")){
-      cacheSettings(result); renderSettings(); toast("Live TV settings saved");
-    }
-    return true;
+    if(!settingsCurrent(generation,"livetv")) return true;
+    cacheSettings(result); toast("Live TV settings saved");
+    return result;
   }catch(e){
     if(settingsCurrent(generation,"livetv")){
       if(error) error.textContent=e.code==="settings_conflict"?"The configuration changed elsewhere. Reload this section before trying again.":e.message;
@@ -15874,24 +15893,29 @@ async function liveTvSettingsWrite(body,button,errorId){
 }
 async function saveLiveTvSettings(button){
   if(SETTINGS.live_tv_enabled) return;
-  return liveTvSettingsWrite({live_tv_config_generation:SETTINGS.live_tv_config_generation,
+  const saved=await liveTvSettingsWrite({live_tv_config_generation:SETTINGS.live_tv_config_generation,
     live_tv_enabled:false,live_tv_device_ipv4:document.getElementById("ltip").value.trim(),
     live_tv_owner_node_id:document.getElementById("ltowner").value.trim(),
     live_tv_max_sessions:Number(document.getElementById("ltlimit").value),
     live_tv_output_height:Number(document.getElementById("ltheight").value)},button);
+  if(saved&&typeof saved==="object") replaceLiveTvCard("live-tv-settings",liveTvSettingsCard(saved),"ltenable");
+  return !!saved;
 }
 async function setLiveTvEnabled(enabled,button){
   const card=document.getElementById("live-tv-settings");
   if(enabled&&card&&card.classList.contains("dirty")){ toast("Save the configuration before enabling Live TV"); return; }
-  return liveTvSettingsWrite({live_tv_config_generation:SETTINGS.live_tv_config_generation,live_tv_enabled:enabled},button);
+  const saved=await liveTvSettingsWrite({live_tv_config_generation:SETTINGS.live_tv_config_generation,live_tv_enabled:enabled},button);
+  if(saved&&typeof saved==="object") replaceLiveTvCard("live-tv-settings",liveTvSettingsCard(saved),"ltenable");
+  return !!saved;
 }
 async function recoverLiveTvOwner(button){
   const checked=document.getElementById("ltfenced");
   if(!checked||!checked.checked||SETTINGS.live_tv_enabled){ toast("Physical fencing must be confirmed while Live TV is disabled"); return; }
-  return liveTvSettingsWrite({live_tv_config_generation:SETTINGS.live_tv_config_generation,
+  const saved=await liveTvSettingsWrite({live_tv_config_generation:SETTINGS.live_tv_config_generation,
     live_tv_fenced_owner:{owner_node_id:SETTINGS.live_tv_transition_from_owner_node_id,
-      drain_before_generation:SETTINGS.live_tv_transition_drain_before,
-      stopped_and_restart_prevented:true}},button);
+      drain_before_generation:SETTINGS.live_tv_transition_drain_before,stopped_and_restart_prevented:true}},button);
+  if(saved&&typeof saved==="object") replaceLiveTvCard("live-tv-settings",liveTvSettingsCard(saved),"ltenable");
+  return !!saved;
 }
 async function checkLiveTvReadiness(button){
   const generation=PAGE_RENDER_GENERATION;
@@ -17423,6 +17447,8 @@ async function savePreparedQuality(btn){
   try{
     const saved=cacheSettings(await api("/settings",{method:"PUT",body:{
       prepared_quality_handoff:document.getElementById("pqh").checked}}));
+    const toggle=document.getElementById("pqh");
+    if(toggle) toggle.checked=!!saved.prepared_quality_handoff;
     const state=document.getElementById("pqhstate");
     if(state) state.textContent=saved.prepared_quality_handoff?"Enabled":"Disabled";
     toast("Quality switching saved"); if(btn) setCardSaved(btn);

@@ -258,6 +258,26 @@ test("Playback saves per card, and each card writes only its own fields", () => 
   });
 });
 
+test("quality switching renders the server's saved value", async () => {
+  const elements = {
+    pqh: { checked: true },
+    pqherr: { textContent: "" },
+    pqhstate: { textContent: "Enabled" },
+  };
+  let body;
+  const save = new Function(
+    "api", "document", "cacheSettings", "toast", "setCardSaved",
+    `${shippedSource("savePreparedQuality")}\nreturn savePreparedQuality;`,
+  )(
+    async (_, options) => { body = options.body; return { prepared_quality_handoff: false }; },
+    { getElementById: (id) => elements[id] }, (value) => value, () => {}, () => {},
+  );
+  await save({ disabled: false });
+  assert.deepEqual(body, { prepared_quality_handoff: true });
+  assert.equal(elements.pqh.checked, false, "the checkbox reflects the returned setting");
+  assert.equal(elements.pqhstate.textContent, "Disabled", "the badge agrees with the checkbox");
+});
+
 test("everyday settings move out of Developer while experiments retain advisory evidence", () => {
   const panels = new Function(
     "setHead", "setCard", "cardHead", "togRow", "setCardFoot", "esc",
@@ -390,24 +410,27 @@ test("changing the guide source dirties the replacement card after its repaint",
     },
     querySelector: (selector) => selector.includes("button.primary") ? save : state,
   };
-  const replacement = { closest: () => card };
+  const replacement = { closest: () => card, focus: () => {} };
   const oldUrl = { value: "https://guide.example/listings.xml" };
   const oldHours = { value: "48" };
+  const oldCard = { isConnected: true, set outerHTML(value) { rendered = value === "replacement"; } };
   const document = {
     getElementById(id) {
       if (id === "ltgurl") return rendered ? null : oldUrl;
       if (id === "ltghours") return rendered ? null : oldHours;
       if (id === "ltgsrc") return rendered ? replacement : null;
+      if (id === "live-tv-guide-settings") return oldCard;
       return null;
     },
   };
   const guide = new Function(
-    "document", "renderSettings",
+    "document", "liveTvGuideCard", "SETTINGS",
     `${shippedConst("LIVE_TV_GUIDE_DRAFT")}
      ${shippedSource("markSetCard")}
+     ${shippedSource("liveTvGuideFieldDraft")}
      ${shippedSource("liveTvGuideSourceDraft")}
      return {change:liveTvGuideSourceDraft,draft:LIVE_TV_GUIDE_DRAFT};`,
-  )(document, () => { rendered = true; });
+  )(document, () => "replacement", {});
 
   guide.draft.checked = 42;
   guide.change("hdhomerun");
@@ -415,6 +438,7 @@ test("changing the guide source dirties the replacement card after its repaint",
   assert.equal(guide.draft.source, "hdhomerun");
   assert.equal(guide.draft.url, oldUrl.value);
   assert.equal(guide.draft.hours, 48);
+  assert.equal(guide.draft.revision, 1);
   assert.equal(guide.draft.checked, null, "the replacement readiness panel runs a current check");
   assert.ok(classes.has("dirty"), "the repainted card carries the unsaved state");
   assert.equal(save.disabled, false, "the repainted card's Save is enabled");
@@ -429,14 +453,16 @@ test("saving the guide rechecks the saved source and retires its draft", async (
     ltghours: { value: "24" },
   };
   const guide = new Function(
-    "document", "liveTvSettingsWrite", "SETTINGS",
+    "document", "liveTvSettingsWrite", "SETTINGS", "replaceLiveTvCard", "liveTvGuideCard",
     `${shippedConst("LIVE_TV_GUIDE_DRAFT")}
+     ${shippedSource("liveTvGuideFieldDraft")}
      ${shippedSource("saveLiveTvGuide")}
      return {save:saveLiveTvGuide,draft:LIVE_TV_GUIDE_DRAFT};`,
   )(
     { getElementById: (id) => fields[id] },
     async (body) => { written = body; return true; },
     { live_tv_config_generation: 7, live_tv_xmltv_url: "" },
+    () => {}, () => "",
   );
   Object.assign(guide.draft, { source: "hdhomerun", url: "old", hours: 48, checked: 42 });
 
@@ -447,7 +473,29 @@ test("saving the guide rechecks the saved source and retires its draft", async (
     live_tv_xmltv_url: "",
     live_tv_guide_hours: 24,
   });
-  assert.deepEqual(guide.draft, { source: null, url: null, hours: null, checked: null });
+  assert.deepEqual(guide.draft, { source: null, url: null, hours: null, checked: null, revision: 1 });
+});
+
+test("Live TV mutations repaint only the card that owns the saved fields", () => {
+  assert.doesNotMatch(shippedSource("liveTvGuideSourceDraft"), /renderSettings\(/,
+    "changing guide source cannot erase a dirty tuner card");
+  assert.doesNotMatch(shippedSource("liveTvSettingsWrite"), /renderSettings\(/,
+    "a successful write cannot erase a sibling card's draft");
+  assert.match(shippedSource("saveLiveTvGuide"),
+    /replaceLiveTvCard\("live-tv-guide-settings",liveTvGuideCard\(saved\),"ltgsrc"\)/);
+  assert.match(shippedSource("saveLiveTvSettings"),
+    /replaceLiveTvCard\("live-tv-settings",liveTvSettingsCard\(saved\),"ltenable"\)/);
+  assert.match(shippedSource("setLiveTvEnabled"),
+    /replaceLiveTvCard\("live-tv-settings",liveTvSettingsCard\(saved\),"ltenable"\)/);
+});
+
+test("every asynchronous Live TV settings response is fenced to the Live TV route", () => {
+  for (const name of ["checkLiveTvGuide", "refreshLiveTvGuide", "liveTvSettingsWrite", "checkLiveTvReadiness"]) {
+    const source = shippedSource(name);
+    assert.match(source, /settingsCurrent\(generation,"livetv"\)/, `${name} follows the new route`);
+    assert.doesNotMatch(source, /settingsCurrent\(generation,"developer"\)/,
+      `${name} cannot repaint Developer after navigation`);
+  }
 });
 
 test("Verified decode states its cost, its prerequisites, and what this node measured", () => {
@@ -474,10 +522,10 @@ test("Verified decode states its cost, its prerequisites, and what this node mea
   // No covered path pays a rename yet, but the control remains enabled: the
   // prerequisites are advice, not a disabled switch.
   assert.match(bare, /No measured path can produce a verified artifact today/);
-  assert.match(bare, /checks above are advisory and never disable this control/);
+  assert.match(bare, /Readiness is advisory and never disables this control/);
   assert.doesNotMatch(bare, /This node can honour the request/);
-  // Why the feature exists at all, in the words the failure actually takes.
-  assert.match(bare, /drop every frame of a file and still exit successfully/);
+  assert.match(bare, /evidence of a clean decode before reusing transcodes/);
+  assert.match(bare, /<details class="setdetails"><summary>Cache impact and diagnostic evidence/);
   assert.equal((bare.match(/✗/g) || []).length, 3, "three unmet checks, each shown");
   assert.match(bare, /Not requested on this node\./);
 
