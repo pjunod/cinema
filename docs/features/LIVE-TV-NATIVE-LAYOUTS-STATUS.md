@@ -18,7 +18,7 @@ being built, and what remains unproved*.
 | Shared input, metadata, and preference contracts | verified | bounded FFmpeg input parser/cache; cross-client DTO and badge cases; generated input tables; pinned Rust compile plus 3 focused server and 39 web checks green | promotion gate |
 | Apple TV and iOS | verified | all three saved layouts, anchored/pinned guide, scoped input, compact schedule/grid, Apple build 130; iOS and tvOS compile green; 28 focused Live TV tests green on each platform | physical Siri Remote walkthrough remains unproved; promotion gate |
 | Google TV and Android | verified | all three saved layouts around one movable player, stable UTC-anchor D-pad navigation, false-on-delegate input, compact schedule/grid, Android build 79; Kotlin compile and 35 JVM checks green; real D-pad case green on Google TV Streamer | broader physical walkthrough remains unproved; promotion gate |
-| Integrated promotion to `main` | candidate finalized | Forgejo PR [#229](http://192.168.4.7:3000/noirr/plurx/pulls/229); exactly one Astra adversarial review of head `f5e67fe9`; all findings addressed; final focused pass green; no feature gates; full suites reserved for the separate sweep | first lane found the Apple 129 collision with current `main` and an obsolete validator that rejected the specification's required live `menu` state; the finalized candidate claims build 130 and corrects that validator before its current-head lane |
+| Integrated promotion to `main` | candidate finalized | Forgejo PR [#229](http://192.168.4.7:3000/noirr/plurx/pulls/229); exactly one Astra adversarial review of head `f5e67fe9`; all findings addressed; final focused pass green; no feature gates; full suites reserved for the separate sweep | the remote workflow still launched the legacy full qualification on a ready effort PR, so that run was canceled; the candidate adds the required label-triggered compile-only lane before obtaining its current-head verdict |
 
 ## Contract — presentation moves, playback does not
 
@@ -89,6 +89,7 @@ The review's build-number question originally distinguished Apple build
 |---|---|---|
 | Keep the approved package order on one effort branch | metadata and input contracts are the seam both native implementations consume; one integrated branch minimizes promotion overhead | a package requires an independently releasable server compatibility step |
 | Use the existing runtime Live TV enable control only | it already exposes configuration and readiness; another activation mechanism would be a hidden gate by a different name | never, unless the product-level enable contract changes explicitly |
+| Add the missing [`fast-lane` workflow](../../.github/workflows/main-fast-lane.yml) in this PR | the remote workflow ignored label events and started full suites, which could not produce the required gate without violating the resource budget; the new lane reuses the proven effort compile jobs and verifies the current head and base before promotion | once the separate full-suite scheduler replaces the legacy PR fan-out completely |
 
 ## Non-goals — this effort stays bounded
 

@@ -1,0 +1,252 @@
+name: main fast lane
+
+on:
+  pull_request:
+    branches: [main]
+    types: [labeled]
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Removing `fast-lane` cancels the active run. Reapplying it after returning a
+# PR to ready state starts one exact-head promotion attempt.
+concurrency:
+  group: main-fast-lane-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  scope:
+    name: fast-lane validation scope
+    if: >-
+      github.event.label.name == 'fast-lane' &&
+      github.event.pull_request.draft == false
+    runs-on: [self-hosted, Linux, X64, lab, general]
+    timeout-minutes: 2
+    outputs:
+      rust: ${{ steps.scope.outputs.rust }}
+      apple: ${{ steps.scope.outputs.apple }}
+      android_jvm: ${{ steps.scope.outputs.android_jvm }}
+      web_layout: ${{ steps.scope.outputs.web_layout }}
+      mobile_version: ${{ steps.scope.outputs.mobile_version }}
+      docs_only: ${{ steps.scope.outputs.docs_only }}
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Select affected compile surfaces
+        id: scope
+        env:
+          VALIDATION_BASE: ${{ github.event.pull_request.base.sha }}
+        run: >-
+          python3 -m validation.ci_scope
+          --event pull_request --base "$VALIDATION_BASE" >> "$GITHUB_OUTPUT"
+
+  mobile_version:
+    name: fast-lane mobile release version
+    needs: scope
+    if: needs.scope.outputs.mobile_version == 'true'
+    runs-on: [self-hosted, Linux, X64, lab, general]
+    timeout-minutes: 3
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Compare release counters with the current merge target
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          VALIDATION_BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git fetch --no-tags --force origin \
+            "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
+          PLURX_VALIDATION_MODE=changed-from \
+            PLURX_VALIDATION_BASE="$VALIDATION_BASE" \
+            PLURX_VALIDATION_MERGE_TARGET="origin/$BASE_REF" \
+            python3 -m validation.mobile_versions
+
+  preflight:
+    name: fast policy and contract preflight
+    needs: scope
+    runs-on: [self-hosted, Linux, X64, lab, general]
+    timeout-minutes: 3
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Audit corrective-history evidence
+        run: make history-check
+      - name: Check validation catalog and static contracts
+        run: |
+          make validation-lint
+          python3 -m unittest discover -s tests/validation -p 'test_*.py'
+      - uses: https://data.forgejo.org/actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Check CI, deploy, and shipping contracts
+        run: make operations-check
+      - name: Check the shared player input contract
+        run: |
+          node tests/playback/player-input-contract.test.js
+          node tests/web/player-dom.test.js
+      - name: Record the documentation-only lane
+        if: needs.scope.outputs.docs_only == 'true'
+        run: echo "Documentation-only diff; compiler surfaces are skipped."
+
+  rust_compile:
+    name: fast Rust gate
+    needs: [scope, preflight]
+    if: needs.scope.outputs.rust == 'true'
+    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
+    timeout-minutes: 10
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v4
+      - uses: https://github.com/dtolnay/rust-toolchain@1.97.1
+        with:
+          components: rustfmt, clippy
+      - id: cargo-cache
+        uses: ./.github/actions/cargo-cache
+        with:
+          lane: main-fast-rust
+      - name: Compile every Rust target without executing tests
+        run: |
+          make effort-rust-check
+          make hiqlite-vendor-clippy
+      - name: Enforce persistent Cargo bounds
+        if: always() && steps.cargo-cache.outputs.local == 'true'
+        continue-on-error: true
+        uses: ./.github/actions/cargo-cache-finalize
+        with:
+          cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
+          budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
+          last-used: ${{ steps.cargo-cache.outputs.last-used }}
+
+  web_compile:
+    name: fast web syntax gate
+    needs: [scope, preflight]
+    if: needs.scope.outputs.web_layout == 'true'
+    runs-on: [self-hosted, Linux, X64, lab, general]
+    timeout-minutes: 5
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v4
+      - uses: https://data.forgejo.org/actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Parse every shipped JavaScript surface
+        run: |
+          scripts/js-check
+          git ls-files -z 'crates/plurxd/src/web/*.js' | xargs -0 -n1 node --check
+
+  apple_compile:
+    name: fast Apple compile
+    needs: [scope, preflight]
+    if: needs.scope.outputs.apple == 'true'
+    runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-26]
+    timeout-minutes: 10
+    env:
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+      PATH: /opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v4
+      - name: Verify the pinned Apple toolchain
+        run: |
+          xcode_version="$(xcodebuild -version)"
+          grep -Fxq "Xcode 26.6" <<< "$xcode_version"
+          grep -Fxq "Build version 17F113" <<< "$xcode_version"
+          test "$(xcodegen --version)" = "Version: 2.46.0"
+      - name: Cache DerivedData
+        uses: https://data.forgejo.org/actions/cache@v4
+        with:
+          path: clients/apple/build/DerivedData
+          key: main-fast-apple-dd-${{ hashFiles('clients/apple/project.yml') }}-${{ hashFiles('clients/apple/Sources/**') }}
+          restore-keys: |
+            main-fast-apple-dd-${{ hashFiles('clients/apple/project.yml') }}-
+            effort-apple-dd-
+            apple-dd-
+      - name: Compile iOS and tvOS without running simulator tests
+        run: make apple-build
+
+  android_compile:
+    name: fast Android compile
+    needs: [scope, preflight]
+    if: needs.scope.outputs.android_jvm == 'true'
+    runs-on: [self-hosted, Linux, X64, lab, android-kvm]
+    timeout-minutes: 10
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v4
+      - name: Reuse the pinned Android toolchain image from Forgejo
+        env:
+          REGISTRY_TOKEN: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
+        run: |
+          tag="192.168.4.7:3000/noirr/android-build:$(sha256sum clients/android/Dockerfile | cut -c1-16)"
+          echo "$REGISTRY_TOKEN" | docker login 192.168.4.7:3000 -u fleet --password-stdin || true
+          if docker pull "$tag"; then
+            docker tag "$tag" plurx-android-build
+          else
+            make android-image \
+              && docker tag plurx-android-build "$tag" \
+              && docker push "$tag" || true
+          fi
+          echo "PLURX_ANDROID_IMAGE_READY=1" >> "$GITHUB_ENV"
+      - name: Cache Gradle dependencies
+        uses: https://data.forgejo.org/actions/cache@v4
+        with:
+          path: |
+            clients/android/.gradle-docker/caches
+            clients/android/.gradle-docker/wrapper
+          key: main-fast-gradle-${{ hashFiles('clients/android/build.gradle.kts', 'clients/android/settings.gradle.kts', 'clients/android/app/build.gradle.kts', 'clients/android/gradle/libs.versions.toml', 'clients/android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            main-fast-gradle-
+            effort-gradle-
+      - name: Compile the Android debug application without running tests
+        run: make android
+
+  promotion_gate:
+    name: Main promotion gate
+    if: >-
+      always() &&
+      github.event.label.name == 'fast-lane' &&
+      github.event.pull_request.draft == false
+    needs:
+      - scope
+      - mobile_version
+      - preflight
+      - rust_compile
+      - web_compile
+      - apple_compile
+      - android_compile
+    runs-on: [self-hosted, Linux, X64, lab, general]
+    timeout-minutes: 2
+    steps:
+      - name: Require policy and every affected compile surface
+        env:
+          SCOPE_RESULT: ${{ needs.scope.result }}
+          MOBILE_VERSION_RESULT: ${{ needs.mobile_version.result }}
+          PREFLIGHT_RESULT: ${{ needs.preflight.result }}
+          RUST_RESULT: ${{ needs.rust_compile.result }}
+          WEB_RESULT: ${{ needs.web_compile.result }}
+          APPLE_RESULT: ${{ needs.apple_compile.result }}
+          ANDROID_RESULT: ${{ needs.android_compile.result }}
+        run: |
+          for result in \
+            "$SCOPE_RESULT" "$MOBILE_VERSION_RESULT" "$PREFLIGHT_RESULT" \
+            "$RUST_RESULT" "$WEB_RESULT" "$APPLE_RESULT" \
+            "$ANDROID_RESULT"; do
+            case "$result" in
+              success|skipped) ;;
+              *) echo "A selected fast-lane job ended with: $result"; exit 1 ;;
+            esac
+          done
+      - uses: https://data.forgejo.org/actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require the reviewed head and base to remain current
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git fetch --no-tags --force origin \
+            "+refs/heads/$HEAD_REF:refs/plurx/current-head" \
+            "+refs/heads/$BASE_REF:refs/plurx/current-base"
+          test "$(git rev-parse refs/plurx/current-head)" = "$EVENT_HEAD_SHA"
+          test "$(git rev-parse refs/plurx/current-base)" = "$EVENT_BASE_SHA"
