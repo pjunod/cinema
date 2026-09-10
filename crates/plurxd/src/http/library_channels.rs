@@ -38,8 +38,6 @@ const GUIDE_MAX_MS: i64 = 24 * 60 * 60 * 1_000;
 
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
-        // Collection names are registered before `/{id}` by construction.
-        .route("/", get(list).post(create))
         .route("/preview", post(preview))
         .route("/guide", get(guide))
         .route("/{id}", get(get_one).put(update).delete(delete_one))
@@ -52,11 +50,12 @@ pub(crate) fn router() -> Router<AppState> {
         .layer(middleware::from_fn(private_no_store))
 }
 
-/// Accept the collection spelling shipped by the first native clients while
-/// they roll forward to the canonical no-trailing-slash endpoint. Axum 0.8
-/// does not treat the two paths as equivalent when a router is nested.
-pub(crate) fn trailing_slash_compatibility_router() -> Router<AppState> {
+/// Register the canonical collection route explicitly, plus the spelling
+/// shipped by the first native clients while they roll forward. Axum 0.8 does
+/// not treat the two paths as equivalent when a router is nested.
+pub(crate) fn collection_router() -> Router<AppState> {
     Router::new()
+        .route("/library-channels", get(list).post(create))
         .route("/library-channels/", get(list).post(create))
         .layer(DefaultBodyLimit::max(64 * 1024))
         .layer(middleware::from_fn(private_no_store))

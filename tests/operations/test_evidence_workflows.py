@@ -224,10 +224,13 @@ class EvidenceWorkflowCase(unittest.TestCase):
             "clients/android/app/src/main/java/tv/plurx/app/data/PlurxApi.kt"
         )
 
-        self.assertIn("library_channels::trailing_slash_compatibility_router()", http)
+        self.assertIn("library_channels::collection_router()", http)
         self.assertIn(
             "library_channel_collection_routes_accept_rollout_spellings_with_same_guards",
             http,
+        )
+        self.assertIn(
+            '.route("/library-channels", get(list).post(create))', routes
         )
         self.assertIn(
             '.route("/library-channels/", get(list).post(create))', routes
@@ -241,7 +244,7 @@ class EvidenceWorkflowCase(unittest.TestCase):
         self.assertIn('@GET("library-channels")', android)
         self.assertIn('@POST("library-channels")', android)
 
-        error_view = web_errors.split("function errorView(error)", 1)[1].split(
+        error_view = web_errors.split("function errorView(error, context)", 1)[1].split(
             "return {code, title: selected[0], detail: selected[1]};", 1
         )[0]
         self.assertIn(
