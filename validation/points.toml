@@ -792,6 +792,7 @@ paths = [
   "brand/tokens.css",
   "crates/plurxd/src/http/web.rs",
   "crates/plurxd/src/web/**",
+  "docs/features/SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS.md",
   "docs/clients/UI-*.md",
   "docs/clients/PLAYER-INPUT-CONTRACT*.md",
   "scripts/contrast-*",

@@ -1,7 +1,7 @@
 # Library channels status — what is built and what remains
 
 **Status:** single review addressed · fast lane pending · **Effort:**
-`effort/library-channels` · **Updated:** 2026-09-10 · **Base:** `20057416`
+`effort/library-channels` · **Updated:** 2026-09-10 · **Base:** `7fabfbf2`
 
 Companion to [FEATURES.md](../FEATURES.md) (what Plurx supports),
 [PLAYBACK.md](../PLAYBACK.md) (finite-media delivery), and
@@ -13,7 +13,7 @@ proved, and what remains?*
 
 | Milestone | State | Evidence |
 |---|---|---|
-| M0 isolated base and compiler | complete | clean independent clone; current `main` merged at `20057416`; Rust 1.97.1 compiler loop established before Rust edits |
+| M0 isolated base and compiler | complete | clean independent clone; current `main` merged at `7fabfbf2`; Rust 1.97.1 compiler loop established before Rust edits |
 | M1 recipes, schedules, and durable storage | built; pinned workspace compile passed | one normalized evaluator and deterministic clock/order implementation; SQLite v55 and Hiqlite v35 entities, authorization-at-write, 24-hour bounded idempotency, coherent catalogue snapshots, renewable claims, guarded publication, immutable-vector LRU, bounded pruning, and import census |
 | M2 API and playback purpose | built; pinned workspace compile passed | bounded authenticated CRUD/opaque-preview/guide/resolve routes, idempotent rebuild/delete, pinned-occurrence finite-HLS starts, durable purpose binding, control-time authorization, and following-mode start/history isolation |
 | M3 web | built; integration compile passed | responsive paginated browse/guide, three-step resumable editor, stable preview seed, admin management, fenced following playback, watch-from-start/return, and advisory Developer enablement |

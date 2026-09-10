@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["b0799512"]
+points = ["web.experience"]
+checks = ["web-static", "web-layout"]
+reason = "The settings-section regression requires every measured path to remain visible inside one host-independent evidence container, while the portable UI golden proves that decoder inventory size no longer changes Developer-page structure across layouts and viewports."

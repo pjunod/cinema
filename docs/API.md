@@ -382,7 +382,7 @@ of never storing it.
 | GET | `/api/v1/system/library-shape` | admin | Codec and HDR census over the library |
 | POST | `/api/v1/system/storage` | admin | Re-measures storage. Costs real I/O |
 | POST | `/api/v1/system/search-index/rebuild` | admin | Rebuilds the derived search index on every voter |
-| GET | `/api/v1/developer/readiness` | admin | Reports advisory observations for Developer enable controls; never gates them |
+| GET | `/api/v1/developer/readiness` | admin | Reports advisory observations for Playback, Cluster and Developer settings; never gates controls |
 | POST | `/api/v1/client-log` | bearer | Files one client-side playback error into the server log |
 | GET | `/api/v1/scan/status` | bearer | Per-library scan status |
 | GET | `/api/v1/activity` | bearer | Flat list of what the server is doing |
@@ -1878,7 +1878,7 @@ evidence about the tuner.
 | `configuration` | A saved setting is invalid — session limit outside 1–4, output height not 720 or 1080, a blank owner, a half-written owner-transition barrier, or an HDHomeRun address that is not private or link-local unicast IPv4. plurx will not be pointed at a routable or cloud-metadata address |
 | `cluster_protocol` | A node in the cluster runs a build without the live-TV protocol. It is named. This check does *not* short-circuit the device probe |
 | `serving_authority` | The node you are asking has lost quorum serving authority. Nothing media-related will start here |
-| `owner_transition` | The previous tuner owner has not acknowledged cleanup. Bring it back, or perform the explicit physical-fencing attestation in Developer settings |
+| `owner_transition` | The previous tuner owner has not acknowledged cleanup. Bring it back, or perform the explicit physical-fencing attestation in Live TV settings |
 | `owner_network` | The owner could not reach the device, or is not a reachable committed voter, or the device answered something invalid. Messages never contain the device URL by construction |
 | `lineup` | The lineup is empty (scan on the device), or it is `Stale` — the fetch failed and the owner is serving a projection up to 5 minutes old |
 | `session_limit` | plurx is configured to lease more tuners than the device reports |

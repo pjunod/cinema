@@ -85,6 +85,13 @@ const BORROWED = [
   "leavePanel",
   "joinTokenHtml",
   "clusterPanel",
+  "clusterTransportRecoveryCard",
+  "setCard",
+  "cardHead",
+  "devReq",
+  "devReadinessRow",
+  "devReadinessPill",
+  "devReadinessEvidence",
   "toggleClusterNodes",
   "syncClusterNodeToggle",
   "promoteNode",
@@ -2620,6 +2627,13 @@ test("the join token is never written to browser storage or a URL", () => {
     "copyJoinToken",
     "forgetJoinToken",
     "clusterPanel",
+    "clusterTransportRecoveryCard",
+    "setCard",
+    "cardHead",
+    "devReq",
+    "devReadinessRow",
+    "devReadinessPill",
+    "devReadinessEvidence",
   ].map((name) => `${name}:\n${shippedSource(name)}`);
   for (const source of handlers) {
     for (const sink of [
@@ -2732,7 +2746,7 @@ test("the Cluster tab is registered and dispatched", () => {
   assert.match(SHIPPED_UI, /if\(tab==="cluster"\)\s*return clusterPanel\(d\)/);
   // The active-tab manifest fetches this roster on first Cluster open; it is
   // absent from every other tab's dependency wave.
-  assert.match(SHIPPED_UI, /cluster:\{required:\["cluster"\],secondary:\["clusterOps"\]\}/);
+  assert.match(SHIPPED_UI, /cluster:\{required:\["cluster"\],secondary:\["clusterOps","developerReadiness"\]\}/);
   assert.match(SHIPPED_UI, /cluster:\(\)=>api\("\/cluster\/nodes"\)/);
   assert.match(SHIPPED_UI, /clusterOps:\(\)=>api\("\/cluster\/status",\{keepSessionOn401:true\}\)/);
   assert.equal(
