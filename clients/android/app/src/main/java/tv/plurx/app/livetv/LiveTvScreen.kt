@@ -725,7 +725,7 @@ private fun TelevisionLiveTvBrowser(
             value = search,
             onValueChange = onSearch,
             label = { Text("Search") },
-            modifier = Modifier.width(260.dp).tvFocusRing(),
+            modifier = Modifier.width(260.dp).testTag("live-tv-channel-search").tvFocusRing(),
             singleLine = true,
         )
         Box {
