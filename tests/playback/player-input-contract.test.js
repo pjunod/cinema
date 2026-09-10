@@ -171,36 +171,47 @@ test("the 2026-09-02 rulings survive on the live surface", () => {
   const live = contract.live.routing;
   // Ruling 1, unchanged: a direction on a hidden ten-foot overlay only reveals.
   for (const d of ["left", "right", "up", "down", "select"]) {
-    assert.equal(live["ten-foot"].hidden[d], "reveal", `ten-foot/hidden/${d} does something other than reveal`);
+    assert.equal(
+      live["ten-foot"].fullscreen_hidden[d],
+      "reveal",
+      `ten-foot/fullscreen_hidden/${d} does something other than reveal`,
+    );
   }
   // Nothing on a hidden ten-foot overlay changes channel.
   for (const input of contract.live.inputs) {
     assert.ok(
-      !["tune", "channel_up", "channel_down", "strip_prev", "strip_next"].includes(live["ten-foot"].hidden[input]),
-      `ten-foot/hidden/${input} changes channel behind a hidden overlay`,
+      !["tune", "channel_up", "channel_down", "strip_prev", "strip_next"].includes(
+        live["ten-foot"].fullscreen_hidden[input],
+      ),
+      `ten-foot/fullscreen_hidden/${input} changes channel behind hidden controls`,
     );
   }
-  // Ruling 2 applied to channels: the ten-foot list is preview-then-commit.
-  for (const d of ["up", "down"]) assert.equal(live["ten-foot"].overlay[d], "focus_row");
-  assert.equal(live["ten-foot"].overlay.select, "activate");
-  assert.equal(live["ten-foot"].overlay.back, "hide");
+  // Ruling 2 applied to fullscreen chrome: arrows move focus and Select alone
+  // activates the chosen control.
+  for (const d of ["left", "right", "up", "down"]) {
+    assert.equal(live["ten-foot"].fullscreen_controls[d], "focus_control");
+  }
+  assert.equal(live["ten-foot"].fullscreen_controls.select, "activate");
+  assert.equal(live["ten-foot"].fullscreen_controls.back, "hide");
   assert.equal(contract.live.timings.preview_auto_commit_ms, null);
   // The deliberate divergence: a desktop keyboard has no focus ring, so
   // vertical tunes directly. Recorded here so it cannot be "fixed" silently.
-  assert.equal(live.desktop.hidden.up, "channel_up");
-  assert.equal(live.desktop.hidden.down, "channel_down");
-  assert.equal(live.desktop.overlay.select, "tune");
+  assert.equal(live.desktop.fullscreen_hidden.up, "channel_up");
+  assert.equal(live.desktop.fullscreen_hidden.down, "channel_down");
+  assert.equal(live.desktop.fullscreen_controls.select, "tune");
 });
 
 test("the live overlay hides only from a visible overlay, and a held channel key is one tuner start", () => {
   const live = contract.live;
   for (const surface of Object.keys(live.routing)) {
-    assert.equal(live.routing[surface].hidden.idle, "ignore", `${surface}: a hidden overlay auto-hides again`);
-    assert.equal(live.routing[surface].page.idle, "ignore", `${surface}: the inline page auto-hides`);
+    for (const state of Object.keys(live.states)) {
+      if (state === "fullscreen_controls") continue;
+      assert.equal(live.routing[surface][state].idle, "ignore", `${surface}/${state}: non-chrome state auto-hides`);
+    }
   }
-  assert.equal(live.routing["ten-foot"].overlay.idle, "hide");
-  assert.equal(live.routing.desktop.overlay.idle, "hide");
-  assert.equal(live.routing.touch.overlay.idle, "hide");
+  assert.equal(live.routing["ten-foot"].fullscreen_controls.idle, "hide");
+  assert.equal(live.routing.desktop.fullscreen_controls.idle, "hide");
+  assert.equal(live.routing.touch.fullscreen_controls.idle, "hide");
   // The same numbers as the finite player, deliberately.
   assert.equal(live.timings.hide_after_ms, contract.timings.hide_after_ms);
   assert.equal(live.timings.hidden_only_while_playing, contract.timings.hidden_only_while_playing);
@@ -208,22 +219,25 @@ test("the live overlay hides only from a visible overlay, and a held channel key
   assert.ok(live.timings.channel_coalesce_ms >= 350, "channel coalescing is shorter than one held-key repeat");
 });
 
-test("the inline live page owns only the transport key", () => {
-  // Browsing owns the keyboard while the player is inline; a stray arrow must
-  // not tune a channel out from under someone scrolling a list.
+test("the root live browser never retunes or controls playback behind native browsing", () => {
+  const tuning = new Set(["tune", "channel_up", "channel_down", "strip_prev", "strip_next"]);
   for (const surface of Object.keys(contract.live.routing)) {
-    const page = contract.live.routing[surface].page;
+    const browser = contract.live.routing[surface].browser;
     for (const input of contract.live.inputs) {
-      if (input === "play_pause") continue;
-      assert.equal(page[input], "ignore", `live ${surface}/page/${input} acts while the player is inline`);
+      assert.ok(!tuning.has(browser[input]), `live ${surface}/browser/${input} retunes behind browsing`);
+    }
+    assert.equal(browser.play_pause, "ignore", `live ${surface}/browser owns the transport key`);
+  }
+  for (const surface of ["ten-foot", "desktop"]) {
+    for (const input of ["left", "right", "up", "down", "select"]) {
+      assert.equal(contract.live.routing[surface].browser[input], "delegate");
     }
   }
-  assert.equal(contract.live.routing.desktop.page.play_pause, "toggle_play");
 });
 
 test("the served web live routing table is the fixture live table", () => {
   assert.deepEqual(webPolicy.LIVE_INPUT_ROUTING, contract.live.routing);
-  assert.equal(webPolicy.routeLiveInput("desktop", "overlay", "select"), "tune");
+  assert.equal(webPolicy.routeLiveInput("desktop", "fullscreen_controls", "select"), "tune");
   assert.equal(webPolicy.liveContractTiming("hide_after_ms"), contract.live.timings.hide_after_ms);
   assert.equal(webPolicy.liveHotkey("G"), "guide_sheet");
   assert.equal(webPolicy.liveHotkey("q"), null);
