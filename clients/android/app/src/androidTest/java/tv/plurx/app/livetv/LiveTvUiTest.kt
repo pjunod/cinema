@@ -170,13 +170,16 @@ class LiveTvUiTest {
         compose.setContent { PlurxTheme { LiveTvScreen(origin) {} } }
         awaitText("7.1 · Fixture News")
         // Initial focus is the 10-foot navigation contract, and it is what the
-        // television profile must prove. On the phone profile this node was
+        // television profile must prove. The merged TV layout deliberately
+        // enters its guide action rather than the screen-level Back action so
+        // a remote starts inside the viewing workflow. On the phone profile
+        // Back was
         // observed with Focused = 'false': a touch device has no focus cursor to
         // place, and pinning one on Back would draw a focus ring nobody asked
         // for. Assert reachability there instead of a focus state the product
         // does not owe a touch screen. This has to precede search input, which
         // correctly moves focus into the field.
-        if (television) compose.onNodeWithText("Back").assertIsFocused()
+        if (television) compose.onNodeWithTag("live-tv-guide-action").assertIsFocused()
         else compose.onNodeWithText("Back").assertHasClickAction()
         // The native schedule rows added by the TV-layout work are taller than
         // the old lineup-only rows. Select the protected result explicitly so
