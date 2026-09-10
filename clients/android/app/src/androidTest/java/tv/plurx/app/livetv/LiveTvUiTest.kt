@@ -11,6 +11,7 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTextClearance
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.printToString
@@ -167,6 +168,13 @@ class LiveTvUiTest {
     @Test fun channelsAreSearchableAndProtectedChannelsCannotStart() {
         compose.setContent { PlurxTheme { LiveTvScreen(origin) {} } }
         awaitText("7.1 · Fixture News")
+        // The native schedule rows added by the TV-layout work are taller than
+        // the old lineup-only rows. Select the protected result explicitly so
+        // this contract does not depend on both fixture channels fitting in one
+        // emulator viewport.
+        val search = compose.onNodeWithText("Number, name, or what is on")
+        search.performTextInput("Protected")
+        awaitText("DRM unsupported")
         compose.onNodeWithText("DRM unsupported").assertIsNotEnabled()
         // Initial focus is the 10-foot navigation contract, and it is what the
         // television profile must prove. On the phone profile this node was
@@ -179,7 +187,8 @@ class LiveTvUiTest {
         // The field's label says what search now matches. It used to read
         // "Find a channel"; since the guide landed it also matches the
         // programme on now, and the label says so.
-        compose.onNodeWithText("Number, name, or what is on").performTextInput("Fixture")
+        search.performTextClearance()
+        search.performTextInput("Fixture")
         compose.onNodeWithText("7.1 · Fixture News").assertIsDisplayed()
         compose.onNodeWithText("Watch live").assertIsDisplayed()
         assertTrue(requests.none { it.startsWith("POST ") })

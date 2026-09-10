@@ -1,6 +1,6 @@
 # Library channels status — what is built and what remains
 
-**Status:** single review addressed · rebased corrective fast lane pending · **Effort:**
+**Status:** single review addressed · rebased corrective fast lane rerun pending · **Effort:**
 `effort/library-channels` · **Updated:** 2026-09-10 · **Base:** `23769947`
 
 Companion to [FEATURES.md](../FEATURES.md) (what Plurx supports),
@@ -19,7 +19,7 @@ proved, and what remains?*
 | M3 web | built; integration compile passed | responsive paginated browse/guide, three-step resumable editor, stable preview seed, admin management, fenced following playback, watch-from-start/return, and advisory Developer enablement |
 | M4 Apple | built; iOS and tvOS compile passed | native paginated guide, three persisted tvOS layouts, iPhone/iPad resumable preview/authoring from navigation or title detail, finite playback control, server-monotonic following, and ordinary watch-from-start/return; build 131 |
 | M5 Android | built; Android APK compile passed | native paginated guide, phone/tablet resumable authoring from navigation or title detail, three Google TV layouts, finite playback control, server-monotonic following, and ordinary watch-from-start/return; versionCode 80 |
-| M6 promotion | rebased corrective candidate | exactly one adversarial review completed; fast-lane qualification exposed and directly covered promotion inventories including v14 import parity, ordinary-session ownership, replicated schema parsing and migration-source admission, channel publication parameters, and sole-voter readdress snapshot boundaries; `main` advanced with native Live TV layouts during the long recovery lane, so that base is merged and the combined clients are requalified before merge |
+| M6 promotion | rebased corrective candidate | exactly one adversarial review completed; fast-lane qualification exposed and directly covered promotion inventories including v14 import parity, ordinary-session ownership, replicated schema parsing and migration-source admission, channel publication parameters, and sole-voter readdress snapshot boundaries; `main` advanced with native Live TV layouts during the long recovery lane, so that base is merged; run 1684 then exposed a viewport-dependent Android instrumentation assumption, and the corrected contract selects the protected channel before asserting its disabled state |
 
 ## Current decision — the merged Live TV guide is the UI seam
 
