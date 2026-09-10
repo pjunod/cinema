@@ -113,7 +113,7 @@ const LEARNER_LIFECYCLE_CAPABILITY: &str = "learner_lifecycle_v1";
 /// protocol for process-local cache-only admin authorization. Unlike an
 /// activated Raft protocol this remains a rolling capability: consumers must
 /// stop using the cache whenever any committed member no longer proves it.
-const CACHE_ADMIN_REVOCATION_CAPABILITY: &str = "cache_admin_revocation_v3";
+const CACHE_ADMIN_REVOCATION_CAPABILITY: &str = "cache_admin_revocation_v4";
 #[cfg(test)]
 const LEGACY_CACHE_ADMIN_REVOCATION_V1_CAPABILITY: &str = "cache_admin_revocation_v1";
 #[cfg(test)]
@@ -617,7 +617,8 @@ const REQUIRE_CACHE_ADMIN_LEASE_DELETE_INTENT_SQL: &str =
      BEGIN SELECT RAISE(IGNORE); END";
 // Full-roster activation is a permanent witness. A single upgraded voter must
 // not break credential writes on the older voters during a rolling upgrade;
-// the singleton is published only after the exact committed roster proves v3.
+// the singleton is published only after the exact committed roster proves the
+// current response-authenticated protocol capability.
 // Once published, every authority-changing users/tokens statement must carry
 // the transaction-local marker that current Store code creates and consumes.
 // This closes the polling interval between a rollback heartbeat and other
@@ -2257,7 +2258,7 @@ fn committed_cache_admin_revocation_activation_needed_sql() -> String {
 
 /// Permanently activate the credential guards only while a replicated
 /// cache-admin exclusion freezes membership and every exact committed member
-/// concurrently carries a current v3 heartbeat proof.
+/// concurrently carries a current protocol heartbeat proof.
 fn activate_credential_guard_sql() -> String {
     format!(
         "INSERT INTO cluster_credential_guard_activation (singleton) \
@@ -2277,8 +2278,9 @@ fn activate_credential_guard_sql() -> String {
 }
 
 /// A credential mutation may fan out only after the permanent transition and
-/// while the exact current roster still proves v3. The latter check keeps a
-/// post-activation rollback fail-closed even though the witness never clears.
+/// while the exact current roster still proves the current protocol. The latter
+/// check keeps a post-activation rollback fail-closed even though the witness
+/// never clears.
 fn committed_credential_guard_ready_sql() -> String {
     format!(
         "SELECT (\
@@ -6449,6 +6451,53 @@ impl MembershipManager {
         response: &[u8],
         signature: &str,
     ) -> Result<bool, MembershipError> {
+        self.authorize_internal_peer_response_for_role(
+            source_node_id,
+            target_node_id,
+            request_nonce,
+            path,
+            response,
+            signature,
+            PeerAuthorityRole::CommittedVoter,
+        )
+        .await
+    }
+
+    /// Verify the exact response from any committed member. Credential-cache
+    /// revocation includes learners because they can serve authenticated
+    /// requests even though they do not vote in Raft.
+    pub async fn authorize_internal_peer_member_response(
+        &self,
+        source_node_id: &str,
+        target_node: &str,
+        request_nonce: &str,
+        path: &str,
+        response: &[u8],
+        signature: &str,
+    ) -> Result<bool, MembershipError> {
+        self.authorize_internal_peer_response_for_role(
+            source_node_id,
+            target_node,
+            request_nonce,
+            path,
+            response,
+            signature,
+            PeerAuthorityRole::CommittedMember,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn authorize_internal_peer_response_for_role(
+        &self,
+        source_node_id: &str,
+        target_node_id: &str,
+        request_nonce: &str,
+        path: &str,
+        response: &[u8],
+        signature: &str,
+        role: PeerAuthorityRole,
+    ) -> Result<bool, MembershipError> {
         let inner = self.replicated_inner()?;
         if target_node_id != inner.identity.node_id
             || source_node_id == target_node_id
@@ -6477,12 +6526,8 @@ impl MembershipManager {
         {
             return Ok(false);
         }
-        self.verify_live_peer_authority(
-            source_node_id,
-            unix_ms()?,
-            PeerAuthorityRole::CommittedVoter,
-        )
-        .await
+        self.verify_live_peer_authority(source_node_id, unix_ms()?, role)
+            .await
     }
 
     /// Authenticate an idempotent read-only relay. Signature verification is
@@ -12135,10 +12180,10 @@ mod tests {
     }
 
     #[test]
-    fn cache_admin_exclusion_is_separate_rolling_safe_and_capability_v3() {
+    fn cache_admin_exclusion_is_separate_rolling_safe_and_capability_v4() {
         assert_eq!(
             CACHE_ADMIN_REVOCATION_CAPABILITY,
-            "cache_admin_revocation_v3"
+            "cache_admin_revocation_v4"
         );
         assert!(MEMBERSHIP_SCHEMA.iter().any(|statement| {
             statement.contains("CREATE TABLE IF NOT EXISTS cluster_operation_leases")
@@ -14902,7 +14947,7 @@ mod tests {
                      REFERENCES users(id) ON DELETE CASCADE); \
                  INSERT INTO cluster_nodes VALUES ('node-a', 100); \
                  INSERT INTO cluster_node_capabilities VALUES \
-                   ('node-a', 'cache_admin_revocation_v3', 100); \
+                   ('node-a', 'cache_admin_revocation_v4', 100); \
                  INSERT INTO cluster_credential_guard_activation VALUES (1); \
                  INSERT INTO users VALUES (1, 'old-hash', 1); \
                  INSERT INTO tokens VALUES ('old-token', 1);",
@@ -15061,7 +15106,7 @@ mod tests {
                      SELECT node_id, ?2, last_seen_at FROM cluster_nodes WHERE node_id = ?1",
                     rusqlite::params![node_id, CACHE_ADMIN_REVOCATION_CAPABILITY],
                 )
-                .expect("publish current v3 heartbeat capability");
+                .expect("publish current v4 heartbeat capability");
         };
         let activate = || {
             connection
@@ -15081,6 +15126,14 @@ mod tests {
                 .expect("count guard activation")
         };
 
+        connection
+            .execute(
+                "INSERT INTO cluster_node_capabilities \
+                 SELECT node_id, 'cache_admin_revocation_v3', last_seen_at \
+                 FROM cluster_nodes WHERE node_id = 'node-b'",
+                [],
+            )
+            .expect("publish old unsigned-response capability");
         publish_capability("node-a");
         assert_eq!(
             connection
@@ -15091,7 +15144,11 @@ mod tests {
                 .expect("reject a non-owned activation claim"),
             0
         );
-        assert_eq!(activate(), 0);
+        assert_eq!(
+            activate(),
+            0,
+            "a current v3 peer must not satisfy the signed-response protocol"
+        );
         assert_eq!(activation_count(), 0);
         assert_eq!(
             connection
@@ -15121,6 +15178,14 @@ mod tests {
                 [],
             )
             .expect("roll voter b back to a legacy heartbeat");
+        connection
+            .execute(
+                "INSERT INTO cluster_node_capabilities \
+                 VALUES ('node-b', 'cache_admin_revocation_v3', 101) \
+                 ON CONFLICT(node_id, capability) DO UPDATE SET last_seen_at = 101",
+                [],
+            )
+            .expect("v3 rollback publishes its own current capability");
         assert_eq!(activate(), 0, "activation is permanent and idempotent");
         for (sql, label) in [
             (
@@ -15167,7 +15232,7 @@ mod tests {
                    ('node-a', 1, 100, NULL), ('node-b', 2, 100, NULL), \
                    ('node-c', 3, 100, NULL); \
                  INSERT INTO cluster_node_capabilities \
-                   SELECT node_id, 'cache_admin_revocation_v3', last_seen_at \
+                   SELECT node_id, 'cache_admin_revocation_v4', last_seen_at \
                    FROM cluster_nodes; \
                  INSERT INTO cluster_credential_guard_activation VALUES (1); \
                  INSERT INTO cluster_cache_admin_revocation_leases \

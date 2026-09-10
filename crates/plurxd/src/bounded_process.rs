@@ -45,29 +45,33 @@ impl OwnedChild {
     }
 
     async fn kill_and_reap(&mut self) {
-        #[cfg(unix)]
-        if let Some(group) = self.process_group {
-            // SAFETY: the child was placed in a new process group whose id is
-            // its pid. A negative pid addresses only that owned group.
-            let _ = unsafe { libc::kill(-group, libc::SIGKILL) };
-        }
+        self.kill_process_group();
         if let Some(mut child) = self.child.take() {
             let _ = child.start_kill();
             let _ = child.wait().await;
+        }
+    }
+
+    fn kill_process_group(&mut self) {
+        #[cfg(unix)]
+        if let Some(group) = self.process_group.take() {
+            // SAFETY: the child was placed in a new process group whose id is
+            // its pid. A negative pid addresses only that owned group.
+            let _ = unsafe { libc::kill(-group, libc::SIGKILL) };
         }
     }
 }
 
 impl Drop for OwnedChild {
     fn drop(&mut self) {
-        let Some(mut child) = self.child.take() else {
-            return;
-        };
         #[cfg(unix)]
-        if let Some(group) = self.process_group {
+        if let Some(group) = self.process_group.take() {
             // SAFETY: see `kill_and_reap`; Drop owns the same process group.
             let _ = unsafe { libc::kill(-group, libc::SIGKILL) };
         }
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
         let _ = child.start_kill();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
@@ -119,30 +123,43 @@ pub(crate) async fn output(
         .stderr
         .take()
         .ok_or_else(|| io::Error::other("probe stderr was not piped"))?;
-    let stdout = tokio::spawn(drain_capped(stdout, max_output_bytes));
-    let stderr = tokio::spawn(drain_capped(stderr, max_output_bytes));
+    let mut stdout = tokio::spawn(drain_capped(stdout, max_output_bytes));
+    let mut stderr = tokio::spawn(drain_capped(stderr, max_output_bytes));
     let mut child = OwnedChild::new(child);
 
-    let status = match tokio::time::timeout(wall_time, child.wait()).await {
-        Ok(result) => result?,
+    let completed = tokio::time::timeout(wall_time, async {
+        let status = child.wait().await?;
+        // A short-lived probe may not daemonize. Once its leader exits, kill
+        // any descendant left in the owned group before waiting for pipe EOF.
+        child.kill_process_group();
+        let stdout = (&mut stdout)
+            .await
+            .map_err(|error| io::Error::other(error.to_string()))??;
+        let stderr = (&mut stderr)
+            .await
+            .map_err(|error| io::Error::other(error.to_string()))??;
+        Ok::<_, io::Error>(Output {
+            status,
+            stdout,
+            stderr,
+        })
+    })
+    .await;
+    match completed {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(error)) => {
+            child.kill_and_reap().await;
+            stdout.abort();
+            stderr.abort();
+            Err(error)
+        }
         Err(_) => {
             child.kill_and_reap().await;
-            let _ = stdout.await;
-            let _ = stderr.await;
-            return Err(io::Error::new(io::ErrorKind::TimedOut, "probe timed out"));
+            stdout.abort();
+            stderr.abort();
+            Err(io::Error::new(io::ErrorKind::TimedOut, "probe timed out"))
         }
-    };
-    let stdout = stdout
-        .await
-        .map_err(|error| io::Error::other(error.to_string()))??;
-    let stderr = stderr
-        .await
-        .map_err(|error| io::Error::other(error.to_string()))??;
-    Ok(Output {
-        status,
-        stdout,
-        stderr,
-    })
+    }
 }
 
 /// Keep draining after the retained cap. Closing the reader at the cap can
@@ -193,6 +210,21 @@ mod tests {
         .await
         .expect_err("hanging process must time out");
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn a_descendant_cannot_hold_probe_pipes_past_the_wall_time() {
+        let started = tokio::time::Instant::now();
+        let output = output(
+            "/bin/sh",
+            &["-c", "sleep 300 & exit 0"],
+            Duration::from_millis(50),
+            1024,
+        )
+        .await
+        .expect("the leader exit must reap its background process group");
+        assert!(output.status.success());
         assert!(started.elapsed() < Duration::from_secs(2));
     }
 }

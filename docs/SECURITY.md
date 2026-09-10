@@ -64,7 +64,9 @@ Sign Out attempts the authenticated server revocation for five seconds on web,
 Apple, and Android, then clears the local bearer on every outcome. Each request
 captures its origin, bearer, and credential generation, so its late completion
 cannot borrow or erase a newer login. The login screen distinguishes confirmed
-revocation from offline local cleanup without retaining the bearer.
+revocation from unconfirmed local cleanup without retaining the bearer. Only a
+successful response or this endpoint's `401` counts as confirmation; a `403`
+can be introduced by an intermediary while the bearer remains valid.
 
 **Why `?token=` is not a step down.** It carries the same token as the header
 and is checked identically; it exists only because browsers won't attach
@@ -471,8 +473,9 @@ the audio-track index is `max(0)` and only ever embedded mid-token as
 (`stream.rs`). None can present to ffmpeg as a standalone `-option`. The binary
 names themselves come from operator-set env vars, not from any request. Short
 startup and decoder-identity probes additionally cap retained output and wall
-time, reap their child process group on timeout or cancellation, and refuse
-decoder artifacts above 512 MiB or hashing beyond ten seconds.
+time, reap their child process group after normal leader exit, timeout, or
+cancellation, and refuse decoder artifacts above 512 MiB both from open-handle
+metadata and from the counted hash stream, or hashing beyond ten seconds.
 
 ## The browser client — output escaping
 

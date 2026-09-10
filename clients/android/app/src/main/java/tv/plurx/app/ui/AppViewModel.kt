@@ -5,6 +5,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withTimeoutOrNull
@@ -14,6 +15,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import retrofit2.HttpException
 import java.net.URI
 import tv.plurx.app.data.Caps
@@ -374,54 +376,58 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             val capturedOrigin = Session.origin
             val capturedToken = Session.token
             _busy.value = true
-            val revocation = async {
-                if (capturedOrigin.isBlank() || capturedToken == null) return@async false
-                val boundApi = Net.api(capturedOrigin, Net.profileClient(capturedToken))
-                withTimeoutOrNull(5_000L) {
-                    try {
-                        boundApi.logout()
-                        true
-                    } catch (cancelled: CancellationException) {
-                        throw cancelled
-                    } catch (error: HttpException) {
-                        error.code() == 401 || error.code() == 403
-                    } catch (_: Exception) {
-                        false
-                    }
-                } ?: false
-            }
             OfflineBooks.interruptProfile(instance, user)
-            try {
-                if (removeDownloads && instance != null && user != null) {
-                    OfflineDownloads.removeProfileNow(instance, user, api)
-                    OfflineBooks.removeProfileNow(instance, user)
+            var cancellation: CancellationException? = null
+            val confirmed = try {
+                if (capturedOrigin.isBlank() || capturedToken == null) false else {
+                    val boundApi = Net.api(capturedOrigin, Net.profileClient(capturedToken))
+                    withTimeoutOrNull(5_000L) {
+                        try {
+                            boundApi.logout()
+                            true
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (error: HttpException) {
+                            error.code() == 401
+                        } catch (_: Exception) {
+                            false
+                        }
+                    } ?: false
                 }
             } catch (cancelled: CancellationException) {
-                revocation.cancel()
-                throw cancelled
-            } catch (_: Exception) {
-                // Sign Out still clears the local session. Offline cleanup can
-                // be retried independently and must not retain a bearer.
+                // Leaving the screen or destroying the view model cannot undo
+                // the user's choice to discard this local credential.
+                cancellation = cancelled
+                false
             }
-            val confirmed = revocation.await()
-            // Never let a late response clear a newer login or a different
-            // server. The captured client above likewise never borrows it.
-            if (Session.origin != capturedOrigin || Session.token != capturedToken) {
+            var cleared = false
+            withContext(NonCancellable) {
+                // Never let a late response clear a newer login or a different
+                // server. The captured client above likewise never borrows it.
+                if (Session.origin == capturedOrigin && Session.token == capturedToken) {
+                    settings.clearToken()
+                    Session.token = null
+                    currentUser = null
+                    currentUserId = null
+                    _home.value = HomeState()
+                    _authError.value = if (confirmed) {
+                        "Sign-out was confirmed by the server."
+                    } else {
+                        "Signed out on this device. The server could not confirm revocation."
+                    }
+                    _phase.value = Phase.NeedLogin
+                    cleared = true
+                }
                 _busy.value = false
-                return@launch
+                if (cleared && removeDownloads && instance != null && user != null) {
+                    // These objects own application-lifetime supervisor scopes.
+                    // Local package deletion must not delay or share cancellation
+                    // with leaving the authenticated session.
+                    OfflineDownloads.removeProfile(instance, user)
+                    OfflineBooks.removeProfile(instance, user)
+                }
             }
-            settings.clearToken()
-            Session.token = null
-            currentUser = null
-            currentUserId = null
-            _home.value = HomeState()
-            _authError.value = if (confirmed) {
-                "Sign-out was confirmed by the server."
-            } else {
-                "Signed out on this device. The server could not confirm revocation while it was offline."
-            }
-            _busy.value = false
-            _phase.value = Phase.NeedLogin
+            cancellation?.let { throw it }
         }
     }
 

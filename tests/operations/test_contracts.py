@@ -161,6 +161,16 @@ def workflow_step_literal(step: str, key: str) -> list[str]:
 
 
 class OperationsContractCase(unittest.TestCase):
+    def test_decoder_artifact_hash_opens_once_and_enforces_the_stream_ceiling(self):
+        source = read("crates/plurxd/src/decoder_health.rs")
+        digest = source.split("async fn file_digest", 1)[1].split(
+            "async fn run", 1
+        )[0]
+
+        self.assertLess(digest.index("File::open(path)"), digest.index("file.metadata()"))
+        self.assertIn("total.checked_add(read as u64)?", digest)
+        self.assertIn("total > MAX_ARTIFACT_BYTES", digest)
+
     def test_external_actions_are_immutable_and_checkout_drops_credentials(self):
         action_paths = sorted((ROOT / ".github/actions").glob("*/action.yml"))
         workflow_paths = sorted((ROOT / ".github/workflows").glob("*.yml"))
@@ -190,6 +200,18 @@ class OperationsContractCase(unittest.TestCase):
         )[0]
         self.assertIn(".env_clear()", command)
         self.assertIn('.env("LC_ALL", "C")', command)
+
+    def test_private_origin_fetches_use_only_step_scoped_credentials(self):
+        workflow = read(".github/workflows/ci.yml")
+        fetches = list(re.finditer(r"fetch --no-tags --force origin", workflow))
+        self.assertEqual(len(fetches), 2)
+        for fetch in fetches:
+            step_start = workflow.rfind("\n      - name:", 0, fetch.start())
+            step_end = workflow.find("\n      - ", fetch.end())
+            step = workflow[step_start : None if step_end < 0 else step_end]
+            self.assertIn("GITHUB_TOKEN: ${{ github.token }}", step)
+            self.assertIn('http.extraheader="AUTHORIZATION: basic $auth"', step)
+            self.assertNotIn("git config", step)
 
     def test_browser_validation_never_claims_host_audio_or_media_controls(self):
         for path in ("scripts/playback-lab", "scripts/ui-baseline"):
@@ -1934,7 +1956,7 @@ assert.equal(context.ACT_TIMER, null);
             "ambiguous_cache_admin_acquire_advances_watermark_and_cannot_resurrect",
             "repeated_ambiguous_cache_admin_cleanup_keeps_one_bounded_watermark",
             "server_commit_response_loss_and_crash_expire_cache_admin_exclusion_conservatively",
-            "cache_admin_exclusion_is_separate_rolling_safe_and_capability_v3",
+            "cache_admin_exclusion_is_separate_rolling_safe_and_capability_v4",
             "active_cache_revocation_exclusion_blocks_readiness_without_wall_clock_expiry",
             "cache_revocation_capability_keeps_a_joiner_closed_until_self_is_committed",
             "rollback_heartbeat_cannot_republish_retired_cache_revocation_capabilities",

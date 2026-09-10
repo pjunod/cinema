@@ -606,7 +606,7 @@ async fn fanout(
                     body,
                     deadline,
                     256,
-                    PeerAuthMode::ExactRequestAndResponse,
+                    PeerAuthMode::ExactRequestAndMemberResponse,
                 )
                 .await
                 .is_ok_and(|response| response.status == reqwest::StatusCode::NO_CONTENT)
@@ -781,7 +781,7 @@ mod tests {
             .split_once("fn propagation_error")
             .expect("revocation fanout end")
             .0;
-        assert!(fanout.contains("PeerAuthMode::ExactRequestAndResponse"));
+        assert!(fanout.contains("PeerAuthMode::ExactRequestAndMemberResponse"));
         assert!(!fanout.contains("PeerAuthMode::ExactRequest,"));
         let receive = include_str!("internal_auth_revocation.rs")
             .split_once("pub(crate) async fn receive(")

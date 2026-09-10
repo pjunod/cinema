@@ -319,7 +319,7 @@ final class AppModel: ObservableObject {
             do {
                 try await PlurxAPI(origin: capturedOrigin).logout(token: token)
                 confirmed = true
-            } catch APIError.http(let code) where code == 401 || code == 403 {
+            } catch APIError.http(let code) where code == 401 {
                 confirmed = true
             } catch {
                 confirmed = false
@@ -334,7 +334,7 @@ final class AppModel: ObservableObject {
             self.signOutLocally(
                 message: confirmed
                     ? "Sign-out was confirmed by the server."
-                    : "Signed out on this device. The server could not confirm revocation while it was offline."
+                    : "Signed out on this device. The server could not confirm revocation."
             )
         }
     }

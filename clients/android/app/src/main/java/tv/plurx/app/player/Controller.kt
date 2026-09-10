@@ -2186,6 +2186,10 @@ class Controller(
     private var preparedPlayer: ExoPlayer? = null
     /** Film position used for the readiness seek; commit samples again. */
     private var preparedAlignedFilmMs: Long? = null
+    /** A final seek is asynchronous; the incumbent stays frozen until a later
+     * poll proves the successor landed with fresh runway. */
+    private var preparedCommitAlignmentFilmMs: Long? = null
+    private var preparedCommitAlignmentObserved = false
     private var preparedOrigin: ProgressiveMediaOrigin? = null
     private var preparedListener: Player.Listener? = null
     private var preparedStartedAtMs = 0L
@@ -2316,6 +2320,8 @@ class Controller(
         preparedStartedAtMs = monotonicNowMs()
         preparedPlayer = built.player
         preparedAlignedFilmMs = null
+        preparedCommitAlignmentFilmMs = null
+        preparedCommitAlignmentObserved = false
         preparedOrigin = built.progressiveMediaOrigin
         val successorListener = object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) {
@@ -2333,6 +2339,19 @@ class Controller(
                 val errored = built.player
                 scope.launch {
                     if (preparedPlayer === errored) abandonPreparedReplacement(failed = true)
+                }
+            }
+
+            override fun onPositionDiscontinuity(
+                oldPosition: Player.PositionInfo,
+                newPosition: Player.PositionInfo,
+                reason: Int,
+            ) {
+                if (reason == Player.DISCONTINUITY_REASON_SEEK &&
+                    preparedPlayer === built.player &&
+                    preparedCommitAlignmentFilmMs != null
+                ) {
+                    preparedCommitAlignmentObserved = true
                 }
             }
         }
@@ -2392,8 +2411,33 @@ class Controller(
         }
         val bufferedThrough = successorFilmPositionMs(originMs, successor.bufferedPosition)
         if (!successorIsBuffered(bufferedThrough, incumbentFilmMs)) return
+        val successorFilmMs = successorFilmPositionMs(originMs, successor.currentPosition)
+        val pendingAlignment = preparedCommitAlignmentFilmMs
+        if (pendingAlignment != null) {
+            // `seekTo` only requests alignment. A later tick must observe the
+            // completed position and re-check runway against the incumbent,
+            // which remains the surface owner while frozen on this frame.
+            if (!preparedCommitAlignmentObserved) return
+            if (kotlin.math.abs(incumbentFilmMs - pendingAlignment) > PREPARED_ALIGNMENT_SLACK_MS ||
+                kotlin.math.abs(successorFilmMs - incumbentFilmMs) > PREPARED_ALIGNMENT_SLACK_MS
+            ) {
+                preparedCommitAlignmentFilmMs = incumbentFilmMs
+                preparedCommitAlignmentObserved = false
+                player.playWhenReady = false
+                successor.seekTo(successorAttachPositionMs(originMs, incumbentFilmMs))
+                return
+            }
+        } else if (kotlin.math.abs(successorFilmMs - incumbentFilmMs) > PREPARED_ALIGNMENT_SLACK_MS) {
+            preparedCommitAlignmentFilmMs = incumbentFilmMs
+            preparedCommitAlignmentObserved = false
+            // Freeze only transport execution, not `playbackIntent`; a user
+            // request during alignment remains the intent copied at commit.
+            player.playWhenReady = false
+            successor.seekTo(successorAttachPositionMs(originMs, incumbentFilmMs))
+            return
+        }
         publishAcknowledgement(preparedLedger.bufferReady(bufferedThrough))
-        commitPreparedReplacement()
+        commitPreparedReplacement(incumbentFilmMs)
     }
 
     /**
@@ -2406,9 +2450,15 @@ class Controller(
      * incarnation to the staged one, so the predecessor's session is retired by
      * that CAS rather than by an `endHlsSession` from here.
      */
-    private fun commitPreparedReplacement() {
+    private fun commitPreparedReplacement(commitFilmMs: Long) {
         val successor = preparedPlayer ?: return
         val action = preparedLedger.action ?: return
+        val originMs = action.mediaOriginMs ?: return
+        val successorFilmMs = successorFilmPositionMs(originMs, successor.currentPosition)
+        val bufferedThrough = successorFilmPositionMs(originMs, successor.bufferedPosition)
+        if (kotlin.math.abs(successorFilmMs - commitFilmMs) > PREPARED_ALIGNMENT_SLACK_MS ||
+            !successorIsBuffered(bufferedThrough, commitFilmMs)
+        ) return
         // The ledger enters its unabortable state before anything moves. From
         // here the viewer is looking at this pipeline, so a Back press or a
         // seek in the seconds before its first frame must settle the commit
@@ -2423,13 +2473,8 @@ class Controller(
         awaitingCommitFrameSinceMs = monotonicNowMs()
         val previous = player
         val previousVolume = previous.volume
-        val previousPlayWhenReady = previous.playWhenReady
+        val previousPlayWhenReady = playbackIntent.playbackRequested
         val previousPlaybackParameters = previous.playbackParameters
-        val commitFilmMs = realPosition()
-        val successorFilmMs = successorFilmPositionMs(action.mediaOriginMs ?: 0L, successor.currentPosition)
-        if (kotlin.math.abs(successorFilmMs - commitFilmMs) > PREPARED_ALIGNMENT_SLACK_MS) {
-            successor.seekTo(successorAttachPositionMs(action.mediaOriginMs ?: 0L, commitFilmMs))
-        }
         val predecessor = PreparedPredecessor(
             player = previous,
             filmPositionMs = commitFilmMs,
@@ -2456,6 +2501,8 @@ class Controller(
         preparedListener = null
         preparedPlayer = null
         preparedOrigin = null
+        preparedCommitAlignmentFilmMs = null
+        preparedCommitAlignmentObserved = false
 
         previous.removeListener(this.listener)
         externalListeners.forEach { previous.removeListener(it) }
@@ -2470,7 +2517,7 @@ class Controller(
         // in one place, so no two answers about the same stream can drift.
         activeMediaPath = action.playlistUrl?.let(::relativeMediaPath)
         baseMs = sessionPlaybackTimeline(
-            mediaOriginMs = action.mediaOriginMs ?: 0L,
+            mediaOriginMs = originMs,
             isVod = sessionIsVod,
             requestedStartMs = 0L,
         ).baseMs
@@ -2633,12 +2680,16 @@ class Controller(
      */
     private fun releaseSuccessor() {
         val successor = preparedPlayer ?: return
+        val restorePlayback = preparedCommitAlignmentFilmMs != null
         preparedListener?.let { successor.removeListener(it) }
         preparedListener = null
         preparedPlayer = null
         preparedOrigin = null
         preparedAlignedFilmMs = null
+        preparedCommitAlignmentFilmMs = null
+        preparedCommitAlignmentObserved = false
         successor.release()
+        if (restorePlayback) player.playWhenReady = playbackIntent.playbackRequested
     }
 
     /**

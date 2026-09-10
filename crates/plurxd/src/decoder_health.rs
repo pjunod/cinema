@@ -1299,18 +1299,25 @@ impl MeasuredBuild {
         use tokio::io::AsyncReadExt;
 
         const MAX_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
-        let metadata = tokio::fs::metadata(path).await.ok()?;
+        let mut file = tokio::fs::File::open(path).await.ok()?;
+        let metadata = file.metadata().await.ok()?;
         if !metadata.is_file() || metadata.len() > MAX_ARTIFACT_BYTES {
             return None;
         }
         tokio::time::timeout(Duration::from_secs(10), async {
-            let mut file = tokio::fs::File::open(path).await.ok()?;
             let mut hasher = sha2::Sha256::new();
             let mut chunk = vec![0_u8; 64 * 1024];
+            let mut total = 0_u64;
             loop {
                 match file.read(&mut chunk).await.ok()? {
                     0 => break,
-                    read => hasher.update(&chunk[..read]),
+                    read => {
+                        total = total.checked_add(read as u64)?;
+                        if total > MAX_ARTIFACT_BYTES {
+                            return None;
+                        }
+                        hasher.update(&chunk[..read]);
+                    }
                 }
             }
             Some(hex::encode(hasher.finalize()))

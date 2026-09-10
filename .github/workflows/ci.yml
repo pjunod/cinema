@@ -117,8 +117,10 @@ jobs:
         if: github.event_name == 'pull_request'
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          git fetch --no-tags --force origin \
+          auth="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')"
+          git -c http.extraheader="AUTHORIZATION: basic $auth" fetch --no-tags --force origin \
             "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
           echo "MERGE_TARGET=origin/$BASE_REF" >> "$GITHUB_ENV"
       - name: Check mobile release hygiene
@@ -1553,9 +1555,11 @@ jobs:
         env:
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          git fetch --no-tags --force origin \
+          auth="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')"
+          git -c http.extraheader="AUTHORIZATION: basic $auth" fetch --no-tags --force origin \
             "+refs/heads/$HEAD_REF:refs/plurx/current-head" \
             "+refs/heads/$BASE_REF:refs/plurx/current-base"
           {

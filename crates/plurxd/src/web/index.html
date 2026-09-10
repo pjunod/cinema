@@ -4153,13 +4153,14 @@ async function logout({revoke=true,notice=""}={}){
       const response=await fetch(location.origin+API+"/auth/logout",{
         method:"POST",headers:{authorization:"Bearer "+token},signal:controller.signal
       });
-      // 401/403 also proves this bearer no longer authorizes API access.
-      confirmed=response.ok||response.status===401||response.status===403;
+      // This endpoint uses the authentication extractor, so 401 proves this
+      // bearer no longer authorizes API access. A proxy-generated 403 does not.
+      confirmed=response.ok||response.status===401;
     }catch(e){ void e; }
     finally{ clearTimeout(timer); }
     clearLocalSession(authGeneration,confirmed
       ?"Sign-out was confirmed by the server."
-      :"Signed out on this device. The server could not confirm revocation while it was offline.");
+      :"Signed out on this device. The server could not confirm revocation.");
     return confirmed;
   })();
   SIGN_OUT_RUN={generation:authGeneration,promise:run};

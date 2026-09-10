@@ -1,8 +1,8 @@
 # Weekly review remediation — what is fixed, what remains, and why
 
-**Status:** implementation complete; adversarial review pending · **Baseline:**
+**Status:** complete; main promotion pending · **Baseline:**
 `4cef0da740c797364023284520adad8a93b172cd` · **Branch:**
-`codex/weekly-review-remediation` · **Updated:** 2026-09-09
+`codex/weekly-review-remediation` · **Updated:** 2026-09-10
 
 Companion to [SECURITY.md](../SECURITY.md) (the current trust boundaries),
 [PLAYBACK.md](../PLAYBACK.md) (the current delivery contract), and
@@ -69,7 +69,7 @@ availability still decide whether an individual operation succeeds.
 | Server work bounds | **Complete** | Hash, guide, Live TV environment, and startup process bounds committed in `319b2ad7`; Rust 1.97.1 format, all-target check, and Clippy are green. |
 | Peer, worker, and audit hardening | **Complete** | Authenticated acknowledgements, immutable action inputs, checkout credential removal, and deterministic audit commands committed in `2b4d32fd`; workflow YAML parses. |
 | Documentation and bookkeeping | **Complete** | Security, operations, both client guides, this ledger, the docs index, and functionality ownership describe the changed contract. |
-| Main promotion | **Draft open** | Exactly one adversarial review, findings addressed, then the fast lane. |
+| Main promotion | **Pending** | The one adversarial review found nine issues; all are addressed below. Rust 1.97.1 format/check/Clippy, Android and Apple compilation, workflow parsing, client syntax, mobile-version validation, and diff hygiene are green; the fast lane is next. |
 
 The compile-only verification also includes the shipped page's inline
 JavaScript syntax check. No unit, integration, browser, simulator, emulator,
@@ -96,6 +96,31 @@ A qualifying trace must record, on one monotonic wall clock:
 If that trace shows a repeat or skip outside 250 ms, the corrective change is a
 commit-boundary reseek with an explicit completion/timeout contract. Until
 then, the retained incumbent and bounded rollback remain the safer behavior.
+
+## Adversarial review — one pass, every finding addressed
+
+The required single review found nine concrete defects. The author corrected
+and verifies them without requesting a second review:
+
+1. revocation response proof now admits every committed member, including a
+   learner, while other voter-only response proofs keep their narrower role;
+2. the wire change advertises `cache_admin_revocation_v4`, and mixed v3/v4
+   rosters fail closed through the existing heartbeat capability mechanism;
+3. private ref refreshes use a run-scoped token header for one command after
+   checkout removes its credential;
+4. probe deadlines cover leader wait and both pipe drains, and normal leader
+   exit also kills any descendant left in the owned process group;
+5. Android's final seek must publish its discontinuity and then re-prove ready
+   state, drift, generation, and runway before the surface moves;
+6. guide settings and shutdown cancel active work, while an already-running
+   blocking parser retains refresh admission until it finishes and its stale
+   answer is discarded;
+7. only success or the logout endpoint's `401`, never a generic `403`, counts
+   as confirmed revocation;
+8. Android clears the captured local bearer in a non-cancellable section and
+   launches optional package deletion independently afterward; and
+9. decoder identity opens before metadata inspection and counts bytes while
+   hashing, closing replacement and growth races around the 512 MiB ceiling.
 
 ## Decisions to review later — implementation may continue without blocking
 

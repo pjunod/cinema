@@ -191,6 +191,7 @@ class EvidenceWorkflowCase(unittest.TestCase):
         apple_api = self.read("clients/apple/Sources/PlurxAPI.swift")
         self.assertIn("let capturedOrigin = origin", apple_model)
         self.assertIn("Session.shared.token == token", apple_model)
+        self.assertIn("where code == 401", apple_model)
         self.assertIn(
             "PlurxAPI(origin: capturedOrigin).logout(token: token)", apple_model
         )
@@ -204,8 +205,28 @@ class EvidenceWorkflowCase(unittest.TestCase):
         self.assertIn("val capturedToken = Session.token", android)
         self.assertIn("withTimeoutOrNull(5_000L)", android)
         self.assertIn("Net.profileClient(capturedToken)", android)
-        self.assertIn("Session.origin != capturedOrigin", android)
-        self.assertIn("Session.token != capturedToken", android)
+        self.assertIn("withContext(NonCancellable)", android)
+        self.assertIn("Session.origin == capturedOrigin", android)
+        self.assertIn("Session.token == capturedToken", android)
+        self.assertIn("OfflineDownloads.removeProfile(instance, user)", android)
+        self.assertNotIn("error.code() == 401 || error.code() == 403", android)
+
+    def test_android_final_alignment_completes_before_surface_transfer(self) -> None:
+        controller = self.read(
+            "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+        )
+        poll = controller.split("private fun pollPreparedReplacement()", 1)[1].split(
+            "private fun commitPreparedReplacement", 1
+        )[0]
+        commit = controller.split("private fun commitPreparedReplacement", 1)[1].split(
+            "private fun settleCommitOnFirstFrame", 1
+        )[0]
+        self.assertIn("preparedCommitAlignmentFilmMs", poll)
+        self.assertIn("successor.seekTo", poll)
+        self.assertIn("commitPreparedReplacement(incumbentFilmMs)", poll)
+        self.assertIn("successorFilmMs - commitFilmMs", commit)
+        self.assertIn("successorIsBuffered(bufferedThrough, commitFilmMs)", commit)
+        self.assertNotIn("successor.seekTo", commit)
 
     def test_apple_prepared_enablement_is_visible_and_advisory(self) -> None:
         view = self.read("clients/apple/Sources/LiveTvDeveloperView.swift")

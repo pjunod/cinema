@@ -1134,14 +1134,15 @@ impl SnapshotCache {
 }
 
 /// The owner's in-memory programme cache. Same shape as `SnapshotCache` — a
-/// mutex around the state, a bounded admission semaphore for forced
-/// refreshes, generation equality as the only invalidation rule — with one
-/// difference: the guide has a refresh *loop*, so a serving read never
-/// triggers a fetch. `GET /live-tv/guide` answers from whatever is here, which
-/// is what makes it always fast and always answerable.
+/// mutex around the state, one admission permit shared by manual/background
+/// refreshes and cloned into blocking parsers, and generation equality as the
+/// invalidation rule — with one difference: the guide has a refresh *loop*, so
+/// a serving read never triggers a fetch. `GET /live-tv/guide` answers from
+/// whatever is here, which is what makes it always fast and always answerable.
 struct GuideCache {
     state: tokio::sync::Mutex<GuideCacheState>,
-    refresh_admission: tokio::sync::Semaphore,
+    refresh_admission: Arc<tokio::sync::Semaphore>,
+    refresh_cancel: StdMutex<Option<(LiveTvConfig, CancellationToken)>>,
     next_sequence: AtomicU64,
 }
 
@@ -1182,13 +1183,38 @@ impl Default for GuideCache {
     fn default() -> Self {
         Self {
             state: tokio::sync::Mutex::new(GuideCacheState::default()),
-            refresh_admission: tokio::sync::Semaphore::new(1),
+            refresh_admission: Arc::new(tokio::sync::Semaphore::new(1)),
+            refresh_cancel: StdMutex::new(None),
             next_sequence: AtomicU64::new(1),
         }
     }
 }
 
 impl GuideCache {
+    fn begin_refresh(&self, config: &LiveTvConfig) -> CancellationToken {
+        let token = CancellationToken::new();
+        let mut active = self
+            .refresh_cancel
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((_, previous)) = active.replace((config.clone(), token.clone())) {
+            previous.cancel();
+        }
+        token
+    }
+
+    fn cancel_if_config_changed(&self, config: &LiveTvConfig) {
+        let active = self
+            .refresh_cancel
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((started, token)) = active.as_ref() {
+            if started != config {
+                token.cancel();
+            }
+        }
+    }
+
     /// What a reader gets. Never fetches: a cache older than the stale window
     /// is dropped rather than served, because a six-hour-old grid pretending
     /// to be current is worse than an empty one.
@@ -1283,6 +1309,43 @@ fn guide_parser_stopped(error: tokio::task::JoinError) -> LiveTvError {
     LiveTvError::DeviceUnavailable(format!("programme guide parser stopped: {error}"))
 }
 
+fn guide_refresh_cancelled() -> LiveTvError {
+    LiveTvError::DeviceUnavailable(
+        "programme guide settings changed while the refresh was running".to_owned(),
+    )
+}
+
+async fn cancellable_guide_step<T, F>(
+    cancel: &CancellationToken,
+    future: F,
+) -> Result<T, LiveTvError>
+where
+    F: std::future::Future<Output = Result<T, LiveTvError>>,
+{
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err(guide_refresh_cancelled()),
+        result = future => result,
+    }
+}
+
+async fn await_guide_parser<T: Send + 'static>(
+    mut parser: tokio::task::JoinHandle<Result<T, LiveTvError>>,
+    cancel: &CancellationToken,
+) -> Result<T, LiveTvError> {
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => {
+            // Dropping a blocking JoinHandle detaches rather than aborts it.
+            // Return promptly; the permit clone inside the closure prevents a
+            // replacement parser from starting until this stale one exits.
+            drop(parser);
+            Err(guide_refresh_cancelled())
+        }
+        result = &mut parser => result.map_err(guide_parser_stopped)?,
+    }
+}
+
 #[derive(Clone)]
 struct CachedGraphProbe {
     height: u16,
@@ -1363,6 +1426,7 @@ impl LiveTvManager {
     }
 
     pub(crate) fn observe_config(&self, config: &LiveTvConfig) {
+        self.guide_cache.cancel_if_config_changed(config);
         let mut projection = self
             .metrics
             .projection
@@ -2252,7 +2316,17 @@ impl LiveTvManager {
     pub(crate) async fn refresh_guide(
         &self,
         config: &LiveTvConfig,
+        force: bool,
+    ) -> Result<LiveTvGuide, LiveTvError> {
+        self.refresh_guide_with_cancel(config, force, CancellationToken::new())
+            .await
+    }
+
+    async fn refresh_guide_with_cancel(
+        &self,
+        config: &LiveTvConfig,
         _force: bool,
+        external_cancel: CancellationToken,
     ) -> Result<LiveTvGuide, LiveTvError> {
         if config.owner_node_id != self.node_id {
             return Err(LiveTvError::OwnerUnavailable(
@@ -2264,15 +2338,16 @@ impl LiveTvManager {
                 "no programme guide source is configured".to_owned(),
             ));
         }
-        let _permit = self
-            .guide_cache
-            .refresh_admission
-            .try_acquire()
-            .map_err(|_| {
-                LiveTvError::DeviceUnavailable(
-                    "a guide refresh is already running; retry shortly".to_owned(),
-                )
-            })?;
+        let refresh_permit = Arc::new(
+            Arc::clone(&self.guide_cache.refresh_admission)
+                .try_acquire_owned()
+                .map_err(|_| {
+                    LiveTvError::DeviceUnavailable(
+                        "a guide refresh is already running; retry shortly".to_owned(),
+                    )
+                })?,
+        );
+        let refresh_cancel = self.guide_cache.begin_refresh(config);
         let sequence = self
             .guide_cache
             .next_sequence
@@ -2299,19 +2374,58 @@ impl LiveTvManager {
             ));
         }
         let deadline = tokio::time::Instant::now() + guide::GUIDE_REFRESH_TIMEOUT;
-        let result =
-            tokio::time::timeout_at(deadline, self.fetch_guide(config, &channels, deadline))
-                .await
-                .unwrap_or_else(|_| {
+        let fetch = self.fetch_guide(
+            config,
+            &channels,
+            deadline,
+            &refresh_cancel,
+            &refresh_permit,
+        );
+        tokio::pin!(fetch);
+        let watch_config = async {
+            loop {
+                tokio::select! {
+                    _ = external_cancel.cancelled() => {
+                        refresh_cancel.cancel();
+                        return;
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+                }
+                match self.config().await {
+                    Ok(current) if current == *config => {}
+                    _ => {
+                        refresh_cancel.cancel();
+                        return;
+                    }
+                }
+            }
+        };
+        tokio::pin!(watch_config);
+        let coordinated = async {
+            tokio::select! {
+                result = &mut fetch => result,
+                _ = &mut watch_config => fetch.await,
+            }
+        };
+        let (result, timed_out) = match tokio::time::timeout_at(deadline, coordinated).await {
+            Ok(result) => (result, false),
+            Err(_) => {
+                refresh_cancel.cancel();
+                (
                     Err(LiveTvError::DeviceUnavailable(
                         "programme guide refresh exceeded its total deadline".to_owned(),
-                    ))
-                });
+                    )),
+                    true,
+                )
+            }
+        };
+        if external_cancel.is_cancelled() {
+            return Err(LiveTvError::DeviceUnavailable(
+                "programme guide refresh stopped during shutdown".to_owned(),
+            ));
+        }
         let current = self.config().await?;
-        if current.generation != config.generation
-            || current.owner_node_id != config.owner_node_id
-            || current.guide_source != config.guide_source
-        {
+        if current != *config || (refresh_cancel.is_cancelled() && !timed_out) {
             return Err(LiveTvError::DeviceUnavailable(
                 "programme guide settings changed while the refresh was running".to_owned(),
             ));
@@ -2352,8 +2466,9 @@ impl LiveTvManager {
         config: &LiveTvConfig,
         lineup: &[LiveTvChannel],
         deadline: tokio::time::Instant,
+        cancel: &CancellationToken,
+        refresh_permit: &Arc<tokio::sync::OwnedSemaphorePermit>,
     ) -> Result<LiveTvGuide, LiveTvError> {
-        let client = self.guide_client()?;
         let window = guide::refresh_window(config.guide_hours);
         let channels = match config.guide_source {
             GuideSource::Off => Vec::new(),
@@ -2363,31 +2478,43 @@ impl LiveTvManager {
                         "an HDHomeRun address is required for the HDHomeRun guide".to_owned(),
                     )
                 })?;
-                self.fetch_hdhomerun_guide(&client, address, lineup, &window, deadline)
-                    .await?
+                self.fetch_hdhomerun_guide(
+                    address,
+                    lineup,
+                    &window,
+                    deadline,
+                    cancel,
+                    refresh_permit,
+                )
+                .await?
             }
             GuideSource::Xmltv => {
+                let client = self.guide_client()?;
                 let url = validate_xmltv_url(&config.xmltv_url)?;
-                let pinned = resolve_permitted_addrs(&url).await?;
+                let pinned = cancellable_guide_step(cancel, resolve_permitted_addrs(&url)).await?;
                 let client = if pinned.is_empty() {
                     client.clone()
                 } else {
                     self.pinned_guide_client(&url, &pinned)?
                 };
-                let body = fetch_bounded(
-                    &client,
-                    url,
-                    guide::GUIDE_MAX_DOCUMENT_BYTES,
-                    remaining_guide_budget(deadline)?.min(guide::GUIDE_FETCH_TIMEOUT),
+                let body = cancellable_guide_step(
+                    cancel,
+                    fetch_bounded(
+                        &client,
+                        url,
+                        guide::GUIDE_MAX_DOCUMENT_BYTES,
+                        remaining_guide_budget(deadline)?.min(guide::GUIDE_FETCH_TIMEOUT),
+                    ),
                 )
                 .await?;
                 let lineup = lineup.to_vec();
-                tokio::task::spawn_blocking(move || {
+                let permit = Arc::clone(refresh_permit);
+                let parser = tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
                     let body = guide::decompress_if_gzip(body)?;
                     guide::parse_xmltv(&body, &lineup)
-                })
-                .await
-                .map_err(guide_parser_stopped)??
+                });
+                await_guide_parser(parser, cancel).await?
             }
         };
         let matched = channels.len();
@@ -2406,32 +2533,39 @@ impl LiveTvManager {
 
     async fn fetch_hdhomerun_guide(
         &self,
-        client: &reqwest::Client,
         address: Ipv4Addr,
         lineup: &[LiveTvChannel],
         window: &GuideWindow,
         deadline: tokio::time::Instant,
+        cancel: &CancellationToken,
+        refresh_permit: &Arc<tokio::sync::OwnedSemaphorePermit>,
     ) -> Result<Vec<LiveTvGuideChannel>, LiveTvError> {
+        let client = self.guide_client()?;
         // Read the credential, use it, drop it. It is a local binding inside
         // this function and appears in nothing this function returns.
-        let device_auth = guide::read_device_auth(client, address).await?;
-        let bulk = fetch_bounded(
-            client,
-            guide::guide_request_url(&device_auth, None, None)?,
-            guide::GUIDE_MAX_DOCUMENT_BYTES,
-            remaining_guide_budget(deadline)?.min(guide::GUIDE_FETCH_TIMEOUT),
+        let device_auth =
+            cancellable_guide_step(cancel, guide::read_device_auth(&client, address)).await?;
+        let bulk = cancellable_guide_step(
+            cancel,
+            fetch_bounded(
+                &client,
+                guide::guide_request_url(&device_auth, None, None)?,
+                guide::GUIDE_MAX_DOCUMENT_BYTES,
+                remaining_guide_budget(deadline)?.min(guide::GUIDE_FETCH_TIMEOUT),
+            ),
         )
         .await?;
         let parse_lineup = lineup.to_vec();
-        let mut channels = tokio::task::spawn_blocking(move || {
+        let permit = Arc::clone(refresh_permit);
+        let parser = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
             let by_number = parse_lineup
                 .iter()
                 .map(|channel| (channel.guide_number.clone(), channel))
                 .collect::<BTreeMap<_, _>>();
             guide::parse_hdhomerun_guide(&bulk, &by_number)
-        })
-        .await
-        .map_err(guide_parser_stopped)??;
+        });
+        let mut channels = await_guide_parser(parser, cancel).await?;
 
         // The free tier answers a few hours to the bulk call. Extend the
         // channels that fall short until the request budget is spent — an
@@ -2440,6 +2574,9 @@ impl LiveTvManager {
         let mut budget = guide::GUIDE_MAX_EXTENSION_REQUESTS;
         let mut index = 0;
         while index < channels.len() && budget > 0 {
+            if cancel.is_cancelled() {
+                return Err(guide_refresh_cancelled());
+            }
             let Ok(remaining) = remaining_guide_budget(deadline) else {
                 break;
             };
@@ -2454,11 +2591,14 @@ impl LiveTvManager {
             budget -= 1;
             let number = channels[index].guide_number.clone();
             let url = guide::guide_request_url(&device_auth, Some(&number), Some(last_end))?;
-            let page = match fetch_bounded(
-                client,
-                url,
-                guide::GUIDE_MAX_DOCUMENT_BYTES,
-                remaining.min(guide::GUIDE_FETCH_TIMEOUT),
+            let page = match cancellable_guide_step(
+                cancel,
+                fetch_bounded(
+                    &client,
+                    url,
+                    guide::GUIDE_MAX_DOCUMENT_BYTES,
+                    remaining.min(guide::GUIDE_FETCH_TIMEOUT),
+                ),
             )
             .await
             {
@@ -2471,15 +2611,16 @@ impl LiveTvManager {
                 }
             };
             let parse_lineup = lineup.to_vec();
-            let extra = tokio::task::spawn_blocking(move || {
+            let permit = Arc::clone(refresh_permit);
+            let parser = tokio::task::spawn_blocking(move || {
+                let _permit = permit;
                 let by_number = parse_lineup
                     .iter()
                     .map(|channel| (channel.guide_number.clone(), channel))
                     .collect::<BTreeMap<_, _>>();
                 guide::parse_hdhomerun_guide(&page, &by_number)
-            })
-            .await
-            .map_err(guide_parser_stopped)??;
+            });
+            let extra = await_guide_parser(parser, cancel).await?;
             let Some(extra) = extra
                 .into_iter()
                 .find(|candidate| candidate.guide_number == number)
@@ -2595,12 +2736,12 @@ impl LiveTvManager {
                     self.clear_guide_titles();
                 }
                 if ours && config.guide_fetches() && self.serving.admit().is_some() {
-                    let refresh = self.refresh_guide(&config, false);
-                    tokio::pin!(refresh);
-                    let refreshed = tokio::select! {
-                        _ = shutdown.cancelled() => return,
-                        result = &mut refresh => result,
-                    };
+                    let refreshed = self
+                        .refresh_guide_with_cancel(&config, false, shutdown.clone())
+                        .await;
+                    if shutdown.is_cancelled() {
+                        return;
+                    }
                     match refreshed {
                         Ok(_) => delay = guide::GUIDE_REFRESH_INTERVAL,
                         Err(error) => {
@@ -6693,6 +6834,46 @@ exec /bin/cat >/dev/null
             )
             .await;
         assert_eq!(served.matched_channels, 2);
+    }
+
+    #[tokio::test]
+    async fn a_config_change_cancels_the_active_guide_refresh() {
+        let cache = GuideCache::default();
+        let mut started = LiveTvConfig::from_snapshot(&BTreeMap::new(), "node-a");
+        started.generation = 4;
+        let cancelled = cache.begin_refresh(&started);
+        let mut changed = started.clone();
+        changed.generation = 5;
+        cache.cancel_if_config_changed(&changed);
+        assert!(cancelled.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn abandoned_blocking_guide_work_retains_refresh_admission() {
+        let cache = GuideCache::default();
+        let permit = Arc::new(
+            Arc::clone(&cache.refresh_admission)
+                .try_acquire_owned()
+                .expect("first guide refresh"),
+        );
+        let parser_permit = Arc::clone(&permit);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let parser = tokio::task::spawn_blocking(move || {
+            let _permit = parser_permit;
+            let _ = started_tx.send(());
+            release_rx.recv().expect("release parser");
+        });
+        started_rx.await.expect("parser started");
+        drop(permit);
+        assert!(Arc::clone(&cache.refresh_admission)
+            .try_acquire_owned()
+            .is_err());
+        release_tx.send(()).expect("stop parser");
+        parser.await.expect("parser stopped");
+        assert!(Arc::clone(&cache.refresh_admission)
+            .try_acquire_owned()
+            .is_ok());
     }
 
     #[test]

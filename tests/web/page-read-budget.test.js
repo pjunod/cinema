@@ -1793,7 +1793,7 @@ test("logout revokes the captured bearer and cannot clear a newer login", async 
   assert.deepEqual(harness.state(),{TOKEN:"new-token",AUTH_GENERATION:5,notice:""},
     "a late logout response belongs to the old generation only");
 
-  requests[1].reject(new Error("offline"));
+  requests[1].resolve({ok:false,status:403});
   assert.equal(await currentLogout,false);
   assert.equal(harness.state().TOKEN,null,"offline revocation never traps the local session");
   assert.match(harness.state().notice,/could not confirm revocation/);
