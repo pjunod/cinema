@@ -1,6 +1,6 @@
 # Settings navigation and Developer — implementation status
 
-**Status:** building · **Owner:** Codex implementation task · **Started:**
+**Status:** implementation complete; review pending · **Owner:** Codex implementation task · **Started:**
 2026-09-09
 
 Companion to [FEATURES.md](../FEATURES.md) (current settings behavior),
@@ -18,7 +18,7 @@ the settings navigation and Developer-page redesign.
 | Readiness layout and responsive treatment | complete | Shared nonshrinking rows · neutral static throughput support · closed native disclosures · deliberate stacking below 360 CSS px |
 | Interaction and stale-response correctness | complete | Independent save payloads · returned-value badges · Live TV route fencing · card-local repaint and sibling-draft preservation |
 | Current-reference documentation | complete | `FEATURES.md` names each control owner and advisory semantics · `API.md` names all three readiness consumers and the moved fencing action |
-| Actual-app visual evidence | queued | Desktop, narrow, zoomed, and expanded-readiness captures remain to be recorded |
+| Actual-app visual evidence | complete | Isolated daemon at `127.0.0.1:32419` · 1280, 880, 390, and 320 CSS px · light and dark · 640 CSS px as the 200% responsive equivalent |
 | Adversarial review | queued | Exactly one review will run only after the branch is ready to merge |
 | Fast lane | queued | Runs only after review findings are addressed and the PR is marked ready |
 | Merge to `main` | queued | Requires a green Main promotion gate on the current head |
@@ -27,6 +27,33 @@ No unit, integration, browser, simulator, emulator, recovery, playback,
 package, or smoke suite has run for this branch. The main-bound workflow
 deliberately defers those suites; the current fast lane runs once, after the
 single adversarial review is addressed.
+
+## Actual-app evidence
+
+The branch was compiled and served as an isolated single-node installation on
+loopback-only ports. A disposable local admin account was used; no production
+data or existing plurx installation was touched.
+
+| Surface | Evidence |
+|---|---|
+| Developer, desktop | [1280 px dark](../img/settings-developer-1280-dark.png) · [1280 px light](../img/settings-developer-1280-light.png) |
+| Developer, responsive | [880 px](../img/settings-developer-880-dark.png) · [390 px](../img/settings-developer-390-dark.png) · [320 px](../img/settings-developer-320-dark.png) |
+| Developer, zoom pressure | [640 CSS px](../img/settings-developer-200-percent-equivalent.png), the layout-equivalent viewport for a 1280 px window at 200% browser zoom |
+| Control ownership | [Playback quality](../img/settings-playback-1280-dark.png) · [Live TV tuner and guide](../img/settings-live-tv-1280-dark.png) · [Cluster recovery](../img/settings-cluster-recovery-1280-dark.png) |
+
+Manual actual-app exercises also confirmed that:
+
+- saving prepared quality changes updates only that card and renders the
+  returned enabled/disabled state;
+- changing and saving the guide source preserves an unsaved tuner-address
+  draft; and
+- leaving Live TV while a saved-configuration check is pending keeps the
+  destination route on Developer when the response completes.
+
+The in-app browser harness cannot set browser chrome zoom directly. Its 640
+CSS px viewport exercises the same responsive width as a 1280 px window at
+200%; the evidence names this limitation instead of claiming a native zoom
+gesture was performed.
 
 ## Decisions — preserve operator choice
 
@@ -54,6 +81,5 @@ single adversarial review is addressed.
   prove that a particular stream, client, or network has enough throughput.
 - Guide readiness describes saved configuration. It must not be presented as
   validation of an unsaved XMLTV draft.
-- Actual-app screenshots and current-head fast-lane results will be added only
-  when they exist; historical prototype observations are not evidence for this
-  branch.
+- Current-head fast-lane results will be added only when they exist;
+  historical prototype observations are not evidence for this branch.
