@@ -270,6 +270,25 @@ pub fn pipe_with_duplicate_hevc_sample_entry(kind: &str) -> Vec<u8> {
     expanded
 }
 
+/// The production-shaped pipe with two complete, nonidentical HEVC decoder
+/// descriptions. The second entry has a distinct PPS while fragments retain
+/// their original default sample-description index.
+pub fn pipe_with_distinct_hevc_sample_entries(kind: &str) -> Vec<u8> {
+    let feed = pipe(kind);
+    let mut reader = crate::fmp4::FragmentReader::new();
+    reader.push(&feed);
+    let Some(crate::fmp4::Unit::Init(mut init)) = reader.next_unit().expect("parsing fixture")
+    else {
+        panic!("the pipe fixture must open with an initialization segment");
+    };
+    let original_init_len = init.bytes.len();
+    crate::fmp4::duplicate_hevc_sample_entry_for_fixture(&mut init);
+    crate::fmp4::differentiate_second_hevc_pps_for_fixture(&mut init);
+    let mut expanded = init.bytes;
+    expanded.extend_from_slice(&feed[original_init_len..]);
+    expanded
+}
+
 /// Where [`pipe`] caches its output, for tests that hand the path to ffprobe.
 pub fn pipe_path(kind: &str) -> PathBuf {
     // Keep the cache key tied to the authored timeline. Older fixture files

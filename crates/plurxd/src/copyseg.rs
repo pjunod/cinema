@@ -1320,7 +1320,7 @@ mod tests {
 
     #[tokio::test]
     async fn validated_multi_entry_hevc_feed_requests_fallback_before_publication() {
-        let feed = plurx_core::testfixtures::pipe_with_duplicate_hevc_sample_entry("closed-gop");
+        let feed = plurx_core::testfixtures::pipe_with_distinct_hevc_sample_entries("closed-gop");
         let dir = crate::test_tempdir().expect("tempdir");
         let outcome = run(
             &feed[..],

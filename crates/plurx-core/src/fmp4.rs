@@ -2588,6 +2588,53 @@ pub(crate) fn duplicate_hevc_sample_entry_for_fixture(init: &mut Init) {
     }
 }
 
+/// Make the duplicate HEVC fixture describe a genuinely different decoder
+/// configuration without changing its structural validity.
+///
+/// Production encountered two complete `hvc1` entries whose PPS NALs were
+/// different. A byte-for-byte duplicate proves the entry-count refusal, but
+/// it does not protect against a future shortcut that drops one entry merely
+/// because the codec names match. Keep the fixture synthetic while giving the
+/// two descriptions the same meaningful distinction as the observed file.
+#[cfg(any(test, feature = "fixtures"))]
+pub(crate) fn differentiate_second_hevc_pps_for_fixture(init: &mut Init) {
+    let locations =
+        locate_hevc_sample_entries(&init.bytes).expect("locating duplicated HEVC sample entries");
+    assert_eq!(locations.len(), 2, "fixture must have two HEVC entries");
+    let payload = locations[1]
+        .as_ref()
+        .expect("second HEVC sample entry has hvcC")
+        .payload
+        .clone();
+    let arrays = init.bytes[payload.start + 22] as usize;
+    let mut pos = payload.start + 23;
+    for _ in 0..arrays {
+        let nal_type = init.bytes[pos] & 0x3f;
+        pos += 1;
+        let nal_count = u16::from_be_bytes(
+            init.bytes[pos..pos + 2]
+                .try_into()
+                .expect("fixture hvcC NAL count"),
+        ) as usize;
+        pos += 2;
+        for _ in 0..nal_count {
+            let nal_len = u16::from_be_bytes(
+                init.bytes[pos..pos + 2]
+                    .try_into()
+                    .expect("fixture hvcC NAL length"),
+            ) as usize;
+            pos += 2;
+            assert!(nal_len > 0 && pos + nal_len <= payload.end);
+            if nal_type == 34 {
+                init.bytes[pos + nal_len - 1] ^= 0x01;
+                return;
+            }
+            pos += nal_len;
+        }
+    }
+    panic!("fixture hvcC has no PPS NAL to differentiate");
+}
+
 fn find_child(
     bytes: &[u8],
     range: Range<usize>,
@@ -6073,9 +6120,8 @@ mod tests {
 
     #[test]
     fn complete_multi_entry_hevc_is_a_typed_validated_structural_refusal() {
-        let feed = pipe("open-gop");
+        let feed = crate::testfixtures::pipe_with_distinct_hevc_sample_entries("open-gop");
         let (mut init, fragments, _) = read_all(&feed);
-        duplicate_hevc_sample_entry(&mut init);
 
         let promotion = promote_hevc_parameter_sets(&mut init, &fragments[0])
             .expect_err("the writer cannot choose one of two sample descriptions");
