@@ -1246,6 +1246,21 @@ async function main() {
     assert.equal(h.loading.length,1);
     assert.equal(h.loading[0][1],'The stream probe timed out.',`${failureAt} is bounded by the same probe deadline`);
   }
+  {
+    const h=new Function([
+      "let PLAYER={method:'remux',probeUrl:'/stream.mp4',started:false};let requests=0;const loading=[];const TOKEN=null;",
+      "let STREAM_FAILURE={code:'session_failed',status:502,at:Date.now()};const PlaybackPolicy={streamFailureOverlay:()=>({title:'The server could not start playback.',detail:'copy output validation failed: unusable decoder configuration',retryable:false})};",
+      "const document={getElementById:()=>({classList:{add(){}},currentTime:0})};const console={warn(){}};function fetch(){requests++;throw Error('terminal refusal must suppress generic probe');}",
+      "function pbPosSec(){return 0;}function notifyPlaybackControl(){}function finishStallRecovery(){}function clientLog(){}function toast(){}function setLoading(...args){loading.push(args);}",
+      shippedSource("currentStreamFailureOverlay"),shippedSource("probePlaybackSource"),shippedSource("stallDiagnose"),
+      shippedSource("hasPendingPlaybackOpen"),shippedSource("playbackOwnsAttachedMedia"),
+      "return {start:stallDiagnose,result:()=>({requests,loading})};",
+    ].join("\n"))();
+    await h.start();
+    assert.equal(h.result().requests,0,'a typed terminal refusal remains the authoritative diagnosis');
+    assert.equal(h.result().loading[0][1],'The server could not start playback.');
+    assert.match(h.result().loading[0][2],/unusable decoder configuration/);
+  }
   for(const replacement of ['title','close','seek']){
     const h=new Function([
       "let PLAYER={method:'remux',probeUrl:'/stream.mp4',started:false},resolve;const loading=[];const TOKEN=null;",
