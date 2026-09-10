@@ -12,6 +12,7 @@
     "tuner_unavailable",
     "startup_timeout",
     "stream_failed",
+    "source_format_changed",
     "capability_expired",
   ]);
 
@@ -19,7 +20,7 @@
     const code = String((error && error.code) || "owner_unavailable");
     const views = {
       live_tv_disabled: ["Live TV is off", "An administrator can enable it in Settings → Developer."],
-      live_tv_protocol_unready: ["Live TV is updating", "Every active cluster node must run the compatible Live TV protocol."],
+      live_tv_protocol_unready: ["Live TV route is updating", "This tuner owner cannot serve the requested route yet. Another compatible owner may still work."],
       owner_unavailable: ["Tuner owner unavailable", "The selected tuner owner cannot serve Live TV right now."],
       start_outcome_unknown: ["Start response was lost", "Wait 90 seconds for any unclaimed tuner session to expire, then select the channel again."],
       live_tv_storage_unavailable: ["Live TV needs browser storage", "Allow this site's local storage so an interrupted start cannot acquire a second tuner after reload."],
@@ -30,6 +31,7 @@
       codec_unsupported: ["Channel format unsupported", "The tuner owner cannot decode this channel into the compatible live format."],
       startup_timeout: ["Channel took too long to start", "No first live segment arrived before the startup deadline."],
       stream_failed: ["Live stream stopped", "The tuner or transcoder stopped producing live television."],
+      source_format_changed: ["Broadcast format changed", "The player will release this session and select a fresh compatible route once."],
       capability_expired: ["Live session expired", "The player was idle or disconnected. Start the channel again."],
       settings_conflict: ["Live TV settings changed", "Reload the channel list before starting another channel."],
       guide_unavailable: ["No programme guide yet", "The tuner owner has not fetched a guide. Channels still play; rows show number and callsign only."],

@@ -45,6 +45,7 @@ EXPECTED_INVENTORY_IDS = {
     "process.live_tv_producer",
     "process.live_tv_stderr",
     "process.live_tv_graph_probe",
+    "process.live_tv_source_probe",
     "process.vod_generation",
     "process.vod_head_regeneration",
     "process.vod_pipe_consumer",
@@ -446,7 +447,7 @@ class DecoderSelectionInventoryTests(unittest.TestCase):
         identifiers = [surface["id"] for surface in surfaces]
         self.assertEqual(len(identifiers), len(set(identifiers)))
         self.assertEqual(set(identifiers), EXPECTED_INVENTORY_IDS)
-        self.assertEqual(len(surfaces), 73)
+        self.assertEqual(len(surfaces), 74)
         for surface in surfaces:
             with self.subTest(surface=surface["id"]):
                 source = ROOT / surface["source"]
@@ -472,7 +473,7 @@ class DecoderSelectionInventoryTests(unittest.TestCase):
         ).split("#[cfg(test)]", 1)[0]
         self.assertEqual(
             live_tv.count("tokio::process::Command::new("),
-            2,
+            3,
             "inventory every direct shipping Live TV FFmpeg command",
         )
         for anchor in (

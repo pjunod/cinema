@@ -75,7 +75,7 @@ class LiveTvPlayer private constructor(context: Context) {
                 if (mine != serial) return@launch
                 val identity = origin to token
                 if (profile != identity || api == null) {
-                    val next = LiveTvApi(origin, token)
+                    val next = LiveTvApi(origin, token, context)
                     api = next
                     lease = LiveTvLease(next, barrier, scope)
                     profile = identity
@@ -125,7 +125,7 @@ class LiveTvPlayer private constructor(context: Context) {
         }
     }
 
-    fun watch(channel: LiveTvChannel) {
+    fun watch(channel: LiveTvChannel, compatibilityRetry: Boolean = false) {
         if (!channel.watchable) return
         val api = api ?: return
         val lease = lease ?: return
@@ -153,7 +153,11 @@ class LiveTvPlayer private constructor(context: Context) {
                         if (mine != serial) return
                         val code = liveTvPlaybackErrorCode(error.errorCode)
                         scope.launch(Dispatchers.Main) {
-                            if (mine == serial) stopWithMessage(liveTvMessage(code))
+                            if (mine == serial && code == "codec_unsupported" && !compatibilityRetry) {
+                                retryCompatible(channel, api, lease, LiveTvCompatibility(
+                                    failed_video = true, failed_audio = true, failed_container = true,
+                                ))
+                            } else if (mine == serial) stopWithMessage(liveTvMessage(code))
                         }
                     }
                     override fun onPlaybackStateChanged(playbackState: Int) {
@@ -202,11 +206,45 @@ class LiveTvPlayer private constructor(context: Context) {
                             }
                         }
                     } catch (error: Exception) {
-                        if (mine == serial) stopWithMessage(message(error))
+                        if (mine == serial && error is LiveTvFailure &&
+                            error.code == "source_format_changed" && !compatibilityRetry) {
+                            retryCompatible(channel, api, lease, null)
+                        } else if (mine == serial) stopWithMessage(message(error))
                     }
                 }
             } catch (error: Exception) {
                 if (mine == serial) { fail(error); stopWithMessage(message(error)) }
+            }
+        }
+    }
+
+    private fun retryCompatible(
+        channel: LiveTvChannel,
+        api: LiveTvApi,
+        lease: LiveTvLease,
+        compatibility: LiveTvCompatibility?,
+    ) {
+        val mine = ++serial
+        detach()
+        mutableState.value = mutableState.value.copy(
+            busy = true, playing = false, watching = channel, status = null,
+            message = if (compatibility == null)
+                "The broadcast changed format. Selecting a fresh route once…"
+            else "The original route was rejected. Retrying once with a compatible conversion…",
+        )
+        scope.launch {
+            try {
+                lease.stop().await()
+                if (mine != serial) return@launch
+                if (compatibility != null) api.retryCompatibility(compatibility)
+                watch(channel, compatibilityRetry = true)
+            } catch (_: Exception) {
+                if (mine == serial) {
+                    mutableState.value = mutableState.value.copy(
+                        busy = false, watching = null,
+                        message = "Cleanup is unconfirmed; retry Stop before opening another channel.",
+                    )
+                }
             }
         }
     }

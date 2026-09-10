@@ -14715,7 +14715,7 @@ function playbackPanel(settings,readiness){
 }
 // Live TV owns its own media element and capability. It never enters PLAYER,
 // file progress, playback-control, watched state, autoskip, or Trakt.
-const LIVE_TV={channels:[],serial:0,hls:null,timer:null,polling:false,lastChannel:null,cleanupMarker:null,unplayedSince:null,lastPosition:0,starting:null,status:null};
+const LIVE_TV={channels:[],serial:0,hls:null,timer:null,polling:false,lastChannel:null,cleanupMarker:null,unplayedSince:null,lastPosition:0,starting:null,status:null,compatibility:null,compatibilityRetried:false};
 function liveTvNow(){
   return performance.now();
 }
@@ -14731,11 +14731,32 @@ try{ LIVE_TV_BARRIER.sync(); }catch(e){}
 // not lost starts, so the browser must show them instead of inventing a
 // 90-second quarantine. Unknown transport/owner failures retain the marker.
 const LIVE_TV_DEFINITIVE_REFUSALS=new Set(["live_tv_disabled","live_tv_protocol_unready","drm_unsupported","channel_not_found","settings_conflict","tuner_capacity","tuner_unavailable","device_unavailable","codec_unsupported","stream_failed","capability_expired","admin_required","invalid_settings"]);
+function liveTvPlaybackEnvelope(compatibility=null){
+  const caps=currentCapsDocument();
+  const audio=(caps.audio||[]).filter(codec=>["aac","ac3","eac3"].includes(codec));
+  const formats=[{container:"mpegts",video:"h264",audio:"aac"}];
+  for(const video of caps.video||[]){
+    const container=video.codec==="hevc"?"fmp4":"mpegts";
+    for(const codec of audio) formats.push({container,video:video.codec,audio:codec});
+  }
+  const unique=new Map(formats.map(value=>[`${value.container}|${value.video}|${value.audio}`,value]));
+  const video_limits=[];
+  for(const video of caps.video||[]){
+    const profiles=video.profiles&&video.profiles.length?video.profiles:[null];
+    for(const profile of profiles) video_limits.push({codec:video.codec,profile,
+      max_width:3840,max_height:video.max_height||2160,max_frame_rate:{num:60,den:1},interlaced:false});
+  }
+  return {v:1,caps,hls_formats:Array.from(unique.values()),video_limits,
+    audio_limits:audio.map(codec=>({codec,max_channels:codec==="aac"?2:8})),
+    ...(compatibility?{compatibility}:{})};
+}
 const LIVE_TV_LEASE=new PlurxLiveTv.Lease({
   start:async channel=>{
     const marker=LIVE_TV_BARRIER.begin(); // durable before the POST can leave
     try{
-      const info=await liveTvRequest(`/live-tv/channels/${encodeURIComponent(channel)}/sessions`,"POST",45000,true);
+      const compatibility=LIVE_TV.compatibility; LIVE_TV.compatibility=null;
+      const info=await liveTvRequest(`/live-tv/channels/${encodeURIComponent(channel)}/sessions`,"POST",45000,true,false,
+        {playback:liveTvPlaybackEnvelope(compatibility)});
       if(!info||typeof info.session_id!=="string"||!info.session_id) throw {code:"start_outcome_unknown"};
       // Retain ownership through an active-player crash too. Normal channel
       // switches confirm DELETE first; another document waits conservatively.
@@ -14768,13 +14789,14 @@ const LIVE_TV_LEASE=new PlurxLiveTv.Lease({
     return liveTvRequest(`/live-tv/sessions/${encodeURIComponent(id)}/keepalive`,"PUT",15000);
   },
 });
-async function liveTvRequest(path,method,timeout,authenticated=false,keepalive=false){
+async function liveTvRequest(path,method,timeout,authenticated=false,keepalive=false,body=null){
   const headers=authenticated&&TOKEN?{authorization:"Bearer "+TOKEN}:{};
+  if(body!==null) headers["content-type"]="application/json";
   // `keepalive` lets the unload DELETE outlive the document. Without it the
   // browser aborts the only release that could confirm the durable marker, so
   // every ordinary reload while watching cost a 90-second safety wait for a
   // tuner the server had in fact already released.
-  const response=await fetch(API+path,{method,headers,cache:"no-store",keepalive,signal:AbortSignal.timeout(timeout)});
+  const response=await fetch(API+path,{method,headers,body:body===null?undefined:JSON.stringify(body),cache:"no-store",keepalive,signal:AbortSignal.timeout(timeout)});
   if(!response.ok){
     let body={}; try{ body=await response.json(); }catch(e){}
     const error=new Error(body.message||body.error||"Live TV request failed");
@@ -14953,8 +14975,14 @@ function liveTvTechnicalDetails(channel,status){
   if(source.exact.length) rows.push(`<div class="lt-tech-row"><b>Source</b><span>${esc(source.exact.join(" · "))}</span></div>`);
   if(source.observedAt) rows.push(`<div class="lt-tech-row"><b>Observed</b><span>${esc(new Date(source.observedAt*1000).toLocaleString())}</span></div>`);
   if(status){
-    const delivery=["H.264",status.output_height?`${status.output_height}p`:null,"AAC"].filter(Boolean).join(" · ");
-    const encoder=status.encoder&&status.encoder!=="pending"?` · ${String(status.encoder).toUpperCase()} encoder`:"";
+    const plan=status.delivery;
+    const delivery=plan
+      ?[plan.video_action==="copy"?"Original video":String(plan.output.video_codec||"").toUpperCase()+" video",
+        plan.audio_action==="copy"?"Original audio":String(plan.output.audio_codec||"").toUpperCase()+" audio",
+        plan.output.width&&plan.output.height?`${plan.output.width}×${plan.output.height}`:null,
+        String(plan.packaging||"").toUpperCase()].filter(Boolean).join(" · ")
+      :["H.264",status.output_height?`${status.output_height}p`:null,"AAC"].filter(Boolean).join(" · ");
+    const encoder=!plan&&status.encoder&&status.encoder!=="pending"?` · ${String(status.encoder).toUpperCase()} encoder`:"";
     rows.push(`<div class="lt-tech-row"><b>Playing</b><span>${esc(delivery+encoder)}</span></div>`);
     const signal=status.signal;
     if(signal){
@@ -15489,9 +15517,10 @@ async function stopLiveTv(){
   const stopped=await stopping; if(!stopped.ok) throw stopped.error;
   return stopped.value;
 }
-async function watchLiveTv(index){
+async function watchLiveTv(index,isCompatibilityRetry=false){
   const channel=LIVE_TV.channels[index];
   if(!channel||PlurxLiveTv.channelView(channel).disabled||location.hash!=="#/live-tv") return;
+  if(!isCompatibilityRetry){ LIVE_TV.compatibilityRetried=false; LIVE_TV.compatibility=null; }
   const serial=++LIVE_TV.serial, generation=PAGE_RENDER_GENERATION;
   // Two different questions, and conflating them is what stopped the tuner
   // watchdog the moment the picture docked. `owned` asks "is this still the
@@ -15522,20 +15551,28 @@ async function watchLiveTv(index){
     // Ignore the wire URL: the capability only grants same-origin live resources.
     const playlist=API+`/live-tv/sessions/${encodeURIComponent(info.session_id)}/index.m3u8`;
     const play=()=>{ if(owned()) video.play().then(()=>{ if(owned()) liveTvMessage("Playing live"); }).catch(()=>{ if(owned()) liveTvMessage("Ready — press Play live within 30 seconds to start audio and video."); }); };
-    const failed=async error=>{
+    const failed=async (error,compatibility=null,retryFresh=false)=>{
       if(!owned()) return;
       try{ await LIVE_TV_LEASE.status(); }catch(typed){ error=typed; }
       if(!owned()) return;
+      if((compatibility||retryFresh)&&!LIVE_TV.compatibilityRetried){
+        LIVE_TV.compatibilityRetried=true; LIVE_TV.compatibility=compatibility;
+        await stopLiveTv();
+        if(location.hash==="#/live-tv") await watchLiveTv(index,true);
+        return;
+      }
       liveTvFailure(error);
       stopLiveTv().catch(()=>liveTvMessage("Stream stopped. Owner cleanup is unconfirmed; retry Stop before opening another channel."));
     };
-    video.onerror=()=>failed({code:video.error&&[3,4].includes(video.error.code)?"codec_unsupported":"stream_failed"});
+    video.onerror=()=>failed({code:video.error&&[3,4].includes(video.error.code)?"codec_unsupported":"stream_failed"},
+      video.error&&[3,4].includes(video.error.code)?{failed_video:true,failed_audio:true,failed_container:true}:null);
     video.onended=()=>failed({code:"stream_failed"});
     if(window.Hls&&Hls.isSupported()){
       const hls=new Hls({liveSyncDurationCount:2,liveMaxLatencyDurationCount:4,maxBufferLength:12,maxMaxBufferLength:18,backBufferLength:0});
       LIVE_TV.hls=hls;
       hls.on(Hls.Events.MANIFEST_PARSED,play);
-      hls.on(Hls.Events.ERROR,(_,data)=>{ if(data.fatal) failed({code:data.type===Hls.ErrorTypes.MEDIA_ERROR?"codec_unsupported":"stream_failed"}); });
+      hls.on(Hls.Events.ERROR,(_,data)=>{ if(data.fatal) failed({code:data.type===Hls.ErrorTypes.MEDIA_ERROR?"codec_unsupported":"stream_failed"},
+        data.type===Hls.ErrorTypes.MEDIA_ERROR?{failed_video:true,failed_audio:true,failed_container:true}:null); });
       hls.loadSource(playlist); hls.attachMedia(video);
     }else if(video.canPlayType("application/vnd.apple.mpegurl")){
       video.src=playlist; play();
@@ -15575,7 +15612,7 @@ async function watchLiveTv(index){
           if(typeof liveTvRefreshTechnicalDetails==="function") liveTvRefreshTechnicalDetails();
           if(typeof liveTvPaint==="function") liveTvPaint();
         }
-      }catch(e){ await failed(e); }
+      }catch(e){ await failed(e,null,e&&e.code==="source_format_changed"); }
       finally{ LIVE_TV.polling=false; }
     },10000);
   }catch(e){ if(onPage()) liveTvFailure(e); }
@@ -16004,13 +16041,13 @@ function liveTvSettingsCard(s){
   const enabled=!!s.live_tv_enabled, disabled=enabled?' disabled':'';
   const barrier=!!s.live_tv_transition_from_owner_node_id;
   return setCard(`${cardHead("HDHomeRun Live TV","Watch unprotected antenna channels from one network tuner.",`<span class="pill">${enabled?"Enabled":"Disabled"}</span>`)}
-    <p>Before enabling: complete the HDHomeRun channel scan; use a stable private IPv4 address; choose one reachable, committed tuner-owner node; and keep every serving node on a compatible plurx version. The owner needs network access to the tuner, writable scratch space, and working FFmpeg H.264/AAC encoding. Each viewer uses one physical tuner and one encoder slot.</p>
-    <p class="hint">Start with 720p and two sessions. ATSC 3.0 may require HEVC and AC-4 decoders your FFmpeg does not include. DRM, recording, rewind and captions are not supported. A read-only programme guide is configured separately below; there is no recording or scheduling behind it. A readiness check tests the output graph, not every broadcast codec.</p>
+    <p>Before enabling: complete the HDHomeRun channel scan; use a stable private IPv4 address; and choose one reachable, committed tuner-owner node. The owner needs tuner network access and writable scratch space. Compatible broadcasts are copied without an encoder; conversion routes additionally need a working FFmpeg encoder and tone mapping when HDR must become SDR.</p>
+    <p class="hint">Original / Auto preserves the received dimensions and converts only incompatible tracks. Every viewer uses one physical tuner; only conversion uses an encoder slot. DRM, recording, rewind and captions are not supported. Readiness is advisory and reports what is currently met without disabling the switch.</p>
     <div class="setfields">
       <div><label for="ltip">Tuner private IPv4</label><input id="ltip" value="${esc(s.live_tv_device_ipv4||"")}" placeholder="192.168.4.100" inputmode="decimal"${disabled}></div>
       <div><label for="ltowner">Tuner-owner node ID</label><input id="ltowner" value="${esc(s.live_tv_owner_node_id||"")}" maxlength="256"${disabled}><div class="hint">Use the node ID shown in Settings → Cluster.</div></div>
       <div><label for="ltlimit">Maximum sessions</label><select id="ltlimit"${disabled}>${[1,2,3,4].map(n=>`<option value="${n}"${n===Number(s.live_tv_max_sessions)?' selected':''}>${n}</option>`).join("")}</select></div>
-      <div><label for="ltheight">Output height</label><select id="ltheight"${disabled}>${[720,1080].map(n=>`<option value="${n}"${n===Number(s.live_tv_output_height)?' selected':''}>${n}p</option>`).join("")}</select></div>
+      <div><label for="ltheight">Maximum quality</label><select id="ltheight"${disabled}>${[[0,"Original / Auto"],[480,"480p ceiling"],[720,"720p ceiling"],[1080,"1080p ceiling"],[2160,"2160p ceiling"]].map(([n,label])=>`<option value="${n}"${n===Number(s.live_tv_max_output_height||0)?' selected':''}>${label}</option>`).join("")}</select></div>
     </div>
     <p class="hint">${enabled?"Disable before changing the device, owner, or profile. Disabling stops current Live TV sessions.":"Save the configuration, check readiness, then enable. Readiness is advice, not a gate — you can enable with a red check and find out what breaks. Saving never enables playback."}</p>
     <div id="ltreadiness" aria-live="polite"></div>
@@ -16062,7 +16099,8 @@ async function saveLiveTvSettings(button){
     live_tv_enabled:false,live_tv_device_ipv4:document.getElementById("ltip").value.trim(),
     live_tv_owner_node_id:document.getElementById("ltowner").value.trim(),
     live_tv_max_sessions:Number(document.getElementById("ltlimit").value),
-    live_tv_output_height:Number(document.getElementById("ltheight").value)},button);
+    live_tv_output_height:720,
+    live_tv_max_output_height:Number(document.getElementById("ltheight").value)},button);
   if(saved&&typeof saved==="object") replaceLiveTvCard("live-tv-settings",liveTvSettingsCard(saved),"ltenable");
   return !!saved;
 }

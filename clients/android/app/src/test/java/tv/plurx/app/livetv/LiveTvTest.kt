@@ -268,7 +268,8 @@ class LiveTvTest {
 
     @Test fun configurationEnableAndExactOwnerRecoveryHaveSeparateCasShapes() {
         val configuration = LiveTvSettingsChange.Configure("192.168.4.20", "owner-new", 2, 720).body(19)
-        assertEquals(setOf("live_tv_config_generation", "live_tv_device_ipv4", "live_tv_owner_node_id", "live_tv_max_sessions", "live_tv_output_height"), configuration.keys)
+        assertEquals(setOf("live_tv_config_generation", "live_tv_device_ipv4", "live_tv_owner_node_id", "live_tv_max_sessions", "live_tv_output_height", "live_tv_max_output_height"), configuration.keys)
+        assertEquals("0", configuration.getValue("live_tv_max_output_height").jsonPrimitive.content)
         val enabled = LiveTvSettingsChange.Enabled(true).body(20)
         assertEquals(setOf("live_tv_config_generation", "live_tv_enabled"), enabled.keys)
         val recovery = LiveTvSettingsChange.FencedOwner("owner-original", 18).body(21)

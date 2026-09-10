@@ -9,8 +9,8 @@ use axum::Json;
 use super::peer_transport::exact_auth_from_headers;
 use crate::live_tv::{
     LiveTvActivateRequest, LiveTvDrainAck, LiveTvDrainRequest, LiveTvResourceRequest,
-    LiveTvStartRequest, LiveTvStopRequest, SnapshotRequest, ACTIVATE_PATH, DRAIN_PATH, GUIDE_PATH,
-    RESOURCE_PATH, SNAPSHOT_PATH, START_PATH, STOP_PATH,
+    LiveTvStartRequest, LiveTvStartRequestV2, LiveTvStopRequest, SnapshotRequest, ACTIVATE_PATH,
+    DRAIN_PATH, GUIDE_PATH, RESOURCE_PATH, SNAPSHOT_PATH, START_PATH, START_V2_PATH, STOP_PATH,
 };
 use crate::state::AppState;
 
@@ -26,14 +26,6 @@ pub(crate) async fn snapshot(
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
     authorize(&state, &headers, &body, SNAPSHOT_PATH).await?;
-    if !state
-        .membership
-        .live_tv_protocol_pending_nodes()
-        .await
-        .is_ok_and(|nodes| nodes.is_empty())
-    {
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
-    }
     let request =
         serde_json::from_slice::<SnapshotRequest>(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
     let config = state
@@ -121,6 +113,44 @@ pub(crate) async fn start(
     }
 }
 
+pub(crate) async fn start_v2(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(status) = require_start_authority(&state).await {
+        return status.into_response();
+    }
+    let request = match serde_json::from_slice::<LiveTvStartRequestV2>(&body) {
+        Ok(request) => request,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    if request.playback.validate().is_err() {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    if let Err(status) = authorize_voter(
+        &state,
+        &headers,
+        &body,
+        START_V2_PATH,
+        Some(&request.source_node_id),
+    )
+    .await
+    {
+        return status.into_response();
+    }
+    let Some(_restart_admission) = state.serving.try_restart_admission().await else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    match state.live_tv.start_local(request.into()).await {
+        Ok(response) => {
+            signed_json_response(&state, &headers, START_V2_PATH, StatusCode::OK, &response)
+                .unwrap_or_else(IntoResponse::into_response)
+        }
+        Err(error) => signed_wire_error(&state, &headers, START_V2_PATH, error),
+    }
+}
+
 pub(crate) async fn activate(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -161,7 +191,9 @@ pub(crate) async fn resource(
     let request = serde_json::from_slice::<LiveTvResourceRequest>(&body)
         .map_err(|_| StatusCode::BAD_REQUEST)?;
     let content_type = match &request {
-        LiveTvResourceRequest::Segment { .. } => None,
+        LiveTvResourceRequest::Segment { .. }
+        | LiveTvResourceRequest::Fragment { .. }
+        | LiveTvResourceRequest::Init { .. } => None,
         LiveTvResourceRequest::Playlist { .. } => Some("application/vnd.apple.mpegurl"),
         _ => Some("application/json"),
     };
@@ -260,13 +292,7 @@ pub(crate) async fn drain(
 }
 
 async fn require_start_authority(state: &AppState) -> Result<(), StatusCode> {
-    if !state.serving.is_ready()
-        || !state
-            .membership
-            .live_tv_protocol_pending_nodes()
-            .await
-            .is_ok_and(|nodes| nodes.is_empty())
-    {
+    if !state.serving.is_ready() {
         Err(StatusCode::SERVICE_UNAVAILABLE)
     } else {
         Ok(())
@@ -280,7 +306,7 @@ fn error_status(error: crate::live_tv::LiveTvError) -> StatusCode {
         | LiveTvError::InvalidResponse(_)
         | LiveTvError::ChannelNotFound(_)
         | LiveTvError::DrmUnsupported(_) => StatusCode::BAD_REQUEST,
-        LiveTvError::Conflict(_) => StatusCode::CONFLICT,
+        LiveTvError::Conflict(_) | LiveTvError::SourceFormatChanged(_) => StatusCode::CONFLICT,
         LiveTvError::CapabilityExpired(_) => StatusCode::GONE,
         LiveTvError::StartupTimeout(_) => StatusCode::REQUEST_TIMEOUT,
         LiveTvError::Disabled(_)

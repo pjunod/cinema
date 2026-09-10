@@ -193,10 +193,104 @@ struct LiveTvLineup: Decodable, Sendable {
     let ageSeconds: Int
 }
 
+struct LiveTvRational: Codable, Sendable {
+    let num: Int
+    let den: Int
+}
+
+struct LiveTvHlsFormat: Codable, Sendable {
+    let container: String
+    let video: String
+    let audio: String
+}
+
+struct LiveTvVideoLimit: Codable, Sendable {
+    let codec: String
+    let profile: String?
+    let maxWidth: Int
+    let maxHeight: Int
+    let maxFrameRate: LiveTvRational
+    let interlaced: Bool
+}
+
+struct LiveTvAudioLimit: Codable, Sendable {
+    let codec: String
+    let maxChannels: Int
+}
+
+struct LiveTvCompatibility: Codable, Sendable {
+    let failedVideo: Bool
+    let failedAudio: Bool
+    let failedContainer: Bool
+}
+
+struct LiveTvPlaybackEnvelope: Encodable {
+    let v = 1
+    let caps: DeviceCaps
+    let hlsFormats: [LiveTvHlsFormat]
+    let videoLimits: [LiveTvVideoLimit]
+    let audioLimits: [LiveTvAudioLimit]
+    let maxHeight: Int?
+    let maxBitrateBps: Int?
+    let compatibility: LiveTvCompatibility?
+
+    static func current(compatibility: LiveTvCompatibility? = nil) -> Self {
+        let caps = Caps.capsDocument()
+        let liveAudio = caps.audio.filter { ["aac", "ac3", "eac3"].contains($0) }
+        var formats = [LiveTvHlsFormat(container: "mpegts", video: "h264", audio: "aac")]
+        for video in caps.video {
+            let container = video.codec == "hevc" ? "fmp4" : "mpegts"
+            for audio in liveAudio {
+                formats.append(LiveTvHlsFormat(container: container, video: video.codec, audio: audio))
+            }
+        }
+        let limits = caps.video.flatMap { video -> [LiveTvVideoLimit] in
+            let profiles = video.profiles?.isEmpty == false ? video.profiles!.map(Optional.some) : [nil]
+            return profiles.map { profile in
+                LiveTvVideoLimit(codec: video.codec, profile: profile, maxWidth: 3840,
+                                 maxHeight: video.maxHeight ?? 2160,
+                                 maxFrameRate: LiveTvRational(num: 60, den: 1), interlaced: false)
+            }
+        }
+        return Self(
+            caps: caps,
+            hlsFormats: Array(Set(formats.map { "\($0.container)|\($0.video)|\($0.audio)" })).sorted().compactMap { value in
+                let parts = value.split(separator: "|").map(String.init)
+                return parts.count == 3 ? LiveTvHlsFormat(container: parts[0], video: parts[1], audio: parts[2]) : nil
+            },
+            videoLimits: limits,
+            audioLimits: liveAudio.map { LiveTvAudioLimit(codec: $0, maxChannels: $0 == "aac" ? 2 : 8) },
+            maxHeight: nil,
+            maxBitrateBps: nil,
+            compatibility: compatibility
+        )
+    }
+}
+
+struct LiveTvDeliveryOutput: Decodable, Sendable {
+    let container: String
+    let videoCodec: String
+    let audioCodec: String
+    let width: Int
+    let height: Int
+    let bitDepth: Int?
+    let frameRate: LiveTvRational?
+    let hdr: String?
+    let audioChannels: Int
+}
+
+struct LiveTvDelivery: Decodable, Sendable {
+    let output: LiveTvDeliveryOutput
+    let videoAction: String
+    let audioAction: String
+    let packaging: String
+}
+
 struct LiveTvStarted: Decodable, Sendable {
     let sessionId: String
     let channel: LiveTvChannel
     let live: Bool
+    var delivery: LiveTvDelivery? = nil
 }
 
 struct LiveTvStatus: Decodable, Sendable {
@@ -206,6 +300,7 @@ struct LiveTvStatus: Decodable, Sendable {
     let encoder: String
     let outputHeight: Int
     let signal: LiveTvSignal?
+    var delivery: LiveTvDelivery? = nil
 }
 
 struct LiveTvSignal: Decodable, Equatable, Sendable {
@@ -221,6 +316,7 @@ struct LiveTvSettings: Decodable, Equatable, Sendable {
     let liveTvOwnerNodeId: String
     let liveTvMaxSessions: Int
     let liveTvOutputHeight: Int
+    let liveTvMaxOutputHeight: Int
     let liveTvConfigGeneration: Int64
     let liveTvTransitionFromOwnerNodeId: String
     let liveTvTransitionDrainBefore: Int64
@@ -232,6 +328,7 @@ struct LiveTvSettings: Decodable, Equatable, Sendable {
         case liveTvOwnerNodeId
         case liveTvMaxSessions
         case liveTvOutputHeight
+        case liveTvMaxOutputHeight
         case liveTvConfigGeneration
         case liveTvTransitionFromOwnerNodeId
         case liveTvTransitionDrainBefore
@@ -252,6 +349,7 @@ struct LiveTvSettings: Decodable, Equatable, Sendable {
         liveTvOwnerNodeId = try values.decode(String.self, forKey: .liveTvOwnerNodeId)
         liveTvMaxSessions = try values.decode(Int.self, forKey: .liveTvMaxSessions)
         liveTvOutputHeight = try values.decode(Int.self, forKey: .liveTvOutputHeight)
+        liveTvMaxOutputHeight = try values.decodeIfPresent(Int.self, forKey: .liveTvMaxOutputHeight) ?? 0
         liveTvConfigGeneration = try values.decode(Int64.self, forKey: .liveTvConfigGeneration)
         liveTvTransitionFromOwnerNodeId = try values.decode(
             String.self,
@@ -278,7 +376,7 @@ struct LiveTvReadiness: Decodable, Sendable {
 /// The three write shapes deliberately cannot mix configuration, enablement,
 /// or physical recovery. Every mutation carries the last observed generation.
 enum LiveTvSettingsChange {
-    case configure(ipv4: String, owner: String, sessions: Int, height: Int)
+    case configure(ipv4: String, owner: String, sessions: Int, height: Int, maxHeight: Int = 0)
     case enabled(Bool)
     case libraryChannelsEnabled(Bool)
     case fencedOwner(owner: String, cutoff: Int64)
@@ -286,11 +384,12 @@ enum LiveTvSettingsChange {
     func body(generation: Int64) throws -> Data {
         var fields: [String: Any] = ["live_tv_config_generation": generation]
         switch self {
-        case let .configure(ipv4, owner, sessions, height):
+        case let .configure(ipv4, owner, sessions, height, maxHeight):
             fields["live_tv_device_ipv4"] = ipv4
             fields["live_tv_owner_node_id"] = owner
             fields["live_tv_max_sessions"] = sessions
             fields["live_tv_output_height"] = height
+            fields["live_tv_max_output_height"] = maxHeight
         case let .enabled(enabled): fields["live_tv_enabled"] = enabled
         case let .libraryChannelsEnabled(enabled): fields["library_channels_enabled"] = enabled
         case let .fencedOwner(owner, cutoff):
@@ -315,6 +414,7 @@ struct LiveTvFailure: Error, LocalizedError, Sendable {
         case "drm_unsupported": return "DRM-protected television is not supported."
         case "codec_unsupported": return "The tuner owner or this device cannot decode this channel. ATSC 3.0 may require HEVC and AC-4 support."
         case "startup_timeout": return "The channel did not produce a live segment before the startup deadline."
+        case "source_format_changed": return "The broadcast changed format. plurx will select a fresh compatible route."
         case "stream_failed": return "The live stream stopped. Select a channel to try again."
         case "capability_expired": return "The live session expired. Select a channel to start again."
         case "settings_conflict": return "Live TV settings changed elsewhere. Reload before trying again."
@@ -340,6 +440,8 @@ final class LiveTvAPI: LiveTvRequests, @unchecked Sendable {
     private let control: URLSession
     private let cleanup: URLSession
     private let redirects = LiveTvNoRedirects()
+    private let compatibilityLock = NSLock()
+    private var nextCompatibility: LiveTvCompatibility?
 
     init(origin: String, token: String?, session: URLSession? = nil) {
         self.origin = origin
@@ -406,9 +508,28 @@ final class LiveTvAPI: LiveTvRequests, @unchecked Sendable {
         try decode(LiveTvLineup.self, data: await request("live-tv/channels", authenticated: true, session: transport))
     }
 
+    func retryCompatibility(_ compatibility: LiveTvCompatibility) {
+        compatibilityLock.lock()
+        nextCompatibility = compatibility
+        compatibilityLock.unlock()
+    }
+
+    private func takeCompatibility() -> LiveTvCompatibility? {
+        compatibilityLock.lock()
+        defer { compatibilityLock.unlock() }
+        let value = nextCompatibility
+        nextCompatibility = nil
+        return value
+    }
+
     func start(_ channel: String) async throws -> LiveTvStarted {
-        try decode(LiveTvStarted.self, data: await request("live-tv/channels/\(Self.pathComponent(channel))/sessions",
-                                                       method: "POST", authenticated: true, session: transport))
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        let body = try encoder.encode(["playback": LiveTvPlaybackEnvelope.current(
+            compatibility: takeCompatibility()
+        )])
+        return try decode(LiveTvStarted.self, data: await request("live-tv/channels/\(Self.pathComponent(channel))/sessions",
+                                                              method: "POST", authenticated: true, body: body, session: transport))
     }
 
     func release(_ capability: String) async throws {

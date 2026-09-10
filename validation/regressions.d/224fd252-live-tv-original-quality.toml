@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["224fd252", "23afe2c2"]
+points = ["live-tv.integration"]
+checks = ["rust-gate", "security-boundaries", "resource-bounds", "web-static"]
+reason = "Original-quality Live TV now probes one bounded replay prefix, resolves independent video and audio actions into one frozen client-claimed HLS route, preserves owner fencing while keeping mixed-version readiness advisory, detects post-start source changes without classifying initial discovery as a change, and exposes the selected route to every first-party client."

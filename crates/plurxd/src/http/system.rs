@@ -1548,6 +1548,7 @@ pub struct SettingsDto {
     pub live_tv_owner_node_id: String,
     pub live_tv_max_sessions: u8,
     pub live_tv_output_height: u16,
+    pub live_tv_max_output_height: u16,
     pub live_tv_config_generation: i64,
     pub live_tv_transition_from_owner_node_id: String,
     pub live_tv_transition_drain_before: i64,
@@ -1931,6 +1932,7 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         live_tv_owner_node_id: live_tv.owner_node_id,
         live_tv_max_sessions: live_tv.max_sessions,
         live_tv_output_height: live_tv.output_height,
+        live_tv_max_output_height: live_tv.max_output_height,
         live_tv_config_generation: live_tv.generation,
         live_tv_transition_from_owner_node_id: live_tv.transition_from_owner_node_id,
         live_tv_transition_drain_before: live_tv.transition_drain_before,
@@ -2158,6 +2160,9 @@ pub struct UpdateSettings {
     pub live_tv_owner_node_id: Option<String>,
     pub live_tv_max_sessions: Option<u8>,
     pub live_tv_output_height: Option<u16>,
+    /// Advisory quality ceiling for subsequent tunes. Zero preserves source
+    /// resolution whenever the client can accept it.
+    pub live_tv_max_output_height: Option<u16>,
     pub live_tv_config_generation: Option<i64>,
     /// Programme-guide selection. Information settings, not tuner settings:
     /// they ride the same generation CAS but stay editable while Live TV is
@@ -2294,6 +2299,10 @@ fn live_tv_setting_values(config: &crate::live_tv::LiveTvConfig) -> Vec<(&'stati
             config.output_height.to_string(),
         ),
         (
+            keys::LIVE_TV_MAX_OUTPUT_HEIGHT,
+            config.max_output_height.to_string(),
+        ),
+        (
             keys::LIVE_TV_TRANSITION_FROM_OWNER_NODE_ID,
             config.transition_from_owner_node_id.clone(),
         ),
@@ -2408,6 +2417,7 @@ pub async fn update_settings(
         || req.live_tv_owner_node_id.is_some()
         || req.live_tv_max_sessions.is_some()
         || req.live_tv_output_height.is_some()
+        || req.live_tv_max_output_height.is_some()
         || req.live_tv_guide_source.is_some()
         || req.live_tv_xmltv_url.is_some()
         || req.live_tv_guide_hours.is_some()
@@ -2434,7 +2444,8 @@ pub async fn update_settings(
         let non_enable_change = req.live_tv_device_ipv4.is_some()
             || req.live_tv_owner_node_id.is_some()
             || req.live_tv_max_sessions.is_some()
-            || req.live_tv_output_height.is_some();
+            || req.live_tv_output_height.is_some()
+            || req.live_tv_max_output_height.is_some();
         if non_enable_change && (current.enabled || req.live_tv_enabled == Some(true)) {
             return Err(ApiError::Conflict(
                 "disable Live TV before changing its device, owner, limit, or output; save and test the new configuration before enabling"
@@ -2526,6 +2537,9 @@ pub async fn update_settings(
             owner_node_id,
             max_sessions: req.live_tv_max_sessions.unwrap_or(current.max_sessions),
             output_height: req.live_tv_output_height.unwrap_or(current.output_height),
+            max_output_height: req
+                .live_tv_max_output_height
+                .unwrap_or(current.max_output_height),
             guide_source,
             xmltv_url,
             guide_hours: req.live_tv_guide_hours.unwrap_or(current.guide_hours),
@@ -5060,6 +5074,7 @@ mod tests {
                                 output_height: 720,
                                 state: "active".into(),
                                 programme_title: Some("City Beat".into()),
+                                delivery: None,
                             }],
                         },
                     ),

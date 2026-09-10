@@ -18720,21 +18720,22 @@ impl TranscodeManager {
         }
     }
 
-    /// Reserve the same foreground encoder pool used by ordinary playback for
-    /// one always-compiled HDHomeRun session. The pessimistic 4K HEVC/HDR
-    /// shape prevents an unmeasured software fallback from promising a live
-    /// stream that cannot run in real time; the returned opaque guard owns the
-    /// permit until the live session ends.
+    /// Reserve the foreground encoder pool for the measured live workload.
+    /// Copy and audio-only routes never call this method, so an unavailable or
+    /// saturated video encoder cannot block source-compatible playback.
     pub(crate) async fn admit_live_tv(
         &self,
+        source_height: u16,
+        codec: &str,
+        hdr: Option<&str>,
         target_height: u16,
         max_wait: Duration,
     ) -> Result<LiveAdmission, String> {
         let preferred = self.encoder().await;
         let work = Workload {
-            source_height: 2160,
-            codec: "hevc",
-            hdr: Some("hdr"),
+            source_height: i64::from(source_height),
+            codec,
+            hdr,
             target_height: i64::from(target_height),
         };
         // Live TV plans its own command and is never served from the movie

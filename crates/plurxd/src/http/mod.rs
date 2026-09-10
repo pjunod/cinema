@@ -107,7 +107,9 @@ pub fn router(state: AppState) -> Router {
         .route("/live-tv/guide/readiness", get(live_tv::guide_readiness))
         .route(
             "/live-tv/channels/{channel}/sessions",
-            post(live_tv::start_session),
+            post(live_tv::start_session).layer(DefaultBodyLimit::max(
+                crate::live_tv::MAX_INTERNAL_BODY_BYTES,
+            )),
         )
         .route(
             "/live-tv/sessions/{capability}/index.m3u8",
@@ -482,6 +484,12 @@ pub fn router(state: AppState) -> Router {
         .route(
             crate::live_tv::START_PATH,
             post(internal_live_tv::start).layer(DefaultBodyLimit::max(
+                crate::live_tv::MAX_INTERNAL_BODY_BYTES,
+            )),
+        )
+        .route(
+            crate::live_tv::START_V2_PATH,
+            post(internal_live_tv::start_v2).layer(DefaultBodyLimit::max(
                 crate::live_tv::MAX_INTERNAL_BODY_BYTES,
             )),
         )

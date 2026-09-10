@@ -109,7 +109,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
 
     def test_frozen_inventory_and_argument_claims_match_retained_artifacts(self) -> None:
         surfaces = self.inventory["surfaces"]
-        self.assertEqual(len(surfaces), 73)
+        self.assertEqual(len(surfaces), 74)
         self.assertIn("bring the inventory to 73", self.status)
 
         names = [case["name"] for case in self.arguments]

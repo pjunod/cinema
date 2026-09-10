@@ -12,7 +12,7 @@ struct LiveTvDeveloperView: View {
     @State private var ipv4 = ""
     @State private var owner = ""
     @State private var sessions = 2
-    @State private var height = 720
+    @State private var height = 0
     @State private var attested = false
     @State private var busy = false
     @State private var message = "Administrator access is required."
@@ -21,7 +21,7 @@ struct LiveTvDeveloperView: View {
     private var dirty: Bool {
         guard let saved else { return false }
         return ipv4 != saved.liveTvDeviceIpv4 || owner != saved.liveTvOwnerNodeId
-            || sessions != saved.liveTvMaxSessions || height != saved.liveTvOutputHeight
+            || sessions != saved.liveTvMaxSessions || height != saved.liveTvMaxOutputHeight
     }
 
     var body: some View {
@@ -59,7 +59,7 @@ struct LiveTvDeveloperView: View {
             Section("HDHomeRun Live TV · runtime enablement") {
                 Text("Watch unprotected antenna channels from one network tuner. No special build is needed.")
                 Text("Before enabling: finish the HDHomeRun channel scan, reserve a stable private IPv4 address, and choose one reachable, committed tuner-owner node. Keep all serving nodes on a compatible plurx version.")
-                Text("The owner needs network access to the tuner, writable scratch space, and FFmpeg H.264/AAC encoding. Every viewer uses one physical tuner and one encoder slot. Start with 720p and two sessions.")
+                Text("The owner needs network access to the tuner and writable scratch space. Compatible broadcasts are copied without an encoder; conversion routes additionally need a working FFmpeg encoder and tone mapping when HDR must become SDR.")
                 Text("ATSC 3.0 can require HEVC and AC-4 decoders your FFmpeg lacks. DRM, recording, rewind, captions, and guide scheduling are not supported. Readiness tests the output graph, not every broadcast codec.")
             }
             if let saved {
@@ -72,14 +72,17 @@ struct LiveTvDeveloperView: View {
                     Picker("Maximum sessions", selection: $sessions) {
                         ForEach(1...4, id: \.self) { Text(String($0)).tag($0) }
                     }.disabled(saved.liveTvEnabled || busy)
-                    Picker("Output height", selection: $height) {
-                        Text("720p").tag(720)
-                        Text("1080p").tag(1080)
+                    Picker("Maximum quality", selection: $height) {
+                        Text("Original / Auto").tag(0)
+                        Text("480p ceiling").tag(480)
+                        Text("720p ceiling").tag(720)
+                        Text("1080p ceiling").tag(1080)
+                        Text("2160p ceiling").tag(2160)
                     }.disabled(saved.liveTvEnabled || busy)
                     Button("Save configuration while disabled") {
                         write(.configure(ipv4: ipv4.trimmingCharacters(in: .whitespacesAndNewlines),
                                          owner: owner.trimmingCharacters(in: .whitespacesAndNewlines),
-                                         sessions: sessions, height: height))
+                                         sessions: sessions, height: 720, maxHeight: height))
                     }.disabled(saved.liveTvEnabled || busy || !dirty)
                     Button("Check saved configuration") { checkReadiness() }.disabled(busy || dirty)
                     Button(saved.liveTvEnabled ? "Disable Live TV and drain sessions" : "Enable Live TV") {
@@ -99,7 +102,8 @@ struct LiveTvDeveloperView: View {
                         }.disabled(saved.liveTvEnabled || busy || !attested || dirty)
                         Button("Retry authenticated cleanup while disabled") {
                             write(.configure(ipv4: saved.liveTvDeviceIpv4, owner: saved.liveTvOwnerNodeId,
-                                             sessions: saved.liveTvMaxSessions, height: saved.liveTvOutputHeight))
+                                             sessions: saved.liveTvMaxSessions, height: saved.liveTvOutputHeight,
+                                             maxHeight: saved.liveTvMaxOutputHeight))
                         }.disabled(saved.liveTvEnabled || busy || dirty)
                     }
                 }
@@ -126,7 +130,7 @@ struct LiveTvDeveloperView: View {
         ipv4 = settings.liveTvDeviceIpv4
         owner = settings.liveTvOwnerNodeId
         sessions = settings.liveTvMaxSessions
-        height = settings.liveTvOutputHeight
+        height = settings.liveTvMaxOutputHeight
         readiness = nil
         attested = false
     }

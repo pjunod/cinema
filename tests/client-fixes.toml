@@ -1027,7 +1027,7 @@ test_anchor = "testPlatformRestartMarkerStoreCanRoundTrip"
 id = "android.streaming-promotion-build-counter"
 commits = ["fdbed69e"]
 source = "clients/android/app/build.gradle.kts"
-source_anchor = "versionCode = 82"
+source_anchor = "versionCode = 83"
 test = "tests/validation/test_mobile_versions.py"
 test_anchor = "test_android_counter_the_target_already_ships_fails_against_the_target"
 
@@ -1037,7 +1037,7 @@ test_anchor = "test_android_counter_the_target_already_ships_fails_against_the_t
 id = "live-tv.mobile-release-build-counters"
 commits = ["b2834adb"]
 source = "clients/android/app/build.gradle.kts"
-source_anchor = "versionCode = 82"
+source_anchor = "versionCode = 83"
 test = "tests/validation/test_mobile_versions.py"
 test_anchor = "test_each_changed_app_requires_only_its_own_build_counter"
 
@@ -1113,7 +1113,7 @@ test_anchor = "live_tv_session_never_revives_an_expired_lineup_observation"
 id = "apple.live-tv-promotion-build-counter"
 commits = ["bc4a6208"]
 source = "clients/apple/project.yml"
-source_anchor = "CURRENT_PROJECT_VERSION: \"134\""
+source_anchor = "CURRENT_PROJECT_VERSION: \"135\""
 test = "tests/validation/test_mobile_versions.py"
 test_anchor = "test_apple_counter_the_target_already_ships_fails_against_the_target"
 
@@ -1136,6 +1136,17 @@ source = "clients/apple/Sources/LiveTvGuide.swift"
 source_anchor = "struct LiveTvGuideFocusCoordinator"
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "testFocusCoordinatorRejectsStaleRestoresAndTransfersTheBoundaryAtomically"
+
+[[fixes]]
+# Review remediation preserves the server's typed source-change response and
+# requires the fresh route to be a complete client-claimed codec/container
+# tuple instead of treating source evolution as a decoder rejection.
+id = "clients.live-tv-source-change-replan"
+commits = ["d0d16a45"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = "if failureCode == \"codec_unsupported\" {"
+test = "crates/plurxd/src/live_tv_delivery.rs"
+test_anchor = "encoded_video_never_invents_an_unclaimed_audio_tuple"
 
 [[fixes]]
 # Web, Apple, and Android must use the canonical no-trailing-slash collection

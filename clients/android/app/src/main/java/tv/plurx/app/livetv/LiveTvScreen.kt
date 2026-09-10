@@ -1252,13 +1252,20 @@ private fun LiveTvTechnicalDetails(channel: LiveTvChannel, status: LiveTvStatus?
             LiveTvTechnicalRow("Observed", liveTvObservedTime(observed))
         }
         status?.let {
-            val delivery = buildList {
-                add("H.264")
-                it.output_height?.let { height -> add("${height}p") }
-                add("AAC")
-                it.encoder?.takeUnless { encoder -> encoder == "pending" }
-                    ?.let { encoder -> add("${encoder.uppercase()} encoder") }
-            }.joinToString(" · ")
+            val delivery = it.delivery?.let { plan ->
+                listOf(
+                    if (plan.video_action == "copy") "Original video" else "${plan.output.video_codec.uppercase()} video",
+                    if (plan.audio_action == "copy") "Original audio" else "${plan.output.audio_codec.uppercase()} audio",
+                    "${plan.output.width}×${plan.output.height}",
+                    plan.packaging.uppercase(),
+                ).joinToString(" · ")
+            } ?: buildList {
+                    add("H.264")
+                    it.output_height?.let { height -> add("${height}p") }
+                    add("AAC")
+                    it.encoder?.takeUnless { encoder -> encoder == "pending" }
+                        ?.let { encoder -> add("${encoder.uppercase()} encoder") }
+                }.joinToString(" · ")
             LiveTvTechnicalRow("Playing", delivery)
         }
         val meters = status?.signal?.let { signal ->

@@ -854,6 +854,7 @@ mod tests {
             age_seconds: u64::MAX,
             output_height: 1080,
             state: "\0".repeat(32),
+            delivery: None,
             programme_title: Some("\0".repeat(256)),
         };
         let delivery = ActivityDelivery {
