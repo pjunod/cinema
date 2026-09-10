@@ -1036,6 +1036,7 @@ fn wire_api_error(status: reqwest::StatusCode, body: &[u8]) -> ApiError {
         "drm_unsupported" => "drm_unsupported",
         "codec_unsupported" => "codec_unsupported",
         "startup_timeout" => "startup_timeout",
+        "source_format_changed" => "source_format_changed",
         "stream_failed" => "stream_failed",
         "settings_conflict" => "settings_conflict",
         "capability_expired" => "capability_expired",
@@ -1215,6 +1216,18 @@ mod tests {
         };
         assert!(!rendered.contains("192.168.4.20"), "{rendered}");
         assert!(!rendered.contains("http://"), "{rendered}");
+    }
+
+    #[test]
+    fn owner_format_change_keeps_its_stable_recovery_code() {
+        let error = wire_api_error(
+            reqwest::StatusCode::CONFLICT,
+            br#"{"code":"source_format_changed","message":"select a fresh route"}"#,
+        );
+        let ApiError::Typed { code, .. } = error else {
+            panic!("expected typed owner error");
+        };
+        assert_eq!(code, "source_format_changed");
     }
 
     #[tokio::test]

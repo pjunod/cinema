@@ -154,7 +154,9 @@ class LiveTvPlayer private constructor(context: Context) {
                         val code = liveTvPlaybackErrorCode(error.errorCode)
                         scope.launch(Dispatchers.Main) {
                             if (mine == serial && code == "codec_unsupported" && !compatibilityRetry) {
-                                retryCompatible(channel, api, lease)
+                                retryCompatible(channel, api, lease, LiveTvCompatibility(
+                                    failed_video = true, failed_audio = true, failed_container = true,
+                                ))
                             } else if (mine == serial) stopWithMessage(liveTvMessage(code))
                         }
                     }
@@ -206,7 +208,7 @@ class LiveTvPlayer private constructor(context: Context) {
                     } catch (error: Exception) {
                         if (mine == serial && error is LiveTvFailure &&
                             error.code == "source_format_changed" && !compatibilityRetry) {
-                            retryCompatible(channel, api, lease)
+                            retryCompatible(channel, api, lease, null)
                         } else if (mine == serial) stopWithMessage(message(error))
                     }
                 }
@@ -216,20 +218,25 @@ class LiveTvPlayer private constructor(context: Context) {
         }
     }
 
-    private fun retryCompatible(channel: LiveTvChannel, api: LiveTvApi, lease: LiveTvLease) {
+    private fun retryCompatible(
+        channel: LiveTvChannel,
+        api: LiveTvApi,
+        lease: LiveTvLease,
+        compatibility: LiveTvCompatibility?,
+    ) {
         val mine = ++serial
         detach()
         mutableState.value = mutableState.value.copy(
             busy = true, playing = false, watching = channel, status = null,
-            message = "The original route was rejected. Retrying once with a compatible conversion…",
+            message = if (compatibility == null)
+                "The broadcast changed format. Selecting a fresh route once…"
+            else "The original route was rejected. Retrying once with a compatible conversion…",
         )
         scope.launch {
             try {
                 lease.stop().await()
                 if (mine != serial) return@launch
-                api.retryCompatibility(LiveTvCompatibility(
-                    failed_video = true, failed_audio = true, failed_container = true,
-                ))
+                if (compatibility != null) api.retryCompatibility(compatibility)
                 watch(channel, compatibilityRetry = true)
             } catch (_: Exception) {
                 if (mine == serial) {

@@ -153,17 +153,22 @@ final class LiveTvPlayerController: ObservableObject {
                         }
                     } catch {
                         guard self.serial == expected else { return }
-                        if ["codec_unsupported", "source_format_changed"].contains((error as? LiveTvFailure)?.code ?? ""),
+                        let failureCode = (error as? LiveTvFailure)?.code ?? ""
+                        if ["codec_unsupported", "source_format_changed"].contains(failureCode),
                            !compatibilityRetry {
-                            self.message = "The original route was rejected. Retrying once with a compatible conversion…"
+                            self.message = failureCode == "source_format_changed"
+                                ? "The broadcast changed format. Selecting a fresh route once…"
+                                : "The original route was rejected. Retrying once with a compatible conversion…"
                             do { try await self.stopChecked() }
                             catch {
                                 self.message = "Cleanup is unconfirmed; retry Stop before opening another channel."
                                 return
                             }
-                            api.retryCompatibility(LiveTvCompatibility(
-                                failedVideo: true, failedAudio: true, failedContainer: true
-                            ))
+                            if failureCode == "codec_unsupported" {
+                                api.retryCompatibility(LiveTvCompatibility(
+                                    failedVideo: true, failedAudio: true, failedContainer: true
+                                ))
+                            }
                             await self.watch(channel, compatibilityRetry: true)
                             return
                         }

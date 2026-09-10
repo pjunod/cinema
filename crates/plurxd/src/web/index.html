@@ -15551,11 +15551,11 @@ async function watchLiveTv(index,isCompatibilityRetry=false){
     // Ignore the wire URL: the capability only grants same-origin live resources.
     const playlist=API+`/live-tv/sessions/${encodeURIComponent(info.session_id)}/index.m3u8`;
     const play=()=>{ if(owned()) video.play().then(()=>{ if(owned()) liveTvMessage("Playing live"); }).catch(()=>{ if(owned()) liveTvMessage("Ready — press Play live within 30 seconds to start audio and video."); }); };
-    const failed=async (error,compatibility=null)=>{
+    const failed=async (error,compatibility=null,retryFresh=false)=>{
       if(!owned()) return;
       try{ await LIVE_TV_LEASE.status(); }catch(typed){ error=typed; }
       if(!owned()) return;
-      if(compatibility&&!LIVE_TV.compatibilityRetried){
+      if((compatibility||retryFresh)&&!LIVE_TV.compatibilityRetried){
         LIVE_TV.compatibilityRetried=true; LIVE_TV.compatibility=compatibility;
         await stopLiveTv();
         if(location.hash==="#/live-tv") await watchLiveTv(index,true);
@@ -15612,8 +15612,7 @@ async function watchLiveTv(index,isCompatibilityRetry=false){
           if(typeof liveTvRefreshTechnicalDetails==="function") liveTvRefreshTechnicalDetails();
           if(typeof liveTvPaint==="function") liveTvPaint();
         }
-      }catch(e){ await failed(e,e&&e.code==="source_format_changed"
-        ?{failed_video:true,failed_audio:true,failed_container:true}:null); }
+      }catch(e){ await failed(e,null,e&&e.code==="source_format_changed"); }
       finally{ LIVE_TV.polling=false; }
     },10000);
   }catch(e){ if(onPage()) liveTvFailure(e); }

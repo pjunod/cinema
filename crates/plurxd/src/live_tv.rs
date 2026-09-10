@@ -4617,6 +4617,7 @@ async fn capture_live_stderr(
         if read == 0 {
             break;
         }
+        let descriptor_was_done = descriptor_done;
         if !descriptor_done {
             let remaining = MAX_SOURCE_DESCRIPTOR_BYTES.saturating_sub(descriptor.len());
             descriptor.extend_from_slice(&chunk[..read.min(remaining)]);
@@ -4643,6 +4644,13 @@ async fn capture_live_stderr(
                 }
                 descriptor.clear();
             }
+        }
+        if !descriptor_was_done && descriptor_done {
+            // The boundary chunk can still contain initial MPEG-TS discovery
+            // diagnostics. Establish an empty post-start baseline so only a
+            // later stream announcement can invalidate the frozen plan.
+            window.clear();
+            continue;
         }
         window.extend_from_slice(&chunk[..read]);
         if window.len() > 2048 {
@@ -6531,6 +6539,28 @@ exec /bin/cat >/dev/null
                 "{diagnostic}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn initial_stream_discovery_does_not_report_a_format_change() {
+        let (mut writer, reader) = tokio::io::duplex(1024);
+        let changed = Arc::new(AtomicBool::new(false));
+        let capture = tokio::spawn(capture_live_stderr(
+            reader,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(StdMutex::new(None)),
+            Arc::new(AtomicI64::new(0)),
+            Arc::clone(&changed),
+        ));
+        writer
+            .write_all(
+                b"Input #0, mpegts\nNew video stream 0:0 at pos:0\nStream mapping:\n  Stream #0:0 -> #0:0\n",
+            )
+            .await
+            .expect("initial descriptor");
+        drop(writer);
+        capture.await.expect("stderr capture");
+        assert!(!changed.load(Ordering::Acquire));
     }
 
     #[test]

@@ -36,7 +36,7 @@ diverge.
 | Web, Apple, Android clients | done | Each first-party player sends its concrete live HLS envelope, displays the frozen delivery, and permits one release-before-replace compatibility retry. |
 | Developer settings | done | Original / Auto is the default, with optional 480/720/1080/2160 ceilings and visible advisory requirements; explicit enablement remains ungated. |
 | Documentation and measurements | done | This maintained page is the implementation/status record; it distinguishes compile evidence from hardware acceptance and makes no unobserved performance claim. |
-| Main promotion | review | Current main is integrated and the exact-tree pinned compile is green; one adversarial review is next, followed by the fast lane and merge. |
+| Main promotion | lane | The single adversarial review is addressed: final HLS tuples are validated, initial source discovery cannot fake a format change, owner relays retain the typed restart code, and source changes replan without forcing conversion. Exact-tree check and Clippy are green; fast lane is next. |
 
 ## 1. Ship original quality as ordinary behavior
 

@@ -372,6 +372,24 @@ fn format_supports(
         && normalized(&format.audio) == normalized(audio)
 }
 
+fn claimed_packaging(
+    request: &LivePlaybackRequest,
+    preferred: LivePackaging,
+    video: &str,
+    audio: &str,
+) -> Option<LivePackaging> {
+    let alternate = match preferred {
+        LivePackaging::Mpegts => LivePackaging::Fmp4,
+        LivePackaging::Fmp4 => LivePackaging::Mpegts,
+    };
+    [preferred, alternate].into_iter().find(|packaging| {
+        request
+            .hls_formats
+            .iter()
+            .any(|format| format_supports(format, *packaging, video, audio))
+    })
+}
+
 pub(crate) fn resolve_live_delivery(
     source: &LiveSourceFacts,
     request: Option<&LivePlaybackRequest>,
@@ -539,15 +557,51 @@ pub(crate) fn resolve_live_delivery(
     } else {
         "h264".to_owned()
     };
-    let audio_codec = if audio_action == LiveTrackAction::Copy {
+    let mut audio_codec = if audio_action == LiveTrackAction::Copy {
         normalized(source_audio)
     } else {
         "aac".to_owned()
     };
-    let packaging = if video_action == LiveTrackAction::Copy && video_codec == "hevc" {
+    let preferred_packaging = if video_action == LiveTrackAction::Copy && video_codec == "hevc" {
         LivePackaging::Fmp4
     } else {
         LivePackaging::Mpegts
+    };
+    let packaging = if let Some(request) = request {
+        if let Some(packaging) =
+            claimed_packaging(request, preferred_packaging, &video_codec, &audio_codec)
+        {
+            packaging
+        } else if audio_action == LiveTrackAction::Copy {
+            if !available.audio_encode {
+                return Err(
+                    "audio_conversion_unavailable: the final client route requires AAC audio"
+                        .into(),
+                );
+            }
+            let Some(packaging) =
+                claimed_packaging(request, preferred_packaging, &video_codec, "aac")
+            else {
+                return Err(
+                    "client_route_unsupported: the player did not claim the resolved HLS codec and packaging combination"
+                        .into(),
+                );
+            };
+            audio_action = LiveTrackAction::Encode;
+            audio_codec = "aac".to_owned();
+            reasons.push(reason(
+                "container_incompatible",
+                "The source audio cannot be carried in a complete HLS route claimed by this player, so only audio is converted.",
+            ));
+            packaging
+        } else {
+            return Err(
+                "client_route_unsupported: the player did not claim the resolved HLS codec and packaging combination"
+                    .into(),
+            );
+        }
+    } else {
+        preferred_packaging
     };
 
     let client_video_ceiling = request.and_then(|request| {
@@ -717,6 +771,51 @@ mod tests {
         .expect("audio-only conversion");
         assert_eq!(plan.video_action, LiveTrackAction::Copy);
         assert_eq!(plan.audio_action, LiveTrackAction::Encode);
+    }
+
+    #[test]
+    fn encoded_video_never_invents_an_unclaimed_audio_tuple() {
+        let mut playback = request("ac3");
+        playback.caps = serde_json::json!({
+            "v": 2,
+            "video": [{"codec":"h264","profiles":[],"max_height":2160,"present":[]}],
+            "audio": ["aac", "ac3"],
+            "containers": ["mpegts"],
+            "transports": ["hls"]
+        });
+        playback.hls_formats = vec![LiveHlsFormat {
+            container: "mpegts".into(),
+            video: "h264".into(),
+            audio: "aac".into(),
+        }];
+        playback.video_limits = vec![LiveVideoLimit {
+            codec: "h264".into(),
+            profile: None,
+            max_width: 3840,
+            max_height: 2160,
+            max_frame_rate: LiveRational { num: 60, den: 1 },
+            interlaced: false,
+        }];
+        playback.audio_limits.push(LiveAudioLimit {
+            codec: "aac".into(),
+            max_channels: 2,
+        });
+
+        let plan = resolve_live_delivery(
+            &source(),
+            Some(&playback),
+            &LiveQualityPolicy::default(),
+            &LiveExecutionSupport {
+                video_encode: true,
+                audio_encode: true,
+                tone_map: true,
+            },
+        )
+        .expect("claimed H.264/AAC route");
+        assert_eq!(plan.video_action, LiveTrackAction::Encode);
+        assert_eq!(plan.audio_action, LiveTrackAction::Encode);
+        assert_eq!(plan.output.audio_codec, "aac");
+        assert_eq!(plan.packaging, LivePackaging::Mpegts);
     }
 
     #[test]
