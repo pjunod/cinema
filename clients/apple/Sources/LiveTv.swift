@@ -61,6 +61,7 @@ struct LiveTvSignal: Decodable, Equatable, Sendable {
 }
 
 struct LiveTvSettings: Decodable, Equatable, Sendable {
+    let libraryChannelsEnabled: Bool
     let liveTvEnabled: Bool
     let liveTvDeviceIpv4: String
     let liveTvOwnerNodeId: String
@@ -87,6 +88,7 @@ struct LiveTvReadiness: Decodable, Sendable {
 enum LiveTvSettingsChange {
     case configure(ipv4: String, owner: String, sessions: Int, height: Int)
     case enabled(Bool)
+    case libraryChannelsEnabled(Bool)
     case fencedOwner(owner: String, cutoff: Int64)
 
     func body(generation: Int64) throws -> Data {
@@ -98,6 +100,7 @@ enum LiveTvSettingsChange {
             fields["live_tv_max_sessions"] = sessions
             fields["live_tv_output_height"] = height
         case let .enabled(enabled): fields["live_tv_enabled"] = enabled
+        case let .libraryChannelsEnabled(enabled): fields["library_channels_enabled"] = enabled
         case let .fencedOwner(owner, cutoff):
             fields["live_tv_fenced_owner"] = [
                 "owner_node_id": owner, "drain_before_generation": cutoff,

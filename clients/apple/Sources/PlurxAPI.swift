@@ -93,6 +93,14 @@ struct PlurxAPI {
         return try await run(req)
     }
 
+    private func putNoContent<B: Encodable>(_ path: String, body: B) async throws {
+        var req = try jsonRequest(path, body: body)
+        req.httpMethod = "PUT"
+        Session.shared.authorize(&req)
+        let (_, resp) = try await session.data(for: req)
+        try Self.check(resp)
+    }
+
     private func deleteNoContent(_ path: String, query: [URLQueryItem] = []) async throws {
         guard let url = makeURL(path, query: query) else { throw APIError.badURL }
         var req = URLRequest(url: url)
@@ -354,6 +362,91 @@ struct PlurxAPI {
             using: Self.playbackPreparationSession
         )
         return Self.acceptHlsSessionPresentation(started)
+    }
+
+    // MARK: - Library channels
+
+    func libraryChannels(management: Bool = false) async throws -> [LibraryChannel] {
+        try await get("library-channels/", query: management
+            ? [URLQueryItem(name: "management", value: "true")]
+            : [])
+    }
+
+    func libraryChannel(_ id: String) async throws -> LibraryChannel {
+        try await get("library-channels/\(id)")
+    }
+
+    func libraryChannelGuide(ids: [String], from: Int64, to: Int64) async throws -> [LibraryChannelProgramme] {
+        try await get("library-channels/guide", query: [
+            URLQueryItem(name: "channel_ids", value: ids.joined(separator: ",")),
+            URLQueryItem(name: "start_ms", value: String(from)),
+            URLQueryItem(name: "end_ms", value: String(to)),
+        ])
+    }
+
+    func previewLibraryChannel(_ recipe: LibraryChannelRecipe) async throws -> LibraryChannelPreview {
+        try await post("library-channels/preview", body: LibraryChannelPreviewRequest(recipe: recipe, limit: 50))
+    }
+
+    func createLibraryChannel(_ definition: LibraryChannelDefinition) async throws -> LibraryChannelMutation {
+        try await post("library-channels/", body: definition)
+    }
+
+    func updateLibraryChannel(_ channel: LibraryChannel, definition: LibraryChannelDefinition) async throws -> LibraryChannelMutation {
+        try await put("library-channels/\(channel.id)", body: LibraryChannelUpdateRequest(
+            expectedRevision: channel.revision,
+            requestId: definition.requestId,
+            name: definition.name,
+            description: definition.description,
+            visibility: definition.visibility,
+            enabled: definition.enabled,
+            recipe: definition.recipe
+        ))
+    }
+
+    func deleteLibraryChannel(_ channel: LibraryChannel) async throws {
+        try await deleteNoContent("library-channels/\(channel.id)", query: [
+            URLQueryItem(name: "expected_revision", value: String(channel.revision)),
+        ])
+    }
+
+    func setLibraryChannelFavourite(_ id: String, favourite: Bool) async throws {
+        try await putNoContent("library-channels/\(id)/favourite", body: LibraryChannelFavouriteRequest(favourite: favourite))
+    }
+
+    func rebuildLibraryChannel(_ channel: LibraryChannel, activation: String, reshuffle: Bool) async throws -> LibraryChannelBuild {
+        try await post("library-channels/\(channel.id)/rebuild", body: LibraryChannelRebuildRequest(
+            expectedRevision: channel.revision,
+            requestId: UUID().uuidString,
+            activation: activation,
+            reshuffle: reshuffle
+        ))
+    }
+
+    func resolveLibraryChannel(_ id: String) async throws -> LibraryChannelResolved {
+        try await post("library-channels/\(id)/resolve")
+    }
+
+    func createLibraryChannelSession(
+        channelId: String,
+        resolved: LibraryChannelResolved,
+        tuneSequence: UInt64,
+        playback: CreateSessionRequest
+    ) async throws -> LibraryChannelSession {
+        try await post(
+            "library-channels/\(channelId)/sessions",
+            body: LibraryChannelSessionRequest(
+                generationId: resolved.generationId,
+                occurrence: resolved.occurrence,
+                tuneSequence: tuneSequence,
+                playback: playback
+            ),
+            using: Self.playbackPreparationSession
+        )
+    }
+
+    func developerReadiness() async throws -> DeveloperReadiness {
+        try await get("developer/readiness")
     }
 
     /// `vod` describes the presentation the server selected; it is not a

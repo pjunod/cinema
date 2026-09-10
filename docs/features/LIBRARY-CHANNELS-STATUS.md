@@ -17,7 +17,7 @@ proved, and what remains?*
 | M1 recipes, schedules, and durable storage | built; integration compile passed | one normalized evaluator and deterministic clock/order implementation; SQLite v55 and Hiqlite v35 entities, authorization-at-write, idempotent definitions, bounded staging, guarded publication, catalogue projection, and import census |
 | M2 API and playback purpose | built; integration compile passed | bounded authenticated CRUD/preview/guide/resolve routes, pinned-occurrence finite-HLS starts, durable purpose binding, and following-mode start/history isolation |
 | M3 web | built; integration compile passed | responsive browse/guide, three-step resumable editor, preview and management actions, fenced following playback, watch-from-start/return, and advisory Developer enablement |
-| M4 Apple | queued | iPhone/iPad authoring plus Apple TV layouts and following playback |
+| M4 Apple | built; iOS and tvOS compile passed | native now/next guide and adaptive phone/tablet/television layout; iPhone/iPad preview and authoring; fenced finite-HLS following with pause-boundary rejoin and ordinary watch-from-start; build 129 |
 | M5 Android | queued | phone/tablet authoring plus Google TV layouts and following playback |
 | M6 promotion | queued | documentation, one adversarial review, review fixes, fast lane, and merge |
 

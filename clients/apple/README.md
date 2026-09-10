@@ -12,7 +12,7 @@ anything it can't (MKV, DTS/TrueHD, …) is delivered as the server's on-the-fly
 HDR display at runtime and sends that to `/decision`, so the server transcodes
 only what this hardware genuinely can't play.
 
-> Status: **v0.3.0**, build `128` in [`project.yml`](project.yml) — working
+> Status: **v0.3.0**, build `129` in [`project.yml`](project.yml) — working
 > development client. Browse, resume, discover, and play on both iOS and tvOS.
 > Both targets compile against the iOS/tvOS 26.5 SDKs and share the same
 > regression suite.
@@ -102,6 +102,11 @@ only what this hardware genuinely can't play.
   including for shows and seasons, which classify from the server's watch
   rollup. Pages paint as they arrive rather than after the last one.
 - **Search** across the library from its own tab.
+- **Library channels** with a server-timed now/next guide on iPhone, iPad, and
+  Apple TV. iPhone and iPad can preview, create, edit, rebuild, reshuffle, and
+  delete definitions. Following uses finite HLS without seek, marker, resume,
+  progress, or watched-state writes; pausing across a boundary rejoins live,
+  and Watch from start deliberately returns to ordinary title playback.
 - **Detail** pages with backdrop, overview, Resume / Start-over, and a metadata
   badge row (resolution, codec, dynamic range).
 - **On-demand player** with explicit play/pause, ±10 seconds, full-film seek,

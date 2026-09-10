@@ -5,6 +5,7 @@ enum HomeTab: Hashable {
     case home
     case libraries
     case liveTv
+    case libraryChannels
     case search
     case downloads
     case settings
@@ -67,6 +68,10 @@ struct HomeView: View {
                 .tabItem { Label("Live TV", systemImage: "tv") }
                 .tag(HomeTab.liveTv)
 
+            NavigationStack { LibraryChannelsView().appDestinations() }
+                .tabItem { Label("Channels", systemImage: "play.rectangle.on.rectangle") }
+                .tag(HomeTab.libraryChannels)
+
             NavigationStack {
                 SearchView()
                     .appDestinations()
@@ -120,6 +125,9 @@ struct HomeView: View {
 
             LiveTvView()
                 .tabItem { Label("Live TV", systemImage: "tv") }
+
+            LibraryChannelsView()
+                .tabItem { Label("Channels", systemImage: "play.rectangle.on.rectangle") }
 
             SearchView()
                 .tabItem { Label("Search", systemImage: "magnifyingglass") }
