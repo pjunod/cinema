@@ -1113,9 +1113,29 @@ test_anchor = "live_tv_session_never_revives_an_expired_lineup_observation"
 id = "apple.live-tv-promotion-build-counter"
 commits = ["bc4a6208"]
 source = "clients/apple/project.yml"
-source_anchor = "CURRENT_PROJECT_VERSION: \"133\""
+source_anchor = "CURRENT_PROJECT_VERSION: \"134\""
 test = "tests/validation/test_mobile_versions.py"
 test_anchor = "test_apple_counter_the_target_already_ships_fails_against_the_target"
+
+[[fixes]]
+# The first navigation correction routes every directional press through one
+# bounds-safe reducer and keeps the UTC programme anchor stable between rows.
+id = "apple.live-tv-guide-focus-navigation"
+commits = ["ff5c7b7c"]
+source = "clients/apple/Sources/LiveTvGuide.swift"
+source_anchor = "enum LiveTvGuideFocusNavigator"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testGuideFocusMovesInOrderAndHandsTheTopBoundaryToTheToolbar"
+
+[[fixes]]
+# Review remediation makes delayed restores revocable and represents the top
+# boundary as an ordered clear-grid / focus-toolbar adapter transition.
+id = "apple.live-tv-focus-restore-ownership"
+commits = ["0c0c82ba"]
+source = "clients/apple/Sources/LiveTvGuide.swift"
+source_anchor = "struct LiveTvGuideFocusCoordinator"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testFocusCoordinatorRejectsStaleRestoresAndTransfersTheBoundaryAtomically"
 
 [[fixes]]
 # Web, Apple, and Android must use the canonical no-trailing-slash collection

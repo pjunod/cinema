@@ -78,6 +78,7 @@ hidden eligibility test is added.
 | 2026-09-10 | Apple simulators, OS 26.5 | focused `LiveTvTests` | iOS 28/28 passed; tvOS passed 26 initially and the two corrected stale source-contract assertions on their sole retry — 28/28 covered |
 | 2026-09-10 | PR #236 review-remediation worktree | `xcrun swiftc -parse` plus iOS and tvOS compile-only builds | passed after addressing the single review; no simulator tests ran |
 | 2026-09-10 | PR #236 merged-base source tree `fcc2c2e5` | iOS and tvOS compile-only builds, then the one focused tvOS `LiveTvTests` simulator pass | compile passed; 31/31 tests passed with no retry; no other suite ran |
+| 2026-09-10 | PR #236 fast-lane attempt 1770 | policy preflight | stopped before compile because the history ledger still named Apple build 133 and omitted both corrective client commits; anchored both source/test pairs, updated the build claim to 134, and confirmed `make history-check` locally |
 
 Compilation and static contracts are retained here as they pass. The focused
 Google TV D-pad path has physical-device evidence; the complete Google TV and
