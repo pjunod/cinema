@@ -1,6 +1,6 @@
 # Ship three native Live TV layouts
 
-Build: 129
+Build: 130
 Issue: #227
 
 Apple TV now offers Guide + preview, Guide over picture, and Channel browser

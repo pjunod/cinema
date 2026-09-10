@@ -130,8 +130,7 @@ test("the preview acceleration ladder only ever gets coarser", () => {
 // ---- Live TV: the sibling table (docs/clients/PLAYER-INPUT-CONTRACT.md §4a) ----
 // Live television is the same contract with every timeline row removed and a
 // channel added. It is a second table in the same fixture rather than a fourth
-// surface, because the well-formedness test above requires all seven finite
-// states and a live stream can enter none of them.
+// surface, because live browsing has its own presentation states and outcomes.
 
 test("the live table routes every surface, state and input to a defined live outcome", () => {
   const live = contract.live;
@@ -160,7 +159,7 @@ test("nothing in the live table seeks, scrubs or opens a timeline", () => {
   for (const banned of ["skip", "preview", "commit", "cancel", "commit_then_toggle_play"]) {
     assert.ok(!(banned in live.outcomes), `live outcome ${banned} exists — a live stream has no timeline`);
   }
-  for (const banned of ["timeline", "scrub", "menu", "info", "failed", "transport"]) {
+  for (const banned of ["timeline", "scrub", "info", "failed", "transport"]) {
     assert.ok(!(banned in live.states), `live state ${banned} exists — that is a finite-player state`);
   }
   for (const banned of ["skip_back", "skip_forward"]) {

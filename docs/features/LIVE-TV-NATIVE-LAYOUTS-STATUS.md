@@ -1,6 +1,6 @@
 # Native Live TV layouts — implementation status and evidence
 
-**Status:** ready for the main promotion fast lane · **Effort:**
+**Status:** implementation complete · **Effort:**
 `effort/live-tv-native-layouts` · **Base:** Forgejo `main` at `20057416` ·
 **Updated:** 2026-09-10
 
@@ -16,9 +16,9 @@ being built, and what remains unproved*.
 | Package | State | Evidence | Remaining |
 |---|---|---|---|
 | Shared input, metadata, and preference contracts | verified | bounded FFmpeg input parser/cache; cross-client DTO and badge cases; generated input tables; pinned Rust compile plus 3 focused server and 39 web checks green | promotion gate |
-| Apple TV and iOS | verified | all three saved layouts, anchored/pinned guide, scoped input, compact schedule/grid, Apple build 129; iOS and tvOS compile green; 28 focused Live TV tests green on each platform | physical Siri Remote walkthrough remains unproved; promotion gate |
+| Apple TV and iOS | verified | all three saved layouts, anchored/pinned guide, scoped input, compact schedule/grid, Apple build 130; iOS and tvOS compile green; 28 focused Live TV tests green on each platform | physical Siri Remote walkthrough remains unproved; promotion gate |
 | Google TV and Android | verified | all three saved layouts around one movable player, stable UTC-anchor D-pad navigation, false-on-delegate input, compact schedule/grid, Android build 79; Kotlin compile and 35 JVM checks green; real D-pad case green on Google TV Streamer | broader physical walkthrough remains unproved; promotion gate |
-| Integrated promotion to `main` | ready for fast lane | draft Forgejo PR [#229](http://192.168.4.7:3000/noirr/plurx/pulls/229); exactly one Astra adversarial review of head `f5e67fe9`; all findings addressed; final focused pass green; no feature gates; full suites reserved for the separate sweep | mark ready, apply `fast-lane`, require green current-head `Main promotion gate`, merge |
+| Integrated promotion to `main` | candidate finalized | Forgejo PR [#229](http://192.168.4.7:3000/noirr/plurx/pulls/229); exactly one Astra adversarial review of head `f5e67fe9`; all findings addressed; final focused pass green; no feature gates; full suites reserved for the separate sweep | first lane found the Apple 129 collision with current `main` and an obsolete validator that rejected the specification's required live `menu` state; the finalized candidate claims build 130 and corrects that validator before its current-head lane |
 
 ## Contract — presentation moves, playback does not
 
@@ -77,9 +77,11 @@ focused test pass recorded above.
 | Apple mobile, settings, exit, and timer behavior had presentation gaps | added a no-guide Watch fallback, used one `@AppStorage` layout source for Settings and Live TV, switched the selected Home tab on Leave, and rearmed/suspended fullscreen hiding as focus and panels change |
 | Expired measured source facts could survive in server or client snapshots | the session clears its cached lineup observation before applying a fresh session observation; web, Apple, and Android expire at 20 minutes or programme end and fall back to honest lineup facts |
 
-The review's build-number question required no code change: **129** is the
-Apple build counter. **227** is the Forgejo issue number recorded in the
-build-note filename and its `Issue:` field.
+The review's build-number question originally distinguished Apple build
+**129** from Forgejo issue **227**. Current `main` subsequently claimed build
+129, so the promotion correction re-claimed this branch as Apple build
+**130**; 227 remains the issue number in the build-note filename and its
+`Issue:` field.
 
 ## Decisions made while Paul is away
 
