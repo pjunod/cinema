@@ -268,6 +268,8 @@ Two rounds of performance work, each with its plan, review, and response.
 | [CI_TEST_OVERHAUL_PLAN.md](ci/CI_TEST_OVERHAUL_PLAN.md) | Fast failures, selective evidence, safe reuse. | open |
 | [CI_EXECUTION_ACCELERATION_PLAN.md](ci/CI_EXECUTION_ACCELERATION_PLAN.md) · [review](ci/CI_EXECUTION_ACCELERATION_REVIEW.md) | Persistent caches, native packaging, exact sharding. | open |
 | [AGENT-COMPILE-LOOP.md](ci/AGENT-COMPILE-LOOP.md) | A compiler for a checkout that has none. | live |
+| [AI-HARNESS-FABLE-ASSESSMENT.md](ci/AI-HARNESS-FABLE-ASSESSMENT.md) | Fable's assessment: fix the compile loop, test evidence, and prompt drift before navigation tooling; positions on Gemini's and Codex's proposals. | open |
+| [AI-HARNESS-IMPLEMENTATION-PLAN.md](ci/AI-HARNESS-IMPLEMENTATION-PLAN.md) | Ten milestones, in that order, with exact contracts and acceptance checks: agent-check, tests out of the hotspots, prove-fix, fences, guides, swarm/ alignment, status fragments, PR ledger, Ripwire pilot, first extraction. | open |
 | [FORGEJO-MAIN-IMAGE-HANDOFF.md](ci/FORGEJO-MAIN-IMAGE-HANDOFF.md) | Publishing the main image from Forgejo. | open |
 | [RUNNER-DISK.md](ci/RUNNER-DISK.md) | What fills a runner, what bounds it, how to reclaim it. | live |
 | [NYNUC-RUNNER-ORPHANED-PROCESSES.md](ci/NYNUC-RUNNER-ORPHANED-PROCESSES.md) | Why effort preflight leaked stopped children on nynuc, and how cleanup is proved. | open |
