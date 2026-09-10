@@ -30,13 +30,13 @@ diverge.
 
 | Work package | State | Evidence / next action |
 |---|---|---|
-| Isolated clone and pinned compiler | done | Forgejo main `94b46515`; Rust 1.97.1 baseline `cargo check -p plurxd --locked --all-targets` passed. |
+| Isolated clone and pinned compiler | done | Synced Forgejo main `2634f687`; Rust 1.97.1 exact-tree check and Clippy passed. |
 | Server observation and planner | done | One bounded tuner prefix feeds local ffprobe and then the producer; the frozen plan resolves video/audio independently, MPEG-TS/fMP4 packaging, filters, ceiling, and measured admission. Pinned Rust 1.97.1 all-target compile passed. |
 | Public and internal wire contracts | done | Public optional playback envelope is bounded; owner snapshots advertise start versions; exact-body internal v2 falls back to v1 without weakening signed owner requests. |
 | Web, Apple, Android clients | done | Each first-party player sends its concrete live HLS envelope, displays the frozen delivery, and permits one release-before-replace compatibility retry. |
 | Developer settings | done | Original / Auto is the default, with optional 480/720/1080/2160 ceilings and visible advisory requirements; explicit enablement remains ungated. |
 | Documentation and measurements | done | This maintained page is the implementation/status record; it distinguishes compile evidence from hardware acceptance and makes no unobserved performance claim. |
-| Main promotion | queued | Sync current main, exact-tree compile, one adversarial review, fast lane, merge. |
+| Main promotion | review | Current main is integrated and the exact-tree pinned compile is green; one adversarial review is next, followed by the fast lane and merge. |
 
 ## 1. Ship original quality as ordinary behavior
 
