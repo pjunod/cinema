@@ -1205,6 +1205,9 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIsNotNone(assignment)
         self.assertEqual(assignment.group(1), "")
         self.assertIn("PLURX_DEVELOPMENT_TEAM is required for Apple builds", script)
+        self.assertIn('[[ "$DEVELOPMENT_TEAM" =~ ^[A-Z0-9]{10}$ ]]', script)
+        self.assertIn('signed_team="$(codesign -d --verbose=4 "$artifact"', script)
+        self.assertIn('if [[ "$signed_team" != "$DEVELOPMENT_TEAM" ]]', script)
         self.assertNotIn("DEVELOPMENT_TEAM:", project)
         self.assertNotIn("<key>teamID</key>", export_options)
 

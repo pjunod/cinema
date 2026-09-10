@@ -146,7 +146,9 @@ only what this hardware genuinely can't play.
 ## Build and install on your own devices
 
 TestFlight delivery is automated through the macOS Ansible controller; it
-tests both schemes, then archives and uploads each platform. See
+archives and uploads both platforms without rerunning test suites. The
+promotion lane supplies static and compilation evidence, while complete unit
+and simulator suites belong to the separate test sweep. See
 [`docs/PUBLISHING.md`](../../docs/PUBLISHING.md#ansible-owns-the-repeatable-mobile-deploy).
 
 ```bash

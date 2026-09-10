@@ -111,6 +111,8 @@ need python3
 if [[ $DO_APPLE -eq 1 ]]; then
   [[ -n "$DEVELOPMENT_TEAM" ]] || fail \
     "PLURX_DEVELOPMENT_TEAM is required for Apple builds; keep it in local release configuration, not tracked source"
+  [[ "$DEVELOPMENT_TEAM" =~ ^[A-Z0-9]{10}$ ]] || fail \
+    "PLURX_DEVELOPMENT_TEAM must be a 10-character uppercase Apple team identifier"
 fi
 if [[ $DO_APPLE -eq 1 || $BUILD_ONLY -eq 1 ]]; then
   need xcodebuild
@@ -225,13 +227,27 @@ log "shipping plurx $VERSION — Apple build $APPLE_BUILD, Android versionCode $
 # Build
 # --------------------------------------------------------------------------
 
+apple_artifact_needs_build() {
+  local artifact="$1"
+  local signed_team
+
+  [[ -d "$artifact" ]] || return 0
+  signed_team="$(codesign -d --verbose=4 "$artifact" 2>&1 \
+    | sed -n 's/^TeamIdentifier=//p' | head -1)" || return 0
+  if [[ "$signed_team" != "$DEVELOPMENT_TEAM" ]]; then
+    warn "cached $(basename "$artifact") belongs to team ${signed_team:-unknown}; rebuilding for $DEVELOPMENT_TEAM"
+    return 0
+  fi
+  return 1
+}
+
 if [[ $DO_APPLE -eq 1 ]]; then
   if [[ ! -d "$IOS_APP" || ! -d "$TVOS_APP" ]]; then
     log "generating the Apple project"
     run bash -c "cd '$APPLE_DIR' && xcodegen generate"
   fi
 
-  if [[ ! -d "$IOS_APP" ]]; then
+  if apple_artifact_needs_build "$IOS_APP"; then
     log "building plurx-iOS Release for device"
     run bash -c "cd '$APPLE_DIR' && xcodebuild \
       -project plurx.xcodeproj \
@@ -242,12 +258,12 @@ if [[ $DO_APPLE -eq 1 ]]; then
       DEVELOPMENT_TEAM='$DEVELOPMENT_TEAM' \
       CODE_SIGN_STYLE=Automatic \
       -allowProvisioningUpdates \
-      build"
+      clean build"
   else
     log "reusing cached iOS artifact"
   fi
 
-  if [[ ! -d "$TVOS_APP" ]]; then
+  if apple_artifact_needs_build "$TVOS_APP"; then
     log "building plurx-tvOS Release for device"
     run bash -c "cd '$APPLE_DIR' && xcodebuild \
       -project plurx.xcodeproj \
@@ -258,7 +274,7 @@ if [[ $DO_APPLE -eq 1 ]]; then
       DEVELOPMENT_TEAM='$DEVELOPMENT_TEAM' \
       CODE_SIGN_STYLE=Automatic \
       -allowProvisioningUpdates \
-      build"
+      clean build"
   else
     log "reusing cached tvOS artifact"
   fi

@@ -239,8 +239,9 @@ scripts/ship --apple
 ```
 
 The playbook generates the Xcode project, archives both schemes, and exports
-each archive with `destination: upload`. It does not rerun the test suites at
-deployment time because merged source has already passed the promotion lane.
+each archive with `destination: upload`. It does not rerun test suites at
+deployment time. The promotion lane supplies static and compilation evidence;
+complete unit and simulator suites run in the separate test sweep.
 The release controller injects the team ID while signing; neither `project.yml`
 nor `ExportOptions.plist` stores it. Certificates stay in the login Keychain
 and the App Store Connect private key stays in the controller's private-key
