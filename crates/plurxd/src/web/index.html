@@ -10902,8 +10902,11 @@ async function stallDiagnose(){
   const controlTrigger=notifyPlaybackControl("stalled");
   const hdrs={}; if(TOKEN) hdrs["authorization"]="Bearer "+TOKEN;
   const url=p.probeUrl;
-  let verdict="Playback hasn't started.", detail="Open Settings → Logs and read the last plurxd::stream / transcode line.";
-  if(url){
+  const explained=currentStreamFailureOverlay();
+  const terminalFailure=explained&&!explained.retryable;
+  let verdict=terminalFailure?explained.title:"Playback hasn't started.";
+  let detail=terminalFailure?explained.detail:"Open Settings → Logs and read the last plurxd::stream / transcode line.";
+  if(url&&!terminalFailure){
     try{
       const {status,segState}=await probePlaybackSource(url,hdrs,p.method==='transcode');
       if(!current()) return;

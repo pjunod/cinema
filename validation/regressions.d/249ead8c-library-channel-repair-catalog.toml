@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["249ead8c"]
+reason = "This commit records the repair's validation ownership and corrective-history evidence; it changes no runtime behavior."
+ignore = true

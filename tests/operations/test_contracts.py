@@ -1371,6 +1371,7 @@ assert.equal(context.ACT_TIMER, null);
 
     def test_pr_ci_selects_expensive_surfaces_and_has_one_aggregate_gate(self):
         workflow = read(".github/workflows/ci.yml")
+        fast_lane = read(".github/workflows/main-fast-lane.yml")
 
         self.assertIn("python3 -m validation.ci_scope", workflow)
         self.assertIn("name: fast policy and contract preflight", workflow)
@@ -1381,7 +1382,8 @@ assert.equal(context.ACT_TIMER, null);
             workflow.index("name: Check validation catalog and contract unit tests"),
         )
         self.assertIn("name: Main promotion gate", workflow)
-        self.assertIn("branches: [main]", workflow)
+        self.assertIn("branches: [main]", fast_lane)
+        self.assertIn("name: Main promotion gate", fast_lane)
         self.assertIn("effort/*|integration/*-into-main)", workflow)
         self.assertIn("scope_event=effort_qualification", workflow)
         self.assertIn("qualification: ${{ steps.scope.outputs.qualification }}", workflow)
@@ -1605,6 +1607,7 @@ assert.equal(context.ACT_TIMER, null);
 
     def test_main_qualification_is_full_and_effort_prs_are_compile_only(self):
         workflow = read(".github/workflows/ci.yml")
+        fast_lane = read(".github/workflows/main-fast-lane.yml")
         effort = read(".github/workflows/effort-ci.yml")
         effort_jobs = workflow_job_blocks(".github/workflows/effort-ci.yml")
         effort_rust_steps = workflow_step_blocks(effort_jobs["rust_compile"])
@@ -1615,25 +1618,21 @@ assert.equal(context.ACT_TIMER, null);
         membership_web_tests = read("tests/web/cluster-membership.test.js")
 
         # Forgejo has no GitHub merge-queue event. The single required
-        # aggregate workflow fires on main-bound pull requests, while the
-        # badge-only lint workflow runs after merge.
+        # aggregate workflow fires in the labeled fast lane for main-bound
+        # pull requests. Runtime sweeps are manual or release-tag only.
         self.assertNotIn("\n  merge_group:\n", workflow)
         self.assertNotIn("\n  merge_group:\n", lint)
         self.assertNotIn("\n  pull_request:\n", lint)
-        self.assertIn(
-            "if: always() && github.event_name == 'pull_request'",
-            workflow,
-        )
-        # Main pushes may supersede older main pushes, but tags remain durable.
-        self.assertIn(
-            "github.event_name == 'push' && github.ref == 'refs/heads/main'",
-            workflow,
-        )
+        self.assertNotIn("\n  pull_request:\n", workflow)
+        self.assertIn("\n  workflow_dispatch:\n", workflow)
+        self.assertIn("\n  pull_request:\n", fast_lane)
+        self.assertIn("branches: [main]", fast_lane)
+        self.assertIn("name: Main promotion gate", fast_lane)
 
-        # Task PRs target effort/** and get one always-present aggregate. The
-        # lane compiles every affected language but executes none of the slow
-        # release suites; an effort/** -> main PR is expanded above instead.
-        self.assertIn('      - "effort/**"', effort)
+        # Effort compilation is explicitly dispatched and executes none of the
+        # slow release suites.
+        self.assertNotIn("\n  pull_request:\n", effort)
+        self.assertIn("\n  workflow_dispatch:\n", effort)
         self.assertIn("name: Effort development gate", effort)
         self.assertEqual(
             list(effort_rust_steps),
@@ -2339,7 +2338,7 @@ assert.equal(context.ACT_TIMER, null);
             "cluster-store-backstop"
         ]
 
-        self.assertIn('cron: "23 6 * * 1"', workflow)
+        self.assertNotIn("schedule:", workflow)
         self.assertIn("workflow_dispatch:", workflow)
         self.assertIn("runs-on: [self-hosted, Linux, X64, lab, ci-store]", job)
         self.assertIn(
@@ -2984,7 +2983,8 @@ assert.equal(context.ACT_TIMER, null);
             "<Registry>http://192.168.4.7:3000/noirr/-/packages/container/plurxd/main</Registry>",
             unraid,
         )
-        self.assertIn('cron: "41 16 * * 1"', readiness)
+        self.assertNotIn("schedule:", readiness)
+        self.assertIn("workflow_dispatch:", readiness)
         self.assertIn("run: make release-check", readiness)
         self.assertIn("fetch-depth: 0", readiness)
 

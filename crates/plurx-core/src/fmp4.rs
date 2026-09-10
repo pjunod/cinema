@@ -2156,6 +2156,83 @@ pub fn validate_hevc_sample_entries(init: &Init) -> Result<HevcSampleEntryLayout
     }
 }
 
+/// Prove that the first video fragment selects one of the HEVC descriptions
+/// validated above. The selection comes from `tfhd` when present and otherwise
+/// from the track's `trex` default; both indexes are one-based.
+pub fn validate_hevc_sample_description_reference(
+    init: &Init,
+    first: &Fragment,
+) -> Result<(), Fmp4Error> {
+    let Some(video) = init
+        .video()
+        .filter(|track| track.codec == Some(VideoCodec::Hevc))
+    else {
+        return Err(Fmp4Error::Unsupported(
+            "the emitted init does not contain the promised HEVC video track".into(),
+        ));
+    };
+    let description_count = locate_hevc_sample_entries(&init.bytes)?.len();
+    let Some((moov_at, moov)) = find_child(&init.bytes, 0..init.bytes.len(), b"moov")? else {
+        return malformed("init has no moov while reading trex");
+    };
+    let moov_body = moov_at.start + moov.header_len..moov_at.start + moov.size;
+    let Some((mvex_at, mvex)) = find_child(&init.bytes, moov_body, b"mvex")? else {
+        return malformed("fragmented init has no mvex");
+    };
+    let mvex_body = mvex_at.start + mvex.header_len..mvex_at.start + mvex.size;
+    let mut default_index = None;
+    for (trex_at, trex) in find_children(&init.bytes, mvex_body, b"trex")? {
+        let payload = trex_at.start + trex.header_len..trex_at.start + trex.size;
+        if payload.len() < 12 {
+            return malformed("trex too short for sample-description index");
+        }
+        if be_u32(&init.bytes, payload.start + 4) == video.id {
+            default_index = Some(be_u32(&init.bytes, payload.start + 8));
+            break;
+        }
+    }
+    let default_index = default_index.ok_or_else(|| {
+        Fmp4Error::Malformed("video track has no trex sample-description default".into())
+    })?;
+
+    let moof = peek_box(&first.bytes, 0)?
+        .filter(|header| header.kind() == b"moof")
+        .ok_or_else(|| Fmp4Error::Malformed("first fragment has no moof".into()))?;
+    let moof_body = moof.header_len..moof.size;
+    let mut saw_video = false;
+    for (traf_at, traf) in find_children(&first.bytes, moof_body, b"traf")? {
+        let traf_body = traf_at.start + traf.header_len..traf_at.start + traf.size;
+        let Some((tfhd_at, tfhd)) = find_child(&first.bytes, traf_body, b"tfhd")? else {
+            return malformed("traf has no tfhd");
+        };
+        let payload = tfhd_at.start + tfhd.header_len..tfhd_at.start + tfhd.size;
+        if payload.len() < 8 || be_u32(&first.bytes, payload.start + 4) != video.id {
+            continue;
+        }
+        saw_video = true;
+        let flags = be_u32(&first.bytes, payload.start) & 0x00ff_ffff;
+        let index = if flags & 0x00_0002 != 0 {
+            if payload.len() < 12 {
+                return malformed("tfhd truncated at sample_description_index");
+            }
+            be_u32(&first.bytes, payload.start + 8)
+        } else {
+            default_index
+        };
+        if index == 0 || index as usize > description_count {
+            return Err(Fmp4Error::Unsupported(format!(
+                "video fragment selects HEVC sample description {index}, but init declares {description_count}"
+            )));
+        }
+    }
+    if !saw_video {
+        return Err(Fmp4Error::Unsupported(
+            "the first media fragment contains no promised HEVC video track".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub fn validate_hevc_decoder_configuration(init: &Init) -> Result<(), Fmp4Error> {
     validate_hevc_sample_entries(init).map(|_| ())
 }
@@ -2585,6 +2662,38 @@ pub(crate) fn duplicate_hevc_sample_entry_for_fixture(init: &mut Init) {
         .copy_from_slice(&(entry_count + 1).to_be_bytes());
     for &ancestor in &location.ancestors[2..] {
         grow_box(&mut init.bytes, ancestor, delta).expect("growing sample-entry ancestors");
+    }
+}
+
+#[cfg(any(test, feature = "fixtures"))]
+pub(crate) fn replace_second_hevc_configuration_for_fixture(init: &mut Init, donor: &Init) {
+    let locations = locate_hevc_sample_entries(&init.bytes).expect("locating duplicate entries");
+    assert_eq!(locations.len(), 2, "fixture must have two HEVC entries");
+    let target = locations[1]
+        .as_ref()
+        .expect("second HEVC sample entry has hvcC");
+    let donor_location = locate_hvcc(&donor.bytes)
+        .expect("locating donor hvcC")
+        .expect("donor HEVC configuration");
+    let replacement = donor.bytes[donor_location.payload].to_vec();
+    let old_len = target.payload.len();
+    assert_ne!(
+        &init.bytes[target.payload.clone()],
+        replacement.as_slice(),
+        "donor must provide a distinct encoder-produced configuration"
+    );
+    init.bytes
+        .splice(target.payload.clone(), replacement.iter().copied());
+    if replacement.len() > old_len {
+        let delta = replacement.len() - old_len;
+        for &ancestor in &target.ancestors {
+            grow_box(&mut init.bytes, ancestor, delta).expect("growing hvcC ancestors");
+        }
+    } else {
+        let delta = old_len - replacement.len();
+        for &ancestor in &target.ancestors {
+            shrink_box(&mut init.bytes, ancestor, delta).expect("shrinking hvcC ancestors");
+        }
     }
 }
 
@@ -6073,9 +6182,8 @@ mod tests {
 
     #[test]
     fn complete_multi_entry_hevc_is_a_typed_validated_structural_refusal() {
-        let feed = pipe("open-gop");
+        let feed = crate::testfixtures::pipe_with_distinct_hevc_sample_entries("open-gop");
         let (mut init, fragments, _) = read_all(&feed);
-        duplicate_hevc_sample_entry(&mut init);
 
         let promotion = promote_hevc_parameter_sets(&mut init, &fragments[0])
             .expect_err("the writer cannot choose one of two sample descriptions");
@@ -6085,6 +6193,29 @@ mod tests {
             HevcSampleEntryLayout::Multiple { count: 2 }
         );
         assert!(promotion.to_string().contains("2 HEVC sample entries"));
+    }
+
+    #[test]
+    fn channel_playback_repair_validates_default_description_reference() {
+        let feed = crate::testfixtures::pipe_with_distinct_hevc_sample_entries("closed-gop");
+        let (mut init, fragments, _) = read_all(&feed);
+        validate_hevc_sample_description_reference(&init, &fragments[0])
+            .expect("encoder-produced default selects one of two descriptions");
+
+        let video_id = init.video().expect("video track").id;
+        let trex = init.bytes.windows(4).enumerate().find_map(|(name, kind)| {
+            (kind == b"trex"
+                && init.bytes.len() >= name + 16
+                && be_u32(&init.bytes, name + 8) == video_id)
+                .then_some(name)
+        });
+        let name = trex.expect("video trex");
+        init.bytes[name + 12..name + 16].copy_from_slice(&3_u32.to_be_bytes());
+        let error = validate_hevc_sample_description_reference(&init, &fragments[0])
+            .expect_err("default description 3 is out of bounds for two entries");
+        assert!(error
+            .to_string()
+            .contains("selects HEVC sample description 3"));
     }
 
     #[test]

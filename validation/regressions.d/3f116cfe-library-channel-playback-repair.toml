@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["3f116cfe"]
+points = ["playback.pipeline"]
+checks = ["rust-gate", "playback-recovery"]
+reason = "The retained production-constructor and fMP4 regressions require a promotion-dependent copy to install the actor's one native-HLS retry with hevc_mp4toannexb,extract_extradata intact, validate a realistic distinct-PPS multi-description init before first-media publication, and reject malformed initialization bytes."
