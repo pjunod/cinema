@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "upstream": "redhat-et/ripwire",
+  "version": "0.5.0",
+  "tag": "v0.5.0",
+  "source_commit": "bacfa3b7b3ad13648ce3892de06af05b6b55a2ac",
+  "platforms": {
+    "linux-arm64": {
+      "asset": "ripwire-0.5.0-linux-arm64.tar.gz",
+      "archive_sha256": "efe049b1645045e96751a51b1bc321b2d8653aa1f6ab5d7c2390eb3d49716bf0",
+      "binary_member": "ripwire-0.5.0-linux-arm64/ripwire"
+    },
+    "linux-x64": {
+      "asset": "ripwire-0.5.0-linux-x64.tar.gz",
+      "archive_sha256": "f06e9d7e55032e8e5c397405ed72a19d6e70767d28c8c617a925de4401779f50",
+      "binary_member": "ripwire-0.5.0-linux-x64/ripwire"
+    },
+    "macos-arm64": {
+      "asset": "ripwire-0.5.0-macos-arm64.tar.gz",
+      "archive_sha256": "f9b4d638f0f0efeac602fa6fc5037eb2871f933deccffc3b932b0c9c5dc1fe88",
+      "binary_member": "ripwire-0.5.0-macos-arm64/ripwire"
+    },
+    "macos-x64": {
+      "asset": "ripwire-0.5.0-macos-x64.tar.gz",
+      "archive_sha256": "0bc6b8b101cdd56c509825a8690c363cfb35a28b669076df0b32e1558a3c68cd",
+      "binary_member": "ripwire-0.5.0-macos-x64/ripwire"
+    }
+  }
+}
