@@ -202,7 +202,8 @@ class LiveTvUiTest {
         search.performTextClearance()
         search.performTextInput("Fixture")
         compose.onNodeWithText("7.1 · Fixture News").assertIsDisplayed()
-        compose.onNodeWithText("Watch live").assertIsDisplayed()
+        val watchLabel = if (television) "No programme information · Watch live" else "Watch live"
+        compose.onNodeWithText(watchLabel).assertIsDisplayed()
         assertTrue(requests.none { it.startsWith("POST ") })
         assertEquals(emptyList<String>(), fixtureErrors.toList())
         assertEquals(emptyList<String>(), unexpectedPaths.toList())
