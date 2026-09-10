@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["d2bc7e37"]
+points = ["persistence.upgrades"]
+checks = ["cluster-auth"]
+reason = "The retained separate-process `activated_one_voter_rebuilds_current_state_after_sigkill` regression now waits for the one-voter daemon's `/readyz` proof before its acknowledged password mutation and before its recovered-state assertions. TCP bind alone is only liveness: under runner contention the replicated Store can still refuse the first write with a transient 503. The bounded readiness wait preserves the SIGKILL auto-heal proof without racing quorum establishment, and reports the last typed readiness answer if the daemon never becomes ready."
