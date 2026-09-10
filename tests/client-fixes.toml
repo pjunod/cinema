@@ -1094,3 +1094,14 @@ source = "clients/apple/project.yml"
 source_anchor = "CURRENT_PROJECT_VERSION: \"131\""
 test = "tests/validation/test_mobile_versions.py"
 test_anchor = "test_apple_counter_the_target_already_ships_fails_against_the_target"
+
+[[fixes]]
+# Schedule-rich channel rows exceed one small emulator viewport. Filter to the
+# protected channel before asserting its disabled state so virtualization does
+# not turn screen height into part of the DRM refusal contract.
+id = "android.live-tv-protected-row-viewport-independent"
+commits = ["859f1cbf"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvGuideUi.kt"
+source_anchor = "!channel.watchable -> \"DRM unsupported\""
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/livetv/LiveTvUiTest.kt"
+test_anchor = "search.performTextInput(\"Protected\")"
