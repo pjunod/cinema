@@ -1,6 +1,6 @@
 # Native Live TV layouts — implementation status and evidence
 
-**Status:** Apple TV navigation remediation in progress · **Fix:**
+**Status:** Apple TV review findings addressed; focused verification pending · **Fix:**
 `fix/apple-tv-live-focus` · **Base:** Forgejo `main` at `cb76cc8a` ·
 **Updated:** 2026-09-10
 
@@ -30,11 +30,15 @@ the first guide row can leave both the grid and toolbar claiming focus. The
 default tvOS button tint also paints the More and Layout sheet labels and
 their backgrounds the same red, which makes inactive actions unreadable.
 
-The correction will restore guide focus only when guide content changes,
-clear the grid's claim before handing focus to the toolbar, use a native
-focus-scrolling list for On now, and give every Live TV television action an
-explicit foreground/background pair. Compilation and one focused regression
-pass will be recorded here before the fix is promoted.
+The correction gives delayed Guide and On now restoration revocable ownership
+tickets: new remote input, a toolbar focus, or leaving the region invalidates
+the queued write before it can touch `FocusState`. The guide adapter emits one
+ordered boundary transfer that clears the grid before asking the toolbar to
+take focus. Focusable channel headers now live in the vertically scrolling
+rows while cancelling only the horizontal offset, and On now uses a native
+focus-scrolling list. Every Live TV television action owns an explicit
+foreground/background pair. One focused regression pass will be recorded
+here before the fix is promoted.
 
 ## Contract — presentation moves, playback does not
 
@@ -71,6 +75,7 @@ hidden eligibility test is added.
 | 2026-09-10 | merged-base final pass | Android `tv.plurx.app.livetv.*` JVM tests | 34 passed; one equal-value boxed `Int`/`Long` assertion failed, was corrected to the reducer's UTC `Long`, and its sole targeted retry passed — 35/35 covered |
 | 2026-09-10 | Google TV Streamer, Android 14 | `LiveTvGuideFocusTest` real D-pad event instrumentation | first attempt lost its Compose activity when the sleeping display stopped it; after waking the device, 1/1 passed and normal sleep behavior was restored |
 | 2026-09-10 | Apple simulators, OS 26.5 | focused `LiveTvTests` | iOS 28/28 passed; tvOS passed 26 initially and the two corrected stale source-contract assertions on their sole retry — 28/28 covered |
+| 2026-09-10 | PR #236 review-remediation worktree | `xcrun swiftc -parse` plus iOS and tvOS compile-only builds | passed after addressing the single review; no simulator tests ran |
 
 Compilation and static contracts are retained here as they pass. The focused
 Google TV D-pad path has physical-device evidence; the complete Google TV and
@@ -98,6 +103,23 @@ The review's build-number question originally distinguished Apple build
 129, so the promotion correction re-claimed this branch as Apple build
 **130**; 227 remains the issue number in the build-note filename and its
 `Issue:` field.
+
+## Apple TV navigation follow-up — adversarial review disposition
+
+The required single Astra review ran in task
+`01a088d3-145d-7ea3-af07-4240406efcef` against PR
+[#236](http://192.168.4.7:3000/noirr/plurx/pulls/236) draft head `898bf2b3`.
+It required changes; no second review or approval pass will be requested.
+
+| Finding | Author resolution |
+|---|---|
+| Guide and On now restore tasks could reclaim focus after newer input or a move to the toolbar | added one revocable restore-ticket coordinator shared by both paths; explicit entry advances the request, while navigation, focus loss, and toolbar ownership invalidate older work |
+| Focusable channel headers were drawn in an overlay that could not make the guide scroll to off-screen rows | moved the buttons into each scrolling row and compensate only for horizontal motion, leaving vertical reveal under the scroll view's focus ownership |
+| The regression checks exercised destinations and source strings, not restore ownership or the boundary handoff | added coordinator behavior coverage for stale tickets, passive refresh after exit, a newer explicit entry, and the ordered `clearGrid` then `focusToolbar` effects; retained only the visual/container source contracts |
+
+The author compile-checked the remediated shared sources for both iOS and tvOS.
+The one focused simulator test pass remains deliberately deferred until the
+final current-base tree, immediately before fast-lane promotion.
 
 ## Decisions made while Paul is away
 

@@ -122,6 +122,112 @@ enum LiveTvGuideFocusMove: Equatable, Sendable {
     case unchanged
 }
 
+/// One focus owner arbitrates remote moves and delayed restoration. SwiftUI's
+/// `.task(id:)` cancellation is cooperative, so a yielded task also carries a
+/// ticket that becomes invalid as soon as newer input or another focus region
+/// wins. The view applies the returned effects in order; a top-boundary move
+/// therefore clears the grid before asking the toolbar to take focus.
+struct LiveTvFocusRestoreTicket: Equatable, Sendable {
+    fileprivate let request: Int
+    fileprivate let revision: UInt
+}
+
+enum LiveTvGuideFocusEffect: Equatable, Sendable {
+    case focus(LiveTvGuideFocusPosition)
+    case clearGrid
+    case focusToolbar
+}
+
+struct LiveTvFocusRestoreCoordinator: Equatable, Sendable {
+    private enum Owner: Equatable, Sendable { case outside, requested, grid }
+
+    private var owner: Owner = .outside
+    private var request = 0
+    private var revision: UInt = 0
+
+    /// Begin either a new explicit entry request or a reconciliation while the
+    /// grid still owns focus. A passive content refresh cannot resurrect an
+    /// abandoned request.
+    mutating func beginRestore(request newRequest: Int,
+                               ownerRequested: Bool) -> LiveTvFocusRestoreTicket? {
+        guard ownerRequested, newRequest > 0 else { return nil }
+        if newRequest > request {
+            request = newRequest
+            owner = .requested
+            advanceRevision()
+        }
+        guard owner != .outside, newRequest == request else { return nil }
+        return LiveTvFocusRestoreTicket(request: request, revision: revision)
+    }
+
+    func permits(_ ticket: LiveTvFocusRestoreTicket, ownerRequested: Bool) -> Bool {
+        ownerRequested && owner != .outside
+            && ticket.request == request && ticket.revision == revision
+    }
+
+    mutating func focusChanged(active: Bool) {
+        owner = active ? .grid : .outside
+        advanceRevision()
+    }
+
+    mutating func leave() {
+        owner = .outside
+        advanceRevision()
+    }
+
+    mutating func invalidateForNavigation() {
+        advanceRevision()
+    }
+
+    private mutating func advanceRevision() {
+        revision &+= 1
+    }
+}
+
+struct LiveTvGuideFocusCoordinator: Equatable, Sendable {
+    private var restoration = LiveTvFocusRestoreCoordinator()
+
+    mutating func beginRestore(request: Int,
+                               ownerRequested: Bool) -> LiveTvFocusRestoreTicket? {
+        restoration.beginRestore(request: request, ownerRequested: ownerRequested)
+    }
+
+    func permits(_ ticket: LiveTvFocusRestoreTicket, ownerRequested: Bool) -> Bool {
+        restoration.permits(ticket, ownerRequested: ownerRequested)
+    }
+
+    mutating func focusChanged(active: Bool) {
+        restoration.focusChanged(active: active)
+    }
+
+    mutating func leave() {
+        restoration.leave()
+    }
+
+    mutating func move(layout: LiveTvGridLayout,
+                       current: LiveTvGuideFocusPosition,
+                       direction: LiveTvContractInput,
+                       fallbackAnchor: Int) -> [LiveTvGuideFocusEffect] {
+        restoration.invalidateForNavigation()
+        switch LiveTvGuideFocusNavigator.move(
+            layout: layout,
+            current: current,
+            direction: direction,
+            fallbackAnchor: fallbackAnchor
+        ) {
+        case .focus(let next):
+            restoration.focusChanged(active: true)
+            return [.focus(next)]
+        case .toolbar:
+            restoration.leave()
+            return [.clearGrid, .focusToolbar]
+        case .unchanged:
+            return []
+        }
+    }
+
+}
+
 enum LiveTvGuideFocusNavigator {
     static func move(
         layout: LiveTvGridLayout,
