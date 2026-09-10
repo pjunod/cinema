@@ -1100,7 +1100,7 @@ test_anchor = "test_apple_counter_the_target_already_ships_fails_against_the_tar
 # protected channel before asserting its disabled state so virtualization does
 # not turn screen height into part of the DRM refusal contract.
 id = "android.live-tv-protected-row-viewport-independent"
-commits = ["859f1cbf", "2c83d0fa", "d8737f2f", "7ef7be8f", "afe056ef"]
+commits = ["859f1cbf", "2c83d0fa", "d8737f2f", "7ef7be8f", "afe056ef", "8fd45130"]
 source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvScreen.kt"
 source_anchor = "testTag(\"live-tv-channel-search\")"
 test = "clients/android/app/src/androidTest/java/tv/plurx/app/livetv/LiveTvUiTest.kt"
