@@ -244,6 +244,7 @@ final class LiveTvTests: XCTestCase {
         let config = try fields(.configure(ipv4: "192.168.4.100", owner: "new-owner", sessions: 2, height: 720))
         XCTAssertNil(config["live_tv_enabled"])
         XCTAssertEqual(config["live_tv_config_generation"] as? Int, 12)
+        XCTAssertEqual(config["live_tv_max_output_height"] as? Int, 0)
         let enable = try fields(.enabled(true))
         XCTAssertEqual(Set(enable.keys), ["live_tv_enabled", "live_tv_config_generation"])
         let recovery = try fields(.fencedOwner(owner: "original-owner", cutoff: 8))

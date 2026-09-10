@@ -51,19 +51,19 @@ fun LiveTvDeveloperScreen(origin: String, onBack: () -> Unit) {
     var ipv4 by remember { mutableStateOf("") }
     var owner by remember { mutableStateOf("") }
     var sessions by remember { mutableStateOf(2) }
-    var height by remember { mutableStateOf(720) }
+    var height by remember { mutableStateOf(0) }
     var attested by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf("Administrator access is required.") }
     val dirty = saved?.let { ipv4 != it.live_tv_device_ipv4 || owner != it.live_tv_owner_node_id ||
-        sessions != it.live_tv_max_sessions || height != it.live_tv_output_height } ?: false
+        sessions != it.live_tv_max_sessions || height != it.live_tv_max_output_height } ?: false
 
     fun apply(settings: LiveTvSettings) {
         saved = settings
         ipv4 = settings.live_tv_device_ipv4
         owner = settings.live_tv_owner_node_id
         sessions = settings.live_tv_max_sessions
-        height = settings.live_tv_output_height
+        height = settings.live_tv_max_output_height
         attested = false
         readiness = null
     }
@@ -132,7 +132,7 @@ fun LiveTvDeveloperScreen(origin: String, onBack: () -> Unit) {
         }
         Text("HDHomeRun Live TV · runtime enablement", style = MaterialTheme.typography.titleLarge)
         Text("No special build is needed. Finish the tuner channel scan and reserve a stable private IPv4 address. Choose one reachable, committed voter as tuner owner; keep every serving node on a compatible plurx version.")
-        Text("The owner needs tuner network access, writable scratch space, and FFmpeg H.264/AAC encoding. Each viewer uses one physical tuner and one encoder slot. Start with 720p and two sessions.")
+        Text("The owner needs tuner network access and writable scratch space. Compatible broadcasts are copied without an encoder; conversion routes additionally need a working FFmpeg encoder and tone mapping when HDR must become SDR.")
         Text("ATSC 3.0 may need HEVC and AC-4 decoders your FFmpeg lacks. DRM, DVR, rewind, captions and guide scheduling are unsupported. Readiness tests the output graph, not every broadcast codec.")
         saved?.let { settings ->
             Text(if (settings.live_tv_enabled) "Live TV is enabled" else "Live TV is disabled", style = MaterialTheme.typography.titleMedium)
@@ -142,9 +142,10 @@ fun LiveTvDeveloperScreen(origin: String, onBack: () -> Unit) {
             Text("Copy the node ID from the server's Settings → Cluster page.")
             if (editable) {
                 ChoicePicker("Maximum sessions", sessions, listOf(1, 2, 3, 4), { it.toString() }, { sessions = it })
-                ChoicePicker("Output height", height, listOf(720, 1080), { "${it}p" }, { height = it })
-            } else Text("Maximum sessions: $sessions · output: ${height}p")
-            Button(enabled = editable && dirty, onClick = { write(LiveTvSettingsChange.Configure(ipv4.trim(), owner.trim(), sessions, height)) }) {
+                ChoicePicker("Maximum quality", height, listOf(0, 480, 720, 1080, 2160),
+                    { if (it == 0) "Original / Auto" else "${it}p ceiling" }, { height = it })
+            } else Text("Maximum sessions: $sessions · quality: ${if (height == 0) "Original / Auto" else "${height}p ceiling"}")
+            Button(enabled = editable && dirty, onClick = { write(LiveTvSettingsChange.Configure(ipv4.trim(), owner.trim(), sessions, 720, height)) }) {
                 Text("Save configuration while disabled")
             }
             Button(enabled = !busy && !dirty, onClick = {
@@ -175,7 +176,8 @@ fun LiveTvDeveloperScreen(origin: String, onBack: () -> Unit) {
                     write(LiveTvSettingsChange.FencedOwner(settings.live_tv_transition_from_owner_node_id, settings.live_tv_transition_drain_before))
                 }) { Text("Record physical fencing of this exact previous owner") }
                 Button(enabled = editable && !dirty, onClick = {
-                    write(LiveTvSettingsChange.Configure(settings.live_tv_device_ipv4, settings.live_tv_owner_node_id, settings.live_tv_max_sessions, settings.live_tv_output_height))
+                    write(LiveTvSettingsChange.Configure(settings.live_tv_device_ipv4, settings.live_tv_owner_node_id,
+                        settings.live_tv_max_sessions, settings.live_tv_output_height, settings.live_tv_max_output_height))
                 }) { Text("Retry authenticated cleanup while disabled") }
             }
         }

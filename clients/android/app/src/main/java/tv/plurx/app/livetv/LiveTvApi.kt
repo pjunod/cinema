@@ -1,5 +1,6 @@
 package tv.plurx.app.livetv
 
+import android.content.Context
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -13,6 +14,7 @@ import kotlinx.serialization.json.JsonDecoder
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonEncoder
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
@@ -29,6 +31,8 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import tv.plurx.app.data.Net
 import tv.plurx.app.data.Session
 import tv.plurx.app.data.DeveloperReadiness
+import tv.plurx.app.data.Caps
+import tv.plurx.app.data.DeviceCaps
 import java.util.concurrent.TimeUnit
 
 internal enum class TvLiveLayout(val storageValue: String, val label: String) {
@@ -166,8 +170,80 @@ data class LiveTvChannel(
 @Serializable
 data class LiveTvLineup(val channels: List<LiveTvChannel>, val freshness: String = "fresh")
 
+@Serializable data class LiveTvRational(val num: Int, val den: Int)
+@Serializable data class LiveTvHlsFormat(val container: String, val video: String, val audio: String)
+@Serializable data class LiveTvVideoLimit(
+    val codec: String, val profile: String? = null, val max_width: Int,
+    val max_height: Int, val max_frame_rate: LiveTvRational, val interlaced: Boolean = false,
+)
+@Serializable data class LiveTvAudioLimit(val codec: String, val max_channels: Int)
+@Serializable data class LiveTvCompatibility(
+    val failed_video: Boolean = false,
+    val failed_audio: Boolean = false,
+    val failed_container: Boolean = false,
+)
+@Serializable data class LiveTvPlaybackEnvelope(
+    val v: Int = 1,
+    val caps: DeviceCaps,
+    val hls_formats: List<LiveTvHlsFormat>,
+    val video_limits: List<LiveTvVideoLimit>,
+    val audio_limits: List<LiveTvAudioLimit>,
+    val max_height: Int? = null,
+    val max_bitrate_bps: Long? = null,
+    val compatibility: LiveTvCompatibility? = null,
+) {
+    companion object {
+        fun from(caps: DeviceCaps, compatibility: LiveTvCompatibility? = null): LiveTvPlaybackEnvelope {
+            val liveAudio = caps.audio.filter { it in setOf("aac", "ac3", "eac3") }
+            val formats = buildList {
+                add(LiveTvHlsFormat("mpegts", "h264", "aac"))
+                caps.video.forEach { video ->
+                    val container = if (video.codec == "hevc") "fmp4" else "mpegts"
+                    liveAudio.forEach { audio -> add(LiveTvHlsFormat(container, video.codec, audio)) }
+                }
+            }.distinct()
+            val limits = caps.video.flatMap { video ->
+                (video.profiles.map { it.lowercase() }.map { it as String? }.ifEmpty { listOf(null) }).map { profile ->
+                    LiveTvVideoLimit(video.codec, profile, 3840, video.max_height ?: 2160,
+                        LiveTvRational(60, 1), false)
+                }
+            }
+            return LiveTvPlaybackEnvelope(
+                caps = caps,
+                hls_formats = formats,
+                video_limits = limits,
+                audio_limits = liveAudio.map { LiveTvAudioLimit(it, if (it == "aac") 2 else 8) },
+                compatibility = compatibility,
+            )
+        }
+    }
+}
+
+@Serializable data class LiveTvDeliveryOutput(
+    val container: String,
+    val video_codec: String,
+    val audio_codec: String,
+    val width: Int,
+    val height: Int,
+    val bit_depth: Int? = null,
+    val frame_rate: LiveTvRational? = null,
+    val hdr: String? = null,
+    val audio_channels: Int,
+)
+@Serializable data class LiveTvDelivery(
+    val output: LiveTvDeliveryOutput,
+    val video_action: String,
+    val audio_action: String,
+    val packaging: String,
+)
+
 @Serializable
-data class LiveTvStarted(val session_id: String, val channel: LiveTvChannel, val live: Boolean = false)
+data class LiveTvStarted(
+    val session_id: String,
+    val channel: LiveTvChannel,
+    val live: Boolean = false,
+    val delivery: LiveTvDelivery? = null,
+)
 
 @Serializable
 data class LiveTvSignal(
@@ -184,6 +260,7 @@ data class LiveTvStatus(
     val encoder: String? = null,
     val output_height: Int? = null,
     val signal: LiveTvSignal? = null,
+    val delivery: LiveTvDelivery? = null,
 )
 
 @Serializable
@@ -194,6 +271,7 @@ data class LiveTvSettings(
     val live_tv_owner_node_id: String = "",
     val live_tv_max_sessions: Int = 2,
     val live_tv_output_height: Int = 720,
+    val live_tv_max_output_height: Int = 0,
     val live_tv_config_generation: Long = 0,
     val live_tv_transition_from_owner_node_id: String = "",
     val live_tv_transition_drain_before: Long = 0,
@@ -220,12 +298,16 @@ internal fun liveTvMessage(code: String): String = when (code) {
     "settings_conflict" -> "Settings changed on another client. Reload before editing."
     "channel_not_found" -> "This channel is no longer in the saved lineup. Reload channels."
     "startup_timeout" -> "The tuner did not produce playable media in time."
+    "source_format_changed" -> "The broadcast changed format. plurx will select a fresh compatible route."
     "invalid_settings" -> "Check the private IPv4 address, voter node ID, session budget and output height."
     else -> "The live stream could not continue. Stop and select a channel again."
 }
 
 sealed interface LiveTvSettingsChange {
-    data class Configure(val ipv4: String, val owner: String, val sessions: Int, val height: Int) : LiveTvSettingsChange
+    data class Configure(
+        val ipv4: String, val owner: String, val sessions: Int, val height: Int,
+        val maxHeight: Int = 0,
+    ) : LiveTvSettingsChange
     data class Enabled(val enabled: Boolean) : LiveTvSettingsChange
     data class LibraryChannelsEnabled(val enabled: Boolean) : LiveTvSettingsChange
     data class FencedOwner(val owner: String, val cutoff: Long) : LiveTvSettingsChange
@@ -238,6 +320,7 @@ sealed interface LiveTvSettingsChange {
                 put("live_tv_owner_node_id", change.owner)
                 put("live_tv_max_sessions", change.sessions)
                 put("live_tv_output_height", change.height)
+                put("live_tv_max_output_height", change.maxHeight)
             }
             is Enabled -> put("live_tv_enabled", change.enabled)
             is LibraryChannelsEnabled -> put("library_channels_enabled", change.enabled)
@@ -256,7 +339,7 @@ interface LiveTvRequests {
 }
 
 /** Immutable profile-bound API. Narrow capabilities never inherit Session.token. */
-class LiveTvApi(origin: String, private val token: String) : LiveTvRequests {
+class LiveTvApi(origin: String, private val token: String, context: Context? = null) : LiveTvRequests {
     private companion object {
         /** Every lineup-shaped read. A device document is far smaller. */
         const val MAX_BODY_BYTES: Long = 1_048_576
@@ -271,6 +354,8 @@ class LiveTvApi(origin: String, private val token: String) : LiveTvRequests {
     }
 
     private val base = (Session.canonicalOrigin(origin) ?: throw LiveTvFailure("invalid_settings")).toHttpUrl()
+    private val capabilityContext = context?.applicationContext
+    @Volatile private var nextCompatibility: LiveTvCompatibility? = null
     private val client: OkHttpClient = Net.capabilityClient.newBuilder()
         .connectTimeout(8, TimeUnit.SECONDS).readTimeout(45, TimeUnit.SECONDS)
         .callTimeout(45, TimeUnit.SECONDS).build()
@@ -330,8 +415,22 @@ class LiveTvApi(origin: String, private val token: String) : LiveTvRequests {
     }
 
     suspend fun lineup(): LiveTvLineup = Net.json.decodeFromString(request(url("live-tv", "channels"), authenticated = true))
+    fun retryCompatibility(compatibility: LiveTvCompatibility) {
+        nextCompatibility = compatibility
+    }
+
     override suspend fun start(channel: String): LiveTvStarted = try {
-        Net.json.decodeFromString(request(url("live-tv", "channels", channel, "sessions"), "POST", authenticated = true, starting = true))
+        val body = capabilityContext?.let { current ->
+            val compatibility = nextCompatibility
+            nextCompatibility = null
+            buildJsonObject {
+                put("playback", Net.json.encodeToJsonElement(
+                    LiveTvPlaybackEnvelope.from(Caps.snapshot(current).document, compatibility)
+                ))
+            }
+        }
+        Net.json.decodeFromString(request(url("live-tv", "channels", channel, "sessions"), "POST",
+            authenticated = true, body = body, starting = true))
     } catch (error: LiveTvFailure) { throw error }
     catch (cancelled: CancellationException) { throw cancelled }
     catch (_: Exception) { throw LiveTvFailure("start_outcome_unknown") }
