@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["c79abcdd"]
+commits = ["c79abcdd", "b718bf58"]
 points = ["playback.pipeline", "library.channels"]
 checks = ["rust-gate", "rust-gate-ci"]
-reason = "Production Library-channel session s-99a265 on nynuc reproduced a legal seeked ffmpeg init with two hvc1 entries in one stsd. `multi_entry_hevc_is_one_shared_structural_refusal_not_invalid_configuration` constructs that shape and requires promotion and validation to return the same Unsupported fact. `shared_structural_hevc_refusal_uses_the_bounded_legacy_retry` requires that shared fact to remain Unsupported so the existing single prepublication legacy-HLS retry can run, while a distinct incomplete VPS/SPS/PPS validation result remains InvalidHevcConfiguration and terminal."
+reason = "Production Library-channel session s-99a265 on nynuc reproduced a legal seeked ffmpeg init with two hvc1 entries in one stsd. `complete_multi_entry_hevc_is_a_typed_validated_structural_refusal` and `incomplete_multi_entry_hevc_configuration_remains_terminal` require independent validation of every description before fallback. `validated_multi_entry_hevc_feed_requests_fallback_before_publication` drives the parsed bytes through the copy reader and proves it publishes no init or playlist. `copy_retry_is_unsupported_only_and_successor_classifier_is_recipe_owned` proves the actor admits one legacy retry and cannot recurse."
