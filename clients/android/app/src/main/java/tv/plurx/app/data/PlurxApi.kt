@@ -33,6 +33,49 @@ interface PlurxApi {
     @GET("libraries")
     suspend fun libraries(): List<Library>
 
+    @GET("library-channels/")
+    suspend fun libraryChannels(@Query("management") management: Boolean = false): List<LibraryChannel>
+
+    @GET("library-channels/{id}")
+    suspend fun libraryChannel(@Path("id") id: String): LibraryChannel
+
+    @GET("library-channels/guide")
+    suspend fun libraryChannelGuide(
+        @Query("channel_ids") channelIds: String,
+        @Query("start_ms") startMs: Long,
+        @Query("end_ms") endMs: Long,
+    ): List<LibraryChannelProgramme>
+
+    @POST("library-channels/preview")
+    suspend fun previewLibraryChannel(@Body body: LibraryChannelPreviewRequest): LibraryChannelPreview
+
+    @POST("library-channels/")
+    suspend fun createLibraryChannel(@Body body: LibraryChannelDefinition): LibraryChannelMutation
+
+    @PUT("library-channels/{id}")
+    suspend fun updateLibraryChannel(@Path("id") id: String, @Body body: LibraryChannelUpdate): LibraryChannelMutation
+
+    @DELETE("library-channels/{id}")
+    suspend fun deleteLibraryChannel(@Path("id") id: String, @Query("expected_revision") revision: Long)
+
+    @PUT("library-channels/{id}/favourite")
+    suspend fun setLibraryChannelFavourite(@Path("id") id: String, @Body body: LibraryChannelFavourite)
+
+    @POST("library-channels/{id}/rebuild")
+    suspend fun rebuildLibraryChannel(@Path("id") id: String, @Body body: LibraryChannelRebuild): LibraryChannelBuild
+
+    @POST("library-channels/{id}/resolve")
+    suspend fun resolveLibraryChannel(@Path("id") id: String): LibraryChannelResolved
+
+    @POST("library-channels/{id}/sessions")
+    suspend fun createLibraryChannelSession(
+        @Path("id") id: String,
+        @Body body: LibraryChannelSessionRequest,
+    ): LibraryChannelSession
+
+    @GET("developer/readiness")
+    suspend fun developerReadiness(): DeveloperReadiness
+
     @GET("libraries/{id}/items")
     suspend fun libraryItems(
         @Path("id") id: Long,

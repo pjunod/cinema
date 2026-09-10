@@ -45,6 +45,8 @@ import tv.plurx.app.ui.theme.PlurxTheme
 import tv.plurx.app.livetv.LiveTvPlayer
 import tv.plurx.app.livetv.LiveTvScreen
 import tv.plurx.app.livetv.LiveTvDeveloperScreen
+import tv.plurx.app.librarychannels.LibraryChannelPlayer
+import tv.plurx.app.librarychannels.LibraryChannelsScreen
 import androidx.compose.ui.platform.LocalContext
 
 class MainActivity : ComponentActivity() {
@@ -69,6 +71,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun AppRoot(vm: AppViewModel) {
     val liveTv = LiveTvPlayer.get(LocalContext.current)
+    val libraryChannels = LibraryChannelPlayer.get(LocalContext.current)
     val phase by vm.phase.collectAsStateWithLifecycle()
     val busy by vm.busy.collectAsStateWithLifecycle()
     val authError by vm.authError.collectAsStateWithLifecycle()
@@ -76,7 +79,10 @@ private fun AppRoot(vm: AppViewModel) {
     LifecycleEventEffect(Lifecycle.Event.ON_START) { vm.onForeground() }
     LaunchedEffect(phase) {
         if (phase == Phase.Ready) vm.onForeground()
-        else liveTv.stop(clearProfile = true)
+        else {
+            liveTv.stop(clearProfile = true)
+            libraryChannels.stop(clearProfile = true)
+        }
     }
 
     when (phase) {
@@ -102,6 +108,7 @@ private fun MainNav(vm: AppViewModel) {
                 onOpenDownloads = { nav.navigate("downloads") },
                 onOpenSettings = { nav.navigate("settings") },
                 onOpenLiveTv = { nav.navigate("live-tv") },
+                onOpenLibraryChannels = { nav.navigate("library-channels") },
             )
         }
         composable(
@@ -169,6 +176,13 @@ private fun MainNav(vm: AppViewModel) {
         }
         composable("live-tv") {
             LiveTvScreen(origin = vm.origin, onBack = { nav.popBackStack() })
+        }
+        composable("library-channels") {
+            LibraryChannelsScreen(
+                vm = vm,
+                onOpenItem = { id -> nav.navigate("detail/$id") },
+                onBack = { nav.popBackStack() },
+            )
         }
         composable("developer") {
             LiveTvDeveloperScreen(origin = vm.origin, onBack = { nav.popBackStack() })

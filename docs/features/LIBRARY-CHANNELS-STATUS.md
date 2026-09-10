@@ -18,7 +18,7 @@ proved, and what remains?*
 | M2 API and playback purpose | built; integration compile passed | bounded authenticated CRUD/preview/guide/resolve routes, pinned-occurrence finite-HLS starts, durable purpose binding, and following-mode start/history isolation |
 | M3 web | built; integration compile passed | responsive browse/guide, three-step resumable editor, preview and management actions, fenced following playback, watch-from-start/return, and advisory Developer enablement |
 | M4 Apple | built; iOS and tvOS compile passed | native now/next guide and adaptive phone/tablet/television layout; iPhone/iPad preview and authoring; fenced finite-HLS following with pause-boundary rejoin and ordinary watch-from-start; build 129 |
-| M5 Android | queued | phone/tablet authoring plus Google TV layouts and following playback |
+| M5 Android | built; Android compile passed | native now/next guide; phone/tablet authoring; adaptive Google TV layout; fenced finite-HLS following with pause-boundary rejoin and ordinary watch-from-start; versionCode 79 |
 | M6 promotion | queued | documentation, one adversarial review, review fixes, fast lane, and merge |
 
 ## Current decision — the merged Live TV guide is the UI seam

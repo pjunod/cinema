@@ -20,8 +20,11 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `78` — native viewer parity across phone, foldable,
-> and TV. Build 78 labels Live TV channel format and reports live tuner signal
+> Status: **v0.3.0**, build `79` — native viewer parity across phone, foldable,
+> and TV. Build 79 adds Library channel browsing, a now/next guide, phone and
+> tablet authoring, Google TV layouts, and fenced finite-HLS following. Readiness
+> remains advisory in Settings → Developer and the explicit enable is never
+> overridden. Build 78 labels Live TV channel format and reports live tuner signal
 > metrics while a channel plays. Build 77 enables prepared replacement by default while keeping its
 > readiness requirements advisory. Build 76 completes bounded commit → end settlement for prepared
 > replacements and retains the predecessor until final settlement. Build 75
