@@ -17,6 +17,7 @@ the settings navigation and Developer-page redesign.
 | Navigation and control ownership | complete | Live TV owns tuner and guide cards · Playback owns quality switching · Cluster owns transport guidance · Developer owns compatibility and experiments |
 | Readiness layout and responsive treatment | complete | Shared nonshrinking rows · neutral static throughput support · closed native disclosures · deliberate stacking below 360 CSS px |
 | Interaction and stale-response correctness | complete | Independent save payloads · returned-value badges · Live TV route fencing · card-local repaint and sibling-draft preservation |
+| Portable UI structure golden | complete | 78 deterministic captures · 7,536 structural facts · settings and Developer drift accepted across all three layouts at desktop and mobile widths · no console or page errors |
 | Current-reference documentation | complete | `FEATURES.md` names each control owner and advisory semantics · `API.md` names all three readiness consumers and the moved fencing action |
 | Actual-app visual evidence | complete | Isolated daemon at `127.0.0.1:32419` · 1280, 880, 390, and 320 CSS px · light and dark · 640 CSS px as the 200% responsive equivalent · expanded readiness on desktop and phone |
 | Adversarial review | complete | The one permitted review reported five findings; all five are addressed on the draft branch without a re-review |
