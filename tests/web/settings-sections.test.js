@@ -174,6 +174,7 @@ test("a card's Save wakes on a change and sleeps again once saved", () => {
   }
   const save = element("button", ["primary"]), state = element("span", ["setstate"]);
   const card = {
+    dataset: {},
     classList: { add: (c) => card.classes.add(c), remove: (c) => card.classes.delete(c), contains: (c) => card.classes.has(c) },
     classes: new Set(["card", "setcard"]),
     querySelector: (sel) => (sel.includes("button") ? save : state),
@@ -182,6 +183,7 @@ test("a card's Save wakes on a change and sleeps again once saved", () => {
   const input = { closest: card.closest };
   const api = new Function(`${shippedSource("markSetCard")}\n${shippedSource("setCardSaved")}\nreturn {markSetCard,setCardSaved};`)();
   api.markSetCard(input);
+  assert.equal(card.dataset.revision, "1");
   assert.equal(save.disabled, false);
   assert.equal(state.textContent, "Unsaved changes");
   assert.ok(card.classes.has("dirty"));
@@ -278,6 +280,44 @@ test("quality switching renders the server's saved value", async () => {
   assert.equal(elements.pqhstate.textContent, "Disabled", "the badge agrees with the checkbox");
 });
 
+test("an older quality save never overwrites a newer draft", async () => {
+  let finish;
+  const response = new Promise((resolve) => { finish = resolve; });
+  const elements = {
+    pqh: { checked: true },
+    pqherr: { textContent: "" },
+    pqhstate: { textContent: "Unsaved changes" },
+  };
+  const card = { dataset: { revision: "1" }, isConnected: true };
+  const button = { disabled: false, closest: () => card };
+  const notices = [];
+  let savedCalls = 0, cached;
+  const save = new Function(
+    "api", "document", "cacheSettings", "toast", "setCardSaved",
+    `${shippedSource("savePreparedQuality")}\nreturn savePreparedQuality;`,
+  )(
+    async () => response,
+    { getElementById: (id) => elements[id] },
+    (value) => { cached = value; return value; },
+    (message) => notices.push(message),
+    () => { savedCalls += 1; },
+  );
+
+  const pending = save(button);
+  elements.pqh.checked = false;
+  card.dataset.revision = "2";
+  button.disabled = false;
+  finish({ prepared_quality_handoff: true });
+  assert.equal(await pending, true);
+
+  assert.deepEqual(cached, { prepared_quality_handoff: true }, "the returned server snapshot still refreshes the cache");
+  assert.equal(elements.pqh.checked, false, "the later visible draft wins over the older response");
+  assert.equal(elements.pqhstate.textContent, "Unsaved changes");
+  assert.equal(button.disabled, false, "the newer draft remains saveable");
+  assert.equal(savedCalls, 0, "the card is not falsely marked saved");
+  assert.deepEqual(notices, ["Earlier quality change saved; newer edit remains unsaved"]);
+});
+
 test("everyday settings move out of Developer while experiments retain advisory evidence", () => {
   const panels = new Function(
     "setHead", "setCard", "cardHead", "togRow", "setCardFoot", "esc",
@@ -366,6 +406,7 @@ test("everyday settings move out of Developer while experiments retain advisory 
   assert.match(live, /Save the configuration, check readiness, then enable/);
   assert.match(live, /Readiness is advice, not a gate/);
   assert.match(live, /Programme guide/);
+  assert.match(live, /Saved-configuration evidence/);
   assert.match(live, /api\.hdhomerun\.com/);
   assert.match(live, /never stores, logs or relays that credential/);
   assert.match(live, /FOOT:saveLiveTvGuide/);
@@ -378,6 +419,7 @@ test("the guide's readiness rows are advisory and never disable the save", () =>
   )(esc);
   const html = view({
     source: "xmltv",
+    guide_hours: 24,
     freshness: "unavailable",
     age_seconds: 0,
     matched_channels: 0,
@@ -392,6 +434,7 @@ test("the guide's readiness rows are advisory and never disable the save", () =>
   });
   assert.match(html, /Not met yet/);
   assert.match(html, /Met/);
+  assert.match(html, /Saved configuration checked:<\/b> XMLTV · 24 hour look-ahead/);
   assert.match(html, /None of this blocks the switch/);
   assert.match(html, /matched 0 of 12 lineup channels/);
   assert.match(html, /Last refresh failed/);
@@ -496,6 +539,71 @@ test("every asynchronous Live TV settings response is fenced to the Live TV rout
     assert.doesNotMatch(source, /settingsCurrent\(generation,"developer"\)/,
       `${name} cannot repaint Developer after navigation`);
   }
+});
+
+test("an off-route Live TV write refreshes the shared settings cache without repainting", async () => {
+  const result = { live_tv_config_generation: 9, live_tv_guide_source: "xmltv" };
+  let cached, toasted = false;
+  const write = new Function(
+    "ME", "PAGE_RENDER_GENERATION", "api", "settingsCurrent", "cacheSettings", "toast", "document", "AbortSignal",
+    `${shippedSource("liveTvSettingsWrite")}\nreturn liveTvSettingsWrite;`,
+  )(
+    { is_admin: true }, 4, async () => result, () => false,
+    (value) => { cached = value; return value; }, () => { toasted = true; },
+    { getElementById: () => null }, AbortSignal,
+  );
+
+  assert.equal(await write({ live_tv_guide_source: "xmltv" }, null, "ltgerr"), result);
+  assert.equal(cached, result, "a later Settings section must reuse the new generation, not the pre-save cache");
+  assert.equal(toasted, false, "an off-route response cannot paint even a toast onto the destination section");
+});
+
+test("a rejected guide save reports into the replacement card", async () => {
+  let rejectWrite;
+  const response = new Promise((_, reject) => { rejectWrite = reject; });
+  const oldError = { textContent: "", isConnected: true };
+  const currentError = { textContent: "", isConnected: true };
+  let errorNode = oldError;
+  const button = { disabled: false, isConnected: false };
+  const write = new Function(
+    "ME", "PAGE_RENDER_GENERATION", "api", "settingsCurrent", "cacheSettings", "toast", "document", "AbortSignal",
+    `${shippedSource("liveTvSettingsWrite")}\nreturn liveTvSettingsWrite;`,
+  )(
+    { is_admin: true }, 8, async () => response, () => true,
+    (value) => value, () => {}, { getElementById: () => errorNode }, AbortSignal,
+  );
+
+  const pending = write({ live_tv_guide_source: "xmltv" }, button, "ltgerr");
+  oldError.isConnected = false;
+  errorNode = currentError;
+  rejectWrite(new Error("saved source was refused"));
+  assert.equal(await pending, false);
+  assert.equal(oldError.textContent, "", "the detached source card is not the error destination");
+  assert.equal(currentError.textContent, "saved source was refused");
+});
+
+test("a rejected guide refresh reports into the replacement card", async () => {
+  let rejectRefresh;
+  const response = new Promise((_, reject) => { rejectRefresh = reject; });
+  const oldError = { textContent: "", isConnected: true };
+  const currentError = { textContent: "", isConnected: true };
+  let errorNode = oldError;
+  const button = { disabled: false, isConnected: false };
+  const refresh = new Function(
+    "PAGE_RENDER_GENERATION", "api", "settingsCurrent", "checkLiveTvGuide", "document", "AbortSignal",
+    `${shippedSource("refreshLiveTvGuide")}\nreturn refreshLiveTvGuide;`,
+  )(
+    11, async () => response, () => true, async () => {},
+    { getElementById: () => errorNode }, AbortSignal,
+  );
+
+  const pending = refresh(button);
+  oldError.isConnected = false;
+  errorNode = currentError;
+  rejectRefresh(new Error("guide host timed out"));
+  await pending;
+  assert.equal(oldError.textContent, "", "the detached source card is not the error destination");
+  assert.equal(currentError.textContent, "guide host timed out");
 });
 
 test("Verified decode states its cost, its prerequisites, and what this node measured", () => {

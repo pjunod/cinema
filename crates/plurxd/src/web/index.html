@@ -14157,6 +14157,7 @@ function setHead(title,summary,tools){
 function markSetCard(el){
   const card=el&&el.closest?el.closest(".setcard"):null;
   if(!card||card.classList.contains("local")) return;
+  card.dataset.revision=String(Number(card.dataset.revision||0)+1);
   card.classList.add("dirty");
   const save=card.querySelector(".setfoot button.primary"); if(save) save.disabled=false;
   const state=card.querySelector(".setfoot .setstate"); if(state) state.textContent="Unsaved changes";
@@ -15782,6 +15783,7 @@ function liveTvGuideCard(s){
       <div><label for="ltghours">Look ahead</label><select id="ltghours" onchange="liveTvGuideFieldDraft()">${[4,8,12,24,48,72].map(n=>`<option value="${n}"${n===Number(LIVE_TV_GUIDE_DRAFT.hours!==null?LIVE_TV_GUIDE_DRAFT.hours:s.live_tv_guide_hours)?' selected':''}>${n} hours</option>`).join("")}</select></div>
     </div>
     <h2 class="section">Guide status</h2>
+    <p class="hint"><b>Saved-configuration evidence.</b> These checks describe the source and look-ahead already stored by the server. An unsaved source or URL draft is not checked until you save it.</p>
     <div id="ltgready" aria-live="polite"><p class="muted">Checking…</p></div>
     <div class="err" id="ltgerr" role="alert"></div>
 
@@ -15812,13 +15814,15 @@ async function saveLiveTvGuide(button){
 }
 function liveTvGuideReadyView(r){
   // Advisory rendering: a red row is a sentence, never a disabled Save.
+  const source=r.source==="xmltv"?"XMLTV":r.source==="hdhomerun"?"HDHomeRun guide":"Off";
+  const saved=`<p class="hint"><b>Saved configuration checked:</b> ${source} · ${Number(r.guide_hours)} hour look-ahead.</p>`;
   const rows=(r.checks||[]).map(c=>`<div class="tog"><span>${c.ready?"Met":"Not met yet"}<small>${esc(c.message)}</small></span></div>`).join("");
   const fresh=r.freshness==="fresh"?`<span class="pill ok">fresh · ${Math.round(r.age_seconds/60)} min old</span>`
     :r.freshness==="stale"?`<span class="pill warn">stale · ${Math.round(r.age_seconds/60)} min old</span>`
     :`<span class="pill">no data cached</span>`;
   const counts=r.source==="off"?"":`<p>${fresh} · matched ${r.matched_channels} of ${r.lineup_channels} lineup channels · ${r.programmes} programmes cached · refreshes every ${Math.round(r.refresh_interval_seconds/60)} minutes.</p>`;
   const error=r.refresh_error?`<p class="hint"><b>Last refresh failed:</b> ${esc(r.refresh_error)}</p>`:"";
-  return `${rows}${counts}${error}<div class="hint"><b>None of this blocks the switch.</b> Every row above is advice. Save any source you like and read the result here; the guide takes no tuner, so a wrong setting leaves channel rows blank and nothing else.</div>`;
+  return `${saved}${rows}${counts}${error}<div class="hint"><b>None of this blocks the switch.</b> Every row above is advice. Save any source you like and read the result here; the guide takes no tuner, so a wrong setting leaves channel rows blank and nothing else.</div>`;
 }
 async function checkLiveTvGuide(button){
   const generation=PAGE_RENDER_GENERATION;
@@ -15838,7 +15842,10 @@ async function refreshLiveTvGuide(button){
   try{
     await api("/live-tv/guide/refresh",{method:"POST",signal:AbortSignal.timeout(45000)});
     if(settingsCurrent(generation,"livetv")) await checkLiveTvGuide(null);
-  }catch(e){ if(settingsCurrent(generation,"livetv")&&error) error.textContent=e.message; }
+  }catch(e){
+    const currentError=document.getElementById("ltgerr");
+    if(settingsCurrent(generation,"livetv")&&currentError&&currentError.isConnected) currentError.textContent=e.message;
+  }
   finally{ if(button.isConnected) button.disabled=false; }
 }
 function liveTvPanel(settings){
@@ -15877,16 +15884,25 @@ async function liveTvSettingsWrite(body,button,errorId){
   // The caller names its own error slot: a failed guide save was reporting
   // itself under the tuner card, which is a different card about a different
   // setting.
-  const error=document.getElementById(errorId||"lterr"); if(error) error.textContent="";
+  const slotId=errorId||"lterr";
+  const error=document.getElementById(slotId); if(error) error.textContent="";
   try{
     const result=await api("/settings",{method:"PUT",body,signal:AbortSignal.timeout(45000)});
-    if(!settingsCurrent(generation,"livetv")) return true;
-    cacheSettings(result); toast("Live TV settings saved");
+    // Settings section switches reuse the aggregate cache. Persist the server
+    // snapshot even when this response must not touch the destination DOM, or
+    // returning to Live TV can show an old generation and conflict on save.
+    cacheSettings(result);
+    if(!settingsCurrent(generation,"livetv")) return result;
+    toast("Live TV settings saved");
     return result;
   }catch(e){
     if(settingsCurrent(generation,"livetv")){
-      if(error) error.textContent=e.code==="settings_conflict"?"The configuration changed elsewhere. Reload this section before trying again.":e.message;
-      if(button) button.disabled=false;
+      // A guide source edit replaces its card while this request is pending.
+      // Resolve the owning slot now instead of writing into the detached node
+      // captured before the await.
+      const currentError=document.getElementById(slotId);
+      if(currentError&&currentError.isConnected) currentError.textContent=e.code==="settings_conflict"?"The configuration changed elsewhere. Reload this section before trying again.":e.message;
+      if(button&&button.isConnected) button.disabled=false;
     }
     return false;
   }
@@ -17443,10 +17459,22 @@ async function saveDeveloper(btn){
 }
 async function savePreparedQuality(btn){
   const err=document.getElementById("pqherr"); err.textContent="";
+  const card=btn&&btn.closest?btn.closest(".setcard"):null;
+  const revision=Number(card&&card.dataset?card.dataset.revision||0:0);
+  const requested=document.getElementById("pqh").checked;
   if(btn) btn.disabled=true;
   try{
     const saved=cacheSettings(await api("/settings",{method:"PUT",body:{
-      prepared_quality_handoff:document.getElementById("pqh").checked}}));
+      prepared_quality_handoff:requested}}));
+    // The input remains editable while the request is in flight. A later
+    // change is a new draft: keep it visible and dirty instead of overwriting
+    // it with the older response and claiming the newer choice was saved.
+    const currentRevision=Number(card&&card.dataset?card.dataset.revision||0:0);
+    if(card&&!card.isConnected) return true;
+    if(card&&card.isConnected&&currentRevision!==revision){
+      toast("Earlier quality change saved; newer edit remains unsaved");
+      return true;
+    }
     const toggle=document.getElementById("pqh");
     if(toggle) toggle.checked=!!saved.prepared_quality_handoff;
     const state=document.getElementById("pqhstate");

@@ -1,6 +1,6 @@
 # Settings navigation and Developer — implementation status
 
-**Status:** implementation complete; review pending · **Owner:** Codex implementation task · **Started:**
+**Status:** review addressed; fast lane pending · **Owner:** Codex implementation task · **Started:**
 2026-09-09
 
 Companion to [FEATURES.md](../FEATURES.md) (current settings behavior),
@@ -18,8 +18,8 @@ the settings navigation and Developer-page redesign.
 | Readiness layout and responsive treatment | complete | Shared nonshrinking rows · neutral static throughput support · closed native disclosures · deliberate stacking below 360 CSS px |
 | Interaction and stale-response correctness | complete | Independent save payloads · returned-value badges · Live TV route fencing · card-local repaint and sibling-draft preservation |
 | Current-reference documentation | complete | `FEATURES.md` names each control owner and advisory semantics · `API.md` names all three readiness consumers and the moved fencing action |
-| Actual-app visual evidence | complete | Isolated daemon at `127.0.0.1:32419` · 1280, 880, 390, and 320 CSS px · light and dark · 640 CSS px as the 200% responsive equivalent |
-| Adversarial review | queued | Exactly one review will run only after the branch is ready to merge |
+| Actual-app visual evidence | complete | Isolated daemon at `127.0.0.1:32419` · 1280, 880, 390, and 320 CSS px · light and dark · 640 CSS px as the 200% responsive equivalent · expanded readiness on desktop and phone |
+| Adversarial review | complete | The one permitted review reported five findings; all five are addressed on the draft branch without a re-review |
 | Fast lane | queued | Runs only after review findings are addressed and the PR is marked ready |
 | Merge to `main` | queued | Requires a green Main promotion gate on the current head |
 
@@ -40,6 +40,7 @@ data or existing plurx installation was touched.
 | Developer, responsive | [880 px](../img/settings-developer-880-dark.png) · [390 px](../img/settings-developer-390-dark.png) · [320 px](../img/settings-developer-320-dark.png) |
 | Developer, zoom pressure | [640 CSS px](../img/settings-developer-200-percent-equivalent.png), the layout-equivalent viewport for a 1280 px window at 200% browser zoom |
 | Control ownership | [Playback quality](../img/settings-playback-1280-dark.png) · [Live TV tuner and guide](../img/settings-live-tv-1280-dark.png) · [Cluster recovery](../img/settings-cluster-recovery-1280-dark.png) |
+| Expanded readiness | [1280 px](../img/settings-playback-readiness-expanded-1280-dark.png) · [390 px](../img/settings-playback-readiness-expanded-390-dark.png), including long evidence and status pills |
 
 Manual actual-app exercises also confirmed that:
 
@@ -54,6 +55,20 @@ The in-app browser harness cannot set browser chrome zoom directly. Its 640
 CSS px viewport exercises the same responsive width as a 1280 px window at
 200%; the evidence names this limitation instead of claiming a native zoom
 gesture was performed.
+
+## Sole adversarial review
+
+The draft pull request received exactly one adversarial agent review. The
+author addressed every finding directly; no second review or approval pass was
+requested.
+
+| Finding | Disposition |
+|---|---|
+| Off-route Live TV writes left the shared Settings cache stale | Cache the returned snapshot before suppressing route-local DOM work |
+| Guide save and refresh failures could target a detached error node | Re-resolve the owning error slot after each awaited request |
+| An older quality-save response could erase a newer edit | Track each card's draft revision and leave newer edits visible and unsaved |
+| Guide readiness could be mistaken for validation of an unsaved draft | Label the persistent status and response with the saved source and look-ahead |
+| Visual evidence omitted expanded readiness | Add desktop and phone captures with long evidence and nonshrinking status pills |
 
 ## Decisions — preserve operator choice
 
