@@ -265,6 +265,8 @@ Two rounds of performance work, each with its plan, review, and response.
 
 | File | Answers | |
 |---|---|---|
+| [RIPWIRE.md](ci/RIPWIRE.md) | Explicit setup, bounded navigation, output meanings, and coverage limits. | live |
+| [RIPWIRE-STATUS.md](ci/RIPWIRE-STATUS.md) | Ripwire implementation, measured evidence, decisions, and promotion progress. | open |
 | [CI_TEST_OVERHAUL_PLAN.md](ci/CI_TEST_OVERHAUL_PLAN.md) | Fast failures, selective evidence, safe reuse. | open |
 | [CI_EXECUTION_ACCELERATION_PLAN.md](ci/CI_EXECUTION_ACCELERATION_PLAN.md) · [review](ci/CI_EXECUTION_ACCELERATION_REVIEW.md) | Persistent caches, native packaging, exact sharding. | open |
 | [AGENT-COMPILE-LOOP.md](ci/AGENT-COMPILE-LOOP.md) | A compiler for a checkout that has none. | live |

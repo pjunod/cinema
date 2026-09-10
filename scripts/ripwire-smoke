@@ -1,0 +1,129 @@
+#!/usr/bin/env python3
+"""Explicit real-release smoke and cache-freshness evidence; never a CI prerequisite."""
+import json
+from pathlib import Path
+import xml.etree.ElementTree as ET
+import runpy
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+
+ROOT = Path(__file__).resolve().parent.parent
+API = runpy.run_path(str(ROOT / 'scripts/ripwire'))
+
+
+def identities(output):
+    # This diagnostic deliberately reads the release's observed XML; it is
+    # not used by the adapter or exposed as an upstream compatibility API.
+    tree = ET.fromstring(output)
+    return sorted(tuple(row.get(key, '') for key in ('p', 'n', 'l', 'id'))
+                  for row in tree.iter() if row.get('p'))
+
+
+def main():
+    if len(sys.argv) != 1:
+        sys.exit('usage: scripts/ripwire-smoke')
+    lock = API['read_lock'](ROOT)
+    key = API['host_platform']()
+    state = ROOT / 'target/ripwire'
+    report = {'source_commit': API['git'](ROOT, 'rev-parse', 'HEAD'),
+              'tool_version': lock['version'], 'commands': [], 'freshness': []}
+    with API['tool_lock'](state):
+        binary, meta = API['installed'](ROOT, lock, key, check_cli=True)
+        report['binary_sha256'] = meta['binary_sha256']
+        evidence = state / 'evidence' / ('smoke-' + time.strftime('%Y%m%d-%H%M%S'))
+        evidence.mkdir(parents=True)
+        with tempfile.TemporaryDirectory(prefix='smoke-', dir=state) as scratch:
+            root = Path(scratch)
+            shutil.copytree(ROOT / 'tests/fixtures/ripwire', root, dirs_exist_ok=True)
+            (root / '.gitignore').write_text('ignored/\ntarget/\n')
+            (root / 'ignored').mkdir()
+            (root / 'ignored/skip.py').write_text('def ignored_sentinel(): pass\n')
+            for folder in ('docs/archive', 'tmp', 'docs/current'):
+                (root / folder).mkdir(parents=True, exist_ok=True)
+                (root / folder / 'guide.md').write_text('# Playback guide\nFixture playback decisions.\n')
+            def git(*args):
+                return API['git'](root, *args)
+            git('init', '-q')
+            git('config', 'user.name', 'Ripwire fixture')
+            git('config', 'user.email', 'fixture@example.invalid')
+            git('add', '.')
+            git('commit', '-qm', 'fixture baseline')
+            baseline = git('rev-parse', 'HEAD')
+            def run(mode, selector=None, cold=False, profile='default'):
+                values = [mode, '--profile', profile]
+                if selector:
+                    values += ['--base', selector] if mode == 'pr-context' else [selector]
+                if cold:
+                    values.append('--cold')
+                args = API['arguments'](values)
+                rec = {'dirty': bool(git('status', '--porcelain')), 'mode': mode}
+                flags = API['query_args'](root, args, lock, key, rec)
+                started = time.monotonic()
+                code, out, err = API['bounded']([str(binary), *flags], root, 60)
+                name = f'{len(report["commands"]):03}-{mode}'
+                (evidence / (name + '.stdout')).write_bytes(out)
+                (evidence / (name + '.stderr')).write_bytes(err)
+                report['commands'].append(dict(mode=mode, selector=selector, cold=cold,
+                                               profile=profile, exit=code, bytes=len(out),
+                                               elapsed_ms=round((time.monotonic()-started)*1000),
+                                               capture=name, **{k:v for k,v in rec.items() if k != 'mode'}))
+                (evidence / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
+                if code:
+                    raise RuntimeError(f'{mode} failed with {code}; see {evidence}')
+                return out
+            for mode, selector in [('map', None), ('find', 'accept frame'),
+                                   ('outline', 'lib/engine.rs:accept_frame'),
+                                   ('body', 'lib/engine.rs:accept_frame'),
+                                   ('callers', 'lib/engine.rs:accept_frame'),
+                                   ('impact', 'lib/engine.rs:accept_frame'),
+                                   ('pr-context', baseline), ('coverage', None)]:
+                run(mode, selector)
+            run('coverage', profile='history')
+            for symbol in ('player.js:requestPlay', 'player.html:requestEmbeddedPlay',
+                           'Player.kt:requestAndroidPlay', 'Player.swift:requestApplePlay',
+                           'validate.py:validate_frame', 'accept_frame'):
+                # Unsupported selectors may be refused. Record those observations.
+                try:
+                    run('callers', symbol)
+                except RuntimeError:
+                    pass
+            def compare(label):
+                for mode, selector in (('find', 'accept frame'), ('map', None)):
+                    warm = run(mode, selector)
+                    cold = run(mode, selector, cold=True)
+                    a, b = identities(warm), identities(cold)
+                    report['freshness'].append(dict(operation=label, mode=mode,
+                                                    same_identities=a == b,
+                                                    warm_identities=len(a), cold_identities=len(b)))
+                    (evidence / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
+                    if not a or a != b:
+                        raise RuntimeError(f'freshness disagreement after {label} ({mode})')
+            compare('initial')
+            source = root / 'lib/engine.rs'
+            source.write_text(source.read_text().replace('accept_frame', 'accept_frame_edited'))
+            compare('edit')
+            source.rename(root / 'lib/renamed.rs')
+            compare('rename')
+            (root / 'lib/renamed.rs').unlink()
+            compare('delete')
+            git('checkout', '-qb', 'mutated')
+            git('add', '.')
+            git('commit', '-qm', 'fixture mutation')
+            git('checkout', '-q', '--detach', baseline)
+            compare('branch-change')
+            for path in (root / 'target/ripwire/cache').rglob('*.ripwirecache'):
+                path.write_bytes(b'corrupt-cache')
+            compare('corrupt-cache')
+        (evidence / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
+        print(json.dumps({'evidence': str(evidence), 'freshness': report['freshness']}))
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except API['Refusal'] as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(exc.code)
