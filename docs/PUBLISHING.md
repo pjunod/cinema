@@ -118,10 +118,12 @@ debugging?" prompt is simply absent, which is recorded and survived rather than
 being allowed to decide the rest of the fleet's fate; a run that reached no
 device at all is never a success.
 
-`PLURX_RELEASE_ROOT`, `PLURX_DEVELOPMENT_TEAM`, `PLURX_ADB`, `PLURX_APKSIGNER`,
-and `ANDROID_HOME` override the defaults. The script must run on the Mac that
-owns the signing identity and the device pairings; it declines to run anywhere
-else.
+`PLURX_DEVELOPMENT_TEAM` is required whenever the Apple targets are selected;
+keep it in the local release environment because the repository deliberately
+stores no developer-team identifier. `PLURX_RELEASE_ROOT`, `PLURX_ADB`,
+`PLURX_APKSIGNER`, and `ANDROID_HOME` override their defaults. The script must
+run on the Mac that owns the signing identity and the device pairings; it
+declines to run anywhere else.
 
 ## 1. The demo server — solve this before you write any store copy
 
@@ -201,13 +203,19 @@ In the [Apple Developer portal](https://developer.apple.com/account):
 3. In App Store Connect, create the app record and add **both platforms**
    (iOS and tvOS) to it.
 
-Then set your team once, in `clients/apple/project.yml`:
+Keep the team ID outside the repository. The private Ansible controller supplies
+it from release configuration; the standalone path takes it from the local
+environment:
 
-```yaml
-settings:
-  base:
-    DEVELOPMENT_TEAM: "YHK542LK23"   # Paul Junod's paid developer team
+```bash
+export PLURX_DEVELOPMENT_TEAM="<your Apple Developer team ID>"
+scripts/ship-physical --apple
 ```
+
+For an interactive build, generate the project and select the team under
+**Signing & Capabilities** in Xcode. Regenerating the project intentionally
+discards that local choice rather than writing a personal identifier into
+tracked build configuration.
 
 ### 2.2 Version and build numbers
 
@@ -230,13 +238,15 @@ The supported headless path is the Ansible deployment above:
 scripts/ship --apple
 ```
 
-The playbook generates the Xcode project, runs both simulator suites, archives
-both schemes, and exports each archive with `destination: upload`. The
-committed Team ID identifies the paid developer team; it is not a credential.
-Certificates stay in the login Keychain and the App Store Connect private key
-stays in the controller's private-key directory. The API key (App Store
-Connect → Users and Access → Integrations) survives 2FA prompts, which is the
-difference between automation and a job that waits for a phone.
+The playbook generates the Xcode project, archives both schemes, and exports
+each archive with `destination: upload`. It does not rerun the test suites at
+deployment time because merged source has already passed the promotion lane.
+The release controller injects the team ID while signing; neither `project.yml`
+nor `ExportOptions.plist` stores it. Certificates stay in the login Keychain
+and the App Store Connect private key stays in the controller's private-key
+directory. The API key (App Store Connect → Users and Access → Integrations)
+survives 2FA prompts, which is the difference between automation and a job that
+waits for a phone.
 
 **Acceptance check:** the build appears under TestFlight → iOS Builds within
 ~15 minutes with state "Ready to Submit", and no email arrives from Apple about
@@ -410,7 +420,8 @@ Ordered by what blocks a submission soonest.
 
 - [ ] **Demo server** stood up: HTTPS, CC-licensed library, `review` account
       (§1)
-- [ ] `DEVELOPMENT_TEAM` filled in, bundle ID registered, app record created
+- [ ] `PLURX_DEVELOPMENT_TEAM` supplied by private release configuration,
+      bundle ID registered, app record created
       (§2.1)
 - [ ] Simulator screenshots at the three required sizes (§3)
 - [ ] Privacy policy + support URLs published (§3, §5.3)

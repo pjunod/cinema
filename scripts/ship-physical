@@ -33,7 +33,7 @@ set -euo pipefail
 
 SOURCE_REPO="${PLURX_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 RELEASE_ROOT="${PLURX_RELEASE_ROOT:-/private/tmp/plurx-physical-release}"
-DEVELOPMENT_TEAM="${PLURX_DEVELOPMENT_TEAM:-YHK542LK23}"
+DEVELOPMENT_TEAM="${PLURX_DEVELOPMENT_TEAM:-}"
 ANDROID_HOME_DIR="${ANDROID_HOME:-$HOME/Library/Android/sdk}"
 ADB="${PLURX_ADB:-$ANDROID_HOME_DIR/platform-tools/adb}"
 XCRUN="${PLURX_XCRUN:-xcrun}"
@@ -108,6 +108,10 @@ done
 need() { command -v "$1" >/dev/null 2>&1 || fail "missing required tool: $1"; }
 need git
 need python3
+if [[ $DO_APPLE -eq 1 ]]; then
+  [[ -n "$DEVELOPMENT_TEAM" ]] || fail \
+    "PLURX_DEVELOPMENT_TEAM is required for Apple builds; keep it in local release configuration, not tracked source"
+fi
 if [[ $DO_APPLE -eq 1 || $BUILD_ONLY -eq 1 ]]; then
   need xcodebuild
   need xcodegen

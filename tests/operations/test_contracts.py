@@ -1192,6 +1192,22 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("--dry-run", result.stdout)
         self.assertIn("--allow-unknown", result.stdout)
 
+    def test_apple_developer_team_is_injected_instead_of_tracked(self):
+        script = read("scripts/ship-physical")
+        project = read("clients/apple/project.yml")
+        export_options = read("clients/apple/ExportOptions.plist")
+
+        assignment = re.search(
+            r'^DEVELOPMENT_TEAM="\$\{PLURX_DEVELOPMENT_TEAM:-([^}]*)\}"$',
+            script,
+            re.MULTILINE,
+        )
+        self.assertIsNotNone(assignment)
+        self.assertEqual(assignment.group(1), "")
+        self.assertIn("PLURX_DEVELOPMENT_TEAM is required for Apple builds", script)
+        self.assertNotIn("DEVELOPMENT_TEAM:", project)
+        self.assertNotIn("<key>teamID</key>", export_options)
+
     def test_publishing_documents_the_standalone_device_path(self):
         publishing = read("docs/PUBLISHING.md")
         self.assertIn("scripts/ship-physical", publishing)
