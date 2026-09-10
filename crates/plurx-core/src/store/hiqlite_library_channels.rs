@@ -1045,26 +1045,26 @@ impl LibraryChannelStore for HiqliteAuthStore {
         }
         let pointer_sql = if publication.pending {
             "UPDATE library_channels SET pending_generation_id = $1, pending_epoch_ms = $2, \
-             build_state = 'ready', build_candidate_count = $8, build_entry_count = $8, \
-             build_last_success_ms = $3, last_auto_build_ms = CASE WHEN $10 THEN $3 ELSE last_auto_build_ms END, \
-             updated_at_ms = $3 WHERE id = $4 AND definition_revision = $5 \
+             build_state = 'ready', build_candidate_count = $3, build_entry_count = $3, \
+             build_last_success_ms = $4, last_auto_build_ms = CASE WHEN $5 THEN $4 ELSE last_auto_build_ms END, \
+             updated_at_ms = $4 WHERE id = $6 AND definition_revision = $7 \
              AND active_generation_id IS NOT NULL AND EXISTS(SELECT 1 FROM library_channel_generations g \
-               WHERE g.id = $1 AND g.channel_id = $4 AND g.state = 'building' \
-                 AND g.build_claim_id = $6 AND g.build_claim_expires_ms > $3 \
-                 AND g.content_digest = $7 AND (SELECT COUNT(*) FROM library_channel_entries e \
-                   WHERE e.generation_id = g.id) = $8 AND (SELECT COALESCE(MAX(e.cumulative_start_ms + e.duration_ms), 0) \
-                   FROM library_channel_entries e WHERE e.generation_id = g.id) = $9)"
+               WHERE g.id = $1 AND g.channel_id = $6 AND g.state = 'building' \
+                 AND g.build_claim_id = $8 AND g.build_claim_expires_ms > $4 \
+                 AND g.content_digest = $9 AND (SELECT COUNT(*) FROM library_channel_entries e \
+                   WHERE e.generation_id = g.id) = $3 AND (SELECT COALESCE(MAX(e.cumulative_start_ms + e.duration_ms), 0) \
+                   FROM library_channel_entries e WHERE e.generation_id = g.id) = $10)"
         } else {
             "UPDATE library_channels SET active_generation_id = $1, active_epoch_ms = $2, \
              pending_generation_id = NULL, pending_epoch_ms = NULL, build_state = 'ready', \
-             build_candidate_count = $8, build_entry_count = $8, build_last_success_ms = $3, \
-             last_auto_build_ms = CASE WHEN $10 THEN $3 ELSE last_auto_build_ms END, updated_at_ms = $3 \
-             WHERE id = $4 AND definition_revision = $5 AND EXISTS(SELECT 1 FROM library_channel_generations g \
-               WHERE g.id = $1 AND g.channel_id = $4 AND g.state = 'building' \
-                 AND g.build_claim_id = $6 AND g.build_claim_expires_ms > $3 \
-                 AND g.content_digest = $7 AND (SELECT COUNT(*) FROM library_channel_entries e \
-                   WHERE e.generation_id = g.id) = $8 AND (SELECT COALESCE(MAX(e.cumulative_start_ms + e.duration_ms), 0) \
-                   FROM library_channel_entries e WHERE e.generation_id = g.id) = $9)"
+             build_candidate_count = $3, build_entry_count = $3, build_last_success_ms = $4, \
+             last_auto_build_ms = CASE WHEN $5 THEN $4 ELSE last_auto_build_ms END, updated_at_ms = $4 \
+             WHERE id = $6 AND definition_revision = $7 AND EXISTS(SELECT 1 FROM library_channel_generations g \
+               WHERE g.id = $1 AND g.channel_id = $6 AND g.state = 'building' \
+                 AND g.build_claim_id = $8 AND g.build_claim_expires_ms > $4 \
+                 AND g.content_digest = $9 AND (SELECT COUNT(*) FROM library_channel_entries e \
+                   WHERE e.generation_id = g.id) = $3 AND (SELECT COALESCE(MAX(e.cumulative_start_ms + e.duration_ms), 0) \
+                   FROM library_channel_entries e WHERE e.generation_id = g.id) = $10)"
         };
         let results = self
             .client()
@@ -1081,14 +1081,14 @@ impl LibraryChannelStore for HiqliteAuthStore {
                     params!(
                         publication.generation_id.as_str(),
                         publication.activation_epoch_ms,
+                        publication.entry_count,
                         publication.now_ms,
+                        publication.automatic,
                         publication.channel_id.as_str(),
                         publication.expected_revision,
                         publication.claim_id.as_str(),
                         publication.content_digest.as_str(),
-                        publication.entry_count,
-                        publication.loop_duration_ms,
-                        publication.automatic
+                        publication.loop_duration_ms
                     ),
                 ),
                 (
