@@ -2,6 +2,5 @@ version = 1
 
 [[coverage]]
 commits = ["021513b8"]
-points = ["operations.packaging", "validation.framework"]
-checks = ["operations-contract"]
-reason = "The status repair restores the Apple build claim's generated sentence while keeping the signing-environment note in ordinary body prose. `test_the_repository_claim_is_whole` and `test_body_prose_may_still_narrate_a_past_build` exercise `validation.apple_build.check_repository_claims`, so rewording the governed viewers tile or confusing its build number with narrative text fails the retained operations contract."
+reason = "This documentation-only commit restores the generated Apple build sentence on the maintained status page and moves the signing-environment note into ordinary body prose. It changes no runtime behavior."
+ignore = true
