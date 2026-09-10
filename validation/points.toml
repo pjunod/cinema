@@ -716,6 +716,9 @@ id = "library.channels"
 title = "Scheduled channels from library media"
 contract = "Authenticated users define bounded movie and episode selections whose immutable, deterministic rotations resolve from server time on every client. Following playback uses the finite HLS session lifecycle without writing ordinary watch history; readiness facts in Developer settings are advisory and never gate explicit enablement."
 paths = [
+  "crates/plurx-core/src/library_channels.rs",
+  "crates/plurx-core/src/store/hiqlite_library_channels.rs",
+  "crates/plurx-core/src/store/sqlite/library_channels.rs",
   "docs/features/LIBRARY-CHANNELS-STATUS.md",
 ]
 checks = ["rust-gate", "rust-gate-ci", "security-boundaries", "resource-bounds", "operations-contract", "web-static", "web-layout"]

@@ -27,6 +27,86 @@ pub const CHANNEL_FILE_DURATION_MAX_MS: i64 = 24 * 60 * 60 * 1_000;
 pub const CHANNEL_BUILD_CLAIM_MS: i64 = 120_000;
 pub const CHANNEL_BUILD_RENEW_MS: i64 = 30_000;
 pub const CHANNEL_ACTIVATION_LEAD_MS: i64 = 30_000;
+pub const CHANNELS_PER_USER_MAX: i64 = 50;
+pub const CHANNELS_SERVER_MAX: i64 = 200;
+pub const CHANNEL_BUILD_QUEUE_MAX: usize = 200;
+pub const CHANNEL_GENERATION_STAGE_MAX: usize = 200;
+
+/// Durable Library-channel entities, shared verbatim by both Store backends.
+/// All clock/random values are supplied by the application.
+pub(crate) const LIBRARY_CHANNELS_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS library_channels (
+    id                    TEXT PRIMARY KEY,
+    owner_user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name                  TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 320),
+    description           TEXT NOT NULL CHECK (length(description) <= 2000),
+    visibility            TEXT NOT NULL CHECK (visibility IN ('personal','shared')),
+    enabled               INTEGER NOT NULL CHECK (enabled IN (0,1)),
+    definition_revision   INTEGER NOT NULL CHECK (definition_revision > 0),
+    recipe_json           TEXT NOT NULL,
+    seed                  BLOB NOT NULL CHECK (length(seed) = 32),
+    active_generation_id  TEXT,
+    active_epoch_ms       INTEGER,
+    pending_generation_id TEXT,
+    pending_epoch_ms      INTEGER,
+    created_at_ms         INTEGER NOT NULL,
+    updated_at_ms         INTEGER NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS library_channels_owner
+    ON library_channels(owner_user_id, id);
+CREATE INDEX IF NOT EXISTS library_channels_shared
+    ON library_channels(visibility, enabled, id);
+
+CREATE TABLE IF NOT EXISTS library_channel_generations (
+    id                     TEXT PRIMARY KEY,
+    channel_id             TEXT NOT NULL REFERENCES library_channels(id) ON DELETE CASCADE,
+    definition_revision    INTEGER NOT NULL CHECK (definition_revision > 0),
+    algorithm_version      INTEGER NOT NULL CHECK (algorithm_version > 0),
+    content_digest         TEXT NOT NULL CHECK (length(content_digest) = 64),
+    state                  TEXT NOT NULL CHECK (state IN ('building','ready')),
+    entry_count            INTEGER NOT NULL DEFAULT 0 CHECK (entry_count >= 0),
+    loop_duration_ms       INTEGER NOT NULL DEFAULT 0 CHECK (loop_duration_ms >= 0),
+    build_claim_id         TEXT,
+    build_claim_expires_ms INTEGER,
+    created_at_ms          INTEGER NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS library_channel_generations_channel
+    ON library_channel_generations(channel_id, created_at_ms DESC);
+
+CREATE TABLE IF NOT EXISTS library_channel_entries (
+    generation_id       TEXT NOT NULL REFERENCES library_channel_generations(id) ON DELETE CASCADE,
+    ordinal             INTEGER NOT NULL CHECK (ordinal >= 0),
+    item_id             INTEGER NOT NULL CHECK (item_id > 0),
+    file_id             INTEGER NOT NULL CHECK (file_id > 0),
+    file_size           INTEGER NOT NULL CHECK (file_size >= 0),
+    file_mtime          INTEGER NOT NULL CHECK (file_mtime >= 0),
+    duration_ms         INTEGER NOT NULL CHECK (duration_ms > 0 AND duration_ms <= 86400000),
+    cumulative_start_ms INTEGER NOT NULL CHECK (cumulative_start_ms >= 0),
+    show_id             INTEGER,
+    PRIMARY KEY (generation_id, ordinal),
+    UNIQUE (generation_id, item_id)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS library_channel_favourites (
+    user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    channel_id    TEXT NOT NULL REFERENCES library_channels(id) ON DELETE CASCADE,
+    created_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (user_id, channel_id)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS library_channel_requests (
+    user_id        INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    request_id     TEXT NOT NULL,
+    operation_hash TEXT NOT NULL CHECK (length(operation_hash) = 64),
+    channel_id     TEXT NOT NULL,
+    result_revision INTEGER NOT NULL CHECK (result_revision >= 0),
+    created_at_ms  INTEGER NOT NULL,
+    expires_at_ms  INTEGER NOT NULL,
+    PRIMARY KEY (user_id, request_id)
+) STRICT;
+CREATE INDEX IF NOT EXISTS library_channel_requests_expiry
+    ON library_channel_requests(expires_at_ms, user_id);
+"#;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -52,17 +132,12 @@ impl ChannelVisibility {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChannelOrdering {
+    #[default]
     BalancedShuffle,
     ReleaseOrder,
-}
-
-impl Default for ChannelOrdering {
-    fn default() -> Self {
-        Self::BalancedShuffle
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -94,6 +169,120 @@ pub struct LibraryChannelRecipe {
     pub auto_refresh: bool,
     #[serde(default)]
     pub match_all_in_scope: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LibraryChannel {
+    pub id: String,
+    pub owner_user_id: i64,
+    pub name: String,
+    pub description: String,
+    pub visibility: ChannelVisibility,
+    pub enabled: bool,
+    pub revision: i64,
+    pub recipe: LibraryChannelRecipe,
+    pub seed: [u8; 32],
+    pub active_generation_id: Option<String>,
+    pub active_epoch_ms: Option<i64>,
+    pub pending_generation_id: Option<String>,
+    pub pending_epoch_ms: Option<i64>,
+    pub favourite: bool,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewLibraryChannel {
+    pub id: String,
+    pub owner_user_id: i64,
+    pub request_id: String,
+    pub request_hash: String,
+    pub name: String,
+    pub description: String,
+    pub visibility: ChannelVisibility,
+    pub enabled: bool,
+    pub recipe: LibraryChannelRecipe,
+    pub seed: [u8; 32],
+    pub now_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibraryChannelUpdate {
+    pub channel_id: String,
+    pub actor_user_id: i64,
+    pub actor_is_admin: bool,
+    pub expected_revision: i64,
+    pub request_id: String,
+    pub request_hash: String,
+    pub name: String,
+    pub description: String,
+    pub visibility: ChannelVisibility,
+    pub enabled: bool,
+    pub recipe: LibraryChannelRecipe,
+    pub seed: [u8; 32],
+    pub now_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChannelMutation<T> {
+    Applied(T),
+    Replay(T),
+    NotFound,
+    Forbidden,
+    Stale,
+    RequestConflict,
+    LimitExceeded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LibraryChannelGeneration {
+    pub id: String,
+    pub channel_id: String,
+    pub definition_revision: i64,
+    pub algorithm_version: i64,
+    pub content_digest: String,
+    pub state: String,
+    pub entry_count: i64,
+    pub loop_duration_ms: i64,
+    pub build_claim_id: Option<String>,
+    pub build_claim_expires_ms: Option<i64>,
+    pub created_at_ms: i64,
+    pub entries: Vec<ChannelGenerationEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibraryChannelBuildClaim {
+    pub channel_id: String,
+    pub generation_id: String,
+    pub expected_revision: i64,
+    pub claim_id: String,
+    pub content_digest: String,
+    pub now_ms: i64,
+    pub expires_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibraryChannelPublication {
+    pub channel_id: String,
+    pub generation_id: String,
+    pub expected_revision: i64,
+    pub claim_id: String,
+    pub content_digest: String,
+    pub entry_count: i64,
+    pub loop_duration_ms: i64,
+    pub activation_epoch_ms: i64,
+    pub pending: bool,
+    pub now_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChannelBuildMutation {
+    Applied,
+    NotFound,
+    Forbidden,
+    Stale,
+    Busy,
+    Invalid,
 }
 
 fn default_true() -> bool {
@@ -141,7 +330,10 @@ impl LibraryChannelRecipe {
     /// Normalize the persisted representation and enforce every recipe bound.
     pub fn normalize(mut self) -> Result<Self, RecipeValidationError> {
         if self.version != 1 {
-            return Err(recipe_error("version", "only recipe version 1 is supported"));
+            return Err(recipe_error(
+                "version",
+                "only recipe version 1 is supported",
+            ));
         }
         normalize_ids("library_ids", &mut self.library_ids, CHANNEL_LIBRARIES_MAX)?;
         normalize_ids(
@@ -411,10 +603,9 @@ pub fn evaluate_recipe(
                 reasons.push("all titles in scope".to_owned());
             }
         }
-        matches.entry(candidate.item_id).or_insert(ChannelMatch {
-            candidate,
-            reasons,
-        });
+        matches
+            .entry(candidate.item_id)
+            .or_insert(ChannelMatch { candidate, reasons });
         if matches.len() > CHANNEL_ELIGIBLE_POOL_MAX {
             return Err(recipe_error(
                 "recipe",
@@ -543,12 +734,7 @@ pub fn build_rotation(
                     .min_by(|(_, left), (_, right)| release_cmp(left, right))
                     .map(|(index, _)| index)
                     .ok_or(ScheduleError::Empty)?;
-                ordered.push(
-                    queues[selected]
-                        .1
-                        .pop_front()
-                        .ok_or(ScheduleError::Empty)?,
-                );
+                ordered.push(queues[selected].1.pop_front().ok_or(ScheduleError::Empty)?);
             }
         }
     }
@@ -595,9 +781,7 @@ fn release_cmp(left: &ChannelCandidate, right: &ChannelCandidate) -> Ordering {
     .then_with(|| left.item_id.cmp(&right.item_id))
 }
 
-pub fn generation_loop_duration(
-    entries: &[ChannelGenerationEntry],
-) -> Result<i64, ScheduleError> {
+pub fn generation_loop_duration(entries: &[ChannelGenerationEntry]) -> Result<i64, ScheduleError> {
     let last = entries.last().ok_or(ScheduleError::Empty)?;
     last.cumulative_start_ms
         .checked_add(last.duration_ms)

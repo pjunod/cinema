@@ -15,6 +15,7 @@ mod dv_conversion;
 mod fragindex;
 mod fragment_index_cluster;
 mod library;
+mod library_channels;
 mod media;
 mod offline;
 mod outbox;
@@ -1096,6 +1097,11 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         BEGIN
             SELECT RAISE(ABORT, 'invalid offline decoder recovery transition');
         END;",
+    // v55: immutable, deterministic rotations made from the existing movie
+    // and episode catalogue. Item/file identities are intentionally not
+    // foreign keys in generation entries: a rescan may remove their current
+    // rows, but it must not rewrite the clock viewers on other devices see.
+    crate::library_channels::LIBRARY_CHANNELS_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.

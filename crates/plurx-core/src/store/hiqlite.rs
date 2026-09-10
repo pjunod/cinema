@@ -88,7 +88,8 @@ const DRAIN_DEADLINE_SCHEMA_VERSION: i64 = 31;
 const PRODUCER_RECOVERY_SCHEMA_VERSION: i64 = 32;
 const RECOVERY_EPOCH_SCHEMA_VERSION: i64 = 33;
 const OFFLINE_RECOVERY_CLAIM_SCHEMA_VERSION: i64 = 34;
-pub const AUTH_SCHEMA_VERSION: i64 = OFFLINE_RECOVERY_CLAIM_SCHEMA_VERSION;
+const LIBRARY_CHANNELS_SCHEMA_VERSION: i64 = 35;
+pub const AUTH_SCHEMA_VERSION: i64 = LIBRARY_CHANNELS_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -124,6 +125,7 @@ const DRAIN_DEADLINE_SCHEMA_MIGRATION_SOURCE: i64 = ANALYSIS_TERMINAL_IDENTITY_I
 const PRODUCER_RECOVERY_SCHEMA_MIGRATION_SOURCE: i64 = DRAIN_DEADLINE_SCHEMA_VERSION;
 const RECOVERY_EPOCH_SCHEMA_MIGRATION_SOURCE: i64 = PRODUCER_RECOVERY_SCHEMA_VERSION;
 const OFFLINE_RECOVERY_CLAIM_SCHEMA_MIGRATION_SOURCE: i64 = RECOVERY_EPOCH_SCHEMA_VERSION;
+const LIBRARY_CHANNELS_SCHEMA_MIGRATION_SOURCE: i64 = OFFLINE_RECOVERY_CLAIM_SCHEMA_VERSION;
 // Session routing and shared-cache identity are additive durable state and use
 // the existing Hiqlite transport contract. Protocol 4 stays supported so a
 // healthy v9/v10 cluster can authorize the daemon that advances its schema.
@@ -1415,6 +1417,7 @@ impl HiqliteAuthStore {
         super::hiqlite_shared_cache::install_schema(&client).await?;
         super::hiqlite_timeline_annotations::install_schema(&client).await?;
         super::hiqlite_fragment_index_cluster::install_schema(&client).await?;
+        super::hiqlite_library_channels::install_schema(&client).await?;
 
         let store = Self::with_clock(client, clock, NodeLocalTelemetry::open(telemetry_path)?);
         let now = store.now()?;
@@ -2350,6 +2353,26 @@ impl HiqliteAuthStore {
                         .await;
                     self.settle_migration_attempt(
                         OFFLINE_RECOVERY_CLAIM_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(LIBRARY_CHANNELS_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements = super::hiqlite_library_channels::migration_statements()?;
+                    statements.push((
+                        "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                         WHERE singleton = 1 AND schema_version = $3"
+                            .to_owned(),
+                        params!(
+                            LIBRARY_CHANNELS_SCHEMA_VERSION,
+                            now,
+                            LIBRARY_CHANNELS_SCHEMA_MIGRATION_SOURCE
+                        ),
+                    ));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(
+                        LIBRARY_CHANNELS_SCHEMA_MIGRATION_SOURCE,
                         attempt,
                     )
                     .await?;

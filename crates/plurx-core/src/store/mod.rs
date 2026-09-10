@@ -40,6 +40,8 @@ mod hiqlite_fragment_index_cluster;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_import;
 #[cfg(feature = "hiqlite-store")]
+mod hiqlite_library_channels;
+#[cfg(feature = "hiqlite-store")]
 mod hiqlite_media;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_pretranscode;
@@ -1900,6 +1902,91 @@ pub trait LibraryStore: Send + Sync + 'static {
     async fn mark_library_scanned(&self, id: i64, refreshed: bool) -> Result<(), StoreError>;
     async fn get_library(&self, id: i64) -> Result<Option<Library>, StoreError>;
     async fn list_libraries(&self) -> Result<Vec<Library>, StoreError>;
+}
+
+#[async_trait]
+pub trait LibraryChannelStore: Send + Sync + 'static {
+    async fn list_library_channels(
+        &self,
+        actor_user_id: i64,
+        actor_is_admin: bool,
+        management: bool,
+        after_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<crate::library_channels::LibraryChannel>, StoreError>;
+
+    async fn get_library_channel(
+        &self,
+        actor_user_id: i64,
+        actor_is_admin: bool,
+        channel_id: &str,
+    ) -> Result<Option<crate::library_channels::LibraryChannel>, StoreError>;
+
+    async fn create_library_channel(
+        &self,
+        actor_is_admin: bool,
+        channel: &crate::library_channels::NewLibraryChannel,
+    ) -> Result<
+        crate::library_channels::ChannelMutation<crate::library_channels::LibraryChannel>,
+        StoreError,
+    >;
+
+    async fn update_library_channel(
+        &self,
+        update: &crate::library_channels::LibraryChannelUpdate,
+    ) -> Result<
+        crate::library_channels::ChannelMutation<crate::library_channels::LibraryChannel>,
+        StoreError,
+    >;
+
+    async fn delete_library_channel(
+        &self,
+        actor_user_id: i64,
+        actor_is_admin: bool,
+        channel_id: &str,
+        expected_revision: i64,
+    ) -> Result<crate::library_channels::ChannelMutation<()>, StoreError>;
+
+    async fn set_library_channel_favourite(
+        &self,
+        user_id: i64,
+        channel_id: &str,
+        favourite: bool,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    async fn library_channel_catalog_page(
+        &self,
+        after_item_id: i64,
+        limit: i64,
+    ) -> Result<Vec<crate::library_channels::ChannelCandidate>, StoreError>;
+
+    async fn claim_library_channel_build(
+        &self,
+        claim: &crate::library_channels::LibraryChannelBuildClaim,
+    ) -> Result<crate::library_channels::ChannelBuildMutation, StoreError>;
+
+    async fn stage_library_channel_entries(
+        &self,
+        channel_id: &str,
+        generation_id: &str,
+        claim_id: &str,
+        entries: &[crate::library_channels::ChannelGenerationEntry],
+        now_ms: i64,
+    ) -> Result<crate::library_channels::ChannelBuildMutation, StoreError>;
+
+    async fn publish_library_channel_generation(
+        &self,
+        publication: &crate::library_channels::LibraryChannelPublication,
+    ) -> Result<crate::library_channels::ChannelBuildMutation, StoreError>;
+
+    async fn read_library_channel_generation(
+        &self,
+        actor_user_id: i64,
+        actor_is_admin: bool,
+        channel_id: &str,
+        generation_id: &str,
+    ) -> Result<Option<crate::library_channels::LibraryChannelGeneration>, StoreError>;
 }
 
 #[async_trait]
@@ -4244,6 +4331,7 @@ pub trait Store:
     + UserStore
     + ApiKeyStore
     + LibraryStore
+    + LibraryChannelStore
     + MediaStore
     + WatchStore
     + ReadingStore
@@ -4275,6 +4363,7 @@ impl<T> Store for T where
         + UserStore
         + ApiKeyStore
         + LibraryStore
+        + LibraryChannelStore
         + MediaStore
         + WatchStore
         + ReadingStore
