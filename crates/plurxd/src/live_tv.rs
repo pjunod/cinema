@@ -1141,12 +1141,14 @@ impl SnapshotCache {
 /// is what makes it always fast and always answerable.
 struct GuideCache {
     state: tokio::sync::Mutex<GuideCacheState>,
-    forced_admission: tokio::sync::Semaphore,
+    refresh_admission: tokio::sync::Semaphore,
+    next_sequence: AtomicU64,
 }
 
 #[derive(Default)]
 struct GuideCacheState {
     cached: Option<CachedGuide>,
+    published_sequence: u64,
     /// Kept separately from the cache so a refresh that failed while a good
     /// cache is still warm reports the failure without discarding the answer.
     /// Scoped to the generation it happened under: an error from the previous
@@ -1180,7 +1182,8 @@ impl Default for GuideCache {
     fn default() -> Self {
         Self {
             state: tokio::sync::Mutex::new(GuideCacheState::default()),
-            forced_admission: tokio::sync::Semaphore::new(MAX_FORCED_REFRESH_CALLERS),
+            refresh_admission: tokio::sync::Semaphore::new(1),
+            next_sequence: AtomicU64::new(1),
         }
     }
 }
@@ -1219,8 +1222,17 @@ impl GuideCache {
 
     /// A completed refresh. A failure keeps the previous cache and records the
     /// error; only a success replaces the content.
-    async fn store(&self, generation: i64, result: &Result<LiveTvGuide, LiveTvError>) {
+    async fn store(
+        &self,
+        generation: i64,
+        sequence: u64,
+        result: &Result<LiveTvGuide, LiveTvError>,
+    ) -> bool {
         let mut state = self.state.lock().await;
+        if sequence < state.published_sequence {
+            return false;
+        }
+        state.published_sequence = sequence;
         match result {
             Ok(guide) => {
                 state.cached = Some(CachedGuide {
@@ -1235,6 +1247,7 @@ impl GuideCache {
                 state.last_error = Some((generation, guide::sanitize_refresh_error(error)))
             }
         }
+        true
     }
 
     /// A settings change discards the cache: the lineup it was matched
@@ -1253,6 +1266,21 @@ impl GuideCache {
             .as_ref()
             .map(|c| c.generation)
     }
+}
+
+fn remaining_guide_budget(deadline: tokio::time::Instant) -> Result<Duration, LiveTvError> {
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    if remaining.is_zero() {
+        Err(LiveTvError::DeviceUnavailable(
+            "programme guide refresh exceeded its total deadline".to_owned(),
+        ))
+    } else {
+        Ok(remaining)
+    }
+}
+
+fn guide_parser_stopped(error: tokio::task::JoinError) -> LiveTvError {
+    LiveTvError::DeviceUnavailable(format!("programme guide parser stopped: {error}"))
 }
 
 #[derive(Clone)]
@@ -2219,13 +2247,12 @@ impl LiveTvManager {
         self.guide_cache.read(config, window).await
     }
 
-    /// Run one refresh now. Used by the loop and by the Developer card's
-    /// button; `force` only bounds admission, since the loop's own cadence is
-    /// what normally decides when a fetch happens.
+    /// Run one refresh now. Manual and background work share one admission
+    /// slot, so a click cannot overlap the loop and publish an older result.
     pub(crate) async fn refresh_guide(
         &self,
         config: &LiveTvConfig,
-        force: bool,
+        _force: bool,
     ) -> Result<LiveTvGuide, LiveTvError> {
         if config.owner_node_id != self.node_id {
             return Err(LiveTvError::OwnerUnavailable(
@@ -2237,20 +2264,19 @@ impl LiveTvManager {
                 "no programme guide source is configured".to_owned(),
             ));
         }
-        let _permit = if force {
-            Some(
-                self.guide_cache
-                    .forced_admission
-                    .try_acquire()
-                    .map_err(|_| {
-                        LiveTvError::DeviceUnavailable(
-                            "a guide refresh is already running; retry shortly".to_owned(),
-                        )
-                    })?,
-            )
-        } else {
-            None
-        };
+        let _permit = self
+            .guide_cache
+            .refresh_admission
+            .try_acquire()
+            .map_err(|_| {
+                LiveTvError::DeviceUnavailable(
+                    "a guide refresh is already running; retry shortly".to_owned(),
+                )
+            })?;
+        let sequence = self
+            .guide_cache
+            .next_sequence
+            .fetch_add(1, Ordering::Relaxed);
         // The cache is matched against a lineup, so a refresh needs one — but
         // the *cached* one, and only the cached one. Asking `local_snapshot`
         // for it hits the device whenever the 30 s lineup TTL has expired,
@@ -2272,16 +2298,38 @@ impl LiveTvManager {
                     .to_owned(),
             ));
         }
-        let result = self.fetch_guide(config, &channels).await;
+        let deadline = tokio::time::Instant::now() + guide::GUIDE_REFRESH_TIMEOUT;
+        let result =
+            tokio::time::timeout_at(deadline, self.fetch_guide(config, &channels, deadline))
+                .await
+                .unwrap_or_else(|_| {
+                    Err(LiveTvError::DeviceUnavailable(
+                        "programme guide refresh exceeded its total deadline".to_owned(),
+                    ))
+                });
+        let current = self.config().await?;
+        if current.generation != config.generation
+            || current.owner_node_id != config.owner_node_id
+            || current.guide_source != config.guide_source
+        {
+            return Err(LiveTvError::DeviceUnavailable(
+                "programme guide settings changed while the refresh was running".to_owned(),
+            ));
+        }
         let outcome = if result.is_ok() { "ok" } else { "error" };
         self.metrics
             .observe_guide_refresh(config.guide_source, outcome);
-        self.guide_cache.store(config.generation, &result).await;
+        let published = self
+            .guide_cache
+            .store(config.generation, sequence, &result)
+            .await;
         // A failed refresh keeps the previous titles for as long as the cache
         // behind them is still served.
-        if let Ok(guide) = &result {
-            self.metrics.observe_guide(guide.total_programmes());
-            self.publish_guide_titles(guide);
+        if published {
+            if let Ok(guide) = &result {
+                self.metrics.observe_guide(guide.total_programmes());
+                self.publish_guide_titles(guide);
+            }
         }
         result
     }
@@ -2303,6 +2351,7 @@ impl LiveTvManager {
         &self,
         config: &LiveTvConfig,
         lineup: &[LiveTvChannel],
+        deadline: tokio::time::Instant,
     ) -> Result<LiveTvGuide, LiveTvError> {
         let client = self.guide_client()?;
         let window = guide::refresh_window(config.guide_hours);
@@ -2314,7 +2363,7 @@ impl LiveTvManager {
                         "an HDHomeRun address is required for the HDHomeRun guide".to_owned(),
                     )
                 })?;
-                self.fetch_hdhomerun_guide(&client, address, lineup, &window)
+                self.fetch_hdhomerun_guide(&client, address, lineup, &window, deadline)
                     .await?
             }
             GuideSource::Xmltv => {
@@ -2329,10 +2378,16 @@ impl LiveTvManager {
                     &client,
                     url,
                     guide::GUIDE_MAX_DOCUMENT_BYTES,
-                    guide::GUIDE_FETCH_TIMEOUT,
+                    remaining_guide_budget(deadline)?.min(guide::GUIDE_FETCH_TIMEOUT),
                 )
                 .await?;
-                guide::parse_xmltv(&guide::decompress_if_gzip(body)?, lineup)?
+                let lineup = lineup.to_vec();
+                tokio::task::spawn_blocking(move || {
+                    let body = guide::decompress_if_gzip(body)?;
+                    guide::parse_xmltv(&body, &lineup)
+                })
+                .await
+                .map_err(guide_parser_stopped)??
             }
         };
         let matched = channels.len();
@@ -2355,11 +2410,8 @@ impl LiveTvManager {
         address: Ipv4Addr,
         lineup: &[LiveTvChannel],
         window: &GuideWindow,
+        deadline: tokio::time::Instant,
     ) -> Result<Vec<LiveTvGuideChannel>, LiveTvError> {
-        let by_number = lineup
-            .iter()
-            .map(|channel| (channel.guide_number.clone(), channel))
-            .collect::<BTreeMap<_, _>>();
         // Read the credential, use it, drop it. It is a local binding inside
         // this function and appears in nothing this function returns.
         let device_auth = guide::read_device_auth(client, address).await?;
@@ -2367,10 +2419,19 @@ impl LiveTvManager {
             client,
             guide::guide_request_url(&device_auth, None, None)?,
             guide::GUIDE_MAX_DOCUMENT_BYTES,
-            guide::GUIDE_FETCH_TIMEOUT,
+            remaining_guide_budget(deadline)?.min(guide::GUIDE_FETCH_TIMEOUT),
         )
         .await?;
-        let mut channels = guide::parse_hdhomerun_guide(&bulk, &by_number)?;
+        let parse_lineup = lineup.to_vec();
+        let mut channels = tokio::task::spawn_blocking(move || {
+            let by_number = parse_lineup
+                .iter()
+                .map(|channel| (channel.guide_number.clone(), channel))
+                .collect::<BTreeMap<_, _>>();
+            guide::parse_hdhomerun_guide(&bulk, &by_number)
+        })
+        .await
+        .map_err(guide_parser_stopped)??;
 
         // The free tier answers a few hours to the bulk call. Extend the
         // channels that fall short until the request budget is spent — an
@@ -2379,6 +2440,9 @@ impl LiveTvManager {
         let mut budget = guide::GUIDE_MAX_EXTENSION_REQUESTS;
         let mut index = 0;
         while index < channels.len() && budget > 0 {
+            let Ok(remaining) = remaining_guide_budget(deadline) else {
+                break;
+            };
             let Some(last_end) = channels[index].programmes.last().map(|p| p.end) else {
                 index += 1;
                 continue;
@@ -2394,7 +2458,7 @@ impl LiveTvManager {
                 client,
                 url,
                 guide::GUIDE_MAX_DOCUMENT_BYTES,
-                guide::GUIDE_FETCH_TIMEOUT,
+                remaining.min(guide::GUIDE_FETCH_TIMEOUT),
             )
             .await
             {
@@ -2406,7 +2470,16 @@ impl LiveTvManager {
                     continue;
                 }
             };
-            let extra = guide::parse_hdhomerun_guide(&page, &by_number)?;
+            let parse_lineup = lineup.to_vec();
+            let extra = tokio::task::spawn_blocking(move || {
+                let by_number = parse_lineup
+                    .iter()
+                    .map(|channel| (channel.guide_number.clone(), channel))
+                    .collect::<BTreeMap<_, _>>();
+                guide::parse_hdhomerun_guide(&page, &by_number)
+            })
+            .await
+            .map_err(guide_parser_stopped)??;
             let Some(extra) = extra
                 .into_iter()
                 .find(|candidate| candidate.guide_number == number)
@@ -2522,7 +2595,13 @@ impl LiveTvManager {
                     self.clear_guide_titles();
                 }
                 if ours && config.guide_fetches() && self.serving.admit().is_some() {
-                    match self.refresh_guide(&config, false).await {
+                    let refresh = self.refresh_guide(&config, false);
+                    tokio::pin!(refresh);
+                    let refreshed = tokio::select! {
+                        _ = shutdown.cancelled() => return,
+                        result = &mut refresh => result,
+                    };
+                    match refreshed {
                         Ok(_) => delay = guide::GUIDE_REFRESH_INTERVAL,
                         Err(error) => {
                             // Only a cold lineup comes back sooner. Every other
@@ -3310,6 +3389,11 @@ fn live_ffmpeg_command(
     let segments = directory.join("segment-%06d.ts");
     let mut command = tokio::process::Command::new(&system.ffmpeg);
     command
+        // Tuner bytes are untrusted media input. Do not hand their decoder the
+        // daemon's database, API, object-store, or deployment credentials just
+        // because those values happen to live in the parent environment.
+        .env_clear()
+        .env("LC_ALL", "C")
         .args(["-hide_banner", "-loglevel", "warning", "-nostdin", "-y"])
         .args(plan.encoder.init_args())
         .args(["-hwaccel", "none"])
@@ -3345,6 +3429,23 @@ fn live_ffmpeg_command(
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
+    // Keep only runtime selectors a packaged GPU stack may genuinely need.
+    // Loader injection, proxy, home and credential variables stay absent.
+    for name in [
+        "PATH",
+        "LD_LIBRARY_PATH",
+        "DYLD_LIBRARY_PATH",
+        "LIBVA_DRIVER_NAME",
+        "LIBVA_DRIVERS_PATH",
+        "VDPAU_DRIVER",
+        "CUDA_VISIBLE_DEVICES",
+        "NVIDIA_VISIBLE_DEVICES",
+        "NVIDIA_DRIVER_CAPABILITIES",
+    ] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
     Ok(command)
 }
 
@@ -5433,6 +5534,24 @@ exec /bin/cat >/dev/null
             .expect("prepare live-TV plan");
         let command = live_ffmpeg_command(&system, &plan, Path::new("/fixture/live"))
             .expect("build live-TV FFmpeg command");
+        let allowed_environment = [
+            "LC_ALL",
+            "PATH",
+            "LD_LIBRARY_PATH",
+            "DYLD_LIBRARY_PATH",
+            "LIBVA_DRIVER_NAME",
+            "LIBVA_DRIVERS_PATH",
+            "VDPAU_DRIVER",
+            "CUDA_VISIBLE_DEVICES",
+            "NVIDIA_VISIBLE_DEVICES",
+            "NVIDIA_DRIVER_CAPABILITIES",
+        ];
+        assert!(command
+            .as_std()
+            .get_envs()
+            .all(|(name, _)| allowed_environment
+                .iter()
+                .any(|allowed| name == std::ffi::OsStr::new(allowed))));
         let actual = command
             .as_std()
             .get_args()
@@ -6508,7 +6627,7 @@ exec /bin/cat >/dev/null
             "an empty cache is unavailable, not an error"
         );
 
-        cache.store(4, &Ok(guide_with(2, 2, 8))).await;
+        cache.store(4, 1, &Ok(guide_with(2, 2, 8))).await;
         assert_eq!(
             cache.read(&config, window.clone()).await.freshness,
             GuideFreshness::Fresh
@@ -6525,6 +6644,7 @@ exec /bin/cat >/dev/null
         cache
             .store(
                 4,
+                2,
                 &Err(LiveTvError::DeviceUnavailable("the tuner is asleep".into())),
             )
             .await;
@@ -6544,13 +6664,34 @@ exec /bin/cat >/dev/null
             "past the stale window a confidently wrong grid is worse than none"
         );
 
-        cache.store(4, &Ok(guide_with(2, 2, 8))).await;
+        cache.store(4, 3, &Ok(guide_with(2, 2, 8))).await;
         config.generation = 5;
         assert_eq!(
             cache.read(&config, window).await.freshness,
             GuideFreshness::Unavailable,
             "a settings generation change invalidates the cache it was matched against"
         );
+    }
+
+    #[tokio::test]
+    async fn an_older_guide_completion_cannot_replace_a_newer_publication() {
+        let cache = GuideCache::default();
+        let mut config = LiveTvConfig::from_snapshot(&BTreeMap::new(), "node-a");
+        config.generation = 4;
+        config.guide_source = GuideSource::HdHomeRun;
+        assert!(cache.store(4, 2, &Ok(guide_with(2, 1, 8))).await);
+        assert!(!cache.store(4, 1, &Ok(guide_with(1, 1, 8))).await);
+
+        let served = cache
+            .read(
+                &config,
+                GuideWindow {
+                    start: 0,
+                    end: i64::from(u32::MAX),
+                },
+            )
+            .await;
+        assert_eq!(served.matched_channels, 2);
     }
 
     #[test]
@@ -6725,7 +6866,7 @@ exec /bin/cat >/dev/null
         // freshly restarted owner is in before anyone opens Live TV.
         manager
             .guide_cache
-            .store(config.generation, &Ok(guide_with(2, 2, 8)))
+            .store(config.generation, 1, &Ok(guide_with(2, 2, 8)))
             .await;
 
         let error = manager
@@ -6785,7 +6926,7 @@ exec /bin/cat >/dev/null
         guide.channels = channels;
         manager
             .guide_cache
-            .store(config.generation, &Ok(guide))
+            .store(config.generation, 1, &Ok(guide))
             .await;
 
         let served = manager
@@ -6829,6 +6970,7 @@ exec /bin/cat >/dev/null
             .guide_cache
             .store(
                 config.generation,
+                2,
                 &Err(LiveTvError::DeviceUnavailable(
                     "HDHomeRun device request failed".to_owned(),
                 )),

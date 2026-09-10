@@ -1298,23 +1298,29 @@ impl MeasuredBuild {
         use sha2::Digest;
         use tokio::io::AsyncReadExt;
 
-        let mut file = tokio::fs::File::open(path).await.ok()?;
-        let mut hasher = sha2::Sha256::new();
-        let mut chunk = vec![0_u8; 64 * 1024];
-        loop {
-            match file.read(&mut chunk).await.ok()? {
-                0 => break,
-                read => hasher.update(&chunk[..read]),
-            }
+        const MAX_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
+        let metadata = tokio::fs::metadata(path).await.ok()?;
+        if !metadata.is_file() || metadata.len() > MAX_ARTIFACT_BYTES {
+            return None;
         }
-        Some(hex::encode(hasher.finalize()))
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let mut file = tokio::fs::File::open(path).await.ok()?;
+            let mut hasher = sha2::Sha256::new();
+            let mut chunk = vec![0_u8; 64 * 1024];
+            loop {
+                match file.read(&mut chunk).await.ok()? {
+                    0 => break,
+                    read => hasher.update(&chunk[..read]),
+                }
+            }
+            Some(hex::encode(hasher.finalize()))
+        })
+        .await
+        .ok()?
     }
 
     async fn run(bin: &str, args: &[&str]) -> Option<Vec<u8>> {
-        let output = tokio::process::Command::new(bin)
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .output()
+        let output = crate::bounded_process::output(bin, args, Duration::from_secs(5), 64 * 1024)
             .await
             .ok()?;
         // A build that does not understand `-buildconf` exits non-zero and

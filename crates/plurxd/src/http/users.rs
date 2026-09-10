@@ -7,7 +7,6 @@
 
 use axum::extract::{Path, State};
 use axum::Json;
-use plurx_core::auth;
 use serde::Deserialize;
 
 use super::dto::UserDto;
@@ -40,17 +39,16 @@ pub async fn create(
     Json(req): Json<CreateUser>,
 ) -> Result<Json<UserDto>, ApiError> {
     let username = req.username.trim();
-    if username.is_empty() || req.password.len() < 8 {
-        return Err(ApiError::BadRequest(
-            "username required and password must be at least 8 characters".into(),
-        ));
+    if username.is_empty() {
+        return Err(ApiError::BadRequest("username required".into()));
     }
+    super::auth::validate_new_password(&req.password)?;
     if state.store.get_user_by_username(username).await?.is_some() {
         return Err(ApiError::Conflict(format!(
             "a user named `{username}` already exists"
         )));
     }
-    let hash = auth::hash_password(&req.password).map_err(|e| ApiError::Internal(e.to_string()))?;
+    let hash = super::auth::hash_password_bounded(req.password).await?;
     let user = state
         .store
         .create_user(username, &hash, req.is_admin)
@@ -80,13 +78,9 @@ pub async fn update(
         .ok_or(ApiError::NotFound("user"))?;
 
     let password_hash = match req.password.as_deref() {
-        Some(password) if password.len() < 8 => {
-            return Err(ApiError::BadRequest(
-                "password must be at least 8 characters".into(),
-            ));
-        }
         Some(password) => {
-            Some(auth::hash_password(password).map_err(|e| ApiError::Internal(e.to_string()))?)
+            super::auth::validate_new_password(password)?;
+            Some(super::auth::hash_password_bounded(password.to_owned()).await?)
         }
         None => None,
     };
