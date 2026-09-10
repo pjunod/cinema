@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["821ed960"]
+points = ["library.channels"]
+checks = ["rust-gate"]
+reason = "Both replicated generation-publication statements used the correct ten bound values but first mentioned `$8` immediately after `$2`; SQLite assigns `$N` binding slots by first appearance, so that ordering can silently bind the wrong value without Hiqlite's guard. `store::placeholder_census::every_replicated_placeholder_is_introduced_in_order` scans the registered production module and fails both pre-fix statements with `expected $3, found $8`; the Rust gate runs it with Hiqlite contracts enabled."
