@@ -5,3 +5,8 @@ commits = ["3cdafd4c"]
 points = ["playback.pipeline"]
 checks = ["rust-gate"]
 reason = "The retained fMP4 regression builds a real video trun whose sample size comes from tfhd, rewrites its payload, and requires the converter to materialize an explicit per-sample size while growing moof/traf/trun, moving the mdat and data offset, and preserving parseable media bytes. The complete fMP4 module and converted-Dolby-Vision daemon regressions keep the surrounding copy pipeline intact."
+
+[[coverage]]
+commits = ["26b892c3"]
+reason = "This commit only adds the validation mapping for the Dolby Vision runtime correction; it changes no runtime behavior."
+ignore = true
