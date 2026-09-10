@@ -1,8 +1,6 @@
 name: release readiness
 
 on:
-  schedule:
-    - cron: "41 16 * * 1"
   workflow_dispatch:
 
 env:

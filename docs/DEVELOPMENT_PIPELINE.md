@@ -1,5 +1,16 @@
 # Development pipeline — fast effort branches, deliberate qualification
 
+> **Workflow correction, 2026-09-10:** Main-bound pull requests use only
+> [main-fast-lane.yml](../.github/workflows/main-fast-lane.yml): open as draft,
+> obtain exactly one adversarial review, address it, mark ready, then apply
+> `fast-lane`. Removing the label cancels the lane; draft PRs allocate no
+> jobs. Full CI runs only by manual dispatch or an explicit release tag.
+> Effort compiler checks and evidence proofs are manual. Merge does not
+> build or deploy an image. Runtime-test schedules are disabled; the weekly
+> dependency audit remains. These rules supersede the older automatic
+> qualification and post-merge instructions below pending their rewrite.
+
+
 **Status:** accepted and implemented · **Decider:** Paul · **Written:**
 2026-08-29
 

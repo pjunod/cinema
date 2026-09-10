@@ -1,9 +1,8 @@
 name: effort ci
 
+# Optional compiler diagnostics only; task PRs into an effort allocate no jobs.
 on:
-  pull_request:
-    branches:
-      - "effort/**"
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -11,7 +10,7 @@ env:
 # Every new task revision supersedes the previous compile-only verdict. The
 # full qualification workflow is separate and never uses this concurrency key.
 concurrency:
-  group: effort-ci-${{ github.event.pull_request.number }}
+  group: effort-ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -34,7 +33,7 @@ jobs:
       - name: Select affected compile surfaces
         id: scope
         env:
-          VALIDATION_BASE: ${{ github.event.pull_request.base.sha }}
+          VALIDATION_BASE: ${{ github.sha }}
         run: >-
           python3 -m validation.ci_scope
           --event pull_request --base "$VALIDATION_BASE" >> "$GITHUB_OUTPUT"

@@ -1,8 +1,6 @@
 name: replicated Store backstop
 
 on:
-  schedule:
-    - cron: "23 6 * * 1"
   workflow_dispatch:
 
 env:

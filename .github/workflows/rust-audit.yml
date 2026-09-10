@@ -3,19 +3,7 @@ name: Rust dependency audit
 on:
   schedule:
     - cron: "23 9 * * 1"
-  push:
-    branches: [main]
-    paths:
-      - "**/Cargo.toml"
-      - "**/Cargo.lock"
-      - ".github/workflows/rust-audit.yml"
-      - "scripts/vendor-audit-lock"
-  pull_request:
-    paths:
-      - "**/Cargo.toml"
-      - "**/Cargo.lock"
-      - ".github/workflows/rust-audit.yml"
-      - "scripts/vendor-audit-lock"
+  workflow_dispatch:
 
 jobs:
   # Release artifacts resolve from the root workspace; the standalone M0

@@ -3,7 +3,7 @@ name: main fast lane
 on:
   pull_request:
     branches: [main]
-    types: [labeled]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
 
 env:
   CARGO_TERM_COLOR: always
@@ -18,8 +18,8 @@ jobs:
   scope:
     name: fast-lane validation scope
     if: >-
-      github.event.label.name == 'fast-lane' &&
-      github.event.pull_request.draft == false
+      github.event.pull_request.draft == false &&
+      contains(github.event.pull_request.labels.*.name, 'fast-lane')
     runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 2
     outputs:
@@ -216,8 +216,8 @@ jobs:
     name: Main promotion gate
     if: >-
       always() &&
-      github.event.label.name == 'fast-lane' &&
-      github.event.pull_request.draft == false
+      github.event.pull_request.draft == false &&
+      contains(github.event.pull_request.labels.*.name, 'fast-lane')
     needs:
       - scope
       - mobile_version

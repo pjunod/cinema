@@ -1,13 +1,16 @@
 name: fix evidence (opt-in)
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
+    inputs:
+      base_sha:
+        description: Base commit to compare in the disposable proof clone.
+        required: true
+        type: string
 
 jobs:
   revert-proof:
     name: report whether retained Rust tests reject the base implementation
-    if: contains(github.event.pull_request.labels.*.name, 'fixes-behavior')
     runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 60
     steps:
@@ -20,7 +23,7 @@ jobs:
         id: proof
         continue-on-error: true
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_SHA: ${{ inputs.base_sha }}
         run: |
           mapfile -t paths < <(
             git diff --name-only "$BASE_SHA...HEAD" -- 'crates/**/*.rs' \
