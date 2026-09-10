@@ -3,12 +3,10 @@
 /// this file; the views map them to the enums below.
 ///
 /// Live television is the finite player's contract with everything that
-/// assumes a timeline removed and one thing added. There is nothing to seek,
-/// nothing to scrub, no menu and no info panel; there is a channel. So this is
+/// assumes a timeline removed and one thing added. There is nothing to seek or
+/// scrub; guide, menu, programme-detail and Info panels are explicit states. This is
 /// a sibling of `PlayerInputRouting` rather than more cases inside it — a live
-/// stream can never enter `timeline`, `scrub`, `menu` or `info`, and a reducer
-/// that claimed otherwise would be lying in the one place the clients are
-/// tested against.
+/// stream can never enter timeline or scrub states.
 
 enum LiveTvInputSurface: String, CaseIterable {
     case tenFoot = "ten-foot"
@@ -17,9 +15,13 @@ enum LiveTvInputSurface: String, CaseIterable {
 }
 
 enum LiveTvInputState: String, CaseIterable {
-    case hidden
-    case overlay
-    case page
+    case browser
+    case fullscreenHidden = "fullscreen_hidden"
+    case fullscreenControls = "fullscreen_controls"
+    case temporaryGuide = "temporary_guide"
+    case menu
+    case programmeDetails = "programme_details"
+    case streamInfo = "stream_info"
 }
 
 enum LiveTvContractInput: String, CaseIterable {
@@ -37,8 +39,13 @@ enum LiveTvContractInput: String, CaseIterable {
 enum LiveTvInputOutcome: String, CaseIterable {
     case reveal
     case hide
-    case focusRow = "focus_row"
+    case delegate
+    case focusControl = "focus_control"
+    case focusCell = "focus_cell"
+    case focusPanel = "focus_panel"
     case activate
+    case closePanel = "close_panel"
+    case returnBrowser = "return_browser"
     case stripPrev = "strip_prev"
     case stripNext = "strip_next"
     case tune
@@ -72,34 +79,52 @@ enum LiveTvInputRouting {
 
     private static func tenFoot(state: LiveTvInputState, input: LiveTvContractInput) -> LiveTvInputOutcome {
         switch state {
-        case .hidden:
+        case .fullscreenHidden:
             // The 2026-09-02 ruling, unchanged: a direction on a hidden
             // overlay only reveals it. Nothing here changes channel.
             switch input {
             case .left, .right, .up, .down, .select, .tapSurface: .reveal
-            case .back: .exit
+            case .back: .returnBrowser
             case .playPause: .togglePlay
             case .idle: .ignore
             }
-        case .overlay:
+        case .fullscreenControls:
             // Preview-then-commit: move focus, Select tunes, Back hides.
             switch input {
-            case .left, .right, .up, .down: .focusRow
+            case .left, .right, .up, .down: .focusControl
             case .select: .activate
             case .back, .idle: .hide
             case .playPause: .togglePlay
             case .tapSurface: .ignore
             }
-        case .page:
-            // A television never shows an inline player; the state exists only
-            // so the three surfaces are one shape.
-            .ignore
+        case .browser:
+            switch input {
+            case .left, .right, .up, .down, .select, .tapSurface: .delegate
+            case .back: .exit
+            case .playPause, .idle: .ignore
+            }
+        case .temporaryGuide:
+            switch input {
+            case .left, .right, .up, .down: .focusCell
+            case .select: .activate
+            case .back: .closePanel
+            case .playPause: .togglePlay
+            case .tapSurface, .idle: .ignore
+            }
+        case .menu, .programmeDetails, .streamInfo:
+            switch input {
+            case .left, .right, .up, .down: .focusPanel
+            case .select: .activate
+            case .back: .closePanel
+            case .playPause: .togglePlay
+            case .tapSurface, .idle: .ignore
+            }
         }
     }
 
     private static func desktop(state: LiveTvInputState, input: LiveTvContractInput) -> LiveTvInputOutcome {
         switch state {
-        case .hidden:
+        case .fullscreenHidden:
             switch input {
             case .left: .stripPrev
             case .right: .stripNext
@@ -110,7 +135,7 @@ enum LiveTvInputRouting {
             case .playPause: .togglePlay
             case .tapSurface: .reveal
             }
-        case .overlay:
+        case .fullscreenControls:
             switch input {
             case .left: .stripPrev
             case .right: .stripNext
@@ -122,25 +147,38 @@ enum LiveTvInputRouting {
             case .tapSurface: .ignore
             case .idle: .hide
             }
-        case .page:
-            // Browsing owns the keyboard while the player is inline; a stray
-            // arrow must not tune a channel out from under someone scrolling.
+        case .browser:
             switch input {
-            case .playPause: .togglePlay
+            case .left, .right, .up, .down, .select, .tapSurface: .delegate
             default: .ignore
+            }
+        case .temporaryGuide:
+            switch input {
+            case .left, .right, .up, .down: .focusCell
+            case .select: .activate
+            case .back: .closePanel
+            case .playPause: .togglePlay
+            case .tapSurface, .idle: .ignore
+            }
+        case .menu, .programmeDetails, .streamInfo:
+            switch input {
+            case .left, .right, .up, .down, .select: .delegate
+            case .back: .closePanel
+            case .playPause: .togglePlay
+            case .tapSurface, .idle: .ignore
             }
         }
     }
 
     private static func touch(state: LiveTvInputState, input: LiveTvContractInput) -> LiveTvInputOutcome {
         switch state {
-        case .hidden:
+        case .fullscreenHidden:
             switch input {
             case .tapSurface: .toggleChrome
             case .back: .exit
             default: .ignore
             }
-        case .overlay:
+        case .fullscreenControls:
             switch input {
             case .tapSurface: .toggleChrome
             case .select: .activate
@@ -148,8 +186,23 @@ enum LiveTvInputRouting {
             case .idle: .hide
             default: .ignore
             }
-        case .page:
-            .ignore
+        case .browser:
+            switch input {
+            case .back: .exit
+            default: .ignore
+            }
+        case .temporaryGuide:
+            switch input {
+            case .select: .activate
+            case .back: .closePanel
+            default: .ignore
+            }
+        case .menu, .programmeDetails, .streamInfo:
+            switch input {
+            case .select: .activate
+            case .back, .tapSurface: .closePanel
+            default: .ignore
+            }
         }
     }
 }

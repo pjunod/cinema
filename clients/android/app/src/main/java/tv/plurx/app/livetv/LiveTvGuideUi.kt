@@ -3,6 +3,7 @@
 package tv.plurx.app.livetv
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -17,20 +18,31 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import tv.plurx.app.ui.components.TvButton
 import tv.plurx.app.ui.components.TvTextButton
+import tv.plurx.app.ui.components.tvFocusRing
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -101,6 +113,8 @@ fun LiveTvChannelRow(
     Column(
         Modifier
             .fillMaxWidth()
+            .clickable(enabled = channel.watchable, onClick = onWatch)
+            .tvFocusRing()
             .padding(vertical = 8.dp)
             .semantics {
                 contentDescription = buildString {
@@ -141,15 +155,14 @@ fun LiveTvChannelRow(
             else -> Text("No programme information", style = MaterialTheme.typography.labelSmall)
         }
         if (channel.favorite) Text("Favorite", style = MaterialTheme.typography.labelSmall)
-        TvButton(onClick = onWatch, enabled = channel.watchable) {
-            Text(
-                when {
-                    !channel.watchable -> "DRM unsupported"
-                    selected -> "Watching"
-                    else -> "Watch live"
-                },
-            )
-        }
+        Text(
+            when {
+                !channel.watchable -> "DRM unsupported"
+                selected -> "Watching"
+                else -> "Watch live"
+            },
+            style = MaterialTheme.typography.labelSmall,
+        )
     }
 }
 
@@ -164,9 +177,100 @@ fun LiveTvGuideGrid(
     playingChannelId: String?,
     onAiring: (LiveTvChannel) -> Unit,
     onFuture: (LiveTvChannel, LiveTvProgramme) -> Unit,
+    dpadNavigation: Boolean = false,
+    navigationTarget: LiveTvGuideFocusTarget? = null,
+    navigationAnchorTime: Long? = null,
+    onNavigationState: (LiveTvGuideFocusTarget, Long?) -> Unit = { _, _ -> },
+    onFocus: (LiveTvChannel, LiveTvProgramme?) -> Unit = { _, _ -> },
+    onToolbarBoundary: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val scroll = rememberScrollState()
+    val rows = rememberLazyListState()
+    val requesters = remember { mutableStateMapOf<LiveTvGuideFocusTarget, FocusRequester>() }
+    var focused by remember { mutableStateOf(navigationTarget) }
+    var pending by remember { mutableStateOf<LiveTvGuideFocusTarget?>(null) }
+    var preserveAnchorFor by remember { mutableStateOf<LiveTvGuideFocusTarget?>(null) }
+    var anchorTime by remember { mutableStateOf(navigationAnchorTime) }
+    val pendingRequester = pending?.let { requesters[it] }
+
+    LaunchedEffect(dpadNavigation, navigationTarget, navigationAnchorTime) {
+        val restored = navigationTarget ?: return@LaunchedEffect
+        anchorTime = navigationAnchorTime
+        if (dpadNavigation && focused != restored) {
+            focused = restored
+            pending = restored
+            preserveAnchorFor = restored
+        }
+    }
+
+    LaunchedEffect(layout) {
+        val current = focused ?: return@LaunchedEffect
+        val row = layout.rows.firstOrNull { it.channel.id == current.channelId }
+        if (row == null) {
+            focused = null
+            pending = null
+        } else if (current.programmeStart != null && row.cells.none { it.programme.start == current.programmeStart }) {
+            val replacement = row.cells.firstOrNull {
+                val at = anchorTime ?: current.programmeStart
+                it.programme.start <= at && at < it.programme.end
+            } ?: row.cells.minByOrNull {
+                kotlin.math.abs((it.programme.start + it.programme.end) / 2 - (anchorTime ?: current.programmeStart))
+            }
+            pending = replacement?.let { LiveTvGuideFocusTarget(row.channel.id, it.programme.start) }
+                ?: LiveTvGuideFocusTarget(row.channel.id)
+            preserveAnchorFor = pending
+            pending?.let { onNavigationState(it, anchorTime) }
+        }
+    }
+    LaunchedEffect(pending, pendingRequester) {
+        val target = pending ?: return@LaunchedEffect
+        val rowIndex = layout.rows.indexOfFirst { it.channel.id == target.channelId }
+        if (rowIndex < 0) {
+            pending = null
+            return@LaunchedEffect
+        }
+        if (pendingRequester == null) {
+            rows.scrollToItem(rowIndex)
+            return@LaunchedEffect
+        }
+        pendingRequester.requestFocus()
+        pending = null
+    }
+
+    fun receiveFocus(target: LiveTvGuideFocusTarget, channel: LiveTvChannel) {
+        focused = target
+        if (preserveAnchorFor == target) {
+            preserveAnchorFor = null
+        } else if (target.programmeStart != null) {
+            val cell = layout.rows.firstOrNull { it.channel.id == target.channelId }
+                ?.cells?.firstOrNull { it.programme.start == target.programmeStart }
+            anchorTime = cell?.programme?.let { it.start + (it.end - it.start).coerceAtLeast(1) / 2 }
+        }
+        val programme = target.programmeStart?.let { start ->
+            layout.rows.firstOrNull { it.channel.id == target.channelId }
+                ?.cells?.firstOrNull { it.programme.start == start }?.programme
+        }
+        onNavigationState(target, anchorTime)
+        onFocus(channel, programme)
+    }
+
+    fun move(direction: LiveTvGuideFocusDirection) {
+        val current = focused ?: return
+        val outcome = LiveTvGuideReducer.moveGuideFocus(layout, current, anchorTime, direction)
+        if (outcome.toolbarBoundary) {
+            onToolbarBoundary()
+            return
+        }
+        val target = outcome.target ?: return
+        if (direction == LiveTvGuideFocusDirection.Up || direction == LiveTvGuideFocusDirection.Down) {
+            preserveAnchorFor = target
+        }
+        anchorTime = outcome.anchorTime
+        onNavigationState(target, anchorTime)
+        if (target != current) pending = target
+    }
+
     Column(modifier) {
         Row {
             Box(Modifier.width(LiveTvGridMetrics.channelColumnWidth))
@@ -184,13 +288,24 @@ fun LiveTvGuideGrid(
         // while ANDROID-CLIENT-PARITY.md said it shipped — so the grid gave a
         // viewer no way to tell where the present was in a four-hour window.
         Box(Modifier.weight(1f)) {
-        LazyColumn {
+        LazyColumn(state = rows) {
             items(layout.rows, key = { it.channel.id }) { row ->
                 Row(Modifier.height(LiveTvGridMetrics.rowHeight)) {
-                    Column(Modifier.width(LiveTvGridMetrics.channelColumnWidth)) {
-                        Text(row.channel.guide_number, style = MaterialTheme.typography.labelMedium)
-                        Text(row.channel.guide_name, style = MaterialTheme.typography.labelSmall)
-                        LiveTvFormatBadges(row.channel)
+                    val channelTarget = LiveTvGuideFocusTarget(row.channel.id, channelHeader = true)
+                    TvTextButton(
+                        onClick = { if (row.channel.watchable) onAiring(row.channel) },
+                        modifier = Modifier
+                            .width(LiveTvGridMetrics.channelColumnWidth)
+                            .liveTvGuideFocusTarget(channelTarget, requesters) {
+                                receiveFocus(channelTarget, row.channel)
+                            }
+                            .liveTvGuideNavigation(dpadNavigation, ::move),
+                    ) {
+                        Column {
+                            Text(row.channel.guide_number, style = MaterialTheme.typography.labelMedium)
+                            Text(row.channel.guide_name, style = MaterialTheme.typography.labelSmall)
+                            LiveTvFormatBadges(row.channel)
+                        }
                     }
                     Box(Modifier.horizontalScroll(scroll)) {
                         // An empty row is a channel the guide has no data for,
@@ -206,13 +321,38 @@ fun LiveTvGuideGrid(
                         // and a second one is exactly how a grid drifts out of
                         // step with its own time header.
                         row.cells.forEach { cell ->
+                            val target = LiveTvGuideFocusTarget(row.channel.id, cell.programme.start)
                             LiveTvGridCellButton(
                                 cell = cell,
                                 channel = row.channel,
                                 playing = playingChannelId == row.channel.id && cell.airing,
                                 onAiring = onAiring,
                                 onFuture = onFuture,
+                                modifier = Modifier
+                                    .liveTvGuideFocusTarget(target, requesters) {
+                                        receiveFocus(target, row.channel)
+                                    }
+                                    .liveTvGuideNavigation(dpadNavigation, ::move),
                             )
+                        }
+                        if (row.cells.isEmpty()) {
+                            val emptyTarget = LiveTvGuideFocusTarget(row.channel.id)
+                            TvTextButton(
+                                onClick = { if (row.channel.watchable) onAiring(row.channel) },
+                                modifier = Modifier
+                                    .width(LiveTvGridMetrics.slotWidth * slots.size)
+                                    .height(LiveTvGridMetrics.rowHeight)
+                                    .liveTvGuideFocusTarget(emptyTarget, requesters) {
+                                        receiveFocus(emptyTarget, row.channel)
+                                    }
+                                    .liveTvGuideNavigation(dpadNavigation, ::move),
+                            ) {
+                                Text(
+                                    if (row.channel.watchable) "No programme information · Watch live"
+                                    else "Protected channel · unavailable",
+                                    style = MaterialTheme.typography.labelSmall,
+                                )
+                            }
                         }
                     }
                 }
@@ -241,10 +381,11 @@ private fun LiveTvGridCellButton(
     playing: Boolean,
     onAiring: (LiveTvChannel) -> Unit,
     onFuture: (LiveTvChannel, LiveTvProgramme) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     TvTextButton(
         onClick = { if (cell.airing) onAiring(channel) else onFuture(channel, cell.programme) },
-        modifier = Modifier
+        modifier = modifier
             .offset(x = cell.left.dp)
             .width((cell.width - 4f).coerceAtLeast(28f).dp)
             .background(if (playing) Color(0x33FFFFFF) else Color.Transparent),
@@ -256,4 +397,18 @@ private fun LiveTvGridCellButton(
             overflow = TextOverflow.Ellipsis,
         )
     }
+}
+
+@Composable
+private fun Modifier.liveTvGuideFocusTarget(
+    target: LiveTvGuideFocusTarget,
+    requesters: MutableMap<LiveTvGuideFocusTarget, FocusRequester>,
+    onFocused: () -> Unit,
+): Modifier {
+    val requester = remember(target) { FocusRequester() }
+    DisposableEffect(target, requester) {
+        requesters[target] = requester
+        onDispose { if (requesters[target] === requester) requesters.remove(target) }
+    }
+    return focusRequester(requester).onFocusChanged { if (it.isFocused) onFocused() }
 }

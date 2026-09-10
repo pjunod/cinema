@@ -23,6 +23,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -41,6 +42,8 @@ import tv.plurx.app.data.OfflineQuality
 import tv.plurx.app.data.PosterSize
 import tv.plurx.app.data.SubtitleReadiness
 import tv.plurx.app.data.ThemeId
+import tv.plurx.app.data.SettingsStore
+import tv.plurx.app.livetv.TvLiveLayout
 import tv.plurx.app.player.isTelevision
 import tv.plurx.app.player.preparedReplacementRequirements
 import tv.plurx.app.ui.components.ChoicePicker
@@ -49,6 +52,7 @@ import tv.plurx.app.ui.components.SafeTopRow
 import tv.plurx.app.ui.components.TvIconButton
 import tv.plurx.app.ui.components.tvFocusRing
 import tv.plurx.app.ui.theme.Muted
+import kotlinx.coroutines.launch
 
 private val LANGS = listOf(
     "eng" to "English", "jpn" to "Japanese", "spa" to "Spanish", "fre" to "French",
@@ -70,6 +74,10 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit, onOpenDeveloper: () -> 
     var audio by remember { mutableStateOf(LANGS.firstOrNull { it.first == vm.audioLang } ?: LANGS.first()) }
     var sub by remember { mutableStateOf(SUB_LANGS.firstOrNull { it.first == vm.subLang } ?: SUB_LANGS.first()) }
     var confirmingSignOut by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    val deviceSettings = remember(context) { SettingsStore(context) }
+    val liveTvLayoutValue by deviceSettings.liveTvLayout.collectAsStateWithLifecycle(initialValue = null)
+    val settingsScope = rememberCoroutineScope()
     val currentProfileHasDownloads = offlineRecords.any {
         it.serverInstanceId == vm.serverInstanceId && it.userId == vm.currentUserId
     } || offlineBookRecords.any {
@@ -146,6 +154,15 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit, onOpenDeveloper: () -> 
                 ChoicePicker("Appearance", preferences.appearance, Appearance.entries, { it.label }, vm::setAppearance)
                 ChoicePicker("Poster size", preferences.posterSize, PosterSize.entries, { it.label }, vm::setPosterSize)
                 ChoicePicker("Home layout", preferences.homeGrouping, HomeGrouping.entries, { it.label }, vm::setHomeGrouping)
+                if (formFactor == FormFactor.Television) {
+                    ChoicePicker(
+                        "Live TV layout",
+                        TvLiveLayout.fromStorage(liveTvLayoutValue),
+                        TvLiveLayout.entries,
+                        { it.label },
+                        { selected -> settingsScope.launch { deviceSettings.saveLiveTvLayout(selected.storageValue) } },
+                    )
+                }
             }
         }
         val downloads: @Composable () -> Unit = {

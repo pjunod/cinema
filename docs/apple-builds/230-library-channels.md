@@ -1,6 +1,6 @@
 # Follow a library subject like a channel
 
-Build: 129
+Build: 131
 Issue: #230
 
 Library channels add a shared server-timed guide on iPhone, iPad, and Apple TV.

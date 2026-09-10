@@ -10,12 +10,51 @@ struct LiveTvChannel: Codable, Identifiable, Equatable, Sendable {
     let hd: Bool?
     let videoCodec: String?
     let audioCodec: String?
+    let sourceFormat: LiveTvSourceFormat?
+
+    init(
+        id: String,
+        guideNumber: String,
+        guideName: String,
+        favorite: Bool,
+        drm: Bool,
+        support: String,
+        hd: Bool?,
+        videoCodec: String?,
+        audioCodec: String?,
+        sourceFormat: LiveTvSourceFormat? = nil
+    ) {
+        self.id = id
+        self.guideNumber = guideNumber
+        self.guideName = guideName
+        self.favorite = favorite
+        self.drm = drm
+        self.support = support
+        self.hd = hd
+        self.videoCodec = videoCodec
+        self.audioCodec = audioCodec
+        self.sourceFormat = sourceFormat
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(String.self, forKey: .id)
+        guideNumber = try values.decode(String.self, forKey: .guideNumber)
+        guideName = try values.decode(String.self, forKey: .guideName)
+        favorite = try values.decodeIfPresent(Bool.self, forKey: .favorite) ?? false
+        drm = try values.decodeIfPresent(Bool.self, forKey: .drm) ?? false
+        support = try values.decodeIfPresent(String.self, forKey: .support) ?? "ready"
+        hd = (try? values.decodeIfPresent(Bool.self, forKey: .hd)) ?? nil
+        videoCodec = (try? values.decodeIfPresent(String.self, forKey: .videoCodec)) ?? nil
+        audioCodec = (try? values.decodeIfPresent(String.self, forKey: .audioCodec)) ?? nil
+        sourceFormat = (try? values.decodeIfPresent(LiveTvSourceFormat.self, forKey: .sourceFormat)) ?? nil
+    }
     var watchable: Bool { !drm && support == "ready" }
     var title: String { "\(guideNumber) · \(guideName)" }
     var formatBadges: [String] {
         var badges = [String]()
-        if let hd { badges.append(hd ? "HD" : "SD") }
-        for value in [videoCodec, audioCodec] {
+        if let pictureClass { badges.append(pictureClass) }
+        for value in [videoCodec, sourceAudioDescription] {
             guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
                   !value.isEmpty else { continue }
             let badge = value.uppercased()
@@ -25,12 +64,126 @@ struct LiveTvChannel: Codable, Identifiable, Equatable, Sendable {
     }
     var sourceFormatDescription: String? {
         var facts = [String]()
-        if let hd { facts.append(hd ? "HD source" : "SD source") }
+        if let exactSourcePicture { facts.append(exactSourcePicture) }
         if let videoCodec = videoCodec?.trimmingCharacters(in: .whitespacesAndNewlines),
            !videoCodec.isEmpty { facts.append("\(videoCodec.uppercased()) video") }
-        if let audioCodec = audioCodec?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !audioCodec.isEmpty { facts.append("\(audioCodec.uppercased()) audio") }
+        if let sourceAudioDescription { facts.append("\(sourceAudioDescription) audio") }
         return facts.isEmpty ? nil : facts.joined(separator: " · ")
+    }
+
+    var pictureClass: String? {
+        if let height = sourceFormat?.videoHeight {
+            if height > 2160 { return "4K+" }
+            if height == 2160 { return "4K" }
+            if height >= 720 { return "HD" }
+            return "SD"
+        }
+        return hd.map { $0 ? "HD" : "SD" }
+    }
+
+    var exactSourcePicture: String? {
+        guard let width = sourceFormat?.videoWidth,
+              let height = sourceFormat?.videoHeight else { return pictureClass }
+        let suffix = sourceFormat?.scan == "progressive" ? "p" : sourceFormat?.scan == "interlaced" ? "i" : ""
+        return "\(width)×\(height)\(suffix)"
+    }
+
+    var sourceAudioDescription: String? {
+        let codec = audioCodec?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        let layout: String? = switch sourceFormat?.audioLayout {
+        case "mono": "Mono"
+        case "stereo": "Stereo"
+        case let value?: value
+        case nil: sourceFormat?.audioChannels.map { "\($0) ch" }
+        }
+        let parts: [String] = [codec, layout].compactMap { $0 }.filter { !$0.isEmpty }
+        return parts.isEmpty ? nil : parts.joined(separator: " ")
+    }
+
+    func removingSourceFormat() -> LiveTvChannel {
+        LiveTvChannel(
+            id: id,
+            guideNumber: guideNumber,
+            guideName: guideName,
+            favorite: favorite,
+            drm: drm,
+            support: support,
+            hd: hd,
+            videoCodec: videoCodec,
+            audioCodec: audioCodec,
+            sourceFormat: nil
+        )
+    }
+}
+
+struct LiveTvSourceFormat: Codable, Equatable, Sendable {
+    let videoWidth: Int?
+    let videoHeight: Int?
+    let scan: String?
+    let audioChannels: Int?
+    let audioLayout: String?
+    let observedAt: Int64
+
+    init(
+        videoWidth: Int? = nil,
+        videoHeight: Int? = nil,
+        scan: String? = nil,
+        audioChannels: Int? = nil,
+        audioLayout: String? = nil,
+        observedAt: Int64
+    ) {
+        self.videoWidth = videoWidth
+        self.videoHeight = videoHeight
+        self.scan = scan
+        self.audioChannels = audioChannels
+        self.audioLayout = audioLayout
+        self.observedAt = observedAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        let observedAt = try values.decode(Int64.self, forKey: .observedAt)
+        guard observedAt > 0 else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .observedAt,
+                in: values,
+                debugDescription: "source observation time must be positive"
+            )
+        }
+        let dimension: (CodingKeys) -> Int? = { key in
+            (try? values.decodeIfPresent(Int.self, forKey: key))
+                .flatMap { (1...16_384).contains($0) ? $0 : nil }
+        }
+        videoWidth = dimension(.videoWidth)
+        videoHeight = dimension(.videoHeight)
+        let rawScan = try? values.decodeIfPresent(String.self, forKey: .scan)
+        scan = ["progressive", "interlaced"].contains(rawScan ?? "") ? rawScan : nil
+        let rawChannels = try? values.decodeIfPresent(Int.self, forKey: .audioChannels)
+        audioChannels = rawChannels.flatMap { (1...32).contains($0) ? $0 : nil }
+        let rawLayoutValue = (try? values.decodeIfPresent(String.self, forKey: .audioLayout)) ?? nil
+        let rawLayout = rawLayoutValue?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        audioLayout = rawLayout.flatMap { value in
+            guard !value.isEmpty, value.utf8.count <= 32,
+                  value.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || ".+_- ".contains($0)) })
+            else { return nil }
+            return value
+        }
+        self.observedAt = observedAt
+    }
+}
+
+enum TvLiveLayout: String, Codable, CaseIterable, Identifiable, Sendable {
+    case guidePreview = "guide_preview"
+    case guideOverlay = "guide_overlay"
+    case channelBrowser = "channel_browser"
+
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .guidePreview: "Guide + preview"
+        case .guideOverlay: "Guide over picture"
+        case .channelBrowser: "Channel browser"
+        }
     }
 }
 
@@ -48,6 +201,7 @@ struct LiveTvStarted: Decodable, Sendable {
 
 struct LiveTvStatus: Decodable, Sendable {
     let state: String
+    let channel: LiveTvChannel?
     let ownerNodeId: String
     let encoder: String
     let outputHeight: Int

@@ -296,36 +296,53 @@ mouse already drives the neighbour strip.
 
 _Generated from the `live` section of [`tests/playback/player-input-contract.json`](../../tests/playback/player-input-contract.json) by `scripts/player-contract-table`; do not edit by hand._
 
-**Surface `ten-foot`** — Siri Remote (tvOS) and D-pad (Android TV / Google TV) over a live stream that is always fullscreen. Directional input moves focus; it never changes channel on its own.
+**Surface `ten-foot`** — Siri Remote (tvOS) and D-pad (Android TV / Google TV). Root browsing delegates ordinary focus to the native framework; custom grids and fullscreen chrome handle only the events they own.
 
 | state \ input | `left` | `right` | `up` | `down` | `select` | `back` | `play_pause` | `tap_surface` | `idle` |
 |---|---|---|---|---|---|---|---|---|---|
-| `hidden` | `reveal` | `reveal` | `reveal` | `reveal` | `reveal` | `exit` | `toggle_play` | `reveal` | `ignore` |
-| `overlay` | `focus_row` | `focus_row` | `focus_row` | `focus_row` | `activate` | `hide` | `toggle_play` | `ignore` | `hide` |
-| `page` | `ignore` | `ignore` | `ignore` | `ignore` | `ignore` | `ignore` | `ignore` | `ignore` | `ignore` |
+| `browser` | `delegate` | `delegate` | `delegate` | `delegate` | `delegate` | `exit` | `ignore` | `delegate` | `ignore` |
+| `fullscreen_hidden` | `reveal` | `reveal` | `reveal` | `reveal` | `reveal` | `return_browser` | `toggle_play` | `reveal` | `ignore` |
+| `fullscreen_controls` | `focus_control` | `focus_control` | `focus_control` | `focus_control` | `activate` | `hide` | `toggle_play` | `ignore` | `hide` |
+| `temporary_guide` | `focus_cell` | `focus_cell` | `focus_cell` | `focus_cell` | `activate` | `close_panel` | `toggle_play` | `ignore` | `ignore` |
+| `menu` | `focus_panel` | `focus_panel` | `focus_panel` | `focus_panel` | `activate` | `close_panel` | `toggle_play` | `ignore` | `ignore` |
+| `programme_details` | `focus_panel` | `focus_panel` | `focus_panel` | `focus_panel` | `activate` | `close_panel` | `toggle_play` | `ignore` | `ignore` |
+| `stream_info` | `focus_panel` | `focus_panel` | `focus_panel` | `focus_panel` | `activate` | `close_panel` | `toggle_play` | `ignore` | `ignore` |
 
-**Surface `desktop`** — Pointer plus keyboard on the web while the Live TV host is fullscreen or focused. A keyboard user has no focus ring to preview with, so vertical tunes directly.
+**Surface `desktop`** — Pointer plus keyboard on the web while the Live TV host is fullscreen or focused. Existing channel-strip hotkeys remain unchanged.
 
 | state \ input | `left` | `right` | `up` | `down` | `select` | `back` | `play_pause` | `tap_surface` | `idle` |
 |---|---|---|---|---|---|---|---|---|---|
-| `hidden` | `strip_prev` | `strip_next` | `channel_up` | `channel_down` | `ignore` | `exit` | `toggle_play` | `reveal` | `ignore` |
-| `overlay` | `strip_prev` | `strip_next` | `channel_up` | `channel_down` | `tune` | `exit` | `toggle_play` | `ignore` | `hide` |
-| `page` | `ignore` | `ignore` | `ignore` | `ignore` | `ignore` | `ignore` | `toggle_play` | `ignore` | `ignore` |
+| `browser` | `delegate` | `delegate` | `delegate` | `delegate` | `delegate` | `ignore` | `ignore` | `delegate` | `ignore` |
+| `fullscreen_hidden` | `strip_prev` | `strip_next` | `channel_up` | `channel_down` | `ignore` | `exit` | `toggle_play` | `reveal` | `ignore` |
+| `fullscreen_controls` | `strip_prev` | `strip_next` | `channel_up` | `channel_down` | `tune` | `exit` | `toggle_play` | `ignore` | `hide` |
+| `temporary_guide` | `focus_cell` | `focus_cell` | `focus_cell` | `focus_cell` | `activate` | `close_panel` | `toggle_play` | `ignore` | `ignore` |
+| `menu` | `delegate` | `delegate` | `delegate` | `delegate` | `delegate` | `close_panel` | `toggle_play` | `ignore` | `ignore` |
+| `programme_details` | `delegate` | `delegate` | `delegate` | `delegate` | `delegate` | `close_panel` | `toggle_play` | `ignore` | `ignore` |
+| `stream_info` | `delegate` | `delegate` | `delegate` | `delegate` | `delegate` | `close_panel` | `toggle_play` | `ignore` | `ignore` |
 
 **Surface `touch`** — iPhone/iPad and Android phones/tablets. Focus states do not apply; tapping the picture is the whole contract.
 
 | state \ input | `left` | `right` | `up` | `down` | `select` | `back` | `play_pause` | `tap_surface` | `idle` |
 |---|---|---|---|---|---|---|---|---|---|
-| `hidden` | `ignore` | `ignore` | `ignore` | `ignore` | `ignore` | `exit` | `ignore` | `toggle_chrome` | `ignore` |
-| `overlay` | `ignore` | `ignore` | `ignore` | `ignore` | `activate` | `exit` | `ignore` | `toggle_chrome` | `hide` |
-| `page` | `ignore` | `ignore` | `ignore` | `ignore` | `ignore` | `ignore` | `ignore` | `ignore` | `ignore` |
+| `browser` | `ignore` | `ignore` | `ignore` | `ignore` | `ignore` | `exit` | `ignore` | `ignore` | `ignore` |
+| `fullscreen_hidden` | `ignore` | `ignore` | `ignore` | `ignore` | `ignore` | `exit` | `ignore` | `toggle_chrome` | `ignore` |
+| `fullscreen_controls` | `ignore` | `ignore` | `ignore` | `ignore` | `activate` | `exit` | `ignore` | `toggle_chrome` | `hide` |
+| `temporary_guide` | `ignore` | `ignore` | `ignore` | `ignore` | `activate` | `close_panel` | `ignore` | `ignore` | `ignore` |
+| `menu` | `ignore` | `ignore` | `ignore` | `ignore` | `activate` | `close_panel` | `ignore` | `close_panel` | `ignore` |
+| `programme_details` | `ignore` | `ignore` | `ignore` | `ignore` | `activate` | `close_panel` | `ignore` | `close_panel` | `ignore` |
+| `stream_info` | `ignore` | `ignore` | `ignore` | `ignore` | `activate` | `close_panel` | `ignore` | `close_panel` | `ignore` |
 
 | Outcome | What the client does |
 |---|---|
 | `reveal` | Draw the overlay and restart the auto-hide timer. Nothing else happens — the press that reveals never also acts. |
 | `hide` | Hide the overlay and drop focus back to the picture. |
-| `focus_row` | Move focus within the overlay: vertically through the channel list, horizontally across the control row. |
+| `delegate` | Return the event unconsumed so the native focus or button framework receives it exactly once. |
+| `focus_control` | Move deliberately among Guide, Channels, Pause/Play live, Info, and More. |
+| `focus_cell` | Move to the adjacent programme, or to the programme covering the same anchor time in the adjacent channel. |
+| `focus_panel` | Move within the open menu, details, or Info panel without escaping it. |
 | `activate` | Activate the focused overlay control. On a focused channel row that means tune it. |
+| `close_panel` | Close the temporary guide, menu, details, or Info and restore its exact opener. |
+| `return_browser` | Leave fullscreen for the saved root layout without stopping or retuning the current session. |
 | `strip_prev` | Move the neighbour strip's preview one channel earlier and reveal the overlay if it was hidden. Previewing never opens a tuner. |
 | `strip_next` | Move the neighbour strip's preview one channel later and reveal the overlay if it was hidden. |
 | `tune` | Open the previewed channel: release the current lease and start one session on the new channel. |
@@ -345,11 +362,11 @@ _Generated from the `live` section of [`tests/playback/player-input-contract.jso
 
 **Hotkeys** (desktop, only while the live host is fullscreen or focused): `f` fullscreen · `m` mute · `p` picture_in_picture · `g` guide_sheet · `escape` exit.
 
-- This table is the finite player's ten-foot/desktop/touch tables with `skip`, `preview`, `commit` and every timeline state removed, and `channel` added. A live stream has no timeline, so no row here seeks.
-- A directional press on a hidden ten-foot overlay only reveals it. This is the 2026-09-02 ruling applied unchanged.
-- The channel list inside the overlay is preview-then-commit on the ten-foot surface: move focus, `select` tunes, `back` hides.
-- `ten-foot`: A television never shows an inline player, so `page` exists only to keep the three surfaces one shape; every row in it is `ignore`.
-- `desktop`: `up`/`down` tune directly because a keyboard user has no focus ring to preview with and the mouse already drives the neighbour strip. On the ten-foot surface the same keys only move focus — the 2026-09-02 ruling, unchanged.
+- A live stream has no seekable timeline, so no row here seeks, records, rewinds, or schedules playback.
+- A directional press or Select on hidden ten-foot controls only reveals them; the revealing press never also moves focus or tunes.
+- Root channel focus and playing channel are independent. Native focus movement is unconsumed, and Select reaches the focused button exactly once.
+- `ten-foot`: The root browser uses native focus and a persistent preview player. Fullscreen reveal and the programme grid intercept only the moves they own.
+- `desktop`: Existing web channel-strip keys remain direct tune controls. Desktop menus and details delegate ordinary focus while Back closes the panel.
 - `touch`: `play_pause` is `ignore`: a phone has no hardware transport key over this surface and the tap answer is the whole contract.
 
 <!-- contract:live:end -->

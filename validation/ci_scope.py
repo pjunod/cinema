@@ -60,6 +60,7 @@ CI_ROUTING_PATHS = (
     "Makefile",
     ".github/workflows/ci.yml",
     ".github/workflows/effort-ci.yml",
+    ".github/workflows/main-fast-lane.yml",
     ".github/workflows/lint.yml",
     "validation/ci_scope.py",
     "validation/points.toml",

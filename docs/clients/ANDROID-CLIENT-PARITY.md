@@ -4,7 +4,7 @@ The Android client is the native plurx **viewer** for phones, foldables,
 tablets, Android TV, and Google TV. This page records what “web parity” means
 for that viewer and keeps server administration out of the comparison.
 
-> Status (2026-09-10): source is v0.3.0, Android build 79. Library-channel
+> Status (2026-09-10): source is v0.3.0, Android build 80. Library-channel
 > browsing, mobile authoring, server-clock following, and all three television
 > presentation preferences are compiled alongside the existing viewer.
 
@@ -257,14 +257,13 @@ channel list is preview-then-commit, and four seconds of no input hides the
 overlay again. A phone in fullscreen gets the touch rows of the same table —
 a tap toggles the chrome.
 
-**One input table for the ten-foot overlay.** `LiveTvInputPolicy` transcribes
+**One input table for the native Live TV shell.** `LiveTvInputPolicy` transcribes
 the `live` section of `tests/playback/player-input-contract.json`, and
-`LiveTvInputPolicyTest` walks every cell against the fixture. The 2026-09-02
-rulings hold: a direction on a hidden overlay only reveals it, and the channel
-list is preview-then-commit. There is no half-hour grid on Android TV — a
-focus-navigable grid is a milestone of its own on each ten-foot platform, and
-until then the television gets the list, which the focus engine already
-handles.
+`LiveTvInputPolicyTest` walks every cell against the fixture. Build 79 adds the
+browser, hidden/visible fullscreen controls, temporary guide, menu, programme
+details, and stream Info states. The 2026-09-02 reveal-only ruling remains;
+delegated focus and activation return false so Compose receives a D-pad press
+exactly once.
 
 ### Live TV
 
@@ -274,6 +273,21 @@ with no scrubber, no resume point and no progress write. It renews its session
 on **rendered frame count** rather than playback position, because a Media3 live
 window's position can move backwards during healthy playback — a frozen picture
 expires, a shuffling live edge does not.
+
+Build 79 composes Guide + preview, Guide over picture, and Channel browser
+around one movable `PlayerView`; the saved layout changes presentation without
+disposing the controller or tuner lease. Every layout retains a tunable empty
+guide row and the full Guide/On now/Favorites/Search/Layout/Return live/More
+grammar. Portrait phones default Guide to the selected channel's vertical
+schedule with a remembered Grid option, while expanded devices keep the grid.
+The guide requests a bounded six-hour window. Optional measured source facts
+decode field by field and Info separates Source from Playing, observation time,
+and reception.
+
+**Current issue #227 evidence:** Android build 79's Kotlin source compiles
+against the pinned project toolchain. The focused JVM regressions and physical
+Google TV D-pad walkthrough remain reserved/unavailable respectively; neither
+is claimed by compilation.
 
 `LiveTvLease` carries the same uncertainty barrier as the other clients: only a
 failure decided before a tuner can open (`live_tv_disabled`,
@@ -300,7 +314,7 @@ Media3 holds a 4 s-segment live window on real hardware is still open.
 
 ### Library channels
 
-Build 79 keeps Library channels separate from the HDHomeRun controller. Every
+Build 80 keeps Library channels separate from the HDHomeRun controller. Every
 signed-in phone/tablet user can browse and favourite, inspect a server-timed
 guide, search the existing catalogue, explicitly include or exclude titles and
 shows, preview a normalized recipe, and create or edit a personal definition
@@ -328,7 +342,7 @@ preview, Guide over picture, and Channel browser. Cycling a layout preserves
 the active Media3 item. Creation/editing remains a phone, tablet, and web
 surface as intended.
 
-**Proved:** `:app:assembleDebug` compiles build 79 with JDK 25 and the installed
+**Proved:** `:app:assembleDebug` compiles build 80 with JDK 25 and the installed
 SDK 37 toolchain. **Not proved:** physical two-device convergence, D-pad
 focused-versus-playing behavior, PiP/background transitions, and measured
 movie/episode or codec-change boundaries. Those require the device record and

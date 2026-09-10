@@ -14863,19 +14863,30 @@ async function toggleLiveTvPip(){
 function liveTvProgramme(channelId){
   return PlurxLiveTv.programmeAt(LIVE_TV.guide,channelId,liveTvNowSeconds());
 }
+function liveTvSourceProgrammeEnd(channel){
+  const observed=channel&&channel.source_format&&channel.source_format.observed_at;
+  const row=LIVE_TV.guide&&Array.isArray(LIVE_TV.guide.channels)
+    ?LIVE_TV.guide.channels.find(entry=>entry.id===channel.id):null;
+  const programme=row&&Array.isArray(row.programmes)
+    ?row.programmes.find(entry=>entry.start<=observed&&observed<entry.end):null;
+  return programme&&Number.isInteger(programme.end)?programme.end:null;
+}
 function liveTvFormatBadges(channel){
-  const badges=PlurxLiveTv.channelBadges(channel);
+  const badges=PlurxLiveTv.channelBadges(channel,liveTvNowSeconds(),liveTvSourceProgrammeEnd(channel));
   return badges.length?`<span class="lt-badges" aria-label="Source format: ${esc(badges.join(", "))}">${badges.map(label=>`<span class="lt-fbadge">${esc(label)}</span>`).join("")}</span>`:"";
 }
 function liveTvTechnicalDetails(channel,status){
   if(!channel) return "";
-  const badges=PlurxLiveTv.channelBadges(channel);
+  const sourceNow=typeof liveTvNowSeconds==="function"?liveTvNowSeconds():Math.floor(Date.now()/1000);
+  const sourceEnd=typeof liveTvSourceProgrammeEnd==="function"?liveTvSourceProgrammeEnd(channel):null;
+  const source=PlurxLiveTv.sourceDetails(channel,sourceNow,sourceEnd);
   const rows=[];
-  if(badges.length) rows.push(`<div class="lt-tech-row"><b>Source</b><span>${esc(badges.join(" · "))}</span></div>`);
+  if(source.exact.length) rows.push(`<div class="lt-tech-row"><b>Source</b><span>${esc(source.exact.join(" · "))}</span></div>`);
+  if(source.observedAt) rows.push(`<div class="lt-tech-row"><b>Observed</b><span>${esc(new Date(source.observedAt*1000).toLocaleString())}</span></div>`);
   if(status){
     const delivery=["H.264",status.output_height?`${status.output_height}p`:null,"AAC"].filter(Boolean).join(" · ");
     const encoder=status.encoder&&status.encoder!=="pending"?` · ${String(status.encoder).toUpperCase()} encoder`:"";
-    rows.push(`<div class="lt-tech-row"><b>Delivery</b><span>${esc(delivery+encoder)}</span></div>`);
+    rows.push(`<div class="lt-tech-row"><b>Playing</b><span>${esc(delivery+encoder)}</span></div>`);
     const signal=status.signal;
     if(signal){
       const metric=(label,value)=>Number.isFinite(value)
@@ -14894,7 +14905,7 @@ function liveTvRefreshTechnicalDetails(){
 }
 function liveTvOverlayTechnical(channel,status){
   if(!channel) return "";
-  const source=PlurxLiveTv.channelBadges(channel).join(" · ");
+  const source=PlurxLiveTv.channelBadges(channel,liveTvNowSeconds(),liveTvSourceProgrammeEnd(channel)).join(" · ");
   const signal=status&&status.signal;
   const rf=signal?[signal.strength_percent,signal.quality_percent,signal.symbol_quality_percent]
     .map((value,index)=>Number.isFinite(value)?`${["strength","quality","symbol"][index]} ${value}%`:null).filter(Boolean).join(" · "):"";
@@ -15222,8 +15233,8 @@ function liveTvGuideSheet(){
 function liveTvInputState(){
   const host=liveTvHost();
   if(!host||host.hidden) return null;
-  if(host.dataset.mode==="full") return host.classList.contains("idle")?"hidden":"overlay";
-  // The contract's `page` state is "inline on the Live TV page". A dock on
+  if(host.dataset.mode==="full") return host.classList.contains("idle")?"fullscreen_hidden":"fullscreen_controls";
+  // The contract's `browser` state is "inline on the Live TV page". A dock on
   // some other route is not that, and treating it as `page` claimed Space
   // application-wide: every button a keyboard user reached anywhere in the app
   // went dead while a session was docked, and the film player fought the dock
@@ -15234,7 +15245,7 @@ function liveTvInputState(){
   // requires for the finite player.
   const modal=document.getElementById("modal");
   if(modal&&!modal.hidden) return null;
-  return "page";
+  return "browser";
 }
 /// True where a key press is the element's own activation, not ours to take.
 /// `preventDefault` on Space over a focused button suppresses the activation
@@ -15292,8 +15303,13 @@ function liveTvApplyOutcome(outcome){
       return true;
     }
     case "exit": exitLiveTvPresentation(); return true;
-    case "activate": return true;
-    case "focus_row": return true;
+    case "delegate":
+    case "focus_control":
+    case "focus_cell":
+    case "focus_panel":
+    case "activate": return false;
+    case "close_panel": liveTvGuideSheet(); return true;
+    case "return_browser": exitLiveTvPresentation(); return true;
     default: return false;
   }
 }
@@ -15303,7 +15319,7 @@ function liveTvKeydown(event){
   if(event.target&&/^(INPUT|TEXTAREA|SELECT)$/.test(event.target.tagName)) return;
   if(liveTvTargetOwnsKey(event.target,event.key)) return;
   const hotkey=PlaybackPolicy.liveHotkey(event.key);
-  if(hotkey&&state!=="page"){
+  if(hotkey&&state!=="browser"){
     event.preventDefault();
     if(hotkey==="fullscreen") fullscreenLiveTv();
     else if(hotkey==="mute") muteLiveTv();
@@ -15344,7 +15360,7 @@ function liveTvWireHost(){
   // what a key does, and a second listener that also reveals would give every
   // `ignore` row an effect. Same choice the finite player made.
   ["mousemove","pointerdown","touchstart"].forEach(event=>window.addEventListener(event,()=>{
-    if(liveTvInputState()==="hidden"||liveTvInputState()==="overlay") liveTvReveal();
+    if(liveTvInputState()==="fullscreen_hidden"||liveTvInputState()==="fullscreen_controls") liveTvReveal();
   },{passive:true}));
   liveTvWireKeys();
   const video=document.getElementById("live-tv-video");
@@ -15482,6 +15498,10 @@ async function watchLiveTv(index){
         const status=await LIVE_TV_LEASE.status();
         if(status&&status.state!=="active") await failed({code:"stream_failed"});
         else if(status){
+          if(status.channel&&status.channel.id===LIVE_TV.selected){
+            LIVE_TV.channels=LIVE_TV.channels.map(channel=>channel.id===status.channel.id
+              ?{...channel,...status.channel,source_format:status.channel.source_format||null}:channel);
+          }
           LIVE_TV.status=status;
           if(typeof liveTvRefreshTechnicalDetails==="function") liveTvRefreshTechnicalDetails();
           if(typeof liveTvPaint==="function") liveTvPaint();

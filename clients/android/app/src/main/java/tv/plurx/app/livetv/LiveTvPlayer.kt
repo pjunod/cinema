@@ -90,6 +90,41 @@ class LiveTvPlayer private constructor(context: Context) {
         }
     }
 
+    /** Refresh lineup and guide without touching the active decoder or lease. */
+    fun refresh() {
+        val expectedProfile = profile ?: return
+        val client = api ?: return
+        mutableState.value = mutableState.value.copy(busy = true, message = "Refreshing channels…")
+        scope.launch {
+            try {
+                val lineup = client.lineup()
+                if (profile != expectedProfile) return@launch
+                val now = System.currentTimeMillis() / 1000
+                val from = now - now.mod(LiveTvGuideReducer.SLOT_SECONDS)
+                val guide = runCatching { client.guide(from = from, hours = 6) }.getOrNull()
+                if (profile != expectedProfile) return@launch
+                val latest = mutableState.value
+                val channels = lineup.channels.map { channel ->
+                    if (latest.watching?.id == channel.id) latest.watching else channel
+                }
+                mutableState.value = latest.copy(
+                    channels = channels,
+                    guide = guide ?: latest.guide,
+                    busy = false,
+                    message = if (lineup.channels.isEmpty()) {
+                        "No channels. Check the saved tuner and channel scan in Settings → Developer."
+                    } else {
+                        "Channels refreshed · lineup ${lineup.freshness}"
+                    },
+                )
+            } catch (error: Exception) {
+                if (profile == expectedProfile) {
+                    mutableState.value = mutableState.value.copy(busy = false, message = message(error))
+                }
+            }
+        }
+    }
+
     fun watch(channel: LiveTvChannel) {
         if (!channel.watchable) return
         val api = api ?: return
@@ -150,7 +185,17 @@ class LiveTvPlayer private constructor(context: Context) {
                                 val status = api.status(started.session_id)
                                 if (status.state != "active") throw LiveTvFailure("stream_failed")
                                 if (mine == serial) {
-                                    mutableState.value = mutableState.value.copy(status = status)
+                                    val observed = status.channel
+                                    val current = mutableState.value
+                                    mutableState.value = current.copy(
+                                        status = status,
+                                        watching = observed?.takeIf { it.id == current.watching?.id }
+                                            ?: current.watching,
+                                        channels = if (observed == null) current.channels else current.channels.map {
+                                            if (it.id == observed.id) observed else it
+                                        },
+                                    )
+                                    expireSourceFormats(System.currentTimeMillis() / 1000)
                                 }
                             } else if (watchdog.expired) {
                                 stopWithMessage("Live TV stopped after the 30-second no-progress budget. Select a channel to resume.")
@@ -290,7 +335,9 @@ class LiveTvPlayer private constructor(context: Context) {
                 // suppressing the write still left the request itself going out
                 // under credentials the viewer has signed out of.
                 if (profile != origin to token) return@launch
-                runCatching { api.guide() }.getOrNull()?.let { fetched ->
+                val now = System.currentTimeMillis() / 1000
+                val from = now - now.mod(LiveTvGuideReducer.SLOT_SECONDS)
+                runCatching { api.guide(from = from, hours = 6) }.getOrNull()?.let { fetched ->
                     if (profile == origin to token) {
                         mutableState.value = mutableState.value.copy(guide = fetched)
                     }
@@ -302,6 +349,23 @@ class LiveTvPlayer private constructor(context: Context) {
 
     fun airing(channel: LiveTvChannel, now: Long = System.currentTimeMillis() / 1000): LiveTvAiring =
         LiveTvGuideReducer.airing(mutableState.value.guide, channel.id, now)
+
+    /** Drop observations at 20 minutes or the programme that owned them, whichever ends first. */
+    fun expireSourceFormats(now: Long) {
+        val latest = mutableState.value
+        fun fresh(channel: LiveTvChannel): LiveTvChannel {
+            val observed = channel.measuredSource?.observed_at ?: return channel
+            val programmeEnd = LiveTvGuideReducer.channel(latest.guide, channel.id)?.programmes
+                ?.firstOrNull { it.start <= observed && observed < it.end }?.end
+            val ttlEnd = if (observed > Long.MAX_VALUE - 20 * 60) Long.MAX_VALUE else observed + 20 * 60
+            val expiry = minOf(ttlEnd, programmeEnd ?: Long.MAX_VALUE)
+            return if (now < expiry) channel else channel.copy(source_format = null)
+        }
+        mutableState.value = latest.copy(
+            channels = latest.channels.map(::fresh),
+            watching = latest.watching?.let(::fresh),
+        )
+    }
 
     companion object {
         const val GUIDE_REFRESH_MS: Long = 20 * 60 * 1_000
