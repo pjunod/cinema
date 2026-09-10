@@ -9,7 +9,7 @@ The implementation history, deployment evidence, and resolved copied-Dolby-
 Vision investigation are recorded in
 [APPLE-NATIVE-SUBTITLES-HANDOFF.md](APPLE-NATIVE-SUBTITLES-HANDOFF.md).
 
-> Status (2026-09-09): source is v0.3.0, Apple build 128. Native text
+> Status (2026-09-09): source is v0.3.0, Apple build 129. Native text
 > subtitles, the cinematic detail surface, stable seek/recovery, truthful
 > delivered-range badges, and app-managed offline viewing on iPhone/iPad have
 > landed.
@@ -462,6 +462,23 @@ iOS and tvOS play Live TV through the same bounded six-segment window every
 other client uses ([PLAYBACK.md](../PLAYBACK.md)), with the platform differences
 that matter:
 
+- **Three television presentations, one player.** Apple TV defaults to Guide +
+  preview and also offers Guide over picture and Channel browser from the Live
+  TV toolbar and ordinary Settings. The local choice changes geometry only;
+  channel, controller, guide state, and tuner session survive it. Fullscreen
+  Guide is a temporary opaque panel and does not rewrite that preference.
+- **Deterministic guide focus.** Programme widths remain proportional, time and
+  channel headings stay pinned, empty rows remain tunable, and vertical moves
+  retain the current UTC anchor across unequal programme durations. Root
+  buttons own Select; the remote adapter is limited to root escape/transport,
+  hidden-control reveal, and the guide moves that need custom routing.
+- **Compact touch browsing.** Portrait Guide opens the selected channel's
+  schedule with a remembered Grid option. Landscape and tablet sizes retain
+  the grid without automatically forcing fullscreen on rotation.
+- **Honest source metadata.** Optional dimensions, scan, channel count, layout,
+  and observation time augment—not replace—the existing HD/SD and codec facts.
+  Info separates Source from Playing and retains missing versus zero signal.
+
 - **AVPlayer against the capability URL.** The playlist and segments carry the
   opaque capability and no account bearer, so the live item is constructed with
   the capability URL directly rather than through the authenticated asset path
@@ -480,7 +497,11 @@ that matter:
   Live TV from a shipped app, and every mutation requires server-enforced
   administrator access plus an exact settings generation.
 
-**Proved:** iOS and tvOS compile and their focused Live TV tests pass on each
+**Current issue #227 evidence:** iOS and tvOS compile at Apple build 129. The
+focused Live TV tests are retained for the single final pre-merge run; no
+physical Siri Remote walkthrough was available in this authoring session.
+
+**Earlier proved baseline:** iOS and tvOS compile and their focused Live TV tests pass on each
 simulator — 14 for the tuner contract, plus the guide reducers and the live
 input table against their shared fixtures. The server side of Live TV is now proved
 against a real HDHomeRun FLEX 4K over an antenna — see

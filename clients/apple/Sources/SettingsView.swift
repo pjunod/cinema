@@ -35,6 +35,9 @@ enum AppBuildInfo {
 
 struct SettingsView: View {
     @EnvironmentObject var model: AppModel
+    #if os(tvOS)
+    @State private var liveTvLayout = SettingsStore().liveTvLayout
+    #endif
     #if os(iOS)
     @State private var confirmingSignOut = false
     @State private var profileHasDownloads = false
@@ -151,6 +154,23 @@ struct SettingsView: View {
             } footer: {
                 Text("Theme and room brightness are independent. Home layout groups shelves by media category or by individual library.")
             }
+
+            #if os(tvOS)
+            Section {
+                Picker("Live TV layout", selection: $liveTvLayout) {
+                    ForEach(TvLiveLayout.allCases) { layout in
+                        Text(layout.label).tag(layout)
+                    }
+                }
+                .onChange(of: liveTvLayout) { _, layout in
+                    SettingsStore().liveTvLayout = layout
+                }
+            } header: {
+                Text("Live TV")
+            } footer: {
+                Text("Layout changes presentation only; the current channel and tuner session continue playing.")
+            }
+            #endif
 
             Section("Account") {
                 LabeledContent("Signed in as", value: model.username ?? "—")

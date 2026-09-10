@@ -43,8 +43,29 @@ final class LiveTvTests: XCTestCase {
          "video_codec":"HEVC","audio_codec":"AC4"}
         """#.utf8))
         XCTAssertEqual(formatted.formatBadges, ["HD", "HEVC", "AC4"])
-        XCTAssertEqual(formatted.sourceFormatDescription, "HD source · HEVC video · AC4 audio")
+        XCTAssertEqual(formatted.sourceFormatDescription, "HD · HEVC video · AC4 audio")
         XCTAssertTrue(channel.formatBadges.isEmpty)
+
+        let measured = LiveTvChannel(
+            id: "5.1", guideNumber: "5.1", guideName: "WXYZ", favorite: false,
+            drm: false, support: "ready", hd: true, videoCodec: "hevc", audioCodec: "ac3",
+            sourceFormat: LiveTvSourceFormat(
+                videoWidth: 3840, videoHeight: 2160, scan: "progressive",
+                audioChannels: 6, audioLayout: "5.1", observedAt: 1_788_998_400
+            )
+        )
+        XCTAssertEqual(measured.formatBadges, ["4K", "HEVC", "AC3 5.1"])
+        XCTAssertEqual(measured.sourceFormatDescription, "3840×2160p · HEVC video · AC3 5.1 audio")
+
+        let malformed = try decoder.decode(LiveTvChannel.self, from: Data(#"""
+        {"id":"9.1","guide_number":"9.1","guide_name":"Bad Optional",
+         "source_format":{"video_width":-1,"video_height":1080,"scan":"wrong",
+         "audio_channels":2,"audio_layout":"stereo","observed_at":1788998400}}
+        """#.utf8))
+        XCTAssertNil(malformed.sourceFormat?.videoWidth)
+        XCTAssertEqual(malformed.sourceFormat?.videoHeight, 1080)
+        XCTAssertNil(malformed.sourceFormat?.scan)
+        XCTAssertEqual(malformed.sourceFormat?.audioLayout, "stereo")
 
         let status = try decoder.decode(LiveTvStatus.self, from: Data(#"""
         {"state":"active","owner_node_id":"owner","encoder":"vaapi","output_height":720,

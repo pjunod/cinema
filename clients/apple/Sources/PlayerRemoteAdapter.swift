@@ -57,18 +57,36 @@ struct PlayerRemoteAdapter: ViewModifier {
 /// to what the remote does. Live TV routes through its own table because a
 /// live stream has no timeline to scrub.
 struct LiveTvRemoteAdapter: ViewModifier {
+    enum Scope {
+        case root
+        case revealSurface
+        case guide
+    }
+
+    let scope: Scope
     let state: () -> LiveTvInputState
     let apply: (LiveTvInputOutcome, LiveTvContractInput) -> Bool
 
+    @ViewBuilder
     func body(content: Content) -> some View {
-        content
-            .onExitCommand { dispatch(.back) }
-            .onPlayPauseCommand { dispatch(.playPause) }
-            .onTapGesture { dispatch(.select) }
-            .onMoveCommand { direction in
+        switch scope {
+        case .root:
+            content
+                .onExitCommand { dispatch(.back) }
+                .onPlayPauseCommand { dispatch(.playPause) }
+        case .revealSurface:
+            content
+                .onTapGesture { dispatch(.select) }
+                .onMoveCommand { direction in
+                    guard let input = Self.input(for: direction) else { return }
+                    dispatch(input)
+                }
+        case .guide:
+            content.onMoveCommand { direction in
                 guard let input = Self.input(for: direction) else { return }
                 dispatch(input)
             }
+        }
     }
 
     static func input(for direction: MoveCommandDirection) -> LiveTvContractInput? {
@@ -91,10 +109,11 @@ struct LiveTvRemoteAdapter: ViewModifier {
 
 extension View {
     func liveTvRemoteAdapter(
+        _ scope: LiveTvRemoteAdapter.Scope,
         state: @escaping () -> LiveTvInputState,
         apply: @escaping (LiveTvInputOutcome, LiveTvContractInput) -> Bool
     ) -> some View {
-        modifier(LiveTvRemoteAdapter(state: state, apply: apply))
+        modifier(LiveTvRemoteAdapter(scope: scope, state: state, apply: apply))
     }
 
     func playerRemoteAdapter(
