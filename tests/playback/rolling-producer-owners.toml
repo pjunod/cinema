@@ -1402,7 +1402,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # three blocking authentication/guide parsers retain their admissions until
 # their OS work returns; and one test-only parser actor is awaited. None is a
 # competing rolling producer or playback clock.
-expected_occurrences = 480
+# +1 for Live TV's stderr drain. The session retains and joins its handle; it
+# only records decoder/source facts and never owns producer policy.
+expected_occurrences = 481
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -1462,7 +1464,9 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # Live TV configuration uses one explicitly bounded Command spawn in its
 # startup validation. Each child is process-group killed and awaited by the
 # caller before its ownership is released.
-expected_occurrences = 53
+# +1 for the live source ffprobe child. It reads the finite replay sample,
+# is kill-on-drop, and is explicitly killed and reaped on timeout.
+expected_occurrences = 54
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -1732,7 +1736,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # verification, and guide parsing, plus bounded test observations. These bounds
 # cancel no producer; blocking work keeps its admission until the OS task ends.
 # +4 for the bounded init/first-fragment publication reads added by the repair.
-expected_occurrences = 724
+# +4 for Live TV: first-byte and replay-write bounds, a total local ffprobe
+# deadline, and the existing tuner-read deadline clamped while collecting the
+# finite prefix. Each is held by the foreground session owner.
+expected_occurrences = 728
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -1813,7 +1820,9 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # 105 -> 104: two direct decoder-health commands move behind one shared bounded
 # command construction. The replacement owns output caps, a total deadline,
 # process-group termination, and confirmed reap in one place.
-expected_occurrences = 104
+# +1 constructs the finite-sample Live TV ffprobe command; it never receives a
+# tuner URL and is owned through bounded output collection and reap.
+expected_occurrences = 105
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -1990,7 +1999,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # 310 -> 311: the bounded helper exposes one explicit child spawn in place of
 # implicit command output. HTTP and replicated-state `.status()` lookalikes are
 # unchanged; the new launch remains owned through exit or kill-and-reap.
-expected_occurrences = 311
+# +6 in Live TV: one real ffprobe spawn plus delivery/session `output()` and
+# HTTP `status()` lookalikes. Only the ffprobe launches a process, and its
+# foreground owner retains it until ordinary or timeout reap.
+expected_occurrences = 317
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -2065,7 +2077,10 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # Drop fallback, while its two drains are joined before success. The remaining
 # matched waits are bounded test synchronization; no path releases admission
 # before its child or blocking work has actually ended.
-expected_occurrences = 352
+# +3 for finite Live TV source observation: ordinary ffprobe wait plus timeout
+# start-kill and wait. All three address the same retained child before the
+# replay sample and session scratch can be released.
+expected_occurrences = 355
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
@@ -2132,7 +2147,9 @@ pattern = "kill_on_drop\\s*\\("
 # subprocess is killed if its owning deadline or test future is dropped.
 # 67 -> 68: the one shared short-lived probe command is kill-on-drop as the
 # cancellation backstop; normal and timed paths still explicitly reap it.
-expected_occurrences = 68
+# +1 for the finite-sample Live TV ffprobe; explicit kill/reap remains the
+# normal timeout path and kill-on-drop is only its cancellation backstop.
+expected_occurrences = 69
 
 [[module_structures]]
 id = "rolling-supervisor-construction"
