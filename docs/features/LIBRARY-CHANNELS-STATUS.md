@@ -1,7 +1,7 @@
 # Library channels status — what is built and what remains
 
-**Status:** single review addressed · rebased corrective fast lane rerun pending · **Effort:**
-`effort/library-channels` · **Updated:** 2026-09-10 · **Base:** `23769947`
+**Status:** single review addressed · current-head qualification in progress · **Effort:**
+`effort/library-channels` · **Updated:** 2026-09-10 · **Base:** `54eda895`
 
 Companion to [FEATURES.md](../FEATURES.md) (what Plurx supports),
 [PLAYBACK.md](../PLAYBACK.md) (finite-media delivery), and
@@ -13,13 +13,13 @@ proved, and what remains?*
 
 | Milestone | State | Evidence |
 |---|---|---|
-| M0 isolated base and compiler | complete | clean independent clone; current `main` merged at `23769947`; Rust 1.97.1 compiler loop established before Rust edits |
+| M0 isolated base and compiler | complete | clean independent clone; current `main` merged at `54eda895`; Rust 1.97.1 compiler loop established before Rust edits |
 | M1 recipes, schedules, and durable storage | built; pinned workspace compile passed | one normalized evaluator and deterministic clock/order implementation; SQLite v55 and Hiqlite v36 entities/build state, authorization-at-write, 24-hour bounded idempotency, coherent catalogue snapshots, renewable claims, guarded publication, immutable-vector LRU, bounded pruning, and import census |
 | M2 API and playback purpose | built; pinned workspace compile passed | bounded authenticated CRUD/opaque-preview/guide/resolve routes, idempotent rebuild/delete, pinned-occurrence finite-HLS starts, durable purpose binding, control-time authorization, and following-mode start/history isolation |
 | M3 web | built; integration compile passed | responsive paginated browse/guide, three-step resumable editor, stable preview seed, admin management, fenced following playback, watch-from-start/return, and advisory Developer enablement |
-| M4 Apple | built; iOS and tvOS compile passed | native paginated guide, three persisted tvOS layouts, iPhone/iPad resumable preview/authoring from navigation or title detail, finite playback control, server-monotonic following, and ordinary watch-from-start/return; build 131 |
-| M5 Android | built; Android APK compile passed | native paginated guide, phone/tablet resumable authoring from navigation or title detail, three Google TV layouts, finite playback control, server-monotonic following, and ordinary watch-from-start/return; versionCode 80 |
-| M6 promotion | rebased corrective candidate | exactly one adversarial review completed; fast-lane qualification exposed and directly covered promotion inventories including v14 import parity, ordinary-session ownership, replicated schema parsing and migration-source admission, channel publication parameters, and sole-voter readdress snapshot boundaries; `main` advanced with native Live TV layouts during the long recovery lane, so that base is merged; run 1684 then exposed a viewport-dependent Android instrumentation assumption, and the corrected contract selects the protected channel before asserting its disabled state |
+| M4 Apple | built; iOS and tvOS compile passed | native paginated guide, three persisted tvOS layouts, iPhone/iPad resumable preview/authoring from navigation or title detail, finite playback control, server-monotonic following, and ordinary watch-from-start/return; build 132 |
+| M5 Android | built; Android APK compile passed | native paginated guide, phone/tablet resumable authoring from navigation or title detail, three Google TV layouts, finite playback control, server-monotonic following, and ordinary watch-from-start/return; versionCode 81 |
+| M6 promotion | current-head qualification | exactly one adversarial review completed; fast-lane qualification exposed and directly covered promotion inventories including v14 import parity, ordinary-session ownership, replicated schema parsing and migration-source admission, channel publication parameters, and sole-voter readdress snapshot boundaries; `main` advanced first with native Live TV layouts and then with the weekly security/recovery remediation, and both are merged; the Android instrumentation contract now uses stable search semantics, preserves the TV guide's channel-row focus owner, accepts the ten-foot labels, and filters the protected channel before asserting its disabled state |
 
 ## Current decision — the merged Live TV guide is the UI seam
 

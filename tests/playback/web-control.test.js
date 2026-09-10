@@ -3067,6 +3067,7 @@ async function main() {
     let nextTimer = 1;
     const element = (id) => ({
       id, muted: id !== "video", volume: 1, paused: true, currentTime: 0,
+      playbackRate: 1, defaultPlaybackRate: 1,
       videoWidth: options.hasVideo === false ? 0 : 1920,
       style: { display: id === "video" ? "" : "none" },
       attributes: {}, listeners: {}, src: null, loads: 0, plays: 0,
@@ -3311,6 +3312,13 @@ async function main() {
     h.instances[0].events.append();
     assert.equal(latest(h).state, "metadata_ready",
       "buffered to the playhead is not buffered past the switch point");
+    // Intent can change while the successor is preparing. The commit must
+    // sample this boundary, not replay the snapshot from preparation start.
+    p.wantsPlayback = false;
+    h.live.muted = true;
+    h.live.volume = 0.35;
+    h.live.defaultPlaybackRate = 1.5;
+    h.live.playbackRate = 1.5;
     // …and buffered past it is, in FILM time.
     h.spare.ranges = [[300, 320]];
     h.instances[0].events.append();
@@ -3328,7 +3336,11 @@ async function main() {
     assert.equal(p.offset, PREPARE_ORIGIN_MS / 1000, "the player's origin follows the session");
     assert.equal(h.spare.id, "video", "the successor is the element the page addresses");
     assert.equal(h.live.id, "video-prepared", "and the predecessor is the spare");
-    assert.equal(h.spare.muted, false, "the successor is audible only after the switch");
+    assert.equal(h.spare.muted, true, "a muted incumbent cannot leak an audible successor frame");
+    assert.equal(h.spare.volume, 0.35);
+    assert.equal(h.spare.defaultPlaybackRate, 1.5);
+    assert.equal(h.spare.playbackRate, 1.5);
+    assert.equal(h.spare.paused, true, "a pause during preparation survives the switch");
     assert.equal(h.spare.style.display, "", "…and visible only after the switch");
     assert.equal(h.live.style.display, "none");
     assert.equal(h.live.muted, true);
@@ -3367,7 +3379,11 @@ async function main() {
     const incumbent = { bandwidthEstimate: 1, destroyed: false,
       destroy() { this.destroyed = true; } };
     const p = h.set(preparedPlayer({ hls: incumbent, sessionId: "incumbent",
-      probeUrl: "/incumbent/probe", offset: 12 }));
+      probeUrl: "/incumbent/probe", offset: 12, wantsPlayback: false }));
+    h.live.muted = true;
+    h.live.volume = 0.4;
+    h.live.defaultPlaybackRate = 1.25;
+    h.live.playbackRate = 1.25;
     h.handle(prepareAction());
     const successor = h.instances[0];
     h.instances[0].events.manifest();
@@ -3375,6 +3391,9 @@ async function main() {
     h.instances[0].events.append();
     assert.equal(incumbent.destroyed, false,
       "the watchdog window keeps the proven predecessor alive");
+    h.live.volume = 0;
+    h.live.defaultPlaybackRate = 0.5;
+    h.live.playbackRate = 0.5;
     h.fireAll();
     assert.equal(latest(h).state, "failed",
       "the first-frame watchdog settles the staging rather than leaving it to the deadline");
@@ -3386,7 +3405,11 @@ async function main() {
     assert.equal(successor.destroyed, true, "rollback destroys the frame-less successor");
     assert.equal(h.live.id, "video");
     assert.equal(h.live.style.display, "");
-    assert.equal(h.live.muted, false);
+    assert.equal(h.live.muted, true);
+    assert.equal(h.live.volume, 0.4);
+    assert.equal(h.live.defaultPlaybackRate, 1.25);
+    assert.equal(h.live.playbackRate, 1.25);
+    assert.equal(h.live.paused, true);
     assert.equal(h.live.parentNode !== null, true);
     assert.deepEqual(h.removed, [h.created[0]],
       "the discarded successor, not the recovered predecessor, leaves the page");

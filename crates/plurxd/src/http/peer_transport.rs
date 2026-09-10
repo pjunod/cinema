@@ -21,8 +21,10 @@ pub(crate) const RESPONSE_SIGNATURE_HEADER: &str = "x-plurx-response-signature";
 pub(crate) enum PeerAuthMode {
     LegacyActivity,
     ExactRequest,
-    /// A bounded control response must prove its status and exact body too.
+    /// A voter control response must prove its status and exact body too.
     ExactRequestAndResponse,
+    /// A committed member, including a learner, must prove the response.
+    ExactRequestAndMemberResponse,
 }
 
 #[derive(Debug)]
@@ -134,7 +136,9 @@ impl PeerTransport {
                 .membership
                 .sign_activity_request(expected_node_id, timestamp_ms)
                 .map(SignedPeerAuth::Activity),
-            PeerAuthMode::ExactRequest | PeerAuthMode::ExactRequestAndResponse => self
+            PeerAuthMode::ExactRequest
+            | PeerAuthMode::ExactRequestAndResponse
+            | PeerAuthMode::ExactRequestAndMemberResponse => self
                 .membership
                 .sign_internal_peer_request(
                     expected_node_id,
@@ -148,11 +152,15 @@ impl PeerTransport {
         }
         .map_err(|_| PeerTransportError::Unreachable)?;
         let response_binding = match &auth {
-            SignedPeerAuth::Exact(auth)
-                if matches!(auth_mode, PeerAuthMode::ExactRequestAndResponse) =>
-            {
-                Some((auth.node_id.clone(), auth.nonce.clone()))
-            }
+            SignedPeerAuth::Exact(auth) => match auth_mode {
+                PeerAuthMode::ExactRequestAndResponse => {
+                    Some((auth.node_id.clone(), auth.nonce.clone(), false))
+                }
+                PeerAuthMode::ExactRequestAndMemberResponse => {
+                    Some((auth.node_id.clone(), auth.nonce.clone(), true))
+                }
+                _ => None,
+            },
             _ => None,
         };
         let mut request = client.request(method, url);
@@ -184,23 +192,40 @@ impl PeerTransport {
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned);
         let response = read_bounded(response, deadline, max_response_bytes).await?;
-        if let Some((target, nonce)) = response_binding {
+        if let Some((target, nonce, member_scoped)) = response_binding {
             let signature = signature.ok_or(PeerTransportError::InvalidResponse)?;
             let payload = signed_response_payload(response.status.as_u16(), &response.body);
-            let verified = tokio::time::timeout_at(
-                deadline,
-                self.membership.authorize_internal_peer_response(
-                    expected_node_id,
-                    &target,
-                    &nonce,
-                    path,
-                    &payload,
-                    &signature,
-                ),
-            )
-            .await
-            .map_err(|_| PeerTransportError::TimedOut)?
-            .map_err(|_| PeerTransportError::InvalidResponse)?;
+            let verified = if member_scoped {
+                tokio::time::timeout_at(
+                    deadline,
+                    self.membership.authorize_internal_peer_member_response(
+                        expected_node_id,
+                        &target,
+                        &nonce,
+                        path,
+                        &payload,
+                        &signature,
+                    ),
+                )
+                .await
+                .map_err(|_| PeerTransportError::TimedOut)?
+                .map_err(|_| PeerTransportError::InvalidResponse)?
+            } else {
+                tokio::time::timeout_at(
+                    deadline,
+                    self.membership.authorize_internal_peer_response(
+                        expected_node_id,
+                        &target,
+                        &nonce,
+                        path,
+                        &payload,
+                        &signature,
+                    ),
+                )
+                .await
+                .map_err(|_| PeerTransportError::TimedOut)?
+                .map_err(|_| PeerTransportError::InvalidResponse)?
+            };
             if !verified {
                 return Err(PeerTransportError::InvalidResponse);
             }
@@ -236,7 +261,7 @@ impl PeerTransport {
                 .sign_activity_request(expected_node_id, timestamp_ms)
                 .map(SignedPeerAuth::Activity),
             // A stream has no complete body to authenticate at this layer.
-            PeerAuthMode::ExactRequestAndResponse => {
+            PeerAuthMode::ExactRequestAndResponse | PeerAuthMode::ExactRequestAndMemberResponse => {
                 return Err(PeerTransportError::InvalidResponse)
             }
             PeerAuthMode::ExactRequest => self

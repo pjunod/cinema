@@ -87,7 +87,7 @@ def workflow_step_scalar(step: str, key: str) -> str:
     values = re.findall(rf"(?m)^        {re.escape(key)}: ([^\n]+)$", step)
     if len(values) != 1:
         raise AssertionError(f"expected one scalar {key!r}, found {len(values)}")
-    return values[0]
+    return values[0].split(" #", 1)[0].rstrip()
 
 
 def runner_fleet() -> dict:
@@ -161,6 +161,69 @@ def workflow_step_literal(step: str, key: str) -> list[str]:
 
 
 class OperationsContractCase(unittest.TestCase):
+    def test_decoder_artifact_hash_opens_once_and_enforces_the_stream_ceiling(self):
+        source = read("crates/plurxd/src/decoder_health.rs")
+        digest = source.split("async fn file_digest", 1)[1].split(
+            "async fn run", 1
+        )[0]
+
+        self.assertLess(digest.index("File::open(path)"), digest.index("file.metadata()"))
+        self.assertIn("total.checked_add(read as u64)?", digest)
+        self.assertIn("total > MAX_ARTIFACT_BYTES", digest)
+
+    def test_external_actions_are_immutable_and_checkout_drops_credentials(self):
+        action_paths = sorted((ROOT / ".github/actions").glob("*/action.yml"))
+        workflow_paths = sorted((ROOT / ".github/workflows").glob("*.yml"))
+        checkout_count = 0
+        credential_drop_count = 0
+        for path in (*action_paths, *workflow_paths):
+            source = path.read_text(encoding="utf-8")
+            for match in re.finditer(
+                r"(?m)^\s*(?:-\s+)?uses:\s+(https://\S+)", source
+            ):
+                action = match.group(1)
+                self.assertRegex(
+                    action,
+                    r"@[0-9a-f]{40}$",
+                    f"{path.relative_to(ROOT)} has a mutable action input: {action}",
+                )
+            checkout_count += source.count(
+                "https://data.forgejo.org/actions/checkout@"
+            )
+            credential_drop_count += source.count("persist-credentials: false")
+        self.assertEqual(checkout_count, credential_drop_count)
+
+    def test_live_tv_ffmpeg_clears_inherited_environment(self):
+        live_tv = read("crates/plurxd/src/live_tv.rs")
+        command = live_tv.split("fn live_ffmpeg_command(", 1)[1].split(
+            "fn live_probe_args", 1
+        )[0]
+        self.assertIn(".env_clear()", command)
+        self.assertIn('.env("LC_ALL", "C")', command)
+
+    def test_private_origin_fetches_use_only_step_scoped_credentials(self):
+        checked = 0
+        for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
+            workflow = path.read_text(encoding="utf-8")
+            fetches = list(re.finditer(r"fetch --no-tags --force origin", workflow))
+            checked += len(fetches)
+            for fetch in fetches:
+                step_start = workflow.rfind("\n      - name:", 0, fetch.start())
+                step_end = workflow.find("\n      - ", fetch.end())
+                step = workflow[step_start : None if step_end < 0 else step_end]
+                self.assertIn(
+                    "GITHUB_TOKEN: ${{ github.token }}",
+                    step,
+                    path.relative_to(ROOT),
+                )
+                self.assertIn(
+                    'http.extraheader="AUTHORIZATION: basic $auth"',
+                    step,
+                    path.relative_to(ROOT),
+                )
+                self.assertNotIn("git config", step, path.relative_to(ROOT))
+        self.assertGreaterEqual(checked, 4)
+
     def test_browser_validation_never_claims_host_audio_or_media_controls(self):
         for path in ("scripts/playback-lab", "scripts/ui-baseline"):
             with self.subTest(path=path):
@@ -1483,10 +1546,16 @@ assert.equal(context.ACT_TIMER, null);
             "preflight"
         ]
         for contract_preflight in (preflight, effort_preflight):
-            self.assertIn("uses: https://data.forgejo.org/actions/setup-node@v4", contract_preflight)
+            self.assertIn(
+                "uses: https://data.forgejo.org/actions/setup-node@"
+                "49933ea5288caeca8642d1e84afbd3f7d6820020",
+                contract_preflight,
+            )
             self.assertIn('node-version: "22"', contract_preflight)
             self.assertLess(
-                contract_preflight.index("actions/setup-node@v4"),
+                contract_preflight.index(
+                    "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020"
+                ),
                 contract_preflight.index("run: make operations-check"),
             )
             # The shared player-input fixtures compile into no Rust and no
@@ -1579,7 +1648,7 @@ assert.equal(context.ACT_TIMER, null);
         rust_toolchain = effort_rust_steps["Install the pinned Rust toolchain"]
         self.assertEqual(
             workflow_step_scalar(rust_toolchain, "uses"),
-            "https://github.com/dtolnay/rust-toolchain@1.97.1",
+            "https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5",
         )
         self.assertIn("          components: rustfmt, clippy", rust_toolchain)
         self.assertEqual(
@@ -1917,7 +1986,7 @@ assert.equal(context.ACT_TIMER, null);
             "ambiguous_cache_admin_acquire_advances_watermark_and_cannot_resurrect",
             "repeated_ambiguous_cache_admin_cleanup_keeps_one_bounded_watermark",
             "server_commit_response_loss_and_crash_expire_cache_admin_exclusion_conservatively",
-            "cache_admin_exclusion_is_separate_rolling_safe_and_capability_v3",
+            "cache_admin_exclusion_is_separate_rolling_safe_and_capability_v4",
             "active_cache_revocation_exclusion_blocks_readiness_without_wall_clock_expiry",
             "cache_revocation_capability_keeps_a_joiner_closed_until_self_is_committed",
             "rollback_heartbeat_cannot_republish_retired_cache_revocation_capabilities",
@@ -2191,7 +2260,11 @@ assert.equal(context.ACT_TIMER, null);
 
         build = workflow_step_blocks(shard)["Build the exact Store test binary"]
         self.assertEqual(workflow_step_scalar(build, "continue-on-error"), "true")
-        self.assertIn("uses: https://github.com/docker/build-push-action@v6", build)
+        self.assertIn(
+            "uses: https://github.com/docker/build-push-action@"
+            "10e90e3645eae34f1e60eeb005ba3a3d33f178e8",
+            build,
+        )
         self.assertIn("file: Dockerfile.store-shard", build)
         self.assertIn("target: store-contract-binary", build)
         self.assertIn("platforms: linux/amd64", build)
@@ -2269,7 +2342,11 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn('cron: "23 6 * * 1"', workflow)
         self.assertIn("workflow_dispatch:", workflow)
         self.assertIn("runs-on: [self-hosted, Linux, X64, lab, ci-store]", job)
-        self.assertIn("uses: https://github.com/dtolnay/rust-toolchain@1.97.1", job)
+        self.assertIn(
+            "uses: https://github.com/dtolnay/rust-toolchain@"
+            "4716b85f2fac3e324e64fa2810f6b5c3905760a5",
+            job,
+        )
         self.assertIn("lane: cluster-store-backstop", job)
         # No eligibility input any more: a self-hosted runner always gets the
         # bounded runner-local cache, and always enforces it on the way out.
@@ -2406,7 +2483,10 @@ assert.equal(context.ACT_TIMER, null);
             "\n  coverage:", 1
         )[0]
         self.assertEqual(
-            android_device.count("uses: https://github.com/reactivecircus/android-emulator-runner@v2"),
+            android_device.count(
+                "uses: https://github.com/reactivecircus/android-emulator-runner@"
+                "4c44018e59b437e86cdfc41da381398f93ed8808"
+            ),
             2,
         )
         android_steps = workflow_step_blocks(android_device)
@@ -2621,7 +2701,7 @@ assert.equal(context.ACT_TIMER, null);
             self.assertIn(
                 "runs-on: [self-hosted, Linux, X64, lab, ci-topology]", job
             )
-            self.assertIn("rust-toolchain@1.97.1", job)
+            self.assertIn("rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5", job)
             self.assertNotIn("persistent-eligible", job)
             self.assertIn("uses: ./.github/actions/cargo-cache-finalize", job)
         self.assertEqual(
@@ -2820,7 +2900,10 @@ assert.equal(context.ACT_TIMER, null);
         # Every artifact has an explicit bound. Only the tiny qualification
         # receipt outlives the one-day diagnostic binaries.
         self.assertEqual(
-            workflow.count("uses: https://data.forgejo.org/forgejo/upload-artifact@v4"),
+            workflow.count(
+                "uses: https://data.forgejo.org/forgejo/upload-artifact@"
+                "16871d9e8cfcf27ff31822cac382bbb5450f1e1e"
+            ),
             workflow.count("retention-days:"),
         )
         self.assertIn("retention-days: 14", workflow)
@@ -2982,6 +3065,17 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("--additional-lock fuzz/Cargo.lock", scheduled)
         self.assertIn("working-directory: target/rust-audit", scheduled)
         self.assertEqual(workflow.count("token: ${{ secrets.FORGEJO_TOKEN }}"), 3)
+        for name in ("workspace", "fuzz", "scheduled"):
+            with self.subTest(best_effort_reporter=name):
+                reporter = jobs[name].split("rustsec/audit-check@", 1)[1].split(
+                    "\n      -", 1
+                )[0]
+                self.assertIn("continue-on-error: true", reporter)
+        self.assertIn("run: cargo audit", jobs["workspace"])
+        self.assertIn("run: cargo audit", jobs["fuzz"])
+        self.assertIn(
+            "run: cargo audit --file target/rust-audit/Cargo.lock", scheduled
+        )
 
     def test_ci_jobs_use_the_intended_runner_trust_boundary(self):
         def local(*labels):
@@ -3112,7 +3206,8 @@ assert.equal(context.ACT_TIMER, null);
             ".github/workflows/rust-audit.yml"
         ).items():
             self.assertIn(
-                "uses: https://github.com/dtolnay/rust-toolchain@1.97.1",
+                "uses: https://github.com/dtolnay/rust-toolchain@"
+                "4716b85f2fac3e324e64fa2810f6b5c3905760a5",
                 block,
                 f"rust-audit:{name} does not provision the pinned Cargo toolchain",
             )

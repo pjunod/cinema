@@ -14681,16 +14681,27 @@ mod tests {
             segment: i64,
             source: &WindowFixtureSubtitleSource,
         ) -> Response {
-            subtitle_vtt_local_before_with_source(
-                state,
-                session,
-                0,
-                &format!("seg{segment:05}.vtt"),
-                Instant::now() + Duration::from_secs(5),
-                source,
-            )
-            .await
-            .expect("an advertised subtitle segment")
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                match subtitle_vtt_local_before_with_source(
+                    state,
+                    session,
+                    0,
+                    &format!("seg{segment:05}.vtt"),
+                    deadline,
+                    source,
+                )
+                .await
+                {
+                    Ok(response) => return response,
+                    Err(ApiError::Typed { code, .. })
+                        if code == "response_state_changed" && Instant::now() < deadline =>
+                    {
+                        tokio::task::yield_now().await;
+                    }
+                    Err(error) => panic!("an advertised subtitle segment: {error:?}"),
+                }
+            }
         }
 
         /// One accepted control exchange naming where the client now is.

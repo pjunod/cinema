@@ -3,9 +3,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use axum::body::Bytes;
+use axum::body::{Body, Bytes};
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, Response, StatusCode};
 use futures_util::{stream, StreamExt};
 use plurx_core::cluster::membership::{
     ActivityPeer, CacheAdminRevocationCleanupOutcome, CacheAdminRevocationLease, MembershipManager,
@@ -606,7 +606,7 @@ async fn fanout(
                     body,
                     deadline,
                     256,
-                    PeerAuthMode::ExactRequest,
+                    PeerAuthMode::ExactRequestAndMemberResponse,
                 )
                 .await
                 .is_ok_and(|response| response.status == reqwest::StatusCode::NO_CONTENT)
@@ -634,7 +634,7 @@ pub(crate) async fn receive(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<Response<Body>, StatusCode> {
     let auth = exact_auth_from_headers(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
     if !state
         .membership
@@ -665,7 +665,20 @@ pub(crate) async fn receive(
     )
     .await
     .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-    Ok(StatusCode::NO_CONTENT)
+    // The acknowledgement is security evidence, not merely transport
+    // success. Bind the empty 204 to the responder, request nonce, path and
+    // exact status/body so a relay cannot forge or replay Begin/End success.
+    let payload =
+        super::peer_transport::signed_response_payload(StatusCode::NO_CONTENT.as_u16(), &[]);
+    let signature = state
+        .membership
+        .sign_internal_peer_response(&auth.node_id, &auth.nonce, PATH, &payload)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    Response::builder()
+        .status(StatusCode::NO_CONTENT)
+        .header(super::peer_transport::RESPONSE_SIGNATURE_HEADER, signature)
+        .body(Body::empty())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 async fn apply_and_wait_for_local_claim_with<Check, CheckFuture>(
@@ -757,6 +770,29 @@ mod tests {
             .0;
         assert!(source.contains("cache_admin_revocation_peers(claim_id)"));
         assert!(!source.contains("operations_peers()"));
+    }
+
+    #[test]
+    fn revocation_acknowledgements_require_exact_response_authentication() {
+        let fanout = include_str!("internal_auth_revocation.rs")
+            .split_once("async fn fanout(")
+            .expect("revocation fanout")
+            .1
+            .split_once("fn propagation_error")
+            .expect("revocation fanout end")
+            .0;
+        assert!(fanout.contains("PeerAuthMode::ExactRequestAndMemberResponse"));
+        assert!(!fanout.contains("PeerAuthMode::ExactRequest,"));
+        let receive = include_str!("internal_auth_revocation.rs")
+            .split_once("pub(crate) async fn receive(")
+            .expect("revocation receiver")
+            .1
+            .split_once("fn validate(")
+            .expect("revocation receiver end")
+            .0;
+        assert!(receive.contains("sign_internal_peer_response"));
+        assert!(receive.contains("RESPONSE_SIGNATURE_HEADER"));
+        assert!(receive.contains("StatusCode::NO_CONTENT"));
     }
 
     #[test]

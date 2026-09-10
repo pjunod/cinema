@@ -4,7 +4,7 @@ The Android client is the native plurx **viewer** for phones, foldables,
 tablets, Android TV, and Google TV. This page records what “web parity” means
 for that viewer and keeps server administration out of the comparison.
 
-> Status (2026-09-10): source is v0.3.0, Android build 80. Library-channel
+> Status (2026-09-10): source is v0.3.0, Android build 81. Library-channel
 > browsing, mobile authoring, server-clock following, and all three television
 > presentation preferences are compiled alongside the existing viewer.
 
@@ -314,7 +314,7 @@ Media3 holds a 4 s-segment live window on real hardware is still open.
 
 ### Library channels
 
-Build 80 keeps Library channels separate from the HDHomeRun controller. Every
+Build 81 keeps Library channels separate from the HDHomeRun controller. Every
 signed-in phone/tablet user can browse and favourite, inspect a server-timed
 guide, search the existing catalogue, explicitly include or exclude titles and
 shows, preview a normalized recipe, and create or edit a personal definition
@@ -342,7 +342,7 @@ preview, Guide over picture, and Channel browser. Cycling a layout preserves
 the active Media3 item. Creation/editing remains a phone, tablet, and web
 surface as intended.
 
-**Proved:** `:app:assembleDebug` compiles build 80 with JDK 25 and the installed
+**Proved:** `:app:assembleDebug` compiles build 81 with JDK 25 and the installed
 SDK 37 toolchain. **Not proved:** physical two-device convergence, D-pad
 focused-versus-playing behavior, PiP/background transitions, and measured
 movie/episode or codec-change boundaries. Those require the device record and

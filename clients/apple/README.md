@@ -12,7 +12,7 @@ anything it can't (MKV, DTS/TrueHD, …) is delivered as the server's on-the-fly
 HDR display at runtime and sends that to `/decision`, so the server transcodes
 only what this hardware genuinely can't play.
 
-> Status: **v0.3.0**, build `131` in [`project.yml`](project.yml) — working
+> Status: **v0.3.0**, build `132` in [`project.yml`](project.yml) — working
 > development client. Browse, resume, discover, and play on both iOS and tvOS.
 > Both targets compile against the iOS/tvOS 26.5 SDKs and share the same
 > regression suite.
@@ -93,7 +93,9 @@ only what this hardware genuinely can't play.
 - **Connect & sign in**; the bearer token lives in the **Keychain** (so a new
   development build does not sign you out) and the session reconnects silently
   on next launch. Address and token are written together, so changing servers
-  cannot leave the previous server's credential on disk.
+  cannot leave the previous server's credential on disk. Sign Out gives the
+  captured server and bearer five seconds to confirm revocation, then clears
+  Keychain state even when offline; a late response cannot erase a newer login.
 - **Home** with Continue Watching / Next Up / Recently Added and your
   libraries. Hubs, libraries, and Coming Soon are fetched in parallel and each
   shelf paints as it arrives; a refresh never blanks a populated dashboard, and

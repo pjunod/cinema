@@ -101,12 +101,11 @@ pub async fn setup(
     if state.store.count_users().await? > 0 {
         return Err(ApiError::Conflict("setup already completed".into()));
     }
-    if req.username.trim().is_empty() || req.password.len() < 8 {
-        return Err(ApiError::BadRequest(
-            "username required and password must be at least 8 characters".into(),
-        ));
+    if req.username.trim().is_empty() {
+        return Err(ApiError::BadRequest("username required".into()));
     }
-    let hash = auth::hash_password(&req.password).map_err(|e| ApiError::Internal(e.to_string()))?;
+    super::auth::validate_new_password(&req.password)?;
+    let hash = super::auth::hash_password_bounded(req.password).await?;
     let user = state
         .store
         .create_user(req.username.trim(), &hash, true)

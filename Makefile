@@ -812,7 +812,7 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  cluster::membership::tests::server_commit_response_loss_and_crash_expire_cache_admin_exclusion_conservatively \
 	  --lib -- --exact
 	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
-	  cluster::membership::tests::cache_admin_exclusion_is_separate_rolling_safe_and_capability_v3 \
+	  cluster::membership::tests::cache_admin_exclusion_is_separate_rolling_safe_and_capability_v4 \
 	  --lib -- --exact
 	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
 	  cluster::membership::tests::active_cache_revocation_exclusion_blocks_readiness_without_wall_clock_expiry \
