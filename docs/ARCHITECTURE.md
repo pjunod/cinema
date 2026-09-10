@@ -311,6 +311,44 @@ The client half — how each player judges that a live stream is still playing,
 and what it does with an outcome it cannot classify — is
 [PLAYBACK.md](PLAYBACK.md).
 
+## 3b. Library channels — a clock over immutable finite media
+
+A Library channel owns no stream while nobody watches it. Its replicated
+definition is a bounded catalogue recipe plus one active immutable rotation
+and, while an edit waits for a safe boundary, at most one pending replacement.
+Both Store implementations persist the same definition, generation, entry,
+favourite, and idempotency entities; the application supplies every timestamp,
+random seed, digest, and conditional-write expectation.
+
+Channel building reads one bounded catalogue projection in a single consistent
+database query. The Rust evaluator applies the same recipe and ancestry rules
+for SQLite and Hiqlite, pins one eligible file fingerprint and duration per
+item, and derives a deterministic order. Two process slots and one replicated
+120-second claim per channel bound builders. Claims renew every 30 seconds,
+entries stage in bounded batches, and publication atomically verifies the
+definition revision, claim, entry count, offsets, and digest before changing a
+channel pointer. An interrupted or stale build is never visible.
+
+Resolution is arithmetic over the published epoch and cumulative durations:
+it loads the effective generation, binary-searches the current occurrence, and
+returns the source offset computed from server UTC. Guide reads perform a
+bounded merge over only the requested channel/window. Immutable vectors use a
+node-local 64-generation/32 MiB LRU; visibility, enabled state, permissions,
+and the effective generation are still read authoritatively before cache use.
+
+Watching deliberately crosses back into §3's finite HLS service through a
+dedicated channel-session route. A typed purpose containing channel,
+generation, cycle, ordinal, and tune sequence is persisted in the session
+identity before playback side effects. Control exchanges revalidate the
+current channel while that purpose suppresses ordinary playback-start and
+watch-history work. **Watch from start** creates an unrelated ordinary VOD
+purpose, so personal progress and seeking retain their existing semantics.
+
+There is no build feature or readiness veto. `library_channels.enabled` is a
+replicated runtime admission switch, while Settings → Developer reports
+storage, catalogue, and client facts as advice. Definitions remain editable
+while admission is off.
+
 ## 4. Scanner & metadata — ffprobe is ground truth
 
 ```

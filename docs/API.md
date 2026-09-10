@@ -2012,15 +2012,15 @@ them, and only an administrator may publish shared visibility.
 | Method | Path | Auth | What it does |
 |---|---|---|---|
 | GET | `/api/v1/library-channels/` | bearer | Visible channel summaries with private favourite state and derived now/next; `management=true` is admin-only |
-| POST | `/api/v1/library-channels/preview` | bearer | Bounded recipe evaluation without file I/O or publication |
+| POST | `/api/v1/library-channels/preview` | bearer | Bounded recipe evaluation without file I/O or publication; accepts an opaque `cursor` and returns `next_cursor` |
 | POST | `/api/v1/library-channels/` | bearer | Idempotent definition creation and initial immutable generation publication |
 | GET | `/api/v1/library-channels/{id}` | bearer | Definition, revision, generation pointers, and mutation capabilities |
 | PUT | `/api/v1/library-channels/{id}` | bearer | Full expected-revision replacement; the working schedule stays active until the next rotation |
-| DELETE | `/api/v1/library-channels/{id}` | bearer | Expected-revision deletion; media is never deleted |
+| DELETE | `/api/v1/library-channels/{id}` | bearer | Idempotent deletion with mandatory `expected_revision` and `request_id` query parameters; media is never deleted |
 | POST | `/api/v1/library-channels/{id}/rebuild` | bearer | Rebuild with next-rotation or next-programme activation and optional reshuffle |
 | GET | `/api/v1/library-channels/{id}/build` | bearer | Active/pending build projection and activation time |
 | PUT | `/api/v1/library-channels/{id}/favourite` | bearer | Idempotently set the caller's private favourite |
-| GET | `/api/v1/library-channels/guide` | bearer | At most 20 channels and 24 hours, capped at 1,000 derived occurrences |
+| GET | `/api/v1/library-channels/guide` | bearer | At most 20 channels and 24 hours, capped at 1,000 derived occurrences; continue with the opaque cursor in `X-Plurx-Next-Cursor` |
 | POST | `/api/v1/library-channels/{id}/resolve` | bearer | Resolve server-now only; opens no file and creates no session |
 | POST | `/api/v1/library-channels/{id}/sessions` | bearer | Revalidate an occurrence and create one following finite-HLS session |
 
@@ -2037,6 +2037,21 @@ The runtime switch `library_channels_enabled` is always compiled and affects
 resolve/session admission only. Listing, preview, authoring, empty-state help,
 and existing schedules stay inspectable while it is off. Its Developer
 readiness rows are advisory and cannot veto an administrator's explicit save.
+
+Preview cursors bind the caller, normalized recipe, candidate-content digest,
+and offset. Guide cursors bind the caller, channel-generation state, requested
+window, and final ordered occurrence. A changed binding is `409
+catalogue_changed` instead of a page assembled from two catalogue or schedule
+states. Create, update, rebuild, and delete idempotency records live for 24
+hours, are capped at 1,000 per account, and reject a reused request identity
+with a different normalized operation.
+
+Following authorization is not a one-time check. Every finite-HLS control
+exchange reloads the durable session purpose and current channel state. A
+disabled or deleted channel ends following with `410 channel_unavailable`; an
+unavailable authoritative store refuses the exchange with `503
+channel_store_unavailable`. Detached **Watch from start** playback has ordinary
+VOD purpose and is unaffected by later channel state.
 
 ## 18. Trakt and the monarr seam
 

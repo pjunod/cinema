@@ -4,6 +4,10 @@ The Android client is the native plurx **viewer** for phones, foldables,
 tablets, Android TV, and Google TV. This page records what “web parity” means
 for that viewer and keeps server administration out of the comparison.
 
+> Status (2026-09-10): source is v0.3.0, Android build 79. Library-channel
+> browsing, mobile authoring, server-clock following, and all three television
+> presentation preferences are compiled alongside the existing viewer.
+
 > Status (2026-08-02): native text subtitles landed — Android takes the same
 > WebVTT renditions the Apple client does, selects them in place on a
 > direct-played file, and opens a video-recipe-preserving session on a remux
@@ -293,6 +297,42 @@ against a real HDHomeRun FLEX 4K over an antenna — see
 [HDHOMERUN-LIVE-TV-STATUS.md](../features/HDHOMERUN-LIVE-TV-STATUS.md) — but playback on a
 physical phone or Google TV against that tuner has not been run, so whether
 Media3 holds a 4 s-segment live window on real hardware is still open.
+
+### Library channels
+
+Build 79 keeps Library channels separate from the HDHomeRun controller. Every
+signed-in phone/tablet user can browse and favourite, inspect a server-timed
+guide, search the existing catalogue, explicitly include or exclude titles and
+shows, preview a normalized recipe, and create or edit a personal definition
+through Content → Playback → Channel steps. Administrators additionally see
+shared visibility. Empty selection remains an editable draft and cannot
+silently become an all-library rule.
+
+Following uses the dedicated finite-HLS channel session in Media3. A monotone
+tune sequence rejects late work, resolve RTT anchors server time to
+`elapsedRealtime`, and authoritative resolution runs at boundaries and at most
+30 seconds apart while following. After first-frame startup, one bounded
+catch-up compares Media3 position plus `media_origin_ms` with the estimated
+live position and seeks only when more than two seconds behind. An early ended
+event waits for the scheduled boundary; a late timer resolves now and skips
+expired slots. Leaving the surface releases following.
+
+Following has no scrubber, marker skip, autoplay, or progress write. Pause is
+local while the channel clock advances; Resume live and Return resolve now.
+**Watch from start** deliberately creates ordinary personal playback, with the
+normal history and seek behavior, until Return fences it and rejoins the
+current occurrence.
+
+Android TV / Google TV persist the three presentation choices: Guide +
+preview, Guide over picture, and Channel browser. Cycling a layout preserves
+the active Media3 item. Creation/editing remains a phone, tablet, and web
+surface as intended.
+
+**Proved:** `:app:assembleDebug` compiles build 79 with JDK 25 and the installed
+SDK 37 toolchain. **Not proved:** physical two-device convergence, D-pad
+focused-versus-playing behavior, PiP/background transitions, and measured
+movie/episode or codec-change boundaries. Those require the device record and
+are not inferred from an APK build.
 
 ## Layout verification
 

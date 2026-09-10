@@ -1,7 +1,7 @@
 # Library channels status — what is built and what remains
 
-**Status:** M0 complete · implementation in progress · **Effort:**
-`effort/library-channels` · **Updated:** 2026-09-09 · **Base:** `4cef0da7`
+**Status:** implementation complete · promotion pending · **Effort:**
+`effort/library-channels` · **Updated:** 2026-09-10 · **Base:** `4cef0da7`
 
 Companion to [FEATURES.md](../FEATURES.md) (what Plurx supports),
 [PLAYBACK.md](../PLAYBACK.md) (finite-media delivery), and
@@ -14,17 +14,17 @@ proved, and what remains?*
 | Milestone | State | Evidence |
 |---|---|---|
 | M0 isolated base and compiler | complete | clean independent clone at `4cef0da7`; Rust 1.97.1 baseline `cargo check -p plurxd --all-targets` passed in 1m14s |
-| M1 recipes, schedules, and durable storage | built; integration compile passed | one normalized evaluator and deterministic clock/order implementation; SQLite v55 and Hiqlite v35 entities, authorization-at-write, idempotent definitions, bounded staging, guarded publication, catalogue projection, and import census |
-| M2 API and playback purpose | built; integration compile passed | bounded authenticated CRUD/preview/guide/resolve routes, pinned-occurrence finite-HLS starts, durable purpose binding, and following-mode start/history isolation |
+| M1 recipes, schedules, and durable storage | built; pinned workspace compile passed | one normalized evaluator and deterministic clock/order implementation; SQLite v55 and Hiqlite v35 entities, authorization-at-write, 24-hour bounded idempotency, coherent catalogue snapshots, renewable claims, guarded publication, immutable-vector LRU, bounded pruning, and import census |
+| M2 API and playback purpose | built; pinned workspace compile passed | bounded authenticated CRUD/opaque-preview/guide/resolve routes, idempotent rebuild/delete, pinned-occurrence finite-HLS starts, durable purpose binding, control-time authorization, and following-mode start/history isolation |
 | M3 web | built; integration compile passed | responsive browse/guide, three-step resumable editor, preview and management actions, fenced following playback, watch-from-start/return, and advisory Developer enablement |
-| M4 Apple | built; iOS and tvOS compile passed | native now/next guide and adaptive phone/tablet/television layout; iPhone/iPad preview and authoring; fenced finite-HLS following with pause-boundary rejoin and ordinary watch-from-start; build 129 |
-| M5 Android | built; Android compile passed | native now/next guide; phone/tablet authoring; adaptive Google TV layout; fenced finite-HLS following with pause-boundary rejoin and ordinary watch-from-start; versionCode 79 |
-| M6 promotion | queued | documentation, one adversarial review, review fixes, fast lane, and merge |
+| M4 Apple | built; iOS and tvOS compile passed | native now/next guide, three persisted tvOS layouts, iPhone/iPad stepped preview/authoring with catalogue selection, server-monotonic boundary following, and ordinary watch-from-start; build 129 |
+| M5 Android | built; Android APK compile passed | native now/next guide, phone/tablet stepped authoring with catalogue selection, three Google TV layouts, server-monotonic boundary following, and ordinary watch-from-start; versionCode 79 |
+| M6 promotion | queued | documentation is current; next is exactly one adversarial review, owned fixes, the main-only fast lane, and merge |
 
 ## Current decision — the merged Live TV guide is the UI seam
 
 Forgejo `main` already contains the 2026-09-08 Live TV guide and client
-layout work. Library channels will reuse its guide presentation and preserve
+layout work. Library channels reuse its guide presentation and preserve
 its tuner controller as a separate source adapter. There is no parallel
 layout implementation and no combined tuner/library transport.
 
@@ -54,10 +54,15 @@ ready, applies `fast-lane`, and merges only when the current head has a green
 Main promotion gate. Full unit and device sweeps remain owned by the separate
 test-maintenance process.
 
-## Known limits — do not read queued work as shipped behavior
+## Evidence limits — compilation is not a device claim
 
-- No implementation milestone after M0 is claimed until its code is committed.
-- Physical two-device and television-input observations require the named
-  devices and are recorded honestly if unavailable during this effort.
+- Pinned Rust workspace check, iOS/tvOS generic-simulator compilation, and the
+  Android debug APK build pass on the implementation head. The repository's
+  requested full test suites were deliberately not run; the Main promotion
+  gate runs once, after the one review is addressed.
+- Physical two-device convergence, tune-to-frame and transition latency,
+  phone/tablet rotation and PiP, and Siri Remote/D-pad focus observations need
+  the named devices. They are not inferred from compilation and remain the
+  explicit follow-up acceptance record.
 - Library channels never gate on a tuner, remote metadata service, AI key, or
   readiness verdict; only ordinary authentication and media permissions apply.

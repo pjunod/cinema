@@ -571,12 +571,13 @@ checks capacity; a `503` then is normal and says so.
 
 ## 4b. Library channels — "turn a subject into a schedule"
 
-**What it does:** an administrator defines a subject from library filters and
-explicit titles, and plurx publishes that selection as a deterministic,
-continuous schedule. Viewers browse now/next cards or a vertical guide, tune
-into the programme already in progress, and keep following across programme
-boundaries. The underlying titles remain ordinary finite library media: no
-duplicate files, recording process, or live-tuner lease exists.
+**What it does:** every signed-in account can define a personal subject from
+library filters and explicit titles, and plurx publishes that selection as a
+deterministic, continuous schedule. Administrators can additionally publish a
+shared channel for all accounts. Viewers browse now/next cards or a vertical
+guide, tune into the programme already in progress, and keep following across
+programme boundaries. The underlying titles remain ordinary finite library
+media: no duplicate files, recording process, or live-tuner lease exists.
 
 - **A recipe is inspectable before it is saved.** The web editor separates
   content, playback, and channel details; its preview names exclusions and
@@ -592,10 +593,11 @@ duplicate files, recording process, or live-tuner lease exists.
   session. Following suppresses resume, progress, watched-state, markers, and
   seeking; **Watch from start** deliberately leaves the channel and opens the
   title as ordinary playback.
-- **Ownership and visibility are explicit.** Administrators author channels;
-  public channels are visible to every authenticated viewer, while private
-  channels remain visible only to their owner. Favourites are private per-user
-  presentation state and never alter the shared schedule.
+- **Ownership and visibility are explicit.** Every account authors and manages
+  its own personal channels. Administrators may also make channels shared and
+  use the explicit management listing; normal browsing never exposes another
+  account's personal channel. Favourites are private per-user presentation
+  state and never alter the shared schedule.
 - **Enablement is a choice, not a readiness gate.** Settings → Developer shows
   whether storage, eligible probed video, and client compatibility look ready.
   Those facts are advice beside an explicit switch. Disabling stops new

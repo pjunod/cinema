@@ -1417,10 +1417,13 @@ continuing the stale occurrence. **Watch from start** exits following mode and
 opens the same item through the normal finite-media controller, restoring
 seeking, progress, markers, and resume.
 
-The server's enable switch is checked when resolving or opening a new following
-session. Readiness diagnostics are deliberately absent from this decision:
-they explain likely failures to an administrator but cannot veto an explicit
-enable choice.
+The server's enable switch and current channel visibility are checked when
+resolving, opening a new following session, and on every ordinary finite-HLS
+control exchange for a stored channel purpose. Disable, deletion, or a caller
+who no longer has visibility ends following without changing a detached
+personal title. Readiness diagnostics are deliberately absent from this
+decision: they explain likely failures to an administrator but cannot veto an
+explicit enable choice.
 
 ## Non-goals & known limits
 

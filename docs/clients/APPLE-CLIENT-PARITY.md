@@ -9,7 +9,7 @@ The implementation history, deployment evidence, and resolved copied-Dolby-
 Vision investigation are recorded in
 [APPLE-NATIVE-SUBTITLES-HANDOFF.md](APPLE-NATIVE-SUBTITLES-HANDOFF.md).
 
-> Status (2026-09-09): source is v0.3.0, Apple build 129. Native text
+> Status (2026-09-10): source is v0.3.0, Apple build 129. Native text
 > subtitles, the cinematic detail surface, stable seek/recovery, truthful
 > delivered-range badges, and app-managed offline viewing on iPhone/iPad have
 > landed.
@@ -491,6 +491,42 @@ and nothing here settles whether the system picture-in-picture window survives
 two minutes of backgrounding on a physical iPhone — that is
 [LIVE-TV-GUIDE-AND-UI-PLAN.md](../features/LIVE-TV-GUIDE-AND-UI-PLAN.md) §8's
 first physical check.
+
+## Library channels
+
+Build 129 adds the authenticated Library-channel contracts without merging
+them into the HDHomeRun controller. iPhone and iPad can browse and favourite,
+inspect a server-timed now/next guide, preview a recipe, search the existing
+catalogue, include or exclude titles and shows, and create or replace a
+personal channel in the three Content → Playback → Channel steps. An
+administrator additionally sees shared visibility. Empty selection stays an
+editable draft; it is never reinterpreted as the whole server.
+
+Following uses AVPlayer against the dedicated finite-HLS channel session. A
+monotone tune sequence drops late resolve/start work, the resolve RTT anchors a
+server clock advanced by system uptime, and a 30-second refresh or programme
+boundary re-resolves authoritatively. Startup performs one delayed catch-up
+seek when it is more than two seconds behind, accounting for the media origin.
+Pause means the schedule keeps moving; resume and Return resolve now. An early
+player-ended event waits for the shared boundary instead of advancing the
+channel early. Leaving the Library-channel surface ends following.
+
+Following exposes no seek, marker, next-episode, or progress behavior. **Watch
+from start** opens ordinary personal playback and **Return to channel** fences
+that controller before resolving now again. The server also stores and
+revalidates the purpose, so a client omission cannot turn following into a
+history-producing session.
+
+tvOS implements the three presentation preferences — Guide + preview, Guide
+over picture, and Channel browser — with a persisted layout choice. Layout
+changes do not replace the AVPlayer item. Creation/editing remains on iPhone,
+iPad, and web as intended.
+
+**Proved:** both iOS and tvOS schemes compile in Debug for their generic
+simulator destinations. **Not proved:** physical two-device convergence,
+Siri-Remote focused-versus-playing behavior, PiP/background transitions, and
+the measured codec-boundary transition matrix. Those remain device evidence,
+not claims inferred from compilation.
 
 ## Release gate
 
