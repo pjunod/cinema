@@ -1062,3 +1062,13 @@ source = "clients/apple/Sources/LiveTvDeveloperView.swift"
 source_anchor = "Toggle(\"Enable Library channels\""
 test = "tests/operations/test_evidence_workflows.py"
 test_anchor = "test_apple_prepared_enablement_is_visible_and_advisory"
+
+[[fixes]]
+# A client can observe the old settings shape while a cluster rolls forward.
+# Absence of the new switch decodes to the old, disabled behaviour.
+id = "apple.library-channel-settings-rolling-upgrade"
+commits = ["f301636a"]
+source = "clients/apple/Sources/LiveTv.swift"
+source_anchor = "libraryChannelsEnabled = try values.decodeIfPresent("
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testServerSettingsSnakeCaseContractDecodesWithoutUnrelatedSecrets"
