@@ -14,12 +14,12 @@ proved, and what remains?*
 | Milestone | State | Evidence |
 |---|---|---|
 | M0 isolated base and compiler | complete | clean independent clone; current `main` merged at `7fabfbf2`; Rust 1.97.1 compiler loop established before Rust edits |
-| M1 recipes, schedules, and durable storage | built; pinned workspace compile passed | one normalized evaluator and deterministic clock/order implementation; SQLite v55 and Hiqlite v35 entities, authorization-at-write, 24-hour bounded idempotency, coherent catalogue snapshots, renewable claims, guarded publication, immutable-vector LRU, bounded pruning, and import census |
+| M1 recipes, schedules, and durable storage | built; pinned workspace compile passed | one normalized evaluator and deterministic clock/order implementation; SQLite v55 and Hiqlite v36 entities/build state, authorization-at-write, 24-hour bounded idempotency, coherent catalogue snapshots, renewable claims, guarded publication, immutable-vector LRU, bounded pruning, and import census |
 | M2 API and playback purpose | built; pinned workspace compile passed | bounded authenticated CRUD/opaque-preview/guide/resolve routes, idempotent rebuild/delete, pinned-occurrence finite-HLS starts, durable purpose binding, control-time authorization, and following-mode start/history isolation |
 | M3 web | built; integration compile passed | responsive paginated browse/guide, three-step resumable editor, stable preview seed, admin management, fenced following playback, watch-from-start/return, and advisory Developer enablement |
 | M4 Apple | built; iOS and tvOS compile passed | native paginated guide, three persisted tvOS layouts, iPhone/iPad resumable preview/authoring from navigation or title detail, finite playback control, server-monotonic following, and ordinary watch-from-start/return; build 130 |
 | M5 Android | built; Android APK compile passed | native paginated guide, phone/tablet resumable authoring from navigation or title detail, three Google TV layouts, finite playback control, server-monotonic following, and ordinary watch-from-start/return; versionCode 79 |
-| M6 promotion | corrective candidate ready | exactly one adversarial review completed; the first fast-lane run exposed promotion-census, ordinary-session ownership, replicated schema parsing, and sole-voter readdress bootstrap defects; each is fixed with focused evidence, and the 78-capture web structural baseline is current; next is the current-head main-only fast-lane rerun and merge |
+| M6 promotion | corrective candidate in qualification | exactly one adversarial review completed; fast-lane qualification exposed and directly covered promotion inventories, ordinary-session ownership, replicated schema parsing and migration-source admission, channel publication parameters, and sole-voter readdress snapshot boundaries; runner disk/tmpfs faults were repaired without changing the candidate; next is the current-head main-only fast-lane rerun and merge |
 
 ## Current decision — the merged Live TV guide is the UI seam
 
@@ -83,6 +83,10 @@ transaction; and a readdressed sole voter materializes a transferable database
 snapshot before its recovery marker is cleared and peers may join. The static
 schema, transaction, Store, import, readiness, downgrade, and UI inventories
 are updated to describe the shipped surface instead of the pre-feature tree.
+The later legacy migration shard also proved that adding v35 and v36 requires
+admitting both v34 and v35 as migration sources before the corresponding
+transactions can execute; the source allow-list and its direct boundary
+contract now cover both steps.
 
 ## Evidence limits — compilation is not a device claim
 

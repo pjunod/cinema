@@ -4153,7 +4153,9 @@ fn schema_migration_action(
         | DRAIN_DEADLINE_SCHEMA_MIGRATION_SOURCE
         | PRODUCER_RECOVERY_SCHEMA_MIGRATION_SOURCE
         | RECOVERY_EPOCH_SCHEMA_MIGRATION_SOURCE
-        | OFFLINE_RECOVERY_CLAIM_SCHEMA_MIGRATION_SOURCE => {
+        | OFFLINE_RECOVERY_CLAIM_SCHEMA_MIGRATION_SOURCE
+        | LIBRARY_CHANNELS_SCHEMA_MIGRATION_SOURCE
+        | LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -6013,6 +6015,24 @@ mod tests {
             "v33 must advance exactly one step to the offline recovery-claim schema"
         );
         assert_eq!(
+            LIBRARY_CHANNELS_SCHEMA_MIGRATION_SOURCE, OFFLINE_RECOVERY_CLAIM_SCHEMA_VERSION,
+            "the Library channels migration must start from the exact v34 shape"
+        );
+        assert_eq!(
+            LIBRARY_CHANNELS_SCHEMA_MIGRATION_SOURCE + 1,
+            LIBRARY_CHANNELS_SCHEMA_VERSION,
+            "v34 must advance exactly one step to the Library channels schema"
+        );
+        assert_eq!(
+            LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_MIGRATION_SOURCE, LIBRARY_CHANNELS_SCHEMA_VERSION,
+            "the channel build-state migration must start from the exact v35 shape"
+        );
+        assert_eq!(
+            LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_MIGRATION_SOURCE + 1,
+            LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_VERSION,
+            "v35 must advance exactly one step to the channel build-state schema"
+        );
+        assert_eq!(
             AUTH_SCHEMA_MIGRATION_SOURCE + 31,
             AUTH_SCHEMA_VERSION,
             "this implementation contains every additive v5→v36 step"
@@ -6198,6 +6218,22 @@ mod tests {
             SchemaMigrationAction::MigrateFrom(
                 ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA_MIGRATION_SOURCE
             )
+        );
+        assert_eq!(
+            schema_migration_action(
+                &[row(LIBRARY_CHANNELS_SCHEMA_MIGRATION_SOURCE)],
+                ClusterCompatibility::CURRENT,
+            )
+            .expect("Library channels predecessor"),
+            SchemaMigrationAction::MigrateFrom(LIBRARY_CHANNELS_SCHEMA_MIGRATION_SOURCE)
+        );
+        assert_eq!(
+            schema_migration_action(
+                &[row(LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_MIGRATION_SOURCE)],
+                ClusterCompatibility::CURRENT,
+            )
+            .expect("channel build-state predecessor"),
+            SchemaMigrationAction::MigrateFrom(LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_MIGRATION_SOURCE)
         );
 
         for rows in [Vec::new(), vec![row(4)], vec![row(7), row(7)]] {
