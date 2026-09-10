@@ -8,6 +8,7 @@ import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsFocused
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
@@ -172,7 +173,7 @@ class LiveTvUiTest {
         // the old lineup-only rows. Select the protected result explicitly so
         // this contract does not depend on both fixture channels fitting in one
         // emulator viewport.
-        val search = compose.onNodeWithText("Number, name, or what is on")
+        val search = compose.onNodeWithTag("live-tv-channel-search")
         search.performTextInput("Protected")
         awaitText("DRM unsupported")
         compose.onNodeWithText("DRM unsupported").assertIsNotEnabled()
