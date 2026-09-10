@@ -531,9 +531,10 @@ final class LiveTvTests: XCTestCase {
         let source = try String(
             contentsOf: testsDirectory.appendingPathComponent("../Sources/LiveTvView.swift").standardizedFileURL,
             encoding: .utf8)
-        // Both PlayerSurface sites hand the element to AVKit.
-        XCTAssertEqual(source.components(separatedBy: "allowsPictureInPicture: true").count - 1, 2,
-                       "both live surfaces must allow picture-in-picture")
+        // The mutually exclusive iOS inline, tvOS browse-picture, and
+        // fullscreen sites all hand the element to AVKit.
+        XCTAssertEqual(source.components(separatedBy: "allowsPictureInPicture: true").count - 1, 3,
+                       "every live picture surface must allow picture-in-picture")
         XCTAssertFalse(source.contains("allowsPictureInPicture: false"))
         // Entering PiP backgrounds the app. Stopping on that would kill the one
         // case PiP exists for, so every release path consults it — and consults
@@ -563,9 +564,11 @@ final class LiveTvTests: XCTestCase {
             contentsOf: testsDirectory.appendingPathComponent("../Sources/LiveTvView.swift").standardizedFileURL,
             encoding: .utf8)
         XCTAssertTrue(source.contains(".focused($focusedControl, equals: FocusTarget.reveal)"))
-        XCTAssertTrue(source.contains("if !visible { focusedControl = .reveal }"))
-        // And the television is fullscreen without anyone pressing a button.
-        XCTAssertTrue(source.contains(".onChange(of: live.playing) { _, playing in if playing { fullscreen = true } }"))
+        XCTAssertTrue(source.contains("focusedControl = visible ? .guide : .reveal"))
+        // Tuning stays inside the selected browse layout. The viewer chooses
+        // fullscreen explicitly with Return to live or by selecting the
+        // already-playing channel.
+        XCTAssertFalse(source.contains(".onChange(of: live.playing) { _, playing in if playing { fullscreen = true } }"))
         // Search must be explicit on a television. Applying `.searchable` to
         // its List focused the field at entry and covered half the page with a
         // keyboard before the viewer asked for one.
