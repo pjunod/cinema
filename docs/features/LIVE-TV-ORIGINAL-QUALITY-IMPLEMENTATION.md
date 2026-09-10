@@ -31,10 +31,10 @@ diverge.
 | Work package | State | Evidence / next action |
 |---|---|---|
 | Isolated clone and pinned compiler | done | Forgejo main `94b46515`; Rust 1.97.1 baseline `cargo check -p plurxd --locked --all-targets` passed. |
-| Server observation and planner | active | Implement source facts, independent track actions, packaging, and source-aware admission. |
-| Public and internal wire contracts | queued | Add bounded v1 playback envelope and negotiated internal v2 start. |
-| Web, Apple, Android clients | queued | Send concrete live caps, describe actual delivery, and retry once without overlap. |
-| Developer settings | queued | Original default, optional ceiling, and advisory route readiness; no gate. |
+| Server observation and planner | done | One bounded tuner prefix feeds local ffprobe and then the producer; the frozen plan resolves video/audio independently, MPEG-TS/fMP4 packaging, filters, ceiling, and measured admission. Pinned Rust 1.97.1 all-target compile passed. |
+| Public and internal wire contracts | done | Public optional playback envelope is bounded; owner snapshots advertise start versions; exact-body internal v2 falls back to v1 without weakening signed owner requests. |
+| Web, Apple, Android clients | active | Send concrete live caps, describe actual delivery, and retry once without overlap. |
+| Developer settings | active | Server stores Original (`0`) or an optional ceiling in the generation-fenced tuple; client controls remain. |
 | Documentation and measurements | queued | Update maintained references and record only evidence actually observed. |
 | Main promotion | queued | Sync current main, exact-tree compile, one adversarial review, fast lane, merge. |
 
@@ -659,4 +659,3 @@ cases. Mark this document **built** after integration lands; distinguish that
 from deployed and physically verified. A deferred universal device matrix,
 shared-ingest optimization, or seamless switching project is not remaining
 work for this delivery.
-

@@ -1,0 +1,742 @@
+//! Pure Live TV delivery planning.
+//!
+//! The tuner observer supplies source facts, the active player supplies a
+//! transport envelope, and this module freezes one plan. FFmpeg construction
+//! consumes the answer; it does not make another codec, size, or packaging
+//! decision later.
+
+use plurx_core::playback::caps::{DeviceCaps, Transfer};
+use serde::{Deserialize, Serialize};
+
+const MAX_ENTRIES: usize = 32;
+const MAX_TOKEN_BYTES: usize = 32;
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct LiveRational {
+    pub(crate) num: u32,
+    pub(crate) den: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LiveHlsFormat {
+    pub(crate) container: String,
+    pub(crate) video: String,
+    pub(crate) audio: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LiveVideoLimit {
+    pub(crate) codec: String,
+    #[serde(default)]
+    pub(crate) profile: Option<String>,
+    pub(crate) max_width: u16,
+    pub(crate) max_height: u16,
+    pub(crate) max_frame_rate: LiveRational,
+    #[serde(default)]
+    pub(crate) interlaced: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LiveAudioLimit {
+    pub(crate) codec: String,
+    pub(crate) max_channels: u8,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LiveCompatibilityHint {
+    #[serde(default)]
+    pub(crate) failed_video: bool,
+    #[serde(default)]
+    pub(crate) failed_audio: bool,
+    #[serde(default)]
+    pub(crate) failed_container: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LivePlaybackRequest {
+    pub(crate) v: u8,
+    /// The existing playback capability document, retained as JSON so request
+    /// identity remains exactly comparable for idempotent owner starts.
+    pub(crate) caps: serde_json::Value,
+    #[serde(default)]
+    pub(crate) hls_formats: Vec<LiveHlsFormat>,
+    #[serde(default)]
+    pub(crate) video_limits: Vec<LiveVideoLimit>,
+    #[serde(default)]
+    pub(crate) audio_limits: Vec<LiveAudioLimit>,
+    #[serde(default)]
+    pub(crate) max_height: Option<u16>,
+    #[serde(default)]
+    pub(crate) max_bitrate_bps: Option<u64>,
+    #[serde(default)]
+    pub(crate) compatibility: Option<LiveCompatibilityHint>,
+}
+
+impl LivePlaybackRequest {
+    pub(crate) fn validate(&self) -> Result<DeviceCaps, String> {
+        if self.v != 1 {
+            return Err("live playback request version must be 1".into());
+        }
+        if self.hls_formats.len() > MAX_ENTRIES
+            || self.video_limits.len() > MAX_ENTRIES
+            || self.audio_limits.len() > MAX_ENTRIES
+        {
+            return Err("live playback capability arrays may contain at most 32 entries".into());
+        }
+        if self.max_height == Some(0) || self.max_bitrate_bps == Some(0) {
+            return Err("live playback ceilings must be positive when present".into());
+        }
+        for format in &self.hls_formats {
+            validate_token(&format.container)?;
+            validate_token(&format.video)?;
+            validate_token(&format.audio)?;
+        }
+        for limit in &self.video_limits {
+            validate_token(&limit.codec)?;
+            if let Some(profile) = &limit.profile {
+                validate_token(profile)?;
+            }
+            if limit.max_width == 0
+                || limit.max_height == 0
+                || limit.max_frame_rate.num == 0
+                || limit.max_frame_rate.den == 0
+            {
+                return Err(
+                    "live video limits must contain positive dimensions and frame rate".into(),
+                );
+            }
+        }
+        for limit in &self.audio_limits {
+            validate_token(&limit.codec)?;
+            if limit.max_channels == 0 || limit.max_channels > 32 {
+                return Err("live audio channel limits must be between 1 and 32".into());
+            }
+        }
+        if self
+            .compatibility
+            .as_ref()
+            .is_some_and(|hint| !hint.failed_video && !hint.failed_audio && !hint.failed_container)
+        {
+            return Err("a live compatibility hint must identify a failed route component".into());
+        }
+        let caps: DeviceCaps = serde_json::from_value(self.caps.clone())
+            .map_err(|_| "live playback caps are malformed".to_owned())?;
+        if caps.v != DeviceCaps::VERSION {
+            return Err("live playback caps version must be 2".into());
+        }
+        if caps.video.len() > MAX_ENTRIES
+            || caps.audio.len() > MAX_ENTRIES
+            || caps.containers.len() > MAX_ENTRIES
+            || caps.transports.len() > MAX_ENTRIES
+        {
+            return Err("playback caps arrays may contain at most 32 entries".into());
+        }
+        for token in caps
+            .video
+            .iter()
+            .flat_map(|entry| std::iter::once(&entry.codec).chain(entry.profiles.iter()))
+            .chain(caps.audio.iter())
+            .chain(caps.containers.iter())
+            .chain(caps.transports.iter())
+        {
+            validate_token(token)?;
+        }
+        Ok(caps)
+    }
+}
+
+fn validate_token(value: &str) -> Result<(), String> {
+    if value.is_empty()
+        || value.len() > MAX_TOKEN_BYTES
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(
+            "live playback codec, profile, and transport names must be 1-32 ASCII token bytes"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+fn normalized(value: &str) -> String {
+    value.trim().to_ascii_lowercase()
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct LiveSourceFacts {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) video_codec: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) video_profile: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) video_level: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) width: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) height: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) pixel_format: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) bit_depth: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) field_order: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) frame_rate: Option<LiveRational>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) sample_aspect_ratio: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) color_primaries: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) color_transfer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) color_space: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) hdr: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) audio_codec: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) audio_sample_rate: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) audio_channels: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) audio_layout: Option<String>,
+}
+
+impl LiveSourceFacts {
+    fn interlaced(&self) -> bool {
+        self.field_order
+            .as_deref()
+            .is_some_and(|order| !matches!(order, "progressive" | "unknown"))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum LiveTrackAction {
+    Copy,
+    Encode,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum LivePackaging {
+    Mpegts,
+    Fmp4,
+}
+
+impl LivePackaging {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Mpegts => "mpegts",
+            Self::Fmp4 => "fmp4",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct LiveDeliveryReason {
+    pub(crate) code: String,
+    pub(crate) explanation: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct LiveDeliveryOutput {
+    pub(crate) container: String,
+    pub(crate) video_codec: String,
+    pub(crate) audio_codec: String,
+    pub(crate) width: u16,
+    pub(crate) height: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) bit_depth: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) frame_rate: Option<LiveRational>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) hdr: Option<String>,
+    pub(crate) audio_channels: u8,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct LiveDeliveryPlan {
+    pub(crate) source: LiveSourceFacts,
+    pub(crate) output: LiveDeliveryOutput,
+    pub(crate) video_action: LiveTrackAction,
+    pub(crate) audio_action: LiveTrackAction,
+    pub(crate) packaging: LivePackaging,
+    pub(crate) reasons: Vec<LiveDeliveryReason>,
+    pub(crate) deinterlace: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) max_bitrate_bps: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct LiveQualityPolicy {
+    pub(crate) max_height: Option<u16>,
+    pub(crate) max_bitrate_bps: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LiveExecutionSupport {
+    pub(crate) video_encode: bool,
+    pub(crate) audio_encode: bool,
+    pub(crate) tone_map: bool,
+}
+
+fn reason(code: &str, explanation: &str) -> LiveDeliveryReason {
+    LiveDeliveryReason {
+        code: code.to_owned(),
+        explanation: explanation.to_owned(),
+    }
+}
+
+fn rate_within(source: Option<LiveRational>, limit: LiveRational) -> bool {
+    source.is_none_or(|source| {
+        u64::from(source.num) * u64::from(limit.den) <= u64::from(limit.num) * u64::from(source.den)
+    })
+}
+
+fn video_limit_supports(source: &LiveSourceFacts, limit: &LiveVideoLimit) -> bool {
+    let Some(codec) = source.video_codec.as_deref() else {
+        return false;
+    };
+    let Some(width) = source.width else {
+        return false;
+    };
+    let Some(height) = source.height else {
+        return false;
+    };
+    normalized(&limit.codec) == normalized(codec)
+        && source.video_profile.as_deref().is_some_and(|profile| {
+            limit
+                .profile
+                .as_deref()
+                .is_some_and(|claimed| normalized(claimed) == normalized(profile))
+        })
+        && width <= limit.max_width
+        && height <= limit.max_height
+        && rate_within(source.frame_rate, limit.max_frame_rate)
+        && (!source.interlaced() || limit.interlaced)
+}
+
+fn device_video_supports(source: &LiveSourceFacts, caps: &DeviceCaps) -> bool {
+    let Some(codec) = source.video_codec.as_deref() else {
+        return false;
+    };
+    let Some(profile) = source.video_profile.as_deref() else {
+        return false;
+    };
+    let Some(height) = source.height else {
+        return false;
+    };
+    caps.video.iter().any(|entry| {
+        normalized(&entry.codec) == normalized(codec)
+            && entry
+                .profiles
+                .iter()
+                .any(|claimed| normalized(claimed) == normalized(profile))
+            && entry
+                .max_height
+                .is_none_or(|maximum| i64::from(height) <= maximum)
+            && match source.hdr.as_deref() {
+                None | Some("sdr") => true,
+                Some("hlg") => entry.present.contains(&Transfer::Hlg),
+                Some(_) => entry.present.contains(&Transfer::Pq),
+            }
+    })
+}
+
+fn audio_limit_supports(source: &LiveSourceFacts, limit: &LiveAudioLimit) -> bool {
+    source.audio_codec.as_deref().is_some_and(|codec| {
+        normalized(&limit.codec) == normalized(codec)
+            && source
+                .audio_channels
+                .is_some_and(|channels| channels <= limit.max_channels)
+    })
+}
+
+fn format_supports(
+    format: &LiveHlsFormat,
+    packaging: LivePackaging,
+    video: &str,
+    audio: &str,
+) -> bool {
+    normalized(&format.container) == packaging.as_str()
+        && normalized(&format.video) == normalized(video)
+        && normalized(&format.audio) == normalized(audio)
+}
+
+pub(crate) fn resolve_live_delivery(
+    source: &LiveSourceFacts,
+    request: Option<&LivePlaybackRequest>,
+    policy: &LiveQualityPolicy,
+    available: &LiveExecutionSupport,
+) -> Result<LiveDeliveryPlan, String> {
+    let width = source
+        .width
+        .ok_or_else(|| "source_probe_incomplete: source width is unknown".to_owned())?;
+    let height = source
+        .height
+        .ok_or_else(|| "source_probe_incomplete: source height is unknown".to_owned())?;
+    let source_video = source
+        .video_codec
+        .as_deref()
+        .ok_or_else(|| "source_probe_incomplete: source video codec is unknown".to_owned())?;
+    let source_audio = source
+        .audio_codec
+        .as_deref()
+        .ok_or_else(|| "source_probe_incomplete: source audio codec is unknown".to_owned())?;
+    let source_channels = source.audio_channels.unwrap_or(2);
+
+    let caps = request.map(LivePlaybackRequest::validate).transpose()?;
+    let compatibility = request.and_then(|request| request.compatibility.as_ref());
+    let explicit_height = [
+        policy.max_height,
+        request.and_then(|request| request.max_height),
+    ]
+    .into_iter()
+    .flatten()
+    .min();
+    let max_bitrate_bps = [
+        policy.max_bitrate_bps,
+        request.and_then(|request| request.max_bitrate_bps),
+    ]
+    .into_iter()
+    .flatten()
+    .min();
+
+    let mut reasons = Vec::new();
+    let copy_height_allowed = explicit_height.is_none_or(|maximum| height <= maximum);
+    if !copy_height_allowed {
+        reasons.push(reason(
+            "explicit_resolution_ceiling",
+            "The requested or saved maximum resolution is below the source.",
+        ));
+    }
+
+    let copy_packaging = if normalized(source_video) == "hevc" {
+        LivePackaging::Fmp4
+    } else {
+        LivePackaging::Mpegts
+    };
+    let video_claimed = request.is_some_and(|request| {
+        caps.as_ref()
+            .is_some_and(|caps| device_video_supports(source, caps))
+            && request
+                .video_limits
+                .iter()
+                .any(|limit| video_limit_supports(source, limit))
+    });
+    let audio_claimed = request.is_some_and(|request| {
+        caps.as_ref().is_some_and(|caps| {
+            caps.audio
+                .iter()
+                .any(|codec| normalized(codec) == normalized(source_audio))
+        }) && request
+            .audio_limits
+            .iter()
+            .any(|limit| audio_limit_supports(source, limit))
+    });
+    let complete_copy_claim = request.is_some_and(|request| {
+        request
+            .hls_formats
+            .iter()
+            .any(|format| format_supports(format, copy_packaging, source_video, source_audio))
+    });
+
+    let video_copy = video_claimed
+        && copy_height_allowed
+        && !compatibility.is_some_and(|hint| hint.failed_video || hint.failed_container);
+    let audio_copy = audio_claimed
+        && !compatibility.is_some_and(|hint| hint.failed_audio || hint.failed_container);
+
+    let mut video_action = if video_copy {
+        LiveTrackAction::Copy
+    } else {
+        LiveTrackAction::Encode
+    };
+    let mut audio_action = if audio_copy {
+        LiveTrackAction::Copy
+    } else {
+        LiveTrackAction::Encode
+    };
+
+    if request.is_none() {
+        reasons.push(reason(
+            "client_capability_unknown",
+            "This client did not describe its live HLS playback path, so the server selected a conservative route.",
+        ));
+    } else {
+        if video_action == LiveTrackAction::Encode && copy_height_allowed {
+            reasons.push(reason(
+                "video_incompatible",
+                "The active player did not claim the complete source video route.",
+            ));
+        }
+        if audio_action == LiveTrackAction::Encode {
+            reasons.push(reason(
+                "audio_incompatible",
+                "The active output route did not claim the source audio codec and channel layout.",
+            ));
+        }
+        if compatibility.is_some() {
+            reasons.push(reason(
+                "compatibility_fallback",
+                "The player reported that the previous delivery route failed.",
+            ));
+        }
+    }
+
+    if video_action == LiveTrackAction::Copy
+        && audio_action == LiveTrackAction::Copy
+        && !complete_copy_claim
+    {
+        audio_action = LiveTrackAction::Encode;
+        reasons.push(reason(
+            "container_incompatible",
+            "The player did not claim the complete source video/audio packaging combination.",
+        ));
+    }
+
+    if source.interlaced()
+        && !request.is_some_and(|request| {
+            request
+                .video_limits
+                .iter()
+                .any(|limit| video_limit_supports(source, limit) && limit.interlaced)
+        })
+    {
+        video_action = LiveTrackAction::Encode;
+        reasons.push(reason(
+            "unsupported_interlacing",
+            "The player did not claim a usable deinterlacing path for this source.",
+        ));
+    }
+
+    if source.hdr.as_deref().is_some_and(|value| value != "sdr")
+        && video_action == LiveTrackAction::Encode
+        && !available.tone_map
+    {
+        return Err(
+            "hdr_conversion_unsupported: no verified tone-mapping route is available".into(),
+        );
+    }
+    if video_action == LiveTrackAction::Encode && !available.video_encode {
+        return Err("video_conversion_unavailable: this route requires a video encoder".into());
+    }
+    if audio_action == LiveTrackAction::Encode && !available.audio_encode {
+        return Err("audio_conversion_unavailable: this route requires an audio encoder".into());
+    }
+
+    let video_codec = if video_action == LiveTrackAction::Copy {
+        normalized(source_video)
+    } else {
+        "h264".to_owned()
+    };
+    let audio_codec = if audio_action == LiveTrackAction::Copy {
+        normalized(source_audio)
+    } else {
+        "aac".to_owned()
+    };
+    let packaging = if video_action == LiveTrackAction::Copy && video_codec == "hevc" {
+        LivePackaging::Fmp4
+    } else {
+        LivePackaging::Mpegts
+    };
+
+    let client_video_ceiling = request.and_then(|request| {
+        request
+            .video_limits
+            .iter()
+            .filter(|limit| normalized(&limit.codec) == video_codec)
+            .map(|limit| limit.max_height)
+            .max()
+    });
+    let output_height = [Some(height), explicit_height, client_video_ceiling]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(height);
+    let output_width = if output_height < height {
+        let scaled = u32::from(width) * u32::from(output_height) / u32::from(height);
+        u16::try_from(scaled & !1).unwrap_or(width)
+    } else {
+        width
+    };
+    let audio_channels = if audio_action == LiveTrackAction::Copy {
+        source_channels
+    } else {
+        request
+            .and_then(|request| {
+                request
+                    .audio_limits
+                    .iter()
+                    .filter(|limit| normalized(&limit.codec) == "aac")
+                    .map(|limit| limit.max_channels)
+                    .max()
+            })
+            .unwrap_or(2)
+            .min(source_channels)
+    };
+
+    if max_bitrate_bps.is_some() {
+        reasons.push(reason(
+            "explicit_bitrate_ceiling",
+            "An explicit saved or requested bitrate ceiling applies to this delivery.",
+        ));
+    }
+    if video_action == LiveTrackAction::Copy && audio_action == LiveTrackAction::Encode {
+        reasons.push(reason(
+            "video_preserved",
+            "Only audio conversion is required; the compressed source video is copied.",
+        ));
+    }
+
+    Ok(LiveDeliveryPlan {
+        source: source.clone(),
+        output: LiveDeliveryOutput {
+            container: packaging.as_str().to_owned(),
+            video_codec,
+            audio_codec,
+            width: output_width,
+            height: output_height,
+            bit_depth: (video_action == LiveTrackAction::Copy)
+                .then_some(source.bit_depth)
+                .flatten(),
+            frame_rate: source.frame_rate,
+            hdr: (video_action == LiveTrackAction::Copy)
+                .then_some(source.hdr.clone())
+                .flatten(),
+            audio_channels,
+        },
+        video_action,
+        audio_action,
+        packaging,
+        reasons,
+        deinterlace: source.interlaced() && video_action == LiveTrackAction::Encode,
+        max_bitrate_bps,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn source() -> LiveSourceFacts {
+        LiveSourceFacts {
+            video_codec: Some("hevc".into()),
+            video_profile: Some("main10".into()),
+            width: Some(3840),
+            height: Some(2160),
+            bit_depth: Some(10),
+            field_order: Some("progressive".into()),
+            frame_rate: Some(LiveRational {
+                num: 60000,
+                den: 1001,
+            }),
+            hdr: Some("pq".into()),
+            audio_codec: Some("ac3".into()),
+            audio_channels: Some(6),
+            ..LiveSourceFacts::default()
+        }
+    }
+
+    fn request(audio: &str) -> LivePlaybackRequest {
+        LivePlaybackRequest {
+            v: 1,
+            caps: serde_json::json!({
+                "v": 2,
+                "video": [{"codec":"hevc","profiles":["main10"],"max_height":2160,"present":["pq"]}],
+                "audio": [audio],
+                "containers": ["fmp4"],
+                "transports": ["hls"]
+            }),
+            hls_formats: vec![LiveHlsFormat {
+                container: "fmp4".into(),
+                video: "hevc".into(),
+                audio: audio.into(),
+            }],
+            video_limits: vec![LiveVideoLimit {
+                codec: "hevc".into(),
+                profile: Some("main10".into()),
+                max_width: 3840,
+                max_height: 2160,
+                max_frame_rate: LiveRational {
+                    num: 60000,
+                    den: 1001,
+                },
+                interlaced: false,
+            }],
+            audio_limits: vec![LiveAudioLimit {
+                codec: audio.into(),
+                max_channels: 6,
+            }],
+            max_height: None,
+            max_bitrate_bps: None,
+            compatibility: None,
+        }
+    }
+
+    #[test]
+    fn compatible_main10_copies_both_tracks_in_fmp4() {
+        let plan = resolve_live_delivery(
+            &source(),
+            Some(&request("ac3")),
+            &LiveQualityPolicy::default(),
+            &LiveExecutionSupport {
+                video_encode: true,
+                audio_encode: true,
+                tone_map: false,
+            },
+        )
+        .expect("copy route");
+        assert_eq!(plan.video_action, LiveTrackAction::Copy);
+        assert_eq!(plan.audio_action, LiveTrackAction::Copy);
+        assert_eq!(plan.packaging, LivePackaging::Fmp4);
+        assert_eq!(plan.output.height, 2160);
+    }
+
+    #[test]
+    fn audio_mismatch_preserves_video() {
+        let plan = resolve_live_delivery(
+            &source(),
+            Some(&request("aac")),
+            &LiveQualityPolicy::default(),
+            &LiveExecutionSupport {
+                video_encode: true,
+                audio_encode: true,
+                tone_map: false,
+            },
+        )
+        .expect("audio-only conversion");
+        assert_eq!(plan.video_action, LiveTrackAction::Copy);
+        assert_eq!(plan.audio_action, LiveTrackAction::Encode);
+    }
+
+    #[test]
+    fn ceiling_never_upscales() {
+        let mut lower = source();
+        lower.width = Some(1280);
+        lower.height = Some(720);
+        let plan = resolve_live_delivery(
+            &lower,
+            Some(&request("ac3")),
+            &LiveQualityPolicy {
+                max_height: Some(2160),
+                max_bitrate_bps: None,
+            },
+            &LiveExecutionSupport {
+                video_encode: true,
+                audio_encode: true,
+                tone_map: false,
+            },
+        )
+        .expect("bounded route");
+        assert_eq!(plan.output.height, 720);
+    }
+}

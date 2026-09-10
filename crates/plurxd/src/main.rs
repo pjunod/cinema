@@ -13,6 +13,7 @@ mod fragment_index_cluster;
 mod http;
 mod job_lease;
 mod live_tv;
+mod live_tv_delivery;
 mod logbuf;
 mod manifest_cache;
 mod media_pool;

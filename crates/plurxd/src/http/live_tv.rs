@@ -14,9 +14,11 @@ use super::peer_transport::{deadline_after, PeerAuthMode, PeerTransport, PeerTra
 use crate::live_tv::{
     capability_owner, guide, GuideWindow, LiveTvActivateRequest, LiveTvActivated, LiveTvConfig,
     LiveTvDrainAck, LiveTvError, LiveTvGuide, LiveTvResourceRequest, LiveTvSnapshot,
-    LiveTvStartRequest, LiveTvStopRequest, SnapshotFreshness, SnapshotRequest, ACTIVATE_PATH,
-    GUIDE_PATH, MAX_SNAPSHOT_BYTES, RESOURCE_PATH, SNAPSHOT_PATH, START_PATH, STOP_PATH,
+    LiveTvStartRequest, LiveTvStartRequestV2, LiveTvStopRequest, SnapshotFreshness,
+    SnapshotRequest, ACTIVATE_PATH, GUIDE_PATH, MAX_SNAPSHOT_BYTES, RESOURCE_PATH, SNAPSHOT_PATH,
+    START_PATH, START_V2_PATH, STOP_PATH,
 };
+use crate::live_tv_delivery::LivePlaybackRequest;
 use crate::state::AppState;
 
 const SNAPSHOT_DEADLINE: Duration = Duration::from_secs(25);
@@ -323,10 +325,18 @@ struct WireError {
     message: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PublicLiveTvStart {
+    #[serde(default)]
+    playback: Option<LivePlaybackRequest>,
+}
+
 pub(crate) async fn start_session(
     Path(channel): Path<String>,
     AuthUser(user): AuthUser,
     State(state): State<AppState>,
+    body: Option<Json<PublicLiveTvStart>>,
 ) -> Result<Json<LiveTvActivated>, ApiError> {
     let ingress_generation = state.serving.authority().admit().ok_or_else(|| {
         ApiError::typed(
@@ -341,7 +351,19 @@ pub(crate) async fn start_session(
             "Live TV is disabled; an administrator can enable it in Settings → Developer".into(),
         )));
     }
-    require_protocol(&state).await?;
+    let mut playback = body.and_then(|Json(body)| body.playback);
+    if let Some(request) = &playback {
+        request.validate().map_err(|message| {
+            ApiError::typed(StatusCode::BAD_REQUEST, "invalid_request", message)
+        })?;
+    }
+    let owner_protocols = owner_snapshot(&state, &config, false, false)
+        .await
+        .map(|snapshot| snapshot.start_protocols)
+        .unwrap_or_default();
+    if !owner_protocols.contains(&2) {
+        playback = None;
+    }
     let request = LiveTvStartRequest {
         expected_owner_node_id: config.owner_node_id.clone(),
         source_node_id: state.node_id.clone(),
@@ -351,6 +373,7 @@ pub(crate) async fn start_session(
         channel_id: channel,
         config_generation: config.generation,
         source_serving_generation: ingress_generation,
+        playback,
     };
     let provisional = owner_start(&state, &config, &request).await?;
     let activation = LiveTvActivateRequest {
@@ -388,24 +411,36 @@ pub(crate) async fn segment(
     Path((capability, segment)): Path<(String, String)>,
     State(state): State<AppState>,
 ) -> Result<Response<Body>, ApiError> {
-    let sequence = segment
+    if segment == "init.mp4" {
+        return owner_resource(&state, LiveTvResourceRequest::Init { capability }).await;
+    }
+    let (value, fragment) = segment
         .strip_prefix("segment-")
-        .and_then(|value| value.strip_suffix(".ts"))
-        .filter(|value| {
-            !value.is_empty()
-                && value.len() <= 10
-                && value.bytes().all(|byte| byte.is_ascii_digit())
+        .and_then(|value| {
+            value
+                .strip_suffix(".ts")
+                .map(|value| (value, false))
+                .or_else(|| value.strip_suffix(".m4s").map(|value| (value, true)))
         })
-        .and_then(|value| value.parse().ok())
         .ok_or(ApiError::NotFound("live segment"))?;
-    owner_resource(
-        &state,
+    if value.is_empty() || value.len() > 10 || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(ApiError::NotFound("live segment"));
+    }
+    let sequence = value
+        .parse()
+        .map_err(|_| ApiError::NotFound("live segment"))?;
+    let request = if fragment {
+        LiveTvResourceRequest::Fragment {
+            capability,
+            sequence,
+        }
+    } else {
         LiveTvResourceRequest::Segment {
             capability,
             sequence,
-        },
-    )
-    .await
+        }
+    };
+    owner_resource(&state, request).await
 }
 
 pub(crate) async fn session_status(
@@ -650,8 +685,18 @@ async fn owner_start(
             .map_err(api_error);
     }
     let (node_id, base) = owner_peer(state, &config.owner_node_id).await?;
-    let body =
-        serde_json::to_vec(request).map_err(|error| ApiError::Internal(error.to_string()))?;
+    let (path, body) = if request.playback.is_some() {
+        (
+            START_V2_PATH,
+            serde_json::to_vec(&LiveTvStartRequestV2::from(request))
+                .map_err(|error| ApiError::Internal(error.to_string()))?,
+        )
+    } else {
+        (
+            START_PATH,
+            serde_json::to_vec(request).map_err(|error| ApiError::Internal(error.to_string()))?,
+        )
+    };
     let transport = PeerTransport::new(state.membership.clone());
     let mut last_transport = PeerTransportError::Unreachable;
     let total_deadline = deadline_after(START_EXCHANGE_TOTAL);
@@ -662,7 +707,7 @@ async fn owner_start(
                 &node_id,
                 &base,
                 reqwest::Method::POST,
-                START_PATH,
+                path,
                 body.clone(),
                 attempt_deadline,
                 MAX_START_RESPONSE_BYTES,
@@ -790,13 +835,20 @@ async fn owner_resource(
     let (node_id, base) = owner_peer(state, &owner).await?;
     let max_body_bytes = match &request {
         LiveTvResourceRequest::Playlist { .. } => crate::live_tv::MAX_PLAYLIST_BYTES,
-        LiveTvResourceRequest::Segment { .. } => crate::live_tv::MAX_SEGMENT_BYTES,
+        LiveTvResourceRequest::Segment { .. }
+        | LiveTvResourceRequest::Init { .. }
+        | LiveTvResourceRequest::Fragment { .. } => crate::live_tv::MAX_SEGMENT_BYTES,
         LiveTvResourceRequest::Status { .. } => 32 * 1024,
         LiveTvResourceRequest::Keepalive { .. } => 1024,
     };
     let body =
         serde_json::to_vec(&request).map_err(|error| ApiError::Internal(error.to_string()))?;
-    if !matches!(request, LiveTvResourceRequest::Segment { .. }) {
+    if !matches!(
+        request,
+        LiveTvResourceRequest::Segment { .. }
+            | LiveTvResourceRequest::Init { .. }
+            | LiveTvResourceRequest::Fragment { .. }
+    ) {
         let response = PeerTransport::new(state.membership.clone())
             .request(
                 &node_id,

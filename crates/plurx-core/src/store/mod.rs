@@ -1346,6 +1346,9 @@ pub mod keys {
     pub const LIVE_TV_DEVICE_IPV4: &str = "live_tv.device_ipv4";
     pub const LIVE_TV_OWNER_NODE_ID: &str = "live_tv.owner_node_id";
     pub const LIVE_TV_MAX_SESSIONS: &str = "live_tv.max_sessions";
+    /// Source-preserving Live TV ceiling. Zero/absence means Original; the
+    /// legacy output height remains separate for mixed-version sessions.
+    pub const LIVE_TV_MAX_OUTPUT_HEIGHT: &str = "live_tv.max_output_height";
     pub const LIVE_TV_OUTPUT_HEIGHT: &str = "live_tv.output_height";
     pub const LIVE_TV_CONFIG_GENERATION: &str = "live_tv.config_generation";
     /// Persisted owner-handoff safety barrier. These are internal state, not
