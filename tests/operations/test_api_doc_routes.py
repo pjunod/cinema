@@ -11,8 +11,9 @@ shell with a 200.
 
 So the router is parsed, not grepped for prose. Route literals come from the
 three `Router::new()` chains in `router()` and from any named subrouter nested
-inside the native API. Constants are resolved to their declared values, nested
-prefixes are composed, and the `/api/v1` nest is applied to the native chain.
+or merged inside the native API. Constants are resolved to their declared
+values, nested prefixes are composed, and the `/api/v1` nest is applied to the
+native chain.
 """
 
 from __future__ import annotations
@@ -138,6 +139,30 @@ def _nested_router_routes(segment: str) -> set[str]:
     return routes
 
 
+def _merged_router_routes(segment: str) -> set[str]:
+    """Expand `.merge(module::named_router())` at the current prefix."""
+    routes: set[str] = set()
+    merged = re.compile(
+        r"\.merge\(\s*([A-Za-z_]\w*)::([A-Za-z_]\w*)\(\)\s*\)"
+    )
+    for module, function in merged.findall(segment):
+        source = (ROUTER.parent / f"{module}.rs").read_text(encoding="utf-8")
+        subrouter = re.search(
+            rf"(?:pub(?:\(crate\))?\s+)?fn\s+{re.escape(function)}\([^)]*\)[^{{]*\{{(?P<body>.*?)^\}}",
+            source,
+            re.MULTILINE | re.DOTALL,
+        )
+        if subrouter is None:
+            raise AssertionError(f"no {function}() body found in module {module}")
+        for argument in _route_arguments(subrouter.group("body")):
+            routes.add(
+                argument.strip('"')
+                if argument.startswith('"')
+                else _resolve_constant(argument)
+            )
+    return routes
+
+
 def registered_routes() -> set[str]:
     body = _router_body()
     api_at = body.index("let api = Router::new()")
@@ -150,6 +175,7 @@ def registered_routes() -> set[str]:
         literal = argument.strip('"') if argument.startswith('"') else _resolve_constant(argument)
         routes.add("/api/v1" + literal)
     routes.update("/api/v1" + path for path in _nested_router_routes(api_segment))
+    routes.update("/api/v1" + path for path in _merged_router_routes(api_segment))
     for argument in _route_arguments(body[plex_at:]):
         literal = argument.strip('"') if argument.startswith('"') else _resolve_constant(argument)
         routes.add(literal)
