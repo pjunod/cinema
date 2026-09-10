@@ -66,7 +66,7 @@ runs:
 
     - name: Start a persistent self-hosted builder
       if: steps.configure.outputs.local == 'true'
-      uses: https://github.com/docker/setup-buildx-action@v3
+      uses: https://github.com/docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       with:
         name: ${{ steps.configure.outputs.builder_name }}
         keep-state: true
@@ -74,6 +74,6 @@ runs:
 
     - name: Start an ephemeral hosted builder
       if: steps.configure.outputs.local != 'true'
-      uses: https://github.com/docker/setup-buildx-action@v3
+      uses: https://github.com/docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       with:
         buildkitd-config: ${{ github.workspace }}/.github/buildkitd.toml

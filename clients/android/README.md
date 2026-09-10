@@ -20,8 +20,10 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `79` — native viewer parity across phone, foldable,
-> and TV. Build 79 adds three saved Google TV layouts around one Media3 player,
+> Status: **v0.3.0**, build `80` — native viewer parity across phone, foldable,
+> and TV. Build 80 makes sign-out revoke the captured server session within a
+> five-second bound, clear the exact local credential even during cancellation,
+> and leave a newer login untouched. Build 79 adds three saved Google TV layouts around one Media3 player,
 > six-hour guide browsing, compact phone schedules, exact-once D-pad delegation,
 > and measured source-format details. Build 78 labels Live TV channel format and reports live tuner signal
 > metrics while a channel plays. Build 77 enables prepared replacement by default while keeping its
@@ -330,7 +332,9 @@ icon'd app. For a native iOS / Apple TV build, see
    enough (`192.168.1.10:32400`); `http://` is assumed if you leave the scheme off.
 2. Sign in with your plurx username and password.
 3. That's it — the token is stored (DataStore) and reused until it stops working or you sign
-   out from Settings.
+   out from Settings. Sign Out sends the captured bearer to the captured server
+   for at most five seconds while offline cleanup proceeds, then clears local
+   state on every outcome; its late result cannot erase a newer login.
 
 ## How playback decides
 

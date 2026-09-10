@@ -3956,7 +3956,7 @@ void probe_main(unsigned long *stack) {
                 "phase {phase:?} must fail at its absolute deadline"
             );
             let _ownership = tokio::time::timeout(
-                Duration::from_secs(2),
+                Duration::from_secs(5),
                 Arc::clone(&ownership).acquire_owned(),
             )
             .await

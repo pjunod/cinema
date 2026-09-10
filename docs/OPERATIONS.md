@@ -196,6 +196,12 @@ validation fan-out, builds once on an X64 runner, verifies the immutable
 registry copy, and only then moves the fleet tag. It publishes
 `sha-<12hex>` for rollback and `main` for the newest qualified merge.
 Versioned releases own `latest`; fleet merges never overwrite that alias.
+Every external workflow action is resolved to a reviewed 40-character commit,
+and checkout drops its injected repository credential immediately after the
+fetch. Version comments preserve the human update trail without restoring a
+mutable execution input. The two jobs that must refresh private branch refs
+derive a masked Basic header from the run-scoped token for that one `git fetch`;
+they write no credential helper, remote URL, or repository configuration.
 
 If the automatic job must be recovered, run the same guarded publisher on
 nuc4 from the exact Forgejo commit. Supplying both identity variables makes a
@@ -1825,18 +1831,18 @@ generation before its read and publishes proof only if that generation is
 unchanged. On replicated nodes, publication and cache-only authentication start
 disabled. A separate node-owned background activation pass enables them only
 after every member in the exact committed Raft configuration carries a
-`cache_admin_revocation_v3`
+`cache_admin_revocation_v4`
 row whose timestamp equals that node's current heartbeat. The pass takes the
 replicated membership exclusion, waits for its exact claim to apply locally,
 and globally clears cached proofs with the same bounded Begin/End fanout used
 for credential mutations before publishing readiness. It cannot block the
 independent membership-status publisher while an exclusion cleanup waits for
-quorum. Version 3 means the node
-supports the replicated credential-mutation exclusion, exact Store-write
-predicate, and local-applied claim acknowledgement described below. Version 1
-and version 2 capability heartbeats are retired by the replicated schema so a
-rolled-back process cannot silently restore the weaker contract. A joining
-member, missing
+quorum. Version 4 adds an exact signed response acknowledgement from every
+committed member, including learners, to the replicated mutation exclusion,
+exact Store-write predicate, and local-applied claim acknowledgement. Version 1
+and version 2 capability heartbeats are retired by the replicated schema;
+version 3 is no longer refreshed by the current binary, so heartbeat freshness
+also closes the gate on that rollback. A joining member, missing
 row, refresh failure, or heartbeat from a rolled-back binary closes the gate and
 clears every proof; reopening requires a new ordinary authentication. Logout,
 demotion, password reset, and user deletion invalidate proof and advance the
@@ -1845,7 +1851,9 @@ therefore cannot republish a revoked credential. These mutations first acquire
 a separate replicated singleton lease that blocks join, promotion, removal,
 and planned-outage acquisition. They then bracket the Store write with signed
 begin/end messages to every member of a stable exact committed roster under one
-two-second aggregate bound. The Store mutation names the exact lease claim, so
+two-second aggregate bound. Both the request and the peer's exact status/body
+acknowledgement are signed; a transport-level `204` without that response proof
+is a failed revocation. The Store mutation names the exact lease claim, so
 a delayed write cannot commit after cancellation has released it. The lease
 remains owned until the terminal peer invalidation; heartbeat expiry creates a
 permanent receipt before cleanup after a crash.
@@ -4187,7 +4195,14 @@ here long before anyone notices an empty grid), and
 The guide cache lives in the owner's memory only. A restart refetches; nothing
 is written to the settings table, which is replicated on every write and copied
 whole into every snapshot and is therefore the wrong place for a blob that
-changes every twenty minutes.
+changes every twenty minutes. Manual and background refreshes share one active
+slot and one 25-second response budget covering resolution, fetch,
+decompression, and parse. Shutdown or a settings change cancels network work
+and prevents publication. A blocking parser that has already started keeps a
+clone of the admission permit until its bounded input drains, so a timed-out
+caller cannot admit an overlapping parser. Older completions are discarded
+before cache and title publication. HDHomeRun extension pages stop at the
+shared deadline and retain the already useful bulk answer.
 | `drm_boundary` | informational; never blocks. Protected channels are listed and refused |
 
 Before it is enabled, expect exactly the enablement check to fail and every

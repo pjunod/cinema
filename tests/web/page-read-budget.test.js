@@ -1743,7 +1743,7 @@ test("stale authorization responses cannot revoke or feed a newer session", asyn
   assert.equal(harness.state().TOKEN,"newer");
 });
 
-test("logout clears every protected page cache before rendering auth", () => {
+test("local sign-out clears every protected page cache before rendering auth", () => {
   const main={innerHTML:"protected"}, removed=[];
   const document={getElementById:(id)=>id==="main"?main:null,documentElement:{classList:{remove(){}}}};
   const localStorage={removeItem:(key)=>removed.push(key)};
@@ -1757,8 +1757,8 @@ test("logout clears every protected page cache before rendering auth", () => {
      function forgetJoinToken(){CLUSTER_TOKEN=null;CLUSTER_REFUSAL=null;}
      async function stopLiveTv(){}
      function render(){rendered++;}
-     ${shippedSource("logout")};
-     return {logout,state:()=>({TOKEN,ME,PAGE_RENDER_GENERATION,PAGE_TIMER,ACTIVITY_SNAPSHOT,
+     ${shippedSource("clearLocalSession")};
+     return {logout:()=>clearLocalSession(AUTH_GENERATION,""),state:()=>({TOKEN,ME,PAGE_RENDER_GENERATION,PAGE_TIMER,ACTIVITY_SNAPSHOT,
        SETTINGS_DATA,loaded:SETTINGS_LOADED.size,loads:SETTINGS_LOADS.size,LOGS_RUN,CLUSTER_LOGS_RUN,
        CLUSTER_TOKEN,CLUSTER_REFUSAL,CLUSTER_LOADED,CLUSTER_LEAVING,rendered,main:document.getElementById("main").innerHTML})};`,
   )(document,localStorage);
@@ -1767,6 +1767,38 @@ test("logout clears every protected page cache before rendering auth", () => {
     ACTIVITY_SNAPSHOT:null,SETTINGS_DATA:{},loaded:0,loads:0,LOGS_RUN:null,CLUSTER_LOGS_RUN:null,
     CLUSTER_TOKEN:null,CLUSTER_REFUSAL:null,CLUSTER_LOADED:false,CLUSTER_LEAVING:false,rendered:1,main:""});
   assert.deepEqual(removed,["plurx_token"]);
+});
+
+test("logout revokes the captured bearer and cannot clear a newer login", async () => {
+  const requests=[];
+  const fetch=(url,options)=>new Promise((resolve,reject)=>requests.push({url,options,resolve,reject}));
+  const harness=new Function("fetch","setTimeout","clearTimeout",
+    `const API="/api/v1",location={origin:"https://old.example"};
+     let TOKEN="old-token",AUTH_GENERATION=4,SIGN_OUT_RUN=null,notice="";
+     function clearLocalSession(expectedGeneration,message){
+       if(expectedGeneration!==AUTH_GENERATION) return false;
+       TOKEN=null;AUTH_GENERATION++;notice=message;return true;
+     }
+     ${shippedSource("logout")};
+     return {logout,login:(token)=>{TOKEN=token;AUTH_GENERATION++;},
+       state:()=>({TOKEN,AUTH_GENERATION,notice})};`,
+  )(fetch,()=>1,()=>{});
+
+  const oldLogout=harness.logout();
+  assert.equal(requests[0].url,"https://old.example/api/v1/auth/logout");
+  assert.equal(requests[0].options.headers.authorization,"Bearer old-token");
+  harness.login("new-token");
+  const currentLogout=harness.logout();
+  assert.equal(requests[1].options.headers.authorization,"Bearer new-token");
+  requests[0].resolve({ok:true,status:200});
+  assert.equal(await oldLogout,true);
+  assert.deepEqual(harness.state(),{TOKEN:"new-token",AUTH_GENERATION:5,notice:""},
+    "a late logout response belongs to the old generation only");
+
+  requests[1].resolve({ok:false,status:403});
+  assert.equal(await currentLogout,false);
+  assert.equal(harness.state().TOKEN,null,"offline revocation never traps the local session");
+  assert.match(harness.state().notice,/could not confirm revocation/);
 });
 
 test("Page phases are generation-fenced, ordered, and wired to measured routes", () => {

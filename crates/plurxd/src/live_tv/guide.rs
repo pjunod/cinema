@@ -38,6 +38,10 @@ pub(crate) const GUIDE_STALE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 /// for twenty minutes, so a refresh that found no lineup comes back soon.
 pub(crate) const GUIDE_COLD_LINEUP_RETRY: Duration = Duration::from_secs(60);
 pub(crate) const GUIDE_FETCH_TIMEOUT: Duration = Duration::from_secs(15);
+/// One refresh owns this total wall-clock budget, including DNS, credentials,
+/// every extension request, decompression and parsing. The manual endpoint's
+/// 30-second client budget therefore still has time to return a useful error.
+pub(crate) const GUIDE_REFRESH_TIMEOUT: Duration = Duration::from_secs(25);
 /// XMLTV for a large lineup is a few MiB. Anything larger is refused rather
 /// than streamed: this is a cache fill, not a download service.
 pub(crate) const GUIDE_MAX_DOCUMENT_BYTES: usize = 4 * 1024 * 1024;

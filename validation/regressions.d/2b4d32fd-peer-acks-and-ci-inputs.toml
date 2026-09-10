@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["2b4d32fd"]
+points = ["identity.access", "cluster.membership", "operations.packaging", "validation.framework"]
+checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "security-boundaries", "operations-contract"]
+reason = "revocation_acknowledgements_require_exact_response_authentication pins signed status-and-body responses on the revocation fanout; test_external_actions_are_immutable_and_checkout_drops_credentials pins immutable external action revisions and credential removal; test_private_origin_fetches_use_only_step_scoped_credentials pins the only remaining private fetches to one-command authorization headers; and test_live_tv_ffmpeg_clears_inherited_environment pins the explicit worker environment. Reverting any boundary makes its direct check fail."

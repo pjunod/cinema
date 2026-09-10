@@ -281,6 +281,7 @@ Two rounds of performance work, each with its plan, review, and response.
 | [HDHOMERUN-LIVE-TV-PLAN.md](features/HDHOMERUN-LIVE-TV-PLAN.md) | One tuner, every plurx client. | open |
 | [HDHOMERUN-LIVE-TV-STATUS.md](features/HDHOMERUN-LIVE-TV-STATUS.md) | What is built and what is proved on a real FLEX 4K. | open |
 | [LIVE-TV-GUIDE-AND-UI-PLAN.md](features/LIVE-TV-GUIDE-AND-UI-PLAN.md) | The Live TV page rebuilt — list and grid views, the guide feed, fullscreen and picture-in-picture on every client. | open |
+| [WEEKLY-REVIEW-REMEDIATION-STATUS.md](features/WEEKLY-REVIEW-REMEDIATION-STATUS.md) | Which September 3–9 security, recovery, and playback findings were fixed, and which remain separately scoped capabilities. | done |
 | [LIVE-TV-NATIVE-LAYOUTS-STATUS.md](features/LIVE-TV-NATIVE-LAYOUTS-STATUS.md) | Three native TV presentations, compact mobile browsing, and the exact implementation evidence. | open |
 | [SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS.md](features/SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS.md) | What is built, reviewed, and proved for the settings navigation and Developer-page redesign. | open |
 | [HOMEVIDEO-PLAN.md](features/HOMEVIDEO-PLAN.md) | Home video and photos — the `home` libraries. | built |

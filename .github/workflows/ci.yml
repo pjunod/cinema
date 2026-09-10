@@ -58,8 +58,9 @@ jobs:
       qualification: ${{ steps.scope.outputs.qualification }}
       execution_mode: ${{ steps.execution_mode.outputs.mode }}
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v4
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
           fetch-depth: 0
       - name: Select affected CI surfaces
         id: scope
@@ -101,8 +102,9 @@ jobs:
     runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 3
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v4
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
           fetch-depth: 0
       # The recorded base sha is the target tip at event time, not now. Two
       # branches that write the same build counter auto-merge with no conflict
@@ -115,8 +117,10 @@ jobs:
         if: github.event_name == 'pull_request'
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          git fetch --no-tags --force origin \
+          auth="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')"
+          git -c http.extraheader="AUTHORIZATION: basic $auth" fetch --no-tags --force origin \
             "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
           echo "MERGE_TARGET=origin/$BASE_REF" >> "$GITHUB_ENV"
       - name: Check mobile release hygiene
@@ -143,8 +147,9 @@ jobs:
     runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 3
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v4
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
           fetch-depth: 0
       - name: Audit corrective-history evidence
         run: make history-check
@@ -152,7 +157,7 @@ jobs:
         run: |
           make validation-lint
           python3 -m unittest discover -s tests/validation -p 'test_*.py'
-      - uses: https://data.forgejo.org/actions/setup-node@v4
+      - uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
       - name: Check CI, deploy, and shipping contracts
@@ -175,8 +180,10 @@ jobs:
     runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
     timeout-minutes: 10
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v4
-      - uses: https://github.com/dtolnay/rust-toolchain@1.97.1
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
         with:
           components: rustfmt, clippy
       - id: cargo-cache
@@ -209,8 +216,10 @@ jobs:
     runs-on: [self-hosted, Linux, X64, lab, general, high-cpu, ffmpeg-6]
     timeout-minutes: 30
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v4
-      - uses: https://github.com/dtolnay/rust-toolchain@1.97.1
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
         with:
           components: rustfmt, clippy
       - uses: ./.github/actions/ffmpeg
@@ -239,8 +248,10 @@ jobs:
     runs-on: [self-hosted, Linux, X64, lab, ci-store]
     timeout-minutes: 40
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v4
-      - uses: https://github.com/dtolnay/rust-toolchain@1.97.1
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
       - id: cargo-cache
         uses: ./.github/actions/cargo-cache
         with:
@@ -266,7 +277,7 @@ jobs:
           --command "make cluster-store-check"
       - name: Retain the Store lane log and receipt
         if: always()
-        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: cluster-store-legacy-contracts
           path: |
@@ -361,8 +372,10 @@ jobs:
     # three-voter proof. Persistent non-voter caches shorten later runs.
     timeout-minutes: 40
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v4
-      - uses: https://github.com/dtolnay/rust-toolchain@1.97.1
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
         with:
           components: clippy
       - name: Resolve pinned Rust executables for the long contract run
@@ -424,7 +437,7 @@ jobs:
           "${receipt[@]}"
       - name: Retain the topology lane log and receipt
         if: always()
-        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: cluster-topology-contracts
           path: |
@@ -435,7 +448,7 @@ jobs:
       - name: Retain deterministic topology evidence
         if: always() && needs.scope.outputs.cluster_auth == 'true'
         continue-on-error: true
-        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: cluster-topology-semantic
           path: target/validation/cluster-topology-semantic.json
@@ -444,7 +457,7 @@ jobs:
       - name: Retain deterministic failure-drill evidence
         if: always() && needs.scope.outputs.cluster_auth == 'true'
         continue-on-error: true
-        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: cluster-failure-drills
           path: target/validation/cluster-failure-drills.json
@@ -468,8 +481,10 @@ jobs:
     runs-on: [self-hosted, Linux, X64, lab, ci-topology]
     timeout-minutes: 30
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v4
-      - uses: https://github.com/dtolnay/rust-toolchain@1.97.1
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
       - id: cargo-cache
         uses: ./.github/actions/cargo-cache
         with:
@@ -485,7 +500,7 @@ jobs:
             2>&1 | tee target/validation/cluster-transport-recovery-contracts.log
       - name: Retain recovery contract logs
         if: always()
-        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: cluster-transport-recovery-contracts
           path: target/validation/cluster-transport-recovery-contracts.log
@@ -513,8 +528,10 @@ jobs:
     steps:
       - name: Record the role job budget start
         run: echo "RECOVERY_JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
-      - uses: https://data.forgejo.org/actions/checkout@v4
-      - uses: https://github.com/dtolnay/rust-toolchain@1.97.1
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
       - id: cargo-cache
         uses: ./.github/actions/cargo-cache
         with:
@@ -548,7 +565,7 @@ jobs:
             2>&1 | tee target/validation/cluster-transport-recovery-voter.log
       - name: Retain voter report, diagnostics, and log
         if: always()
-        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: cluster-transport-recovery-voter
           path: |
@@ -579,8 +596,10 @@ jobs:
     steps:
       - name: Record the role job budget start
         run: echo "RECOVERY_JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
-      - uses: https://data.forgejo.org/actions/checkout@v4
-      - uses: https://github.com/dtolnay/rust-toolchain@1.97.1
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
       - id: cargo-cache
         uses: ./.github/actions/cargo-cache
         with:
@@ -614,7 +633,7 @@ jobs:
             2>&1 | tee target/validation/cluster-transport-recovery-learner.log
       - name: Retain learner report, diagnostics, and log
         if: always()
-        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: cluster-transport-recovery-learner
           path: |
@@ -646,10 +665,11 @@ jobs:
     runs-on: [self-hosted, Linux, X64, lab, ci-topology]
     timeout-minutes: 30
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v4
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
           fetch-depth: 0
-      - uses: https://github.com/dtolnay/rust-toolchain@1.97.1
+      - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
       - id: cargo-cache
         uses: ./.github/actions/cargo-cache
         with:
@@ -663,14 +683,14 @@ jobs:
       - name: Download this run's voter evidence
         id: download_voter_recovery
         continue-on-error: true
-        uses: https://data.forgejo.org/forgejo/download-artifact@v4
+        uses: https://data.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e # v4
         with:
           name: cluster-transport-recovery-voter
           path: target/validation/voter-artifact
       - name: Download this run's learner evidence
         id: download_learner_recovery
         continue-on-error: true
-        uses: https://data.forgejo.org/forgejo/download-artifact@v4
+        uses: https://data.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e # v4
         with:
           name: cluster-transport-recovery-learner
           path: target/validation/learner-artifact
@@ -725,7 +745,7 @@ jobs:
           --command "transport-recovery-assemble"
       - name: Retain transport recovery log, receipt, and evidence
         if: always()
-        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: cluster-transport-recovery
           path: |
@@ -752,8 +772,10 @@ jobs:
     runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
     timeout-minutes: 30
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v4
-      - uses: https://github.com/dtolnay/rust-toolchain@1.97.1
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
       - id: cargo-cache
         uses: ./.github/actions/cargo-cache
         with:
@@ -775,8 +797,10 @@ jobs:
     runs-on: [self-hosted, Linux, X64, lab, general, high-cpu, ffmpeg-6]
     timeout-minutes: 30
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v4
-      - uses: https://github.com/dtolnay/rust-toolchain@1.97.1
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
       - id: cargo-cache
         uses: ./.github/actions/cargo-cache
         with:
@@ -807,8 +831,10 @@ jobs:
     runs-on: [self-hosted, Linux, X64, lab, general, ffmpeg-6]
     timeout-minutes: 30
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v4
-      - uses: https://github.com/dtolnay/rust-toolchain@1.97.1
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
       - id: cargo-cache
         uses: ./.github/actions/cargo-cache
         with:
@@ -816,7 +842,7 @@ jobs:
       # Pinned so the browser-bundle cache key below is meaningful; bump both
       # together. A cache hit skips the ~150 MB Chromium download every run.
       - name: Cache Playwright browsers
-        uses: https://data.forgejo.org/actions/cache@v4
+        uses: https://data.forgejo.org/actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-1.62.0
@@ -853,8 +879,10 @@ jobs:
     runs-on: [self-hosted, Linux, X64, lab, general, ffmpeg-6]
     timeout-minutes: 25
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v4
-      - uses: https://github.com/dtolnay/rust-toolchain@1.97.1
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
       - id: cargo-cache
         uses: ./.github/actions/cargo-cache
         with:
@@ -863,11 +891,11 @@ jobs:
           # of the 21G workspace tree, and it is the one that passed the
           # default check and then filled the disk mid-build.
           disk-gb: "45"
-      - uses: https://data.forgejo.org/actions/setup-node@v4
+      - uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
       - name: Cache Playwright browsers
-        uses: https://data.forgejo.org/actions/cache@v4
+        uses: https://data.forgejo.org/actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-1.62.0
@@ -904,7 +932,9 @@ jobs:
     runs-on: [self-hosted, Linux, X64, lab, android-kvm]
     timeout-minutes: 20
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v4
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       # The toolchain image only changes when its Dockerfile does, yet both
       # Android jobs used to rebuild it from scratch — cmdline-tools plus four
       # sdkmanager downloads — on every run. Keyed on the Dockerfile hash, a
@@ -925,7 +955,7 @@ jobs:
             echo "PLURX_ANDROID_IMAGE_READY=1" >> "$GITHUB_ENV"
           fi
       - name: Cache Gradle dependencies
-        uses: https://data.forgejo.org/actions/cache@v4
+        uses: https://data.forgejo.org/actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             clients/android/.gradle-validation/caches
@@ -953,7 +983,9 @@ jobs:
       # JavaScript actions such as checkout and cache can even start.
       PATH: /opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v4
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - name: Verify the pinned Apple toolchain
         run: |
           xcode_version="$(xcodebuild -version)"
@@ -971,7 +1003,7 @@ jobs:
       # incremental rebuild from a near miss still beats a cold compile, and a
       # poisoned cache only ever costs the rebuild we paid before caching.
       - name: Cache DerivedData
-        uses: https://data.forgejo.org/actions/cache@v4
+        uses: https://data.forgejo.org/actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: clients/apple/build/DerivedData
           key: apple-dd-${{ hashFiles('clients/apple/project.yml') }}-${{ hashFiles('clients/apple/Sources/**', 'clients/apple/Tests/**') }}
@@ -1033,7 +1065,9 @@ jobs:
     runs-on: [self-hosted, Linux, X64, lab, android-kvm]
     timeout-minutes: 35
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v4
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - name: Isolate the Android SDK from the repository checkout
         run: |
           echo "ANDROID_HOME=$RUNNER_TEMP/android-sdk" >> "$GITHUB_ENV"
@@ -1065,7 +1099,7 @@ jobs:
             echo "PLURX_ANDROID_IMAGE_READY=1" >> "$GITHUB_ENV"
           fi
       - name: Cache Gradle dependencies
-        uses: https://data.forgejo.org/actions/cache@v4
+        uses: https://data.forgejo.org/actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             clients/android/.gradle-validation/caches
@@ -1077,7 +1111,7 @@ jobs:
       - name: Run the Compose and TV focus suite on a disposable emulator
         id: android_instrumentation
         continue-on-error: true
-        uses: https://github.com/reactivecircus/android-emulator-runner@v2
+        uses: https://github.com/reactivecircus/android-emulator-runner@4c44018e59b437e86cdfc41da381398f93ed8808 # v2
         with:
           # Google's Android TV repository publishes API 36 for both x86 and
           # x86_64 (and none for API 35). The x86_64 guest hangs its QEMU CPU
@@ -1104,7 +1138,7 @@ jobs:
           fi
       - name: Retry a pre-test emulator boot failure once
         if: steps.android_instrumentation.outcome == 'failure' && steps.android_instrumentation_first_attempt.outputs.started == 'false'
-        uses: https://github.com/reactivecircus/android-emulator-runner@v2
+        uses: https://github.com/reactivecircus/android-emulator-runner@4c44018e59b437e86cdfc41da381398f93ed8808 # v2
         with:
           # The upstream action checks boot completion and then sends one
           # unretied unlock command. API 36 can briefly reconnect ADB between
@@ -1126,7 +1160,7 @@ jobs:
       - name: Upload Android test reports
         if: always()
         continue-on-error: true
-        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: android-instrumentation-reports
           path: |
@@ -1152,15 +1186,17 @@ jobs:
     # loads the SVG through github.com so authorized private-repo viewers work;
     # shields.io cannot read a private raw.githubusercontent.com branch.
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v4
-      - uses: https://github.com/dtolnay/rust-toolchain@1.97.1
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
         with:
           components: llvm-tools-preview
       - id: cargo-cache
         uses: ./.github/actions/cargo-cache
         with:
           lane: coverage
-      - uses: https://github.com/taiki-e/install-action@cargo-llvm-cov
+      - uses: https://github.com/taiki-e/install-action@711afc95f818c1e7c7b527b2d34c6925a825d206 # cargo-llvm-cov
       # Instrumented or not, this runs the same suite as the check job, so it
       # needs the same ffmpeg.
       - uses: ./.github/actions/ffmpeg
@@ -1239,8 +1275,9 @@ jobs:
             docker_machine: aarch64
             runs_on: '["self-hosted","Linux","ARM64","lab","ci-arm64"]'
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v4
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
           fetch-depth: 0
       - name: Prove the package runner and Docker engine are native
         env:
@@ -1260,7 +1297,7 @@ jobs:
           python3 -m validation.release_dockerfile --binary-export
           Dockerfile Dockerfile.binaries
       - name: Compile and export the exact candidate binaries
-        uses: https://github.com/docker/build-push-action@v6
+        uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: Dockerfile.binaries
@@ -1288,7 +1325,7 @@ jobs:
             }
           done
       - name: Build the runtime from only the verified binaries
-        uses: https://github.com/docker/build-push-action@v6
+        uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: Dockerfile.release
@@ -1318,7 +1355,7 @@ jobs:
             "$IMAGE" build-identity)" = "$GITHUB_SHA"
           scripts/container-smoke "$IMAGE"
       - name: Retain the exact package receipt
-        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: package-smoke-receipt-${{ matrix.arch }}
           path: |
@@ -1328,7 +1365,7 @@ jobs:
           retention-days: 14
       - name: Retain candidate binaries for push, tag, and qualification runs
         if: needs.scope.outputs.qualification == 'true'
-        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: package-smoke-binaries-${{ matrix.arch }}
           path: |
@@ -1341,7 +1378,7 @@ jobs:
       - name: Retain candidate binaries for non-qualification push and tag runs
         if: github.event_name == 'push' && needs.scope.outputs.qualification != 'true'
         continue-on-error: true
-        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: package-smoke-binaries-${{ matrix.arch }}
           path: |
@@ -1431,13 +1468,14 @@ jobs:
               *) echo "A post-merge validation job ended with: $result"; exit 1 ;;
             esac
           done
-      - uses: https://data.forgejo.org/actions/checkout@v4
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
           fetch-depth: 0
-      - uses: https://github.com/docker/setup-buildx-action@v3
+      - uses: https://github.com/docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         with:
           buildkitd-config: ${{ github.workspace }}/.github/buildkitd.toml
-      - uses: https://github.com/docker/login-action@v3
+      - uses: https://github.com/docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: 192.168.4.7:3000
           username: fleet
@@ -1507,18 +1545,21 @@ jobs:
               *) echo "A selected validation job ended with: $result"; exit 1 ;;
             esac
           done
-      - uses: https://data.forgejo.org/actions/checkout@v4
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         if: needs.scope.outputs.qualification == 'true'
         with:
+          persist-credentials: false
           fetch-depth: 0
       - name: Resolve the current qualification refs
         if: needs.scope.outputs.qualification == 'true'
         env:
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          git fetch --no-tags --force origin \
+          auth="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')"
+          git -c http.extraheader="AUTHORIZATION: basic $auth" fetch --no-tags --force origin \
             "+refs/heads/$HEAD_REF:refs/plurx/current-head" \
             "+refs/heads/$BASE_REF:refs/plurx/current-base"
           {
@@ -1538,7 +1579,7 @@ jobs:
           --output target/validation/qualification-receipt.json
       - name: Retain the effort qualification record
         if: needs.scope.outputs.qualification == 'true'
-        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: effort-qualification-${{ github.event.pull_request.number }}
           path: target/validation/qualification-receipt.json

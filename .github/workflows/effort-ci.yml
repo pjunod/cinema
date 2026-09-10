@@ -27,8 +27,9 @@ jobs:
       docs_only: ${{ steps.scope.outputs.docs_only }}
       execution_mode: ${{ steps.execution_mode.outputs.mode }}
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v4
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
           fetch-depth: 0
       - name: Select affected compile surfaces
         id: scope
@@ -51,8 +52,9 @@ jobs:
     runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 3
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v4
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
           fetch-depth: 0
       - name: Audit corrective-history evidence
         run: make history-check
@@ -60,7 +62,7 @@ jobs:
         run: |
           make validation-lint
           python3 -m unittest discover -s tests/validation -p 'test_*.py'
-      - uses: https://data.forgejo.org/actions/setup-node@v4
+      - uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
       - name: Check CI, deploy, and shipping contracts
@@ -81,9 +83,11 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Check out the candidate
-        uses: https://data.forgejo.org/actions/checkout@v4
+        uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - name: Install the pinned Rust toolchain
-        uses: https://github.com/dtolnay/rust-toolchain@1.97.1
+        uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
         with:
           components: rustfmt, clippy
       - name: Restore the effort Rust cache
@@ -110,8 +114,10 @@ jobs:
     runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 5
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v4
-      - uses: https://data.forgejo.org/actions/setup-node@v4
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
       - name: Check embedded JavaScript and theme contracts
@@ -127,7 +133,9 @@ jobs:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
       PATH: /opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v4
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - name: Verify the pinned Apple toolchain
         run: |
           xcode_version="$(xcodebuild -version)"
@@ -135,7 +143,7 @@ jobs:
           grep -Fxq "Build version 17F113" <<< "$xcode_version"
           test "$(xcodegen --version)" = "Version: 2.46.0"
       - name: Cache DerivedData
-        uses: https://data.forgejo.org/actions/cache@v4
+        uses: https://data.forgejo.org/actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: clients/apple/build/DerivedData
           key: effort-apple-dd-${{ hashFiles('clients/apple/project.yml') }}-${{ hashFiles('clients/apple/Sources/**', 'clients/apple/Tests/**') }}
@@ -152,7 +160,9 @@ jobs:
     runs-on: [self-hosted, Linux, X64, lab, android-kvm]
     timeout-minutes: 10
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v4
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - name: Reuse the pinned Android toolchain image from Forgejo
         env:
           REGISTRY_TOKEN: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
@@ -168,7 +178,7 @@ jobs:
           fi
           echo "PLURX_ANDROID_IMAGE_READY=1" >> "$GITHUB_ENV"
       - name: Cache Gradle dependencies
-        uses: https://data.forgejo.org/actions/cache@v4
+        uses: https://data.forgejo.org/actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             clients/android/.gradle-docker/caches
