@@ -20,10 +20,12 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `79` — native viewer parity across phone, foldable,
-> and TV. Build 79 makes sign-out revoke the captured server session within a
+> Status: **v0.3.0**, build `80` — native viewer parity across phone, foldable,
+> and TV. Build 80 makes sign-out revoke the captured server session within a
 > five-second bound, clear the exact local credential even during cancellation,
-> and leave a newer login untouched. Build 78 labels Live TV channel format and reports live tuner signal
+> and leave a newer login untouched. Build 79 adds three saved Google TV layouts around one Media3 player,
+> six-hour guide browsing, compact phone schedules, exact-once D-pad delegation,
+> and measured source-format details. Build 78 labels Live TV channel format and reports live tuner signal
 > metrics while a channel plays. Build 77 enables prepared replacement by default while keeping its
 > readiness requirements advisory. Build 76 completes bounded commit → end settlement for prepared
 > replacements and retains the predecessor until final settlement. Build 75

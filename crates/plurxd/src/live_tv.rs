@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::Duration;
 
@@ -40,6 +40,8 @@ const MAX_CHANNELS: usize = 512;
 const MAX_GUIDE_NUMBER_BYTES: usize = 32;
 const MAX_GUIDE_NAME_BYTES: usize = 256;
 const MAX_CHANNEL_FORMAT_BYTES: usize = 32;
+const MAX_SOURCE_DESCRIPTOR_BYTES: usize = 64 * 1024;
+const SOURCE_FORMAT_TTL: Duration = Duration::from_secs(20 * 60);
 const MAX_DEVICE_FIELD_BYTES: usize = 256;
 const MAX_TUNER_STATUS_BYTES: usize = 64 * 1024;
 const SNAPSHOT_TTL: Duration = Duration::from_secs(30);
@@ -487,6 +489,212 @@ pub(crate) struct LiveTvChannel {
     pub(crate) video_codec: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) audio_codec: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_source_format"
+    )]
+    pub(crate) source_format: Option<LiveTvSourceFormat>,
+}
+
+/// Facts observed from FFmpeg's bounded description of the selected tuner
+/// input. These describe the source only; Live TV's delivered H.264/AAC
+/// rendition remains represented by [`LiveTvOutput`].
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub(crate) struct LiveTvSourceFormat {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) video_width: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) video_height: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) scan: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) audio_channels: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) audio_layout: Option<String>,
+    pub(crate) observed_at: i64,
+}
+
+fn deserialize_source_format<'de, D>(
+    deserializer: D,
+) -> Result<Option<LiveTvSourceFormat>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let Some(value) = Option::<serde_json::Value>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    let Some(object) = value.as_object() else {
+        return Ok(None);
+    };
+    let Some(observed_at) = object
+        .get("observed_at")
+        .and_then(serde_json::Value::as_i64)
+    else {
+        return Ok(None);
+    };
+    if observed_at <= 0 {
+        return Ok(None);
+    }
+    let dimension = |name: &str| {
+        object
+            .get(name)
+            .and_then(serde_json::Value::as_u64)
+            .filter(|value| (1..=16_384).contains(value))
+            .map(|value| value as u16)
+    };
+    let audio_channels = object
+        .get("audio_channels")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|value| (1..=32).contains(value))
+        .map(|value| value as u8);
+    let scan = object
+        .get("scan")
+        .and_then(serde_json::Value::as_str)
+        .and_then(normalize_scan);
+    let audio_layout = object
+        .get("audio_layout")
+        .and_then(serde_json::Value::as_str)
+        .and_then(normalize_audio_layout);
+    Ok(Some(LiveTvSourceFormat {
+        video_width: dimension("video_width"),
+        video_height: dimension("video_height"),
+        scan,
+        audio_channels,
+        audio_layout,
+        observed_at,
+    }))
+}
+
+fn normalize_scan(value: &str) -> Option<String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "progressive" => Some("progressive".to_owned()),
+        "interlaced" => Some("interlaced".to_owned()),
+        _ => None,
+    }
+}
+
+fn normalize_audio_layout(value: &str) -> Option<String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    if normalized.is_empty()
+        || normalized.len() > MAX_CHANNEL_FORMAT_BYTES
+        || !normalized.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '+' | '-' | '_' | ' ')
+        })
+    {
+        return None;
+    }
+    Some(normalized)
+}
+
+fn parse_source_dimensions(line: &str) -> (Option<u16>, Option<u16>, Option<String>) {
+    let bytes = line.as_bytes();
+    for x in 1..bytes.len().saturating_sub(1) {
+        if bytes[x] != b'x' || !bytes[x - 1].is_ascii_digit() || !bytes[x + 1].is_ascii_digit() {
+            continue;
+        }
+        let mut start = x - 1;
+        while start > 0 && bytes[start - 1].is_ascii_digit() {
+            start -= 1;
+        }
+        let mut end = x + 1;
+        while end + 1 < bytes.len() && bytes[end + 1].is_ascii_digit() {
+            end += 1;
+        }
+        let width = line[start..x].parse::<u16>().ok();
+        let height = line[x + 1..=end].parse::<u16>().ok();
+        if width.is_none_or(|value| value == 0 || value > 16_384)
+            || height.is_none_or(|value| value == 0 || value > 16_384)
+        {
+            continue;
+        }
+        let suffix = bytes.get(end + 1).copied();
+        let lower = line.to_ascii_lowercase();
+        let scan = if suffix == Some(b'i')
+            || lower.contains("top first")
+            || lower.contains("bottom first")
+            || lower.contains("interlaced")
+        {
+            Some("interlaced".to_owned())
+        } else if suffix == Some(b'p') || lower.contains("progressive") {
+            Some("progressive".to_owned())
+        } else {
+            None
+        };
+        return (width, height, scan);
+    }
+    (None, None, None)
+}
+
+fn parse_source_audio(line: &str) -> (Option<u8>, Option<String>) {
+    let lower = line.to_ascii_lowercase();
+    for token in lower.split(',').map(str::trim) {
+        let word = token.split_whitespace().next().unwrap_or_default();
+        if word == "mono" {
+            return (Some(1), Some("mono".to_owned()));
+        }
+        if word == "stereo" {
+            return (Some(2), Some("stereo".to_owned()));
+        }
+        let base = word.split('(').next().unwrap_or(word);
+        if let Some((front, rear)) = base.split_once('.') {
+            if let (Ok(front), Ok(rear)) = (front.parse::<u8>(), rear.parse::<u8>()) {
+                if let Some(channels) = front
+                    .checked_add(rear)
+                    .filter(|value| (1..=32).contains(value))
+                {
+                    if let Some(layout) = normalize_audio_layout(base) {
+                        return (Some(channels), Some(layout));
+                    }
+                }
+            }
+        }
+        if let Some(value) = token.strip_suffix(" channels") {
+            if let Ok(channels) = value.trim().parse::<u8>() {
+                if (1..=32).contains(&channels) {
+                    return (Some(channels), None);
+                }
+            }
+        }
+    }
+    (None, None)
+}
+
+fn parse_live_source_format(descriptor: &[u8], observed_at: i64) -> Option<LiveTvSourceFormat> {
+    let text = String::from_utf8_lossy(descriptor);
+    let mut in_input = false;
+    let mut video = (None, None, None);
+    let mut audio = (None, None);
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("Input #0") {
+            in_input = true;
+            continue;
+        }
+        if !in_input {
+            continue;
+        }
+        if trimmed.starts_with("Stream mapping:") || trimmed.starts_with("Output #0") {
+            break;
+        }
+        if video.0.is_none() && trimmed.starts_with("Stream #0:") && trimmed.contains(" Video:") {
+            video = parse_source_dimensions(trimmed);
+        }
+        if audio.0.is_none() && trimmed.starts_with("Stream #0:") && trimmed.contains(" Audio:") {
+            audio = parse_source_audio(trimmed);
+        }
+    }
+    if video.0.is_none() && video.1.is_none() && audio.0.is_none() && audio.1.is_none() {
+        return None;
+    }
+    Some(LiveTvSourceFormat {
+        video_width: video.0,
+        video_height: video.1,
+        scan: video.2,
+        audio_channels: audio.0,
+        audio_layout: audio.1,
+        observed_at,
+    })
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -792,6 +1000,7 @@ struct LiveTvSession {
     activation_token: String,
     request: LiveTvStartRequest,
     channel: LiveTvChannel,
+    device_id: String,
     output: LiveTvOutput,
     device_ipv4: Option<Ipv4Addr>,
     owner_serving_generation: u64,
@@ -803,6 +1012,8 @@ struct LiveTvSession {
     worker: StdMutex<Option<tokio::task::JoinHandle<()>>>,
     process: tokio::sync::Mutex<Option<LiveTvProcess>>,
     decoder_unavailable: Arc<AtomicBool>,
+    source_format: Arc<StdMutex<Option<LiveTvSourceFormat>>>,
+    source_format_expires_at: Arc<AtomicI64>,
     /// Bytes the tuner has delivered into the graph. Shared with the pump so
     /// the startup decision can tell a slow channel from an absent one.
     tuner_bytes: Arc<AtomicU64>,
@@ -819,6 +1030,25 @@ struct LiveTvProcess {
 }
 
 impl LiveTvSession {
+    fn channel_with_source_format(&self) -> LiveTvChannel {
+        let mut channel = self.channel.clone();
+        // `self.channel` can contain a cached observation copied from lineup
+        // at tune time. It is only the immutable channel baseline; freshness
+        // belongs to the separately expiring session observation below.
+        channel.source_format = None;
+        if unix_seconds() <= self.source_format_expires_at.load(Ordering::Acquire) {
+            if let Some(format) = self
+                .source_format
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+            {
+                channel.source_format = Some(format);
+            }
+        }
+        channel
+    }
+
     fn status(&self, owner_node_id: &str) -> LiveTvSessionStatus {
         let now = tokio::time::Instant::now();
         let state = self
@@ -827,7 +1057,7 @@ impl LiveTvSession {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         LiveTvSessionStatus {
             state: session_phase_name(state.phase).to_owned(),
-            channel: self.channel.clone(),
+            channel: self.channel_with_source_format(),
             owner_node_id: owner_node_id.to_owned(),
             encoder: state.encoder.clone(),
             output_height: self.output.height,
@@ -1354,6 +1584,19 @@ struct CachedGraphProbe {
     result: (bool, String),
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct SourceFormatKey {
+    generation: i64,
+    device_id: String,
+    channel_id: String,
+}
+
+#[derive(Clone)]
+struct CachedSourceFormat {
+    expires_at: tokio::time::Instant,
+    format: LiveTvSourceFormat,
+}
+
 pub(crate) struct LiveTvManager {
     store: Arc<dyn Store>,
     client: Result<reqwest::Client, String>,
@@ -1375,6 +1618,7 @@ pub(crate) struct LiveTvManager {
     /// expires in a minute.
     relayed_guide: tokio::sync::Mutex<Option<(i64, tokio::time::Instant, LiveTvGuide)>>,
     graph_cache: tokio::sync::Mutex<Option<CachedGraphProbe>>,
+    source_formats: StdMutex<HashMap<SourceFormatKey, CachedSourceFormat>>,
     registry: Arc<StdMutex<LiveTvRegistry>>,
     scratch_claims: StdMutex<HashSet<PathBuf>>,
     scratch_sweep_gate: tokio::sync::Mutex<()>,
@@ -1409,6 +1653,7 @@ impl LiveTvManager {
             guide_titles: StdMutex::new(Arc::new(BTreeMap::new())),
             relayed_guide: tokio::sync::Mutex::new(None),
             graph_cache: tokio::sync::Mutex::new(None),
+            source_formats: StdMutex::new(HashMap::new()),
             registry: Arc::clone(&metrics.registry),
             scratch_claims: StdMutex::new(HashSet::new()),
             scratch_sweep_gate: tokio::sync::Mutex::new(()),
@@ -1427,6 +1672,10 @@ impl LiveTvManager {
 
     pub(crate) fn observe_config(&self, config: &LiveTvConfig) {
         self.guide_cache.cancel_if_config_changed(config);
+        self.source_formats
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|key, _| key.generation == config.generation);
         let mut projection = self
             .metrics
             .projection
@@ -1483,9 +1732,80 @@ impl LiveTvManager {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .device = None;
         }
+        let snapshot = self.with_source_formats(snapshot, config.generation);
         Ok(self
             .with_graph_probe(snapshot, config, force, probe_graph)
             .await)
+    }
+
+    fn with_source_formats(&self, mut snapshot: LiveTvSnapshot, generation: i64) -> LiveTvSnapshot {
+        let now = tokio::time::Instant::now();
+        let device_id = snapshot.device.device_id.clone();
+        let channel_ids = snapshot
+            .channels
+            .iter()
+            .map(|channel| channel.id.as_str())
+            .collect::<HashSet<_>>();
+        let mut cache = self
+            .source_formats
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        cache.retain(|key, value| {
+            key.generation == generation
+                && key.device_id == device_id
+                && channel_ids.contains(key.channel_id.as_str())
+                && value.expires_at > now
+        });
+        for channel in &mut snapshot.channels {
+            let key = SourceFormatKey {
+                generation,
+                device_id: device_id.clone(),
+                channel_id: channel.id.clone(),
+            };
+            if let Some(cached) = cache.get(&key) {
+                channel.source_format = Some(cached.format.clone());
+            }
+        }
+        snapshot
+    }
+
+    fn record_source_format(
+        &self,
+        key: SourceFormatKey,
+        guide_number: &str,
+        format: LiveTvSourceFormat,
+    ) -> i64 {
+        let expires_at = self.source_format_expiry(guide_number, format.observed_at);
+        let now_wall = unix_seconds();
+        let ttl = Duration::from_secs(expires_at.saturating_sub(now_wall) as u64);
+        self.source_formats
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                key,
+                CachedSourceFormat {
+                    expires_at: tokio::time::Instant::now() + ttl,
+                    format,
+                },
+            );
+        expires_at
+    }
+
+    fn source_format_expiry(&self, guide_number: &str, observed_at: i64) -> i64 {
+        let absolute_ceiling = observed_at.saturating_add(SOURCE_FORMAT_TTL.as_secs() as i64);
+        let now_wall = unix_seconds();
+        self.guide_titles
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(guide_number)
+            .and_then(|rows| {
+                rows.iter()
+                    .find(|(start, end, _)| *start <= now_wall && *end > now_wall)
+                    .map(|(_, end, _)| *end)
+            })
+            .map_or(absolute_ceiling, |programme_end| {
+                absolute_ceiling.min(programme_end)
+            })
     }
 
     async fn fetch_snapshot(
@@ -1670,6 +1990,7 @@ impl LiveTvManager {
                 "a fresh HDHomeRun lineup is required to start Live TV".to_owned(),
             ));
         }
+        let device_id = snapshot.device.device_id.clone();
         let channel = snapshot
             .channels
             .into_iter()
@@ -1702,11 +2023,18 @@ impl LiveTvManager {
             audio: "aac".to_owned(),
             height: config.output_height,
         };
+        let source_format = Arc::new(StdMutex::new(channel.source_format.clone()));
+        let source_format_expires_at = Arc::new(AtomicI64::new(
+            channel.source_format.as_ref().map_or(0, |format| {
+                self.source_format_expiry(&channel.guide_number, format.observed_at)
+            }),
+        ));
         let session = Arc::new(LiveTvSession {
             capability: capability.clone(),
             activation_token,
             request: request.clone(),
             channel,
+            device_id,
             output,
             device_ipv4: Some(address),
             owner_serving_generation: serving_generation,
@@ -1718,6 +2046,8 @@ impl LiveTvManager {
             worker: StdMutex::new(None),
             process: tokio::sync::Mutex::new(None),
             decoder_unavailable: Arc::new(AtomicBool::new(false)),
+            source_format,
+            source_format_expires_at,
             tuner_bytes: Arc::new(AtomicU64::new(0)),
             resource_admission: Arc::new(tokio::sync::Semaphore::new(LOCAL_RESOURCE_CONCURRENCY)),
             signal_cache: tokio::sync::Mutex::new(None),
@@ -1872,7 +2202,7 @@ impl LiveTvManager {
         Ok(LiveTvActivated {
             session_id: session.capability.clone(),
             playlist_url: format!("/api/v1/live-tv/sessions/{}/index.m3u8", session.capability),
-            channel: session.channel.clone(),
+            channel: session.channel_with_source_format(),
             output: session.output.clone(),
             live: true,
         })
@@ -3226,6 +3556,8 @@ async fn run_live_session_inner(
         tokio::spawn(capture_live_stderr(
             stderr,
             Arc::clone(&session.decoder_unavailable),
+            Arc::clone(&session.source_format),
+            Arc::clone(&session.source_format_expires_at),
         ))
     });
     let Some(stdin) = stdin else {
@@ -3251,6 +3583,11 @@ async fn run_live_session_inner(
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut ticks = 0u64;
     let mut published = false;
+    let mut recorded_source_observation = session
+        .channel
+        .source_format
+        .as_ref()
+        .map_or(0, |format| format.observed_at);
     let observe = async {
         loop {
             tick.tick().await;
@@ -3268,6 +3605,31 @@ async fn run_live_session_inner(
                 break Err(LiveTvError::StreamFailed(
                     "the tuner stream ended unexpectedly".into(),
                 ));
+            }
+
+            let observed = session
+                .source_format
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if let Some(format) =
+                observed.filter(|format| format.observed_at > recorded_source_observation)
+            {
+                if let Some(owner) = manager.upgrade() {
+                    let expires_at = owner.record_source_format(
+                        SourceFormatKey {
+                            generation: config.generation,
+                            device_id: session.device_id.clone(),
+                            channel_id: session.channel.id.clone(),
+                        },
+                        &session.channel.guide_number,
+                        format.clone(),
+                    );
+                    session
+                        .source_format_expires_at
+                        .store(expires_at, Ordering::Release);
+                    recorded_source_observation = format.observed_at;
+                }
             }
 
             match inspect_scratch(&session.directory).await {
@@ -3300,7 +3662,7 @@ async fn run_live_session_inner(
                             session_id: session.capability.clone(),
                             capability: session.capability.clone(),
                             activation_token: session.activation_token.clone(),
-                            channel: session.channel.clone(),
+                            channel: session.channel_with_source_format(),
                             output: session.output.clone(),
                             config_generation: session.request.config_generation,
                             owner_serving_generation: session.owner_serving_generation,
@@ -3535,7 +3897,7 @@ fn live_ffmpeg_command(
         // because those values happen to live in the parent environment.
         .env_clear()
         .env("LC_ALL", "C")
-        .args(["-hide_banner", "-loglevel", "warning", "-nostdin", "-y"])
+        .args(["-hide_banner", "-loglevel", "info", "-nostdin", "-y"])
         .args(plan.encoder.init_args())
         .args(["-hwaccel", "none"])
         .args(["-fflags", "+genpts+discardcorrupt"])
@@ -3650,14 +4012,46 @@ fn live_video_filter(encoder: Encoder, height: u16) -> String {
 async fn capture_live_stderr(
     mut stderr: impl tokio::io::AsyncRead + Unpin,
     decoder_unavailable: Arc<AtomicBool>,
+    source_format: Arc<StdMutex<Option<LiveTvSourceFormat>>>,
+    source_format_expires_at: Arc<AtomicI64>,
 ) {
-    // Drain forever without retaining an unbounded log or exposing device
-    // metadata. A rolling 2 KiB window also recognizes split reads.
+    // Drain forever without exposing device metadata. Retain only FFmpeg's
+    // bounded initial input description and stop parsing at Stream mapping;
+    // output facts must never be mistaken for source facts.
     let mut window = Vec::with_capacity(2048);
+    let mut descriptor = Vec::with_capacity(MAX_SOURCE_DESCRIPTOR_BYTES);
+    let mut descriptor_done = false;
     let mut chunk = [0; 1024];
     while let Ok(read) = stderr.read(&mut chunk).await {
         if read == 0 {
-            return;
+            break;
+        }
+        if !descriptor_done {
+            let remaining = MAX_SOURCE_DESCRIPTOR_BYTES.saturating_sub(descriptor.len());
+            descriptor.extend_from_slice(&chunk[..read.min(remaining)]);
+            let boundary = String::from_utf8_lossy(&descriptor)
+                .find("Stream mapping:")
+                .or_else(|| String::from_utf8_lossy(&descriptor).find("Output #0"));
+            if let Some(boundary) = boundary {
+                descriptor.truncate(boundary);
+                descriptor_done = true;
+            } else if descriptor.len() == MAX_SOURCE_DESCRIPTOR_BYTES {
+                descriptor_done = true;
+            }
+            if descriptor_done {
+                if let Some(format) = parse_live_source_format(&descriptor, unix_seconds()) {
+                    source_format_expires_at.store(
+                        format
+                            .observed_at
+                            .saturating_add(SOURCE_FORMAT_TTL.as_secs() as i64),
+                        Ordering::Release,
+                    );
+                    *source_format
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(format);
+                }
+                descriptor.clear();
+            }
         }
         window.extend_from_slice(&chunk[..read]);
         if window.len() > 2048 {
@@ -3673,6 +4067,19 @@ async fn capture_live_stderr(
             || (text.contains("stream map") && text.contains("matches no streams"))
         {
             decoder_unavailable.store(true, Ordering::Release);
+        }
+    }
+    if !descriptor_done {
+        if let Some(format) = parse_live_source_format(&descriptor, unix_seconds()) {
+            source_format_expires_at.store(
+                format
+                    .observed_at
+                    .saturating_add(SOURCE_FORMAT_TTL.as_secs() as i64),
+                Ordering::Release,
+            );
+            *source_format
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(format);
         }
     }
 }
@@ -4475,6 +4882,7 @@ fn validate_lineup(rows: Vec<serde_json::Value>) -> Result<Vec<LiveTvChannel>, L
             hd,
             video_codec: channel_format(row.video_codec.as_deref()),
             audio_codec: channel_format(row.audio_codec.as_deref()),
+            source_format: None,
         });
     }
     channels.sort_by(|left, right| guide_order(&left.guide_number, &right.guide_number));
@@ -4848,7 +5256,9 @@ mod tests {
                 hd: None,
                 video_codec: None,
                 audio_codec: None,
+                source_format: None,
             },
+            device_id: "fixture-device".into(),
             output: LiveTvOutput {
                 container: "hls".into(),
                 video: "h264".into(),
@@ -4866,6 +5276,8 @@ mod tests {
             resource_admission: Arc::new(tokio::sync::Semaphore::new(LOCAL_RESOURCE_CONCURRENCY)),
             process: tokio::sync::Mutex::new(None),
             decoder_unavailable: Arc::new(AtomicBool::new(false)),
+            source_format: Arc::new(StdMutex::new(None)),
+            source_format_expires_at: Arc::new(AtomicI64::new(0)),
             tuner_bytes: Arc::new(AtomicU64::new(0)),
             state: StdMutex::new(LiveTvSessionState {
                 phase: LiveTvSessionPhase::Active,
@@ -5379,6 +5791,8 @@ exec /bin/cat >/dev/null
         let stderr = tokio::spawn(capture_live_stderr(
             child.stderr.take().expect("stderr"),
             Arc::clone(&detected),
+            Arc::new(StdMutex::new(None)),
+            Arc::new(AtomicI64::new(0)),
         ));
         let mut stdin = child.stdin.take().expect("stdin");
         stdin
@@ -5420,7 +5834,12 @@ exec /bin/cat >/dev/null
         ] {
             let (mut writer, reader) = tokio::io::duplex(128);
             let detected = Arc::new(AtomicBool::new(false));
-            let capture = tokio::spawn(capture_live_stderr(reader, Arc::clone(&detected)));
+            let capture = tokio::spawn(capture_live_stderr(
+                reader,
+                Arc::clone(&detected),
+                Arc::new(StdMutex::new(None)),
+                Arc::new(AtomicI64::new(0)),
+            ));
             writer
                 .write_all(&vec![b'x'; 32 * 1024])
                 .await
@@ -5437,6 +5856,96 @@ exec /bin/cat >/dev/null
                 "{diagnostic}"
             );
         }
+    }
+
+    #[test]
+    fn live_tv_source_format_reads_only_the_selected_input_description() {
+        let interlaced = br#"
+Input #0, mpegts, from 'pipe:0':
+  Stream #0:0[0x31]: Video: mpeg2video (Main), yuv420p(tv, top first), 1920x1080 [SAR 1:1 DAR 16:9], 29.97 fps
+  Stream #0:1[0x34]: Audio: ac3, 48000 Hz, stereo, fltp, 192 kb/s
+Stream mapping:
+  Stream #0:0 -> #0:0 (mpeg2video -> h264)
+Output #0, hls, to 'index.m3u8':
+  Stream #0:0: Video: h264, 3840x2160p
+"#;
+        let observed =
+            parse_live_source_format(interlaced, 1_788_998_400).expect("input source facts");
+        assert_eq!(observed.video_width, Some(1920));
+        assert_eq!(observed.video_height, Some(1080));
+        assert_eq!(observed.scan.as_deref(), Some("interlaced"));
+        assert_eq!(observed.audio_channels, Some(2));
+        assert_eq!(observed.audio_layout.as_deref(), Some("stereo"));
+
+        let ultra_hd = br#"
+Input #0, mpegts, from 'pipe:0':
+  Stream #0:0: Video: hevc (Main 10), yuv420p10le(progressive), 3840x2160p, 59.94 fps
+  Stream #0:1: Audio: eac3, 48000 Hz, 5.1(side), fltp
+Output #0, hls, to 'index.m3u8':
+  Stream #0:0: Video: h264, 1280x720
+"#;
+        let observed = parse_live_source_format(ultra_hd, 1_788_998_401)
+            .expect("hardware-path input source facts");
+        assert_eq!(observed.video_width, Some(3840));
+        assert_eq!(observed.video_height, Some(2160));
+        assert_eq!(observed.scan.as_deref(), Some("progressive"));
+        assert_eq!(observed.audio_channels, Some(6));
+        assert_eq!(observed.audio_layout.as_deref(), Some("5.1"));
+    }
+
+    #[test]
+    fn live_tv_source_format_rejects_bad_optional_fields_independently() {
+        let channel: LiveTvChannel = serde_json::from_value(serde_json::json!({
+            "id": "2.1",
+            "guide_number": "2.1",
+            "guide_name": "WXYZ",
+            "favorite": false,
+            "drm": false,
+            "support": "ready",
+            "source_format": {
+                "video_width": -1,
+                "video_height": 2160,
+                "scan": "invented",
+                "audio_channels": 99,
+                "audio_layout": "5.1",
+                "observed_at": 1788998400
+            }
+        }))
+        .expect("one invalid optional fact must not reject a channel");
+        let observed = channel.source_format.expect("valid observation envelope");
+        assert_eq!(observed.video_width, None);
+        assert_eq!(observed.video_height, Some(2160));
+        assert_eq!(observed.scan, None);
+        assert_eq!(observed.audio_channels, None);
+        assert_eq!(observed.audio_layout.as_deref(), Some("5.1"));
+    }
+
+    #[test]
+    fn live_tv_session_never_revives_an_expired_lineup_observation() {
+        let format = LiveTvSourceFormat {
+            video_width: Some(1920),
+            video_height: Some(1080),
+            scan: Some("interlaced".into()),
+            audio_channels: Some(2),
+            audio_layout: Some("stereo".into()),
+            observed_at: unix_seconds() - 60,
+        };
+        let mut session = test_session(PathBuf::from("unused"), 1);
+        Arc::get_mut(&mut session)
+            .expect("unshared test session")
+            .channel
+            .source_format = Some(format.clone());
+
+        assert_eq!(session.channel_with_source_format().source_format, None);
+
+        *session.source_format.lock().expect("source format") = Some(format.clone());
+        session
+            .source_format_expires_at
+            .store(unix_seconds() + 60, Ordering::Release);
+        assert_eq!(
+            session.channel_with_source_format().source_format,
+            Some(format)
+        );
     }
 
     #[tokio::test]
@@ -5702,7 +6211,7 @@ exec /bin/cat >/dev/null
         let expected = [
             "-hide_banner",
             "-loglevel",
-            "warning",
+            "info",
             "-nostdin",
             "-y",
             "-hwaccel",
@@ -6402,6 +6911,7 @@ exec /bin/cat >/dev/null
                 hd: None,
                 video_codec: None,
                 audio_codec: None,
+                source_format: None,
             },
             LiveTvChannel {
                 id: "4.1".into(),
@@ -6413,6 +6923,7 @@ exec /bin/cat >/dev/null
                 hd: None,
                 video_codec: None,
                 audio_codec: None,
+                source_format: None,
             },
         ]
     }

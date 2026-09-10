@@ -95,6 +95,21 @@ data class LiveTvGridLayout(
     val nowX: Float?,
 )
 
+/** Stable guide identity used by television focus; geometry and list indexes never identify a cell. */
+data class LiveTvGuideFocusTarget(
+    val channelId: String,
+    val programmeStart: Long? = null,
+    val channelHeader: Boolean = false,
+)
+
+data class LiveTvGuideFocusMove(
+    val target: LiveTvGuideFocusTarget?,
+    val anchorTime: Long?,
+    val toolbarBoundary: Boolean = false,
+)
+
+enum class LiveTvGuideFocusDirection { Left, Right, Up, Down }
+
 data class LiveTvChannelFilter(
     val query: String = "",
     val favoritesOnly: Boolean = false,
@@ -250,4 +265,86 @@ object LiveTvGuideReducer {
         if (at < 0) return visible.first()
         return visible[(at + delta).mod(visible.size)]
     }
+
+    /**
+     * Resolve one D-pad move by channel/programme identity and UTC time.
+     * Vertical movement preserves the original time anchor across short and
+     * long programmes instead of repeatedly adopting each cell's midpoint.
+     */
+    fun moveGuideFocus(
+        layout: LiveTvGridLayout,
+        current: LiveTvGuideFocusTarget,
+        anchorTime: Long?,
+        direction: LiveTvGuideFocusDirection,
+    ): LiveTvGuideFocusMove {
+        val rowIndex = layout.rows.indexOfFirst { it.channel.id == current.channelId }
+        if (rowIndex < 0) return LiveTvGuideFocusMove(null, anchorTime)
+        val row = layout.rows[rowIndex]
+        val cells = row.cells.sortedBy { it.programme.start }
+
+        if (direction == LiveTvGuideFocusDirection.Left || direction == LiveTvGuideFocusDirection.Right) {
+            if (current.channelHeader) {
+                val first = cells.firstOrNull()
+                return if (direction == LiveTvGuideFocusDirection.Right && first != null) {
+                    val midpoint = programmeMidpoint(first.programme)
+                    LiveTvGuideFocusMove(
+                        LiveTvGuideFocusTarget(row.channel.id, first.programme.start),
+                        midpoint,
+                    )
+                } else {
+                    LiveTvGuideFocusMove(current, anchorTime)
+                }
+            }
+            if (current.programmeStart == null) {
+                return if (direction == LiveTvGuideFocusDirection.Left) {
+                    LiveTvGuideFocusMove(
+                        LiveTvGuideFocusTarget(row.channel.id, channelHeader = true),
+                        anchorTime,
+                    )
+                } else {
+                    LiveTvGuideFocusMove(current, anchorTime)
+                }
+            }
+            val cellIndex = cells.indexOfFirst { it.programme.start == current.programmeStart }
+            if (cellIndex < 0) return LiveTvGuideFocusMove(current, anchorTime)
+            val next = cellIndex + if (direction == LiveTvGuideFocusDirection.Right) 1 else -1
+            if (next < 0) {
+                return LiveTvGuideFocusMove(
+                    LiveTvGuideFocusTarget(row.channel.id, channelHeader = true),
+                    anchorTime,
+                )
+            }
+            val target = cells.getOrNull(next) ?: return LiveTvGuideFocusMove(current, anchorTime)
+            return LiveTvGuideFocusMove(
+                LiveTvGuideFocusTarget(row.channel.id, target.programme.start),
+                programmeMidpoint(target.programme),
+            )
+        }
+
+        val nextRowIndex = rowIndex + if (direction == LiveTvGuideFocusDirection.Down) 1 else -1
+        if (nextRowIndex < 0) return LiveTvGuideFocusMove(null, anchorTime, toolbarBoundary = true)
+        val nextRow = layout.rows.getOrNull(nextRowIndex)
+            ?: return LiveTvGuideFocusMove(current, anchorTime)
+        if (current.channelHeader) {
+            return LiveTvGuideFocusMove(
+                LiveTvGuideFocusTarget(nextRow.channel.id, channelHeader = true),
+                anchorTime,
+            )
+        }
+        if (nextRow.cells.isEmpty()) {
+            return LiveTvGuideFocusMove(LiveTvGuideFocusTarget(nextRow.channel.id), anchorTime)
+        }
+        val anchor = anchorTime ?: current.programmeStart
+        val target = anchor?.let { at ->
+            nextRow.cells.firstOrNull { it.programme.start <= at && at < it.programme.end }
+                ?: nextRow.cells.minByOrNull { kotlin.math.abs(programmeMidpoint(it.programme) - at) }
+        } ?: nextRow.cells.first()
+        return LiveTvGuideFocusMove(
+            LiveTvGuideFocusTarget(nextRow.channel.id, target.programme.start),
+            anchor ?: programmeMidpoint(target.programme),
+        )
+    }
+
+    private fun programmeMidpoint(programme: LiveTvProgramme): Long =
+        programme.start + (programme.end - programme.start).coerceAtLeast(1) / 2
 }

@@ -43,8 +43,29 @@ final class LiveTvTests: XCTestCase {
          "video_codec":"HEVC","audio_codec":"AC4"}
         """#.utf8))
         XCTAssertEqual(formatted.formatBadges, ["HD", "HEVC", "AC4"])
-        XCTAssertEqual(formatted.sourceFormatDescription, "HD source · HEVC video · AC4 audio")
+        XCTAssertEqual(formatted.sourceFormatDescription, "HD · HEVC video · AC4 audio")
         XCTAssertTrue(channel.formatBadges.isEmpty)
+
+        let measured = LiveTvChannel(
+            id: "5.1", guideNumber: "5.1", guideName: "WXYZ", favorite: false,
+            drm: false, support: "ready", hd: true, videoCodec: "hevc", audioCodec: "ac3",
+            sourceFormat: LiveTvSourceFormat(
+                videoWidth: 3840, videoHeight: 2160, scan: "progressive",
+                audioChannels: 6, audioLayout: "5.1", observedAt: 1_788_998_400
+            )
+        )
+        XCTAssertEqual(measured.formatBadges, ["4K", "HEVC", "AC3 5.1"])
+        XCTAssertEqual(measured.sourceFormatDescription, "3840×2160p · HEVC video · AC3 5.1 audio")
+
+        let malformed = try decoder.decode(LiveTvChannel.self, from: Data(#"""
+        {"id":"9.1","guide_number":"9.1","guide_name":"Bad Optional",
+         "source_format":{"video_width":-1,"video_height":1080,"scan":"wrong",
+         "audio_channels":2,"audio_layout":"stereo","observed_at":1788998400}}
+        """#.utf8))
+        XCTAssertNil(malformed.sourceFormat?.videoWidth)
+        XCTAssertEqual(malformed.sourceFormat?.videoHeight, 1080)
+        XCTAssertNil(malformed.sourceFormat?.scan)
+        XCTAssertEqual(malformed.sourceFormat?.audioLayout, "stereo")
 
         let status = try decoder.decode(LiveTvStatus.self, from: Data(#"""
         {"state":"active","owner_node_id":"owner","encoder":"vaapi","output_height":720,
@@ -510,9 +531,10 @@ final class LiveTvTests: XCTestCase {
         let source = try String(
             contentsOf: testsDirectory.appendingPathComponent("../Sources/LiveTvView.swift").standardizedFileURL,
             encoding: .utf8)
-        // Both PlayerSurface sites hand the element to AVKit.
-        XCTAssertEqual(source.components(separatedBy: "allowsPictureInPicture: true").count - 1, 2,
-                       "both live surfaces must allow picture-in-picture")
+        // The mutually exclusive iOS inline, tvOS browse-picture, and
+        // fullscreen sites all hand the element to AVKit.
+        XCTAssertEqual(source.components(separatedBy: "allowsPictureInPicture: true").count - 1, 3,
+                       "every live picture surface must allow picture-in-picture")
         XCTAssertFalse(source.contains("allowsPictureInPicture: false"))
         // Entering PiP backgrounds the app. Stopping on that would kill the one
         // case PiP exists for, so every release path consults it — and consults
@@ -542,9 +564,11 @@ final class LiveTvTests: XCTestCase {
             contentsOf: testsDirectory.appendingPathComponent("../Sources/LiveTvView.swift").standardizedFileURL,
             encoding: .utf8)
         XCTAssertTrue(source.contains(".focused($focusedControl, equals: FocusTarget.reveal)"))
-        XCTAssertTrue(source.contains("if !visible { focusedControl = .reveal }"))
-        // And the television is fullscreen without anyone pressing a button.
-        XCTAssertTrue(source.contains(".onChange(of: live.playing) { _, playing in if playing { fullscreen = true } }"))
+        XCTAssertTrue(source.contains("focusedControl = visible ? .guide : .reveal"))
+        // Tuning stays inside the selected browse layout. The viewer chooses
+        // fullscreen explicitly with Return to live or by selecting the
+        // already-playing channel.
+        XCTAssertFalse(source.contains(".onChange(of: live.playing) { _, playing in if playing { fullscreen = true } }"))
         // Search must be explicit on a television. Applying `.searchable` to
         // its List focused the field at entry and covered half the page with a
         // keyboard before the viewer asked for one.

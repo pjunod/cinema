@@ -1027,7 +1027,7 @@ test_anchor = "testPlatformRestartMarkerStoreCanRoundTrip"
 id = "android.streaming-promotion-build-counter"
 commits = ["fdbed69e"]
 source = "clients/android/app/build.gradle.kts"
-source_anchor = "versionCode ="
+source_anchor = "versionCode = 80"
 test = "tests/validation/test_mobile_versions.py"
 test_anchor = "test_android_counter_the_target_already_ships_fails_against_the_target"
 
@@ -1037,7 +1037,7 @@ test_anchor = "test_android_counter_the_target_already_ships_fails_against_the_t
 id = "live-tv.mobile-release-build-counters"
 commits = ["b2834adb"]
 source = "clients/android/app/build.gradle.kts"
-source_anchor = "versionCode ="
+source_anchor = "versionCode = 80"
 test = "tests/validation/test_mobile_versions.py"
 test_anchor = "test_each_changed_app_requires_only_its_own_build_counter"
 
@@ -1074,3 +1074,25 @@ source = "clients/android/app/src/main/java/tv/plurx/app/ui/AppViewModel.kt"
 source_anchor = "withContext(NonCancellable)"
 test = "tests/operations/test_evidence_workflows.py"
 test_anchor = "test_native_sign_out_is_bounded_to_the_captured_session"
+
+[[fixes]]
+# A session channel retains the lineup snapshot it was tuned from. Once that
+# snapshot's measured source observation expires, status must not copy it back
+# merely because the newer per-session observation is absent.
+id = "live-tv.expired-session-source-observation"
+commits = ["54d10407"]
+source = "crates/plurxd/src/live_tv.rs"
+source_anchor = "channel.source_format = None;"
+test = "crates/plurxd/src/live_tv.rs"
+test_anchor = "live_tv_session_never_revives_an_expired_lineup_observation"
+
+[[fixes]]
+# Current main claimed the Apple build number while this effort was open. The
+# promotion correction must clear the merge target's counter, not merely the
+# branch point's, before the native Live TV client can ship.
+id = "apple.live-tv-promotion-build-counter"
+commits = ["bc4a6208"]
+source = "clients/apple/project.yml"
+source_anchor = "CURRENT_PROJECT_VERSION: \"131\""
+test = "tests/validation/test_mobile_versions.py"
+test_anchor = "test_apple_counter_the_target_already_ships_fails_against_the_target"

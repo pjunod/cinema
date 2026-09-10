@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["5c707ae7", "4b811b81"]
+points = ["web.experience"]
+checks = ["web-static"]
+reason = "The retained shipped-HTML settings regressions require Live TV guide and tuner cards to preserve one another's drafts, cache successful off-route writes, surface rejected saves and refreshes in the replacement card, fence late responses to the owning route, and keep a newer prepared-quality edit visible and unsaved when an older response completes."

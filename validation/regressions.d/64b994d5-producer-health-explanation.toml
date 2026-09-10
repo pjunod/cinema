@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["64b994d5"]
+points = ["web.experience"]
+checks = ["web-static", "history-regressions"]
+reason = "The retained shipped-page decoder-readiness contract and the settings-section regression require the verified-artifact card to explain that FFmpeg can drop every frame and still exit successfully, so exit status alone is not producer-health evidence."

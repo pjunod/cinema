@@ -1,6 +1,7 @@
 # Live TV guide and UI — a real channel list, a real grid, and a player that follows you
 
-**Status:** ready to build · **Executes:** the layout decision of 2026-09-07
+**Status:** built baseline; native TV presentation rules superseded by
+[LIVE-TV-NATIVE-LAYOUTS-STATUS.md](LIVE-TV-NATIVE-LAYOUTS-STATUS.md) · **Executes:** the layout decision of 2026-09-07
 (list view + grid view with a switch; HDHomeRun guide first, XMLTV when
 configured; web, Apple and Android) · **Written:** 2026-09-07 ·
 **Effort branch:** `effort/live-tv-guide` · **Renderings:**
@@ -558,9 +559,12 @@ a dock composable (`pip-dock.png`, 200 dp wide on phones) bound to the same
 
 **Television** (`FormFactor.Television`): the §3.6 tvOS behaviour with the
 TV focus components (`ui/components/TvFocus.kt`: `RequestInitialFocus`,
-`tvFocusRing`, `TvButton`, `TightTvButtonFocusBounds`), video always
-fullscreen, overlay revealed by any DPAD press, list is preview-then-commit.
-No grid on TV in this effort; `Guide` is the per-channel vertical schedule.
+`tvFocusRing`, `TvButton`, `TightTvButtonFocusBounds`) remain the platform
+foundation. Issue #227 supersedes the former list-only/fullscreen-only
+exclusion: television viewers choose Guide + preview, Guide over picture, or
+Channel browser, while fullscreen remains an explicit presentation reached
+from every layout. The shared input fixture now owns browser, temporary-guide,
+menu, programme-detail, and stream-info states.
 
 **View persistence**: DataStore preference `live_tv_view`.
 

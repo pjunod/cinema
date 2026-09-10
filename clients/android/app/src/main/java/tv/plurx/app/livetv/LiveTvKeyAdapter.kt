@@ -58,3 +58,26 @@ internal fun Modifier.liveTvInputAdapter(
     val input = LiveTvKeyAdapter.decode(event) ?: return@onPreviewKeyEvent false
     route(input)
 }
+
+/**
+ * The guide is the one browser region whose geometry cannot safely be left to
+ * Compose's nearest-neighbour focus search: programme widths vary, while a
+ * vertical press must retain a UTC-time anchor. Decoding still stays in this
+ * single adapter file; handled moves are consumed and Select remains a normal
+ * button activation.
+ */
+internal fun Modifier.liveTvGuideNavigation(
+    enabled: Boolean,
+    move: (LiveTvGuideFocusDirection) -> Unit,
+): Modifier = this.onPreviewKeyEvent { event ->
+    if (!enabled) return@onPreviewKeyEvent false
+    val direction = when (LiveTvKeyAdapter.decode(event)) {
+        LiveTvContractInput.Left -> LiveTvGuideFocusDirection.Left
+        LiveTvContractInput.Right -> LiveTvGuideFocusDirection.Right
+        LiveTvContractInput.Up -> LiveTvGuideFocusDirection.Up
+        LiveTvContractInput.Down -> LiveTvGuideFocusDirection.Down
+        else -> return@onPreviewKeyEvent false
+    }
+    move(direction)
+    true
+}

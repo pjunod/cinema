@@ -707,6 +707,7 @@ paths = [
   "scripts/live-tv-hardware",
   "docs/features/HDHOMERUN-LIVE-TV-*.md",
   "docs/features/LIVE-TV-GUIDE-AND-UI-PLAN.md",
+  "docs/features/LIVE-TV-NATIVE-LAYOUTS-*.md",
   "tests/playback/live-tv-guide-cases.json",
 ]
 checks = ["rust-gate", "rust-gate-ci", "security-boundaries", "resource-bounds", "operations-contract", "web-static", "web-layout", "live-tv-two-node", "live-tv-hardware"]
@@ -778,6 +779,7 @@ paths = [
   "brand/tokens.css",
   "crates/plurxd/src/http/web.rs",
   "crates/plurxd/src/web/**",
+  "docs/features/SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS.md",
   "docs/clients/UI-*.md",
   "docs/clients/PLAYER-INPUT-CONTRACT*.md",
   "scripts/contrast-*",

@@ -67,12 +67,13 @@ test("every section is a route, grouped in the rail's order", () => {
   const r = routing(memoryStorage(), "#/settings/playback");
   assert.deepEqual(r.SET_GROUPS.map(([group]) => group), ["Content", "Playback", "Server", "Outside", "Developer"]);
   assert.deepEqual(r.SET_TABS.map(([id]) => id), [
-    "libraries", "metadata", "playback", "analysis",
+    "libraries", "metadata", "livetv", "playback", "analysis",
     "maintenance", "users", "system", "cluster", "integrations", "developer",
   ]);
   const dispatch = {
     metadata: "metadataPanel(d.settings)",
-    playback: "playbackPanel(d.settings)",
+    playback: "playbackPanel(d.settings,d.developerReadiness)",
+    livetv: "liveTvPanel(d.settings)",
     analysis: "analysisSettingsPanel(d.settings,d.analysis)",
     maintenance: "maintenancePanel(d.settings,d.dvConversions)",
     users: "usersPanel(d.users)",
@@ -173,6 +174,7 @@ test("a card's Save wakes on a change and sleeps again once saved", () => {
   }
   const save = element("button", ["primary"]), state = element("span", ["setstate"]);
   const card = {
+    dataset: {},
     classList: { add: (c) => card.classes.add(c), remove: (c) => card.classes.delete(c), contains: (c) => card.classes.has(c) },
     classes: new Set(["card", "setcard"]),
     querySelector: (sel) => (sel.includes("button") ? save : state),
@@ -181,6 +183,7 @@ test("a card's Save wakes on a change and sleeps again once saved", () => {
   const input = { closest: card.closest };
   const api = new Function(`${shippedSource("markSetCard")}\n${shippedSource("setCardSaved")}\nreturn {markSetCard,setCardSaved};`)();
   api.markSetCard(input);
+  assert.equal(card.dataset.revision, "1");
   assert.equal(save.disabled, false);
   assert.equal(state.textContent, "Unsaved changes");
   assert.ok(card.classes.has("dirty"));
@@ -212,11 +215,12 @@ test("Playback saves per card, and each card writes only its own fields", () => 
     (v) => v, () => {}, () => {}, {}, {}, () => "", () => "",
   );
   const defaults = ["pal", "psl", "psm", "perr"];
-  // The two switches that are off on purpose moved to Developer, so Streaming
-  // no longer writes them: a card that saves a field it does not show can turn
+  // Protocol and quality switching have separate cards. Streaming must not
+  // write either field: a card that saves a field it does not show can turn
   // something back on that an operator deliberately turned off.
   const streaming = ["prr", "pabr", "phr", "phb", "pha", "pvod", "pvlr", "pvws", "pvmb", "pvbg", "serr"];
-  const developer = ["pcpv1", "pqh", "dverr"];
+  const developer = ["pcpv1", "dverr"];
+  const prepared = ["pqh", "pqherr", "pqhstate"];
   // `vdcard` is read too: this handler replaces its own card rather than
   // re-rendering the panel, because the four cards beside it stage unsaved
   // edits. The handler's own catch would swallow a missing-id assertion, so
@@ -228,6 +232,7 @@ test("Playback saves per card, and each card writes only its own fields", () => 
     run("savePlaybackDefaults", defaults)({ disabled: false }),
     run("saveStreaming", streaming)({ disabled: false }),
     run("saveDeveloper", developer)({ disabled: false }),
+    run("savePreparedQuality", prepared)({ disabled: false }),
     run("saveVerifiedDecode", verifiedDecode)({ disabled: false }),
     run("saveAutomaticDecoderRecovery", automaticRecovery)({ disabled: false }),
     run("saveExperimental", experimental)({ disabled: false }),
@@ -239,7 +244,8 @@ test("Playback saves per card, and each card writes only its own fields", () => 
       "vod_live_recovery", "vod_materialize_budget_secs", "vod_presentation",
       "vod_working_set_bytes",
     ]);
-    assert.deepEqual(Object.keys(writes.saveDeveloper.body).sort(), ["playback_control_protocol_v1", "prepared_quality_handoff"]);
+    assert.deepEqual(Object.keys(writes.saveDeveloper.body).sort(), ["playback_control_protocol_v1"]);
+    assert.deepEqual(Object.keys(writes.savePreparedQuality.body), ["prepared_quality_handoff"]);
     // Its own card, its own field. The verified-decode request renames cached
     // transcodes on covered paths, so it must never ride along with a save an
     // operator made for something else.
@@ -254,8 +260,66 @@ test("Playback saves per card, and each card writes only its own fields", () => 
   });
 });
 
-test("Developer is where the switches that cost something live", () => {
-  const panel = new Function(
+test("quality switching renders the server's saved value", async () => {
+  const elements = {
+    pqh: { checked: true },
+    pqherr: { textContent: "" },
+    pqhstate: { textContent: "Enabled" },
+  };
+  let body;
+  const save = new Function(
+    "api", "document", "cacheSettings", "toast", "setCardSaved",
+    `${shippedSource("savePreparedQuality")}\nreturn savePreparedQuality;`,
+  )(
+    async (_, options) => { body = options.body; return { prepared_quality_handoff: false }; },
+    { getElementById: (id) => elements[id] }, (value) => value, () => {}, () => {},
+  );
+  await save({ disabled: false });
+  assert.deepEqual(body, { prepared_quality_handoff: true });
+  assert.equal(elements.pqh.checked, false, "the checkbox reflects the returned setting");
+  assert.equal(elements.pqhstate.textContent, "Disabled", "the badge agrees with the checkbox");
+});
+
+test("an older quality save never overwrites a newer draft", async () => {
+  let finish;
+  const response = new Promise((resolve) => { finish = resolve; });
+  const elements = {
+    pqh: { checked: true },
+    pqherr: { textContent: "" },
+    pqhstate: { textContent: "Unsaved changes" },
+  };
+  const card = { dataset: { revision: "1" }, isConnected: true };
+  const button = { disabled: false, closest: () => card };
+  const notices = [];
+  let savedCalls = 0, cached;
+  const save = new Function(
+    "api", "document", "cacheSettings", "toast", "setCardSaved",
+    `${shippedSource("savePreparedQuality")}\nreturn savePreparedQuality;`,
+  )(
+    async () => response,
+    { getElementById: (id) => elements[id] },
+    (value) => { cached = value; return value; },
+    (message) => notices.push(message),
+    () => { savedCalls += 1; },
+  );
+
+  const pending = save(button);
+  elements.pqh.checked = false;
+  card.dataset.revision = "2";
+  button.disabled = false;
+  finish({ prepared_quality_handoff: true });
+  assert.equal(await pending, true);
+
+  assert.deepEqual(cached, { prepared_quality_handoff: true }, "the returned server snapshot still refreshes the cache");
+  assert.equal(elements.pqh.checked, false, "the later visible draft wins over the older response");
+  assert.equal(elements.pqhstate.textContent, "Unsaved changes");
+  assert.equal(button.disabled, false, "the newer draft remains saveable");
+  assert.equal(savedCalls, 0, "the card is not falsely marked saved");
+  assert.deepEqual(notices, ["Earlier quality change saved; newer edit remains unsaved"]);
+});
+
+test("everyday settings move out of Developer while experiments retain advisory evidence", () => {
+  const panels = new Function(
     "setHead", "setCard", "cardHead", "togRow", "setCardFoot", "esc",
     // Joined with newlines, never bare interpolation: `shippedSource` here
     // stops at the next `\nfunction `, so a fragment can end inside a trailing
@@ -266,7 +330,10 @@ test("Developer is where the switches that cost something live", () => {
       shippedSource("liveTvGuideCard"), shippedConst("DEV_READINESS_LABEL"),
       shippedSource("devReadinessRow"), shippedSource("devReadinessPill"),
       shippedSource("devReadinessEvidence"), shippedSource("devReq"),
-      shippedSource("developerPanel"), "return developerPanel;",
+      shippedSource("devStaticReq"), shippedSource("clusterTransportRecoveryCard"),
+      shippedSource("preparedQualityCard"), shippedSource("developerPanel"),
+      shippedSource("liveTvPanel"),
+      "return {developerPanel,preparedQualityCard,clusterTransportRecoveryCard,liveTvPanel};",
     ].join("\n"),
   )(
     (title, sub) => `HEAD:${title}|${sub}`,
@@ -288,102 +355,61 @@ test("Developer is where the switches that cost something live", () => {
       { id: "fleet_receipt", status: "unobservable", evidence: "The fleet receipt is not visible to this daemon." },
     ],
   }] };
-  const html = panel({
+  const settings = {
     playback_control_protocol_v1: true,
     prepared_quality_handoff: true,
     automatic_decoder_recovery: true,
     hls_typeless_sliding: false,
     live_tv_guide_source: "hdhomerun",
     live_tv_guide_hours: 24,
-  }, readiness);
-  for (const id of ["pcpv1", "pqh", "pdp", "phs", "dhqa", "adr"]) {
-    assert.match(html, new RegExp(`TOG:${id}\\|`), `Developer is missing the ${id} switch`);
-  }
+  };
+  const html = panels.developerPanel(settings, readiness);
+  for (const id of ["pcpv1", "pdp", "phs", "dhqa", "adr"])
+    assert.match(html, new RegExp(`TOG:${id}\\|`), `Developer retains ${id}`);
+  assert.doesNotMatch(html, /TOG:pqh\||HDHomeRun Live TV|CARDHEAD:Programme guide/);
+  for (const route of ["livetv", "playback", "cluster"])
+    assert.ok(html.includes(`href="#/settings/${route}"`), `${route} has a destination link`);
   assert.match(html, /FOOT:saveDeveloper/);
   assert.match(html, /FOOT:saveExperimental/);
-  assert.match(html, /Enable prepared quality handoff/);
-  assert.match(html, /This checkbox is the enable path/);
-  assert.match(html, /twenty consecutive commits/);
-  assert.match(html, /Apple, Android, and web contain the adapter/);
-  // The prepared card says what has to be true *and whether it is*, because
-  // a requirement an operator cannot check is a requirement they will skip.
-  // None of it gates the toggle: the switch is in the card above and this one
-  // has no input at all.
-  assert.match(html, /What must be true first, and whether it is/);
-  assert.match(html, /The server primes the successor it stages/);
-  assert.match(html, /no qualification gate or restart step/);
-  // The card is advisory AND it carries the switch. Those are not in tension:
-  // the list says what enabling costs and whether each part is true, and
-  // nothing in it disables the control. A page that refuses to let an operator
-  // turn something on tells them less than one that says what will happen.
-  const preparedCard = html
-    .slice(html.indexOf("Prepared quality handoff"))
-    .split("Experimental delivery")[0];
-  assert.match(preparedCard, /TOG:pqh\|/, "the prepared card carries the server enable switch");
-  assert.match(preparedCard, /TOG:pdp\|/, "the prepared card carries the enable switch");
-  assert.match(preparedCard, /FOOT:saveDeveloper/,
-    "the server switch saves through Developer settings");
-  assert.doesNotMatch(preparedCard, /disabled/,
-    "nothing in the readiness list disables it");
-  const off = panel({ playback_control_protocol_v1: false, prepared_quality_handoff: false, hls_typeless_sliding: false }, readiness);
-  assert.match(html, /The control endpoint is advertised<small>[\s\S]*?<span class="pill" style="color:var\(--good\)/);
-  assert.match(off, /The control endpoint is advertised<small>[\s\S]*?<span class="pill warn">not met<\/span>/);
-  assert.match(html, /Enable cluster transport recovery/);
-  assert.match(html, /there is no hidden production feature flag/);
-  assert.match(html, /Keep a ready voter majority/);
-  assert.match(html, /\/cluster\/transport\/sqlite/);
-  assert.match(html, /twenty learner plus twenty voter recovery cycles/);
-  // The section says what it is for, so a capability that costs something has
-  // somewhere honest to land rather than being buried under Streaming. The
-  // transport is always compiled and automatic; this must not imply a gate.
-  assert.match(html, /compiled in and activates automatically/);
-  assert.doesNotMatch(html, /special build/);
   // The switch has to be wired to something. A control that renders and does
   // nothing is worse than no control: it reports a capability to the operator
   // that the server never hears about.
   assert.match(html, /TOG:pdp\|[^|]*\|[^|]*\|checked=true\|onchange="setPreparedHandoff\(this\.checked\)"/,
     "the prepared-handoff switch reflects the stored state and sets it");
-  assert.match(html, /dual_player_preparation/,
-    "…and says which field it sets, because that is the whole of Gate A");
-  assert.match(html, /Nothing above blocks this switch/);
-  assert.match(html, /TOG:pqh\|[^|]*\|[^|]*\|checked=true/,
-    "the server prepared-handoff switch reflects persisted settings");
-  // Readiness pills, counted rather than matched, because "not met" contains
-  // "met": an assertion that only looks for the word cannot tell a met row from
-  // an unmet one, and would pass with the two renderings swapped.
-  const pills = html.match(/>(met|not met|not observable)<\/span>/g) || [];
-  const counted = (word) => pills.filter((pill) => pill === `>${word}</span>`).length;
-  assert.ok(counted("not observable") >= 2,
-    "physical client and fleet qualification remain explicitly advisory and unobserved");
-  assert.ok(counted("met") >= 3, "the server-prime and runtime facts this page checked say so");
-  // Automatic decode recovery has one direct switch; every measured or fleet
-  // fact below it is advice rather than a second enable path.
   assert.match(html, /Automatic decode recovery/);
   assert.match(html, /TOG:adr\|[^|]*\|[^|]*\|checked=true/);
   assert.match(html, /FOOT:saveAutomaticDecoderRecovery/);
-  assert.match(html, /This checkbox is the enable path/);
   assert.match(html, /missing measurements or retained contracts never turn it back off/);
   assert.match(html, /reopen loop/);
   assert.match(html, /One recovery per playback, and it is never given back/);
   assert.match(html, /best-effort selected-stream diagnostics/);
-  assert.ok(counted("not observable") >= 2,
-    "…and a fleet fact the daemon cannot inspect is not rounded either way");
-  assert.match(html, /This build attaches a running worker before announcing it/,
-    "the page paints the daemon's live evidence, not just a source-hardcoded label");
-  assert.match(html, /HDHomeRun Live TV/);
-  assert.match(html, /Save the configuration, check readiness, then enable/);
-  // Readiness is advice, not a gate (2026-09-07). The card has to say so where
-  // the operator is standing, or the next person reads a red row as a refusal.
-  assert.match(html, /Readiness is advice, not a gate/);
-  // The programme guide has its own enable section beside the tuner card, and
-  // it names the credential it sends and the one host it sends it to.
-  assert.match(html, /Programme guide/);
-  assert.match(html, /What must be true to enable it safely/);
-  assert.match(html, /api\.hdhomerun\.com/);
-  assert.match(html, /never stores, logs or relays that credential/);
-  assert.match(html, /FOOT:saveLiveTvGuide/);
-  // Nothing here may imply the guide is a code-level gate or a build variant.
-  assert.doesNotMatch(html, /program-guide scheduling are not supported/);
+  const quality = panels.preparedQualityCard(settings, readiness);
+  assert.match(quality, /TOG:pqh\|[^|]*\|[^|]*\|checked=true/);
+  assert.match(quality, /FOOT:savePreparedQuality/);
+  assert.match(quality, /Throughput measurement[\s\S]*?>supported<\/span>/);
+  assert.match(quality, /not proof that a particular session/);
+  assert.match(quality, /Missing qualification does not disable/);
+  assert.doesNotMatch(quality, /TOG:pcpv1|TOG:pdp| disabled/);
+  assert.equal((quality.match(/>not observable<\/span>/g) || []).length, 2);
+  const off = panels.preparedQualityCard({...settings,
+    playback_control_protocol_v1: false, prepared_quality_handoff: false}, readiness);
+  assert.match(off, /TOG:pqh\|[^|]*\|[^|]*\|checked=false/);
+  assert.match(off, /Control protocol<\/strong>[\s\S]*?<span class="pill warn">not met<\/span>/);
+  const cluster = panels.clusterTransportRecoveryCard(readiness);
+  assert.match(cluster, /No enable switch is required/);
+  assert.match(cluster, /Keep a ready voter majority/);
+  assert.match(cluster, /\/cluster\/transport\/sqlite/);
+  assert.match(cluster, /twenty learner plus twenty voter recovery cycles/);
+  assert.doesNotMatch(cluster, /TOG:/);
+  const live = panels.liveTvPanel(settings);
+  assert.match(live, /HDHomeRun Live TV/);
+  assert.match(live, /Save the configuration, check readiness, then enable/);
+  assert.match(live, /Readiness is advice, not a gate/);
+  assert.match(live, /Programme guide/);
+  assert.match(live, /Saved-configuration evidence/);
+  assert.match(live, /api\.hdhomerun\.com/);
+  assert.match(live, /never stores, logs or relays that credential/);
+  assert.match(live, /FOOT:saveLiveTvGuide/);
 });
 
 test("the guide's readiness rows are advisory and never disable the save", () => {
@@ -393,6 +419,7 @@ test("the guide's readiness rows are advisory and never disable the save", () =>
   )(esc);
   const html = view({
     source: "xmltv",
+    guide_hours: 24,
     freshness: "unavailable",
     age_seconds: 0,
     matched_channels: 0,
@@ -407,6 +434,7 @@ test("the guide's readiness rows are advisory and never disable the save", () =>
   });
   assert.match(html, /Not met yet/);
   assert.match(html, /Met/);
+  assert.match(html, /Saved configuration checked:<\/b> XMLTV · 24 hour look-ahead/);
   assert.match(html, /None of this blocks the switch/);
   assert.match(html, /matched 0 of 12 lineup channels/);
   assert.match(html, /Last refresh failed/);
@@ -425,24 +453,27 @@ test("changing the guide source dirties the replacement card after its repaint",
     },
     querySelector: (selector) => selector.includes("button.primary") ? save : state,
   };
-  const replacement = { closest: () => card };
+  const replacement = { closest: () => card, focus: () => {} };
   const oldUrl = { value: "https://guide.example/listings.xml" };
   const oldHours = { value: "48" };
+  const oldCard = { isConnected: true, set outerHTML(value) { rendered = value === "replacement"; } };
   const document = {
     getElementById(id) {
       if (id === "ltgurl") return rendered ? null : oldUrl;
       if (id === "ltghours") return rendered ? null : oldHours;
       if (id === "ltgsrc") return rendered ? replacement : null;
+      if (id === "live-tv-guide-settings") return oldCard;
       return null;
     },
   };
   const guide = new Function(
-    "document", "renderSettings",
+    "document", "liveTvGuideCard", "SETTINGS",
     `${shippedConst("LIVE_TV_GUIDE_DRAFT")}
      ${shippedSource("markSetCard")}
+     ${shippedSource("liveTvGuideFieldDraft")}
      ${shippedSource("liveTvGuideSourceDraft")}
      return {change:liveTvGuideSourceDraft,draft:LIVE_TV_GUIDE_DRAFT};`,
-  )(document, () => { rendered = true; });
+  )(document, () => "replacement", {});
 
   guide.draft.checked = 42;
   guide.change("hdhomerun");
@@ -450,6 +481,7 @@ test("changing the guide source dirties the replacement card after its repaint",
   assert.equal(guide.draft.source, "hdhomerun");
   assert.equal(guide.draft.url, oldUrl.value);
   assert.equal(guide.draft.hours, 48);
+  assert.equal(guide.draft.revision, 1);
   assert.equal(guide.draft.checked, null, "the replacement readiness panel runs a current check");
   assert.ok(classes.has("dirty"), "the repainted card carries the unsaved state");
   assert.equal(save.disabled, false, "the repainted card's Save is enabled");
@@ -464,14 +496,16 @@ test("saving the guide rechecks the saved source and retires its draft", async (
     ltghours: { value: "24" },
   };
   const guide = new Function(
-    "document", "liveTvSettingsWrite", "SETTINGS",
+    "document", "liveTvSettingsWrite", "SETTINGS", "replaceLiveTvCard", "liveTvGuideCard",
     `${shippedConst("LIVE_TV_GUIDE_DRAFT")}
+     ${shippedSource("liveTvGuideFieldDraft")}
      ${shippedSource("saveLiveTvGuide")}
      return {save:saveLiveTvGuide,draft:LIVE_TV_GUIDE_DRAFT};`,
   )(
     { getElementById: (id) => fields[id] },
     async (body) => { written = body; return true; },
     { live_tv_config_generation: 7, live_tv_xmltv_url: "" },
+    () => {}, () => "",
   );
   Object.assign(guide.draft, { source: "hdhomerun", url: "old", hours: 48, checked: 42 });
 
@@ -482,7 +516,94 @@ test("saving the guide rechecks the saved source and retires its draft", async (
     live_tv_xmltv_url: "",
     live_tv_guide_hours: 24,
   });
-  assert.deepEqual(guide.draft, { source: null, url: null, hours: null, checked: null });
+  assert.deepEqual(guide.draft, { source: null, url: null, hours: null, checked: null, revision: 1 });
+});
+
+test("Live TV mutations repaint only the card that owns the saved fields", () => {
+  assert.doesNotMatch(shippedSource("liveTvGuideSourceDraft"), /renderSettings\(/,
+    "changing guide source cannot erase a dirty tuner card");
+  assert.doesNotMatch(shippedSource("liveTvSettingsWrite"), /renderSettings\(/,
+    "a successful write cannot erase a sibling card's draft");
+  assert.match(shippedSource("saveLiveTvGuide"),
+    /replaceLiveTvCard\("live-tv-guide-settings",liveTvGuideCard\(saved\),"ltgsrc"\)/);
+  assert.match(shippedSource("saveLiveTvSettings"),
+    /replaceLiveTvCard\("live-tv-settings",liveTvSettingsCard\(saved\),"ltenable"\)/);
+  assert.match(shippedSource("setLiveTvEnabled"),
+    /replaceLiveTvCard\("live-tv-settings",liveTvSettingsCard\(saved\),"ltenable"\)/);
+});
+
+test("every asynchronous Live TV settings response is fenced to the Live TV route", () => {
+  for (const name of ["checkLiveTvGuide", "refreshLiveTvGuide", "liveTvSettingsWrite", "checkLiveTvReadiness"]) {
+    const source = shippedSource(name);
+    assert.match(source, /settingsCurrent\(generation,"livetv"\)/, `${name} follows the new route`);
+    assert.doesNotMatch(source, /settingsCurrent\(generation,"developer"\)/,
+      `${name} cannot repaint Developer after navigation`);
+  }
+});
+
+test("an off-route Live TV write refreshes the shared settings cache without repainting", async () => {
+  const result = { live_tv_config_generation: 9, live_tv_guide_source: "xmltv" };
+  let cached, toasted = false;
+  const write = new Function(
+    "ME", "PAGE_RENDER_GENERATION", "api", "settingsCurrent", "cacheSettings", "toast", "document", "AbortSignal",
+    `${shippedSource("liveTvSettingsWrite")}\nreturn liveTvSettingsWrite;`,
+  )(
+    { is_admin: true }, 4, async () => result, () => false,
+    (value) => { cached = value; return value; }, () => { toasted = true; },
+    { getElementById: () => null }, AbortSignal,
+  );
+
+  assert.equal(await write({ live_tv_guide_source: "xmltv" }, null, "ltgerr"), result);
+  assert.equal(cached, result, "a later Settings section must reuse the new generation, not the pre-save cache");
+  assert.equal(toasted, false, "an off-route response cannot paint even a toast onto the destination section");
+});
+
+test("a rejected guide save reports into the replacement card", async () => {
+  let rejectWrite;
+  const response = new Promise((_, reject) => { rejectWrite = reject; });
+  const oldError = { textContent: "", isConnected: true };
+  const currentError = { textContent: "", isConnected: true };
+  let errorNode = oldError;
+  const button = { disabled: false, isConnected: false };
+  const write = new Function(
+    "ME", "PAGE_RENDER_GENERATION", "api", "settingsCurrent", "cacheSettings", "toast", "document", "AbortSignal",
+    `${shippedSource("liveTvSettingsWrite")}\nreturn liveTvSettingsWrite;`,
+  )(
+    { is_admin: true }, 8, async () => response, () => true,
+    (value) => value, () => {}, { getElementById: () => errorNode }, AbortSignal,
+  );
+
+  const pending = write({ live_tv_guide_source: "xmltv" }, button, "ltgerr");
+  oldError.isConnected = false;
+  errorNode = currentError;
+  rejectWrite(new Error("saved source was refused"));
+  assert.equal(await pending, false);
+  assert.equal(oldError.textContent, "", "the detached source card is not the error destination");
+  assert.equal(currentError.textContent, "saved source was refused");
+});
+
+test("a rejected guide refresh reports into the replacement card", async () => {
+  let rejectRefresh;
+  const response = new Promise((_, reject) => { rejectRefresh = reject; });
+  const oldError = { textContent: "", isConnected: true };
+  const currentError = { textContent: "", isConnected: true };
+  let errorNode = oldError;
+  const button = { disabled: false, isConnected: false };
+  const refresh = new Function(
+    "PAGE_RENDER_GENERATION", "api", "settingsCurrent", "checkLiveTvGuide", "document", "AbortSignal",
+    `${shippedSource("refreshLiveTvGuide")}\nreturn refreshLiveTvGuide;`,
+  )(
+    11, async () => response, () => true, async () => {},
+    { getElementById: () => errorNode }, AbortSignal,
+  );
+
+  const pending = refresh(button);
+  oldError.isConnected = false;
+  errorNode = currentError;
+  rejectRefresh(new Error("guide host timed out"));
+  await pending;
+  assert.equal(oldError.textContent, "", "the detached source card is not the error destination");
+  assert.equal(currentError.textContent, "guide host timed out");
 });
 
 test("Verified decode states its cost, its prerequisites, and what this node measured", () => {
@@ -509,10 +630,11 @@ test("Verified decode states its cost, its prerequisites, and what this node mea
   // No covered path pays a rename yet, but the control remains enabled: the
   // prerequisites are advice, not a disabled switch.
   assert.match(bare, /No measured path can produce a verified artifact today/);
-  assert.match(bare, /checks above are advisory and never disable this control/);
-  assert.doesNotMatch(bare, /This node can honour the request/);
-  // Why the feature exists at all, in the words the failure actually takes.
+  assert.match(bare, /Readiness checks are advisory and never disable this control/);
   assert.match(bare, /drop every frame of a file and still exit successfully/);
+  assert.doesNotMatch(bare, /This node can honour the request/);
+  assert.match(bare, /evidence of a clean decode before reusing transcodes/);
+  assert.match(bare, /<details class="setdetails"><summary>Cache impact and diagnostic evidence/);
   assert.equal((bare.match(/✗/g) || []).length, 3, "three unmet checks, each shown");
   assert.match(bare, /Not requested on this node\./);
 
@@ -527,7 +649,7 @@ test("Verified decode states its cost, its prerequisites, and what this node mea
   assert.match(refused, /Enabled · covered paths/);
   assert.match(refused, /Coverage advisory/);
   assert.match(refused, /No retained diagnostic contract covers/);
-  assert.match(refused, /<code>h264\/software\/h264<\/code>/, "what it did measure is still shown");
+  assert.match(refused, /<code>h264\/software\/h264 · hevc\/software\/hevc<\/code>/, "what it did measure is still shown in one host-independent container");
   assert.equal((refused.match(/✓/g) || []).length, 2);
   assert.equal((refused.match(/✗/g) || []).length, 1);
 

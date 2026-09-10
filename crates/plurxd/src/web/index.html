@@ -945,6 +945,31 @@
   .setcard.dirty .setfoot .setstate{color:var(--warn)}
   .setfoot button.primary[disabled]{opacity:.45;cursor:default}
   .setcard.local{border-style:dashed;border-color:color-mix(in srgb,var(--accent) 45%,var(--line))}
+  .setsection{margin:28px 0 12px}
+  .setsection h2{margin:0;font-size:16px;font-weight:600}
+  .setsection p{margin:4px 0 0;color:var(--muted);font-size:12.5px;line-height:1.5}
+  .setdestinations{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,190px),1fr));gap:10px;margin:0 0 24px}
+  .setdestinations a{display:flex;flex-direction:column;gap:6px;padding:16px;border:1px solid var(--line);border-radius:10px;text-decoration:none;color:var(--text);min-width:0}
+  .setdestinations a:hover{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 5%,transparent)}
+  .setdestinations strong{display:flex;justify-content:space-between;gap:8px;font-size:13px}
+  .setdestinations a>span{font-size:12px;color:var(--muted);line-height:1.45}
+  .setdetails{margin-top:14px;border-top:1px solid var(--line);font-size:13px}
+  .setdetails>summary{padding:13px 0;cursor:pointer;font-weight:500;color:var(--muted)}
+  .setdetails[open]>summary{color:var(--text)}
+  .setdetails-body{padding:0 0 8px;overflow-wrap:anywhere}
+  .setdetails-body h2.section{font-size:13px}
+  .devcheck{padding:16px 0;border-top:1px solid var(--line);min-width:0}
+  .devcheck-head{display:flex;align-items:flex-start;justify-content:space-between;gap:8px 16px}
+  .devcheck-head>strong{flex:1 1 0;min-width:0;font-size:13px;font-weight:600;line-height:1.5}
+  .devcheck-status{flex:0 0 auto;white-space:nowrap}
+  .devcheck-status .pill{display:inline-flex;white-space:nowrap;line-height:1.4}
+  .devcheck-description,.devcheck-evidence{margin:6px 0 0;font-size:12px;line-height:1.65;max-width:76ch;color:var(--muted);overflow-wrap:anywhere}
+  .devcheck-evidence{padding-left:10px;border-left:2px solid var(--line);color:var(--text)}
+  .devcheck-evidence:empty{display:none}
+  .devcheck-group{margin:22px 0 8px;font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+  .devcheck-note{padding:12px 14px;margin:12px 0 0;border:1px solid var(--line);border-radius:8px;font-size:12px;line-height:1.6;color:var(--muted)}
+  .setdestinations a:focus-visible,.setdetails>summary:focus-visible{outline:2px solid var(--accent);outline-offset:4px;border-radius:6px}
+  @media(max-width:360px){.devcheck-head{display:block}.devcheck-status{display:block;margin-top:6px}}
   .setgrid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:14px;align-items:start}
   #dv-recovery-guards h3.section{font-size:12px;margin:14px 0 4px;padding:0;border:0;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
   #dv-recovery-guards>div{font-size:13px}
@@ -13948,12 +13973,13 @@ const SETTINGS_ENDPOINTS={
 const SETTINGS_MANIFEST={
   libraries:{required:["settings","libs","status","dvConversions"],secondary:[]},
   metadata:{required:["settings"],secondary:["libs"]},
-  playback:{required:["settings"],secondary:[]},
+  playback:{required:["settings"],secondary:["developerReadiness"]},
+  livetv:{required:["settings"],secondary:[]},
   analysis:{required:["settings","analysis"],secondary:[]},
   maintenance:{required:["settings","dvConversions"],secondary:[]},
   users:{required:["users"],secondary:[]},
   system:{required:["sys"],secondary:["playbackEvents"]},
-  cluster:{required:["cluster"],secondary:["clusterOps"]},
+  cluster:{required:["cluster"],secondary:["clusterOps","developerReadiness"]},
   integrations:{required:["settings","trakt"],secondary:[]},
   developer:{required:["settings"],secondary:["developerReadiness"]},
 };
@@ -14028,7 +14054,7 @@ function patchSettingsSecondary(tab,key,value){
     const mount=document.getElementById("settings-playback-events");
     if(mount) mount.innerHTML=playbackSummaryCard(SETTINGS_DATA.playbackEvents||[]);
   }
-  if(tab==="developer"&&key==="developerReadiness"){
+  if(["developer","playback","cluster"].includes(tab)&&key==="developerReadiness"){
     // Patch only the evidence rows. Re-rendering the entire panel here could
     // overwrite a local prepared-handoff toggle while its change event is in
     // flight.
@@ -14057,7 +14083,7 @@ function patchSettingsSecondaryError(tab,key,error){
     const mount=document.getElementById("settings-playback-events");
     if(mount) mount.innerHTML=`<div class="card"><h2 class="section" style="margin-top:0">Playback <span class="muted">(7 days)</span></h2><span class="muted">Playback history is unavailable: ${message}</span></div>`;
   }
-  if(tab==="developer"&&key==="developerReadiness"){
+  if(["developer","playback","cluster"].includes(tab)&&key==="developerReadiness"){
     applyDeveloperReadiness({unavailable:error&&error.message||"request failed"});
   }
   if(tab==="cluster"&&key==="clusterOps"){
@@ -14127,7 +14153,7 @@ async function viewSettings(generation=++PAGE_RENDER_GENERATION,reset=true){
 // you tune, the server you operate, and outside services. The order here is
 // the rail's order and the chip strip's order.
 const SET_GROUPS=[
-  ["Content",[["libraries","Libraries"],["metadata","Metadata"]]],
+  ["Content",[["libraries","Libraries"],["metadata","Metadata"],["livetv","Live TV"]]],
   ["Playback",[["playback","Playback"],["analysis","Analysis"]]],
   ["Server",[["maintenance","Maintenance"],["users","Users"],["system","System"],["cluster","Cluster"]]],
   ["Outside",[["integrations","Integrations"]]],
@@ -14176,7 +14202,8 @@ function renderSettings(){
 }
 function settingsPanel(tab,d){
   if(tab==="metadata")     return metadataPanel(d.settings);
-  if(tab==="playback")     return playbackPanel(d.settings);
+  if(tab==="playback")     return playbackPanel(d.settings,d.developerReadiness);
+  if(tab==="livetv")       return liveTvPanel(d.settings);
   if(tab==="analysis")     return analysisSettingsPanel(d.settings,d.analysis);
   if(tab==="maintenance")  return maintenancePanel(d.settings,d.dvConversions);
   if(tab==="users")        return usersPanel(d.users);
@@ -14196,6 +14223,7 @@ function setHead(title,summary,tools){
 function markSetCard(el){
   const card=el&&el.closest?el.closest(".setcard"):null;
   if(!card||card.classList.contains("local")) return;
+  card.dataset.revision=String(Number(card.dataset.revision||0)+1);
   card.classList.add("dirty");
   const save=card.querySelector(".setfoot button.primary"); if(save) save.disabled=false;
   const state=card.querySelector(".setfoot .setstate"); if(state) state.textContent="Unsaved changes";
@@ -14585,7 +14613,7 @@ function analysisSettingsPanel(settings,snapshot){
       <div class="analysis-diag-grid"><b>1 · Verify</b><span>Read and hash the exact source without blocking playback.</span><b>2 · Index</b><span>Build a complete fragment timeline on an eligible media worker.</span><b>3 · Publish</b><span>Store the content-addressed artifact and mark the file VOD HLS ready.</span></div>
     </div>`;
 }
-function playbackPanel(settings){
+function playbackPanel(settings,readiness){
   const vodWorking=Number(settings.vod_working_set_bytes)||(8*1024*1024*1024);
   const vodMaterialize=Number(settings.vod_materialize_budget_secs)||30;
   const vodBlockedGets=Number(settings.vod_blocked_get_cap)||64;
@@ -14629,7 +14657,7 @@ function playbackPanel(settings){
       ${togRow("autonext","Auto-play the next episode when one finishes","",autoNextOn(),'onchange="setAutoNext(this.checked)"')}
       <div class="tog"><span>Measured playback limits<small>When an original stream loses visible frames, this browser remembers that exact media load — codec/profile, resolution, bit depth, dynamic range, and a 10 Mb/s bitrate band — and lets <b>Auto</b> transcode it next time instead of stuttering first. A measurement expires after 30 days; <b>Quality → Original</b> always bypasses it.</small></span></div>
       <div class="row" id="dlrow">${decodeLimitsSummary()}</div>`,{local:true});
-  return `${setHead("Playback","How streams start, how they are delivered, and what every player picks by default.")}${defaults}${streaming}${local}`;
+  return `${setHead("Playback","How streams start, how they are delivered, and what every player picks by default.")}${defaults}${preparedQualityCard(settings,readiness)}${streaming}${local}`;
 }
 // Live TV owns its own media element and capability. It never enters PLAYER,
 // file progress, playback-control, watched state, autoskip, or Trakt.
@@ -14850,19 +14878,30 @@ async function toggleLiveTvPip(){
 function liveTvProgramme(channelId){
   return PlurxLiveTv.programmeAt(LIVE_TV.guide,channelId,liveTvNowSeconds());
 }
+function liveTvSourceProgrammeEnd(channel){
+  const observed=channel&&channel.source_format&&channel.source_format.observed_at;
+  const row=LIVE_TV.guide&&Array.isArray(LIVE_TV.guide.channels)
+    ?LIVE_TV.guide.channels.find(entry=>entry.id===channel.id):null;
+  const programme=row&&Array.isArray(row.programmes)
+    ?row.programmes.find(entry=>entry.start<=observed&&observed<entry.end):null;
+  return programme&&Number.isInteger(programme.end)?programme.end:null;
+}
 function liveTvFormatBadges(channel){
-  const badges=PlurxLiveTv.channelBadges(channel);
+  const badges=PlurxLiveTv.channelBadges(channel,liveTvNowSeconds(),liveTvSourceProgrammeEnd(channel));
   return badges.length?`<span class="lt-badges" aria-label="Source format: ${esc(badges.join(", "))}">${badges.map(label=>`<span class="lt-fbadge">${esc(label)}</span>`).join("")}</span>`:"";
 }
 function liveTvTechnicalDetails(channel,status){
   if(!channel) return "";
-  const badges=PlurxLiveTv.channelBadges(channel);
+  const sourceNow=typeof liveTvNowSeconds==="function"?liveTvNowSeconds():Math.floor(Date.now()/1000);
+  const sourceEnd=typeof liveTvSourceProgrammeEnd==="function"?liveTvSourceProgrammeEnd(channel):null;
+  const source=PlurxLiveTv.sourceDetails(channel,sourceNow,sourceEnd);
   const rows=[];
-  if(badges.length) rows.push(`<div class="lt-tech-row"><b>Source</b><span>${esc(badges.join(" · "))}</span></div>`);
+  if(source.exact.length) rows.push(`<div class="lt-tech-row"><b>Source</b><span>${esc(source.exact.join(" · "))}</span></div>`);
+  if(source.observedAt) rows.push(`<div class="lt-tech-row"><b>Observed</b><span>${esc(new Date(source.observedAt*1000).toLocaleString())}</span></div>`);
   if(status){
     const delivery=["H.264",status.output_height?`${status.output_height}p`:null,"AAC"].filter(Boolean).join(" · ");
     const encoder=status.encoder&&status.encoder!=="pending"?` · ${String(status.encoder).toUpperCase()} encoder`:"";
-    rows.push(`<div class="lt-tech-row"><b>Delivery</b><span>${esc(delivery+encoder)}</span></div>`);
+    rows.push(`<div class="lt-tech-row"><b>Playing</b><span>${esc(delivery+encoder)}</span></div>`);
     const signal=status.signal;
     if(signal){
       const metric=(label,value)=>Number.isFinite(value)
@@ -14881,7 +14920,7 @@ function liveTvRefreshTechnicalDetails(){
 }
 function liveTvOverlayTechnical(channel,status){
   if(!channel) return "";
-  const source=PlurxLiveTv.channelBadges(channel).join(" · ");
+  const source=PlurxLiveTv.channelBadges(channel,liveTvNowSeconds(),liveTvSourceProgrammeEnd(channel)).join(" · ");
   const signal=status&&status.signal;
   const rf=signal?[signal.strength_percent,signal.quality_percent,signal.symbol_quality_percent]
     .map((value,index)=>Number.isFinite(value)?`${["strength","quality","symbol"][index]} ${value}%`:null).filter(Boolean).join(" · "):"";
@@ -15209,8 +15248,8 @@ function liveTvGuideSheet(){
 function liveTvInputState(){
   const host=liveTvHost();
   if(!host||host.hidden) return null;
-  if(host.dataset.mode==="full") return host.classList.contains("idle")?"hidden":"overlay";
-  // The contract's `page` state is "inline on the Live TV page". A dock on
+  if(host.dataset.mode==="full") return host.classList.contains("idle")?"fullscreen_hidden":"fullscreen_controls";
+  // The contract's `browser` state is "inline on the Live TV page". A dock on
   // some other route is not that, and treating it as `page` claimed Space
   // application-wide: every button a keyboard user reached anywhere in the app
   // went dead while a session was docked, and the film player fought the dock
@@ -15221,7 +15260,7 @@ function liveTvInputState(){
   // requires for the finite player.
   const modal=document.getElementById("modal");
   if(modal&&!modal.hidden) return null;
-  return "page";
+  return "browser";
 }
 /// True where a key press is the element's own activation, not ours to take.
 /// `preventDefault` on Space over a focused button suppresses the activation
@@ -15279,8 +15318,13 @@ function liveTvApplyOutcome(outcome){
       return true;
     }
     case "exit": exitLiveTvPresentation(); return true;
-    case "activate": return true;
-    case "focus_row": return true;
+    case "delegate":
+    case "focus_control":
+    case "focus_cell":
+    case "focus_panel":
+    case "activate": return false;
+    case "close_panel": liveTvGuideSheet(); return true;
+    case "return_browser": exitLiveTvPresentation(); return true;
     default: return false;
   }
 }
@@ -15290,7 +15334,7 @@ function liveTvKeydown(event){
   if(event.target&&/^(INPUT|TEXTAREA|SELECT)$/.test(event.target.tagName)) return;
   if(liveTvTargetOwnsKey(event.target,event.key)) return;
   const hotkey=PlaybackPolicy.liveHotkey(event.key);
-  if(hotkey&&state!=="page"){
+  if(hotkey&&state!=="browser"){
     event.preventDefault();
     if(hotkey==="fullscreen") fullscreenLiveTv();
     else if(hotkey==="mute") muteLiveTv();
@@ -15331,7 +15375,7 @@ function liveTvWireHost(){
   // what a key does, and a second listener that also reveals would give every
   // `ignore` row an effect. Same choice the finite player made.
   ["mousemove","pointerdown","touchstart"].forEach(event=>window.addEventListener(event,()=>{
-    if(liveTvInputState()==="hidden"||liveTvInputState()==="overlay") liveTvReveal();
+    if(liveTvInputState()==="fullscreen_hidden"||liveTvInputState()==="fullscreen_controls") liveTvReveal();
   },{passive:true}));
   liveTvWireKeys();
   const video=document.getElementById("live-tv-video");
@@ -15469,6 +15513,10 @@ async function watchLiveTv(index){
         const status=await LIVE_TV_LEASE.status();
         if(status&&status.state!=="active") await failed({code:"stream_failed"});
         else if(status){
+          if(status.channel&&status.channel.id===LIVE_TV.selected){
+            LIVE_TV.channels=LIVE_TV.channels.map(channel=>channel.id===status.channel.id
+              ?{...channel,...status.channel,source_format:status.channel.source_format||null}:channel);
+          }
           LIVE_TV.status=status;
           if(typeof liveTvRefreshTechnicalDetails==="function") liveTvRefreshTechnicalDetails();
           if(typeof liveTvPaint==="function") liveTvPaint();
@@ -15604,7 +15652,11 @@ function devReadinessEvidence(found,readiness){
 function devReq(readiness,itemId,reqId,title,detail){
   const found=devReadinessRow(readiness,itemId,reqId);
   const key=`${itemId}:${reqId}`;
-  return `<div class="tog"><span>${title} <span data-devstat="${esc(key)}">${devReadinessPill(found,readiness)}</span><small>${detail}</small><small class="hint" data-devev="${esc(key)}">${esc(devReadinessEvidence(found,readiness))}</small></span></div>`;
+  return `<div class="devcheck">
+    <div class="devcheck-head"><strong>${title}</strong><span class="devcheck-status" data-devstat="${esc(key)}">${devReadinessPill(found,readiness)}</span></div>
+    <p class="devcheck-description">${detail}</p>
+    <p class="devcheck-evidence" data-devev="${esc(key)}">${esc(devReadinessEvidence(found,readiness))}</p>
+  </div>`;
 }
 function applyDeveloperReadiness(readiness){
   document.querySelectorAll("[data-devstat]").forEach(node=>{
@@ -15617,54 +15669,61 @@ function applyDeveloperReadiness(readiness){
   });
 }
 
+function devStaticReq(title,status,detail,tone){
+  return `<div class="devcheck"><div class="devcheck-head"><strong>${title}</strong><span class="devcheck-status"><span class="pill${tone?` ${tone}`:""}">${status}</span></span></div><p class="devcheck-description">${detail}</p></div>`;
+}
+function clusterTransportRecoveryCard(readiness){
+  return setCard(`${cardHead("Transport recovery","Automatic recovery for interrupted cluster transfers. No enable switch is required.",`<span class="pill ok">automatic</span>`)}
+      <details class="setdetails"><summary>Deployment guidance and readiness</summary><div class="setdetails-body">
+      <p class="hint"><b>Safe use is a deployment decision, not a code gate.</b> Keep a ready voter majority, deploy one node at a time, and expose the cluster API only on the trusted cluster network.</p>
+      ${devReq(readiness,"cluster_transport_recovery","recovery_budgets","Recovery budgets","Keep chunk, whole-transfer, final-install, startup, and container-health allowances aligned. Defaults are 30 s, 1,200 s, and 120 s; measured state size may require a longer final-install allowance.")}
+      ${devReq(readiness,"cluster_transport_recovery","cluster_api_advertised","Authenticated diagnostics","Every node must advertise its private Hiqlite API address, share the cluster API credential, and keep <code>/cluster/transport/sqlite</code> off the public Internet.")}
+      ${devReq(readiness,"cluster_transport_recovery","cache_revocation_capability","Cache revocation","Every member of the exact committed configuration must prove the capability in its current heartbeat before cache-only recovery authorization opens.")}
+      ${devReq(readiness,"cluster_transport_recovery","recovery_receipt","Recovery receipt","Qualify the real-TLS 3 MiB transport matrix, acknowledged writes, and twenty learner plus twenty voter recovery cycles before fleet rollout.")}
+      <p class="devcheck-note">Use the supported one-node-at-a-time deployment when these checks are acceptable. Readiness is advisory; transport recovery remains automatic on clustered nodes.</p>
+      </div></details>`);
+}
+function preparedQualityCard(settings,readiness){
+  return setCard(`${cardHead("Quality switching","Prepare the next stream before replacing the one you are watching.",`<span class="pill" id="pqhstate">${settings.prepared_quality_handoff?"Enabled":"Disabled"}</span>`)}
+      ${togRow("pqh",`Prepare quality changes <span class="pill warn">experimental</span>`,`Uses a second player and temporary server capacity to reduce interruptions. Applies after saving to the next eligible quality change.`,settings.prepared_quality_handoff)}
+      <div class="hint">Still experimental. Readiness is advisory and never overrides your choice. <a href="#/settings/developer">Browser compatibility controls</a> are in Developer.</div>
+      <details class="setdetails"><summary>Readiness and device qualification</summary><div class="setdetails-body">
+      <p class="hint">These readings describe this server. Missing evidence does not disable the setting.</p>
+      <h3 class="devcheck-group">Server readiness</h3>
+      ${devStaticReq("Control protocol",settings.playback_control_protocol_v1?"met":"not met","Enable protocol advertisement in Developer for new sessions. An existing session without the control block cannot prepare a replacement.",settings.playback_control_protocol_v1?"ok":"warn")}
+      ${devReq(readiness,"prepared_quality_handoff","server_preparation_is_real","Server preparation","The server must reserve capacity, warm the unpublished replacement, and release both the worker and capacity slot on cancellation.")}
+      ${devStaticReq("Throughput measurement","supported","Client and server reporting exists. This is implementation support, not proof that a particular session has enough measured throughput.","")}
+      <h3 class="devcheck-group">Device qualification</h3>
+      ${devReq(readiness,"prepared_quality_handoff","client_two_player_handoff","Client handoff","Apple, Android, and web contain the adapter. Physical-device evidence must still demonstrate aligned playback and a visible first frame.")}
+      ${devReq(readiness,"prepared_quality_handoff","fleet_receipt","Fleet validation","Qualification needs consecutive handoffs with stable memory and a measured fallback interruption on physical clients.")}
+      <p class="devcheck-note">Missing qualification does not disable the feature or override the saved choice. A failed preparation falls back to reopening the stream.</p>
+      </div></details>
+      <div class="err" id="pqherr" role="alert"></div>
+      ${setCardFoot("savePreparedQuality")}`);
+}
 function developerPanel(settings,readiness){
-  const advisory=`<div class="hint">Each reading below says what <b>this server</b> can currently see. It is advisory: no result disables a switch, and “not observable” means the fact lives somewhere the running daemon cannot inspect.</div>`;
-  const transportRecovery=setCard(`${cardHead("Enable cluster transport recovery","The corrected transport is compiled in and activates automatically on clustered nodes; there is no hidden production feature flag.",`<span class="pill" style="color:var(--good);border-color:var(--good)">automatic</span>`)}
-      <div class="hint"><b>Safe enablement means deployment qualification, not flipping a code gate.</b> Keep a ready voter majority, deploy one node at a time, and leave the cluster API listener reachable only on the trusted cluster network. Cache-only recovery authorization stays disabled until every current committed node has heartbeat-proven the cache revocation capability and the automatic guarded activation has cleared cached proofs cluster-wide; a rollback closes it again.</div>
-      <h2 class="section">What must be true first</h2>
-      ${advisory}
-      ${devReq(readiness,"cluster_transport_recovery","recovery_budgets","Recovery budgets fit the deployment","Keep chunk, whole-transfer, final-install, startup, and container health allowances aligned. The defaults are 30 s, 1,200 s, and 120 s; the rollout may use a longer final-install allowance when measured state size requires it.")}
-      ${devReq(readiness,"cluster_transport_recovery","cluster_api_advertised","Authenticated diagnostics are reachable","Every node must advertise its private Hiqlite API address, share the cluster API credential, and keep <code>/cluster/transport/sqlite</code> off the public Internet. Port 32400 may remain closed while a learner catches up.")}
-      ${devReq(readiness,"cluster_transport_recovery","cache_revocation_capability","Every committed node proves cache revocation","Cache-only recovery authorization stays closed until every member of the exact committed configuration writes the capability inside its current heartbeat.")}
-      ${devReq(readiness,"cluster_transport_recovery","recovery_receipt","The recovery receipt passes","Require the real-TLS 3 MiB transport matrix, acknowledged-write verification, and twenty learner plus twenty voter recovery cycles on the supported Linux path before fleet rollout.")}
-      <div class="hint"><b>Enable path after those checks pass:</b> use the supported one-node-at-a-time cluster deployment. The recovery code and read-only status route are always present; failed readiness remains fail-closed.</div>`);
-  const preview=setCard(`${cardHead("Playback control protocol","The additive control endpoint clients use to report what they are playing and ask for changes. On by default now that every client ships a reporter and prepared-switch adapter.")}
-      ${togRow("pcpv1",`Advertise playback control protocol v1 <span class="pill">preview</span>`,"New sessions advertise the control endpoint. Passive on its own: the server measures what a quality change would cost, and takes no automatic action.",settings.playback_control_protocol_v1)}
-      <h2 class="section">What must be true first</h2>
-      ${advisory}
-      ${devReq(readiness,"playback_control_protocol_v1","clients_report","Every client has a passive reporter","A silent client cannot be counted, so the server reports only the vocabulary it has actually observed since this process started.")}
-      <div class="err" id="dverr"></div>
-      ${setCardFoot("saveDeveloper")}`);
-  // Advisory, never a gate. Each requirement says what it is and whether it
-  // is true right now, because "experimental" on its own tells an operator
-  // nothing about whether turning something on will cost them a stream. The
-  // toggle above is not disabled by anything here: an operator who reads this
-  // and enables it anyway is making an informed choice, which is the point.
-  const req=(state,label,note)=>{
-    const pill=state==="met"?`<span class="pill" style="color:var(--good);border-color:var(--good)">met</span>`
-      :state==="partly"?`<span class="pill warn">partly met</span>`
-      :`<span class="pill warn">not met</span>`;
-    return `<div class="tog"><span>${label}<small>${note}</small></span>${pill}</div>`;
-  };
-  const prepared=setCard(`${cardHead("Prepared quality handoff","Build and warm a second VOD player before replacing the one currently on screen.",settings.prepared_quality_handoff?`<span class="pill" style="color:var(--good);border-color:var(--good)">enabled</span>`:`<span class="pill">disabled</span>`)}
-      ${togRow("pqh",`Enable prepared quality handoff <span class="pill warn">experimental</span>`,`On by default. This directly enables server reserve-and-prime work for the next eligible quality change; it applies immediately and no readiness result can override it.`,settings.prepared_quality_handoff)}
-      <div class="hint"><b>This checkbox is the enable path.</b> There is no qualification gate or restart step. The readings below are advisory so you can judge the cost while still choosing to try it.</div>
-      <h2 class="section">What must be true first, and whether it is</h2>
-      ${advisory}
-      ${req(settings.playback_control_protocol_v1?"met":"unmet","The control endpoint is advertised","New sessions carry the control block only while <b>Advertise playback control protocol v1</b> above is on. Nothing is staged for a session that never had one.")}
-      ${devReq(readiness,"prepared_quality_handoff","server_preparation_is_real","The server primes the successor it stages","The reserve-and-prime phase must reserve capacity, start the unpublished successor, bound every Store write and teardown, and prove abort releases both the worker and the slot.")}
-      ${devReq(readiness,"prepared_quality_handoff","client_two_player_handoff","A client owns a measured two-player handoff","Apple, Android, and web contain the adapter, but runtime declarations and a physical first-frame qualification determine whether the deployed clients are ready.")}
-      ${req("met","A prepared handoff can fire on the sessions you actually serve","The throughput floor needs both the client's observed rate and the server's delivered rate. Both are reported now, on VOD as well as live: the clients fill <code>observed_download_bps</code> and the VOD serving boundary measures <code>delivered_bps</code>. A window that has not closed yet still refuses, which is the honest reading rather than a missing input.")}
-      ${devReq(readiness,"prepared_quality_handoff","fleet_receipt","The fleet receipt is complete","Requires twenty consecutive commits on the corrected realistic-runway instrument with stable memory, plus a measured fallback interruption on physical clients.")}
-      ${togRow("pdp",`Tell the server this browser can prepare a second player <span class="pill warn">qualification open</span>`,"On by default. Sets <code>dual_player_preparation</code> on this browser's control exchanges, which is the only thing that lets the server stage a successor for it. Nothing above blocks this switch — the list is what tells you the cost. It reaches the server on the next control exchange, and a playback whose successor was never playable stops offering for the rest of that playback.",preparedHandoffEnabled(),'onchange="setPreparedHandoff(this.checked)"')}
-      <div class="hint"><b>Safe-use guidance:</b> keep the protocol advertised and validate first-frame alignment on the devices you care about before treating handoff as production-qualified. These are recommendations, not gates; a failed preparation is torn down and the client falls back to the ordinary reopen.</div>
-      <div class="err" id="pqherr"></div>
-      ${setCardFoot("saveDeveloper")}`);
-  const experimental=setCard(`${cardHead("Experimental delivery","Changes the shape of the stream itself. Applies to new sessions only.")}
-      ${togRow("phs",`Typeless sliding HLS <span class="pill warn">experimental</span>`,"Only for the iPad control comparison.",settings.hls_typeless_sliding)}
-      <div class="err" id="dxerr"></div>
-      ${setCardFoot("saveExperimental")}`);
-  return `${setHead("Developer","Runtime controls with the requirements needed to use each feature safely. Readiness is advisory and never overrides your choice.")}${transportRecovery}${liveTvSettingsCard(settings)}${liveTvGuideCard(settings)}${preview}${verifiedDecodeCard(settings)}${decodeRecoveryCard(settings)}${prepared}${experimental}`;
+  const destinations=`<nav class="setdestinations" aria-label="Everyday settings">
+    <a href="#/settings/livetv"><strong>Live TV <span aria-hidden="true">↗</span></strong><span>Tuner and guide</span></a>
+    <a href="#/settings/playback"><strong>Playback <span aria-hidden="true">↗</span></strong><span>Quality and defaults</span></a>
+    <a href="#/settings/cluster"><strong>Cluster <span aria-hidden="true">↗</span></strong><span>Health and recovery</span></a>
+  </nav>`;
+  const protocol=setCard(`${cardHead("Playback control protocol","Allow compatible clients to report playback and request stream changes.",`<span class="pill">compatibility</span>`)}
+      ${togRow("pcpv1","Advertise playback control protocol v1","Applies to new sessions. Quality switching needs this enabled.",settings.playback_control_protocol_v1)}
+      <details class="setdetails"><summary>Client readiness</summary><div class="setdetails-body">
+      ${devReq(readiness,"playback_control_protocol_v1","clients_report","Client reporters","Only clients observed by this server can be reported here; silent clients remain unknown.")}
+      </div></details>
+      <div class="err" id="dverr" role="alert"></div>${setCardFoot("saveDeveloper")}`);
+  const browser=setCard(`${cardHead("Second player in this browser","Advertise this browser's ability to prepare a replacement stream.",`<span class="pill acc">this browser</span>`)}
+      ${togRow("pdp","Allow a second player","Uses additional device memory and decoder capacity. Saved automatically in this browser; the next reporter exchange sends the change.",preparedHandoffEnabled(),'onchange="setPreparedHandoff(this.checked)"')}
+      <div class="hint">A failed preparation falls back to reopening the stream. <a href="#/settings/playback">Quality switching</a> must also be enabled on the server.</div>`,{local:true});
+  const experimental=setCard(`${cardHead("HLS delivery comparison","A stream-format override for controlled client comparisons.",`<span class="pill warn">experimental</span>`)}
+      ${togRow("phs","Typeless sliding HLS","Changes the playlist format for new sessions only.",settings.hls_typeless_sliding)}
+      <div class="err" id="dxerr" role="alert"></div>${setCardFoot("saveExperimental")}`);
+  return `${setHead("Developer","Compatibility controls, experimental playback and device diagnostics.")}
+      ${destinations}
+      <div class="setsection"><h2>Compatibility</h2><p>Protocol and browser preparation controls.</p></div>${protocol}${browser}
+      <div class="setsection"><h2>Decoder experiments</h2><p>Recovery and cache-policy experiments. Evidence is advisory; saved choices remain authoritative.</p></div>${verifiedDecodeCard(settings)}${decodeRecoveryCard(settings)}
+      <div class="setsection"><h2>Delivery experiments</h2><p>Use these overrides for controlled comparisons.</p></div>${experimental}`;
 }
 // Automatic decode recovery.
 //
@@ -15674,7 +15733,7 @@ function developerPanel(settings,readiness){
 function decodeRecoveryCard(s){
   const q=s.decoder_health_qualification||{};
   // FFmpeg's strings again — a build banner and decoder names.
-  const list=v=>(v&&v.length)?v.map(x=>`<code>${esc(x)}</code>`).join(" "):"<i>none</i>";
+  const list=v=>`<code>${v&&v.length?v.map(esc).join(" · "):"none"}</code>`;
   const covered=q.covered_paths_v2||q.covered_decoders||[];
   const paths=covered.map(value=>{
     const fields=String(value).split("/");
@@ -15688,9 +15747,10 @@ function decodeRecoveryCard(s){
   const state=enabled
     ? `<span class="pill" style="color:var(--good);border-color:var(--good)">enabled</span>`
     : `<span class="pill">disabled</span>`;
-  return setCard(`${cardHead("Automatic decode recovery","A producer that says out loud it could not decode the source is answered once — by a successor that decodes in software behind the same hardware encoder — instead of being answered with the command that just failed. Every timing verdict tells a client to try again, so without this a file that cannot be decoded is a reopen loop.",state)}
+  return setCard(`${cardHead("Automatic decode recovery","Retry a failed hardware decode in software while keeping the hardware encoder. Recovery increases CPU use and prevents a reopen loop.",state)}
       ${togRow("adr",`Enable automatic decoder recovery <span class="pill warn">experimental</span>`,`Applies immediately to new producer attempts. This checkbox is authoritative: missing measurements or retained contracts never turn it back off.`,enabled)}
       <div class="hint"><b>This checkbox is the enable path.</b> The checks below are advisory only. With incomplete coverage, the server uses its bounded selected-stream diagnostic matcher and never treats that best-effort observation as permission to reuse an artifact.</div>
+      <details class="setdetails"><summary>Recovery limits and diagnostic evidence</summary><div class="setdetails-body">
       <h2 class="section">Safety evidence and current state</h2>
       <div class="tog"><span>${ok(!!q.measured_build)} This node measured its own FFmpeg<small>${q.measured_build?`<code>${esc(q.measured_build)}</code>`:"Not measured. Recovery can still be enabled; diagnostics use the selected input and stream without claiming build-qualified evidence."}</small></span></div>
       <div class="tog"><span>${ok(software.length>0)} A retained contract covers this build's software decoders<small>${list(software.map(path=>path.value))}<br>A covered software path increases confidence in the successor; absence is advisory and does not block the switch.</small></span></div>
@@ -15699,7 +15759,8 @@ function decodeRecoveryCard(s){
       <h2 class="section">What it costs when it does fire</h2>
       <div class="hint"><b>One recovery per playback, and it is never given back.</b> The budget is durable and keyed by the playback, so a reopen, a seek or a track change does not buy another. A playback that has spent it is told its source did not decode — a permanent answer the client shows once, rather than an impermanent one it will follow forever. Two paths give a budget up without using it, both on purpose: an executor cancelled mid-install, and a node that cannot read the budget. Each costs that playback its automatic recovery and nothing else.</div>
       <div class="hint">The successor keeps the hardware encoder and its slot; what grows is the CPU the pipeline spends decoding. That difference has to be available on the node at the moment of the recovery, and a recovery that cannot get it fails rather than waiting on a viewer's behalf indefinitely.</div>
-      <div class="err" id="adrerr"></div>
+      </div></details>
+      <div class="err" id="adrerr" role="alert"></div>
       ${setCardFoot("saveAutomaticDecoderRecovery")}`,{id:"drcard"});
 }
 // Verified decode artifacts.
@@ -15722,12 +15783,12 @@ function verifiedDecodeCard(s){
             : `<span class="pill">Off</span>`));
   // Everything below comes from FFmpeg — a version banner and decoder names —
   // so it is somebody else's string in this page's markup.
-  const list=v=>(v&&v.length)?v.map(x=>`<code>${esc(x)}</code>`).join(" "):"<i>none</i>";
+  const list=v=>`<code>${v&&v.length?v.map(esc).join(" · "):"none"}</code>`;
   const ok=b=>b?"✓":"✗";
   const checks=`
       <h2 class="section">What this node measured</h2>
       <div class="tog"><span>${ok(!!q.measured_build)} This node measured its own FFmpeg<small>${q.measured_build?`<code>${esc(q.measured_build)}</code>`:"Not measured. Nothing this build prints can be matched to a contract, so nothing it prints is evidence."}</small></span></div>
-      <div class="tog"><span>${ok(measuredPaths.length>0)} The startup probe named the decode paths this build selects<small>${list(measuredPaths)}<br>Current responses use <code>codec/backend/decoder</code>; older nodes report software-only <code>codec/decoder</code> pairs. Hardware appears only when FFmpeg positively confirms it used the requested backend; a clean exit is not evidence.</small></span></div>
+      <div class="tog"><span>${ok(measuredPaths.length>0)} The startup probe named the decode paths this build selects<small>${list(measuredPaths)}<br>Current responses use <code>codec/backend/decoder</code>; older nodes report software-only <code>codec/decoder</code> pairs. Hardware appears only when FFmpeg positively confirms it used the requested backend. FFmpeg can drop every frame of a file and still exit successfully, so a clean exit is not evidence.</small></span></div>
       <div class="tog"><span>${ok(coveredPaths.length>0)} A retained diagnostic contract covers this build<small>${list(coveredPaths)}<br>Covered means covered as this node runs it: the same binary, backend, decoder, and qualified log flags. A contract qualified under different flags or a different backend describes a different log.</small></span></div>`;
   const refusal=q.explanation
     ? `<div class="hint"><b>Coverage advisory:</b> ${esc(q.explanation)}</div>`
@@ -15740,33 +15801,40 @@ function verifiedDecodeCard(s){
   const applies=q.pending_restart
     ? `<div class="hint"><b>Saved, and not yet in force.</b> This node applies the request when it next starts. Qualification is part of each covered path's cache key, so applying it while sessions are running could move an affected key space under work already in flight.</div>`
     : `<div class="hint">The request takes effect when this node next starts and is stored regardless of readiness. Each exact decode path uses it only when that path has one unique covering contract; uncovered or ambiguous paths keep serving under their present identity.</div>`;
-  return setCard(`${cardHead("Verified decode artifacts","A transcode may only be reused when the producer that made it left a receipt saying its decode was clean. FFmpeg can drop every frame of a file and still exit successfully; without this, that result is cached and served forever.",pill)}
-      ${cost}
-      ${checks}
-      ${refusal}
-      ${togRow("dhqa",`Require a producer health receipt <span class="pill">preview</span>`,"Enables the path-scoped verified policy on the next start. The checks above are advisory and never disable this control.",s.decoder_health_qualified_artifacts)}
-      ${applies}
-      <div class="err" id="dhqerr"></div>
+  return setCard(`${cardHead("Verified decode artifacts","Require evidence of a clean decode before reusing transcodes on covered paths.",pill)}
+      ${togRow("dhqa",`Require a producer health receipt <span class="pill">preview</span>`,"Enables the path-scoped verified policy on the next start. Readiness checks are advisory and never disable this control.",s.decoder_health_qualified_artifacts)}
+      <div class="hint">Applies after a server restart. Covered paths use a new cache identity, so affected titles may need transcoding again.</div>
+      <details class="setdetails"><summary>Cache impact and diagnostic evidence</summary><div class="setdetails-body">
+      ${cost}${checks}${refusal}${applies}
+      </div></details>
+      <div class="err" id="dhqerr" role="alert"></div>
       ${setCardFoot("saveVerifiedDecode")}`,{id:"vdcard"});
 }
 // The unsaved state of the guide panel. `null` means "no edit yet, show what
 // is saved"; a value means the operator has chosen something the server has
 // not been told about.
-const LIVE_TV_GUIDE_DRAFT={source:null,url:null,hours:null,checked:null};
-function liveTvGuideSourceDraft(value){
+const LIVE_TV_GUIDE_DRAFT={source:null,url:null,hours:null,checked:null,revision:0};
+function liveTvGuideFieldDraft(){
   const url=document.getElementById("ltgurl");
   const hours=document.getElementById("ltghours");
   if(url) LIVE_TV_GUIDE_DRAFT.url=url.value;
   if(hours) LIVE_TV_GUIDE_DRAFT.hours=Number(hours.value);
+  LIVE_TV_GUIDE_DRAFT.revision+=1;
+}
+function liveTvGuideSourceDraft(value){
+  liveTvGuideFieldDraft();
   LIVE_TV_GUIDE_DRAFT.source=value;
-  // The repaint replaces the readiness mount too. Let the replacement run
+  // The card repaint replaces the readiness mount too. Let the replacement run
   // one current check instead of leaving its fresh "Checking…" row forever.
   LIVE_TV_GUIDE_DRAFT.checked=null;
-  renderSettings();
+  const card=document.getElementById("live-tv-guide-settings");
+  if(card&&card.isConnected) card.outerHTML=liveTvGuideCard(SETTINGS);
   // `setCard`'s delegated change handler belongs to the card that the repaint
   // just removed. Mark the replacement card explicitly, or its Save remains
   // disabled even though the newly selected source is still visible.
-  markSetCard(document.getElementById("ltgsrc"));
+  const replacement=document.getElementById("ltgsrc");
+  markSetCard(replacement);
+  if(replacement) replacement.focus();
 }
 function liveTvGuideCard(s){
   // The guide's own enable section. Everything here is advisory: it says what
@@ -15777,7 +15845,7 @@ function liveTvGuideCard(s){
   // more. (Keep this comment inside the body: a leading comment lands in the
   // previous function's slice in tests/web/settings-sections.test.js.)
   // The dropdown edits a draft, not the saved settings. `onchange` repaints
-  // this panel from `SETTINGS_DATA`, so reading the saved value here snapped
+  // this card from the draft, so reading the saved value here would snap
   // the control straight back and the XMLTV URL field — which only exists
   // while the draft says xmltv — could never be reached at all.
   const source=(LIVE_TV_GUIDE_DRAFT.source!==null?LIVE_TV_GUIDE_DRAFT.source:s.live_tv_guide_source)||"off";
@@ -15793,13 +15861,15 @@ function liveTvGuideCard(s){
     queueMicrotask(()=>{ const mount=document.getElementById("ltgready"); if(mount&&mount.isConnected) checkLiveTvGuide(); });
   }
   return setCard(`${cardHead("Programme guide","What is on each channel now and next. Read-only: no recording, no reminders, no scheduling.",pill)}
-    <div class="hint"><b>This is the first outbound internet request the tuner owner makes on your behalf</b>, which is why it is off until you turn it on. The HDHomeRun guide reads your device's <code>DeviceAuth</code> fresh at each refresh, sends it to <code>api.hdhomerun.com</code> over TLS, and forgets it — plurx never stores, logs or relays that credential, and only the owner node ever holds it. XMLTV fetches the one URL you give and nothing else.</div>
+    <p class="hint">The guide is optional and off by default. Enabling it lets the tuner owner contact the selected guide source.</p>
+    <details class="setdetails"><summary>Guide sources and privacy</summary><div class="setdetails-body"><div class="hint"><b>Guide requests are sent by the tuner owner.</b> The HDHomeRun guide reads your device's <code>DeviceAuth</code> fresh at each refresh, sends it to <code>api.hdhomerun.com</code> over TLS, and forgets it — plurx never stores, logs or relays that credential, and only the owner node ever holds it. XMLTV fetches the one URL you give and nothing else.</div></div></details>
     <div class="setfields">
       <div><label for="ltgsrc">Source</label><select id="ltgsrc" onchange="liveTvGuideSourceDraft(this.value)">${opt("off","Off")}${opt("hdhomerun","HDHomeRun guide")}${opt("xmltv","XMLTV")}</select></div>
-      ${source==="xmltv"?`<div style="flex:1 1 340px"><label for="ltgurl">XMLTV URL</label><input id="ltgurl" value="${esc(LIVE_TV_GUIDE_DRAFT.url!==null?LIVE_TV_GUIDE_DRAFT.url:(s.live_tv_xmltv_url||""))}" placeholder="https://example/guide.xml.gz" maxlength="1024"><div class="hint">Plain or gzipped. Matched to your lineup by display name, then LCN, then callsign.</div></div>`:""}
-      <div><label for="ltghours">Look ahead</label><select id="ltghours">${[4,8,12,24,48,72].map(n=>`<option value="${n}"${n===Number(LIVE_TV_GUIDE_DRAFT.hours!==null?LIVE_TV_GUIDE_DRAFT.hours:s.live_tv_guide_hours)?' selected':''}>${n} hours</option>`).join("")}</select></div>
+      ${source==="xmltv"?`<div style="flex:1 1 340px"><label for="ltgurl">XMLTV URL</label><input id="ltgurl" value="${esc(LIVE_TV_GUIDE_DRAFT.url!==null?LIVE_TV_GUIDE_DRAFT.url:(s.live_tv_xmltv_url||""))}" placeholder="https://example/guide.xml.gz" maxlength="1024" oninput="liveTvGuideFieldDraft()"><div class="hint">Plain or gzipped. Matched to your lineup by display name, then LCN, then callsign.</div></div>`:""}
+      <div><label for="ltghours">Look ahead</label><select id="ltghours" onchange="liveTvGuideFieldDraft()">${[4,8,12,24,48,72].map(n=>`<option value="${n}"${n===Number(LIVE_TV_GUIDE_DRAFT.hours!==null?LIVE_TV_GUIDE_DRAFT.hours:s.live_tv_guide_hours)?' selected':''}>${n} hours</option>`).join("")}</select></div>
     </div>
-    <h2 class="section">What must be true to enable it safely</h2>
+    <h2 class="section">Guide status</h2>
+    <p class="hint"><b>Saved-configuration evidence.</b> These checks describe the source and look-ahead already stored by the server. An unsaved source or URL draft is not checked until you save it.</p>
     <div id="ltgready" aria-live="polite"><p class="muted">Checking…</p></div>
     <div class="err" id="ltgerr" role="alert"></div>
 
@@ -15807,6 +15877,8 @@ function liveTvGuideCard(s){
     <div class="row"><button class="ghost sm" onclick="checkLiveTvGuide(this)">Check the guide</button><button class="ghost sm" onclick="refreshLiveTvGuide(this)">Refresh now</button><a href="#/live-tv">Browse channels</a></div>`,{id:"live-tv-guide-settings"});
 }
 async function saveLiveTvGuide(button){
+  liveTvGuideFieldDraft();
+  const revision=LIVE_TV_GUIDE_DRAFT.revision;
   const source=document.getElementById("ltgsrc").value;
   const url=document.getElementById("ltgurl");
   // A successful write repaints with the server's new source. Arm that paint
@@ -15818,22 +15890,25 @@ async function saveLiveTvGuide(button){
     live_tv_guide_hours:Number(document.getElementById("ltghours").value)},button,"ltgerr");
   // Only a save that landed retires the draft; a refused one keeps what the
   // operator typed so they can correct it rather than retype it.
-  if(saved){
+  if(saved&&LIVE_TV_GUIDE_DRAFT.revision===revision){
     LIVE_TV_GUIDE_DRAFT.source=null;
     LIVE_TV_GUIDE_DRAFT.url=null;
     LIVE_TV_GUIDE_DRAFT.hours=null;
+    if(typeof saved==="object") replaceLiveTvCard("live-tv-guide-settings",liveTvGuideCard(saved),"ltgsrc");
   }
-  return saved;
+  return !!saved;
 }
 function liveTvGuideReadyView(r){
   // Advisory rendering: a red row is a sentence, never a disabled Save.
+  const source=r.source==="xmltv"?"XMLTV":r.source==="hdhomerun"?"HDHomeRun guide":"Off";
+  const saved=`<p class="hint"><b>Saved configuration checked:</b> ${source} · ${Number(r.guide_hours)} hour look-ahead.</p>`;
   const rows=(r.checks||[]).map(c=>`<div class="tog"><span>${c.ready?"Met":"Not met yet"}<small>${esc(c.message)}</small></span></div>`).join("");
   const fresh=r.freshness==="fresh"?`<span class="pill ok">fresh · ${Math.round(r.age_seconds/60)} min old</span>`
     :r.freshness==="stale"?`<span class="pill warn">stale · ${Math.round(r.age_seconds/60)} min old</span>`
     :`<span class="pill">no data cached</span>`;
   const counts=r.source==="off"?"":`<p>${fresh} · matched ${r.matched_channels} of ${r.lineup_channels} lineup channels · ${r.programmes} programmes cached · refreshes every ${Math.round(r.refresh_interval_seconds/60)} minutes.</p>`;
   const error=r.refresh_error?`<p class="hint"><b>Last refresh failed:</b> ${esc(r.refresh_error)}</p>`:"";
-  return `${rows}${counts}${error}<div class="hint"><b>None of this blocks the switch.</b> Every row above is advice. Save any source you like and read the result here; the guide takes no tuner, so a wrong setting leaves channel rows blank and nothing else.</div>`;
+  return `${saved}${rows}${counts}${error}<div class="hint"><b>None of this blocks the switch.</b> Every row above is advice. Save any source you like and read the result here; the guide takes no tuner, so a wrong setting leaves channel rows blank and nothing else.</div>`;
 }
 async function checkLiveTvGuide(button){
   const generation=PAGE_RENDER_GENERATION;
@@ -15841,9 +15916,9 @@ async function checkLiveTvGuide(button){
   if(button) button.disabled=true;
   try{
     const r=await api("/live-tv/guide/readiness",{signal:AbortSignal.timeout(30000)});
-    if(!settingsCurrent(generation,"developer")||!mount||!mount.isConnected) return;
+    if(!settingsCurrent(generation,"livetv")||!mount||!mount.isConnected) return;
     mount.innerHTML=liveTvGuideReadyView(r);
-  }catch(e){ if(settingsCurrent(generation,"developer")&&mount&&mount.isConnected) mount.textContent=e.message; }
+  }catch(e){ if(settingsCurrent(generation,"livetv")&&mount&&mount.isConnected) mount.textContent=e.message; }
   finally{ if(button&&button.isConnected) button.disabled=false; }
 }
 async function refreshLiveTvGuide(button){
@@ -15852,9 +15927,15 @@ async function refreshLiveTvGuide(button){
   button.disabled=true;
   try{
     await api("/live-tv/guide/refresh",{method:"POST",signal:AbortSignal.timeout(45000)});
-    if(settingsCurrent(generation,"developer")) await checkLiveTvGuide(null);
-  }catch(e){ if(settingsCurrent(generation,"developer")&&error) error.textContent=e.message; }
+    if(settingsCurrent(generation,"livetv")) await checkLiveTvGuide(null);
+  }catch(e){
+    const currentError=document.getElementById("ltgerr");
+    if(settingsCurrent(generation,"livetv")&&currentError&&currentError.isConnected) currentError.textContent=e.message;
+  }
   finally{ if(button.isConnected) button.disabled=false; }
+}
+function liveTvPanel(settings){
+  return `${setHead("Live TV","Connect your network tuner and choose what appears in the programme guide.",`<a class="ghost sm" href="#/live-tv" style="text-decoration:none">Browse channels ↗</a>`)}${liveTvSettingsCard(settings)}${liveTvGuideCard(settings)}`;
 }
 function liveTvSettingsCard(s){
   const enabled=!!s.live_tv_enabled, disabled=enabled?' disabled':'';
@@ -15875,6 +15956,13 @@ function liveTvSettingsCard(s){
     <div class="row"><button class="ghost sm" onclick="checkLiveTvReadiness(this)">Check saved configuration</button><button id="ltenable" class="${enabled?'ghost':'primary'} sm" onclick="setLiveTvEnabled(${!enabled},this)">${enabled?"Disable Live TV":"Enable Live TV"}</button><a href="#/live-tv">Browse channels</a></div>
     ${barrier?`<div class="card"><h3>Previous owner cleanup required</h3><p>Owner <strong>${esc(s.live_tv_transition_from_owner_node_id)}</strong> has not confirmed cleanup before generation ${esc(s.live_tv_transition_drain_before)}. Save again to retry authenticated cleanup. An unreachable node is not proof that its tuner streams stopped.</p><label class="tog" for="ltfenced"><span>I have stopped or powered off the previous owner and prevented it from restarting until it can synchronize the current configuration.</span><input id="ltfenced" type="checkbox"></label><button class="ghost sm" onclick="recoverLiveTvOwner(this)">Confirm physical fencing — keep Live TV disabled</button></div>`:""}`,{id:"live-tv-settings"});
 }
+function replaceLiveTvCard(cardId,html,focusId){
+  const card=document.getElementById(cardId);
+  if(!card||!card.isConnected) return;
+  card.outerHTML=html;
+  const focus=document.getElementById(focusId);
+  if(focus) focus.focus();
+}
 async function liveTvSettingsWrite(body,button,errorId){
   if(!ME||!ME.is_admin) return false;
   const generation=PAGE_RENDER_GENERATION;
@@ -15882,41 +15970,54 @@ async function liveTvSettingsWrite(body,button,errorId){
   // The caller names its own error slot: a failed guide save was reporting
   // itself under the tuner card, which is a different card about a different
   // setting.
-  const error=document.getElementById(errorId||"lterr"); if(error) error.textContent="";
+  const slotId=errorId||"lterr";
+  const error=document.getElementById(slotId); if(error) error.textContent="";
   try{
     const result=await api("/settings",{method:"PUT",body,signal:AbortSignal.timeout(45000)});
-    if(settingsCurrent(generation,"developer")){
-      cacheSettings(result); renderSettings(); toast("Live TV settings saved");
-    }
-    return true;
+    // Settings section switches reuse the aggregate cache. Persist the server
+    // snapshot even when this response must not touch the destination DOM, or
+    // returning to Live TV can show an old generation and conflict on save.
+    cacheSettings(result);
+    if(!settingsCurrent(generation,"livetv")) return result;
+    toast("Live TV settings saved");
+    return result;
   }catch(e){
-    if(settingsCurrent(generation,"developer")){
-      if(error) error.textContent=e.code==="settings_conflict"?"The configuration changed elsewhere. Reload this section before trying again.":e.message;
-      if(button) button.disabled=false;
+    if(settingsCurrent(generation,"livetv")){
+      // A guide source edit replaces its card while this request is pending.
+      // Resolve the owning slot now instead of writing into the detached node
+      // captured before the await.
+      const currentError=document.getElementById(slotId);
+      if(currentError&&currentError.isConnected) currentError.textContent=e.code==="settings_conflict"?"The configuration changed elsewhere. Reload this section before trying again.":e.message;
+      if(button&&button.isConnected) button.disabled=false;
     }
     return false;
   }
 }
 async function saveLiveTvSettings(button){
   if(SETTINGS.live_tv_enabled) return;
-  return liveTvSettingsWrite({live_tv_config_generation:SETTINGS.live_tv_config_generation,
+  const saved=await liveTvSettingsWrite({live_tv_config_generation:SETTINGS.live_tv_config_generation,
     live_tv_enabled:false,live_tv_device_ipv4:document.getElementById("ltip").value.trim(),
     live_tv_owner_node_id:document.getElementById("ltowner").value.trim(),
     live_tv_max_sessions:Number(document.getElementById("ltlimit").value),
     live_tv_output_height:Number(document.getElementById("ltheight").value)},button);
+  if(saved&&typeof saved==="object") replaceLiveTvCard("live-tv-settings",liveTvSettingsCard(saved),"ltenable");
+  return !!saved;
 }
 async function setLiveTvEnabled(enabled,button){
   const card=document.getElementById("live-tv-settings");
   if(enabled&&card&&card.classList.contains("dirty")){ toast("Save the configuration before enabling Live TV"); return; }
-  return liveTvSettingsWrite({live_tv_config_generation:SETTINGS.live_tv_config_generation,live_tv_enabled:enabled},button);
+  const saved=await liveTvSettingsWrite({live_tv_config_generation:SETTINGS.live_tv_config_generation,live_tv_enabled:enabled},button);
+  if(saved&&typeof saved==="object") replaceLiveTvCard("live-tv-settings",liveTvSettingsCard(saved),"ltenable");
+  return !!saved;
 }
 async function recoverLiveTvOwner(button){
   const checked=document.getElementById("ltfenced");
   if(!checked||!checked.checked||SETTINGS.live_tv_enabled){ toast("Physical fencing must be confirmed while Live TV is disabled"); return; }
-  return liveTvSettingsWrite({live_tv_config_generation:SETTINGS.live_tv_config_generation,
+  const saved=await liveTvSettingsWrite({live_tv_config_generation:SETTINGS.live_tv_config_generation,
     live_tv_fenced_owner:{owner_node_id:SETTINGS.live_tv_transition_from_owner_node_id,
-      drain_before_generation:SETTINGS.live_tv_transition_drain_before,
-      stopped_and_restart_prevented:true}},button);
+      drain_before_generation:SETTINGS.live_tv_transition_drain_before,stopped_and_restart_prevented:true}},button);
+  if(saved&&typeof saved==="object") replaceLiveTvCard("live-tv-settings",liveTvSettingsCard(saved),"ltenable");
+  return !!saved;
 }
 async function checkLiveTvReadiness(button){
   const generation=PAGE_RENDER_GENERATION;
@@ -15924,9 +16025,9 @@ async function checkLiveTvReadiness(button){
   button.disabled=true; mount.textContent="Checking the saved configuration on the tuner owner…";
   try{
     const r=await api("/live-tv/readiness/refresh",{method:"POST",signal:AbortSignal.timeout(40000)});
-    if(!settingsCurrent(generation,"developer")||!mount.isConnected) return;
+    if(!settingsCurrent(generation,"livetv")||!mount.isConnected) return;
     mount.innerHTML=`<h3>${r.ready?"Ready to enable":"Needs attention"}</h3><ul>${r.checks.map(c=>`<li><strong>${c.ready?"Pass":"Not ready"}:</strong> ${esc(c.message)}</li>`).join("")}</ul>${r.snapshot?`<p>${esc(r.snapshot.device.friendly_name)} · ${esc(r.snapshot.device.model_number)} · ${esc(r.snapshot.device.tuner_count)} tuners</p>`:""}<p class="hint">This result describes saved generation ${esc(r.generation)}. It is advisory: enabling is not blocked by a red check. Structural problems — an address that is not private, an unresolved previous owner, a stale generation — still refuse the save.</p>`;
-  }catch(e){ if(settingsCurrent(generation,"developer")&&mount.isConnected) mount.textContent=e.message; }
+  }catch(e){ if(settingsCurrent(generation,"livetv")&&mount.isConnected) mount.textContent=e.message; }
   finally{ if(button.isConnected) button.disabled=false; }
 }
 function usersPanel(users){
@@ -16887,7 +16988,7 @@ function clusterPanel(d){
         ${roster}${statusFailure?`<div class="empty">The committed roster could not be read from this node.</div>
         <div class="row" style="margin-top:12px"><button class="ghost sm" onclick="retryCluster()">Retry roster</button></div>`:""}</section>
         ${clustered?`<section class="cluster-card"><div id="cluster-operations">${clusterOperationsCard(d.clusterOps)}</div></section>`:""}</div>`:""}</div>
-    ${clusterTroubleshootingPanel(cluster,d.clusterOps)}</div>`;
+    ${clusterTroubleshootingPanel(cluster,d.clusterOps)}${clusterTransportRecoveryCard(d.developerReadiness)}</div>`;
 }
 function toggleClusterNodes(btn){
   const cards=[...document.querySelectorAll("#cluster-node-list>.clnode")];
@@ -17438,9 +17539,33 @@ async function saveDeveloper(btn){
   if(btn) btn.disabled=true;
   try{
     cacheSettings(await api("/settings",{method:"PUT",body:{
-      playback_control_protocol_v1:document.getElementById("pcpv1").checked,
-      prepared_quality_handoff:document.getElementById("pqh").checked}}));
+      playback_control_protocol_v1:document.getElementById("pcpv1").checked}}));
     toast("Developer settings saved"); if(btn) setCardSaved(btn);
+  }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
+}
+async function savePreparedQuality(btn){
+  const err=document.getElementById("pqherr"); err.textContent="";
+  const card=btn&&btn.closest?btn.closest(".setcard"):null;
+  const revision=Number(card&&card.dataset?card.dataset.revision||0:0);
+  const requested=document.getElementById("pqh").checked;
+  if(btn) btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{
+      prepared_quality_handoff:requested}}));
+    // The input remains editable while the request is in flight. A later
+    // change is a new draft: keep it visible and dirty instead of overwriting
+    // it with the older response and claiming the newer choice was saved.
+    const currentRevision=Number(card&&card.dataset?card.dataset.revision||0:0);
+    if(card&&!card.isConnected) return true;
+    if(card&&card.isConnected&&currentRevision!==revision){
+      toast("Earlier quality change saved; newer edit remains unsaved");
+      return true;
+    }
+    const toggle=document.getElementById("pqh");
+    if(toggle) toggle.checked=!!saved.prepared_quality_handoff;
+    const state=document.getElementById("pqhstate");
+    if(state) state.textContent=saved.prepared_quality_handoff?"Enabled":"Disabled";
+    toast("Quality switching saved"); if(btn) setCardSaved(btn);
   }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
 }
 async function saveVerifiedDecode(btn){

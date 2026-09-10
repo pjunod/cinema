@@ -59,6 +59,8 @@ class SettingsStore(private val context: Context) {
          * eleven unrelated preferences to record itself.
          */
         val LIVE_TV_VIEW = stringPreferencesKey("live_tv_view")
+        val LIVE_TV_LAYOUT = stringPreferencesKey("live_tv_layout")
+        val LIVE_TV_MOBILE_GUIDE = stringPreferencesKey("live_tv_mobile_guide")
         val PREPARED_REPLACEMENT = booleanPreferencesKey("prepared_replacement")
     }
 
@@ -160,6 +162,19 @@ class SettingsStore(private val context: Context) {
 
     suspend fun saveLiveTvView(storage: String) {
         context.dataStore.edit { it[Keys.LIVE_TV_VIEW] = storage }
+    }
+
+    /** Television presentation only; the phone list/grid choice stays separate. */
+    val liveTvLayout: Flow<String?> = context.dataStore.data.map { it[Keys.LIVE_TV_LAYOUT] }
+
+    suspend fun saveLiveTvLayout(storage: String) {
+        context.dataStore.edit { it[Keys.LIVE_TV_LAYOUT] = storage }
+    }
+
+    val liveTvMobileGuide: Flow<String?> = context.dataStore.data.map { it[Keys.LIVE_TV_MOBILE_GUIDE] }
+
+    suspend fun saveLiveTvMobileGuide(storage: String) {
+        context.dataStore.edit { it[Keys.LIVE_TV_MOBILE_GUIDE] = storage }
     }
 
     suspend fun saveViewerPreferences(value: ViewerPreferences) {
