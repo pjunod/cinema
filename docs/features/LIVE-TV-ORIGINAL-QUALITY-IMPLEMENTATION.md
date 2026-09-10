@@ -12,7 +12,7 @@ new playback framework, or second planning phase is required.
 
 Companion to [the original tuner plan](HDHOMERUN-LIVE-TV-PLAN.md),
 [its hardware record](HDHOMERUN-LIVE-TV-STATUS.md),
-[native layouts](LIVE-TV-NATIVE-LAYOUTS-IMPLEMENTATION.md), and
+[native layouts](LIVE-TV-NATIVE-LAYOUTS-STATUS.md), and
 [the development pipeline](../DEVELOPMENT_PIPELINE.md). This plan supersedes
 the tuner's mandatory 720/1080p H.264/AAC normalization contract. It owns the
 4K and audio-preservation work excluded from the layouts plan; that exclusion

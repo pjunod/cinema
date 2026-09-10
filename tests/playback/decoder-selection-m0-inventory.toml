@@ -84,6 +84,13 @@ anchor = "async fn run_graph_probe(\n    ffmpeg: &str,"
 obligation = "bind graph readiness to exact build, device, encoder, renderer, and output surface without qualifying arbitrary media"
 
 [[surfaces]]
+id = "process.live_tv_source_probe"
+kind = "support_process"
+source = "crates/plurxd/src/live_tv.rs"
+anchor = "async fn probe_live_source("
+obligation = "inspect only the finite replay sample under a total deadline, output cap, kill-on-drop fallback, and explicit timeout reap"
+
+[[surfaces]]
 id = "process.vod_generation"
 kind = "process_owner"
 source = "crates/plurxd/src/vodserve.rs"
