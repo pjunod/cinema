@@ -1118,6 +1118,17 @@ test = "tests/validation/test_mobile_versions.py"
 test_anchor = "test_apple_counter_the_target_already_ships_fails_against_the_target"
 
 [[fixes]]
+# Web, Apple, and Android must use the canonical no-trailing-slash collection
+# endpoint while the server preserves the first native spelling during rollout.
+# The shared operations contract anchors every client and both server routes.
+id = "clients.library-channel-canonical-collection-route"
+commits = ["f746f742"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/PlurxApi.kt"
+source_anchor = '@GET("library-channels")'
+test = "tests/operations/test_evidence_workflows.py"
+test_anchor = "test_library_channel_collection_urls_match_router_and_fail_truthfully"
+
+[[fixes]]
 # Schedule-rich channel rows exceed one small emulator viewport. Filter to the
 # protected channel before asserting its disabled state so virtualization does
 # not turn screen height into part of the DRM refusal contract.
