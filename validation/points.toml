@@ -712,6 +712,16 @@ checks = ["rust-gate", "rust-gate-ci", "security-boundaries", "resource-bounds",
 depends_on = ["server.api", "identity.access", "playback.pipeline"]
 
 [[points]]
+id = "library.channels"
+title = "Scheduled channels from library media"
+contract = "Authenticated users define bounded movie and episode selections whose immutable, deterministic rotations resolve from server time on every client. Following playback uses the finite HLS session lifecycle without writing ordinary watch history; readiness facts in Developer settings are advisory and never gate explicit enablement."
+paths = [
+  "docs/features/LIBRARY-CHANNELS-STATUS.md",
+]
+checks = ["rust-gate", "rust-gate-ci", "security-boundaries", "resource-bounds", "operations-contract", "web-static", "web-layout"]
+depends_on = ["library.catalog", "identity.access", "playback.pipeline", "server.api"]
+
+[[points]]
 id = "playback.benchmark"
 title = "Cinema-vs-Plex controlled A/B benchmark"
 contract = "The same corpus, operations, output contract, and client clock produce credential-safe raw evidence, distributions, failure rates, and directionally explicit ratios for Cinema and Plex."
