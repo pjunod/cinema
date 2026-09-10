@@ -202,16 +202,27 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn('.env("LC_ALL", "C")', command)
 
     def test_private_origin_fetches_use_only_step_scoped_credentials(self):
-        workflow = read(".github/workflows/ci.yml")
-        fetches = list(re.finditer(r"fetch --no-tags --force origin", workflow))
-        self.assertEqual(len(fetches), 2)
-        for fetch in fetches:
-            step_start = workflow.rfind("\n      - name:", 0, fetch.start())
-            step_end = workflow.find("\n      - ", fetch.end())
-            step = workflow[step_start : None if step_end < 0 else step_end]
-            self.assertIn("GITHUB_TOKEN: ${{ github.token }}", step)
-            self.assertIn('http.extraheader="AUTHORIZATION: basic $auth"', step)
-            self.assertNotIn("git config", step)
+        checked = 0
+        for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
+            workflow = path.read_text(encoding="utf-8")
+            fetches = list(re.finditer(r"fetch --no-tags --force origin", workflow))
+            checked += len(fetches)
+            for fetch in fetches:
+                step_start = workflow.rfind("\n      - name:", 0, fetch.start())
+                step_end = workflow.find("\n      - ", fetch.end())
+                step = workflow[step_start : None if step_end < 0 else step_end]
+                self.assertIn(
+                    "GITHUB_TOKEN: ${{ github.token }}",
+                    step,
+                    path.relative_to(ROOT),
+                )
+                self.assertIn(
+                    'http.extraheader="AUTHORIZATION: basic $auth"',
+                    step,
+                    path.relative_to(ROOT),
+                )
+                self.assertNotIn("git config", step, path.relative_to(ROOT))
+        self.assertGreaterEqual(checked, 4)
 
     def test_browser_validation_never_claims_host_audio_or_media_controls(self):
         for path in ("scripts/playback-lab", "scripts/ui-baseline"):

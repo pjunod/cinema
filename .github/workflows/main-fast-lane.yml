@@ -57,8 +57,10 @@ jobs:
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           VALIDATION_BASE: ${{ github.event.pull_request.base.sha }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          git fetch --no-tags --force origin \
+          auth="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')"
+          git -c http.extraheader="AUTHORIZATION: basic $auth" fetch --no-tags --force origin \
             "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
           PLURX_VALIDATION_MODE=changed-from \
             PLURX_VALIDATION_BASE="$VALIDATION_BASE" \
@@ -256,8 +258,10 @@ jobs:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          git fetch --no-tags --force origin \
+          auth="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')"
+          git -c http.extraheader="AUTHORIZATION: basic $auth" fetch --no-tags --force origin \
             "+refs/heads/$HEAD_REF:refs/plurx/current-head" \
             "+refs/heads/$BASE_REF:refs/plurx/current-base"
           test "$(git rev-parse refs/plurx/current-head)" = "$EVENT_HEAD_SHA"
