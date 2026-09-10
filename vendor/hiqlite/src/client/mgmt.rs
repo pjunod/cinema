@@ -29,6 +29,8 @@ pub(crate) const DB_QUORUM_WATERMARK_COMPAT_PROBE: &str =
 #[cfg(feature = "cache")]
 use crate::network::management::{self, ClusterLeaveReq};
 #[cfg(feature = "sqlite")]
+use crate::store::state_machine::sqlite::state_machine::QueryWrite;
+#[cfg(feature = "sqlite")]
 use crate::store::state_machine::sqlite::writer::WriterRequest;
 #[cfg(any(feature = "sqlite", feature = "cache"))]
 use crate::{Node, NodeId};
@@ -148,15 +150,27 @@ pub(crate) async fn db_quorum_watermark_local(
 
 impl Client {
     /// Ask this embedded database voter to materialize its current state as a
-    /// Raft snapshot. The trigger returns after the command is accepted;
-    /// callers that need publication must observe [`Self::metrics_db`].
+    /// Raft snapshot, returning the applied index the snapshot must cover.
+    ///
+    /// The no-op write is intentional. A restored database may predate the
+    /// rebuilt Raft log, so its writer metadata needs one applied entry before
+    /// OpenRaft can describe the preserved image in a transferable snapshot.
+    /// The trigger returns after the command is accepted; callers that need
+    /// publication must observe [`Self::metrics_db`].
     #[cfg(feature = "sqlite")]
-    pub async fn trigger_db_snapshot(&self) -> Result<(), Error> {
+    pub async fn trigger_db_snapshot(&self) -> Result<u64, Error> {
         let state = self.inner.state.as_ref().ok_or_else(|| {
             Error::Connect("database snapshot trigger requires a local node client".to_owned())
         })?;
+        let applied = state
+            .raft_db
+            .raft
+            .client_write(QueryWrite::RTT)
+            .await?
+            .log_id
+            .index;
         state.raft_db.raft.trigger().snapshot().await?;
-        Ok(())
+        Ok(applied)
     }
 
     /// Subscribe to database Raft metrics only when this client owns the local

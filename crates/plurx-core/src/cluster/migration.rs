@@ -1647,9 +1647,9 @@ async fn materialize_readdress_join_snapshot(
     {
         return Ok(());
     }
-    client.trigger_db_snapshot().await.map_err(|error| {
+    let target = client.trigger_db_snapshot().await.map_err(|error| {
         StoreError::Database(format!(
-            "triggering readdressed voter snapshot for node {node_id}: {error}"
+            "anchoring and triggering readdressed voter snapshot for node {node_id}: {error}"
         ))
     })?;
     let deadline = tokio::time::Instant::now() + HIQLITE_HEALTH_TIMEOUT;
@@ -4028,8 +4028,9 @@ mod tests {
         );
         let hiqlite_management = include_str!("../../../../vendor/hiqlite/src/client/mgmt.rs");
         assert!(
-            hiqlite_management.contains("state.raft_db.raft.trigger().snapshot().await?"),
-            "the local client snapshot hook must issue the real OpenRaft trigger"
+            hiqlite_management.contains(".client_write(QueryWrite::RTT)")
+                && hiqlite_management.contains("state.raft_db.raft.trigger().snapshot().await?"),
+            "the local client snapshot hook must anchor writer metadata before the real OpenRaft trigger"
         );
     }
 
