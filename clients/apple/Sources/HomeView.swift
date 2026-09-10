@@ -1,6 +1,5 @@
 import SwiftUI
 
-#if os(iOS)
 enum HomeTab: Hashable {
     case home
     case libraries
@@ -9,18 +8,15 @@ enum HomeTab: Hashable {
     case downloads
     case settings
 }
-#endif
 
 struct HomeView: View {
     @EnvironmentObject var model: AppModel
     @Environment(\.scenePhase) private var scenePhase
-    #if os(iOS)
     @State private var selectedTab: HomeTab
 
     init(initialTab: HomeTab = .home) {
         _selectedTab = State(initialValue: initialTab)
     }
-    #endif
 
     var body: some View {
         #if os(iOS)
@@ -63,7 +59,7 @@ struct HomeView: View {
             .tabItem { Label("Libraries", systemImage: "rectangle.stack") }
             .tag(HomeTab.libraries)
 
-            NavigationStack { LiveTvView() }
+            NavigationStack { LiveTvView(onLeave: { selectedTab = .home }) }
                 .tabItem { Label("Live TV", systemImage: "tv") }
                 .tag(HomeTab.liveTv)
 
@@ -111,21 +107,26 @@ struct HomeView: View {
     }
     #else
     private var tvTabs: some View {
-        TabView {
+        TabView(selection: $selectedTab) {
             HomeDashboard()
                 .tabItem { Label("Home", systemImage: "house") }
+                .tag(HomeTab.home)
 
             LibrariesDashboard()
                 .tabItem { Label("Libraries", systemImage: "rectangle.stack") }
+                .tag(HomeTab.libraries)
 
-            LiveTvView()
+            LiveTvView(onLeave: { selectedTab = .home })
                 .tabItem { Label("Live TV", systemImage: "tv") }
+                .tag(HomeTab.liveTv)
 
             SearchView()
                 .tabItem { Label("Search", systemImage: "magnifyingglass") }
+                .tag(HomeTab.search)
 
             SettingsView()
                 .tabItem { Label("Settings", systemImage: "gearshape") }
+                .tag(HomeTab.settings)
         }
         .tint(Palette.accent)
         .task { if model.homeLoading { await model.loadHome() } }

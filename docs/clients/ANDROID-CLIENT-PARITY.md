@@ -253,14 +253,13 @@ channel list is preview-then-commit, and four seconds of no input hides the
 overlay again. A phone in fullscreen gets the touch rows of the same table —
 a tap toggles the chrome.
 
-**One input table for the ten-foot overlay.** `LiveTvInputPolicy` transcribes
+**One input table for the native Live TV shell.** `LiveTvInputPolicy` transcribes
 the `live` section of `tests/playback/player-input-contract.json`, and
-`LiveTvInputPolicyTest` walks every cell against the fixture. The 2026-09-02
-rulings hold: a direction on a hidden overlay only reveals it, and the channel
-list is preview-then-commit. There is no half-hour grid on Android TV — a
-focus-navigable grid is a milestone of its own on each ten-foot platform, and
-until then the television gets the list, which the focus engine already
-handles.
+`LiveTvInputPolicyTest` walks every cell against the fixture. Build 79 adds the
+browser, hidden/visible fullscreen controls, temporary guide, menu, programme
+details, and stream Info states. The 2026-09-02 reveal-only ruling remains;
+delegated focus and activation return false so Compose receives a D-pad press
+exactly once.
 
 ### Live TV
 
@@ -270,6 +269,21 @@ with no scrubber, no resume point and no progress write. It renews its session
 on **rendered frame count** rather than playback position, because a Media3 live
 window's position can move backwards during healthy playback — a frozen picture
 expires, a shuffling live edge does not.
+
+Build 79 composes Guide + preview, Guide over picture, and Channel browser
+around one movable `PlayerView`; the saved layout changes presentation without
+disposing the controller or tuner lease. Every layout retains a tunable empty
+guide row and the full Guide/On now/Favorites/Search/Layout/Return live/More
+grammar. Portrait phones default Guide to the selected channel's vertical
+schedule with a remembered Grid option, while expanded devices keep the grid.
+The guide requests a bounded six-hour window. Optional measured source facts
+decode field by field and Info separates Source from Playing, observation time,
+and reception.
+
+**Current issue #227 evidence:** Android build 79's Kotlin source compiles
+against the pinned project toolchain. The focused JVM regressions and physical
+Google TV D-pad walkthrough remain reserved/unavailable respectively; neither
+is claimed by compilation.
 
 `LiveTvLease` carries the same uncertainty barrier as the other clients: only a
 failure decided before a tuner can open (`live_tv_disabled`,

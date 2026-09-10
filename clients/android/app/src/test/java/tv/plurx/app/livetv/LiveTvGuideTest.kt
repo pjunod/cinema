@@ -169,6 +169,68 @@ class LiveTvGuideTest {
     }
 
     @Test
+    fun verticalGuideFocusKeepsItsUtcAnchorAcrossDifferentProgrammeLengths() {
+        fun cell(start: Long, end: Long, title: String) = LiveTvGridCell(
+            LiveTvProgramme(start, end, title), 0f, 100f, airing = false, clipped = false,
+        )
+        val layout = LiveTvGridLayout(
+            rows = listOf(
+                LiveTvGridRow(lineup[0], listOf(cell(0, 3_600, "Hour"))),
+                LiveTvGridRow(lineup[1], listOf(cell(0, 1_800, "Early"), cell(1_800, 2_700, "Short"), cell(2_700, 5_400, "Long"))),
+                LiveTvGridRow(lineup[2], listOf(cell(0, 1_200, "A"), cell(1_200, 2_400, "B"), cell(2_400, 3_600, "C"))),
+            ),
+            totalWidth = 480f,
+            nowX = null,
+        )
+        val first = LiveTvGuideReducer.moveGuideFocus(
+            layout,
+            LiveTvGuideFocusTarget(lineup[0].id, 0),
+            anchorTime = 3_000,
+            direction = LiveTvGuideFocusDirection.Down,
+        )
+        assertEquals(2_700L, first.target?.programmeStart)
+        val second = LiveTvGuideReducer.moveGuideFocus(
+            layout,
+            checkNotNull(first.target),
+            anchorTime = first.anchorTime,
+            direction = LiveTvGuideFocusDirection.Down,
+        )
+        assertEquals(2_400L, second.target?.programmeStart)
+        assertEquals(3_000L, second.anchorTime)
+    }
+
+    @Test
+    fun guideFocusReachesHeadersEmptyRowsAndTheToolbarBoundary() {
+        val layout = LiveTvGridLayout(
+            rows = listOf(
+                LiveTvGridRow(
+                    lineup[0],
+                    listOf(LiveTvGridCell(LiveTvProgramme(0, 1_800, "Now"), 0f, 100f, false, false)),
+                ),
+                LiveTvGridRow(lineup[1], emptyList()),
+            ),
+            totalWidth = 320f,
+            nowX = null,
+        )
+        val cell = LiveTvGuideFocusTarget(lineup[0].id, 0)
+        val header = LiveTvGuideReducer.moveGuideFocus(
+            layout, cell, 900, LiveTvGuideFocusDirection.Left,
+        )
+        assertEquals(true, header.target?.channelHeader)
+        val empty = LiveTvGuideReducer.moveGuideFocus(
+            layout, cell, 900, LiveTvGuideFocusDirection.Down,
+        )
+        assertEquals(lineup[1].id, empty.target?.channelId)
+        assertEquals(null, empty.target?.programmeStart)
+        assertEquals(false, empty.target?.channelHeader)
+        assertTrue(
+            LiveTvGuideReducer.moveGuideFocus(
+                layout, cell, 900, LiveTvGuideFocusDirection.Up,
+            ).toolbarBoundary,
+        )
+    }
+
+    @Test
     fun theGuideWireShapeIgnoresFieldsThisClientShouldNotSee() {
         // `Net.json` ignores unknown keys, which is what lets a server grow a
         // field without breaking an older build — and what keeps a credential

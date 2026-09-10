@@ -478,17 +478,21 @@
     ]
   },
   "live": {
-    "title": "Live TV input contract \u2014 the same rulings applied to a surface with no timeline",
-    "ruled": "2026-09-07",
+    "title": "Live TV input contract \u2014 browsing and one persistent live player",
+    "ruled": "2026-09-09",
     "surfaces": {
-      "ten-foot": "Siri Remote (tvOS) and D-pad (Android TV / Google TV) over a live stream that is always fullscreen. Directional input moves focus; it never changes channel on its own.",
-      "desktop": "Pointer plus keyboard on the web while the Live TV host is fullscreen or focused. A keyboard user has no focus ring to preview with, so vertical tunes directly.",
+      "ten-foot": "Siri Remote (tvOS) and D-pad (Android TV / Google TV). Root browsing delegates ordinary focus to the native framework; custom grids and fullscreen chrome handle only the events they own.",
+      "desktop": "Pointer plus keyboard on the web while the Live TV host is fullscreen or focused. Existing channel-strip hotkeys remain unchanged.",
       "touch": "iPhone/iPad and Android phones/tablets. Focus states do not apply; tapping the picture is the whole contract."
     },
     "states": {
-      "hidden": "The bare live picture; the overlay is not drawn.",
-      "overlay": "The live overlay is drawn: channel and programme, the neighbour strip, the progress bar and the controls.",
-      "page": "The player is inline on the Live TV page rather than fullscreen. Browsing owns the keyboard; only the transport key belongs to the player."
+      "browser": "The saved root browse layout. Native arrows and Select belong to ordinary controls unless a custom guide navigator performs an explicit move.",
+      "fullscreen_hidden": "The bare live picture; controls are not drawn.",
+      "fullscreen_controls": "Fullscreen controls are visible. Initial focus is Guide and four seconds of genuine inactivity hides them only while playing.",
+      "temporary_guide": "The guide opened over fullscreen. It does not auto-hide and does not change the saved root layout.",
+      "menu": "Layout or More is open and traps focus until Back closes it to its opener.",
+      "programme_details": "A future or past programme's details are open; no tuning or scheduling action is offered.",
+      "stream_info": "Source, playing, freshness, and reception facts are open."
     },
     "inputs": [
       "left",
@@ -504,8 +508,13 @@
     "outcomes": {
       "reveal": "Draw the overlay and restart the auto-hide timer. Nothing else happens \u2014 the press that reveals never also acts.",
       "hide": "Hide the overlay and drop focus back to the picture.",
-      "focus_row": "Move focus within the overlay: vertically through the channel list, horizontally across the control row.",
+      "delegate": "Return the event unconsumed so the native focus or button framework receives it exactly once.",
+      "focus_control": "Move deliberately among Guide, Channels, Pause/Play live, Info, and More.",
+      "focus_cell": "Move to the adjacent programme, or to the programme covering the same anchor time in the adjacent channel.",
+      "focus_panel": "Move within the open menu, details, or Info panel without escaping it.",
       "activate": "Activate the focused overlay control. On a focused channel row that means tune it.",
+      "close_panel": "Close the temporary guide, menu, details, or Info and restore its exact opener.",
+      "return_browser": "Leave fullscreen for the saved root layout without stopping or retuning the current session.",
       "strip_prev": "Move the neighbour strip's preview one channel earlier and reveal the overlay if it was hidden. Previewing never opens a tuner.",
       "strip_next": "Move the neighbour strip's preview one channel later and reveal the overlay if it was hidden.",
       "tune": "Open the previewed channel: release the current lease and start one session on the new channel.",
@@ -536,42 +545,58 @@
     },
     "routing": {
       "ten-foot": {
-        "hidden": {
+        "fullscreen_hidden": {
           "left": "reveal",
           "right": "reveal",
           "up": "reveal",
           "down": "reveal",
           "select": "reveal",
-          "back": "exit",
+          "back": "return_browser",
           "play_pause": "toggle_play",
           "tap_surface": "reveal",
           "idle": "ignore"
         },
-        "overlay": {
-          "left": "focus_row",
-          "right": "focus_row",
-          "up": "focus_row",
-          "down": "focus_row",
+        "fullscreen_controls": {
+          "left": "focus_control",
+          "right": "focus_control",
+          "up": "focus_control",
+          "down": "focus_control",
           "select": "activate",
           "back": "hide",
           "play_pause": "toggle_play",
           "tap_surface": "ignore",
           "idle": "hide"
         },
-        "page": {
-          "left": "ignore",
-          "right": "ignore",
-          "up": "ignore",
-          "down": "ignore",
-          "select": "ignore",
-          "back": "ignore",
+        "browser": {
+          "left": "delegate",
+          "right": "delegate",
+          "up": "delegate",
+          "down": "delegate",
+          "select": "delegate",
+          "back": "exit",
           "play_pause": "ignore",
-          "tap_surface": "ignore",
+          "tap_surface": "delegate",
           "idle": "ignore"
+        },
+        "temporary_guide": {
+          "left": "focus_cell", "right": "focus_cell", "up": "focus_cell", "down": "focus_cell",
+          "select": "activate", "back": "close_panel", "play_pause": "toggle_play", "tap_surface": "ignore", "idle": "ignore"
+        },
+        "menu": {
+          "left": "focus_panel", "right": "focus_panel", "up": "focus_panel", "down": "focus_panel",
+          "select": "activate", "back": "close_panel", "play_pause": "toggle_play", "tap_surface": "ignore", "idle": "ignore"
+        },
+        "programme_details": {
+          "left": "focus_panel", "right": "focus_panel", "up": "focus_panel", "down": "focus_panel",
+          "select": "activate", "back": "close_panel", "play_pause": "toggle_play", "tap_surface": "ignore", "idle": "ignore"
+        },
+        "stream_info": {
+          "left": "focus_panel", "right": "focus_panel", "up": "focus_panel", "down": "focus_panel",
+          "select": "activate", "back": "close_panel", "play_pause": "toggle_play", "tap_surface": "ignore", "idle": "ignore"
         }
       },
       "desktop": {
-        "hidden": {
+        "fullscreen_hidden": {
           "left": "strip_prev",
           "right": "strip_next",
           "up": "channel_up",
@@ -582,7 +607,7 @@
           "tap_surface": "reveal",
           "idle": "ignore"
         },
-        "overlay": {
+        "fullscreen_controls": {
           "left": "strip_prev",
           "right": "strip_next",
           "up": "channel_up",
@@ -593,20 +618,36 @@
           "tap_surface": "ignore",
           "idle": "hide"
         },
-        "page": {
-          "left": "ignore",
-          "right": "ignore",
-          "up": "ignore",
-          "down": "ignore",
-          "select": "ignore",
+        "browser": {
+          "left": "delegate",
+          "right": "delegate",
+          "up": "delegate",
+          "down": "delegate",
+          "select": "delegate",
           "back": "ignore",
-          "play_pause": "toggle_play",
-          "tap_surface": "ignore",
+          "play_pause": "ignore",
+          "tap_surface": "delegate",
           "idle": "ignore"
+        },
+        "temporary_guide": {
+          "left": "focus_cell", "right": "focus_cell", "up": "focus_cell", "down": "focus_cell",
+          "select": "activate", "back": "close_panel", "play_pause": "toggle_play", "tap_surface": "ignore", "idle": "ignore"
+        },
+        "menu": {
+          "left": "delegate", "right": "delegate", "up": "delegate", "down": "delegate",
+          "select": "delegate", "back": "close_panel", "play_pause": "toggle_play", "tap_surface": "ignore", "idle": "ignore"
+        },
+        "programme_details": {
+          "left": "delegate", "right": "delegate", "up": "delegate", "down": "delegate",
+          "select": "delegate", "back": "close_panel", "play_pause": "toggle_play", "tap_surface": "ignore", "idle": "ignore"
+        },
+        "stream_info": {
+          "left": "delegate", "right": "delegate", "up": "delegate", "down": "delegate",
+          "select": "delegate", "back": "close_panel", "play_pause": "toggle_play", "tap_surface": "ignore", "idle": "ignore"
         }
       },
       "touch": {
-        "hidden": {
+        "fullscreen_hidden": {
           "left": "ignore",
           "right": "ignore",
           "up": "ignore",
@@ -617,7 +658,7 @@
           "tap_surface": "toggle_chrome",
           "idle": "ignore"
         },
-        "overlay": {
+        "fullscreen_controls": {
           "left": "ignore",
           "right": "ignore",
           "up": "ignore",
@@ -628,28 +669,44 @@
           "tap_surface": "toggle_chrome",
           "idle": "hide"
         },
-        "page": {
+        "browser": {
           "left": "ignore",
           "right": "ignore",
           "up": "ignore",
           "down": "ignore",
           "select": "ignore",
-          "back": "ignore",
+          "back": "exit",
           "play_pause": "ignore",
           "tap_surface": "ignore",
           "idle": "ignore"
+        },
+        "temporary_guide": {
+          "left": "ignore", "right": "ignore", "up": "ignore", "down": "ignore",
+          "select": "activate", "back": "close_panel", "play_pause": "ignore", "tap_surface": "ignore", "idle": "ignore"
+        },
+        "menu": {
+          "left": "ignore", "right": "ignore", "up": "ignore", "down": "ignore",
+          "select": "activate", "back": "close_panel", "play_pause": "ignore", "tap_surface": "close_panel", "idle": "ignore"
+        },
+        "programme_details": {
+          "left": "ignore", "right": "ignore", "up": "ignore", "down": "ignore",
+          "select": "activate", "back": "close_panel", "play_pause": "ignore", "tap_surface": "close_panel", "idle": "ignore"
+        },
+        "stream_info": {
+          "left": "ignore", "right": "ignore", "up": "ignore", "down": "ignore",
+          "select": "activate", "back": "close_panel", "play_pause": "ignore", "tap_surface": "close_panel", "idle": "ignore"
         }
       }
     },
     "surface_notes": {
-      "ten-foot": "A television never shows an inline player, so `page` exists only to keep the three surfaces one shape; every row in it is `ignore`.",
-      "desktop": "`up`/`down` tune directly because a keyboard user has no focus ring to preview with and the mouse already drives the neighbour strip. On the ten-foot surface the same keys only move focus \u2014 the 2026-09-02 ruling, unchanged.",
+      "ten-foot": "The root browser uses native focus and a persistent preview player. Fullscreen reveal and the programme grid intercept only the moves they own.",
+      "desktop": "Existing web channel-strip keys remain direct tune controls. Desktop menus and details delegate ordinary focus while Back closes the panel.",
       "touch": "`play_pause` is `ignore`: a phone has no hardware transport key over this surface and the tap answer is the whole contract."
     },
     "notes": [
-      "This table is the finite player's ten-foot/desktop/touch tables with `skip`, `preview`, `commit` and every timeline state removed, and `channel` added. A live stream has no timeline, so no row here seeks.",
-      "A directional press on a hidden ten-foot overlay only reveals it. This is the 2026-09-02 ruling applied unchanged.",
-      "The channel list inside the overlay is preview-then-commit on the ten-foot surface: move focus, `select` tunes, `back` hides."
+      "A live stream has no seekable timeline, so no row here seeks, records, rewinds, or schedules playback.",
+      "A directional press or Select on hidden ten-foot controls only reveals them; the revealing press never also moves focus or tunes.",
+      "Root channel focus and playing channel are independent. Native focus movement is unconsumed, and Select reaches the focused button exactly once."
     ]
   },
   "surface_notes": {

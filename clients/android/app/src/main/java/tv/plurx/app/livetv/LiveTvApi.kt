@@ -4,9 +4,19 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.KSerializer
+import kotlinx.serialization.descriptors.SerialDescriptor
+import kotlinx.serialization.encoding.Decoder
+import kotlinx.serialization.encoding.Encoder
 import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.JsonDecoder
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonEncoder
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
@@ -20,6 +30,77 @@ import tv.plurx.app.data.Net
 import tv.plurx.app.data.Session
 import java.util.concurrent.TimeUnit
 
+internal enum class TvLiveLayout(val storageValue: String, val label: String) {
+    GuidePreview("guide_preview", "Guide + preview"),
+    GuideOverlay("guide_overlay", "Guide over picture"),
+    ChannelBrowser("channel_browser", "Channel browser");
+
+    companion object {
+        fun fromStorage(value: String?): TvLiveLayout = entries.firstOrNull {
+            it.storageValue == value
+        } ?: GuidePreview
+    }
+}
+
+@Serializable(with = LiveTvSourceFormatSerializer::class)
+data class LiveTvSourceFormat(
+    val video_width: Int? = null,
+    val video_height: Int? = null,
+    val scan: String? = null,
+    val audio_channels: Int? = null,
+    val audio_layout: String? = null,
+    val observed_at: Long,
+) {
+    val validVideoWidth: Int? get() = video_width?.takeIf { it in 1..16_384 }
+    val validVideoHeight: Int? get() = video_height?.takeIf { it in 1..16_384 }
+    val validScan: String? get() = scan?.takeIf { it == "progressive" || it == "interlaced" }
+    val validAudioChannels: Int? get() = audio_channels?.takeIf { it in 1..32 }
+    val validAudioLayout: String? get() = audio_layout?.trim()?.lowercase()?.takeIf { value ->
+        value.isNotEmpty() && value.length <= 32 && value.all {
+            it.isLetterOrDigit() || it in ".+_- "
+        }
+    }
+    val valid: Boolean get() = observed_at > 0
+}
+
+/**
+ * Decode each observation independently. A tuner or older owner sending one
+ * malformed optional fact must not discard the channel or the other measured
+ * facts that are still honest.
+ */
+internal object LiveTvSourceFormatSerializer : KSerializer<LiveTvSourceFormat> {
+    override val descriptor: SerialDescriptor = JsonObject.serializer().descriptor
+
+    override fun deserialize(decoder: Decoder): LiveTvSourceFormat {
+        val input = decoder as? JsonDecoder ?: error("LiveTvSourceFormat is JSON-only")
+        val objectValue = input.decodeJsonElement() as? JsonObject ?: return LiveTvSourceFormat(observed_at = 0)
+        fun element(name: String): JsonElement? = objectValue[name]
+        fun int(name: String): Int? = runCatching { element(name)?.jsonPrimitive?.intOrNull }.getOrNull()
+        fun long(name: String): Long? = runCatching { element(name)?.jsonPrimitive?.longOrNull }.getOrNull()
+        fun text(name: String): String? = runCatching { element(name)?.jsonPrimitive?.contentOrNull }.getOrNull()
+        return LiveTvSourceFormat(
+            video_width = int("video_width"),
+            video_height = int("video_height"),
+            scan = text("scan"),
+            audio_channels = int("audio_channels"),
+            audio_layout = text("audio_layout"),
+            observed_at = long("observed_at") ?: 0,
+        )
+    }
+
+    override fun serialize(encoder: Encoder, value: LiveTvSourceFormat) {
+        val output = encoder as? JsonEncoder ?: error("LiveTvSourceFormat is JSON-only")
+        output.encodeJsonElement(buildJsonObject {
+            value.video_width?.let { put("video_width", it) }
+            value.video_height?.let { put("video_height", it) }
+            value.scan?.let { put("scan", it) }
+            value.audio_channels?.let { put("audio_channels", it) }
+            value.audio_layout?.let { put("audio_layout", it) }
+            put("observed_at", value.observed_at)
+        })
+    }
+}
+
 @Serializable
 data class LiveTvChannel(
     val id: String,
@@ -31,21 +112,54 @@ data class LiveTvChannel(
     val hd: Boolean? = null,
     val video_codec: String? = null,
     val audio_codec: String? = null,
+    val source_format: LiveTvSourceFormat? = null,
 ) {
     val title: String get() = "$guide_number · $guide_name"
     val watchable: Boolean get() = !drm && support == "ready"
     val formatBadges: List<String> get() = buildList {
-        hd?.let { add(if (it) "HD" else "SD") }
-        listOfNotNull(video_codec, audio_codec).forEach { raw ->
+        pictureClass?.let(::add)
+        listOfNotNull(video_codec, sourceAudioDescription).forEach { raw ->
             val badge = raw.trim().uppercase()
             if (badge.isNotEmpty() && badge !in this) add(badge)
         }
     }
     val sourceFormatDescription: String? get() = buildList {
-        hd?.let { add(if (it) "HD source" else "SD source") }
+        exactSourcePicture?.let(::add)
         video_codec?.trim()?.takeIf { it.isNotEmpty() }?.let { add("${it.uppercase()} video") }
-        audio_codec?.trim()?.takeIf { it.isNotEmpty() }?.let { add("${it.uppercase()} audio") }
+        sourceAudioDescription?.let { add("$it audio") }
     }.takeIf { it.isNotEmpty() }?.joinToString(" · ")
+
+    val measuredSource: LiveTvSourceFormat? get() = source_format?.takeIf { it.valid }
+    val pictureClass: String? get() = measuredSource?.validVideoHeight?.let { height ->
+        when {
+            height > 2160 -> "4K+"
+            height == 2160 -> "4K"
+            height >= 720 -> "HD"
+            else -> "SD"
+        }
+    } ?: hd?.let { if (it) "HD" else "SD" }
+    val exactSourcePicture: String? get() {
+        val source = measuredSource ?: return pictureClass
+        val width = source.validVideoWidth ?: return pictureClass
+        val height = source.validVideoHeight ?: return pictureClass
+        val suffix = when (source.validScan) {
+            "progressive" -> "p"
+            "interlaced" -> "i"
+            else -> ""
+        }
+        return "$width×$height$suffix"
+    }
+    val sourceAudioDescription: String? get() {
+        val codec = audio_codec?.trim()?.uppercase()?.takeIf { it.isNotEmpty() }
+        val source = measuredSource
+        val layout = when (val raw = source?.validAudioLayout) {
+            "mono" -> "Mono"
+            "stereo" -> "Stereo"
+            null -> source?.validAudioChannels?.let { "$it ch" }
+            else -> raw
+        }
+        return listOfNotNull(codec, layout).takeIf { it.isNotEmpty() }?.joinToString(" ")
+    }
 }
 
 @Serializable
@@ -64,6 +178,7 @@ data class LiveTvSignal(
 @Serializable
 data class LiveTvStatus(
     val state: String,
+    val channel: LiveTvChannel? = null,
     val owner_node_id: String? = null,
     val encoder: String? = null,
     val output_height: Int? = null,
@@ -233,8 +348,16 @@ class LiveTvApi(origin: String, private val token: String) : LiveTvRequests {
      * `freshness: "unavailable"`, which the client draws rather than retries.
      * Its ceiling is the server's own response cap, not the lineup's.
      */
-    suspend fun guide(): LiveTvGuide = Net.json.decodeFromString(
-        request(url("live-tv", "guide"), authenticated = true, timeout = 20, maxBytes = MAX_GUIDE_BYTES),
+    suspend fun guide(from: Long? = null, hours: Int? = null): LiveTvGuide = Net.json.decodeFromString(
+        request(
+            url("live-tv", "guide").newBuilder().apply {
+                from?.let { addQueryParameter("from", it.toString()) }
+                hours?.let { addQueryParameter("hours", it.coerceIn(1, 72).toString()) }
+            }.build(),
+            authenticated = true,
+            timeout = 20,
+            maxBytes = MAX_GUIDE_BYTES,
+        ),
     )
 
     suspend fun settings(): LiveTvSettings = Net.json.decodeFromString(request(url("settings"), authenticated = true))

@@ -58,8 +58,28 @@ class LiveTvTest {
             "hd":true,"video_codec":"HEVC","audio_codec":"AC4"
         }""")
         assertEquals(listOf("HD", "HEVC", "AC4"), formatted.formatBadges)
-        assertEquals("HD source · HEVC video · AC4 audio", formatted.sourceFormatDescription)
+        assertEquals("HD · HEVC video · AC4 audio", formatted.sourceFormatDescription)
         assertTrue(channel.formatBadges.isEmpty())
+
+        val measured = LiveTvChannel(
+            id = "5.1", guide_number = "5.1", guide_name = "WXYZ",
+            hd = true, video_codec = "hevc", audio_codec = "ac3",
+            source_format = LiveTvSourceFormat(
+                video_width = 3840, video_height = 2160, scan = "progressive",
+                audio_channels = 6, audio_layout = "5.1", observed_at = 1_788_998_400,
+            ),
+        )
+        assertEquals(listOf("4K", "HEVC", "AC3 5.1"), measured.formatBadges)
+        assertEquals("3840×2160p · HEVC video · AC3 5.1 audio", measured.sourceFormatDescription)
+        val malformed = Net.json.decodeFromString<LiveTvChannel>("""{
+            "id":"9.1","guide_number":"9.1","guide_name":"Bad Optional",
+            "source_format":{"video_width":{},"video_height":1080,"scan":"wrong",
+            "audio_channels":2,"audio_layout":"stereo","observed_at":1788998400}
+        }""")
+        assertEquals(null, malformed.source_format?.validVideoWidth)
+        assertEquals(1080, malformed.source_format?.validVideoHeight)
+        assertEquals(null, malformed.source_format?.validScan)
+        assertEquals("stereo", malformed.source_format?.validAudioLayout)
 
         val status = Net.json.decodeFromString<LiveTvStatus>("""{
             "state":"active","encoder":"vaapi","output_height":720,

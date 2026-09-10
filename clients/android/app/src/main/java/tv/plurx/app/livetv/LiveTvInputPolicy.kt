@@ -5,12 +5,10 @@ package tv.plurx.app.livetv
  * `tests/playback/player-input-contract.json`.
  *
  * Live television is the finite player's contract with everything that assumes
- * a timeline removed and one thing added. There is nothing to seek, nothing to
- * scrub, no menu and no info panel; there is a channel. So this is a sibling of
+ * a timeline removed and one thing added. There is nothing to seek or scrub;
+ * guide, menu, programme-detail and Info panels are explicit states. This is a sibling of
  * [tv.plurx.app.player.PlayerInputPolicy] rather than more cases inside it — a
- * live stream can never enter `timeline`, `scrub`, `menu` or `info`, and a
- * reducer that claimed otherwise would be lying in the one place the clients
- * are tested against.
+ * live stream can never enter timeline or scrub states.
  */
 internal enum class LiveTvInputSurface(val contractName: String) {
     TenFoot("ten-foot"),
@@ -18,9 +16,13 @@ internal enum class LiveTvInputSurface(val contractName: String) {
 }
 
 internal enum class LiveTvInputState(val contractName: String) {
-    Hidden("hidden"),
-    Overlay("overlay"),
-    Page("page"),
+    Browser("browser"),
+    FullscreenHidden("fullscreen_hidden"),
+    FullscreenControls("fullscreen_controls"),
+    TemporaryGuide("temporary_guide"),
+    Menu("menu"),
+    ProgrammeDetails("programme_details"),
+    StreamInfo("stream_info"),
 }
 
 internal enum class LiveTvContractInput(val contractName: String) {
@@ -38,8 +40,13 @@ internal enum class LiveTvContractInput(val contractName: String) {
 internal enum class LiveTvInputOutcome(val contractName: String) {
     Reveal("reveal"),
     Hide("hide"),
-    FocusRow("focus_row"),
+    Delegate("delegate"),
+    FocusControl("focus_control"),
+    FocusCell("focus_cell"),
+    FocusPanel("focus_panel"),
     Activate("activate"),
+    ClosePanel("close_panel"),
+    ReturnBrowser("return_browser"),
     StripPrev("strip_prev"),
     StripNext("strip_next"),
     Tune("tune"),
@@ -81,7 +88,7 @@ internal object LiveTvInputPolicy {
         when (state) {
             // The 2026-09-02 ruling, unchanged: a direction on a hidden
             // overlay only reveals it. Nothing here changes channel.
-            LiveTvInputState.Hidden -> when (input) {
+            LiveTvInputState.FullscreenHidden -> when (input) {
                 LiveTvContractInput.Left,
                 LiveTvContractInput.Right,
                 LiveTvContractInput.Up,
@@ -89,41 +96,93 @@ internal object LiveTvInputPolicy {
                 LiveTvContractInput.Select,
                 LiveTvContractInput.TapSurface,
                 -> LiveTvInputOutcome.Reveal
-                LiveTvContractInput.Back -> LiveTvInputOutcome.Exit
+                LiveTvContractInput.Back -> LiveTvInputOutcome.ReturnBrowser
                 LiveTvContractInput.PlayPause -> LiveTvInputOutcome.TogglePlay
                 LiveTvContractInput.Idle -> LiveTvInputOutcome.Ignore
             }
             // Preview-then-commit: move focus, Select tunes, Back hides.
-            LiveTvInputState.Overlay -> when (input) {
+            LiveTvInputState.FullscreenControls -> when (input) {
                 LiveTvContractInput.Left,
                 LiveTvContractInput.Right,
                 LiveTvContractInput.Up,
                 LiveTvContractInput.Down,
-                -> LiveTvInputOutcome.FocusRow
+                -> LiveTvInputOutcome.FocusControl
                 LiveTvContractInput.Select -> LiveTvInputOutcome.Activate
                 LiveTvContractInput.Back, LiveTvContractInput.Idle -> LiveTvInputOutcome.Hide
                 LiveTvContractInput.PlayPause -> LiveTvInputOutcome.TogglePlay
                 LiveTvContractInput.TapSurface -> LiveTvInputOutcome.Ignore
             }
-            // A television never shows an inline player; the state exists only
-            // so the surfaces are one shape.
-            LiveTvInputState.Page -> LiveTvInputOutcome.Ignore
+            // Root browsing delegates ordinary focus and activation to
+            // Compose; this table owns only the explicit Back escape.
+            LiveTvInputState.Browser -> when (input) {
+                LiveTvContractInput.Left,
+                LiveTvContractInput.Right,
+                LiveTvContractInput.Up,
+                LiveTvContractInput.Down,
+                LiveTvContractInput.Select,
+                LiveTvContractInput.TapSurface,
+                -> LiveTvInputOutcome.Delegate
+                LiveTvContractInput.Back -> LiveTvInputOutcome.Exit
+                LiveTvContractInput.PlayPause, LiveTvContractInput.Idle -> LiveTvInputOutcome.Ignore
+            }
+            LiveTvInputState.TemporaryGuide -> when (input) {
+                LiveTvContractInput.Left,
+                LiveTvContractInput.Right,
+                LiveTvContractInput.Up,
+                LiveTvContractInput.Down,
+                -> LiveTvInputOutcome.FocusCell
+                LiveTvContractInput.Select -> LiveTvInputOutcome.Activate
+                LiveTvContractInput.Back -> LiveTvInputOutcome.ClosePanel
+                LiveTvContractInput.PlayPause -> LiveTvInputOutcome.TogglePlay
+                LiveTvContractInput.TapSurface, LiveTvContractInput.Idle -> LiveTvInputOutcome.Ignore
+            }
+            LiveTvInputState.Menu,
+            LiveTvInputState.ProgrammeDetails,
+            LiveTvInputState.StreamInfo,
+            -> when (input) {
+                LiveTvContractInput.Left,
+                LiveTvContractInput.Right,
+                LiveTvContractInput.Up,
+                LiveTvContractInput.Down,
+                -> LiveTvInputOutcome.FocusPanel
+                LiveTvContractInput.Select -> LiveTvInputOutcome.Activate
+                LiveTvContractInput.Back -> LiveTvInputOutcome.ClosePanel
+                LiveTvContractInput.PlayPause -> LiveTvInputOutcome.TogglePlay
+                LiveTvContractInput.TapSurface, LiveTvContractInput.Idle -> LiveTvInputOutcome.Ignore
+            }
         }
 
     private fun touch(state: LiveTvInputState, input: LiveTvContractInput): LiveTvInputOutcome =
         when (state) {
-            LiveTvInputState.Hidden -> when (input) {
+            LiveTvInputState.FullscreenHidden -> when (input) {
                 LiveTvContractInput.TapSurface -> LiveTvInputOutcome.ToggleChrome
                 LiveTvContractInput.Back -> LiveTvInputOutcome.Exit
                 else -> LiveTvInputOutcome.Ignore
             }
-            LiveTvInputState.Overlay -> when (input) {
+            LiveTvInputState.FullscreenControls -> when (input) {
                 LiveTvContractInput.TapSurface -> LiveTvInputOutcome.ToggleChrome
                 LiveTvContractInput.Select -> LiveTvInputOutcome.Activate
                 LiveTvContractInput.Back -> LiveTvInputOutcome.Exit
                 LiveTvContractInput.Idle -> LiveTvInputOutcome.Hide
                 else -> LiveTvInputOutcome.Ignore
             }
-            LiveTvInputState.Page -> LiveTvInputOutcome.Ignore
+            LiveTvInputState.Browser -> if (input == LiveTvContractInput.Back) {
+                LiveTvInputOutcome.Exit
+            } else {
+                LiveTvInputOutcome.Ignore
+            }
+            LiveTvInputState.TemporaryGuide -> when (input) {
+                LiveTvContractInput.Select -> LiveTvInputOutcome.Activate
+                LiveTvContractInput.Back -> LiveTvInputOutcome.ClosePanel
+                else -> LiveTvInputOutcome.Ignore
+            }
+            LiveTvInputState.Menu,
+            LiveTvInputState.ProgrammeDetails,
+            LiveTvInputState.StreamInfo,
+            -> when (input) {
+                LiveTvContractInput.Select -> LiveTvInputOutcome.Activate
+                LiveTvContractInput.Back, LiveTvContractInput.TapSurface -> LiveTvInputOutcome.ClosePanel
+                else -> LiveTvInputOutcome.Ignore
+            }
         }
 }
