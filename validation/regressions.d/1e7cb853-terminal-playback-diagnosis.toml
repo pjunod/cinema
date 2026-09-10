@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["1e7cb853"]
+points = ["playback.pipeline"]
+checks = ["web-static"]
+reason = "The shipped-source browser regression preserves the typed terminal server refusal through delayed stall diagnosis and proves the generic network probe cannot replace it with blocker advice."

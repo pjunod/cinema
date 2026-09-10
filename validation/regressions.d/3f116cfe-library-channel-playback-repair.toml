@@ -5,26 +5,3 @@ commits = ["3f116cfe"]
 points = ["playback.pipeline"]
 checks = ["rust-gate", "playback-recovery"]
 reason = "The retained production-constructor and fMP4 regressions require a promotion-dependent copy to install the actor's one native-HLS retry with hevc_mp4toannexb,extract_extradata intact, validate a realistic distinct-PPS multi-description init before first-media publication, and reject malformed initialization bytes."
-
-[[coverage]]
-commits = ["db958a0b"]
-points = ["playback.pipeline"]
-checks = ["rust-gate"]
-reason = "The retained probe comparison reproduces the six optional FFmpeg audio-report fields omitted for file 5310 while proving changed video geometry and stream identity still reject the held source."
-
-[[coverage]]
-commits = ["1e7cb853"]
-points = ["playback.pipeline"]
-checks = ["web-static"]
-reason = "The shipped-source browser regression preserves the typed terminal server refusal through delayed stall diagnosis and proves the generic network probe cannot replace it with blocker advice."
-
-[[coverage]]
-commits = ["3d16c662"]
-reason = "This commit records diagnostic evidence, implementation status, document indexing, and path ownership; it changes no runtime behavior."
-ignore = true
-
-[[coverage]]
-commits = ["35b9d4b4"]
-points = ["playback.pipeline"]
-checks = ["rust-gate", "playback-recovery"]
-reason = "Review-driven regressions require the first HEVC fragment's trex or tfhd description index to select a complete declared entry, reject a missing promised video track, use a second encoder-produced PPS, drive the actor from Unsupported to the exact frozen retry, and keep the measured probe omission exception on matching audio streams only."

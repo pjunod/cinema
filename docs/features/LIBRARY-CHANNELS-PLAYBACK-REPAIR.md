@@ -11,7 +11,7 @@ Library channels feature build. If the short route in §4 cannot deliver the
 required bytes, report that specific result at the one scope checkpoint;
 do not quietly turn this into a general MP4 engine rewrite.
 
-Companion to [the channel implementation plan](LIBRARY-CHANNELS-IMPLEMENTATION.md)
+Companion to [the channel status](LIBRARY-CHANNELS-STATUS.md)
 (the feature and its user contracts), [PLAYBACK.md](../PLAYBACK.md)
 (the shared delivery paths), [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md)
 (the current merge process), and [VALIDATION.md](../VALIDATION.md)

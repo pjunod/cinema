@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["3d16c662"]
+reason = "This commit records diagnostic evidence, implementation status, document indexing, and path ownership; it changes no runtime behavior."
+ignore = true
