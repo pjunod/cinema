@@ -1,7 +1,7 @@
 # Native Live TV layouts — implementation status and evidence
 
-**Status:** implementation complete · **Effort:**
-`effort/live-tv-native-layouts` · **Base:** Forgejo `main` at `7fabfbf2` ·
+**Status:** Apple TV navigation remediation in progress · **Fix:**
+`fix/apple-tv-live-focus` · **Base:** Forgejo `main` at `cb76cc8a` ·
 **Updated:** 2026-09-10
 
 Companion to
@@ -19,6 +19,22 @@ being built, and what remains unproved*.
 | Apple TV and iOS | verified | all three saved layouts, anchored/pinned guide, scoped input, compact schedule/grid, Apple build 130; iOS and tvOS compile green; 28 focused Live TV tests green on each platform | physical Siri Remote walkthrough remains unproved; promotion gate |
 | Google TV and Android | verified | all three saved layouts around one movable player, stable UTC-anchor D-pad navigation, false-on-delegate input, compact schedule/grid, Android build 79; Kotlin compile and 35 JVM checks green; real D-pad case green on Google TV Streamer | broader physical walkthrough remains unproved; promotion gate |
 | Integrated promotion to `main` | candidate finalized | Forgejo PR [#229](http://192.168.4.7:3000/noirr/plurx/pulls/229); exactly one Astra adversarial review of head `f5e67fe9`; all findings addressed; final focused pass green; no feature gates; full suites reserved for the separate sweep | the remote workflow still launched the legacy full qualification on a ready effort PR, so that run was canceled; the candidate adds the required label-triggered compile-only lane before obtaining its current-head verdict |
+
+## Apple TV navigation follow-up — one focus owner per press
+
+Forgejo issue
+[#235](http://192.168.4.7:3000/noirr/plurx/issues/235) tracks a physical
+Apple TV regression reported after build 130 shipped. Rapid Siri Remote moves
+can be overwritten by the guide's asynchronous restore pass, and moving above
+the first guide row can leave both the grid and toolbar claiming focus. The
+default tvOS button tint also paints the More and Layout sheet labels and
+their backgrounds the same red, which makes inactive actions unreadable.
+
+The correction will restore guide focus only when guide content changes,
+clear the grid's claim before handing focus to the toolbar, use a native
+focus-scrolling list for On now, and give every Live TV television action an
+explicit foreground/background pair. Compilation and one focused regression
+pass will be recorded here before the fix is promoted.
 
 ## Contract — presentation moves, playback does not
 
