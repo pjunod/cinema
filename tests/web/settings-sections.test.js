@@ -631,6 +631,7 @@ test("Verified decode states its cost, its prerequisites, and what this node mea
   // prerequisites are advice, not a disabled switch.
   assert.match(bare, /No measured path can produce a verified artifact today/);
   assert.match(bare, /Readiness checks are advisory and never disable this control/);
+  assert.match(bare, /drop every frame of a file and still exit successfully/);
   assert.doesNotMatch(bare, /This node can honour the request/);
   assert.match(bare, /evidence of a clean decode before reusing transcodes/);
   assert.match(bare, /<details class="setdetails"><summary>Cache impact and diagnostic evidence/);

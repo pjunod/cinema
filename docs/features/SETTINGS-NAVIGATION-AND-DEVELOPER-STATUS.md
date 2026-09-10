@@ -1,6 +1,6 @@
 # Settings navigation and Developer — implementation status
 
-**Status:** review addressed; fast lane pending · **Owner:** Codex implementation task · **Started:**
+**Status:** review addressed; promotion gate required · **Owner:** Codex implementation task · **Started:**
 2026-09-09
 
 Companion to [FEATURES.md](../FEATURES.md) (current settings behavior),
@@ -20,13 +20,14 @@ the settings navigation and Developer-page redesign.
 | Current-reference documentation | complete | `FEATURES.md` names each control owner and advisory semantics · `API.md` names all three readiness consumers and the moved fencing action |
 | Actual-app visual evidence | complete | Isolated daemon at `127.0.0.1:32419` · 1280, 880, 390, and 320 CSS px · light and dark · 640 CSS px as the 200% responsive equivalent · expanded readiness on desktop and phone |
 | Adversarial review | complete | The one permitted review reported five findings; all five are addressed on the draft branch without a re-review |
-| Fast lane | queued | Runs only after review findings are addressed and the PR is marked ready |
-| Merge to `main` | queued | Requires a green Main promotion gate on the current head |
+| Fast lane | required | PR #228 is the authoritative record for current-head attempts and corrections; runs begin only after the one review is addressed |
+| Merge to `main` | required | Requires a green Main promotion gate on the current head |
 
-No unit, integration, browser, simulator, emulator, recovery, playback,
-package, or smoke suite has run for this branch. The main-bound workflow
-deliberately defers those suites; the current fast lane runs once, after the
-single adversarial review is addressed.
+No separate unit, integration, browser, simulator, emulator, recovery,
+playback, package, or smoke suite has run for this branch. The main-bound
+workflow deliberately defers those suites; fast-lane attempts and any
+current-head corrections begin only after the single adversarial review is
+addressed.
 
 ## Actual-app evidence
 
