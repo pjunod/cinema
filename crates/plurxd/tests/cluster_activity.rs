@@ -739,11 +739,12 @@ async fn node_a_coalesces_activity_reads_and_reports_peer_failures_truthfully() 
     // waiting on node B alone makes scheduler timing decide the test verdict.
     wait_for_fragment_index(&mut node_a, &mut node_b).await;
 
-    // The joined voter has proved its replicated file row and index, but its
-    // short-lived serving fence may still be refreshing after quorum startup.
-    // That explicit refusal is correct product behavior, so wait for the
-    // prerequisite instead of making scheduler timing decide this transport
-    // test. Any other response still fails immediately.
+    // The joined voter has proved the cluster's replicated file row and index,
+    // but its local state machine may still be applying the bootstrap snapshot
+    // and its short-lived serving fence may still be refreshing after quorum
+    // startup. Those two explicit refusals are transient startup behavior, so
+    // wait for the prerequisite instead of making scheduler timing decide this
+    // transport test. Any other response still fails immediately.
     let hls_deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let hls = client
@@ -761,10 +762,11 @@ async fn node_a_coalesces_activity_reads_and_reports_peer_failures_truthfully() 
         if hls_status.is_success() {
             break;
         }
-        let waiting_for_authority = hls_status == StatusCode::SERVICE_UNAVAILABLE
-            && hls_body.contains("local media worker has no serving authority");
+        let waiting_for_replica = hls_status == StatusCode::SERVICE_UNAVAILABLE
+            && (hls_body.contains("local media worker has no serving authority")
+                || hls_body.contains("session ownership could not be prepared"));
         assert!(
-            waiting_for_authority && Instant::now() < hls_deadline,
+            waiting_for_replica && Instant::now() < hls_deadline,
             "HLS start failed: {hls_status}: {hls_body}\nnode A log:\n{}\nnode B log:\n{}",
             node_a.diagnostics(),
             node_b.diagnostics(),
