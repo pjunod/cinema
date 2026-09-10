@@ -25696,23 +25696,43 @@ mod tests {
             ProducerExitClassifier::Immediate,
             "the fallback attempt must use its frozen recipe classifier"
         );
-        assert_eq!(
-            unsupported.classify_copy_producer_exit_at(
-                classified_at + Duration::from_nanos(2),
-                1,
-                CopyProducerExitClassification::Completed,
-            ),
-            Err(ProducerAttemptRejection::StaleAttempt)
-        );
+        assert_eq!(unsupported.decision_applied_at(1, Some(2)), Ok(()));
         assert_eq!(
             unsupported.classify_copy_producer_exit_at(
                 classified_at + Duration::from_nanos(2),
                 2,
-                CopyProducerExitClassification::Completed,
+                CopyProducerExitClassification::Unsupported,
             ),
-            Err(ProducerAttemptRejection::ClassifierMismatch)
+            Err(ProducerAttemptRejection::ClassifierMismatch),
+            "the legacy retry cannot mint another copy-reader retry"
         );
-
+        let retry_exit_at = classified_at + Duration::from_nanos(3);
+        assert_eq!(
+            unsupported.observe_producer_exit_at(
+                retry_exit_at,
+                RollingProducerExitObservation {
+                    producer_attempt: 2,
+                    success: false,
+                    code: Some(1),
+                    signal: None,
+                    observed_at: retry_exit_at,
+                },
+            ),
+            ProducerExitAcceptance::Accepted
+        );
+        assert!(matches!(
+            unsupported.pending_decision.as_deref(),
+            Some(ProducerDecision::Fail {
+                decision_sequence: 2,
+                failed_attempt: 2,
+                reason: ProducerDecisionReason::ProcessExit,
+                ..
+            })
+        ));
+        assert_eq!(
+            unsupported.admit_producer_retry_at(retry_exit_at, 2, "recipe-copy-retry"),
+            Err(ProducerAttemptRejection::RetryUnavailable)
+        );
         for (classification, reason) in [
             (
                 CopyProducerExitClassification::InvalidConfiguration,

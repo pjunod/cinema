@@ -37,7 +37,7 @@ use std::ops::Range;
 
 /// What went wrong reading someone else's bytes.
 ///
-/// Split two ways on purpose: [`Fmp4Error::Malformed`] means the stream is not
+/// Split on purpose: [`Fmp4Error::Malformed`] means the stream is not
 /// what it claims to be, [`Fmp4Error::Unsupported`] means it is legal MP4 that
 /// this reader deliberately does not handle (an explicit `base_data_offset`,
 /// say — ffmpeg only writes one without `default_base_moof`, which plurx
@@ -53,6 +53,24 @@ pub enum Fmp4Error {
     /// Legal MP4 this reader does not implement.
     #[error("unsupported fMP4: {0}")]
     Unsupported(String),
+    /// A legal HEVC track has more than one sample description. Mutating
+    /// operations cannot choose one, but callers may independently validate
+    /// every description before selecting a non-mutating fallback.
+    #[error(
+        "unsupported fMP4: this stsd has {count} HEVC sample entries; plurx describes one video configuration per track and cannot say which one it means"
+    )]
+    MultipleHevcSampleEntries { count: usize },
+}
+
+/// The validated HEVC sample-description shape carried by an initialization
+/// segment. Every reported description has already had its decoder
+/// configuration checked; this is therefore safe policy input rather than an
+/// inference from a parser error string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HevcSampleEntryLayout {
+    NotHevc,
+    Single,
+    Multiple { count: usize },
 }
 
 fn malformed<T>(msg: impl Into<String>) -> Result<T, Fmp4Error> {
@@ -2077,11 +2095,20 @@ pub fn hevc_parameter_sets_complete(init: &Init) -> Result<bool, Fmp4Error> {
     if video.codec != Some(VideoCodec::Hevc) {
         return Ok(false);
     }
-    let Some(location) = locate_hvcc(&init.bytes)? else {
+    let locations = locate_hevc_sample_entries(&init.bytes)?;
+    if locations.is_empty() {
         return Ok(false);
-    };
-    let present = hvcc_nal_array_types(&init.bytes[location.payload])?;
-    Ok((32u8..=34).all(|kind| present.contains(&kind)))
+    }
+    for location in locations {
+        let Some(location) = location else {
+            return Ok(false);
+        };
+        let present = hvcc_nal_array_types(&init.bytes[location.payload])?;
+        if !(32u8..=34).all(|kind| present.contains(&kind)) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Validate the decoder configuration promised by an HEVC sample entry.
@@ -2092,29 +2119,45 @@ pub fn hevc_parameter_sets_complete(init: &Init) -> Result<bool, Fmp4Error> {
 /// init is not publishable until hvcC contains VPS, SPS, and PPS. This ruling
 /// comes from the emitted init itself rather than probe metadata, which may be
 /// absent or stale.
-pub fn validate_hevc_decoder_configuration(init: &Init) -> Result<(), Fmp4Error> {
+pub fn validate_hevc_sample_entries(init: &Init) -> Result<HevcSampleEntryLayout, Fmp4Error> {
     let Some(video) = init.video() else {
-        return Ok(());
+        return Ok(HevcSampleEntryLayout::NotHevc);
     };
     if video.codec != Some(VideoCodec::Hevc) {
-        return Ok(());
+        return Ok(HevcSampleEntryLayout::NotHevc);
     }
-    let Some(location) = locate_hvcc(&init.bytes)? else {
+    let locations = locate_hevc_sample_entries(&init.bytes)?;
+    if locations.is_empty() {
         return Err(Fmp4Error::Unsupported(
             "the HEVC video sample entry has no hvcC box".into(),
         ));
-    };
-    if location.parameter_sets_in_band {
-        return Ok(());
     }
-    let present = hvcc_nal_array_types(&init.bytes[location.payload])?;
-    if (32u8..=34).all(|kind| present.contains(&kind)) {
-        Ok(())
+    let count = locations.len();
+    for location in locations {
+        let Some(location) = location else {
+            return Err(Fmp4Error::Unsupported(
+                "an HEVC video sample entry has no hvcC box".into(),
+            ));
+        };
+        if location.parameter_sets_in_band {
+            continue;
+        }
+        let present = hvcc_nal_array_types(&init.bytes[location.payload])?;
+        if !(32u8..=34).all(|kind| present.contains(&kind)) {
+            return Err(Fmp4Error::Unsupported(
+                "an out-of-band HEVC decoder configuration has no complete VPS/SPS/PPS set".into(),
+            ));
+        }
+    }
+    if count == 1 {
+        Ok(HevcSampleEntryLayout::Single)
     } else {
-        Err(Fmp4Error::Unsupported(
-            "the out-of-band HEVC decoder configuration has no complete VPS/SPS/PPS set".into(),
-        ))
+        Ok(HevcSampleEntryLayout::Multiple { count })
     }
+}
+
+pub fn validate_hevc_decoder_configuration(init: &Init) -> Result<(), Fmp4Error> {
+    validate_hevc_sample_entries(init).map(|_| ())
 }
 
 fn hevc_parameter_set_nals(sample: &[u8], length_size: u8) -> Vec<&[u8]> {
@@ -2430,9 +2473,10 @@ struct HvcCLocation {
     ancestors: Vec<BoxAt>,
 }
 
-fn locate_hvcc(bytes: &[u8]) -> Result<Option<HvcCLocation>, Fmp4Error> {
+fn locate_hevc_sample_entries(bytes: &[u8]) -> Result<Vec<Option<HvcCLocation>>, Fmp4Error> {
+    let mut locations = Vec::new();
     let Some((moov_at, moov)) = find_child(bytes, 0..bytes.len(), b"moov")? else {
-        return Ok(None);
+        return Ok(locations);
     };
     let moov_body = moov_at.start + moov.header_len..moov_at.start + moov.size;
     for (trak_at, trak) in find_children(bytes, moov_body, b"trak")? {
@@ -2457,27 +2501,15 @@ fn locate_hvcc(bytes: &[u8]) -> Result<Option<HvcCLocation>, Fmp4Error> {
         if entries_start > entries_end {
             return malformed("stsd too short while locating hvcC");
         }
-        // Every HEVC sample entry in this stsd, and there must be exactly one.
-        //
-        // This used to return the first match, which was harmless while the
-        // only caller read. It is not harmless for a writer: a second entry
-        // would silently receive nothing, while `Track::dolby_vision_config`
-        // is an OR over all of them — so the init would claim a record that
-        // one of its entries does not carry. Refusing is honest, and no
-        // encoder in the corpus produces a multi-entry stsd.
+        // Keep every HEVC description. Mutators deliberately reject more than
+        // one below; validation must inspect every description before the
+        // multi-entry shape may authorize a non-mutating fallback.
         let hevc_entries: Vec<_> = find_children(bytes, entries_start..entries_end, b"hvc1")?
             .into_iter()
             .chain(find_children(bytes, entries_start..entries_end, b"hev1")?)
             .chain(find_children(bytes, entries_start..entries_end, b"dvh1")?)
             .chain(find_children(bytes, entries_start..entries_end, b"dvhe")?)
             .collect();
-        if hevc_entries.len() > 1 {
-            return Err(Fmp4Error::Unsupported(format!(
-                "this stsd has {} HEVC sample entries; plurx describes one video \
-                 configuration per track and cannot say which one it means",
-                hevc_entries.len()
-            )));
-        }
         for (entry_at, entry) in hevc_entries {
             let extra_start = entry_at.start + entry.header_len + 78;
             let extra_end = entry_at.start + entry.size;
@@ -2485,13 +2517,14 @@ fn locate_hvcc(bytes: &[u8]) -> Result<Option<HvcCLocation>, Fmp4Error> {
                 return malformed("visual sample entry too short while locating hvcC");
             }
             let Some((hvcc_at, hvcc)) = find_child(bytes, extra_start..extra_end, b"hvcC")? else {
+                locations.push(None);
                 continue;
             };
             let payload = hvcc_at.start + hvcc.header_len..hvcc_at.start + hvcc.size;
             if payload.len() < 23 {
                 return malformed("hvcC too short for its NAL arrays");
             }
-            return Ok(Some(HvcCLocation {
+            locations.push(Some(HvcCLocation {
                 payload,
                 sample_entry_end: extra_end,
                 parameter_sets_in_band: matches!(entry.kind(), b"hev1" | b"dvhe"),
@@ -2517,7 +2550,42 @@ fn locate_hvcc(bytes: &[u8]) -> Result<Option<HvcCLocation>, Fmp4Error> {
             }));
         }
     }
-    Ok(None)
+    Ok(locations)
+}
+
+fn locate_hvcc(bytes: &[u8]) -> Result<Option<HvcCLocation>, Fmp4Error> {
+    let mut locations = locate_hevc_sample_entries(bytes)?;
+    if locations.len() > 1 {
+        return Err(Fmp4Error::MultipleHevcSampleEntries {
+            count: locations.len(),
+        });
+    }
+    Ok(locations.pop().flatten())
+}
+
+#[cfg(any(test, feature = "fixtures"))]
+pub(crate) fn duplicate_hevc_sample_entry_for_fixture(init: &mut Init) {
+    let location = locate_hvcc(&init.bytes)
+        .expect("locating the original hvcC")
+        .expect("HEVC sample entry");
+    let entry = location.ancestors[1];
+    let stsd = location.ancestors[2];
+    let entry_size = peek_box(&init.bytes, entry.start)
+        .expect("reading the HEVC sample entry")
+        .expect("complete HEVC sample entry")
+        .size;
+    let entry_end = entry.start + entry_size;
+    let duplicate = init.bytes[entry.start..entry_end].to_vec();
+    let delta = duplicate.len();
+    init.bytes.splice(entry_end..entry_end, duplicate);
+
+    let entry_count_at = stsd.start + stsd.header_len + 4;
+    let entry_count = be_u32(&init.bytes, entry_count_at);
+    init.bytes[entry_count_at..entry_count_at + 4]
+        .copy_from_slice(&(entry_count + 1).to_be_bytes());
+    for &ancestor in &location.ancestors[2..] {
+        grow_box(&mut init.bytes, ancestor, delta).expect("growing sample-entry ancestors");
+    }
 }
 
 fn find_child(
@@ -4679,6 +4747,10 @@ mod tests {
         init
     }
 
+    fn duplicate_hevc_sample_entry(init: &mut Init) {
+        duplicate_hevc_sample_entry_for_fixture(init);
+    }
+
     /// The two Dolby Vision configuration records ffmpeg itself wrote, captured
     /// from nuc4 on 2026-08-30 (`docs/streaming/PLAYBACK-CAPS-V2-M0.md` §8).
     ///
@@ -5993,6 +6065,34 @@ mod tests {
         assert!(!hevc_parameter_sets_complete(&init).expect("reading hvcC"));
         let error = validate_hevc_decoder_configuration(&init)
             .expect_err("an incomplete out-of-band hvcC is not publishable");
+        assert!(
+            error.to_string().contains("complete VPS/SPS/PPS"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn complete_multi_entry_hevc_is_a_typed_validated_structural_refusal() {
+        let feed = pipe("open-gop");
+        let (mut init, fragments, _) = read_all(&feed);
+        duplicate_hevc_sample_entry(&mut init);
+
+        let promotion = promote_hevc_parameter_sets(&mut init, &fragments[0])
+            .expect_err("the writer cannot choose one of two sample descriptions");
+        assert_eq!(promotion, Fmp4Error::MultipleHevcSampleEntries { count: 2 });
+        assert_eq!(
+            validate_hevc_sample_entries(&init).expect("both descriptions are decoder-valid"),
+            HevcSampleEntryLayout::Multiple { count: 2 }
+        );
+        assert!(promotion.to_string().contains("2 HEVC sample entries"));
+    }
+
+    #[test]
+    fn incomplete_multi_entry_hevc_configuration_remains_terminal() {
+        let mut init = minimal_hvcc_dv_init();
+        duplicate_hevc_sample_entry(&mut init);
+        let error = validate_hevc_sample_entries(&init)
+            .expect_err("each out-of-band description is incomplete");
         assert!(
             error.to_string().contains("complete VPS/SPS/PPS"),
             "{error}"

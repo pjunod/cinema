@@ -1,8 +1,9 @@
 # Library channels status — what is built and what remains
 
-**Status:** shipped on `main`; production collection-route correction
-implemented in source and tracked by [#233](http://192.168.4.7:3000/noirr/plurx/issues/233)
-· **Updated:** 2026-09-10 · **Correction base:** `cb76cc8a`
+**Status:** shipped on `main`; collection-route correction merged as
+`29d97094`; production playback correction tracked by
+[#237](http://192.168.4.7:3000/noirr/plurx/issues/237)
+· **Updated:** 2026-09-10 · **Playback correction base:** `9e29429e`
 
 Companion to [FEATURES.md](../FEATURES.md) (what Plurx supports),
 [PLAYBACK.md](../PLAYBACK.md) (finite-media delivery), and
@@ -21,7 +22,8 @@ proved, and what remains?*
 | M4 Apple | built; iOS and tvOS compile passed | native paginated guide, three persisted tvOS layouts, iPhone/iPad resumable preview/authoring from navigation or title detail, finite playback control, server-monotonic following, and ordinary watch-from-start/return; build 132 |
 | M5 Android | built; Android APK compile passed | native paginated guide, phone/tablet resumable authoring from navigation or title detail, three Google TV layouts, finite playback control, server-monotonic following, and ordinary watch-from-start/return; versionCode 81 |
 | M6 promotion | complete | PR #231 merged as `cb76cc8a` after exactly one adversarial review and a green current-head Main promotion gate |
-| M7 production collection route | single review addressed; fast lane aligning merged-subrouter inventory; promotion state is linked from issue #233 | deployed clients request `/api/v1/library-channels/`, which Axum 0.8 returns as 404 while the canonical no-slash collection route authenticates normally; the Store schema and list query are healthy; server compatibility plus corrected web, Apple build 133, and Android versionCode 82 are in the candidate; the review findings and corrective-evidence mappings are addressed; both collection spellings are explicit top-level routes and the API inventory now expands named merged subrouters as well as nested ones |
+| M7 production collection route | complete | PR #234 merged as `29d97094` after one adversarial review and a green exact-head Main promotion gate; all clients use the canonical collection route, the server accepts both rollout spellings, and Apple build 133 / Android versionCode 82 carry the correction |
+| M8 multi-entry HEVC playback | diagnosed; correction in progress at issue #237 | production session `s-99a265…` on nynuc proved ffmpeg can emit two legal `hvc1` sample descriptions after a mid-title channel seek; the copy reader currently calls that unsupported container shape an invalid decoder configuration instead of using its bounded prepublication legacy-HLS retry |
 
 ## Production correction — route failure, not Store failure
 
@@ -46,6 +48,23 @@ an untyped 404 as a missing route, and a router-level regression constructs the
 complete application and exercises both spellings with unauthenticated and
 authenticated GETs, rejected creates, the 64 KiB body ceiling, and
 `private, no-store` responses.
+
+## Production correction — legal multi-entry HEVC init
+
+The first successful production authoring pass exposed a separate playback
+failure. A channel occurrence for file 5310 resolved and created its finite
+session, but the owning worker returned `InvalidConfiguration` before the
+playlist could publish. The worker log and an exact two-second reproduction
+showed why: ffmpeg's seeked fragmented-MP4 output declared two legal `hvc1`
+sample descriptions in the video track's `stsd`.
+
+The GOP-aware copy reader intentionally does not mutate a track when it cannot
+identify one decoder description. That is an unsupported container shape, not
+proof that either description is invalid. The correction keeps an identical
+structural refusal from promotion and validation in the existing one-shot
+prepublication legacy-HLS fallback. A distinct validation failure—such as an
+out-of-band `hvc1` entry with incomplete VPS/SPS/PPS—remains terminal. This
+changes no enablement, authorization, scheduling, or retry-count rule.
 
 ## Current decision — the merged Live TV guide is the UI seam
 

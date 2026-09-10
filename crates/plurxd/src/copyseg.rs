@@ -120,6 +120,43 @@ pub enum Outcome {
     Cancelled(SegmentCounts),
 }
 
+/// Turn a failed HEVC-init promotion into the copy reader's policy-bearing
+/// outcome.
+///
+/// A multi-entry `stsd` is fallback-safe only when validation has independently
+/// inspected every description and proved its decoder configuration complete.
+/// The typed layout prevents a matching parser error string from standing in
+/// for that proof. Any missing or incomplete hvcC remains terminal.
+fn hevc_promotion_failure(
+    promotion: fmp4::Fmp4Error,
+    validation: Result<fmp4::HevcSampleEntryLayout, fmp4::Fmp4Error>,
+) -> Outcome {
+    let reason = format!("preparing the HLS init segment: {promotion}");
+    if matches!(
+        &promotion,
+        fmp4::Fmp4Error::MultipleHevcSampleEntries { .. }
+    ) && matches!(
+        &validation,
+        Ok(fmp4::HevcSampleEntryLayout::Multiple { .. })
+    ) {
+        return Outcome::Unsupported(reason);
+    }
+    match validation {
+        Ok(_) => match promotion {
+            fmp4::Fmp4Error::Unsupported(_) | fmp4::Fmp4Error::MultipleHevcSampleEntries { .. } => {
+                Outcome::Unsupported(reason)
+            }
+            fmp4::Fmp4Error::Malformed(_) => Outcome::ReaderFailed {
+                reason,
+                counts: SegmentCounts::default(),
+            },
+        },
+        Err(configuration) => {
+            Outcome::InvalidHevcConfiguration(format!("{reason}; {configuration}"))
+        }
+    }
+}
+
 /// Everything a session writes, and the playlist it keeps in step.
 ///
 /// The playlist is rewritten whole on every segment rather than appended to,
@@ -336,6 +373,9 @@ pub async fn run<R: AsyncRead + Unpin>(
                     // RetainPublished from its ordered response state.
                     return match e {
                         fmp4::Fmp4Error::Unsupported(reason) => Outcome::Unsupported(reason),
+                        error @ fmp4::Fmp4Error::MultipleHevcSampleEntries { .. } => {
+                            Outcome::Unsupported(error.to_string())
+                        }
                         fmp4::Fmp4Error::Malformed(reason) => Outcome::ReaderFailed {
                             reason: format!("parsing the fragmented MP4 stream: {reason}"),
                             counts: segmenter
@@ -490,22 +530,25 @@ pub async fn run<R: AsyncRead + Unpin>(
                                 "promoted in-band HEVC parameter sets into the HLS init segment"
                             ),
                             Ok(false) => {}
-                            Err(e) => {
-                                let reason = format!("preparing the HLS init segment: {e}");
-                                return match fmp4::validate_hevc_decoder_configuration(&init) {
-                                    Ok(()) => match e {
-                                        fmp4::Fmp4Error::Unsupported(_) => {
-                                            Outcome::Unsupported(reason)
-                                        }
-                                        fmp4::Fmp4Error::Malformed(_) => Outcome::ReaderFailed {
-                                            reason,
-                                            counts: SegmentCounts::default(),
-                                        },
-                                    },
-                                    Err(configuration) => Outcome::InvalidHevcConfiguration(
-                                        format!("{reason}; {configuration}"),
-                                    ),
-                                };
+                            Err(error) => {
+                                return hevc_promotion_failure(
+                                    error,
+                                    fmp4::validate_hevc_sample_entries(&init),
+                                );
+                            }
+                        }
+                        match fmp4::validate_hevc_sample_entries(&init) {
+                            Ok(fmp4::HevcSampleEntryLayout::Multiple { count }) => {
+                                return Outcome::Unsupported(format!(
+                                    "preparing the HLS init segment: {}",
+                                    fmp4::Fmp4Error::MultipleHevcSampleEntries { count }
+                                ));
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                return Outcome::InvalidHevcConfiguration(format!(
+                                    "validating the HEVC decoder configuration: {error}"
+                                ));
                             }
                         }
                         match fmp4::promote_hdr10_static_metadata(&mut init, &fragment) {
@@ -517,6 +560,11 @@ pub async fn run<R: AsyncRead + Unpin>(
                             Err(fmp4::Fmp4Error::Unsupported(reason)) => {
                                 return Outcome::Unsupported(format!(
                                     "preparing the HLS init segment: {reason}"
+                                ));
+                            }
+                            Err(error @ fmp4::Fmp4Error::MultipleHevcSampleEntries { .. }) => {
+                                return Outcome::Unsupported(format!(
+                                    "preparing the HLS init segment: {error}"
                                 ));
                             }
                             Err(fmp4::Fmp4Error::Malformed(reason)) => {
@@ -582,6 +630,9 @@ pub async fn run<R: AsyncRead + Unpin>(
                             return match e {
                                 fmp4::Fmp4Error::Unsupported(reason) => {
                                     Outcome::Unsupported(reason)
+                                }
+                                error @ fmp4::Fmp4Error::MultipleHevcSampleEntries { .. } => {
+                                    Outcome::Unsupported(error.to_string())
                                 }
                                 fmp4::Fmp4Error::Malformed(reason) => Outcome::ReaderFailed {
                                     reason: format!("merging a fragmented MP4 segment: {reason}"),
@@ -691,6 +742,9 @@ async fn finish(
             }
             Err(fmp4::Fmp4Error::Unsupported(reason)) => {
                 return Outcome::Unsupported(reason);
+            }
+            Err(error @ fmp4::Fmp4Error::MultipleHevcSampleEntries { .. }) => {
+                return Outcome::Unsupported(error.to_string());
             }
             Err(fmp4::Fmp4Error::Malformed(reason)) => {
                 return Outcome::ReaderFailed {
@@ -842,6 +896,24 @@ mod tests {
         )
         .await;
         (dir, outcome)
+    }
+
+    #[test]
+    fn shared_structural_hevc_refusal_uses_the_bounded_legacy_retry() {
+        let outcome = hevc_promotion_failure(
+            fmp4::Fmp4Error::MultipleHevcSampleEntries { count: 2 },
+            Ok(fmp4::HevcSampleEntryLayout::Multiple { count: 2 }),
+        );
+        assert!(matches!(outcome, Outcome::Unsupported(_)));
+
+        let invalid = fmp4::Fmp4Error::Unsupported(
+            "the out-of-band HEVC decoder configuration has no complete VPS/SPS/PPS set".into(),
+        );
+        let outcome = hevc_promotion_failure(
+            fmp4::Fmp4Error::MultipleHevcSampleEntries { count: 2 },
+            Err(invalid),
+        );
+        assert!(matches!(outcome, Outcome::InvalidHevcConfiguration(_)));
     }
 
     fn replace_hvcc_array_type(bytes: &mut [u8], from: u8, to: u8) {
@@ -1242,6 +1314,27 @@ mod tests {
             panic!("an incomplete emitted hvcC was not terminal: {outcome:?}");
         };
         assert!(reason.contains("complete VPS/SPS/PPS"), "{reason}");
+        assert!(!dir.path().join("init.mp4").exists());
+        assert!(!dir.path().join("index.m3u8").exists());
+    }
+
+    #[tokio::test]
+    async fn validated_multi_entry_hevc_feed_requests_fallback_before_publication() {
+        let feed = plurx_core::testfixtures::pipe_with_duplicate_hevc_sample_entry("closed-gop");
+        let dir = crate::test_tempdir().expect("tempdir");
+        let outcome = run(
+            &feed[..],
+            dir.path().to_path_buf(),
+            "test",
+            brisk(),
+            &plain().0,
+            plain().1,
+        )
+        .await;
+        let Outcome::Unsupported(reason) = outcome else {
+            panic!("a validated multi-entry init did not request fallback: {outcome:?}");
+        };
+        assert!(reason.contains("2 HEVC sample entries"), "{reason}");
         assert!(!dir.path().join("init.mp4").exists());
         assert!(!dir.path().join("index.m3u8").exists());
     }

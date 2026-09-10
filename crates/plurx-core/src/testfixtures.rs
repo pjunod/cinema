@@ -252,6 +252,24 @@ pub fn pipe(kind: &str) -> Vec<u8> {
     generated.unwrap_or_else(|| std::fs::read(&out).expect("reading the cached pipe output"))
 }
 
+/// The production pipe with a second, decoder-valid HEVC sample description
+/// in its video `stsd`. The media fragments are unchanged; only the init is
+/// expanded, matching the legal container shape seen in production.
+pub fn pipe_with_duplicate_hevc_sample_entry(kind: &str) -> Vec<u8> {
+    let feed = pipe(kind);
+    let mut reader = crate::fmp4::FragmentReader::new();
+    reader.push(&feed);
+    let Some(crate::fmp4::Unit::Init(mut init)) = reader.next_unit().expect("parsing fixture")
+    else {
+        panic!("the pipe fixture must open with an initialization segment");
+    };
+    let original_init_len = init.bytes.len();
+    crate::fmp4::duplicate_hevc_sample_entry_for_fixture(&mut init);
+    let mut expanded = init.bytes;
+    expanded.extend_from_slice(&feed[original_init_len..]);
+    expanded
+}
+
 /// Where [`pipe`] caches its output, for tests that hand the path to ffprobe.
 pub fn pipe_path(kind: &str) -> PathBuf {
     // Keep the cache key tied to the authored timeline. Older fixture files
