@@ -154,6 +154,62 @@ pub struct SqliteTransactionSite {
 /// boundaries here makes their port shape reviewable beside the CAS primitive.
 pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
     SqliteTransactionSite {
+        module: "library_channels.rs",
+        method: "create_library_channel",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "library_channels.rs",
+        method: "update_library_channel",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "library_channels.rs",
+        method: "delete_library_channel",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "library_channels.rs",
+        method: "prune_library_channel_state",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::VerbatimBatch,
+    },
+    SqliteTransactionSite {
+        module: "library_channels.rs",
+        method: "claim_library_channel_build",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "library_channels.rs",
+        method: "stage_library_channel_entries",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadExpandWrite,
+    },
+    SqliteTransactionSite {
+        module: "library_channels.rs",
+        method: "publish_library_channel_generation",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "library_channels.rs",
+        method: "fail_library_channel_build",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BranchOnRowsAffected,
+    },
+    SqliteTransactionSite {
         module: "mod.rs",
         method: "put_settings",
         is_async: true,
@@ -810,6 +866,10 @@ mod tests {
             include_str!("sqlite/fragment_index_cluster.rs"),
         ),
         ("library.rs", include_str!("sqlite/library.rs")),
+        (
+            "library_channels.rs",
+            include_str!("sqlite/library_channels.rs"),
+        ),
         ("media.rs", include_str!("sqlite/media.rs")),
         ("mod.rs", include_str!("sqlite/mod.rs")),
         ("offline.rs", include_str!("sqlite/offline.rs")),
@@ -927,7 +987,7 @@ mod tests {
         methods.sort_unstable();
         methods.dedup();
         assert_eq!(methods.len(), original_len);
-        // 72 on the merge. Both parents moved this counter from a shared 66
+        // 80 on the merge. Both parents moved this counter from a shared 66
         // and neither parent's total describes the merged tree, so it is read
         // off the merge rather than added up — but every boundary each of them
         // classified is retained, and the arithmetic happens to agree:
@@ -950,7 +1010,7 @@ mod tests {
         // transaction boundary has to be a deliberate edit here. That is the
         // point of the assertion: two of the sites above reached main without
         // one.
-        assert_eq!(methods.len(), 72);
+        assert_eq!(methods.len(), 80);
     }
 
     #[test]

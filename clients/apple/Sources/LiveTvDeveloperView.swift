@@ -8,6 +8,7 @@ struct LiveTvDeveloperView: View {
     @State private var api: LiveTvAPI?
     @State private var saved: LiveTvSettings?
     @State private var readiness: LiveTvReadiness?
+    @State private var developerReadiness: DeveloperReadiness?
     @State private var ipv4 = ""
     @State private var owner = ""
     @State private var sessions = 2
@@ -38,6 +39,22 @@ struct LiveTvDeveloperView: View {
                 Label("Current playback throughput: Checked during playback", systemImage: "questionmark.circle")
                 Text("A live session must report delivered throughput and this device must measure enough download headroom. Settings has no active session to measure.")
                     .font(.caption)
+            }
+            if let saved {
+                Section("Library channels · advisory enablement") {
+                    Toggle("Enable Library channels", isOn: Binding(
+                        get: { saved.libraryChannelsEnabled },
+                        set: { write(.libraryChannelsEnabled($0)) }
+                    ))
+                    Text("Schedules use already-probed local movies and episodes. The checks explain whether this server looks ready; they do not disable or override the switch.")
+                    if let item = developerReadiness?.items.first(where: { $0.id == "library_channels" }) {
+                        ForEach(item.requirements) { requirement in
+                            Label(requirement.title, systemImage: requirement.status == "met" ? "checkmark.circle" : (requirement.status == "unmet" ? "exclamationmark.triangle" : "questionmark.circle"))
+                            Text(requirement.evidence).font(.caption)
+                        }
+                    }
+                    Button("Refresh Library channel readiness") { Task { await loadDeveloperReadiness() } }
+                }
             }
             Section("HDHomeRun Live TV · runtime enablement") {
                 Text("Watch unprotected antenna channels from one network tuner. No special build is needed.")
@@ -124,6 +141,7 @@ struct LiveTvDeveloperView: View {
             let settings = try await client.settings()
             guard revision == expected else { return }
             apply(settings)
+            await loadDeveloperReadiness()
             message = "Settings loaded. Save, check readiness, then enable."
         } catch {
             guard revision == expected else { return }
@@ -142,7 +160,7 @@ struct LiveTvDeveloperView: View {
                 let settings = try await api.update(change, generation: saved.liveTvConfigGeneration)
                 guard revision == expected else { return }
                 apply(settings)
-                message = "Saved. Live TV is \(settings.liveTvEnabled ? "enabled" : "disabled")."
+                message = "Saved. Library channels are \(settings.libraryChannelsEnabled ? "enabled" : "disabled"); Live TV is \(settings.liveTvEnabled ? "enabled" : "disabled")."
             } catch {
                 guard revision == expected else { return }
                 // No automatic retry of an uncertain mutation: reload its
@@ -174,6 +192,15 @@ struct LiveTvDeveloperView: View {
                 message = error.localizedDescription
             }
             busy = false
+        }
+    }
+
+    @MainActor private func loadDeveloperReadiness() async {
+        do {
+            developerReadiness = try await model.requireAPI().developerReadiness()
+        } catch {
+            developerReadiness = nil
+            message = error.localizedDescription
         }
     }
 }

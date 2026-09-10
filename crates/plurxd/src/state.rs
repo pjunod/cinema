@@ -5152,6 +5152,7 @@ impl JobManager {
                 "recording the library scan completion time failed"
             );
         }
+        crate::http::library_channels::notify_catalogue_mutation();
         self.finish(library_id, status).await;
     }
 

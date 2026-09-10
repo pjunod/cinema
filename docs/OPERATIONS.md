@@ -4073,6 +4073,82 @@ normal: the id says what it is, and enrichment then fills in title, overview
 and artwork on the same pass. An item that keeps its filename as its title
 means enrichment has no TMDB key configured — the scan itself succeeded.
 
+## Library channels — the runbook
+
+Library channels are compiled into every server and client build and are off
+for following playback on a new install. The switch is in **Settings →
+Developer → Library channels**. Its three companion checks answer whether the
+authoritative Store is readable, whether at least one successfully probed
+movie or episode can be scheduled, and whether deployed clients understand the
+following-session contract. A red or unknown check is advice: it never moves
+or refuses the switch.
+
+When disabled, signed-in users can still browse the empty state, create or edit
+personal definitions, preview recipes, and inspect existing schedules. Resolve
+and new following-session admission return unavailable. Re-enabling rejoins
+the existing schedule at server-now; it does not restart a rotation.
+
+### Enable and inspect
+
+The web setting is the ordinary path. For API inspection, use an administrator
+login token and read the current settings generation before writing settings:
+
+```bash
+TOKEN=…
+HOST=http://localhost:32400
+
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "$HOST/api/v1/developer/readiness"
+
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "$HOST/api/v1/settings"
+```
+
+The settings response exposes `library_channels_enabled`; the normal settings
+update carries the current generation just like every other Developer switch.
+Do not turn a readiness observation into deployment automation that flips the
+setting back off. Explicit administrator intent owns the enabled state.
+
+### Runtime shape and limits
+
+- A channel with no viewers owns no file descriptor, media reader, FFmpeg
+  process, segment directory, or per-occurrence write. Its current slot and
+  guide are derived from an immutable vector and server UTC.
+- A process admits two concurrent builders and at most 200 queued waiters. A
+  replicated channel claim prevents two nodes from publishing the same build;
+  claims expire after 120 seconds and renew every 30 seconds.
+- Recipe evaluation reads at most 100,000 catalogue rows and publishes at most
+  10,000 entries. More is an actionable limit error, never truncation.
+- Automatic reconciliation starts after a 30-second startup debounce and then
+  checks enabled `auto_refresh` channels every 15 minutes. Unchanged membership
+  performs no generation write, and a failed replacement leaves the prior
+  schedule active.
+- Each reconciliation pass removes at most 200 expired idempotency records,
+  claims abandoned for an hour, or superseded generations older than 24 hours.
+  Referenced active and pending generations are retained.
+- Immutable generation vectors use a node-local LRU capped at 64 generations
+  or 32 MiB. Current visibility, enabled state, permissions, and effective
+  generation are always authoritative reads and are not trusted to that cache.
+
+### Failure diagnosis
+
+| Symptom | Meaning and response |
+|---|---|
+| `channel_empty` | The normalized recipe has no eligible probed video. Keep the draft or old schedule and inspect preview exclusions. |
+| `channel_limit_exceeded` | A definition, catalogue selection, queue, or account/server count crossed its named bound. Narrow scope or remove unused channels; no partial schedule was published. |
+| `channel_build_busy` | The process queue or 1,000-live-request ledger is full. Retry after the response delay; reconciliation recovers coalesced automatic work. |
+| `catalogue_changed` | An opaque preview/guide continuation no longer binds the same content or schedule. Restart that read. |
+| `scheduled_media_unavailable` | The pinned file disappeared or its size/mtime changed. The shared occurrence times remain correct; rebuild after the catalogue is repaired. |
+| `channel_occurrence_changed` | A programme or pending generation crossed its boundary during startup. Resolve server-now once and retry with the new identity. |
+| `channel_unavailable` | The definition was disabled/deleted or is no longer visible. Following ends on its next control exchange. |
+| `channel_store_unavailable` | This node cannot establish authoritative state. An already-rendered guide may remain visible, but do not mint a new tune. |
+
+Structured channel logs may name channel/session IDs but never recipes, raw
+keywords, absolute media paths, or credential-bearing URLs. Following uses
+finite-HLS control traffic for liveness and Activity; clients must not send
+item-progress calls to keep it visible. **Watch from start** is ordinary VOD
+and therefore resumes ordinary progress and notification behavior.
+
 ## Live TV (HDHomeRun) — the runbook
 
 Live TV plays one over-the-air tuner live. It records nothing. It is off on

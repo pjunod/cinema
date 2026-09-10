@@ -8,12 +8,15 @@ import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsFocused
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTextClearance
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.printToString
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.test.platform.app.InstrumentationRegistry
 import java.net.InetAddress
 import java.net.ServerSocket
@@ -167,21 +170,40 @@ class LiveTvUiTest {
     @Test fun channelsAreSearchableAndProtectedChannelsCannotStart() {
         compose.setContent { PlurxTheme { LiveTvScreen(origin) {} } }
         awaitText("7.1 · Fixture News")
-        compose.onNodeWithText("DRM unsupported").assertIsNotEnabled()
         // Initial focus is the 10-foot navigation contract, and it is what the
-        // television profile must prove. On the phone profile this node was
+        // television profile must prove. The merged TV browser selects and
+        // focuses its first available channel so the remote starts inside the
+        // viewing workflow. On the phone profile Back was
         // observed with Focused = 'false': a touch device has no focus cursor to
         // place, and pinning one on Back would draw a focus ring nobody asked
         // for. Assert reachability there instead of a focus state the product
-        // does not owe a touch screen.
-        if (television) compose.onNodeWithText("Back").assertIsFocused()
-        else compose.onNodeWithText("Back").assertHasClickAction()
+        // does not owe a touch screen. This has to precede search input, which
+        // correctly moves focus into the field.
+        if (television) {
+            val firstChannel = compose.onNodeWithText("7.1 · Fixture News")
+            compose.waitUntil(timeoutMillis = 2_000) {
+                firstChannel.fetchSemanticsNode().config
+                    .getOrElse(SemanticsProperties.Focused) { false }
+            }
+            firstChannel.assertIsFocused()
+        } else compose.onNodeWithText("Back").assertHasClickAction()
+        // The native schedule rows added by the TV-layout work are taller than
+        // the old lineup-only rows. Select the protected result explicitly so
+        // this contract does not depend on both fixture channels fitting in one
+        // emulator viewport.
+        val search = compose.onNodeWithTag("live-tv-channel-search")
+        search.performTextInput("Protected")
+        val protectedLabel = if (television) "Protected · unavailable" else "DRM unsupported"
+        awaitText(protectedLabel)
+        compose.onNodeWithText(protectedLabel).assertIsNotEnabled()
         // The field's label says what search now matches. It used to read
         // "Find a channel"; since the guide landed it also matches the
         // programme on now, and the label says so.
-        compose.onNodeWithText("Number, name, or what is on").performTextInput("Fixture")
+        search.performTextClearance()
+        search.performTextInput("Fixture")
         compose.onNodeWithText("7.1 · Fixture News").assertIsDisplayed()
-        compose.onNodeWithText("Watch live").assertIsDisplayed()
+        val watchLabel = if (television) "No programme information · Watch live" else "Watch live"
+        compose.onNodeWithText(watchLabel).assertIsDisplayed()
         assertTrue(requests.none { it.startsWith("POST ") })
         assertEquals(emptyList<String>(), fixtureErrors.toList())
         assertEquals(emptyList<String>(), unexpectedPaths.toList())

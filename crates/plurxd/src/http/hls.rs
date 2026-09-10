@@ -1593,6 +1593,36 @@ pub async fn create(
     super::network::RemoteAddress(remote): super::network::RemoteAddress,
     Json(req): Json<CreateSession>,
 ) -> Result<Json<StartResponse>, ApiError> {
+    create_with_purpose(user, state, id, headers, remote, req, None).await
+}
+
+/// The finite-session application service used by Library channels after it
+/// has authoritatively resolved an occurrence. The purpose is not a public
+/// field on ordinary VOD creation: old servers must reject the dedicated
+/// route instead of silently turning a channel tune into history-writing VOD.
+pub(crate) async fn create_for_library_channel(
+    user: plurx_core::domain::User,
+    state: AppState,
+    file_id: i64,
+    headers: HeaderMap,
+    remote: Option<std::net::SocketAddr>,
+    req: CreateSession,
+    purpose: crate::http::library_channels::LibraryChannelPlaybackPurpose,
+) -> Result<StartResponse, ApiError> {
+    create_with_purpose(user, state, file_id, headers, remote, req, Some(purpose))
+        .await
+        .map(|Json(response)| response)
+}
+
+async fn create_with_purpose(
+    user: plurx_core::domain::User,
+    state: AppState,
+    id: i64,
+    headers: HeaderMap,
+    remote: Option<std::net::SocketAddr>,
+    req: CreateSession,
+    library_channel: Option<crate::http::library_channels::LibraryChannelPlaybackPurpose>,
+) -> Result<Json<StartResponse>, ApiError> {
     if !valid_playback_id(&req.playback_id) {
         return Err(ApiError::BadRequest(
             "playback_id must contain 1 to 128 safe characters".into(),
@@ -1758,7 +1788,10 @@ pub async fn create(
     .await?;
     let request = resolved.request;
     let height = resolved.height;
-    let fingerprint = resolved.intent_fingerprint;
+    let fingerprint = match library_channel.as_ref() {
+        Some(purpose) => purpose.bind_session_fingerprint(&resolved.intent_fingerprint),
+        None => resolved.intent_fingerprint,
+    };
     let plan_notes = resolved.plan_notes;
     let native_subtitles = resolved.native_subtitles;
     let native_subtitle = resolved.native_subtitle;
@@ -1973,9 +2006,29 @@ pub async fn create(
         // takeover can tell whether this URL was ever serving a shape a
         // successor is allowed to continue.
         typeless_playlist: state.transcode.cluster_playlist_is_typeless().await,
+        library_channel: library_channel.as_ref().map(|purpose| {
+            serde_json::to_value(purpose).expect("bounded Library-channel purpose serializes")
+        }),
         request: worker_request,
     };
     let recipe_json = serde_json::to_string(&remote_request)?;
+    if library_channel.is_some()
+        && !state
+            .store
+            .record_library_channel_session_recipe(
+                user.id,
+                &request_claim_id,
+                &incarnation_id,
+                &recipe_json,
+                unix_ms(),
+            )
+            .await
+            .map_err(|error| session_store_error("recording the channel session purpose", error))?
+    {
+        return Err(ApiError::ServiceUnavailable(
+            "the channel session purpose could not be recorded; retry shortly".to_owned(),
+        ));
+    }
     let placement_deadline = super::peer_transport::deadline_after(START_DEADLINE);
 
     // Every activation is a predecessor CAS, including an ordinary start.
@@ -2411,7 +2464,20 @@ pub async fn create(
         }),
         plan_notes,
     };
-    let response_json = serde_json::to_string(&response)?;
+    // `response_json` is the canonical durable session recipe/response. Keep
+    // channel purpose in that row so restart and owner takeover cannot turn a
+    // following session into ordinary VOD. `StartResponse` deliberately
+    // ignores additive fields, preserving every existing recovery reader.
+    let response_json = if let Some(purpose) = library_channel.as_ref() {
+        let mut value = serde_json::to_value(&response)?;
+        value
+            .as_object_mut()
+            .expect("StartResponse serializes as an object")
+            .insert("library_channel".to_owned(), serde_json::to_value(purpose)?);
+        serde_json::to_string(&value)?
+    } else {
+        serde_json::to_string(&response)?
+    };
     let activation_now_ms = unix_ms();
     let activation = MediaSessionActivation {
         // The one mint for this start, from the local bound above placement.
@@ -2629,14 +2695,16 @@ pub async fn create(
             .seed_owned_lease(&published_route)
             .await;
     }
-    crate::playstart::note_playback_started(
-        &state,
-        user.id,
-        &user.username,
-        id,
-        method,
-        Some(&request.playback_id),
-    );
+    if library_channel.is_none() {
+        crate::playstart::note_playback_started(
+            &state,
+            user.id,
+            &user.username,
+            id,
+            method,
+            Some(&request.playback_id),
+        );
+    }
     publication_guard.disarm();
     Ok(Json(response))
 }
@@ -5549,6 +5617,9 @@ async fn control_inner(
             );
         }
     };
+    if let Some(refusal) = library_channel_control_refusal(&state, &route).await {
+        return refusal;
+    }
     let owner_epoch = match u64::try_from(route.owner_epoch)
         .ok()
         .filter(|epoch| *epoch > 0)
@@ -5727,6 +5798,119 @@ async fn control_inner(
         };
     }
     control_local(&state, &route, request, deadline_unix_ms).await
+}
+
+/// Revalidate a durable following purpose at every normal control exchange.
+/// The session UUID is still the bearer capability, but it cannot keep a
+/// deleted, disabled, or newly-hidden channel alive. Ordinary VOD response
+/// JSON has no `library_channel` member and pays only one object lookup.
+async fn library_channel_control_refusal(
+    state: &AppState,
+    route: &MediaSessionRoute,
+) -> Option<Response> {
+    let response = match serde_json::from_str::<serde_json::Value>(&route.response_json) {
+        Ok(response) => response,
+        Err(_) => return None, // The ordinary response parser reports this below.
+    };
+    let raw_purpose = response.get("library_channel")?;
+    let purpose = match serde_json::from_value::<
+        crate::http::library_channels::LibraryChannelPlaybackPurpose,
+    >(raw_purpose.clone())
+    {
+        Ok(purpose) => purpose,
+        Err(_) => {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Unavailable);
+            return Some(control_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "control_unavailable",
+                "the durable Library-channel purpose is unreadable",
+                Some(route.incarnation_id.clone()),
+                u64::try_from(route.owner_epoch).ok(),
+                Some(500),
+                None,
+            ));
+        }
+    };
+    let runtime_enabled = match state
+        .store
+        .get_setting(plurx_core::store::keys::LIBRARY_CHANNELS_ENABLED)
+        .await
+    {
+        Ok(value) => plurx_core::store::stored_switch(value.as_deref(), false),
+        Err(_) => {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Unavailable);
+            return Some(control_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "control_unavailable",
+                "Library-channel authority is temporarily unavailable",
+                Some(route.incarnation_id.clone()),
+                u64::try_from(route.owner_epoch).ok(),
+                Some(500),
+                None,
+            ));
+        }
+    };
+    if !runtime_enabled {
+        return Some(control_error(
+            StatusCode::GONE,
+            "channel_unavailable",
+            "Library-channel playback was disabled",
+            Some(route.incarnation_id.clone()),
+            u64::try_from(route.owner_epoch).ok(),
+            None,
+            None,
+        ));
+    }
+    let user = match state.store.get_user(route.user_id).await {
+        Ok(Some(user)) => user,
+        Ok(None) => {
+            return Some(control_error(
+                StatusCode::GONE,
+                "channel_unavailable",
+                "the Library-channel viewer no longer exists",
+                Some(route.incarnation_id.clone()),
+                u64::try_from(route.owner_epoch).ok(),
+                None,
+                None,
+            ));
+        }
+        Err(_) => {
+            return Some(control_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "control_unavailable",
+                "Library-channel authorization is temporarily unavailable",
+                Some(route.incarnation_id.clone()),
+                u64::try_from(route.owner_epoch).ok(),
+                Some(500),
+                None,
+            ));
+        }
+    };
+    match state
+        .store
+        .get_library_channel(user.id, false, &purpose.channel_id)
+        .await
+    {
+        Ok(Some(channel)) if channel.enabled => None,
+        Ok(_) => Some(control_error(
+            StatusCode::GONE,
+            "channel_unavailable",
+            "the Library channel was deleted, disabled, or is no longer visible",
+            Some(route.incarnation_id.clone()),
+            u64::try_from(route.owner_epoch).ok(),
+            None,
+            None,
+        )),
+        Err(_) => Some(control_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "control_unavailable",
+            "Library-channel authorization is temporarily unavailable",
+            Some(route.incarnation_id.clone()),
+            u64::try_from(route.owner_epoch).ok(),
+            Some(500),
+            None,
+        )),
+    }
 }
 
 fn control_start_response(route: &MediaSessionRoute) -> Option<StartResponse> {
@@ -7250,6 +7434,7 @@ async fn stage_prepared_successor_with_prime(
         // Read from the predecessor rather than assumed: this decides whether
         // anything may ever take the successor over.
         typeless_playlist: predecessor.typeless_playlist,
+        library_channel: predecessor.library_channel.clone(),
         request: staged_request.clone(),
     }) else {
         return;
@@ -12525,6 +12710,7 @@ mod tests {
             source_size: 1,
             source_mtime: 1,
             typeless_playlist: true,
+            library_channel: None,
             request: crate::transcode::SessionRequest {
                 control_sequence: None,
                 file_id: 1,
@@ -13434,6 +13620,7 @@ mod tests {
             source_size: 1,
             source_mtime: 1,
             typeless_playlist: true,
+            library_channel: None,
             request: crate::transcode::SessionRequest {
                 control_sequence: None,
                 file_id: fixture.file_id(),
@@ -13668,6 +13855,7 @@ mod tests {
                 source_size: 1,
                 source_mtime: 1,
                 typeless_playlist: true,
+                library_channel: None,
                 request: crate::transcode::SessionRequest {
                     control_sequence: None,
                     file_id: fixture.file_id(),
@@ -16021,6 +16209,7 @@ mod tests {
             source_size: 1,
             source_mtime: 1,
             typeless_playlist: false,
+            library_channel: None,
             request: predecessor_request.clone(),
         };
         let predecessor_start = StartResponse {
@@ -16360,6 +16549,7 @@ mod tests {
                 source_size: 1,
                 source_mtime: 1,
                 typeless_playlist: false,
+                library_channel: None,
                 request: staged_request,
             })
             .expect("recipe"),
@@ -16610,6 +16800,7 @@ mod tests {
                     source_size: 0,
                     source_mtime: 0,
                     typeless_playlist: false,
+                    library_channel: None,
                     request: recipe,
                 },
                 selection: crate::playback_control::ClientSelection {
@@ -18782,6 +18973,7 @@ mod tests {
             source_size: 4_096,
             source_mtime: 1_700_000_000,
             typeless_playlist: false,
+            library_channel: None,
             request: staged_candidate_request(),
         }
     }

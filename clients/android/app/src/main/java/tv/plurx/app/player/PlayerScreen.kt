@@ -448,6 +448,8 @@ fun PlayerScreen(
      * the next item starts from its own route with no memory of it.
      */
     preplayTracks: PreplayTracks = PreplayTracks.NONE,
+    returnChannelId: String? = null,
+    onReturnToChannel: () -> Unit = {},
     onPlayNext: (PlaybackTarget) -> Unit,
     onExit: () -> Unit,
 ) {
@@ -556,6 +558,12 @@ fun PlayerScreen(
                 onPlayNext = onPlayNext,
                 onExit = onExit,
             )
+        }
+        if (returnChannelId != null) {
+            TvButton(
+                onClick = onReturnToChannel,
+                modifier = Modifier.align(Alignment.TopEnd).padding(16.dp),
+            ) { Text("Return to channel") }
         }
     }
 }

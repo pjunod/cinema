@@ -28,6 +28,7 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import tv.plurx.app.data.Net
 import tv.plurx.app.data.Session
+import tv.plurx.app.data.DeveloperReadiness
 import java.util.concurrent.TimeUnit
 
 internal enum class TvLiveLayout(val storageValue: String, val label: String) {
@@ -187,6 +188,7 @@ data class LiveTvStatus(
 
 @Serializable
 data class LiveTvSettings(
+    val library_channels_enabled: Boolean = false,
     val live_tv_enabled: Boolean = false,
     val live_tv_device_ipv4: String = "",
     val live_tv_owner_node_id: String = "",
@@ -225,6 +227,7 @@ internal fun liveTvMessage(code: String): String = when (code) {
 sealed interface LiveTvSettingsChange {
     data class Configure(val ipv4: String, val owner: String, val sessions: Int, val height: Int) : LiveTvSettingsChange
     data class Enabled(val enabled: Boolean) : LiveTvSettingsChange
+    data class LibraryChannelsEnabled(val enabled: Boolean) : LiveTvSettingsChange
     data class FencedOwner(val owner: String, val cutoff: Long) : LiveTvSettingsChange
 
     fun body(generation: Long): JsonObject = buildJsonObject {
@@ -237,6 +240,7 @@ sealed interface LiveTvSettingsChange {
                 put("live_tv_output_height", change.height)
             }
             is Enabled -> put("live_tv_enabled", change.enabled)
+            is LibraryChannelsEnabled -> put("library_channels_enabled", change.enabled)
             is FencedOwner -> putJsonObject("live_tv_fenced_owner") {
                 put("owner_node_id", change.owner)
                 put("drain_before_generation", change.cutoff)
@@ -365,4 +369,7 @@ class LiveTvApi(origin: String, private val token: String) : LiveTvRequests {
         request(url("settings"), "PUT", authenticated = true, body = change.body(settings.live_tv_config_generation)),
     )
     suspend fun readiness(): LiveTvReadiness = Net.json.decodeFromString(request(url("live-tv", "readiness", "refresh"), "POST", authenticated = true))
+    suspend fun developerReadiness(): DeveloperReadiness = Net.json.decodeFromString(
+        request(url("developer", "readiness"), authenticated = true),
+    )
 }

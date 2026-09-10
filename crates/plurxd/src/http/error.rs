@@ -29,6 +29,12 @@ pub enum ApiError {
         code: &'static str,
         message: String,
     },
+    TypedRetry {
+        status: StatusCode,
+        code: &'static str,
+        message: String,
+        retry_after_seconds: u64,
+    },
     /// A typed error whose recovery needs data the client cannot recompute —
     /// the durable film position a lost playback session reached, say. The
     /// extra fields join `code` and `message` in the same object, so a client
@@ -96,6 +102,9 @@ impl ApiError {
             }
             | ApiError::TypedDetail {
                 status, message, ..
+            }
+            | ApiError::TypedRetry {
+                status, message, ..
             } => (*status, message.clone()),
             ApiError::Internal(msg) => {
                 // Detail is logged, not leaked to the client.
@@ -134,6 +143,22 @@ impl IntoResponse for ApiError {
             detail.insert("code".to_owned(), json!(code));
             detail.insert("message".to_owned(), json!(message));
             return (status, Json(serde_json::Value::Object(detail))).into_response();
+        }
+        if let ApiError::TypedRetry {
+            status,
+            code,
+            message,
+            retry_after_seconds,
+        } = self
+        {
+            let mut response =
+                (status, Json(json!({ "code": code, "message": message }))).into_response();
+            if let Ok(value) = retry_after_seconds.to_string().parse() {
+                response
+                    .headers_mut()
+                    .insert(axum::http::header::RETRY_AFTER, value);
+            }
+            return response;
         }
         let (status, message) = self.parts();
         (status, Json(json!({ "error": message }))).into_response()

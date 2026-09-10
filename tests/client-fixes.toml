@@ -1027,7 +1027,7 @@ test_anchor = "testPlatformRestartMarkerStoreCanRoundTrip"
 id = "android.streaming-promotion-build-counter"
 commits = ["fdbed69e"]
 source = "clients/android/app/build.gradle.kts"
-source_anchor = "versionCode = 80"
+source_anchor = "versionCode = 81"
 test = "tests/validation/test_mobile_versions.py"
 test_anchor = "test_android_counter_the_target_already_ships_fails_against_the_target"
 
@@ -1037,7 +1037,7 @@ test_anchor = "test_android_counter_the_target_already_ships_fails_against_the_t
 id = "live-tv.mobile-release-build-counters"
 commits = ["b2834adb"]
 source = "clients/android/app/build.gradle.kts"
-source_anchor = "versionCode = 80"
+source_anchor = "versionCode = 81"
 test = "tests/validation/test_mobile_versions.py"
 test_anchor = "test_each_changed_app_requires_only_its_own_build_counter"
 
@@ -1052,6 +1052,26 @@ source = "clients/apple/Sources/LiveTvView.swift"
 source_anchor = "private struct LiveTvChannelButtonStyle: ButtonStyle"
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "testTheTenFootSurfaceKeepsSomethingFocusableWhileTheOverlayIsHidden"
+
+[[fixes]]
+# Readiness facts explain risk but never own the administrator's enable choice.
+# A transient settings request may not disable the Library-channel switch.
+id = "apple.library-channel-enablement-remains-advisory"
+commits = ["9bfef968"]
+source = "clients/apple/Sources/LiveTvDeveloperView.swift"
+source_anchor = "Toggle(\"Enable Library channels\""
+test = "tests/operations/test_evidence_workflows.py"
+test_anchor = "test_apple_prepared_enablement_is_visible_and_advisory"
+
+[[fixes]]
+# A client can observe the old settings shape while a cluster rolls forward.
+# Absence of the new switch decodes to the old, disabled behaviour.
+id = "apple.library-channel-settings-rolling-upgrade"
+commits = ["f301636a"]
+source = "clients/apple/Sources/LiveTv.swift"
+source_anchor = "libraryChannelsEnabled = try values.decodeIfPresent("
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testServerSettingsSnakeCaseContractDecodesWithoutUnrelatedSecrets"
 
 [[fixes]]
 # Logout owns the captured server, bearer, and auth generation. A late
@@ -1093,6 +1113,17 @@ test_anchor = "live_tv_session_never_revives_an_expired_lineup_observation"
 id = "apple.live-tv-promotion-build-counter"
 commits = ["bc4a6208"]
 source = "clients/apple/project.yml"
-source_anchor = "CURRENT_PROJECT_VERSION: \"131\""
+source_anchor = "CURRENT_PROJECT_VERSION: \"132\""
 test = "tests/validation/test_mobile_versions.py"
 test_anchor = "test_apple_counter_the_target_already_ships_fails_against_the_target"
+
+[[fixes]]
+# Schedule-rich channel rows exceed one small emulator viewport. Filter to the
+# protected channel before asserting its disabled state so virtualization does
+# not turn screen height into part of the DRM refusal contract.
+id = "android.live-tv-protected-row-viewport-independent"
+commits = ["859f1cbf", "2c83d0fa", "d8737f2f", "7ef7be8f", "afe056ef", "8fd45130", "94cbad30", "0c6b73bb"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvScreen.kt"
+source_anchor = "testTag(\"live-tv-channel-search\")"
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/livetv/LiveTvUiTest.kt"
+test_anchor = "onNodeWithTag(\"live-tv-channel-search\")"

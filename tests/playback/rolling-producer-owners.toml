@@ -1390,12 +1390,16 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # diagnostic reader task feeds an advisory selected-stream fault and is joined
 # before the test returns. It owns no producer or process and cannot outlive
 # its fixture.
+# 479 -> 480 with Library-channel reconciliation: one `tokio::spawn` installs
+# the catalogue-notification reconciler beside the existing server background
+# loops. The shared `BackgroundLoopGuard` cancellation token owns its lifetime;
+# the loop starts no media producer or process and returns when the token fires.
 # 472 -> 479 for the bounded review work: two joined pipe drains belong to the
 # exact short-lived probe child; one Drop fallback owns that child until reap;
 # three blocking authentication/guide parsers retain their admissions until
 # their OS work returns; and one test-only parser actor is awaited. None is a
 # competing rolling producer or playback clock.
-expected_occurrences = 479
+expected_occurrences = 480
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -1717,10 +1721,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # 710 -> 711 with the HEVC argv fixture correction: one test-only 30-second
 # deadline owns the tiny libx265 subprocess and fails the regression instead of
 # allowing a contended fixture encode to consume the fast-Rust job deadline.
+# 717 -> 720 with Library-channel reconciliation: the initial debounce, the
+# periodic 15-minute wake, and the post-notification debounce all live in the
+# one cancellation-owned background loop. They pace catalogue reconciliation;
+# none bounds, launches, or owns a media producer or operating-system process.
 # 711 -> 717: the review adds total deadlines for the shared probe, password
 # verification, and guide parsing, plus bounded test observations. These bounds
 # cancel no producer; blocking work keeps its admission until the OS task ends.
-expected_occurrences = 717
+expected_occurrences = 720
 
 [[module_structures]]
 id = "bare-time-constructor"

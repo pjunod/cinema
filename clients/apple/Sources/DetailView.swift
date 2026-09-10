@@ -2141,6 +2141,9 @@ struct DetailView: View {
                     mobileDownloadButton(detail: detail, file: file, compact: false)
                 }
                 if !item.isBook { watchButton(detail) }
+                if ["movie", "show", "episode"].contains(item.kind) {
+                    makeChannelButton(item)
+                }
             }
             .frame(maxWidth: hasPlayback ? .infinity : 220, alignment: .leading)
         } else {
@@ -2168,11 +2171,29 @@ struct DetailView: View {
                     }
 
                     if !item.isBook { mobileWatchButton(detail) }
+                    if ["movie", "show", "episode"].contains(item.kind) {
+                        makeChannelButton(item)
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .frame(maxWidth: hasPlayback ? .infinity : nil, alignment: .leading)
         }
+    }
+
+    private func makeChannelButton(_ item: Item) -> some View {
+        Button {
+            NotificationCenter.default.post(
+                name: .makeLibraryChannelFromItem,
+                object: nil,
+                userInfo: ["itemId": item.id, "kind": item.kind, "title": item.title]
+            )
+        } label: {
+            Label("Make channel", systemImage: "play.rectangle.on.rectangle")
+                .font(.subheadline.weight(.semibold))
+                .lineLimit(1)
+        }
+        .buttonStyle(IOSDetailSecondaryActionButtonStyle(selected: false))
     }
 
     @ViewBuilder

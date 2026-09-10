@@ -62,6 +62,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -488,7 +489,7 @@ fun LiveTvScreen(origin: String, onBack: () -> Unit) {
                 search,
                 onValueChange = { search = it },
                 label = { Text("Number, name, or what is on") },
-                modifier = Modifier.fillMaxWidth().tvFocusRing(),
+                modifier = Modifier.fillMaxWidth().testTag("live-tv-channel-search").tvFocusRing(),
                 singleLine = true,
             )
             if (browse == LiveTvBrowseView.Guide && !television &&
@@ -724,7 +725,7 @@ private fun TelevisionLiveTvBrowser(
             value = search,
             onValueChange = onSearch,
             label = { Text("Search") },
-            modifier = Modifier.width(260.dp).tvFocusRing(),
+            modifier = Modifier.width(260.dp).testTag("live-tv-channel-search").tvFocusRing(),
             singleLine = true,
         )
         Box {

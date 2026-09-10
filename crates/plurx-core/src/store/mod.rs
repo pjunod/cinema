@@ -40,6 +40,8 @@ mod hiqlite_fragment_index_cluster;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_import;
 #[cfg(feature = "hiqlite-store")]
+mod hiqlite_library_channels;
+#[cfg(feature = "hiqlite-store")]
 mod hiqlite_media;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_pretranscode;
@@ -1334,6 +1336,9 @@ pub(crate) fn persistable_credential(value: &SealedSecret) -> Result<String, Sto
 /// Well-known settings keys. Keys are dotted, lowercase, and owned by the
 /// module that writes them.
 pub mod keys {
+    /// Runtime Library-channel playback switch. The feature is always compiled;
+    /// absence is off so an upgrade never starts scheduled playback implicitly.
+    pub const LIBRARY_CHANNELS_ENABLED: &str = "library_channels.enabled";
     /// Runtime-only HDHomeRun live-TV configuration. The values are read
     /// as one snapshot and written with a generation CAS; the enable bit is
     /// deliberately absent/off on upgrade.
@@ -1900,6 +1905,123 @@ pub trait LibraryStore: Send + Sync + 'static {
     async fn mark_library_scanned(&self, id: i64, refreshed: bool) -> Result<(), StoreError>;
     async fn get_library(&self, id: i64) -> Result<Option<Library>, StoreError>;
     async fn list_libraries(&self) -> Result<Vec<Library>, StoreError>;
+}
+
+#[async_trait]
+pub trait LibraryChannelStore: Send + Sync + 'static {
+    async fn list_library_channels(
+        &self,
+        actor_user_id: i64,
+        actor_is_admin: bool,
+        management: bool,
+        after_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<crate::library_channels::LibraryChannel>, StoreError>;
+
+    async fn get_library_channel(
+        &self,
+        actor_user_id: i64,
+        actor_is_admin: bool,
+        channel_id: &str,
+    ) -> Result<Option<crate::library_channels::LibraryChannel>, StoreError>;
+
+    async fn create_library_channel(
+        &self,
+        actor_is_admin: bool,
+        channel: &crate::library_channels::NewLibraryChannel,
+    ) -> Result<
+        crate::library_channels::ChannelMutation<crate::library_channels::LibraryChannel>,
+        StoreError,
+    >;
+
+    async fn update_library_channel(
+        &self,
+        update: &crate::library_channels::LibraryChannelUpdate,
+    ) -> Result<
+        crate::library_channels::ChannelMutation<crate::library_channels::LibraryChannel>,
+        StoreError,
+    >;
+
+    async fn delete_library_channel(
+        &self,
+        deletion: &crate::library_channels::LibraryChannelDelete,
+    ) -> Result<crate::library_channels::ChannelMutation<()>, StoreError>;
+
+    async fn set_library_channel_favourite(
+        &self,
+        user_id: i64,
+        channel_id: &str,
+        favourite: bool,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    /// Read one bounded, coherent catalogue selection snapshot. Implementations
+    /// execute the item/file/ancestry projection as a single database query so
+    /// a channel build cannot combine pages from different catalogue states.
+    async fn library_channel_catalog_snapshot(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<crate::library_channels::ChannelCandidate>, StoreError>;
+
+    async fn list_library_channel_refresh_candidates(
+        &self,
+        after_id: Option<&str>,
+        limit: i64,
+        now_ms: i64,
+    ) -> Result<Vec<crate::library_channels::LibraryChannel>, StoreError>;
+
+    async fn prune_library_channel_state(&self, now_ms: i64, limit: i64)
+        -> Result<i64, StoreError>;
+
+    async fn claim_library_channel_build(
+        &self,
+        claim: &crate::library_channels::LibraryChannelBuildClaim,
+    ) -> Result<crate::library_channels::ChannelBuildMutation, StoreError>;
+
+    async fn renew_library_channel_build(
+        &self,
+        channel_id: &str,
+        generation_id: &str,
+        claim_id: &str,
+        now_ms: i64,
+        expires_at_ms: i64,
+    ) -> Result<crate::library_channels::ChannelBuildMutation, StoreError>;
+
+    async fn stage_library_channel_entries(
+        &self,
+        channel_id: &str,
+        generation_id: &str,
+        claim_id: &str,
+        entries: &[crate::library_channels::ChannelGenerationEntry],
+        now_ms: i64,
+    ) -> Result<crate::library_channels::ChannelBuildMutation, StoreError>;
+
+    async fn publish_library_channel_generation(
+        &self,
+        publication: &crate::library_channels::LibraryChannelPublication,
+    ) -> Result<crate::library_channels::ChannelBuildMutation, StoreError>;
+
+    async fn fail_library_channel_build(
+        &self,
+        failure: &crate::library_channels::LibraryChannelBuildFailure,
+    ) -> Result<crate::library_channels::ChannelBuildMutation, StoreError>;
+
+    async fn complete_library_channel_build_without_publication(
+        &self,
+        channel_id: &str,
+        expected_revision: i64,
+        candidate_count: i64,
+        automatic: bool,
+        now_ms: i64,
+    ) -> Result<crate::library_channels::ChannelBuildMutation, StoreError>;
+
+    async fn read_library_channel_generation(
+        &self,
+        actor_user_id: i64,
+        actor_is_admin: bool,
+        channel_id: &str,
+        generation_id: &str,
+    ) -> Result<Option<crate::library_channels::LibraryChannelGeneration>, StoreError>;
 }
 
 #[async_trait]
@@ -3601,6 +3723,17 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         claim_expires_at_ms: i64,
     ) -> Result<MediaSessionRequestClaim, StoreError>;
 
+    /// Bind a Library-channel start's canonical worker recipe to its claimed
+    /// durable identity before producer placement.
+    async fn record_library_channel_session_recipe(
+        &self,
+        user_id: i64,
+        request_id: &str,
+        incarnation_id: &str,
+        recipe_json: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+
     async fn assign_media_session_request_owner(
         &self,
         user_id: i64,
@@ -4244,6 +4377,7 @@ pub trait Store:
     + UserStore
     + ApiKeyStore
     + LibraryStore
+    + LibraryChannelStore
     + MediaStore
     + WatchStore
     + ReadingStore
@@ -4275,6 +4409,7 @@ impl<T> Store for T where
         + UserStore
         + ApiKeyStore
         + LibraryStore
+        + LibraryChannelStore
         + MediaStore
         + WatchStore
         + ReadingStore

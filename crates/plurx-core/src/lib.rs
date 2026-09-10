@@ -15,6 +15,7 @@ pub mod error;
 pub mod fmp4;
 #[cfg(unix)]
 pub mod fs_secure;
+pub mod library_channels;
 pub mod mediafacts;
 pub mod metadata;
 pub mod playback;

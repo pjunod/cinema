@@ -14,7 +14,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-One binary serves everything on one port (`:32400` by default). plurx has 174
+One binary serves everything on one port (`:32400` by default). plurx has 184
 routes across the four surfaces below. Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
@@ -1994,6 +1994,67 @@ Error codes: `invalid_request` (400), `channel_not_found` (404),
 
 ---
 
+### 17.5 Library channels — a deterministic schedule over finite media
+
+Library channels use the same finite HLS session service as ordinary VOD, but
+only through the dedicated session route below. The server resolves the
+effective immutable generation from its UTC clock, verifies the pinned file
+fingerprint, supplies the source offset, and binds the complete typed worker
+recipe to the durable request identity before producer placement. Activation
+requires that exact pre-placement record, and the canonical media-session
+recipe carries it through ownership transfer and recovery. Following
+sessions do not consume the normal playback-start/history notification; an
+ordinary session for the same user and item remains ordinary VOD.
+
+Every response under this prefix is `Cache-Control: private, no-store`.
+Personal-channel IDs that are not the caller's are 404. Shared definitions are
+visible to signed-in users; only their owner or an administrator may mutate
+them, and only an administrator may publish shared visibility.
+
+| Method | Path | Auth | What it does |
+|---|---|---|---|
+| GET | `/api/v1/library-channels/` | bearer | Visible channel summaries with private favourite state and derived now/next; `management=true` is admin-only |
+| POST | `/api/v1/library-channels/preview` | bearer | Bounded recipe evaluation without file I/O or publication; accepts an opaque `cursor` plus reusable `preview_seed`, and returns `next_cursor`, `first_ten`, diagnostics and the effective seed |
+| POST | `/api/v1/library-channels/` | bearer | Idempotent definition creation and initial immutable generation publication |
+| GET | `/api/v1/library-channels/{id}` | bearer | Definition, revision, generation pointers, and mutation capabilities |
+| PUT | `/api/v1/library-channels/{id}` | bearer | Full expected-revision replacement; the working schedule stays active until the next rotation |
+| DELETE | `/api/v1/library-channels/{id}` | bearer | Idempotent deletion with mandatory `expected_revision` and `request_id` query parameters; media is never deleted |
+| POST | `/api/v1/library-channels/{id}/rebuild` | bearer | Rebuild with next-rotation or next-programme activation and optional reshuffle |
+| GET | `/api/v1/library-channels/{id}/build` | bearer | Durable queued/building/ready/failed state, bounded error/count facts, active/pending generations, attempts, success and activation time |
+| PUT | `/api/v1/library-channels/{id}/favourite` | bearer | Idempotently set the caller's private favourite |
+| GET | `/api/v1/library-channels/guide` | bearer | At most 20 channels and 24 hours, capped at 1,000 derived occurrences; continue with the opaque cursor in `X-Plurx-Next-Cursor` |
+| POST | `/api/v1/library-channels/{id}/resolve` | bearer | Resolve server-now only; opens no file and creates no session |
+| POST | `/api/v1/library-channels/{id}/sessions` | bearer | Revalidate an occurrence and create one following finite-HLS session |
+
+`resolve` returns the channel and definition revision, generation, cycle and
+ordinal, server time, half-open start/end boundaries, pinned item/file, source
+position, and explicit capabilities. The session call repeats the generation
+and occurrence plus a monotone client `tune_sequence`; it nests the existing
+finite-HLS create body under `playback`. Its response is
+`{playback: <StartResponse>, library_channel: <accepted purpose>}`. A slot that
+changed between the two calls is 409 `channel_occurrence_changed`, and the
+client resolves once more rather than starting stale media.
+
+The runtime switch `library_channels_enabled` is always compiled and affects
+resolve/session admission only. Listing, preview, authoring, empty-state help,
+and existing schedules stay inspectable while it is off. Its Developer
+readiness rows are advisory and cannot veto an administrator's explicit save.
+
+Preview cursors bind the caller, normalized recipe, candidate-content digest,
+and offset. Guide cursors bind the caller, channel-generation state, requested
+window, and final ordered occurrence. A changed binding is `409
+catalogue_changed` instead of a page assembled from two catalogue or schedule
+states. Create, update, rebuild, and delete idempotency records live for 24
+hours, are capped at 1,000 per account, and reject a reused request identity
+with a different normalized operation.
+
+Following authorization is not a one-time check. Every finite-HLS control
+exchange reloads the durable session purpose and current channel state. A
+disabled or deleted channel ends following with `410 channel_unavailable`; an
+unavailable authoritative store refuses the exchange with `503
+channel_store_unavailable`. Detached **Watch from start** playback has ordinary
+VOD purpose and is unaffected by later channel state.
+
 ## 18. Trakt and the monarr seam
 
 | Method | Path | Auth | What it does |
@@ -2518,7 +2579,7 @@ returns `learner_route_ineligible` (§3.2).
 |---|---|---|---|
 | GET | `/` | none | The app shell, or the Plex container (§20) |
 | GET | `/assets/hls.min.js` | none | `public, max-age=604800` |
-| GET | `/assets/{cluster-panel,playback-policy,playback-control,live-tv,reader}.js` | none | `no-cache` |
+| GET | `/assets/{cluster-panel,playback-policy,playback-control,live-tv,library-channels,reader}.js` | none | `no-cache` |
 | GET | `/assets/reader.css` | none | `no-cache` |
 | GET | `/connect.svg` | none | QR code of the server origin, taken from `?origin=`. Refuses anything that is not a bare `http`/`https` origin, and carries no credential |
 | GET | `/manifest.webmanifest` | none | `public, max-age=86400` |

@@ -28,6 +28,7 @@ pub(crate) mod internal_media_sessions;
 mod items;
 mod keys;
 mod libraries;
+pub(crate) mod library_channels;
 mod live_tv;
 mod network;
 mod offline;
@@ -93,6 +94,10 @@ pub fn router(state: AppState) -> Router {
         // process can currently observe. Nothing reads it to decide
         // whether a switch may be flipped.
         .route("/developer/readiness", get(developer::readiness))
+        .nest(
+            "/library-channels",
+            library_channels::router().layer(DefaultBodyLimit::max(64 * 1024)),
+        )
         .route("/live-tv/readiness", get(live_tv::readiness))
         .route(
             "/live-tv/readiness/refresh",
@@ -433,6 +438,7 @@ pub fn router(state: AppState) -> Router {
         .route("/assets/playback-policy.js", get(web::playback_policy_js))
         .route("/assets/playback-control.js", get(web::playback_control_js))
         .route("/assets/live-tv.js", get(web::live_tv_js))
+        .route("/assets/library-channels.js", get(web::library_channels_js))
         .route("/assets/reader.js", get(web::reader_js))
         .route("/assets/reader.css", get(web::reader_css))
         .route("/connect.svg", get(web::connect_qr))
@@ -4861,6 +4867,7 @@ mod tests {
         assert_eq!(
             ids,
             vec![
+                "library_channels",
                 "cluster_transport_recovery",
                 "playback_control_protocol_v1",
                 "prepared_quality_handoff",
@@ -4892,14 +4899,17 @@ mod tests {
             }
         }
 
-        // The server-prime row describes this build and is now the one fact a
-        // single node can prove without a deployment receipt.
+        // These two rows describe facts this single-node fixture can prove:
+        // the authoritative catalogue responds and server-side handoff exists.
         let green = seen
             .iter()
             .filter(|(_, status)| status.as_str() == "met")
             .map(|(id, _)| id.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(green, vec!["server_preparation_is_real"]);
+        assert_eq!(
+            green,
+            vec!["authoritative_store", "server_preparation_is_real"]
+        );
         // Order-independent because no row reachable here has a `met` branch a
         // sibling test could reach: the retained engine's two rows refuse
         // `met` by construction, and everything else is a roster or artifact

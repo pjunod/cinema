@@ -88,7 +88,9 @@ const DRAIN_DEADLINE_SCHEMA_VERSION: i64 = 31;
 const PRODUCER_RECOVERY_SCHEMA_VERSION: i64 = 32;
 const RECOVERY_EPOCH_SCHEMA_VERSION: i64 = 33;
 const OFFLINE_RECOVERY_CLAIM_SCHEMA_VERSION: i64 = 34;
-pub const AUTH_SCHEMA_VERSION: i64 = OFFLINE_RECOVERY_CLAIM_SCHEMA_VERSION;
+const LIBRARY_CHANNELS_SCHEMA_VERSION: i64 = 35;
+const LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_VERSION: i64 = 36;
+pub const AUTH_SCHEMA_VERSION: i64 = LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -124,6 +126,8 @@ const DRAIN_DEADLINE_SCHEMA_MIGRATION_SOURCE: i64 = ANALYSIS_TERMINAL_IDENTITY_I
 const PRODUCER_RECOVERY_SCHEMA_MIGRATION_SOURCE: i64 = DRAIN_DEADLINE_SCHEMA_VERSION;
 const RECOVERY_EPOCH_SCHEMA_MIGRATION_SOURCE: i64 = PRODUCER_RECOVERY_SCHEMA_VERSION;
 const OFFLINE_RECOVERY_CLAIM_SCHEMA_MIGRATION_SOURCE: i64 = RECOVERY_EPOCH_SCHEMA_VERSION;
+const LIBRARY_CHANNELS_SCHEMA_MIGRATION_SOURCE: i64 = OFFLINE_RECOVERY_CLAIM_SCHEMA_VERSION;
+const LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_MIGRATION_SOURCE: i64 = LIBRARY_CHANNELS_SCHEMA_VERSION;
 // Session routing and shared-cache identity are additive durable state and use
 // the existing Hiqlite transport contract. Protocol 4 stays supported so a
 // healthy v9/v10 cluster can authorize the daemon that advances its schema.
@@ -1415,6 +1419,7 @@ impl HiqliteAuthStore {
         super::hiqlite_shared_cache::install_schema(&client).await?;
         super::hiqlite_timeline_annotations::install_schema(&client).await?;
         super::hiqlite_fragment_index_cluster::install_schema(&client).await?;
+        super::hiqlite_library_channels::install_schema(&client).await?;
 
         let store = Self::with_clock(client, clock, NodeLocalTelemetry::open(telemetry_path)?);
         let now = store.now()?;
@@ -2354,6 +2359,49 @@ impl HiqliteAuthStore {
                     )
                     .await?;
                 }
+                SchemaMigrationAction::MigrateFrom(LIBRARY_CHANNELS_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements = super::hiqlite_library_channels::migration_statements()?;
+                    statements.push((
+                        "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                         WHERE singleton = 1 AND schema_version = $3"
+                            .to_owned(),
+                        params!(
+                            LIBRARY_CHANNELS_SCHEMA_VERSION,
+                            now,
+                            LIBRARY_CHANNELS_SCHEMA_MIGRATION_SOURCE
+                        ),
+                    ));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(
+                        LIBRARY_CHANNELS_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(
+                    LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_MIGRATION_SOURCE,
+                ) => {
+                    let now = self.now()?;
+                    let mut statements =
+                        super::hiqlite_library_channels::build_state_migration_statements()?;
+                    statements.push((
+                        "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                         WHERE singleton = 1 AND schema_version = $3"
+                            .to_owned(),
+                        params!(
+                            LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_VERSION,
+                            now,
+                            LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_MIGRATION_SOURCE
+                        ),
+                    ));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(
+                        LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
                         "cluster schema {version} has no migration implementation"
@@ -2643,6 +2691,7 @@ impl HiqliteAuthStore {
             "SELECT id, name, key_hash, scopes, created_at, last_used_at, disabled FROM api_keys ORDER BY id",
             "SELECT resource, owner_node_id, fence, revision, expires_at_ms, updated_at_ms FROM job_leases ORDER BY resource",
             "SELECT user_id, request_id, request_fingerprint, playback_id, state, claim_expires_at_ms, incarnation_id, owner_node_id, response_json, updated_at_ms FROM media_session_requests ORDER BY user_id, request_id",
+            "SELECT user_id, request_id, incarnation_id, recipe_json, created_at_ms FROM library_channel_session_recipes ORDER BY user_id, request_id",
             "SELECT user_id, playback_id, current_incarnation_id, updated_at_ms FROM media_playback_pointers ORDER BY user_id, playback_id",
             "SELECT incarnation_id, session_id, user_id, playback_id, request_fingerprint, owner_node_id, owner_epoch, lease_expires_at_ms, state, terminal_reason, publication_ready_at_ms, recipe_json, response_json, produced_playable_through_ms, fetched_through_ms, media_origin_ms, media_sequence, discontinuity_sequence, updated_at_ms FROM media_sessions ORDER BY incarnation_id",
             "SELECT incarnation_id, session_id, owner_node_id, owner_epoch, client_instance_id, sequence, request_fingerprint, response_json, expires_at_ms, updated_at_ms FROM media_session_terminal_acks ORDER BY session_id",
@@ -2707,6 +2756,12 @@ impl HiqliteAuthStore {
                         claim_expires_at_ms, incarnation_id, owner_node_id, response_json, \
                         updated_at_ms \
                    FROM media_session_requests ORDER BY user_id, request_id",
+                params!(),
+            )
+            .await?,
+            library_channel_session_recipes: self.client().query_map(
+                "SELECT user_id, request_id, incarnation_id, recipe_json, created_at_ms \
+                   FROM library_channel_session_recipes ORDER BY user_id, request_id",
                 params!(),
             )
             .await?,
@@ -4098,7 +4153,9 @@ fn schema_migration_action(
         | DRAIN_DEADLINE_SCHEMA_MIGRATION_SOURCE
         | PRODUCER_RECOVERY_SCHEMA_MIGRATION_SOURCE
         | RECOVERY_EPOCH_SCHEMA_MIGRATION_SOURCE
-        | OFFLINE_RECOVERY_CLAIM_SCHEMA_MIGRATION_SOURCE => {
+        | OFFLINE_RECOVERY_CLAIM_SCHEMA_MIGRATION_SOURCE
+        | LIBRARY_CHANNELS_SCHEMA_MIGRATION_SOURCE
+        | LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -4143,6 +4200,7 @@ struct AuthStoreDump {
     api_keys: Vec<ApiKeyDumpRow>,
     job_leases: Vec<JobLeaseDumpRow>,
     media_session_requests: Vec<MediaSessionRequestDumpRow>,
+    library_channel_session_recipes: Vec<LibraryChannelSessionRecipeDumpRow>,
     media_playback_pointers: Vec<MediaPlaybackPointerDumpRow>,
     media_sessions: Vec<MediaSessionDumpRow>,
     media_session_terminal_acks: Vec<MediaSessionTerminalAckDumpRow>,
@@ -4493,6 +4551,13 @@ dump_row!(MediaSessionRequestDumpRow {
     owner_node_id: Option<String>,
     response_json: Option<String>,
     updated_at_ms: i64,
+});
+dump_row!(LibraryChannelSessionRecipeDumpRow {
+    user_id: i64,
+    request_id: String,
+    incarnation_id: String,
+    recipe_json: String,
+    created_at_ms: i64,
 });
 dump_row!(MediaPlaybackPointerDumpRow {
     user_id: i64,
@@ -5950,9 +6015,27 @@ mod tests {
             "v33 must advance exactly one step to the offline recovery-claim schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 29,
+            LIBRARY_CHANNELS_SCHEMA_MIGRATION_SOURCE, OFFLINE_RECOVERY_CLAIM_SCHEMA_VERSION,
+            "the Library channels migration must start from the exact v34 shape"
+        );
+        assert_eq!(
+            LIBRARY_CHANNELS_SCHEMA_MIGRATION_SOURCE + 1,
+            LIBRARY_CHANNELS_SCHEMA_VERSION,
+            "v34 must advance exactly one step to the Library channels schema"
+        );
+        assert_eq!(
+            LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_MIGRATION_SOURCE, LIBRARY_CHANNELS_SCHEMA_VERSION,
+            "the channel build-state migration must start from the exact v35 shape"
+        );
+        assert_eq!(
+            LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_MIGRATION_SOURCE + 1,
+            LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_VERSION,
+            "v35 must advance exactly one step to the channel build-state schema"
+        );
+        assert_eq!(
+            AUTH_SCHEMA_MIGRATION_SOURCE + 31,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v34 step"
+            "this implementation contains every additive v5→v36 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,
@@ -6135,6 +6218,22 @@ mod tests {
             SchemaMigrationAction::MigrateFrom(
                 ANALYSIS_TERMINAL_IDENTITY_INDEX_SCHEMA_MIGRATION_SOURCE
             )
+        );
+        assert_eq!(
+            schema_migration_action(
+                &[row(LIBRARY_CHANNELS_SCHEMA_MIGRATION_SOURCE)],
+                ClusterCompatibility::CURRENT,
+            )
+            .expect("Library channels predecessor"),
+            SchemaMigrationAction::MigrateFrom(LIBRARY_CHANNELS_SCHEMA_MIGRATION_SOURCE)
+        );
+        assert_eq!(
+            schema_migration_action(
+                &[row(LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_MIGRATION_SOURCE)],
+                ClusterCompatibility::CURRENT,
+            )
+            .expect("channel build-state predecessor"),
+            SchemaMigrationAction::MigrateFrom(LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_MIGRATION_SOURCE)
         );
 
         for rows in [Vec::new(), vec![row(4)], vec![row(7), row(7)]] {

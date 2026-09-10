@@ -976,6 +976,12 @@ pub(crate) struct RemoteStartRequest {
     /// defaults to `false`, so it is refused rather than guessed at.
     #[serde(default)]
     pub typeless_playlist: bool,
+    /// Structured following purpose delivered to and retained by every owner.
+    /// This is in the worker envelope, not bolted onto the public response
+    /// after placement, so takeover cannot silently turn a channel play into
+    /// ordinary VOD.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_channel: Option<serde_json::Value>,
     pub request: SessionRequest,
 }
 
@@ -5372,6 +5378,7 @@ mod tests {
             source_size: 123_456,
             source_mtime: 1_700_000_000,
             typeless_playlist: true,
+            library_channel: None,
             request: SessionRequest {
                 control_sequence: None,
                 file_id: 11,

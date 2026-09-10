@@ -29,6 +29,8 @@ const PLAYBACK_CONTROL_JS: &str = include_str!("../web/playback-control.js");
 /// Live-TV channel/session lifecycle policy. It serializes tuner changes and
 /// retains capability ownership until release succeeds, independently of DOM rendering.
 const LIVE_TV_JS: &str = include_str!("../web/live-tv.js");
+/// Library-channel editor, guide and stale-tune policy.
+const LIBRARY_CHANNELS_JS: &str = include_str!("../web/library-channels.js");
 /// EPUB pagination, locator, and sandbox-frame policy. Kept out of the app
 /// shell so native WebViews can reuse the same navigator in M3.
 const READER_JS: &str = include_str!("../web/reader.js");
@@ -110,6 +112,18 @@ pub async fn live_tv_js() -> Response {
             (header::CACHE_CONTROL, "no-cache"),
         ],
         LIVE_TV_JS,
+    )
+        .into_response()
+}
+
+pub async fn library_channels_js() -> Response {
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        LIBRARY_CHANNELS_JS,
     )
         .into_response()
 }

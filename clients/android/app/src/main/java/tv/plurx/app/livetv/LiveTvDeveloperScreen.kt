@@ -30,6 +30,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import tv.plurx.app.data.Session
+import tv.plurx.app.data.DeveloperReadiness
 import tv.plurx.app.ui.components.ChoicePicker
 import tv.plurx.app.ui.components.safeDisplayInsets
 
@@ -46,6 +47,7 @@ fun LiveTvDeveloperScreen(origin: String, onBack: () -> Unit) {
     val api = remember(origin, token) { runCatching { LiveTvApi(origin, token) }.getOrNull() }
     var saved by remember { mutableStateOf<LiveTvSettings?>(null) }
     var readiness by remember { mutableStateOf<LiveTvReadiness?>(null) }
+    var developerReadiness by remember { mutableStateOf<DeveloperReadiness?>(null) }
     var ipv4 by remember { mutableStateOf("") }
     var owner by remember { mutableStateOf("") }
     var sessions by remember { mutableStateOf(2) }
@@ -71,7 +73,11 @@ fun LiveTvDeveloperScreen(origin: String, onBack: () -> Unit) {
         if (busy) return
         busy = true
         scope.launch {
-            try { apply(client.settings()); message = "Settings loaded. Save, check readiness, then enable." }
+            try {
+                apply(client.settings())
+                developerReadiness = client.developerReadiness()
+                message = "Settings loaded. Save, check readiness, then enable."
+            }
             catch (error: Exception) { saved = null; message = failure(error) }
             finally { busy = false }
         }
@@ -85,7 +91,7 @@ fun LiveTvDeveloperScreen(origin: String, onBack: () -> Unit) {
             try {
                 val result = client.save(previous, change)
                 apply(result)
-                message = "Saved. Live TV is ${if (result.live_tv_enabled) "enabled" else "disabled"}."
+                message = "Saved. Library channels are ${if (result.library_channels_enabled) "enabled" else "disabled"}; Live TV is ${if (result.live_tv_enabled) "enabled" else "disabled"}."
             } catch (error: Exception) {
                 // Never retry an uncertain mutation with stale generation/CAS.
                 saved = null; readiness = null
@@ -99,6 +105,31 @@ fun LiveTvDeveloperScreen(origin: String, onBack: () -> Unit) {
         verticalArrangement = Arrangement.spacedBy(14.dp)) {
         TextButton(onClick = onBack, modifier = Modifier.focusRequester(backFocus)) { Text("Back") }
         Text("Developer", style = MaterialTheme.typography.headlineMedium)
+        saved?.let { settings ->
+            Text("Library channels · advisory enablement", style = MaterialTheme.typography.titleLarge)
+            Text("Schedules use already-probed local movies and episodes. These facts explain whether the server looks ready; they never disable or override the explicit switch.")
+            Row {
+                Checkbox(
+                    checked = settings.library_channels_enabled,
+                    onCheckedChange = { write(LiveTvSettingsChange.LibraryChannelsEnabled(it)) },
+                    enabled = !busy,
+                    modifier = Modifier.tvFocusRing(),
+                )
+                Text("Enable Library channels", Modifier.padding(top = 12.dp))
+            }
+            developerReadiness?.items?.firstOrNull { it.id == "library_channels" }?.requirements?.forEach { requirement ->
+                Text("${when (requirement.status) { "met" -> "Met"; "unmet" -> "Needs attention"; else -> "Not observable" }}: ${requirement.title}")
+                Text(requirement.evidence, style = MaterialTheme.typography.bodySmall)
+            }
+            Button(enabled = !busy, onClick = {
+                busy = true
+                scope.launch {
+                    try { developerReadiness = (api ?: throw LiveTvFailure("invalid_settings")).developerReadiness() }
+                    catch (error: Exception) { message = failure(error) }
+                    finally { busy = false }
+                }
+            }) { Text("Refresh Library channel readiness") }
+        }
         Text("HDHomeRun Live TV · runtime enablement", style = MaterialTheme.typography.titleLarge)
         Text("No special build is needed. Finish the tuner channel scan and reserve a stable private IPv4 address. Choose one reachable, committed voter as tuner owner; keep every serving node on a compatible plurx version.")
         Text("The owner needs tuner network access, writable scratch space, and FFmpeg H.264/AAC encoding. Each viewer uses one physical tuner and one encoder slot. Start with 720p and two sessions.")

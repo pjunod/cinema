@@ -118,7 +118,10 @@ struct RootView: View {
             }
         }
         .onChange(of: model.phase) { _, phase in
-            if phase != .ready { Task { await LiveTvPlayerController.shared.stop(clearProfile: true) } }
+            if phase != .ready {
+                Task { await LiveTvPlayerController.shared.stop(clearProfile: true) }
+                Task { await LibraryChannelPlayerController.shared.stop() }
+            }
         }
         #if os(iOS)
         .onChange(of: scenePhase) { _, phase in

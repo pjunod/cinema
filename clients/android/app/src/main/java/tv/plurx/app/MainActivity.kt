@@ -45,6 +45,8 @@ import tv.plurx.app.ui.theme.PlurxTheme
 import tv.plurx.app.livetv.LiveTvPlayer
 import tv.plurx.app.livetv.LiveTvScreen
 import tv.plurx.app.livetv.LiveTvDeveloperScreen
+import tv.plurx.app.librarychannels.LibraryChannelPlayer
+import tv.plurx.app.librarychannels.LibraryChannelsScreen
 import androidx.compose.ui.platform.LocalContext
 
 class MainActivity : ComponentActivity() {
@@ -69,6 +71,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun AppRoot(vm: AppViewModel) {
     val liveTv = LiveTvPlayer.get(LocalContext.current)
+    val libraryChannels = LibraryChannelPlayer.get(LocalContext.current)
     val phase by vm.phase.collectAsStateWithLifecycle()
     val busy by vm.busy.collectAsStateWithLifecycle()
     val authError by vm.authError.collectAsStateWithLifecycle()
@@ -76,7 +79,10 @@ private fun AppRoot(vm: AppViewModel) {
     LifecycleEventEffect(Lifecycle.Event.ON_START) { vm.onForeground() }
     LaunchedEffect(phase) {
         if (phase == Phase.Ready) vm.onForeground()
-        else liveTv.stop(clearProfile = true)
+        else {
+            liveTv.stop(clearProfile = true)
+            libraryChannels.stop(clearProfile = true)
+        }
     }
 
     when (phase) {
@@ -102,6 +108,7 @@ private fun MainNav(vm: AppViewModel) {
                 onOpenDownloads = { nav.navigate("downloads") },
                 onOpenSettings = { nav.navigate("settings") },
                 onOpenLiveTv = { nav.navigate("live-tv") },
+                onOpenLibraryChannels = { nav.navigate("library-channels") },
             )
         }
         composable(
@@ -139,6 +146,9 @@ private fun MainNav(vm: AppViewModel) {
                 onOpenItem = { id -> nav.navigate("detail/$id") },
                 onViewPhoto = { id -> nav.navigate("photo/$id") },
                 onRead = { itemId, fileId -> nav.navigate("reader/$itemId/$fileId") },
+                onMakeChannel = { item ->
+                    nav.navigate("library-channels?seedId=${item.id}&seedKind=${Uri.encode(item.kind)}&seedTitle=${Uri.encode(item.title)}")
+                },
                 onBack = { nav.popBackStack() },
             )
         }
@@ -169,6 +179,25 @@ private fun MainNav(vm: AppViewModel) {
         }
         composable("live-tv") {
             LiveTvScreen(origin = vm.origin, onBack = { nav.popBackStack() })
+        }
+        composable(
+            "library-channels?seedId={seedId}&seedKind={seedKind}&seedTitle={seedTitle}",
+            arguments = listOf(
+                navArgument("seedId") { type = NavType.LongType; defaultValue = -1L },
+                navArgument("seedKind") { type = NavType.StringType; nullable = true },
+                navArgument("seedTitle") { type = NavType.StringType; nullable = true },
+            ),
+        ) { entry ->
+            LibraryChannelsScreen(
+                vm = vm,
+                seedItemId = entry.arguments?.getLong("seedId")?.takeIf { it > 0 },
+                seedKind = entry.arguments?.getString("seedKind"),
+                seedTitle = entry.arguments?.getString("seedTitle"),
+                onWatchFromStart = { itemId, fileId, channelId ->
+                    nav.navigate("player/$itemId/$fileId/0?returnChannel=${Uri.encode(channelId)}")
+                },
+                onBack = { nav.popBackStack() },
+            )
         }
         composable("developer") {
             LiveTvDeveloperScreen(origin = vm.origin, onBack = { nav.popBackStack() })
@@ -204,7 +233,7 @@ private fun MainNav(vm: AppViewModel) {
             // optional: an ordinary Play navigates to exactly the route it
             // always did, and the next episode below carries neither — the
             // choice belongs to one playback, not to the queue.
-            "player/{itemId}/{fileId}/{startMs}?audio={audio}&subtitle={subtitle}",
+            "player/{itemId}/{fileId}/{startMs}?audio={audio}&subtitle={subtitle}&returnChannel={returnChannel}",
             arguments = listOf(
                 navArgument("itemId") { type = NavType.LongType },
                 navArgument("fileId") { type = NavType.LongType },
@@ -215,6 +244,11 @@ private fun MainNav(vm: AppViewModel) {
                     defaultValue = null
                 },
                 navArgument("subtitle") {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
+                navArgument("returnChannel") {
                     type = NavType.StringType
                     nullable = true
                     defaultValue = null
@@ -231,6 +265,13 @@ private fun MainNav(vm: AppViewModel) {
                     audio = a.getString("audio"),
                     subtitle = a.getString("subtitle"),
                 ),
+                returnChannelId = a.getString("returnChannel"),
+                onReturnToChannel = {
+                    a.getString("returnChannel")?.let(
+                        tv.plurx.app.librarychannels.LibraryChannelPlayer::returnToChannel
+                    )
+                    nav.popBackStack("library-channels", inclusive = false)
+                },
                 onPlayNext = { target ->
                     nav.navigate("detail/${target.itemId}") { popUpTo("home") }
                     nav.navigate("player/${target.itemId}/${target.fileId}/${target.startMs}")

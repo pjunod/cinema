@@ -215,6 +215,7 @@ struct LiveTvSignal: Decodable, Equatable, Sendable {
 }
 
 struct LiveTvSettings: Decodable, Equatable, Sendable {
+    let libraryChannelsEnabled: Bool
     let liveTvEnabled: Bool
     let liveTvDeviceIpv4: String
     let liveTvOwnerNodeId: String
@@ -223,6 +224,44 @@ struct LiveTvSettings: Decodable, Equatable, Sendable {
     let liveTvConfigGeneration: Int64
     let liveTvTransitionFromOwnerNodeId: String
     let liveTvTransitionDrainBefore: Int64
+
+    private enum CodingKeys: String, CodingKey {
+        case libraryChannelsEnabled
+        case liveTvEnabled
+        case liveTvDeviceIpv4
+        case liveTvOwnerNodeId
+        case liveTvMaxSessions
+        case liveTvOutputHeight
+        case liveTvConfigGeneration
+        case liveTvTransitionFromOwnerNodeId
+        case liveTvTransitionDrainBefore
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        // Older servers do not send this key. During a rolling upgrade the
+        // safe representation is the old behaviour: authoring stays visible,
+        // while resolve/session admission remains off until an administrator
+        // explicitly enables it on a server that understands the switch.
+        libraryChannelsEnabled = try values.decodeIfPresent(
+            Bool.self,
+            forKey: .libraryChannelsEnabled
+        ) ?? false
+        liveTvEnabled = try values.decode(Bool.self, forKey: .liveTvEnabled)
+        liveTvDeviceIpv4 = try values.decode(String.self, forKey: .liveTvDeviceIpv4)
+        liveTvOwnerNodeId = try values.decode(String.self, forKey: .liveTvOwnerNodeId)
+        liveTvMaxSessions = try values.decode(Int.self, forKey: .liveTvMaxSessions)
+        liveTvOutputHeight = try values.decode(Int.self, forKey: .liveTvOutputHeight)
+        liveTvConfigGeneration = try values.decode(Int64.self, forKey: .liveTvConfigGeneration)
+        liveTvTransitionFromOwnerNodeId = try values.decode(
+            String.self,
+            forKey: .liveTvTransitionFromOwnerNodeId
+        )
+        liveTvTransitionDrainBefore = try values.decode(
+            Int64.self,
+            forKey: .liveTvTransitionDrainBefore
+        )
+    }
 }
 
 struct LiveTvReadiness: Decodable, Sendable {
@@ -241,6 +280,7 @@ struct LiveTvReadiness: Decodable, Sendable {
 enum LiveTvSettingsChange {
     case configure(ipv4: String, owner: String, sessions: Int, height: Int)
     case enabled(Bool)
+    case libraryChannelsEnabled(Bool)
     case fencedOwner(owner: String, cutoff: Int64)
 
     func body(generation: Int64) throws -> Data {
@@ -252,6 +292,7 @@ enum LiveTvSettingsChange {
             fields["live_tv_max_sessions"] = sessions
             fields["live_tv_output_height"] = height
         case let .enabled(enabled): fields["live_tv_enabled"] = enabled
+        case let .libraryChannelsEnabled(enabled): fields["library_channels_enabled"] = enabled
         case let .fencedOwner(owner, cutoff):
             fields["live_tv_fenced_owner"] = [
                 "owner_node_id": owner, "drain_before_generation": cutoff,

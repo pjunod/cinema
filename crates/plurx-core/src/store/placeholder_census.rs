@@ -47,6 +47,10 @@ const STORE_SOURCES: &[(&str, &str)] = &[
         include_str!("hiqlite_fragment_index_cluster.rs"),
     ),
     ("hiqlite_import.rs", include_str!("hiqlite_import.rs")),
+    (
+        "hiqlite_library_channels.rs",
+        include_str!("hiqlite_library_channels.rs"),
+    ),
     ("hiqlite_media.rs", include_str!("hiqlite_media.rs")),
     (
         "hiqlite_pretranscode.rs",

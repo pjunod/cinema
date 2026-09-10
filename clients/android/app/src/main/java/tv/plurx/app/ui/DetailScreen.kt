@@ -112,6 +112,7 @@ fun DetailScreen(
     onOpenItem: (Long) -> Unit,
     onViewPhoto: (Long) -> Unit,
     onRead: (itemId: Long, fileId: Long) -> Unit,
+    onMakeChannel: (Item) -> Unit,
     onBack: () -> Unit,
 ) {
     var refresh by remember(itemId) { mutableIntStateOf(0) }
@@ -157,6 +158,7 @@ fun DetailScreen(
             onOpenItem = onOpenItem,
             onViewPhoto = onViewPhoto,
             onRead = onRead,
+            onMakeChannel = onMakeChannel,
             onWatchedChanged = { refresh++ },
             onBack = onBack,
         )
@@ -172,6 +174,7 @@ private fun DetailContent(
     onOpenItem: (Long) -> Unit,
     onViewPhoto: (Long) -> Unit,
     onRead: (itemId: Long, fileId: Long) -> Unit,
+    onMakeChannel: (Item) -> Unit,
     onWatchedChanged: () -> Unit,
     onBack: () -> Unit,
 ) {
@@ -266,6 +269,7 @@ private fun DetailContent(
                         onPlay = onPlay,
                         onViewPhoto = onViewPhoto,
                         onRead = onRead,
+                        onMakeChannel = onMakeChannel,
                         onWatchedChanged = onWatchedChanged,
                     )
 
@@ -529,6 +533,7 @@ private fun Actions(
     onPlay: (Long, Long, Long, PreplayTracks) -> Unit,
     onViewPhoto: (Long) -> Unit,
     onRead: (itemId: Long, fileId: Long) -> Unit,
+    onMakeChannel: (Item) -> Unit,
     onWatchedChanged: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
@@ -715,6 +720,14 @@ private fun Actions(
                             style = MaterialTheme.typography.bodySmall,
                         )
                     }
+                }
+            }
+        }
+
+        if (formFactor != FormFactor.Television && item.kind in setOf("movie", "show", "episode")) {
+            item {
+                TvOutlinedButton(onClick = { onMakeChannel(item) }) {
+                    Text("Make channel")
                 }
             }
         }

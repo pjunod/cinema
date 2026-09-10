@@ -569,6 +569,50 @@ checks capacity; a `503` then is normal and says so.
 
 ---
 
+## 4b. Library channels — "turn a subject into a schedule"
+
+**What it does:** every signed-in account can define a personal subject from
+library filters and explicit titles, and plurx publishes that selection as a
+deterministic, continuous schedule. Administrators can additionally publish a
+shared channel for all accounts. Viewers browse now/next cards or a vertical
+guide, tune into the programme already in progress, and keep following across
+programme boundaries. The underlying titles remain ordinary finite library
+media: no duplicate files, recording process, or live-tuner lease exists.
+
+- **A recipe is inspectable before it is saved.** The web editor separates
+  content, playback, and channel details; its preview names exclusions and
+  shows the first matching titles. Drafts survive an accidental reload and are
+  scoped to the current server and user.
+- **Publication never edits the schedule under a viewer.** A build produces an
+  immutable generation. An updated recipe becomes active at the next rotation
+  by default, or at the next programme when explicitly requested. Seeded
+  ordering makes the same generation reproducible across nodes.
+- **Following is not a long video.** Tuning resolves the occurrence at server
+  time and starts the ordinary finite-HLS service at that offset. At the exact
+  programme boundary the client resolves again and opens the next finite
+  session. Following suppresses resume, progress, watched-state, markers, and
+  seeking; **Watch from start** deliberately leaves the channel and opens the
+  title as ordinary playback.
+- **Ownership and visibility are explicit.** Every account authors and manages
+  its own personal channels. Administrators may also make channels shared and
+  use the explicit management listing; normal browsing never exposes another
+  account's personal channel. Favourites are private per-user presentation
+  state and never alter the shared schedule.
+- **Enablement is a choice, not a readiness gate.** Settings → Developer shows
+  whether storage, eligible probed video, and client compatibility look ready.
+  Those facts are advice beside an explicit switch. Disabling stops new
+  resolves and following sessions, but leaves definitions and the editor
+  available for repair.
+
+The initial web surface includes presets, exact filters, explicit title search,
+preview, edit/delete, favourites, guide, tune, watch-from-start, apply-after-
+programme, and next-rotation reshuffle. Apple and Android clients consume the
+same definition, guide, resolve, and session contracts; their platform-specific
+presentation is tracked in
+[LIBRARY-CHANNELS-STATUS.md](features/LIBRARY-CHANNELS-STATUS.md).
+
+---
+
 ## 5. The player — "a real playback experience, not a gray box"
 
 **What it does:** a borderless, projection-style player in the web app.

@@ -102,6 +102,14 @@ struct PlurxAPI {
         return try await run(req)
     }
 
+    private func putNoContent<B: Encodable>(_ path: String, body: B) async throws {
+        var req = try jsonRequest(path, body: body)
+        req.httpMethod = "PUT"
+        Session.shared.authorize(&req)
+        let (_, resp) = try await session.data(for: req)
+        try Self.check(resp)
+    }
+
     private func deleteNoContent(_ path: String, query: [URLQueryItem] = []) async throws {
         guard let url = makeURL(path, query: query) else { throw APIError.badURL }
         var req = URLRequest(url: url)
@@ -377,6 +385,119 @@ struct PlurxAPI {
             using: Self.playbackPreparationSession
         )
         return Self.acceptHlsSessionPresentation(started)
+    }
+
+    // MARK: - Library channels
+
+    func libraryChannels(management: Bool = false) async throws -> [LibraryChannel] {
+        var result: [LibraryChannel] = []
+        var after: String?
+        repeat {
+            var query = [URLQueryItem(name: "limit", value: "100")]
+            if management { query.append(URLQueryItem(name: "management", value: "true")) }
+            if let after { query.append(URLQueryItem(name: "after", value: after)) }
+            let page: [LibraryChannel] = try await get("library-channels/", query: query)
+            result += page
+            after = page.count == 100 ? page.last?.id : nil
+        } while after != nil
+        return result
+    }
+
+    func libraryChannel(_ id: String) async throws -> LibraryChannel {
+        try await get("library-channels/\(id)")
+    }
+
+    func libraryChannelGuide(ids: [String], from: Int64, to: Int64) async throws -> [LibraryChannelProgramme] {
+        var programmes: [LibraryChannelProgramme] = []
+        for start in stride(from: 0, to: ids.count, by: 20) {
+            let group = Array(ids[start..<min(ids.count, start + 20)])
+            var cursor: String?
+            repeat {
+                var query = [
+                    URLQueryItem(name: "channel_ids", value: group.joined(separator: ",")),
+                    URLQueryItem(name: "start_ms", value: String(from)),
+                    URLQueryItem(name: "end_ms", value: String(to)),
+                ]
+                if let cursor { query.append(URLQueryItem(name: "cursor", value: cursor)) }
+                guard let url = makeURL("library-channels/guide", query: query) else { throw APIError.badURL }
+                var request = URLRequest(url: url)
+                Session.shared.authorize(&request)
+                let (data, response) = try await session.data(for: request)
+                try Self.check(response)
+                programmes += try Self.decoder.decode([LibraryChannelProgramme].self, from: data)
+                cursor = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "X-Plurx-Next-Cursor")
+            } while cursor != nil
+        }
+        return programmes.sorted {
+            ($0.startsAtMs, $0.channelId) < ($1.startsAtMs, $1.channelId)
+        }
+    }
+
+    func previewLibraryChannel(_ recipe: LibraryChannelRecipe, seed: String?) async throws -> LibraryChannelPreview {
+        try await post("library-channels/preview", body: LibraryChannelPreviewRequest(recipe: recipe, limit: 50, previewSeed: seed))
+    }
+
+    func createLibraryChannel(_ definition: LibraryChannelDefinition) async throws -> LibraryChannelMutation {
+        try await post("library-channels/", body: definition)
+    }
+
+    func updateLibraryChannel(_ channel: LibraryChannel, definition: LibraryChannelDefinition) async throws -> LibraryChannelMutation {
+        try await put("library-channels/\(channel.id)", body: LibraryChannelUpdateRequest(
+            expectedRevision: channel.revision,
+            requestId: definition.requestId,
+            name: definition.name,
+            description: definition.description,
+            visibility: definition.visibility,
+            enabled: definition.enabled,
+            recipe: definition.recipe,
+            previewSeed: definition.previewSeed
+        ))
+    }
+
+    func deleteLibraryChannel(_ channel: LibraryChannel) async throws {
+        try await deleteNoContent("library-channels/\(channel.id)", query: [
+            URLQueryItem(name: "expected_revision", value: String(channel.revision)),
+            URLQueryItem(name: "request_id", value: UUID().uuidString),
+        ])
+    }
+
+    func setLibraryChannelFavourite(_ id: String, favourite: Bool) async throws {
+        try await putNoContent("library-channels/\(id)/favourite", body: LibraryChannelFavouriteRequest(favourite: favourite))
+    }
+
+    func rebuildLibraryChannel(_ channel: LibraryChannel, activation: String, reshuffle: Bool) async throws -> LibraryChannelBuild {
+        try await post("library-channels/\(channel.id)/rebuild", body: LibraryChannelRebuildRequest(
+            expectedRevision: channel.revision,
+            requestId: UUID().uuidString,
+            activation: activation,
+            reshuffle: reshuffle
+        ))
+    }
+
+    func resolveLibraryChannel(_ id: String) async throws -> LibraryChannelResolved {
+        try await post("library-channels/\(id)/resolve")
+    }
+
+    func createLibraryChannelSession(
+        channelId: String,
+        resolved: LibraryChannelResolved,
+        tuneSequence: UInt64,
+        playback: CreateSessionRequest
+    ) async throws -> LibraryChannelSession {
+        try await post(
+            "library-channels/\(channelId)/sessions",
+            body: LibraryChannelSessionRequest(
+                generationId: resolved.generationId,
+                occurrence: resolved.occurrence,
+                tuneSequence: tuneSequence,
+                playback: playback
+            ),
+            using: Self.playbackPreparationSession
+        )
+    }
+
+    func developerReadiness() async throws -> DeveloperReadiness {
+        try await get("developer/readiness")
     }
 
     /// `vod` describes the presentation the server selected; it is not a

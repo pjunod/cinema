@@ -24,6 +24,7 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.LiveTv
+import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -83,6 +84,7 @@ fun HomeScreen(
     onOpenDownloads: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenLiveTv: () -> Unit = {},
+    onOpenLibraryChannels: () -> Unit = {},
 ) {
     val state by vm.home.collectAsStateWithLifecycle()
     val preferences by vm.preferences.collectAsStateWithLifecycle()
@@ -101,6 +103,7 @@ fun HomeScreen(
             onOpenDownloads = onOpenDownloads,
             onOpenSettings = onOpenSettings,
             onOpenLiveTv = onOpenLiveTv,
+            onOpenLibraryChannels = onOpenLibraryChannels,
         )
 
         when {
@@ -417,6 +420,7 @@ internal fun HomeTopBar(
     onOpenSettings: () -> Unit,
     safeInsets: WindowInsets = safeDisplayInsets(),
     onOpenLiveTv: () -> Unit = {},
+    onOpenLibraryChannels: () -> Unit = {},
 ) {
     val brand: @Composable () -> Unit = {
         Text(
@@ -444,6 +448,9 @@ internal fun HomeTopBar(
         }
         TvIconButton(onClick = onOpenLiveTv) {
             Icon(Icons.Filled.LiveTv, contentDescription = "Live TV", tint = Muted)
+        }
+        TvIconButton(onClick = onOpenLibraryChannels) {
+            Icon(Icons.Filled.VideoLibrary, contentDescription = "Library channels", tint = Muted)
         }
         if (formFactor != FormFactor.Television) {
             TvIconButton(onClick = onOpenDownloads) {

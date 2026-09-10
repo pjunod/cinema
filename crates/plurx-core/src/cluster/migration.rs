@@ -1504,6 +1504,9 @@ async fn open_active_store_with_key(
             drop(store);
             return Err(error);
         }
+        if read_readdress_record(&config.storage.data_dir)?.is_some() {
+            materialize_readdress_join_snapshot(&client, &identity.node_id).await?;
+        }
         // Written here rather than beside the rename so a crash in between still
         // converges: any boot that successfully opens an active target re-asserts
         // it, and this is the only place that can be reached without one.
@@ -1616,6 +1619,66 @@ async fn open_active_store_with_key(
         }
     }
     result
+}
+
+/// Complete a sole-voter readdress with a transferable state-machine image.
+///
+/// Readdressing deliberately preserves the imported SQLite database while it
+/// rebuilds Raft metadata. That new log cannot reconstruct the pre-existing
+/// rows for a later learner, so the readdress recovery record remains live
+/// until a snapshot containing the preserved image is published. A crash
+/// after publication is idempotent: the next boot observes the snapshot at the
+/// current applied index and finishes without rebuilding it.
+#[cfg(feature = "hiqlite-store")]
+async fn materialize_readdress_join_snapshot(
+    client: &Client,
+    node_id: &str,
+) -> Result<(), StoreError> {
+    let initial = client.metrics_db().await.map_err(|error| {
+        StoreError::Database(format!(
+            "reading readdressed voter progress before snapshot: {error}"
+        ))
+    })?;
+    let target = initial.last_applied.as_ref().map_or(0, |log| log.index);
+    if initial
+        .snapshot
+        .as_ref()
+        .is_some_and(|snapshot| snapshot.index >= target)
+    {
+        return Ok(());
+    }
+    let target = client.trigger_db_snapshot().await.map_err(|error| {
+        StoreError::Database(format!(
+            "anchoring and triggering readdressed voter snapshot for node {node_id}: {error}"
+        ))
+    })?;
+    let deadline = tokio::time::Instant::now() + HIQLITE_HEALTH_TIMEOUT;
+    loop {
+        let metrics = client.metrics_db().await.map_err(|error| {
+            StoreError::Database(format!(
+                "reading readdressed voter snapshot progress for node {node_id}: {error}"
+            ))
+        })?;
+        if metrics
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.index >= target)
+        {
+            tracing::info!(
+                node_id,
+                snapshot_index = target,
+                "published transferable state-machine snapshot after sole-voter readdress"
+            );
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(StoreError::Database(format!(
+                "readdressed voter {node_id} did not publish state-machine snapshot at index \
+                 {target} within {HIQLITE_HEALTH_TIMEOUT:?}"
+            )));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 /// Resolve the key against the authoritative replicated rows on every reopen.
@@ -3928,6 +3991,46 @@ mod tests {
         assert_eq!(
             local_client_address(configured_v6),
             "[::1]:32402".parse().expect("IPv6 loopback")
+        );
+    }
+
+    /// A readdressed voter has application rows that are older than its new
+    /// Raft log. Clearing the recovery record before snapshot publication
+    /// would make the next learner start from an empty database while still
+    /// reporting an applied membership index.
+    #[cfg(feature = "hiqlite-store")]
+    #[test]
+    fn readdress_completion_waits_for_a_transferable_database_snapshot() {
+        let source = include_str!("migration.rs");
+        let open = source
+            .split_once("async fn open_active_store_with_key")
+            .expect("active store open")
+            .1
+            .split_once("/// Resolve the key")
+            .expect("active store boundary")
+            .0;
+        assert!(
+            open.contains("read_readdress_record(&config.storage.data_dir)?.is_some()")
+                && open.contains("materialize_readdress_join_snapshot(&client"),
+            "an in-progress readdress must publish a snapshot before open succeeds"
+        );
+        let selection = source
+            .split_once("pub async fn select_daemon_store")
+            .expect("daemon selection")
+            .1
+            .split_once("fn install_default_crypto_provider")
+            .expect("daemon selection boundary")
+            .0;
+        assert!(
+            selection.contains("let selected = open_active_store")
+                && selection.contains("finish_readdress(&config.storage.data_dir)?"),
+            "readdress cleanup must remain after the snapshot-owning active-store open"
+        );
+        let hiqlite_management = include_str!("../../../../vendor/hiqlite/src/client/mgmt.rs");
+        assert!(
+            hiqlite_management.contains(".client_write(QueryWrite::RTT)")
+                && hiqlite_management.contains("state.raft_db.raft.trigger().snapshot().await?"),
+            "the local client snapshot hook must anchor writer metadata before the real OpenRaft trigger"
         );
     }
 

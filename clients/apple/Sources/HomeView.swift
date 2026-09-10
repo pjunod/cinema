@@ -4,6 +4,7 @@ enum HomeTab: Hashable {
     case home
     case libraries
     case liveTv
+    case libraryChannels
     case search
     case downloads
     case settings
@@ -63,6 +64,10 @@ struct HomeView: View {
                 .tabItem { Label("Live TV", systemImage: "tv") }
                 .tag(HomeTab.liveTv)
 
+            NavigationStack { LibraryChannelsView().appDestinations() }
+                .tabItem { Label("Channels", systemImage: "play.rectangle.on.rectangle") }
+                .tag(HomeTab.libraryChannels)
+
             NavigationStack {
                 SearchView()
                     .appDestinations()
@@ -104,6 +109,9 @@ struct HomeView: View {
             guard phase == .active, model.phase == .ready else { return }
             Task { await model.loadHome() }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .makeLibraryChannelFromItem)) { _ in
+            selectedTab = .libraryChannels
+        }
     }
     #else
     private var tvTabs: some View {
@@ -119,6 +127,9 @@ struct HomeView: View {
             LiveTvView(onLeave: { selectedTab = .home })
                 .tabItem { Label("Live TV", systemImage: "tv") }
                 .tag(HomeTab.liveTv)
+
+            LibraryChannelsView()
+                .tabItem { Label("Channels", systemImage: "play.rectangle.on.rectangle") }
 
             SearchView()
                 .tabItem { Label("Search", systemImage: "magnifyingglass") }

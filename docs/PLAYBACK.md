@@ -1398,6 +1398,33 @@ it is not the reaper. Idle expiry (45 s with no read), producer-progress timeout
 (30 s), and startup timeout (15 s) are the server's, and an orphaned capability
 is reclaimed by the server whether or not any client ever comes back.
 
+## Library-channel following — live timing over finite files
+
+A Library channel is scheduled like a broadcast but delivered as a succession
+of ordinary finite-media sessions. `resolve` uses server time to identify the
+immutable generation entry on air; `sessions` revalidates that occurrence and
+passes its item, offset, generation, and occurrence identity into the existing
+HLS application service. The purpose participates in the session fingerprint
+and is stored with the durable route, so retries cannot accidentally reuse an
+ordinary VOD session or a different point in the schedule.
+
+Following mode changes client policy, not media routing. Direct-copy and
+transcode decisions still use the same probe, caps, and finite HLS machinery.
+The client hides the seek surface, ignores intro/credits markers, emits no
+progress or watched-state writes, and re-resolves at a programme boundary. If
+the viewer pauses across a boundary, resume resolves server-now rather than
+continuing the stale occurrence. **Watch from start** exits following mode and
+opens the same item through the normal finite-media controller, restoring
+seeking, progress, markers, and resume.
+
+The server's enable switch and current channel visibility are checked when
+resolving, opening a new following session, and on every ordinary finite-HLS
+control exchange for a stored channel purpose. Disable, deletion, or a caller
+who no longer has visibility ends following without changing a detached
+personal title. Readiness diagnostics are deliberately absent from this
+decision: they explain likely failures to an administrator but cannot veto an
+explicit enable choice.
+
 ## Non-goals & known limits
 
 - **Live TV has no seek, no resume, and no progress.** A channel is not a

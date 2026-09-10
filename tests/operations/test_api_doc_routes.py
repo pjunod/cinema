@@ -10,8 +10,9 @@ its row leaves a caller writing against an endpoint that returns the app
 shell with a 200.
 
 So the router is parsed, not grepped for prose. Route literals come from the
-three `Router::new()` chains in `router()`, constants are resolved to their
-declared values, and the `/api/v1` nest is applied to the first chain only.
+three `Router::new()` chains in `router()` and from any named subrouter nested
+inside the native API. Constants are resolved to their declared values, nested
+prefixes are composed, and the `/api/v1` nest is applied to the native chain.
 """
 
 from __future__ import annotations
@@ -107,6 +108,36 @@ def _resolve_constant(name: str) -> str:
     return candidates[0][1]
 
 
+def _nested_router_routes(segment: str) -> set[str]:
+    """Expand `.nest("/prefix", module::router())` without inventing paths.
+
+    Axum subrouters keep a bounded route family and its middleware together.
+    The inventory therefore reads the named module's router chain and composes
+    the literal prefix exactly as Axum does.
+    """
+    routes: set[str] = set()
+    nested = re.compile(
+        r'\.nest\(\s*"([^"]+)"\s*,\s*([A-Za-z_]\w*)::router\(\)'
+    )
+    for prefix, module in nested.findall(segment):
+        source = (ROUTER.parent / f"{module}.rs").read_text(encoding="utf-8")
+        router = re.search(
+            r"(?:pub(?:\(crate\))?\s+)?fn\s+router\([^)]*\)[^{]*\{(?P<body>.*?)^\}",
+            source,
+            re.MULTILINE | re.DOTALL,
+        )
+        if router is None:
+            raise AssertionError(f"no router() body found in module {module}")
+        for argument in _route_arguments(router.group("body")):
+            literal = (
+                argument.strip('"')
+                if argument.startswith('"')
+                else _resolve_constant(argument)
+            )
+            routes.add(prefix + literal)
+    return routes
+
+
 def registered_routes() -> set[str]:
     body = _router_body()
     api_at = body.index("let api = Router::new()")
@@ -114,9 +145,11 @@ def registered_routes() -> set[str]:
     root_at = body.index("Router::new()\n        // Also opted out")
 
     routes: set[str] = set()
-    for argument in _route_arguments(body[api_at:plex_at]):
+    api_segment = body[api_at:plex_at]
+    for argument in _route_arguments(api_segment):
         literal = argument.strip('"') if argument.startswith('"') else _resolve_constant(argument)
         routes.add("/api/v1" + literal)
+    routes.update("/api/v1" + path for path in _nested_router_routes(api_segment))
     for argument in _route_arguments(body[plex_at:]):
         literal = argument.strip('"') if argument.startswith('"') else _resolve_constant(argument)
         routes.add(literal)
