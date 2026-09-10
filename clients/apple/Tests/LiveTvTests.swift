@@ -453,6 +453,65 @@ final class LiveTvTests: XCTestCase {
             ["7.1"])
     }
 
+    func testGuideFocusMovesInOrderAndHandsTheTopBoundaryToTheToolbar() throws {
+        func guideChannel(_ id: String) -> LiveTvChannel {
+            LiveTvChannel(id: id, guideNumber: id, guideName: "Channel \(id)",
+                          favorite: false, drm: false, support: "ready",
+                          hd: nil, videoCodec: nil, audioCodec: nil)
+        }
+        func programme(_ start: Int, _ end: Int, _ title: String) -> LiveTvProgramme {
+            LiveTvProgramme(start: start, end: end, title: title)
+        }
+        func cell(_ programme: LiveTvProgramme) -> LiveTvGridCell {
+            LiveTvGridCell(programme: programme, left: Double(programme.start),
+                           width: Double(programme.end - programme.start),
+                           airing: false, clipped: false)
+        }
+
+        let first = programme(0, 1_800, "First")
+        let second = programme(1_800, 3_600, "Second")
+        let spanning = programme(0, 3_600, "Spanning")
+        let layout = LiveTvGridLayout(rows: [
+            LiveTvGridRow(channel: guideChannel("1"), cells: [cell(first), cell(second)]),
+            LiveTvGridRow(channel: guideChannel("2"), cells: [cell(spanning)]),
+            LiveTvGridRow(channel: guideChannel("3"), cells: []),
+        ], totalWidth: 3_600, nowX: nil)
+
+        var position = LiveTvGuideFocusPosition(
+            channelId: "1", programmeStart: first.start,
+            channelHeader: false, anchorTime: 900)
+        for expected in ["2", "3"] {
+            let move = LiveTvGuideFocusNavigator.move(
+                layout: layout, current: position, direction: .down, fallbackAnchor: 0)
+            guard case .focus(let next) = move else {
+                return XCTFail("down should focus channel \(expected), got \(move)")
+            }
+            XCTAssertEqual(next.channelId, expected)
+            XCTAssertEqual(next.anchorTime, 900, "vertical moves preserve one UTC anchor")
+            position = next
+        }
+        XCTAssertNil(position.programmeStart, "an empty guide row remains focusable")
+
+        position = LiveTvGuideFocusPosition(
+            channelId: "1", programmeStart: first.start,
+            channelHeader: false, anchorTime: 900)
+        guard case .focus(let header) = LiveTvGuideFocusNavigator.move(
+            layout: layout, current: position, direction: .left, fallbackAnchor: 0)
+        else { return XCTFail("left from the first programme should focus its channel header") }
+        XCTAssertTrue(header.channelHeader)
+        guard case .focus(let restored) = LiveTvGuideFocusNavigator.move(
+            layout: layout, current: header, direction: .right, fallbackAnchor: 0)
+        else { return XCTFail("right from the channel header should return to its first programme") }
+        XCTAssertEqual(restored.programmeStart, first.start)
+
+        XCTAssertEqual(
+            LiveTvGuideFocusNavigator.move(
+                layout: layout, current: restored, direction: .up, fallbackAnchor: 0),
+            .toolbar,
+            "the grid must relinquish focus before the toolbar claims it"
+        )
+    }
+
     func testGuideWireShapeDecodesWithSnakeCaseAndIgnoresWhatItShouldNotSee() throws {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
@@ -577,6 +636,35 @@ final class LiveTvTests: XCTestCase {
         // accent colour. Page actions and rows own their focus contrast.
         XCTAssertTrue(source.contains(".buttonStyle(TVReadableButtonStyle(prominent: favoritesOnly))"))
         XCTAssertTrue(source.contains(".buttonStyle(LiveTvChannelButtonStyle())"))
+    }
+
+    func testAppleTvLiveNavigationHasOneRestoreOwnerAndReadablePanels() throws {
+        let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let source = try String(
+            contentsOf: testsDirectory.appendingPathComponent("../Sources/LiveTvView.swift").standardizedFileURL,
+            encoding: .utf8)
+
+        XCTAssertTrue(source.contains(".task(id: gridContentIdentity) { restoreFocus() }"))
+        XCTAssertFalse(source.contains(".task(id: restoreIdentity)"),
+                       "a focus move must not enqueue its own stale restoration")
+        XCTAssertTrue(source.contains("case .toolbar:\n            // Relinquish the grid"))
+        XCTAssertTrue(source.contains("List(visibleChannels) { channel in"),
+                      "On now should use the platform's focus-scrolling container")
+        XCTAssertTrue(source.contains("private struct LiveTvGuideButtonStyle: ButtonStyle"),
+                      "the selected programme needs visible focus chrome")
+
+        func section(_ start: String, _ end: String) throws -> String {
+            let lower = try XCTUnwrap(source.range(of: start)?.lowerBound)
+            let upper = try XCTUnwrap(source.range(of: end, range: lower..<source.endIndex)?.lowerBound)
+            return String(source[lower..<upper])
+        }
+        let more = try section("private var morePanel", "private var actionBar")
+        XCTAssertEqual(more.components(separatedBy: "Button(").count - 1, 8)
+        XCTAssertEqual(more.components(separatedBy: ".buttonStyle(TVReadableButtonStyle").count - 1, 8,
+                       "every More action owns a readable foreground/background pair")
+        let layout = try section("private var layoutPanel", "private var morePanel")
+        XCTAssertEqual(layout.components(separatedBy: ".buttonStyle(TVReadableButtonStyle").count - 1, 2,
+                       "the layout choice and Close action must not inherit the red tint")
     }
 
     func testTuningFromTheOverlayDoesNotDismissTheSurfaceMidStart() throws {

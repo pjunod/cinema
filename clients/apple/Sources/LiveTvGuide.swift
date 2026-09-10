@@ -106,6 +106,111 @@ struct LiveTvChannelFilter: Equatable, Sendable {
     var hideProtected: Bool = false
 }
 
+/// A guide focus location independent of SwiftUI. Keeping movement here makes
+/// a rapid series of remote presses one ordered state transition at a time;
+/// view restoration is not allowed to invent another destination later.
+struct LiveTvGuideFocusPosition: Equatable, Sendable {
+    let channelId: String
+    let programmeStart: Int?
+    let channelHeader: Bool
+    let anchorTime: Int?
+}
+
+enum LiveTvGuideFocusMove: Equatable, Sendable {
+    case focus(LiveTvGuideFocusPosition)
+    case toolbar
+    case unchanged
+}
+
+enum LiveTvGuideFocusNavigator {
+    static func move(
+        layout: LiveTvGridLayout,
+        current: LiveTvGuideFocusPosition,
+        direction: LiveTvContractInput,
+        fallbackAnchor: Int
+    ) -> LiveTvGuideFocusMove {
+        guard let rowIndex = layout.rows.firstIndex(where: { $0.channel.id == current.channelId })
+        else { return .unchanged }
+        let row = layout.rows[rowIndex]
+        let sorted = row.cells.sorted { $0.programme.start < $1.programme.start }
+
+        switch direction {
+        case .left, .right:
+            guard let start = current.programmeStart else {
+                if current.channelHeader, direction == .right, let first = sorted.first {
+                    return .focus(position(row.channel.id, first.programme, header: false))
+                }
+                if !current.channelHeader, direction == .left {
+                    return .focus(LiveTvGuideFocusPosition(
+                        channelId: row.channel.id,
+                        programmeStart: nil,
+                        channelHeader: true,
+                        anchorTime: current.anchorTime
+                    ))
+                }
+                return .unchanged
+            }
+            guard let index = sorted.firstIndex(where: { $0.programme.start == start }) else {
+                return .unchanged
+            }
+            let next = index + (direction == .right ? 1 : -1)
+            if next < 0 {
+                return .focus(LiveTvGuideFocusPosition(
+                    channelId: row.channel.id,
+                    programmeStart: nil,
+                    channelHeader: true,
+                    anchorTime: current.anchorTime
+                ))
+            }
+            guard sorted.indices.contains(next) else { return .unchanged }
+            return .focus(position(row.channel.id, sorted[next].programme, header: false))
+
+        case .up, .down:
+            let nextRow = rowIndex + (direction == .down ? 1 : -1)
+            if nextRow < 0 { return .toolbar }
+            guard layout.rows.indices.contains(nextRow) else { return .unchanged }
+            let targetRow = layout.rows[nextRow]
+            if current.channelHeader {
+                return .focus(LiveTvGuideFocusPosition(
+                    channelId: targetRow.channel.id,
+                    programmeStart: nil,
+                    channelHeader: true,
+                    anchorTime: current.anchorTime
+                ))
+            }
+            let anchor = current.anchorTime ?? current.programmeStart ?? fallbackAnchor
+            let candidate = targetRow.cells.first {
+                $0.programme.start <= anchor && anchor < $0.programme.end
+            } ?? targetRow.cells.min {
+                abs(($0.programme.start + $0.programme.end) / 2 - anchor)
+                    < abs(($1.programme.start + $1.programme.end) / 2 - anchor)
+            }
+            return .focus(LiveTvGuideFocusPosition(
+                channelId: targetRow.channel.id,
+                programmeStart: candidate?.programme.start,
+                channelHeader: false,
+                anchorTime: anchor
+            ))
+
+        default:
+            return .unchanged
+        }
+    }
+
+    private static func position(
+        _ channelId: String,
+        _ programme: LiveTvProgramme,
+        header: Bool
+    ) -> LiveTvGuideFocusPosition {
+        LiveTvGuideFocusPosition(
+            channelId: channelId,
+            programmeStart: programme.start,
+            channelHeader: header,
+            anchorTime: programme.start + max(1, programme.end - programme.start) / 2
+        )
+    }
+}
+
 enum LiveTvGuideReducer {
     static func channel(_ guide: LiveTvGuide?, _ channelId: String) -> LiveTvGuideChannel? {
         guide?.channels.first { $0.id == channelId }

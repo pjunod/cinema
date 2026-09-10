@@ -538,6 +538,33 @@ private struct LiveTvChannelButtonStyle: ButtonStyle {
         }
     }
 }
+
+/// Programme cells need an explicit focus ring. A plain tvOS button still
+/// participates in focus, but gives the viewer no stable visual target; the
+/// details pane changing somewhere else then makes a correct move look random.
+private struct LiveTvGuideButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> Body {
+        Body(configuration: configuration)
+    }
+
+    fileprivate struct Body: View {
+        let configuration: ButtonStyle.Configuration
+        @Environment(\.isFocused) private var isFocused
+
+        var body: some View {
+            configuration.label
+                .foregroundStyle(Palette.onBg)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .stroke(isFocused ? Palette.accent : .clear,
+                                lineWidth: isFocused ? 4 : 0)
+                }
+                .scaleEffect(isFocused ? 1.018 : (configuration.isPressed ? 0.99 : 1))
+                .shadow(color: Palette.accent.opacity(isFocused ? 0.28 : 0), radius: 10)
+                .animation(.easeOut(duration: 0.1), value: isFocused)
+        }
+    }
+}
 #endif
 
 private struct LiveTvGuideScrollOriginKey: PreferenceKey {
@@ -612,8 +639,9 @@ struct LiveTvGuideGrid: View {
                                         )
                                         .clipShape(RoundedRectangle(cornerRadius: 5))
                                 }
-                                .buttonStyle(.plain)
                                 #if os(tvOS)
+                                .buttonStyle(LiveTvGuideButtonStyle())
+                                .focusEffectDisabled()
                                 .focused(
                                     $focusedCell,
                                     equals: FocusKey(
@@ -622,6 +650,8 @@ struct LiveTvGuideGrid: View {
                                         channelHeader: false
                                     )
                                 )
+                                #else
+                                .buttonStyle(.plain)
                                 #endif
                                 .offset(x: cell.left, y: 4)
                                 .accessibilityLabel(
@@ -640,8 +670,9 @@ struct LiveTvGuideGrid: View {
                                         .overlay(RoundedRectangle(cornerRadius: 5).stroke(Palette.outline))
                                         .clipShape(RoundedRectangle(cornerRadius: 5))
                                 }
-                                .buttonStyle(.plain)
                                 #if os(tvOS)
+                                .buttonStyle(LiveTvGuideButtonStyle())
+                                .focusEffectDisabled()
                                 .focused(
                                     $focusedCell,
                                     equals: FocusKey(
@@ -650,6 +681,8 @@ struct LiveTvGuideGrid: View {
                                         channelHeader: false
                                     )
                                 )
+                                #else
+                                .buttonStyle(.plain)
                                 #endif
                                 .offset(x: 0, y: 4)
                             }
@@ -703,8 +736,9 @@ struct LiveTvGuideGrid: View {
                                    height: LiveTvGridMetrics.rowHeight,
                                    alignment: .leading)
                         }
-                        .buttonStyle(.plain)
                         #if os(tvOS)
+                        .buttonStyle(LiveTvGuideButtonStyle())
+                        .focusEffectDisabled()
                         .focused(
                             $focusedCell,
                             equals: FocusKey(
@@ -713,6 +747,8 @@ struct LiveTvGuideGrid: View {
                                 channelHeader: true
                             )
                         )
+                        #else
+                        .buttonStyle(.plain)
                         #endif
                     }
                 }
@@ -745,92 +781,53 @@ struct LiveTvGuideGrid: View {
                 return true
             }
         )
-        .task(id: restoreIdentity) { restoreFocus() }
+        // Restore only when the rendered grid changes. Parent restore values
+        // are written by every focus move; including them in this identity
+        // queued another restore behind every remote press, so a fast second
+        // press could be overwritten by the first press's stale restoration.
+        .task(id: gridContentIdentity) { restoreFocus() }
         #endif
     }
 
     #if os(tvOS)
     private func moveFocus(_ direction: LiveTvContractInput) {
-        guard let current = focusedCell,
-              let rowIndex = layout.rows.firstIndex(where: { $0.channel.id == current.channelId })
-        else { return }
-        let row = layout.rows[rowIndex]
-        let sorted = row.cells.sorted { $0.programme.start < $1.programme.start }
-        switch direction {
-        case .left, .right:
-            guard let start = current.programmeStart else {
-                if current.channelHeader, direction == .right, let first = sorted.first {
-                    anchorTime = first.programme.start + max(1, first.programme.end - first.programme.start) / 2
-                    focusedCell = FocusKey(
-                        channelId: row.channel.id,
-                        programmeStart: first.programme.start,
-                        channelHeader: false
-                    )
-                } else if !current.channelHeader, direction == .left {
-                    focusedCell = FocusKey(
-                        channelId: row.channel.id,
-                        programmeStart: nil,
-                        channelHeader: true
-                    )
-                }
-                return
-            }
-            guard let index = sorted.firstIndex(where: { $0.programme.start == start }) else { return }
-            let next = index + (direction == .right ? 1 : -1)
-            if next < 0 {
-                focusedCell = FocusKey(
-                    channelId: row.channel.id,
-                    programmeStart: nil,
-                    channelHeader: true
-                )
-            } else if sorted.indices.contains(next) {
-                let cell = sorted[next]
-                anchorTime = cell.programme.start + max(1, cell.programme.end - cell.programme.start) / 2
-                focusedCell = FocusKey(
-                    channelId: row.channel.id,
-                    programmeStart: cell.programme.start,
-                    channelHeader: false
-                )
-            }
-        case .up, .down:
-            let nextRow = rowIndex + (direction == .down ? 1 : -1)
-            if nextRow < 0 {
-                onToolbarBoundary()
-                return
-            }
-            guard layout.rows.indices.contains(nextRow) else { return }
-            let targetRow = layout.rows[nextRow]
+        guard let current = focusedCell else { return }
+        let position = LiveTvGuideFocusPosition(
+            channelId: current.channelId,
+            programmeStart: current.programmeStart,
+            channelHeader: current.channelHeader,
+            anchorTime: anchorTime
+        )
+        switch LiveTvGuideFocusNavigator.move(
+            layout: layout,
+            current: position,
+            direction: direction,
+            fallbackAnchor: slots.first ?? 0
+        ) {
+        case .focus(let next):
+            anchorTime = next.anchorTime
             preserveAnchorForNextFocus = true
-            guard !current.channelHeader else {
-                focusedCell = FocusKey(
-                    channelId: targetRow.channel.id,
-                    programmeStart: nil,
-                    channelHeader: true
-                )
-                return
-            }
-            let anchor = anchorTime ?? current.programmeStart ?? slots.first ?? 0
-            let candidate = targetRow.cells.first {
-                $0.programme.start <= anchor && anchor < $0.programme.end
-            } ?? targetRow.cells.min {
-                abs(($0.programme.start + $0.programme.end) / 2 - anchor)
-                    < abs(($1.programme.start + $1.programme.end) / 2 - anchor)
-            }
             focusedCell = FocusKey(
-                channelId: targetRow.channel.id,
-                programmeStart: candidate?.programme.start,
-                channelHeader: false
+                channelId: next.channelId,
+                programmeStart: next.programmeStart,
+                channelHeader: next.channelHeader
             )
-        default:
+        case .toolbar:
+            // Relinquish the grid before the toolbar claims focus. Keeping
+            // both FocusState values non-nil made tvOS reconcile two focus
+            // owners while the scroll view was still moving.
+            focusedCell = nil
+            onToolbarBoundary()
+        case .unchanged:
             break
         }
     }
 
-    private var restoreIdentity: String {
+    private var gridContentIdentity: String {
         let rows = layout.rows.map { row in
             "\(row.channel.id):\(row.cells.map { String($0.programme.start) }.joined(separator: ","))"
         }.joined(separator: "|")
-        return "\(rows)#\(restoreChannelId ?? "")#\(restoreProgrammeStart ?? -1)#\(restoreChannelHeader)#\(restoreAnchorTime ?? -1)"
+        return "\(rows)#\(slots.map(String.init).joined(separator: ","))"
     }
 
     private func restoreFocus() {
@@ -1070,8 +1067,16 @@ struct LiveTvView: View {
                         if layout == tvLayout { Image(systemName: "checkmark") }
                     }
                 }
+                #if os(tvOS)
+                .buttonStyle(TVReadableButtonStyle(prominent: layout == tvLayout))
+                .focusEffectDisabled()
+                #endif
             }
             Button("Close") { showingLayout = false }
+                #if os(tvOS)
+                .buttonStyle(TVReadableButtonStyle(prominent: false))
+                .focusEffectDisabled()
+                #endif
         }
         .padding(48)
         .frame(minWidth: 420, minHeight: 300, alignment: .topLeading)
@@ -1085,28 +1090,60 @@ struct LiveTvView: View {
                 showingMore = false
                 showingLayout = true
             }
+            #if os(tvOS)
+            .buttonStyle(TVReadableButtonStyle(prominent: false))
+            .focusEffectDisabled()
+            #endif
             Button("Refresh channels") {
                 showingMore = false
                 Task { await live.load(origin: model.origin, token: Session.shared.token) }
             }
+            #if os(tvOS)
+            .buttonStyle(TVReadableButtonStyle(prominent: false))
+            .focusEffectDisabled()
+            #endif
             Button(hideProtected ? "Show protected" : "Hide protected") {
                 hideProtected.toggle()
                 showingMore = false
             }
+            #if os(tvOS)
+            .buttonStyle(TVReadableButtonStyle(prominent: hideProtected))
+            .focusEffectDisabled()
+            #endif
             if live.playing {
                 Button(muted ? "Unmute" : "Mute") {
                     muted.toggle()
                     live.player.isMuted = muted
                     showingMore = false
                 }
+                #if os(tvOS)
+                .buttonStyle(TVReadableButtonStyle(prominent: muted))
+                .focusEffectDisabled()
+                #endif
                 Button("Stop") { showingMore = false; Task { await live.stop() } }
+                    #if os(tvOS)
+                    .buttonStyle(TVReadableButtonStyle(prominent: false))
+                    .focusEffectDisabled()
+                    #endif
                 Button("Return to browser") { showingMore = false; fullscreen = false }
+                    #if os(tvOS)
+                    .buttonStyle(TVReadableButtonStyle(prominent: false))
+                    .focusEffectDisabled()
+                    #endif
             }
             Button("Leave Live TV") {
                 showingMore = false
                 Task { await live.stop(); onLeave() }
             }
+            #if os(tvOS)
+            .buttonStyle(TVReadableButtonStyle(prominent: false))
+            .focusEffectDisabled()
+            #endif
             Button("Close") { showingMore = false }
+                #if os(tvOS)
+                .buttonStyle(TVReadableButtonStyle(prominent: true))
+                .focusEffectDisabled()
+                #endif
         }
         .padding(48)
         .frame(minWidth: 420, minHeight: 360, alignment: .topLeading)
@@ -1162,9 +1199,15 @@ struct LiveTvView: View {
                 if browse == .guide {
                     Button("Earlier") { pageGuide(by: -1) }
                         .disabled(!canPageGuide(by: -1))
+                        .buttonStyle(TVReadableButtonStyle(prominent: false))
+                        .focusEffectDisabled()
                     Button("Now") { returnGuideToNow() }
+                        .buttonStyle(TVReadableButtonStyle(prominent: false))
+                        .focusEffectDisabled()
                     Button("Later") { pageGuide(by: 1) }
                         .disabled(!canPageGuide(by: 1))
+                        .buttonStyle(TVReadableButtonStyle(prominent: false))
+                        .focusEffectDisabled()
                 }
                 Button { favoritesOnly.toggle(); browse = .list } label: {
                     Label("Favorites", systemImage: favoritesOnly ? "star.fill" : "star")
@@ -1461,23 +1504,21 @@ struct LiveTvView: View {
     }
 
     private var tvChannelList: some View {
-        ScrollView {
-            LazyVStack(spacing: 9) {
-                ForEach(visibleChannels) { channel in
-                    Button { selectAiring(channel) } label: {
-                        LiveTvChannelRow(
-                            channel: channel,
-                            airing: live.airing(channel, now: now),
-                            selected: live.watching?.id == channel.id
-                        )
-                    }
-                    .buttonStyle(LiveTvChannelButtonStyle())
-                    .focusEffectDisabled()
-                    .focused($focusedChannelId, equals: channel.id)
-                    .disabled(!channel.watchable || live.busy)
-                }
+        List(visibleChannels) { channel in
+            Button { selectAiring(channel) } label: {
+                LiveTvChannelRow(
+                    channel: channel,
+                    airing: live.airing(channel, now: now),
+                    selected: live.watching?.id == channel.id
+                )
             }
+            .buttonStyle(LiveTvChannelButtonStyle())
+            .focusEffectDisabled()
+            .focused($focusedChannelId, equals: channel.id)
+            .disabled(!channel.watchable || live.busy)
+            .listRowBackground(Color.clear)
         }
+        .listStyle(.plain)
         .onChange(of: focusedChannelId) { _, channelId in
             if let channelId { tvFocusedChannelId = channelId }
         }
@@ -1675,6 +1716,10 @@ struct LiveTvView: View {
                             Button("Exit") { fullscreen = false }
                             #endif
                         }
+                        #if os(tvOS)
+                        .buttonStyle(TVReadableButtonStyle(prominent: false))
+                        .focusEffectDisabled()
+                        #endif
                     }
                     Spacer()
                     VStack(alignment: .leading, spacing: 8) {
@@ -1717,6 +1762,8 @@ struct LiveTvView: View {
                             Text("Guide").font(.title2.weight(.semibold))
                             Spacer()
                             Button("Close") { temporaryGuide = false; focusedControl = .guide }
+                                .buttonStyle(TVReadableButtonStyle(prominent: false))
+                                .focusEffectDisabled()
                         }
                         tvBrowseContent(rows: 4)
                     }
