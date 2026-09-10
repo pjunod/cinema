@@ -46,7 +46,6 @@ struct LiveTvDeveloperView: View {
                         get: { saved.libraryChannelsEnabled },
                         set: { write(.libraryChannelsEnabled($0)) }
                     ))
-                    .disabled(busy)
                     Text("Schedules use already-probed local movies and episodes. The checks explain whether this server looks ready; they do not disable or override the switch.")
                     if let item = developerReadiness?.items.first(where: { $0.id == "library_channels" }) {
                         ForEach(item.requirements) { requirement in
@@ -55,7 +54,6 @@ struct LiveTvDeveloperView: View {
                         }
                     }
                     Button("Refresh Library channel readiness") { Task { await loadDeveloperReadiness() } }
-                        .disabled(busy)
                 }
             }
             Section("HDHomeRun Live TV · runtime enablement") {
