@@ -1743,9 +1743,10 @@ mod tests {
                 .oneshot(get(path, None))
                 .await
                 .expect("unauthenticated collection response");
-            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
+            let (parts, _body) = response.into_parts();
+            assert_eq!(parts.status, StatusCode::UNAUTHORIZED, "{path}");
             assert_eq!(
-                response.headers().get(header::CACHE_CONTROL),
+                parts.headers.get(header::CACHE_CONTROL),
                 Some(&HeaderValue::from_static("private, no-store")),
                 "{path}"
             );
@@ -1758,9 +1759,10 @@ mod tests {
                 .oneshot(get(path, Some(&token)))
                 .await
                 .expect("authenticated collection response");
-            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            let (parts, _body) = response.into_parts();
+            assert_eq!(parts.status, StatusCode::OK, "{path}");
             assert_eq!(
-                response.headers().get(header::CACHE_CONTROL),
+                parts.headers.get(header::CACHE_CONTROL),
                 Some(&HeaderValue::from_static("private, no-store")),
                 "{path}"
             );
@@ -1770,9 +1772,10 @@ mod tests {
                 .oneshot(post(path, Some(&token), json!({})))
                 .await
                 .expect("authenticated create response");
-            assert_eq!(invalid.status(), StatusCode::UNPROCESSABLE_ENTITY, "{path}");
+            let (parts, _body) = invalid.into_parts();
+            assert_eq!(parts.status, StatusCode::UNPROCESSABLE_ENTITY, "{path}");
             assert_eq!(
-                invalid.headers().get(header::CACHE_CONTROL),
+                parts.headers.get(header::CACHE_CONTROL),
                 Some(&HeaderValue::from_static("private, no-store")),
                 "{path}"
             );
@@ -1789,9 +1792,10 @@ mod tests {
                 .oneshot(oversized)
                 .await
                 .expect("oversized create response");
-            assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE, "{path}");
+            let (parts, _body) = response.into_parts();
+            assert_eq!(parts.status, StatusCode::PAYLOAD_TOO_LARGE, "{path}");
             assert_eq!(
-                response.headers().get(header::CACHE_CONTROL),
+                parts.headers.get(header::CACHE_CONTROL),
                 Some(&HeaderValue::from_static("private, no-store")),
                 "{path}"
             );
