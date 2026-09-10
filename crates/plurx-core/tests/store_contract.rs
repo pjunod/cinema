@@ -14686,11 +14686,12 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
         .expect("import populated v14 backup");
     assert_eq!(report.source_schema_version, 14);
     assert_eq!(report.backup_sha256, prepared.backup_sha256);
-    // 40 with `media_playback_desired`. A v14 source has no rows for it —
-    // its `minimum_schema` is 28 — but the table is still reported, because
+    // 46 with the current durable tables, including the Library channel
+    // entities. A v14 source has no rows for newer tables — each one's
+    // `minimum_schema` is later — but every table is still reported, because
     // the digest inventory is over what the import *plans*, not over what the
     // source happened to hold.
-    assert_eq!(report.tables.len(), 40);
+    assert_eq!(report.tables.len(), 46);
     assert_eq!(report.search_rows, 2);
     assert_eq!(
         report
