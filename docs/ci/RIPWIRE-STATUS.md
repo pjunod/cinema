@@ -9,7 +9,8 @@ This page tracks the bounded navigation adapter requested by Paul.
 
 Own clone: `/private/tmp/plurx-ripwire`. Integration: `effort/ripwire`.
 [Adapter task PR #244](http://192.168.4.7:3000/noirr/plurx/pulls/244) merged
-into the effort; main promotion has not started.
+into the effort. [Pilot task PR #247](http://192.168.4.7:3000/noirr/plurx/pulls/247)
+is a draft into that effort; main promotion has not started.
 Initial main: `4519f87aa17def278dc4ad6c08a411e7829c2ec4`.
 The user's working tree is untouched. No hooks installed.
 
@@ -30,7 +31,7 @@ scope decisions are recorded for Paul to revisit.
 | M0: base and release | complete on macOS ARM | Archive SHA-256 matches; exact member and version 0.5.0 verified; help confirms CLI flags and lean/rich cache families. |
 | M1: installer and bounded runner | complete | Explicit setup passed; 18 focused fake-tool tests passed (15.728 s). |
 | M2: queries and coverage | complete | All verbs executed in real fixtures; both cache families checked after edit, rename, deletion, branch change, and corruption. Kotlin/embedded-JS selectors are refused; Swift callback and Rust qualified cross-module edges are omitted. |
-| M3: measured pilot | blocked | Frozen `da51ffb7`; 24 timing/RSS samples complete. Warm medians: find 494 ms, callers 325 ms, coverage 318 ms. Three navigation sessions returned; next three failed on account limit; ten remain. Retained correction tests are sensitive, but blind replay has not run. See [pilot](RIPWIRE-PILOT.md). |
+| M3: measured pilot | blocked | Frozen `da51ffb7`; 24 timing/RSS samples complete. Warm medians: find 494 ms, callers 325 ms, coverage 318 ms. Four navigation sessions returned (one after retry); three playback sessions remain failed on account limit and nine are undispatched. Retained correction tests are sensitive, but blind replay has not run. See [pilot](RIPWIRE-PILOT.md). |
 | M4: promotion | blocked | No adversarial review requested and no main PR/fast-lane activation. Finish trial, integrate current main, then exactly one review, fixes, fast lane, merge. |
 
 ## Scope and remaining limitations
@@ -42,3 +43,8 @@ measured results and omissions; default adoption is
 deferred. No reset credits were available when the account limit blocked
 the remaining agent sessions. Full suites have not run. The source-only
 fixture Rust is parser input, not a workspace/product Rust change.
+
+Disposable trial clones and duplicate release downloads were removed.
+The own implementation clone, ignored evidence, and reconstruction helpers
+remain available. Current checks: 18 adapter tests and 4 documentation
+contracts pass; catalog lint passes. No full suites or fast lane ran.

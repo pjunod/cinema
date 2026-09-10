@@ -6,8 +6,9 @@
 Companion to [the usage guide](RIPWIRE.md) and
 [implementation status](RIPWIRE-STATUS.md). The adapter is implemented on
 `effort/ripwire`; this report does not authorize main promotion or default
-agent adoption. Three of sixteen navigation sessions returned results before
-agents hit the account usage limit. The independent adversarial review has
+agent adoption. Four of sixteen navigation sessions returned results, one only after
+resuming an account-limit interruption. Three playback sessions remain
+failed at that limit; nine navigation sessions have not been dispatched. The independent adversarial review has
 not been requested. Do not count the benchmark sessions as that review.
 
 ## Fixed source and environment
@@ -146,7 +147,7 @@ dirty PR context, preserved exits, bounded output, both pipes, process-group
 timeout, lock contention, archive members/checksums/size, version/flags,
 failed-setup preservation, atomic publication, and idempotence.
 
-## Paired navigation — three completed sessions, no adoption inference
+## Paired navigation — four returned sessions, no adoption inference
 
 Freeze these tasks and expected contracts before either arm runs:
 
@@ -167,10 +168,11 @@ clones; do not use their elapsed time as an isolated latency benchmark.
 | SQL baseline 1 | returned | 5/5 | 32 | 12 | 105.045, partial | 0 / 0 | ordinary source tools |
 | SQL candidate 1 | returned | 5/5 | 24 | 11 | 114, after instructions | 2 / 0 | source reads and catalog |
 | SQL candidate 2 | returned | 5/5 | 20 | 9 | 67.453, partial | 2 / 0 | source reads and catalog |
-| SQL baseline 2 | account usage limit | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable |
+| SQL baseline 2 | returned after interruption | 4/5; owner not explicit | 29 | 11 | 66.907, partial | 0 / 0 | ordinary source tools |
 | Playback baseline 1 | account usage limit | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable |
 | Playback candidate 1 | account usage limit | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable |
-| Remaining ten navigation sessions | not dispatched | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable |
+| Playback candidate 2 | account usage limit | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable |
+| Remaining nine navigation sessions | not dispatched | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable |
 
 Read operations are agent-reported explicit cat/sed file inspections;
 search scans are excluded. Instruction inclusion and timing start points
@@ -179,13 +181,16 @@ valid median comparison. Returned shell-output character counts were
 135533, 154575, and 112470 respectively, with one/two/two truncated tool
 outputs. Those are not UTF-8 byte or model-token measurements. Both completed
 candidate sessions measured 9029 total Ripwire stdout bytes from two queries.
-Actual model tokens and billing are unavailable. No coordinator intervention
-was needed in the three completed sessions; both candidate sessions used
-source fallback and reported graph limitations. The fixed five required SQL
-contract groups had no observed omission in these returned answers.
+SQL baseline 2 measured 85,976 output bytes for calls 6–11 only. Actual
+model tokens and billing are unavailable. One coordinator resume request
+recovered SQL baseline 2 after its account-limit failure; both candidate sessions used
+source fallback and reported graph limitations. The first three returned answers covered the five required SQL groups.
+Baseline 2 returned implementation, regression, backend and proof details
+but did not explicitly name the functionality-point owner. No required
+SQL execution consumer was omitted from these bounded answers.
 
-The first pair's read count is lower with Ripwire, but the second baseline
-never returned and other tasks remain incomplete. Do not compute an adoption
+The SQL read counts are lower with Ripwire, but counting/timing were not
+fully consistent and the other tasks remain incomplete. Do not compute an adoption
 threshold from that partial sample or treat agent self-scoring as a review.
 
 ## Historical correction — retained proof is ready, blind replay is not
@@ -196,6 +201,8 @@ is `aae5ba9a230e54e3973dfdb6a390f29c4bdd7621`. Scratch repositories were
 initialized from that source archive with no later Git history; both received
 the same adapter source overlay and only the candidate has it installed.
 No implementation session was dispatched before capacity was exhausted.
+Retrying navigation recovered one final result, then playback agents hit
+the same limit again; the initial failures remain recorded.
 
 The coordinator loaded the retained four Python tests from the correction
 commit, pointed them at the historical pre-fix script, and observed the two
@@ -219,6 +226,8 @@ warm samples without clearing it. Use `/usr/bin/time -l` on macOS and record
 its exit separately from the wrapper provenance. Use equivalent documented
 resource instrumentation on other hosts.
 
+Disposable trial clones have been removed. Their reconstruction helpers
+are retained under `pilot/harness/` alongside the explicit local evidence.
 The current local evidence root is `target/ripwire/evidence/` in the own clone
 `/private/tmp/plurx-ripwire`. It contains `smoke-20260910-193051/`, the first
 smoke capture, and `pilot/` with `latency.json`, the separately retained
