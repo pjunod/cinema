@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["f34aecf5"]
+points = ["cluster.auth"]
+checks = ["rust-gate", "cluster-auth"]
+reason = "The v34→v35 Library channels and v35→v36 build-state transactions existed, but the schema gate omitted both predecessor versions and refused every older replicated fixture after it reached v34. `daemon_schema_gate_accepts_the_complete_supported_chain` now pins both adjacent version relationships and admits both sources, while `replicated_v32_store_migrates_the_producer_recovery_ledger_on_daemon_open` exercises an older store through those new steps under the replicated Store lane."
