@@ -3,9 +3,10 @@
 Build: 134
 Issue: #235
 
-Apple TV Live TV now processes guide moves in one ordered focus state, gives
-the toolbar sole focus ownership when leaving the first row, and uses the
-platform focus-scrolling list for On now. Guide cells show an explicit focus
-ring, while the toolbar, fullscreen controls, More sheet, and Layout sheet own
-readable foreground and background colors instead of inheriting red-on-red
-tvOS tinting.
+Apple TV Live TV now processes guide moves in one ordered focus state, rejects
+delayed restores after newer input, and gives the toolbar sole focus ownership
+when leaving the first row. Channel headers participate in vertical scrolling,
+and On now uses the platform focus-scrolling list. Guide cells show an explicit
+focus ring, while the toolbar, fullscreen controls, More sheet, and Layout
+sheet own readable foreground and background colors instead of inheriting
+red-on-red tvOS tinting.

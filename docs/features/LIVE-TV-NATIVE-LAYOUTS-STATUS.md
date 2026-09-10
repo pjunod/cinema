@@ -1,7 +1,7 @@
 # Native Live TV layouts — implementation status and evidence
 
-**Status:** Apple TV review findings addressed; focused verification pending · **Fix:**
-`fix/apple-tv-live-focus` · **Base:** Forgejo `main` at `cb76cc8a` ·
+**Status:** Apple TV review addressed and focused verification green; promotion pending · **Fix:**
+`fix/apple-tv-live-focus` · **Base:** Forgejo `main` at `29d97094` ·
 **Updated:** 2026-09-10
 
 Companion to
@@ -24,7 +24,8 @@ being built, and what remains unproved*.
 
 Forgejo issue
 [#235](http://192.168.4.7:3000/noirr/plurx/issues/235) tracks a physical
-Apple TV regression reported after build 130 shipped. Rapid Siri Remote moves
+Apple TV regression reported after build 130 shipped. The correction is Apple
+build 134 after integrating current `main`. Rapid Siri Remote moves
 can be overwritten by the guide's asynchronous restore pass, and moving above
 the first guide row can leave both the grid and toolbar claiming focus. The
 default tvOS button tint also paints the More and Layout sheet labels and
@@ -76,6 +77,7 @@ hidden eligibility test is added.
 | 2026-09-10 | Google TV Streamer, Android 14 | `LiveTvGuideFocusTest` real D-pad event instrumentation | first attempt lost its Compose activity when the sleeping display stopped it; after waking the device, 1/1 passed and normal sleep behavior was restored |
 | 2026-09-10 | Apple simulators, OS 26.5 | focused `LiveTvTests` | iOS 28/28 passed; tvOS passed 26 initially and the two corrected stale source-contract assertions on their sole retry — 28/28 covered |
 | 2026-09-10 | PR #236 review-remediation worktree | `xcrun swiftc -parse` plus iOS and tvOS compile-only builds | passed after addressing the single review; no simulator tests ran |
+| 2026-09-10 | PR #236 merged-base source tree `fcc2c2e5` | iOS and tvOS compile-only builds, then the one focused tvOS `LiveTvTests` simulator pass | compile passed; 31/31 tests passed with no retry; no other suite ran |
 
 Compilation and static contracts are retained here as they pass. The focused
 Google TV D-pad path has physical-device evidence; the complete Google TV and
@@ -117,9 +119,10 @@ It required changes; no second review or approval pass will be requested.
 | Focusable channel headers were drawn in an overlay that could not make the guide scroll to off-screen rows | moved the buttons into each scrolling row and compensate only for horizontal motion, leaving vertical reveal under the scroll view's focus ownership |
 | The regression checks exercised destinations and source strings, not restore ownership or the boundary handoff | added coordinator behavior coverage for stale tickets, passive refresh after exit, a newer explicit entry, and the ordered `clearGrid` then `focusToolbar` effects; retained only the visual/container source contracts |
 
-The author compile-checked the remediated shared sources for both iOS and tvOS.
-The one focused simulator test pass remains deliberately deferred until the
-final current-base tree, immediately before fast-lane promotion.
+The author compile-checked the remediated shared sources for both iOS and tvOS,
+then ran the one focused simulator pass on the current-base source tree:
+31/31 tvOS `LiveTvTests` passed without a retry. No broader suite ran. The
+remaining automated evidence is the label-triggered compile-only fast lane.
 
 ## Decisions made while Paul is away
 
