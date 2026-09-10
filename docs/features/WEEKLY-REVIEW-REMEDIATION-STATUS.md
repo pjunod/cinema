@@ -1,7 +1,8 @@
 # Weekly review remediation — what is fixed, what remains, and why
 
 **Status:** complete; main promotion pending · **Baseline:**
-`4cef0da740c797364023284520adad8a93b172cd` · **Branch:**
+`4cef0da740c797364023284520adad8a93b172cd` · **Promotion base:**
+`200574162ad78786de49d06aa4b1127df1a206bf` · **Branch:**
 `codex/weekly-review-remediation` · **Updated:** 2026-09-10
 
 Companion to [SECURITY.md](../SECURITY.md) (the current trust boundaries),
@@ -12,6 +13,8 @@ were selected for the bounded correction pass, what evidence exists, and what
 remains a separately scoped capability*.
 
 The baseline is the exact frozen review revision and was clean in a fresh clone.
+Before promotion, current `main` was merged at the promotion base recorded
+above and the resulting tree was verified again.
 The repository-pinned Rust 1.97.1 compiler completed
 `cargo check -p plurxd --all-targets` before the first source edit and again on
 the completed source. Full runtime tests are deliberately deferred until after
