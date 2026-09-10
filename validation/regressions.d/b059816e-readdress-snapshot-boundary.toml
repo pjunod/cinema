@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["b059816e"]
+points = ["persistence.upgrades"]
+checks = ["rust-gate", "cluster-auth"]
+reason = "The correction keeps a sole voter's imported state transferable after its Raft identity is rebuilt. `readdress_completion_waits_for_a_transferable_database_snapshot` pins the ordering from active-store validation through the real OpenRaft snapshot trigger to recovery-record cleanup, while `cluster-auth` starts separate voter processes and requires a joining voter's local replica to contain and serve the imported file row. Clearing the marker without the snapshot makes that live join fail with an empty local state machine."

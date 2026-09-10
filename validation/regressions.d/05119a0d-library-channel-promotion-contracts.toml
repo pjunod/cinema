@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["05119a0d"]
+points = ["library.channels"]
+checks = ["rust-gate", "web-layout"]
+reason = "The Rust gate executes the ordinary-session ownership regressions, the first-use placeholder census, the atomic channel-schema trigger assertion, both backend migration and Store inventories, downgrade/import fixtures, and Developer-readiness contract. `web-layout` boots through the SQLite-to-replicated migration and captures all 78 theme, viewport, and route combinations; the pre-fix trigger split aborts that boot, while the committed golden pins the new channel navigation and advisory enablement structure."
