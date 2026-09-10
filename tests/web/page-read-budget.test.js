@@ -808,12 +808,13 @@ test("Settings loads only the active tab manifest", () => {
   assert.deepEqual(manifest, {
     libraries: { required: ["settings", "libs", "status", "dvConversions"], secondary: [] },
     metadata: { required: ["settings"], secondary: ["libs"] },
-    playback: { required: ["settings"], secondary: [] },
+    playback: { required: ["settings"], secondary: ["developerReadiness"] },
+    livetv: { required: ["settings"], secondary: [] },
     analysis: { required: ["settings", "analysis"], secondary: [] },
     maintenance: { required: ["settings", "dvConversions"], secondary: [] },
     users: { required: ["users"], secondary: [] },
     system: { required: ["sys"], secondary: ["playbackEvents"] },
-    cluster: { required: ["cluster"], secondary: ["clusterOps"] },
+    cluster: { required: ["cluster"], secondary: ["clusterOps", "developerReadiness"] },
     integrations: { required: ["settings", "trakt"], secondary: [] },
     developer: { required: ["settings"], secondary: ["developerReadiness"] },
   });
@@ -1594,12 +1595,13 @@ test("Settings executes exact required and secondary waves for every tab", async
   const cases={
     libraries:{required:["/settings","/libraries","/scan/status","/dv-conversions"],secondary:[]},
     metadata:{required:["/settings"],secondary:["/libraries"]},
-    playback:{required:["/settings"],secondary:[]},
+    playback:{required:["/settings"],secondary:["/developer/readiness"]},
+    livetv:{required:["/settings"],secondary:[]},
     analysis:{required:["/settings","/analysis/summary"],secondary:[]},
     maintenance:{required:["/settings","/dv-conversions"],secondary:[]},
     users:{required:["/users"],secondary:[]},
     system:{required:["/system"],secondary:["playback-events","system-log"]},
-    cluster:{required:["/cluster/nodes"],secondary:["/cluster/status","cluster-log"]},
+    cluster:{required:["/cluster/nodes"],secondary:["/cluster/status","/developer/readiness","cluster-log"]},
     integrations:{required:["/settings","/trakt/status"],secondary:[]},
     // The switches paint from the settings snapshot; the advisory prerequisite
     // readings arrive behind them because one of them asks membership for the

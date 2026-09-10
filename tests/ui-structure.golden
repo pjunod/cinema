@@ -2387,6 +2387,8 @@ catalog|search@390x780|req|GET /api/v1/search|1
 catalog|search@390x780|req|GET /api/v1/server|1
 catalog|settings-developer@1280x860|dom|^ > div#app|1
 catalog|settings-developer@1280x860|dom|a > span.px-lbl[text]|3
+catalog|settings-developer@1280x860|dom|a > span[text]|3
+catalog|settings-developer@1280x860|dom|a > strong[text]|3
 catalog|settings-developer@1280x860|dom|a > svg.px-ico[aria-hidden=true]|3
 catalog|settings-developer@1280x860|dom|a.on[aria-current=page] > span.px-lbl[text]|1
 catalog|settings-developer@1280x860|dom|a.on[aria-current=page] > svg.px-ico[aria-hidden=true]|1
@@ -2404,44 +2406,19 @@ catalog|settings-developer@1280x860|dom|button.px-tab[aria-expanded=false aria-c
 catalog|settings-developer@1280x860|dom|button.px-tab[aria-expanded=false aria-controls=* type=button] > svg.px-ico[aria-hidden=true]|1
 catalog|settings-developer@1280x860|dom|button.px-tab[type=button] > span[text]|1
 catalog|settings-developer@1280x860|dom|button.px-tab[type=button] > svg.px-ico[aria-hidden=true]|1
-catalog|settings-developer@1280x860|dom|div > div.hint[text]|1
+catalog|settings-developer@1280x860|dom|details.setdetails > div.setdetails-body|3
+catalog|settings-developer@1280x860|dom|details.setdetails > summary[text]|3
 catalog|settings-developer@1280x860|dom|div > h1[text]|1
-catalog|settings-developer@1280x860|dom|div > h2.section[text]|8
-catalog|settings-developer@1280x860|dom|div > input#ltip|1
-catalog|settings-developer@1280x860|dom|div > input#ltowner|1
-catalog|settings-developer@1280x860|dom|div > label[text]|6
-catalog|settings-developer@1280x860|dom|div > p.sub[text]|8
+catalog|settings-developer@1280x860|dom|div > h2.section[text]|5
+catalog|settings-developer@1280x860|dom|div > p.sub[text]|5
 catalog|settings-developer@1280x860|dom|div > p[text]|1
-catalog|settings-developer@1280x860|dom|div > select#ltghours|1
-catalog|settings-developer@1280x860|dom|div > select#ltgsrc|1
-catalog|settings-developer@1280x860|dom|div > select#ltheight|1
-catalog|settings-developer@1280x860|dom|div > select#ltlimit|1
 catalog|settings-developer@1280x860|dom|div#app > div#pxshell.px-shell|1
-catalog|settings-developer@1280x860|dom|div#drcard.card.setcard > div#adrerr.err|1
+catalog|settings-developer@1280x860|dom|div#drcard.card.setcard > details.setdetails|1
+catalog|settings-developer@1280x860|dom|div#drcard.card.setcard > div#adrerr.err[role=alert]|1
 catalog|settings-developer@1280x860|dom|div#drcard.card.setcard > div.cardhead|1
-catalog|settings-developer@1280x860|dom|div#drcard.card.setcard > div.hint[text]|3
+catalog|settings-developer@1280x860|dom|div#drcard.card.setcard > div.hint[text]|1
 catalog|settings-developer@1280x860|dom|div#drcard.card.setcard > div.setfoot|1
-catalog|settings-developer@1280x860|dom|div#drcard.card.setcard > div.tog|4
-catalog|settings-developer@1280x860|dom|div#drcard.card.setcard > h2.section[text]|2
 catalog|settings-developer@1280x860|dom|div#drcard.card.setcard > label.tog|1
-catalog|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > div#ltgerr.err[role=alert]|1
-catalog|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > div#ltgready[aria-live=polite]|1
-catalog|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > div.cardhead|1
-catalog|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > div.hint[text]|1
-catalog|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > div.row|1
-catalog|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > div.setfields|1
-catalog|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > div.setfoot|1
-catalog|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > h2.section[text]|1
-catalog|settings-developer@1280x860|dom|div#live-tv-settings.card.setcard > div#lterr.err[role=alert]|1
-catalog|settings-developer@1280x860|dom|div#live-tv-settings.card.setcard > div#ltreadiness[aria-live=polite]|1
-catalog|settings-developer@1280x860|dom|div#live-tv-settings.card.setcard > div.cardhead|1
-catalog|settings-developer@1280x860|dom|div#live-tv-settings.card.setcard > div.row|1
-catalog|settings-developer@1280x860|dom|div#live-tv-settings.card.setcard > div.setfields|1
-catalog|settings-developer@1280x860|dom|div#live-tv-settings.card.setcard > div.setfoot|1
-catalog|settings-developer@1280x860|dom|div#live-tv-settings.card.setcard > p.hint[text]|2
-catalog|settings-developer@1280x860|dom|div#live-tv-settings.card.setcard > p[text]|1
-catalog|settings-developer@1280x860|dom|div#ltgready[aria-live=polite] > div.hint[text]|1
-catalog|settings-developer@1280x860|dom|div#ltgready[aria-live=polite] > div.tog|4
 catalog|settings-developer@1280x860|dom|div#pxnav.px-scroll > button.ghost.px-sheetx.sm[aria-label=* type=button text]|1
 catalog|settings-developer@1280x860|dom|div#pxnav.px-scroll > div#pxlibs|1
 catalog|settings-developer@1280x860|dom|div#pxnav.px-scroll > div.px-sec[text]|1
@@ -2450,32 +2427,39 @@ catalog|settings-developer@1280x860|dom|div#pxshell.px-shell > aside.px-side|1
 catalog|settings-developer@1280x860|dom|div#pxshell.px-shell > main#main|1
 catalog|settings-developer@1280x860|dom|div#pxshell.px-shell > nav.px-tabs[aria-label=*]|1
 catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div#drcard.card.setcard|1
-catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div#live-tv-guide-settings.card.setcard|1
-catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div#live-tv-settings.card.setcard|1
 catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div#vdcard.card.setcard|1
-catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div.card.setcard|4
+catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div.card.local.setcard|1
+catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div.card.setcard|2
 catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div.sethead|1
-catalog|settings-developer@1280x860|dom|div#vdcard.card.setcard > div#dhqerr.err|1
+catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div.setsection|3
+catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > nav.setdestinations[aria-label=*]|1
+catalog|settings-developer@1280x860|dom|div#vdcard.card.setcard > details.setdetails|1
+catalog|settings-developer@1280x860|dom|div#vdcard.card.setcard > div#dhqerr.err[role=alert]|1
 catalog|settings-developer@1280x860|dom|div#vdcard.card.setcard > div.cardhead|1
-catalog|settings-developer@1280x860|dom|div#vdcard.card.setcard > div.hint[text]|3
+catalog|settings-developer@1280x860|dom|div#vdcard.card.setcard > div.hint[text]|1
 catalog|settings-developer@1280x860|dom|div#vdcard.card.setcard > div.setfoot|1
-catalog|settings-developer@1280x860|dom|div#vdcard.card.setcard > div.tog|3
-catalog|settings-developer@1280x860|dom|div#vdcard.card.setcard > h2.section[text]|1
 catalog|settings-developer@1280x860|dom|div#vdcard.card.setcard > label.tog|1
-catalog|settings-developer@1280x860|dom|div.card.setcard > div#dverr.err|1
-catalog|settings-developer@1280x860|dom|div.card.setcard > div#dxerr.err|1
-catalog|settings-developer@1280x860|dom|div.card.setcard > div#pqherr.err|1
-catalog|settings-developer@1280x860|dom|div.card.setcard > div.cardhead|4
-catalog|settings-developer@1280x860|dom|div.card.setcard > div.hint[text]|7
-catalog|settings-developer@1280x860|dom|div.card.setcard > div.setfoot|3
-catalog|settings-developer@1280x860|dom|div.card.setcard > div.tog|10
-catalog|settings-developer@1280x860|dom|div.card.setcard > h2.section[text]|3
-catalog|settings-developer@1280x860|dom|div.card.setcard > label.tog|4
-catalog|settings-developer@1280x860|dom|div.cardhead > div.cardtools|6
-catalog|settings-developer@1280x860|dom|div.cardhead > div|8
-catalog|settings-developer@1280x860|dom|div.cardtools > span.pill[text]|6
-catalog|settings-developer@1280x860|dom|div.hint[text] > b[text]|13
-catalog|settings-developer@1280x860|dom|div.hint[text] > code[text]|2
+catalog|settings-developer@1280x860|dom|div.card.local.setcard > div.cardhead|1
+catalog|settings-developer@1280x860|dom|div.card.local.setcard > div.hint[text]|1
+catalog|settings-developer@1280x860|dom|div.card.local.setcard > label.tog|1
+catalog|settings-developer@1280x860|dom|div.card.setcard > details.setdetails|1
+catalog|settings-developer@1280x860|dom|div.card.setcard > div#dverr.err[role=alert]|1
+catalog|settings-developer@1280x860|dom|div.card.setcard > div#dxerr.err[role=alert]|1
+catalog|settings-developer@1280x860|dom|div.card.setcard > div.cardhead|2
+catalog|settings-developer@1280x860|dom|div.card.setcard > div.setfoot|2
+catalog|settings-developer@1280x860|dom|div.card.setcard > label.tog|2
+catalog|settings-developer@1280x860|dom|div.cardhead > div.cardtools|5
+catalog|settings-developer@1280x860|dom|div.cardhead > div|5
+catalog|settings-developer@1280x860|dom|div.cardtools > span.acc.pill[text]|1
+catalog|settings-developer@1280x860|dom|div.cardtools > span.pill.warn[text]|1
+catalog|settings-developer@1280x860|dom|div.cardtools > span.pill[text]|3
+catalog|settings-developer@1280x860|dom|div.devcheck > div.devcheck-head|1
+catalog|settings-developer@1280x860|dom|div.devcheck > p.devcheck-description[text]|1
+catalog|settings-developer@1280x860|dom|div.devcheck > p.devcheck-evidence[text]|1
+catalog|settings-developer@1280x860|dom|div.devcheck-head > span.devcheck-status|1
+catalog|settings-developer@1280x860|dom|div.devcheck-head > strong[text]|1
+catalog|settings-developer@1280x860|dom|div.hint[text] > a[text]|1
+catalog|settings-developer@1280x860|dom|div.hint[text] > b[text]|4
 catalog|settings-developer@1280x860|dom|div.px-brand > a.logo[text]|1
 catalog|settings-developer@1280x860|dom|div.px-ctl > div.px-pop|1
 catalog|settings-developer@1280x860|dom|div.px-foot > div.px-ctl|1
@@ -2488,50 +2472,44 @@ catalog|settings-developer@1280x860|dom|div.px-pop > button.ghost.profile.sm|1
 catalog|settings-developer@1280x860|dom|div.px-pop > div#lookmenu.amenu.lookmenu|1
 catalog|settings-developer@1280x860|dom|div.px-pop > div#profilemenu.amenu|1
 catalog|settings-developer@1280x860|dom|div.px-user > div.px-pop|1
-catalog|settings-developer@1280x860|dom|div.row > a[text]|2
-catalog|settings-developer@1280x860|dom|div.row > button#ltenable.primary.sm[text]|1
-catalog|settings-developer@1280x860|dom|div.row > button.ghost.sm[text]|3
-catalog|settings-developer@1280x860|dom|div.setfields > div|6
-catalog|settings-developer@1280x860|dom|div.setfoot > button.primary.sm[disabled text]|7
-catalog|settings-developer@1280x860|dom|div.setfoot > span.setstate[text]|7
+catalog|settings-developer@1280x860|dom|div.setdetails-body > div.devcheck|1
+catalog|settings-developer@1280x860|dom|div.setdetails-body > div.hint[text]|5
+catalog|settings-developer@1280x860|dom|div.setdetails-body > div.tog|7
+catalog|settings-developer@1280x860|dom|div.setdetails-body > h2.section[text]|3
+catalog|settings-developer@1280x860|dom|div.setfoot > button.primary.sm[disabled text]|4
+catalog|settings-developer@1280x860|dom|div.setfoot > span.setstate[text]|4
 catalog|settings-developer@1280x860|dom|div.sethead > div|1
 catalog|settings-developer@1280x860|dom|div.setlayout > div#setbody.adminwrap|1
 catalog|settings-developer@1280x860|dom|div.setlayout > nav.settabs[aria-label=*]|1
-catalog|settings-developer@1280x860|dom|div.tog > span.pill[text]|2
-catalog|settings-developer@1280x860|dom|div.tog > span[text]|21
+catalog|settings-developer@1280x860|dom|div.setsection > h2[text]|3
+catalog|settings-developer@1280x860|dom|div.setsection > p[text]|3
+catalog|settings-developer@1280x860|dom|div.tog > span[text]|7
 catalog|settings-developer@1280x860|dom|label.tog > input#adr[type=checkbox]|1
 catalog|settings-developer@1280x860|dom|label.tog > input#dhqa[type=checkbox]|1
 catalog|settings-developer@1280x860|dom|label.tog > input#pcpv1[type=checkbox]|1
 catalog|settings-developer@1280x860|dom|label.tog > input#pdp[type=checkbox]|1
 catalog|settings-developer@1280x860|dom|label.tog > input#phs[type=checkbox]|1
-catalog|settings-developer@1280x860|dom|label.tog > input#pqh[type=checkbox]|1
-catalog|settings-developer@1280x860|dom|label.tog > span[text]|6
+catalog|settings-developer@1280x860|dom|label.tog > span[text]|5
 catalog|settings-developer@1280x860|dom|main#main > div.setlayout|1
 catalog|settings-developer@1280x860|dom|nav.px-nav[aria-label=*] > a.on[aria-current=page]|1
 catalog|settings-developer@1280x860|dom|nav.px-nav[aria-label=*] > a|3
 catalog|settings-developer@1280x860|dom|nav.px-tabs[aria-label=*] > a.px-tab|2
 catalog|settings-developer@1280x860|dom|nav.px-tabs[aria-label=*] > button.px-tab[aria-expanded=false aria-controls=* type=button]|1
 catalog|settings-developer@1280x860|dom|nav.px-tabs[aria-label=*] > button.px-tab[type=button]|1
+catalog|settings-developer@1280x860|dom|nav.setdestinations[aria-label=*] > a|3
 catalog|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
-catalog|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|9
+catalog|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|10
 catalog|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
-catalog|settings-developer@1280x860|dom|select#ltghours > option[text]|6
-catalog|settings-developer@1280x860|dom|select#ltgsrc > option[text]|3
-catalog|settings-developer@1280x860|dom|select#ltheight > option[text]|2
-catalog|settings-developer@1280x860|dom|select#ltlimit > option[text]|4
 catalog|settings-developer@1280x860|dom|small > code[text]|2
-catalog|settings-developer@1280x860|dom|small[text] > b[text]|1
 catalog|settings-developer@1280x860|dom|small[text] > br|4
 catalog|settings-developer@1280x860|dom|small[text] > code[text]|6
-catalog|settings-developer@1280x860|dom|small[text] > i[text]|5
-catalog|settings-developer@1280x860|dom|span > span.pill.warn[text]|1
-catalog|settings-developer@1280x860|dom|span > span.pill[text]|7
-catalog|settings-developer@1280x860|dom|span[text] > small.hint[text]|8
-catalog|settings-developer@1280x860|dom|span[text] > small[text]|25
+catalog|settings-developer@1280x860|dom|small[text] > i[text]|1
+catalog|settings-developer@1280x860|dom|span.devcheck-status > span.pill[text]|1
+catalog|settings-developer@1280x860|dom|span[text] > small[text]|10
 catalog|settings-developer@1280x860|dom|span[text] > small|2
-catalog|settings-developer@1280x860|dom|span[text] > span.pill.warn[text]|4
-catalog|settings-developer@1280x860|dom|span[text] > span.pill[text]|2
-catalog|settings-developer@1280x860|dom|span[text] > span|8
+catalog|settings-developer@1280x860|dom|span[text] > span.pill.warn[text]|1
+catalog|settings-developer@1280x860|dom|span[text] > span.pill[text]|1
+catalog|settings-developer@1280x860|dom|strong[text] > span[aria-hidden=true text]|3
 catalog|settings-developer@1280x860|dom|svg.px-ico[aria-hidden=true] > circle|2
 catalog|settings-developer@1280x860|dom|svg.px-ico[aria-hidden=true] > path|7
 catalog|settings-developer@1280x860|dom|svg.px-ico[aria-hidden=true] > rect|5
@@ -2545,41 +2523,37 @@ catalog|settings-developer@1280x860|focus|006|button.ghost.sm.lookbtn "Appearanc
 catalog|settings-developer@1280x860|focus|007|button.ghost.sm.profile "Account"
 catalog|settings-developer@1280x860|focus|008|button.settab "Libraries"
 catalog|settings-developer@1280x860|focus|009|button.settab "Metadata"
-catalog|settings-developer@1280x860|focus|010|button.settab "Playback"
-catalog|settings-developer@1280x860|focus|011|button.settab "Analysis"
-catalog|settings-developer@1280x860|focus|012|button.settab "Maintenance"
-catalog|settings-developer@1280x860|focus|013|button.settab "Users"
-catalog|settings-developer@1280x860|focus|014|button.settab "System"
-catalog|settings-developer@1280x860|focus|015|button.settab "Cluster"
-catalog|settings-developer@1280x860|focus|016|button.settab "Integrations"
-catalog|settings-developer@1280x860|focus|017|button.settab.active "Developer"
-catalog|settings-developer@1280x860|focus|018|input#ltip "192.168.4.100"
-catalog|settings-developer@1280x860|focus|019|input#ltowner
-catalog|settings-developer@1280x860|focus|020|select#ltlimit "1 2 3 4"
-catalog|settings-developer@1280x860|focus|021|select#ltheight "720p 1080p"
-catalog|settings-developer@1280x860|focus|022|button.ghost.sm "Check saved configuration"
-catalog|settings-developer@1280x860|focus|023|button#ltenable.primary.sm "Enable Live TV"
-catalog|settings-developer@1280x860|focus|024|a "Browse channels"
-catalog|settings-developer@1280x860|focus|025|select#ltgsrc "Off HDHomeRun guide XMLTV"
-catalog|settings-developer@1280x860|focus|026|select#ltghours "4 hours 8 hours 12 hours 24 hours 48 hours
-catalog|settings-developer@1280x860|focus|027|button.ghost.sm "Check the guide"
-catalog|settings-developer@1280x860|focus|028|button.ghost.sm "Refresh now"
-catalog|settings-developer@1280x860|focus|029|a "Browse channels"
-catalog|settings-developer@1280x860|focus|030|input#pcpv1
-catalog|settings-developer@1280x860|focus|031|input#dhqa
-catalog|settings-developer@1280x860|focus|032|input#adr
-catalog|settings-developer@1280x860|focus|033|input#pqh
-catalog|settings-developer@1280x860|focus|034|input#pdp
-catalog|settings-developer@1280x860|focus|035|input#phs
-catalog|settings-developer@1280x860|focus|036|<wrap>
+catalog|settings-developer@1280x860|focus|010|button.settab "Live TV"
+catalog|settings-developer@1280x860|focus|011|button.settab "Playback"
+catalog|settings-developer@1280x860|focus|012|button.settab "Analysis"
+catalog|settings-developer@1280x860|focus|013|button.settab "Maintenance"
+catalog|settings-developer@1280x860|focus|014|button.settab "Users"
+catalog|settings-developer@1280x860|focus|015|button.settab "System"
+catalog|settings-developer@1280x860|focus|016|button.settab "Cluster"
+catalog|settings-developer@1280x860|focus|017|button.settab "Integrations"
+catalog|settings-developer@1280x860|focus|018|button.settab.active "Developer"
+catalog|settings-developer@1280x860|focus|019|a "Live TV ↗ Tuner and guide"
+catalog|settings-developer@1280x860|focus|020|a "Playback ↗ Quality and defaults"
+catalog|settings-developer@1280x860|focus|021|a "Cluster ↗ Health and recovery"
+catalog|settings-developer@1280x860|focus|022|input#pcpv1
+catalog|settings-developer@1280x860|focus|023|summary "Client readiness"
+catalog|settings-developer@1280x860|focus|024|input#pdp
+catalog|settings-developer@1280x860|focus|025|a "Quality switching"
+catalog|settings-developer@1280x860|focus|026|input#dhqa
+catalog|settings-developer@1280x860|focus|027|summary "Cache impact and diagnostic evidence"
+catalog|settings-developer@1280x860|focus|028|input#adr
+catalog|settings-developer@1280x860|focus|029|summary "Recovery limits and diagnostic evidence"
+catalog|settings-developer@1280x860|focus|030|input#phs
+catalog|settings-developer@1280x860|focus|031|<wrap>
 catalog|settings-developer@1280x860|req|GET /api/v1/activity|2
 catalog|settings-developer@1280x860|req|GET /api/v1/developer/readiness|1
-catalog|settings-developer@1280x860|req|GET /api/v1/live-tv/guide/readiness|1
 catalog|settings-developer@1280x860|req|GET /api/v1/me|1
 catalog|settings-developer@1280x860|req|GET /api/v1/server|1
 catalog|settings-developer@1280x860|req|GET /api/v1/settings|1
 catalog|settings-developer@390x780|dom|^ > div#app|1
 catalog|settings-developer@390x780|dom|a > span.px-lbl[text]|3
+catalog|settings-developer@390x780|dom|a > span[text]|3
+catalog|settings-developer@390x780|dom|a > strong[text]|3
 catalog|settings-developer@390x780|dom|a > svg.px-ico[aria-hidden=true]|3
 catalog|settings-developer@390x780|dom|a.on[aria-current=page] > span.px-lbl[text]|1
 catalog|settings-developer@390x780|dom|a.on[aria-current=page] > svg.px-ico[aria-hidden=true]|1
@@ -2597,44 +2571,19 @@ catalog|settings-developer@390x780|dom|button.px-tab[aria-expanded=false aria-co
 catalog|settings-developer@390x780|dom|button.px-tab[aria-expanded=false aria-controls=* type=button] > svg.px-ico[aria-hidden=true]|1
 catalog|settings-developer@390x780|dom|button.px-tab[type=button] > span[text]|1
 catalog|settings-developer@390x780|dom|button.px-tab[type=button] > svg.px-ico[aria-hidden=true]|1
-catalog|settings-developer@390x780|dom|div > div.hint[text]|1
+catalog|settings-developer@390x780|dom|details.setdetails > div.setdetails-body|3
+catalog|settings-developer@390x780|dom|details.setdetails > summary[text]|3
 catalog|settings-developer@390x780|dom|div > h1[text]|1
-catalog|settings-developer@390x780|dom|div > h2.section[text]|8
-catalog|settings-developer@390x780|dom|div > input#ltip|1
-catalog|settings-developer@390x780|dom|div > input#ltowner|1
-catalog|settings-developer@390x780|dom|div > label[text]|6
-catalog|settings-developer@390x780|dom|div > p.sub[text]|8
+catalog|settings-developer@390x780|dom|div > h2.section[text]|5
+catalog|settings-developer@390x780|dom|div > p.sub[text]|5
 catalog|settings-developer@390x780|dom|div > p[text]|1
-catalog|settings-developer@390x780|dom|div > select#ltghours|1
-catalog|settings-developer@390x780|dom|div > select#ltgsrc|1
-catalog|settings-developer@390x780|dom|div > select#ltheight|1
-catalog|settings-developer@390x780|dom|div > select#ltlimit|1
 catalog|settings-developer@390x780|dom|div#app > div#pxshell.px-shell|1
-catalog|settings-developer@390x780|dom|div#drcard.card.setcard > div#adrerr.err|1
+catalog|settings-developer@390x780|dom|div#drcard.card.setcard > details.setdetails|1
+catalog|settings-developer@390x780|dom|div#drcard.card.setcard > div#adrerr.err[role=alert]|1
 catalog|settings-developer@390x780|dom|div#drcard.card.setcard > div.cardhead|1
-catalog|settings-developer@390x780|dom|div#drcard.card.setcard > div.hint[text]|3
+catalog|settings-developer@390x780|dom|div#drcard.card.setcard > div.hint[text]|1
 catalog|settings-developer@390x780|dom|div#drcard.card.setcard > div.setfoot|1
-catalog|settings-developer@390x780|dom|div#drcard.card.setcard > div.tog|4
-catalog|settings-developer@390x780|dom|div#drcard.card.setcard > h2.section[text]|2
 catalog|settings-developer@390x780|dom|div#drcard.card.setcard > label.tog|1
-catalog|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > div#ltgerr.err[role=alert]|1
-catalog|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > div#ltgready[aria-live=polite]|1
-catalog|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > div.cardhead|1
-catalog|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > div.hint[text]|1
-catalog|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > div.row|1
-catalog|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > div.setfields|1
-catalog|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > div.setfoot|1
-catalog|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > h2.section[text]|1
-catalog|settings-developer@390x780|dom|div#live-tv-settings.card.setcard > div#lterr.err[role=alert]|1
-catalog|settings-developer@390x780|dom|div#live-tv-settings.card.setcard > div#ltreadiness[aria-live=polite]|1
-catalog|settings-developer@390x780|dom|div#live-tv-settings.card.setcard > div.cardhead|1
-catalog|settings-developer@390x780|dom|div#live-tv-settings.card.setcard > div.row|1
-catalog|settings-developer@390x780|dom|div#live-tv-settings.card.setcard > div.setfields|1
-catalog|settings-developer@390x780|dom|div#live-tv-settings.card.setcard > div.setfoot|1
-catalog|settings-developer@390x780|dom|div#live-tv-settings.card.setcard > p.hint[text]|2
-catalog|settings-developer@390x780|dom|div#live-tv-settings.card.setcard > p[text]|1
-catalog|settings-developer@390x780|dom|div#ltgready[aria-live=polite] > div.hint[text]|1
-catalog|settings-developer@390x780|dom|div#ltgready[aria-live=polite] > div.tog|4
 catalog|settings-developer@390x780|dom|div#pxnav.px-scroll > button.ghost.px-sheetx.sm[aria-label=* type=button text]|1
 catalog|settings-developer@390x780|dom|div#pxnav.px-scroll > div#pxlibs|1
 catalog|settings-developer@390x780|dom|div#pxnav.px-scroll > div.px-sec[text]|1
@@ -2643,32 +2592,39 @@ catalog|settings-developer@390x780|dom|div#pxshell.px-shell > aside.px-side|1
 catalog|settings-developer@390x780|dom|div#pxshell.px-shell > main#main|1
 catalog|settings-developer@390x780|dom|div#pxshell.px-shell > nav.px-tabs[aria-label=*]|1
 catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div#drcard.card.setcard|1
-catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div#live-tv-guide-settings.card.setcard|1
-catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div#live-tv-settings.card.setcard|1
 catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div#vdcard.card.setcard|1
-catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div.card.setcard|4
+catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div.card.local.setcard|1
+catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div.card.setcard|2
 catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div.sethead|1
-catalog|settings-developer@390x780|dom|div#vdcard.card.setcard > div#dhqerr.err|1
+catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div.setsection|3
+catalog|settings-developer@390x780|dom|div#setbody.adminwrap > nav.setdestinations[aria-label=*]|1
+catalog|settings-developer@390x780|dom|div#vdcard.card.setcard > details.setdetails|1
+catalog|settings-developer@390x780|dom|div#vdcard.card.setcard > div#dhqerr.err[role=alert]|1
 catalog|settings-developer@390x780|dom|div#vdcard.card.setcard > div.cardhead|1
-catalog|settings-developer@390x780|dom|div#vdcard.card.setcard > div.hint[text]|3
+catalog|settings-developer@390x780|dom|div#vdcard.card.setcard > div.hint[text]|1
 catalog|settings-developer@390x780|dom|div#vdcard.card.setcard > div.setfoot|1
-catalog|settings-developer@390x780|dom|div#vdcard.card.setcard > div.tog|3
-catalog|settings-developer@390x780|dom|div#vdcard.card.setcard > h2.section[text]|1
 catalog|settings-developer@390x780|dom|div#vdcard.card.setcard > label.tog|1
-catalog|settings-developer@390x780|dom|div.card.setcard > div#dverr.err|1
-catalog|settings-developer@390x780|dom|div.card.setcard > div#dxerr.err|1
-catalog|settings-developer@390x780|dom|div.card.setcard > div#pqherr.err|1
-catalog|settings-developer@390x780|dom|div.card.setcard > div.cardhead|4
-catalog|settings-developer@390x780|dom|div.card.setcard > div.hint[text]|7
-catalog|settings-developer@390x780|dom|div.card.setcard > div.setfoot|3
-catalog|settings-developer@390x780|dom|div.card.setcard > div.tog|10
-catalog|settings-developer@390x780|dom|div.card.setcard > h2.section[text]|3
-catalog|settings-developer@390x780|dom|div.card.setcard > label.tog|4
-catalog|settings-developer@390x780|dom|div.cardhead > div.cardtools|6
-catalog|settings-developer@390x780|dom|div.cardhead > div|8
-catalog|settings-developer@390x780|dom|div.cardtools > span.pill[text]|6
-catalog|settings-developer@390x780|dom|div.hint[text] > b[text]|13
-catalog|settings-developer@390x780|dom|div.hint[text] > code[text]|2
+catalog|settings-developer@390x780|dom|div.card.local.setcard > div.cardhead|1
+catalog|settings-developer@390x780|dom|div.card.local.setcard > div.hint[text]|1
+catalog|settings-developer@390x780|dom|div.card.local.setcard > label.tog|1
+catalog|settings-developer@390x780|dom|div.card.setcard > details.setdetails|1
+catalog|settings-developer@390x780|dom|div.card.setcard > div#dverr.err[role=alert]|1
+catalog|settings-developer@390x780|dom|div.card.setcard > div#dxerr.err[role=alert]|1
+catalog|settings-developer@390x780|dom|div.card.setcard > div.cardhead|2
+catalog|settings-developer@390x780|dom|div.card.setcard > div.setfoot|2
+catalog|settings-developer@390x780|dom|div.card.setcard > label.tog|2
+catalog|settings-developer@390x780|dom|div.cardhead > div.cardtools|5
+catalog|settings-developer@390x780|dom|div.cardhead > div|5
+catalog|settings-developer@390x780|dom|div.cardtools > span.acc.pill[text]|1
+catalog|settings-developer@390x780|dom|div.cardtools > span.pill.warn[text]|1
+catalog|settings-developer@390x780|dom|div.cardtools > span.pill[text]|3
+catalog|settings-developer@390x780|dom|div.devcheck > div.devcheck-head|1
+catalog|settings-developer@390x780|dom|div.devcheck > p.devcheck-description[text]|1
+catalog|settings-developer@390x780|dom|div.devcheck > p.devcheck-evidence[text]|1
+catalog|settings-developer@390x780|dom|div.devcheck-head > span.devcheck-status|1
+catalog|settings-developer@390x780|dom|div.devcheck-head > strong[text]|1
+catalog|settings-developer@390x780|dom|div.hint[text] > a[text]|1
+catalog|settings-developer@390x780|dom|div.hint[text] > b[text]|4
 catalog|settings-developer@390x780|dom|div.px-brand > a.logo[text]|1
 catalog|settings-developer@390x780|dom|div.px-ctl > div.px-pop|1
 catalog|settings-developer@390x780|dom|div.px-foot > div.px-ctl|1
@@ -2681,50 +2637,44 @@ catalog|settings-developer@390x780|dom|div.px-pop > button.ghost.profile.sm|1
 catalog|settings-developer@390x780|dom|div.px-pop > div#lookmenu.amenu.lookmenu|1
 catalog|settings-developer@390x780|dom|div.px-pop > div#profilemenu.amenu|1
 catalog|settings-developer@390x780|dom|div.px-user > div.px-pop|1
-catalog|settings-developer@390x780|dom|div.row > a[text]|2
-catalog|settings-developer@390x780|dom|div.row > button#ltenable.primary.sm[text]|1
-catalog|settings-developer@390x780|dom|div.row > button.ghost.sm[text]|3
-catalog|settings-developer@390x780|dom|div.setfields > div|6
-catalog|settings-developer@390x780|dom|div.setfoot > button.primary.sm[disabled text]|7
-catalog|settings-developer@390x780|dom|div.setfoot > span.setstate[text]|7
+catalog|settings-developer@390x780|dom|div.setdetails-body > div.devcheck|1
+catalog|settings-developer@390x780|dom|div.setdetails-body > div.hint[text]|5
+catalog|settings-developer@390x780|dom|div.setdetails-body > div.tog|7
+catalog|settings-developer@390x780|dom|div.setdetails-body > h2.section[text]|3
+catalog|settings-developer@390x780|dom|div.setfoot > button.primary.sm[disabled text]|4
+catalog|settings-developer@390x780|dom|div.setfoot > span.setstate[text]|4
 catalog|settings-developer@390x780|dom|div.sethead > div|1
 catalog|settings-developer@390x780|dom|div.setlayout > div#setbody.adminwrap|1
 catalog|settings-developer@390x780|dom|div.setlayout > nav.settabs[aria-label=*]|1
-catalog|settings-developer@390x780|dom|div.tog > span.pill[text]|2
-catalog|settings-developer@390x780|dom|div.tog > span[text]|21
+catalog|settings-developer@390x780|dom|div.setsection > h2[text]|3
+catalog|settings-developer@390x780|dom|div.setsection > p[text]|3
+catalog|settings-developer@390x780|dom|div.tog > span[text]|7
 catalog|settings-developer@390x780|dom|label.tog > input#adr[type=checkbox]|1
 catalog|settings-developer@390x780|dom|label.tog > input#dhqa[type=checkbox]|1
 catalog|settings-developer@390x780|dom|label.tog > input#pcpv1[type=checkbox]|1
 catalog|settings-developer@390x780|dom|label.tog > input#pdp[type=checkbox]|1
 catalog|settings-developer@390x780|dom|label.tog > input#phs[type=checkbox]|1
-catalog|settings-developer@390x780|dom|label.tog > input#pqh[type=checkbox]|1
-catalog|settings-developer@390x780|dom|label.tog > span[text]|6
+catalog|settings-developer@390x780|dom|label.tog > span[text]|5
 catalog|settings-developer@390x780|dom|main#main > div.setlayout|1
 catalog|settings-developer@390x780|dom|nav.px-nav[aria-label=*] > a.on[aria-current=page]|1
 catalog|settings-developer@390x780|dom|nav.px-nav[aria-label=*] > a|3
 catalog|settings-developer@390x780|dom|nav.px-tabs[aria-label=*] > a.px-tab|2
 catalog|settings-developer@390x780|dom|nav.px-tabs[aria-label=*] > button.px-tab[aria-expanded=false aria-controls=* type=button]|1
 catalog|settings-developer@390x780|dom|nav.px-tabs[aria-label=*] > button.px-tab[type=button]|1
+catalog|settings-developer@390x780|dom|nav.setdestinations[aria-label=*] > a|3
 catalog|settings-developer@390x780|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
-catalog|settings-developer@390x780|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|9
+catalog|settings-developer@390x780|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|10
 catalog|settings-developer@390x780|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
-catalog|settings-developer@390x780|dom|select#ltghours > option[text]|6
-catalog|settings-developer@390x780|dom|select#ltgsrc > option[text]|3
-catalog|settings-developer@390x780|dom|select#ltheight > option[text]|2
-catalog|settings-developer@390x780|dom|select#ltlimit > option[text]|4
 catalog|settings-developer@390x780|dom|small > code[text]|2
-catalog|settings-developer@390x780|dom|small[text] > b[text]|1
 catalog|settings-developer@390x780|dom|small[text] > br|4
 catalog|settings-developer@390x780|dom|small[text] > code[text]|6
-catalog|settings-developer@390x780|dom|small[text] > i[text]|5
-catalog|settings-developer@390x780|dom|span > span.pill.warn[text]|1
-catalog|settings-developer@390x780|dom|span > span.pill[text]|7
-catalog|settings-developer@390x780|dom|span[text] > small.hint[text]|8
-catalog|settings-developer@390x780|dom|span[text] > small[text]|25
+catalog|settings-developer@390x780|dom|small[text] > i[text]|1
+catalog|settings-developer@390x780|dom|span.devcheck-status > span.pill[text]|1
+catalog|settings-developer@390x780|dom|span[text] > small[text]|10
 catalog|settings-developer@390x780|dom|span[text] > small|2
-catalog|settings-developer@390x780|dom|span[text] > span.pill.warn[text]|4
-catalog|settings-developer@390x780|dom|span[text] > span.pill[text]|2
-catalog|settings-developer@390x780|dom|span[text] > span|8
+catalog|settings-developer@390x780|dom|span[text] > span.pill.warn[text]|1
+catalog|settings-developer@390x780|dom|span[text] > span.pill[text]|1
+catalog|settings-developer@390x780|dom|strong[text] > span[aria-hidden=true text]|3
 catalog|settings-developer@390x780|dom|svg.px-ico[aria-hidden=true] > circle|2
 catalog|settings-developer@390x780|dom|svg.px-ico[aria-hidden=true] > path|7
 catalog|settings-developer@390x780|dom|svg.px-ico[aria-hidden=true] > rect|5
@@ -2734,40 +2684,34 @@ catalog|settings-developer@390x780|focus|002|button.ghost.sm.lookbtn "Appearance
 catalog|settings-developer@390x780|focus|003|button.ghost.sm.profile "Account"
 catalog|settings-developer@390x780|focus|004|button.settab "Libraries"
 catalog|settings-developer@390x780|focus|005|button.settab "Metadata"
-catalog|settings-developer@390x780|focus|006|button.settab "Playback"
-catalog|settings-developer@390x780|focus|007|button.settab "Analysis"
-catalog|settings-developer@390x780|focus|008|button.settab "Maintenance"
-catalog|settings-developer@390x780|focus|009|button.settab "Users"
-catalog|settings-developer@390x780|focus|010|button.settab "System"
-catalog|settings-developer@390x780|focus|011|button.settab "Cluster"
-catalog|settings-developer@390x780|focus|012|button.settab "Integrations"
-catalog|settings-developer@390x780|focus|013|button.settab.active "Developer"
-catalog|settings-developer@390x780|focus|014|input#ltip "192.168.4.100"
-catalog|settings-developer@390x780|focus|015|input#ltowner
-catalog|settings-developer@390x780|focus|016|select#ltlimit "1 2 3 4"
-catalog|settings-developer@390x780|focus|017|select#ltheight "720p 1080p"
-catalog|settings-developer@390x780|focus|018|button.ghost.sm "Check saved configuration"
-catalog|settings-developer@390x780|focus|019|button#ltenable.primary.sm "Enable Live TV"
-catalog|settings-developer@390x780|focus|020|a "Browse channels"
-catalog|settings-developer@390x780|focus|021|select#ltgsrc "Off HDHomeRun guide XMLTV"
-catalog|settings-developer@390x780|focus|022|select#ltghours "4 hours 8 hours 12 hours 24 hours 48 hours
-catalog|settings-developer@390x780|focus|023|button.ghost.sm "Check the guide"
-catalog|settings-developer@390x780|focus|024|button.ghost.sm "Refresh now"
-catalog|settings-developer@390x780|focus|025|a "Browse channels"
-catalog|settings-developer@390x780|focus|026|input#pcpv1
-catalog|settings-developer@390x780|focus|027|input#dhqa
-catalog|settings-developer@390x780|focus|028|input#adr
-catalog|settings-developer@390x780|focus|029|input#pqh
-catalog|settings-developer@390x780|focus|030|input#pdp
-catalog|settings-developer@390x780|focus|031|input#phs
-catalog|settings-developer@390x780|focus|032|a.px-tab "Home"
-catalog|settings-developer@390x780|focus|033|button.px-tab "Libraries"
-catalog|settings-developer@390x780|focus|034|button.px-tab "Search"
-catalog|settings-developer@390x780|focus|035|a.px-tab "Activity"
-catalog|settings-developer@390x780|focus|036|<wrap>
+catalog|settings-developer@390x780|focus|006|button.settab "Live TV"
+catalog|settings-developer@390x780|focus|007|button.settab "Playback"
+catalog|settings-developer@390x780|focus|008|button.settab "Analysis"
+catalog|settings-developer@390x780|focus|009|button.settab "Maintenance"
+catalog|settings-developer@390x780|focus|010|button.settab "Users"
+catalog|settings-developer@390x780|focus|011|button.settab "System"
+catalog|settings-developer@390x780|focus|012|button.settab "Cluster"
+catalog|settings-developer@390x780|focus|013|button.settab "Integrations"
+catalog|settings-developer@390x780|focus|014|button.settab.active "Developer"
+catalog|settings-developer@390x780|focus|015|a "Live TV ↗ Tuner and guide"
+catalog|settings-developer@390x780|focus|016|a "Playback ↗ Quality and defaults"
+catalog|settings-developer@390x780|focus|017|a "Cluster ↗ Health and recovery"
+catalog|settings-developer@390x780|focus|018|input#pcpv1
+catalog|settings-developer@390x780|focus|019|summary "Client readiness"
+catalog|settings-developer@390x780|focus|020|input#pdp
+catalog|settings-developer@390x780|focus|021|a "Quality switching"
+catalog|settings-developer@390x780|focus|022|input#dhqa
+catalog|settings-developer@390x780|focus|023|summary "Cache impact and diagnostic evidence"
+catalog|settings-developer@390x780|focus|024|input#adr
+catalog|settings-developer@390x780|focus|025|summary "Recovery limits and diagnostic evidence"
+catalog|settings-developer@390x780|focus|026|input#phs
+catalog|settings-developer@390x780|focus|027|a.px-tab "Home"
+catalog|settings-developer@390x780|focus|028|button.px-tab "Libraries"
+catalog|settings-developer@390x780|focus|029|button.px-tab "Search"
+catalog|settings-developer@390x780|focus|030|a.px-tab "Activity"
+catalog|settings-developer@390x780|focus|031|<wrap>
 catalog|settings-developer@390x780|req|GET /api/v1/activity|2
 catalog|settings-developer@390x780|req|GET /api/v1/developer/readiness|1
-catalog|settings-developer@390x780|req|GET /api/v1/live-tv/guide/readiness|1
 catalog|settings-developer@390x780|req|GET /api/v1/me|1
 catalog|settings-developer@390x780|req|GET /api/v1/server|1
 catalog|settings-developer@390x780|req|GET /api/v1/settings|1
@@ -2835,7 +2779,7 @@ catalog|settings@1280x860|dom|nav.px-tabs[aria-label=*] > a.px-tab|2
 catalog|settings@1280x860|dom|nav.px-tabs[aria-label=*] > button.px-tab[aria-expanded=false aria-controls=* type=button]|1
 catalog|settings@1280x860|dom|nav.px-tabs[aria-label=*] > button.px-tab[type=button]|1
 catalog|settings@1280x860|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
-catalog|settings@1280x860|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|9
+catalog|settings@1280x860|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|10
 catalog|settings@1280x860|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 catalog|settings@1280x860|dom|svg.px-ico[aria-hidden=true] > circle|2
 catalog|settings@1280x860|dom|svg.px-ico[aria-hidden=true] > path|7
@@ -2879,28 +2823,29 @@ catalog|settings@1280x860|focus|006|button.ghost.sm.lookbtn "Appearance"
 catalog|settings@1280x860|focus|007|button.ghost.sm.profile "Account"
 catalog|settings@1280x860|focus|008|button.settab.active "Libraries 3"
 catalog|settings@1280x860|focus|009|button.settab "Metadata"
-catalog|settings@1280x860|focus|010|button.settab "Playback"
-catalog|settings@1280x860|focus|011|button.settab "Analysis"
-catalog|settings@1280x860|focus|012|button.settab "Maintenance"
-catalog|settings@1280x860|focus|013|button.settab "Users"
-catalog|settings@1280x860|focus|014|button.settab "System"
-catalog|settings@1280x860|focus|015|button.settab "Cluster"
-catalog|settings@1280x860|focus|016|button.settab "Integrations"
-catalog|settings@1280x860|focus|017|button.settab "Developer"
-catalog|settings@1280x860|focus|018|button.ghost.sm "Scan every library for new & changed files"
-catalog|settings@1280x860|focus|019|button.ghost.sm "Re-fetch metadata & artwork for every libra
-catalog|settings@1280x860|focus|020|button.sm "+ Add library"
-catalog|settings@1280x860|focus|021|a "Add a free key in Metadata"
-catalog|settings@1280x860|focus|022|button.ghost.sm "Scan"
-catalog|settings@1280x860|focus|023|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-catalog|settings@1280x860|focus|024|button.ghost.sm "Configure ⌄"
-catalog|settings@1280x860|focus|025|button.ghost.sm "Scan"
-catalog|settings@1280x860|focus|026|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-catalog|settings@1280x860|focus|027|button.ghost.sm "Configure ⌄"
-catalog|settings@1280x860|focus|028|button.ghost.sm "Scan"
-catalog|settings@1280x860|focus|029|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-catalog|settings@1280x860|focus|030|button.ghost.sm "Configure ⌄"
-catalog|settings@1280x860|focus|031|<wrap>
+catalog|settings@1280x860|focus|010|button.settab "Live TV"
+catalog|settings@1280x860|focus|011|button.settab "Playback"
+catalog|settings@1280x860|focus|012|button.settab "Analysis"
+catalog|settings@1280x860|focus|013|button.settab "Maintenance"
+catalog|settings@1280x860|focus|014|button.settab "Users"
+catalog|settings@1280x860|focus|015|button.settab "System"
+catalog|settings@1280x860|focus|016|button.settab "Cluster"
+catalog|settings@1280x860|focus|017|button.settab "Integrations"
+catalog|settings@1280x860|focus|018|button.settab "Developer"
+catalog|settings@1280x860|focus|019|button.ghost.sm "Scan every library for new & changed files"
+catalog|settings@1280x860|focus|020|button.ghost.sm "Re-fetch metadata & artwork for every libra
+catalog|settings@1280x860|focus|021|button.sm "+ Add library"
+catalog|settings@1280x860|focus|022|a "Add a free key in Metadata"
+catalog|settings@1280x860|focus|023|button.ghost.sm "Scan"
+catalog|settings@1280x860|focus|024|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+catalog|settings@1280x860|focus|025|button.ghost.sm "Configure ⌄"
+catalog|settings@1280x860|focus|026|button.ghost.sm "Scan"
+catalog|settings@1280x860|focus|027|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+catalog|settings@1280x860|focus|028|button.ghost.sm "Configure ⌄"
+catalog|settings@1280x860|focus|029|button.ghost.sm "Scan"
+catalog|settings@1280x860|focus|030|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+catalog|settings@1280x860|focus|031|button.ghost.sm "Configure ⌄"
+catalog|settings@1280x860|focus|032|<wrap>
 catalog|settings@1280x860|req|GET /api/v1/activity|2
 catalog|settings@1280x860|req|GET /api/v1/dv-conversions|1
 catalog|settings@1280x860|req|GET /api/v1/libraries|1
@@ -2972,7 +2917,7 @@ catalog|settings@390x780|dom|nav.px-tabs[aria-label=*] > a.px-tab|2
 catalog|settings@390x780|dom|nav.px-tabs[aria-label=*] > button.px-tab[aria-expanded=false aria-controls=* type=button]|1
 catalog|settings@390x780|dom|nav.px-tabs[aria-label=*] > button.px-tab[type=button]|1
 catalog|settings@390x780|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
-catalog|settings@390x780|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|9
+catalog|settings@390x780|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|10
 catalog|settings@390x780|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 catalog|settings@390x780|dom|svg.px-ico[aria-hidden=true] > circle|2
 catalog|settings@390x780|dom|svg.px-ico[aria-hidden=true] > path|7
@@ -3012,32 +2957,33 @@ catalog|settings@390x780|focus|002|button.ghost.sm.lookbtn "Appearance"
 catalog|settings@390x780|focus|003|button.ghost.sm.profile "Account"
 catalog|settings@390x780|focus|004|button.settab.active "Libraries"
 catalog|settings@390x780|focus|005|button.settab "Metadata"
-catalog|settings@390x780|focus|006|button.settab "Playback"
-catalog|settings@390x780|focus|007|button.settab "Analysis"
-catalog|settings@390x780|focus|008|button.settab "Maintenance"
-catalog|settings@390x780|focus|009|button.settab "Users"
-catalog|settings@390x780|focus|010|button.settab "System"
-catalog|settings@390x780|focus|011|button.settab "Cluster"
-catalog|settings@390x780|focus|012|button.settab "Integrations"
-catalog|settings@390x780|focus|013|button.settab "Developer"
-catalog|settings@390x780|focus|014|button.ghost.sm "Scan every library for new & changed files"
-catalog|settings@390x780|focus|015|button.ghost.sm "Re-fetch metadata & artwork for every libra
-catalog|settings@390x780|focus|016|button.sm "+ Add library"
-catalog|settings@390x780|focus|017|a "Add a free key in Metadata"
-catalog|settings@390x780|focus|018|button.ghost.sm "Scan"
-catalog|settings@390x780|focus|019|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-catalog|settings@390x780|focus|020|button.ghost.sm "Configure ⌄"
-catalog|settings@390x780|focus|021|button.ghost.sm "Scan"
-catalog|settings@390x780|focus|022|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-catalog|settings@390x780|focus|023|button.ghost.sm "Configure ⌄"
-catalog|settings@390x780|focus|024|button.ghost.sm "Scan"
-catalog|settings@390x780|focus|025|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-catalog|settings@390x780|focus|026|button.ghost.sm "Configure ⌄"
-catalog|settings@390x780|focus|027|a.px-tab "Home"
-catalog|settings@390x780|focus|028|button.px-tab "Libraries"
-catalog|settings@390x780|focus|029|button.px-tab "Search"
-catalog|settings@390x780|focus|030|a.px-tab "Activity"
-catalog|settings@390x780|focus|031|<wrap>
+catalog|settings@390x780|focus|006|button.settab "Live TV"
+catalog|settings@390x780|focus|007|button.settab "Playback"
+catalog|settings@390x780|focus|008|button.settab "Analysis"
+catalog|settings@390x780|focus|009|button.settab "Maintenance"
+catalog|settings@390x780|focus|010|button.settab "Users"
+catalog|settings@390x780|focus|011|button.settab "System"
+catalog|settings@390x780|focus|012|button.settab "Cluster"
+catalog|settings@390x780|focus|013|button.settab "Integrations"
+catalog|settings@390x780|focus|014|button.settab "Developer"
+catalog|settings@390x780|focus|015|button.ghost.sm "Scan every library for new & changed files"
+catalog|settings@390x780|focus|016|button.ghost.sm "Re-fetch metadata & artwork for every libra
+catalog|settings@390x780|focus|017|button.sm "+ Add library"
+catalog|settings@390x780|focus|018|a "Add a free key in Metadata"
+catalog|settings@390x780|focus|019|button.ghost.sm "Scan"
+catalog|settings@390x780|focus|020|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+catalog|settings@390x780|focus|021|button.ghost.sm "Configure ⌄"
+catalog|settings@390x780|focus|022|button.ghost.sm "Scan"
+catalog|settings@390x780|focus|023|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+catalog|settings@390x780|focus|024|button.ghost.sm "Configure ⌄"
+catalog|settings@390x780|focus|025|button.ghost.sm "Scan"
+catalog|settings@390x780|focus|026|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+catalog|settings@390x780|focus|027|button.ghost.sm "Configure ⌄"
+catalog|settings@390x780|focus|028|a.px-tab "Home"
+catalog|settings@390x780|focus|029|button.px-tab "Libraries"
+catalog|settings@390x780|focus|030|button.px-tab "Search"
+catalog|settings@390x780|focus|031|a.px-tab "Activity"
+catalog|settings@390x780|focus|032|<wrap>
 catalog|settings@390x780|req|GET /api/v1/activity|2
 catalog|settings@390x780|req|GET /api/v1/dv-conversions|1
 catalog|settings@390x780|req|GET /api/v1/libraries|1
@@ -4786,92 +4732,77 @@ classic|search@390x780|req|GET /api/v1/me|1
 classic|search@390x780|req|GET /api/v1/search|1
 classic|search@390x780|req|GET /api/v1/server|1
 classic|settings-developer@1280x860|dom|^ > div#app|1
+classic|settings-developer@1280x860|dom|a > span[text]|3
+classic|settings-developer@1280x860|dom|a > strong[text]|3
 classic|settings-developer@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.lookword[text]|1
 classic|settings-developer@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.tsw|1
 classic|settings-developer@1280x860|dom|button.ghost.profile.sm > span.caret[text]|1
 classic|settings-developer@1280x860|dom|button.ghost.profile.sm > span.pavatar[text]|1
 classic|settings-developer@1280x860|dom|button.ghost.profile.sm > span.pname[text]|1
+classic|settings-developer@1280x860|dom|details.setdetails > div.setdetails-body|3
+classic|settings-developer@1280x860|dom|details.setdetails > summary[text]|3
 classic|settings-developer@1280x860|dom|div > button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*]|1
 classic|settings-developer@1280x860|dom|div > button.ghost.profile.sm|1
 classic|settings-developer@1280x860|dom|div > div#lookmenu.amenu.lookmenu|1
 classic|settings-developer@1280x860|dom|div > div#profilemenu.amenu|1
-classic|settings-developer@1280x860|dom|div > div.hint[text]|1
 classic|settings-developer@1280x860|dom|div > h1[text]|1
-classic|settings-developer@1280x860|dom|div > h2.section[text]|8
-classic|settings-developer@1280x860|dom|div > input#ltip|1
-classic|settings-developer@1280x860|dom|div > input#ltowner|1
-classic|settings-developer@1280x860|dom|div > label[text]|6
-classic|settings-developer@1280x860|dom|div > p.sub[text]|8
+classic|settings-developer@1280x860|dom|div > h2.section[text]|5
+classic|settings-developer@1280x860|dom|div > p.sub[text]|5
 classic|settings-developer@1280x860|dom|div > p[text]|1
-classic|settings-developer@1280x860|dom|div > select#ltghours|1
-classic|settings-developer@1280x860|dom|div > select#ltgsrc|1
-classic|settings-developer@1280x860|dom|div > select#ltheight|1
-classic|settings-developer@1280x860|dom|div > select#ltlimit|1
 classic|settings-developer@1280x860|dom|div#app > header.top|1
 classic|settings-developer@1280x860|dom|div#app > main#main|1
-classic|settings-developer@1280x860|dom|div#drcard.card.setcard > div#adrerr.err|1
+classic|settings-developer@1280x860|dom|div#drcard.card.setcard > details.setdetails|1
+classic|settings-developer@1280x860|dom|div#drcard.card.setcard > div#adrerr.err[role=alert]|1
 classic|settings-developer@1280x860|dom|div#drcard.card.setcard > div.cardhead|1
-classic|settings-developer@1280x860|dom|div#drcard.card.setcard > div.hint[text]|3
+classic|settings-developer@1280x860|dom|div#drcard.card.setcard > div.hint[text]|1
 classic|settings-developer@1280x860|dom|div#drcard.card.setcard > div.setfoot|1
-classic|settings-developer@1280x860|dom|div#drcard.card.setcard > div.tog|4
-classic|settings-developer@1280x860|dom|div#drcard.card.setcard > h2.section[text]|2
 classic|settings-developer@1280x860|dom|div#drcard.card.setcard > label.tog|1
-classic|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > div#ltgerr.err[role=alert]|1
-classic|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > div#ltgready[aria-live=polite]|1
-classic|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > div.cardhead|1
-classic|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > div.hint[text]|1
-classic|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > div.row|1
-classic|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > div.setfields|1
-classic|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > div.setfoot|1
-classic|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > h2.section[text]|1
-classic|settings-developer@1280x860|dom|div#live-tv-settings.card.setcard > div#lterr.err[role=alert]|1
-classic|settings-developer@1280x860|dom|div#live-tv-settings.card.setcard > div#ltreadiness[aria-live=polite]|1
-classic|settings-developer@1280x860|dom|div#live-tv-settings.card.setcard > div.cardhead|1
-classic|settings-developer@1280x860|dom|div#live-tv-settings.card.setcard > div.row|1
-classic|settings-developer@1280x860|dom|div#live-tv-settings.card.setcard > div.setfields|1
-classic|settings-developer@1280x860|dom|div#live-tv-settings.card.setcard > div.setfoot|1
-classic|settings-developer@1280x860|dom|div#live-tv-settings.card.setcard > p.hint[text]|2
-classic|settings-developer@1280x860|dom|div#live-tv-settings.card.setcard > p[text]|1
-classic|settings-developer@1280x860|dom|div#ltgready[aria-live=polite] > div.hint[text]|1
-classic|settings-developer@1280x860|dom|div#ltgready[aria-live=polite] > div.tog|4
 classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div#drcard.card.setcard|1
-classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div#live-tv-guide-settings.card.setcard|1
-classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div#live-tv-settings.card.setcard|1
 classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div#vdcard.card.setcard|1
-classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div.card.setcard|4
+classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div.card.local.setcard|1
+classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div.card.setcard|2
 classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div.sethead|1
-classic|settings-developer@1280x860|dom|div#vdcard.card.setcard > div#dhqerr.err|1
+classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div.setsection|3
+classic|settings-developer@1280x860|dom|div#setbody.adminwrap > nav.setdestinations[aria-label=*]|1
+classic|settings-developer@1280x860|dom|div#vdcard.card.setcard > details.setdetails|1
+classic|settings-developer@1280x860|dom|div#vdcard.card.setcard > div#dhqerr.err[role=alert]|1
 classic|settings-developer@1280x860|dom|div#vdcard.card.setcard > div.cardhead|1
-classic|settings-developer@1280x860|dom|div#vdcard.card.setcard > div.hint[text]|3
+classic|settings-developer@1280x860|dom|div#vdcard.card.setcard > div.hint[text]|1
 classic|settings-developer@1280x860|dom|div#vdcard.card.setcard > div.setfoot|1
-classic|settings-developer@1280x860|dom|div#vdcard.card.setcard > div.tog|3
-classic|settings-developer@1280x860|dom|div#vdcard.card.setcard > h2.section[text]|1
 classic|settings-developer@1280x860|dom|div#vdcard.card.setcard > label.tog|1
-classic|settings-developer@1280x860|dom|div.card.setcard > div#dverr.err|1
-classic|settings-developer@1280x860|dom|div.card.setcard > div#dxerr.err|1
-classic|settings-developer@1280x860|dom|div.card.setcard > div#pqherr.err|1
-classic|settings-developer@1280x860|dom|div.card.setcard > div.cardhead|4
-classic|settings-developer@1280x860|dom|div.card.setcard > div.hint[text]|7
-classic|settings-developer@1280x860|dom|div.card.setcard > div.setfoot|3
-classic|settings-developer@1280x860|dom|div.card.setcard > div.tog|10
-classic|settings-developer@1280x860|dom|div.card.setcard > h2.section[text]|3
-classic|settings-developer@1280x860|dom|div.card.setcard > label.tog|4
-classic|settings-developer@1280x860|dom|div.cardhead > div.cardtools|6
-classic|settings-developer@1280x860|dom|div.cardhead > div|8
-classic|settings-developer@1280x860|dom|div.cardtools > span.pill[text]|6
-classic|settings-developer@1280x860|dom|div.hint[text] > b[text]|13
-classic|settings-developer@1280x860|dom|div.hint[text] > code[text]|2
-classic|settings-developer@1280x860|dom|div.row > a[text]|2
-classic|settings-developer@1280x860|dom|div.row > button#ltenable.primary.sm[text]|1
-classic|settings-developer@1280x860|dom|div.row > button.ghost.sm[text]|3
-classic|settings-developer@1280x860|dom|div.setfields > div|6
-classic|settings-developer@1280x860|dom|div.setfoot > button.primary.sm[disabled text]|7
-classic|settings-developer@1280x860|dom|div.setfoot > span.setstate[text]|7
+classic|settings-developer@1280x860|dom|div.card.local.setcard > div.cardhead|1
+classic|settings-developer@1280x860|dom|div.card.local.setcard > div.hint[text]|1
+classic|settings-developer@1280x860|dom|div.card.local.setcard > label.tog|1
+classic|settings-developer@1280x860|dom|div.card.setcard > details.setdetails|1
+classic|settings-developer@1280x860|dom|div.card.setcard > div#dverr.err[role=alert]|1
+classic|settings-developer@1280x860|dom|div.card.setcard > div#dxerr.err[role=alert]|1
+classic|settings-developer@1280x860|dom|div.card.setcard > div.cardhead|2
+classic|settings-developer@1280x860|dom|div.card.setcard > div.setfoot|2
+classic|settings-developer@1280x860|dom|div.card.setcard > label.tog|2
+classic|settings-developer@1280x860|dom|div.cardhead > div.cardtools|5
+classic|settings-developer@1280x860|dom|div.cardhead > div|5
+classic|settings-developer@1280x860|dom|div.cardtools > span.acc.pill[text]|1
+classic|settings-developer@1280x860|dom|div.cardtools > span.pill.warn[text]|1
+classic|settings-developer@1280x860|dom|div.cardtools > span.pill[text]|3
+classic|settings-developer@1280x860|dom|div.devcheck > div.devcheck-head|1
+classic|settings-developer@1280x860|dom|div.devcheck > p.devcheck-description[text]|1
+classic|settings-developer@1280x860|dom|div.devcheck > p.devcheck-evidence[text]|1
+classic|settings-developer@1280x860|dom|div.devcheck-head > span.devcheck-status|1
+classic|settings-developer@1280x860|dom|div.devcheck-head > strong[text]|1
+classic|settings-developer@1280x860|dom|div.hint[text] > a[text]|1
+classic|settings-developer@1280x860|dom|div.hint[text] > b[text]|4
+classic|settings-developer@1280x860|dom|div.setdetails-body > div.devcheck|1
+classic|settings-developer@1280x860|dom|div.setdetails-body > div.hint[text]|5
+classic|settings-developer@1280x860|dom|div.setdetails-body > div.tog|7
+classic|settings-developer@1280x860|dom|div.setdetails-body > h2.section[text]|3
+classic|settings-developer@1280x860|dom|div.setfoot > button.primary.sm[disabled text]|4
+classic|settings-developer@1280x860|dom|div.setfoot > span.setstate[text]|4
 classic|settings-developer@1280x860|dom|div.sethead > div|1
 classic|settings-developer@1280x860|dom|div.setlayout > div#setbody.adminwrap|1
 classic|settings-developer@1280x860|dom|div.setlayout > nav.settabs[aria-label=*]|1
-classic|settings-developer@1280x860|dom|div.tog > span.pill[text]|2
-classic|settings-developer@1280x860|dom|div.tog > span[text]|21
+classic|settings-developer@1280x860|dom|div.setsection > h2[text]|3
+classic|settings-developer@1280x860|dom|div.setsection > p[text]|3
+classic|settings-developer@1280x860|dom|div.tog > span[text]|7
 classic|settings-developer@1280x860|dom|div.topctl > div|2
 classic|settings-developer@1280x860|dom|header.top > a.logo[text]|1
 classic|settings-developer@1280x860|dom|header.top > div.topctl|1
@@ -4884,31 +4815,24 @@ classic|settings-developer@1280x860|dom|label.tog > input#dhqa[type=checkbox]|1
 classic|settings-developer@1280x860|dom|label.tog > input#pcpv1[type=checkbox]|1
 classic|settings-developer@1280x860|dom|label.tog > input#pdp[type=checkbox]|1
 classic|settings-developer@1280x860|dom|label.tog > input#phs[type=checkbox]|1
-classic|settings-developer@1280x860|dom|label.tog > input#pqh[type=checkbox]|1
-classic|settings-developer@1280x860|dom|label.tog > span[text]|6
+classic|settings-developer@1280x860|dom|label.tog > span[text]|5
 classic|settings-developer@1280x860|dom|main#main > div.setlayout|1
 classic|settings-developer@1280x860|dom|nav > a.active[text]|1
 classic|settings-developer@1280x860|dom|nav > a[text]|3
+classic|settings-developer@1280x860|dom|nav.setdestinations[aria-label=*] > a|3
 classic|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
-classic|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|9
+classic|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|10
 classic|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
-classic|settings-developer@1280x860|dom|select#ltghours > option[text]|6
-classic|settings-developer@1280x860|dom|select#ltgsrc > option[text]|3
-classic|settings-developer@1280x860|dom|select#ltheight > option[text]|2
-classic|settings-developer@1280x860|dom|select#ltlimit > option[text]|4
 classic|settings-developer@1280x860|dom|small > code[text]|2
-classic|settings-developer@1280x860|dom|small[text] > b[text]|1
 classic|settings-developer@1280x860|dom|small[text] > br|4
 classic|settings-developer@1280x860|dom|small[text] > code[text]|6
-classic|settings-developer@1280x860|dom|small[text] > i[text]|5
-classic|settings-developer@1280x860|dom|span > span.pill.warn[text]|1
-classic|settings-developer@1280x860|dom|span > span.pill[text]|7
-classic|settings-developer@1280x860|dom|span[text] > small.hint[text]|8
-classic|settings-developer@1280x860|dom|span[text] > small[text]|25
+classic|settings-developer@1280x860|dom|small[text] > i[text]|1
+classic|settings-developer@1280x860|dom|span.devcheck-status > span.pill[text]|1
+classic|settings-developer@1280x860|dom|span[text] > small[text]|10
 classic|settings-developer@1280x860|dom|span[text] > small|2
-classic|settings-developer@1280x860|dom|span[text] > span.pill.warn[text]|4
-classic|settings-developer@1280x860|dom|span[text] > span.pill[text]|2
-classic|settings-developer@1280x860|dom|span[text] > span|8
+classic|settings-developer@1280x860|dom|span[text] > span.pill.warn[text]|1
+classic|settings-developer@1280x860|dom|span[text] > span.pill[text]|1
+classic|settings-developer@1280x860|dom|strong[text] > span[aria-hidden=true text]|3
 classic|settings-developer@1280x860|focus|000|a.logo "cinema"
 classic|settings-developer@1280x860|focus|001|a "home"
 classic|settings-developer@1280x860|focus|002|a "live tv"
@@ -4919,126 +4843,105 @@ classic|settings-developer@1280x860|focus|006|button.ghost.sm.lookbtn "Appearanc
 classic|settings-developer@1280x860|focus|007|button.ghost.sm.profile "Account"
 classic|settings-developer@1280x860|focus|008|button.settab "Libraries"
 classic|settings-developer@1280x860|focus|009|button.settab "Metadata"
-classic|settings-developer@1280x860|focus|010|button.settab "Playback"
-classic|settings-developer@1280x860|focus|011|button.settab "Analysis"
-classic|settings-developer@1280x860|focus|012|button.settab "Maintenance"
-classic|settings-developer@1280x860|focus|013|button.settab "Users"
-classic|settings-developer@1280x860|focus|014|button.settab "System"
-classic|settings-developer@1280x860|focus|015|button.settab "Cluster"
-classic|settings-developer@1280x860|focus|016|button.settab "Integrations"
-classic|settings-developer@1280x860|focus|017|button.settab.active "Developer"
-classic|settings-developer@1280x860|focus|018|input#ltip "192.168.4.100"
-classic|settings-developer@1280x860|focus|019|input#ltowner
-classic|settings-developer@1280x860|focus|020|select#ltlimit "1 2 3 4"
-classic|settings-developer@1280x860|focus|021|select#ltheight "720p 1080p"
-classic|settings-developer@1280x860|focus|022|button.ghost.sm "Check saved configuration"
-classic|settings-developer@1280x860|focus|023|button#ltenable.primary.sm "Enable Live TV"
-classic|settings-developer@1280x860|focus|024|a "Browse channels"
-classic|settings-developer@1280x860|focus|025|select#ltgsrc "Off HDHomeRun guide XMLTV"
-classic|settings-developer@1280x860|focus|026|select#ltghours "4 hours 8 hours 12 hours 24 hours 48 hours
-classic|settings-developer@1280x860|focus|027|button.ghost.sm "Check the guide"
-classic|settings-developer@1280x860|focus|028|button.ghost.sm "Refresh now"
-classic|settings-developer@1280x860|focus|029|a "Browse channels"
-classic|settings-developer@1280x860|focus|030|input#pcpv1
-classic|settings-developer@1280x860|focus|031|input#dhqa
-classic|settings-developer@1280x860|focus|032|input#adr
-classic|settings-developer@1280x860|focus|033|input#pqh
-classic|settings-developer@1280x860|focus|034|input#pdp
-classic|settings-developer@1280x860|focus|035|input#phs
-classic|settings-developer@1280x860|focus|036|<wrap>
+classic|settings-developer@1280x860|focus|010|button.settab "Live TV"
+classic|settings-developer@1280x860|focus|011|button.settab "Playback"
+classic|settings-developer@1280x860|focus|012|button.settab "Analysis"
+classic|settings-developer@1280x860|focus|013|button.settab "Maintenance"
+classic|settings-developer@1280x860|focus|014|button.settab "Users"
+classic|settings-developer@1280x860|focus|015|button.settab "System"
+classic|settings-developer@1280x860|focus|016|button.settab "Cluster"
+classic|settings-developer@1280x860|focus|017|button.settab "Integrations"
+classic|settings-developer@1280x860|focus|018|button.settab.active "Developer"
+classic|settings-developer@1280x860|focus|019|a "Live TV ↗ Tuner and guide"
+classic|settings-developer@1280x860|focus|020|a "Playback ↗ Quality and defaults"
+classic|settings-developer@1280x860|focus|021|a "Cluster ↗ Health and recovery"
+classic|settings-developer@1280x860|focus|022|input#pcpv1
+classic|settings-developer@1280x860|focus|023|summary "Client readiness"
+classic|settings-developer@1280x860|focus|024|input#pdp
+classic|settings-developer@1280x860|focus|025|a "Quality switching"
+classic|settings-developer@1280x860|focus|026|input#dhqa
+classic|settings-developer@1280x860|focus|027|summary "Cache impact and diagnostic evidence"
+classic|settings-developer@1280x860|focus|028|input#adr
+classic|settings-developer@1280x860|focus|029|summary "Recovery limits and diagnostic evidence"
+classic|settings-developer@1280x860|focus|030|input#phs
+classic|settings-developer@1280x860|focus|031|<wrap>
 classic|settings-developer@1280x860|req|GET /api/v1/activity|2
 classic|settings-developer@1280x860|req|GET /api/v1/developer/readiness|1
-classic|settings-developer@1280x860|req|GET /api/v1/live-tv/guide/readiness|1
 classic|settings-developer@1280x860|req|GET /api/v1/me|1
 classic|settings-developer@1280x860|req|GET /api/v1/server|1
 classic|settings-developer@1280x860|req|GET /api/v1/settings|1
 classic|settings-developer@390x780|dom|^ > div#app|1
+classic|settings-developer@390x780|dom|a > span[text]|3
+classic|settings-developer@390x780|dom|a > strong[text]|3
 classic|settings-developer@390x780|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.lookword[text]|1
 classic|settings-developer@390x780|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.tsw|1
 classic|settings-developer@390x780|dom|button.ghost.profile.sm > span.caret[text]|1
 classic|settings-developer@390x780|dom|button.ghost.profile.sm > span.pavatar[text]|1
 classic|settings-developer@390x780|dom|button.ghost.profile.sm > span.pname[text]|1
+classic|settings-developer@390x780|dom|details.setdetails > div.setdetails-body|3
+classic|settings-developer@390x780|dom|details.setdetails > summary[text]|3
 classic|settings-developer@390x780|dom|div > button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*]|1
 classic|settings-developer@390x780|dom|div > button.ghost.profile.sm|1
 classic|settings-developer@390x780|dom|div > div#lookmenu.amenu.lookmenu|1
 classic|settings-developer@390x780|dom|div > div#profilemenu.amenu|1
-classic|settings-developer@390x780|dom|div > div.hint[text]|1
 classic|settings-developer@390x780|dom|div > h1[text]|1
-classic|settings-developer@390x780|dom|div > h2.section[text]|8
-classic|settings-developer@390x780|dom|div > input#ltip|1
-classic|settings-developer@390x780|dom|div > input#ltowner|1
-classic|settings-developer@390x780|dom|div > label[text]|6
-classic|settings-developer@390x780|dom|div > p.sub[text]|8
+classic|settings-developer@390x780|dom|div > h2.section[text]|5
+classic|settings-developer@390x780|dom|div > p.sub[text]|5
 classic|settings-developer@390x780|dom|div > p[text]|1
-classic|settings-developer@390x780|dom|div > select#ltghours|1
-classic|settings-developer@390x780|dom|div > select#ltgsrc|1
-classic|settings-developer@390x780|dom|div > select#ltheight|1
-classic|settings-developer@390x780|dom|div > select#ltlimit|1
 classic|settings-developer@390x780|dom|div#app > header.top|1
 classic|settings-developer@390x780|dom|div#app > main#main|1
-classic|settings-developer@390x780|dom|div#drcard.card.setcard > div#adrerr.err|1
+classic|settings-developer@390x780|dom|div#drcard.card.setcard > details.setdetails|1
+classic|settings-developer@390x780|dom|div#drcard.card.setcard > div#adrerr.err[role=alert]|1
 classic|settings-developer@390x780|dom|div#drcard.card.setcard > div.cardhead|1
-classic|settings-developer@390x780|dom|div#drcard.card.setcard > div.hint[text]|3
+classic|settings-developer@390x780|dom|div#drcard.card.setcard > div.hint[text]|1
 classic|settings-developer@390x780|dom|div#drcard.card.setcard > div.setfoot|1
-classic|settings-developer@390x780|dom|div#drcard.card.setcard > div.tog|4
-classic|settings-developer@390x780|dom|div#drcard.card.setcard > h2.section[text]|2
 classic|settings-developer@390x780|dom|div#drcard.card.setcard > label.tog|1
-classic|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > div#ltgerr.err[role=alert]|1
-classic|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > div#ltgready[aria-live=polite]|1
-classic|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > div.cardhead|1
-classic|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > div.hint[text]|1
-classic|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > div.row|1
-classic|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > div.setfields|1
-classic|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > div.setfoot|1
-classic|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > h2.section[text]|1
-classic|settings-developer@390x780|dom|div#live-tv-settings.card.setcard > div#lterr.err[role=alert]|1
-classic|settings-developer@390x780|dom|div#live-tv-settings.card.setcard > div#ltreadiness[aria-live=polite]|1
-classic|settings-developer@390x780|dom|div#live-tv-settings.card.setcard > div.cardhead|1
-classic|settings-developer@390x780|dom|div#live-tv-settings.card.setcard > div.row|1
-classic|settings-developer@390x780|dom|div#live-tv-settings.card.setcard > div.setfields|1
-classic|settings-developer@390x780|dom|div#live-tv-settings.card.setcard > div.setfoot|1
-classic|settings-developer@390x780|dom|div#live-tv-settings.card.setcard > p.hint[text]|2
-classic|settings-developer@390x780|dom|div#live-tv-settings.card.setcard > p[text]|1
-classic|settings-developer@390x780|dom|div#ltgready[aria-live=polite] > div.hint[text]|1
-classic|settings-developer@390x780|dom|div#ltgready[aria-live=polite] > div.tog|4
 classic|settings-developer@390x780|dom|div#setbody.adminwrap > div#drcard.card.setcard|1
-classic|settings-developer@390x780|dom|div#setbody.adminwrap > div#live-tv-guide-settings.card.setcard|1
-classic|settings-developer@390x780|dom|div#setbody.adminwrap > div#live-tv-settings.card.setcard|1
 classic|settings-developer@390x780|dom|div#setbody.adminwrap > div#vdcard.card.setcard|1
-classic|settings-developer@390x780|dom|div#setbody.adminwrap > div.card.setcard|4
+classic|settings-developer@390x780|dom|div#setbody.adminwrap > div.card.local.setcard|1
+classic|settings-developer@390x780|dom|div#setbody.adminwrap > div.card.setcard|2
 classic|settings-developer@390x780|dom|div#setbody.adminwrap > div.sethead|1
-classic|settings-developer@390x780|dom|div#vdcard.card.setcard > div#dhqerr.err|1
+classic|settings-developer@390x780|dom|div#setbody.adminwrap > div.setsection|3
+classic|settings-developer@390x780|dom|div#setbody.adminwrap > nav.setdestinations[aria-label=*]|1
+classic|settings-developer@390x780|dom|div#vdcard.card.setcard > details.setdetails|1
+classic|settings-developer@390x780|dom|div#vdcard.card.setcard > div#dhqerr.err[role=alert]|1
 classic|settings-developer@390x780|dom|div#vdcard.card.setcard > div.cardhead|1
-classic|settings-developer@390x780|dom|div#vdcard.card.setcard > div.hint[text]|3
+classic|settings-developer@390x780|dom|div#vdcard.card.setcard > div.hint[text]|1
 classic|settings-developer@390x780|dom|div#vdcard.card.setcard > div.setfoot|1
-classic|settings-developer@390x780|dom|div#vdcard.card.setcard > div.tog|3
-classic|settings-developer@390x780|dom|div#vdcard.card.setcard > h2.section[text]|1
 classic|settings-developer@390x780|dom|div#vdcard.card.setcard > label.tog|1
-classic|settings-developer@390x780|dom|div.card.setcard > div#dverr.err|1
-classic|settings-developer@390x780|dom|div.card.setcard > div#dxerr.err|1
-classic|settings-developer@390x780|dom|div.card.setcard > div#pqherr.err|1
-classic|settings-developer@390x780|dom|div.card.setcard > div.cardhead|4
-classic|settings-developer@390x780|dom|div.card.setcard > div.hint[text]|7
-classic|settings-developer@390x780|dom|div.card.setcard > div.setfoot|3
-classic|settings-developer@390x780|dom|div.card.setcard > div.tog|10
-classic|settings-developer@390x780|dom|div.card.setcard > h2.section[text]|3
-classic|settings-developer@390x780|dom|div.card.setcard > label.tog|4
-classic|settings-developer@390x780|dom|div.cardhead > div.cardtools|6
-classic|settings-developer@390x780|dom|div.cardhead > div|8
-classic|settings-developer@390x780|dom|div.cardtools > span.pill[text]|6
-classic|settings-developer@390x780|dom|div.hint[text] > b[text]|13
-classic|settings-developer@390x780|dom|div.hint[text] > code[text]|2
-classic|settings-developer@390x780|dom|div.row > a[text]|2
-classic|settings-developer@390x780|dom|div.row > button#ltenable.primary.sm[text]|1
-classic|settings-developer@390x780|dom|div.row > button.ghost.sm[text]|3
-classic|settings-developer@390x780|dom|div.setfields > div|6
-classic|settings-developer@390x780|dom|div.setfoot > button.primary.sm[disabled text]|7
-classic|settings-developer@390x780|dom|div.setfoot > span.setstate[text]|7
+classic|settings-developer@390x780|dom|div.card.local.setcard > div.cardhead|1
+classic|settings-developer@390x780|dom|div.card.local.setcard > div.hint[text]|1
+classic|settings-developer@390x780|dom|div.card.local.setcard > label.tog|1
+classic|settings-developer@390x780|dom|div.card.setcard > details.setdetails|1
+classic|settings-developer@390x780|dom|div.card.setcard > div#dverr.err[role=alert]|1
+classic|settings-developer@390x780|dom|div.card.setcard > div#dxerr.err[role=alert]|1
+classic|settings-developer@390x780|dom|div.card.setcard > div.cardhead|2
+classic|settings-developer@390x780|dom|div.card.setcard > div.setfoot|2
+classic|settings-developer@390x780|dom|div.card.setcard > label.tog|2
+classic|settings-developer@390x780|dom|div.cardhead > div.cardtools|5
+classic|settings-developer@390x780|dom|div.cardhead > div|5
+classic|settings-developer@390x780|dom|div.cardtools > span.acc.pill[text]|1
+classic|settings-developer@390x780|dom|div.cardtools > span.pill.warn[text]|1
+classic|settings-developer@390x780|dom|div.cardtools > span.pill[text]|3
+classic|settings-developer@390x780|dom|div.devcheck > div.devcheck-head|1
+classic|settings-developer@390x780|dom|div.devcheck > p.devcheck-description[text]|1
+classic|settings-developer@390x780|dom|div.devcheck > p.devcheck-evidence[text]|1
+classic|settings-developer@390x780|dom|div.devcheck-head > span.devcheck-status|1
+classic|settings-developer@390x780|dom|div.devcheck-head > strong[text]|1
+classic|settings-developer@390x780|dom|div.hint[text] > a[text]|1
+classic|settings-developer@390x780|dom|div.hint[text] > b[text]|4
+classic|settings-developer@390x780|dom|div.setdetails-body > div.devcheck|1
+classic|settings-developer@390x780|dom|div.setdetails-body > div.hint[text]|5
+classic|settings-developer@390x780|dom|div.setdetails-body > div.tog|7
+classic|settings-developer@390x780|dom|div.setdetails-body > h2.section[text]|3
+classic|settings-developer@390x780|dom|div.setfoot > button.primary.sm[disabled text]|4
+classic|settings-developer@390x780|dom|div.setfoot > span.setstate[text]|4
 classic|settings-developer@390x780|dom|div.sethead > div|1
 classic|settings-developer@390x780|dom|div.setlayout > div#setbody.adminwrap|1
 classic|settings-developer@390x780|dom|div.setlayout > nav.settabs[aria-label=*]|1
-classic|settings-developer@390x780|dom|div.tog > span.pill[text]|2
-classic|settings-developer@390x780|dom|div.tog > span[text]|21
+classic|settings-developer@390x780|dom|div.setsection > h2[text]|3
+classic|settings-developer@390x780|dom|div.setsection > p[text]|3
+classic|settings-developer@390x780|dom|div.tog > span[text]|7
 classic|settings-developer@390x780|dom|div.topctl > div|2
 classic|settings-developer@390x780|dom|header.top > a.logo[text]|1
 classic|settings-developer@390x780|dom|header.top > div.topctl|1
@@ -5051,31 +4954,24 @@ classic|settings-developer@390x780|dom|label.tog > input#dhqa[type=checkbox]|1
 classic|settings-developer@390x780|dom|label.tog > input#pcpv1[type=checkbox]|1
 classic|settings-developer@390x780|dom|label.tog > input#pdp[type=checkbox]|1
 classic|settings-developer@390x780|dom|label.tog > input#phs[type=checkbox]|1
-classic|settings-developer@390x780|dom|label.tog > input#pqh[type=checkbox]|1
-classic|settings-developer@390x780|dom|label.tog > span[text]|6
+classic|settings-developer@390x780|dom|label.tog > span[text]|5
 classic|settings-developer@390x780|dom|main#main > div.setlayout|1
 classic|settings-developer@390x780|dom|nav > a.active[text]|1
 classic|settings-developer@390x780|dom|nav > a[text]|3
+classic|settings-developer@390x780|dom|nav.setdestinations[aria-label=*] > a|3
 classic|settings-developer@390x780|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
-classic|settings-developer@390x780|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|9
+classic|settings-developer@390x780|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|10
 classic|settings-developer@390x780|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
-classic|settings-developer@390x780|dom|select#ltghours > option[text]|6
-classic|settings-developer@390x780|dom|select#ltgsrc > option[text]|3
-classic|settings-developer@390x780|dom|select#ltheight > option[text]|2
-classic|settings-developer@390x780|dom|select#ltlimit > option[text]|4
 classic|settings-developer@390x780|dom|small > code[text]|2
-classic|settings-developer@390x780|dom|small[text] > b[text]|1
 classic|settings-developer@390x780|dom|small[text] > br|4
 classic|settings-developer@390x780|dom|small[text] > code[text]|6
-classic|settings-developer@390x780|dom|small[text] > i[text]|5
-classic|settings-developer@390x780|dom|span > span.pill.warn[text]|1
-classic|settings-developer@390x780|dom|span > span.pill[text]|7
-classic|settings-developer@390x780|dom|span[text] > small.hint[text]|8
-classic|settings-developer@390x780|dom|span[text] > small[text]|25
+classic|settings-developer@390x780|dom|small[text] > i[text]|1
+classic|settings-developer@390x780|dom|span.devcheck-status > span.pill[text]|1
+classic|settings-developer@390x780|dom|span[text] > small[text]|10
 classic|settings-developer@390x780|dom|span[text] > small|2
-classic|settings-developer@390x780|dom|span[text] > span.pill.warn[text]|4
-classic|settings-developer@390x780|dom|span[text] > span.pill[text]|2
-classic|settings-developer@390x780|dom|span[text] > span|8
+classic|settings-developer@390x780|dom|span[text] > span.pill.warn[text]|1
+classic|settings-developer@390x780|dom|span[text] > span.pill[text]|1
+classic|settings-developer@390x780|dom|strong[text] > span[aria-hidden=true text]|3
 classic|settings-developer@390x780|focus|000|a.logo "cinema"
 classic|settings-developer@390x780|focus|001|a "home"
 classic|settings-developer@390x780|focus|002|a "live tv"
@@ -5086,36 +4982,30 @@ classic|settings-developer@390x780|focus|006|button.ghost.sm.lookbtn "Appearance
 classic|settings-developer@390x780|focus|007|button.ghost.sm.profile "Account"
 classic|settings-developer@390x780|focus|008|button.settab "Libraries"
 classic|settings-developer@390x780|focus|009|button.settab "Metadata"
-classic|settings-developer@390x780|focus|010|button.settab "Playback"
-classic|settings-developer@390x780|focus|011|button.settab "Analysis"
-classic|settings-developer@390x780|focus|012|button.settab "Maintenance"
-classic|settings-developer@390x780|focus|013|button.settab "Users"
-classic|settings-developer@390x780|focus|014|button.settab "System"
-classic|settings-developer@390x780|focus|015|button.settab "Cluster"
-classic|settings-developer@390x780|focus|016|button.settab "Integrations"
-classic|settings-developer@390x780|focus|017|button.settab.active "Developer"
-classic|settings-developer@390x780|focus|018|input#ltip "192.168.4.100"
-classic|settings-developer@390x780|focus|019|input#ltowner
-classic|settings-developer@390x780|focus|020|select#ltlimit "1 2 3 4"
-classic|settings-developer@390x780|focus|021|select#ltheight "720p 1080p"
-classic|settings-developer@390x780|focus|022|button.ghost.sm "Check saved configuration"
-classic|settings-developer@390x780|focus|023|button#ltenable.primary.sm "Enable Live TV"
-classic|settings-developer@390x780|focus|024|a "Browse channels"
-classic|settings-developer@390x780|focus|025|select#ltgsrc "Off HDHomeRun guide XMLTV"
-classic|settings-developer@390x780|focus|026|select#ltghours "4 hours 8 hours 12 hours 24 hours 48 hours
-classic|settings-developer@390x780|focus|027|button.ghost.sm "Check the guide"
-classic|settings-developer@390x780|focus|028|button.ghost.sm "Refresh now"
-classic|settings-developer@390x780|focus|029|a "Browse channels"
-classic|settings-developer@390x780|focus|030|input#pcpv1
-classic|settings-developer@390x780|focus|031|input#dhqa
-classic|settings-developer@390x780|focus|032|input#adr
-classic|settings-developer@390x780|focus|033|input#pqh
-classic|settings-developer@390x780|focus|034|input#pdp
-classic|settings-developer@390x780|focus|035|input#phs
-classic|settings-developer@390x780|focus|036|<wrap>
+classic|settings-developer@390x780|focus|010|button.settab "Live TV"
+classic|settings-developer@390x780|focus|011|button.settab "Playback"
+classic|settings-developer@390x780|focus|012|button.settab "Analysis"
+classic|settings-developer@390x780|focus|013|button.settab "Maintenance"
+classic|settings-developer@390x780|focus|014|button.settab "Users"
+classic|settings-developer@390x780|focus|015|button.settab "System"
+classic|settings-developer@390x780|focus|016|button.settab "Cluster"
+classic|settings-developer@390x780|focus|017|button.settab "Integrations"
+classic|settings-developer@390x780|focus|018|button.settab.active "Developer"
+classic|settings-developer@390x780|focus|019|a "Live TV ↗ Tuner and guide"
+classic|settings-developer@390x780|focus|020|a "Playback ↗ Quality and defaults"
+classic|settings-developer@390x780|focus|021|a "Cluster ↗ Health and recovery"
+classic|settings-developer@390x780|focus|022|input#pcpv1
+classic|settings-developer@390x780|focus|023|summary "Client readiness"
+classic|settings-developer@390x780|focus|024|input#pdp
+classic|settings-developer@390x780|focus|025|a "Quality switching"
+classic|settings-developer@390x780|focus|026|input#dhqa
+classic|settings-developer@390x780|focus|027|summary "Cache impact and diagnostic evidence"
+classic|settings-developer@390x780|focus|028|input#adr
+classic|settings-developer@390x780|focus|029|summary "Recovery limits and diagnostic evidence"
+classic|settings-developer@390x780|focus|030|input#phs
+classic|settings-developer@390x780|focus|031|<wrap>
 classic|settings-developer@390x780|req|GET /api/v1/activity|2
 classic|settings-developer@390x780|req|GET /api/v1/developer/readiness|1
-classic|settings-developer@390x780|req|GET /api/v1/live-tv/guide/readiness|1
 classic|settings-developer@390x780|req|GET /api/v1/me|1
 classic|settings-developer@390x780|req|GET /api/v1/server|1
 classic|settings-developer@390x780|req|GET /api/v1/settings|1
@@ -5160,7 +5050,7 @@ classic|settings@1280x860|dom|main#main > div.setlayout|1
 classic|settings@1280x860|dom|nav > a.active[text]|1
 classic|settings@1280x860|dom|nav > a[text]|3
 classic|settings@1280x860|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
-classic|settings@1280x860|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|9
+classic|settings@1280x860|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|10
 classic|settings@1280x860|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 classic|settings@1280x860|dom|table > tbody|1
 classic|settings@1280x860|dom|table > thead|1
@@ -5201,28 +5091,29 @@ classic|settings@1280x860|focus|006|button.ghost.sm.lookbtn "Appearance"
 classic|settings@1280x860|focus|007|button.ghost.sm.profile "Account"
 classic|settings@1280x860|focus|008|button.settab.active "Libraries 3"
 classic|settings@1280x860|focus|009|button.settab "Metadata"
-classic|settings@1280x860|focus|010|button.settab "Playback"
-classic|settings@1280x860|focus|011|button.settab "Analysis"
-classic|settings@1280x860|focus|012|button.settab "Maintenance"
-classic|settings@1280x860|focus|013|button.settab "Users"
-classic|settings@1280x860|focus|014|button.settab "System"
-classic|settings@1280x860|focus|015|button.settab "Cluster"
-classic|settings@1280x860|focus|016|button.settab "Integrations"
-classic|settings@1280x860|focus|017|button.settab "Developer"
-classic|settings@1280x860|focus|018|button.ghost.sm "Scan every library for new & changed files"
-classic|settings@1280x860|focus|019|button.ghost.sm "Re-fetch metadata & artwork for every libra
-classic|settings@1280x860|focus|020|button.sm "+ Add library"
-classic|settings@1280x860|focus|021|a "Add a free key in Metadata"
-classic|settings@1280x860|focus|022|button.ghost.sm "Scan"
-classic|settings@1280x860|focus|023|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-classic|settings@1280x860|focus|024|button.ghost.sm "Configure ⌄"
-classic|settings@1280x860|focus|025|button.ghost.sm "Scan"
-classic|settings@1280x860|focus|026|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-classic|settings@1280x860|focus|027|button.ghost.sm "Configure ⌄"
-classic|settings@1280x860|focus|028|button.ghost.sm "Scan"
-classic|settings@1280x860|focus|029|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-classic|settings@1280x860|focus|030|button.ghost.sm "Configure ⌄"
-classic|settings@1280x860|focus|031|<wrap>
+classic|settings@1280x860|focus|010|button.settab "Live TV"
+classic|settings@1280x860|focus|011|button.settab "Playback"
+classic|settings@1280x860|focus|012|button.settab "Analysis"
+classic|settings@1280x860|focus|013|button.settab "Maintenance"
+classic|settings@1280x860|focus|014|button.settab "Users"
+classic|settings@1280x860|focus|015|button.settab "System"
+classic|settings@1280x860|focus|016|button.settab "Cluster"
+classic|settings@1280x860|focus|017|button.settab "Integrations"
+classic|settings@1280x860|focus|018|button.settab "Developer"
+classic|settings@1280x860|focus|019|button.ghost.sm "Scan every library for new & changed files"
+classic|settings@1280x860|focus|020|button.ghost.sm "Re-fetch metadata & artwork for every libra
+classic|settings@1280x860|focus|021|button.sm "+ Add library"
+classic|settings@1280x860|focus|022|a "Add a free key in Metadata"
+classic|settings@1280x860|focus|023|button.ghost.sm "Scan"
+classic|settings@1280x860|focus|024|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+classic|settings@1280x860|focus|025|button.ghost.sm "Configure ⌄"
+classic|settings@1280x860|focus|026|button.ghost.sm "Scan"
+classic|settings@1280x860|focus|027|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+classic|settings@1280x860|focus|028|button.ghost.sm "Configure ⌄"
+classic|settings@1280x860|focus|029|button.ghost.sm "Scan"
+classic|settings@1280x860|focus|030|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+classic|settings@1280x860|focus|031|button.ghost.sm "Configure ⌄"
+classic|settings@1280x860|focus|032|<wrap>
 classic|settings@1280x860|req|GET /api/v1/activity|2
 classic|settings@1280x860|req|GET /api/v1/dv-conversions|1
 classic|settings@1280x860|req|GET /api/v1/libraries|1
@@ -5271,7 +5162,7 @@ classic|settings@390x780|dom|main#main > div.setlayout|1
 classic|settings@390x780|dom|nav > a.active[text]|1
 classic|settings@390x780|dom|nav > a[text]|3
 classic|settings@390x780|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
-classic|settings@390x780|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|9
+classic|settings@390x780|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|10
 classic|settings@390x780|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 classic|settings@390x780|dom|table > tbody|1
 classic|settings@390x780|dom|table > thead|1
@@ -5312,28 +5203,29 @@ classic|settings@390x780|focus|006|button.ghost.sm.lookbtn "Appearance"
 classic|settings@390x780|focus|007|button.ghost.sm.profile "Account"
 classic|settings@390x780|focus|008|button.settab.active "Libraries"
 classic|settings@390x780|focus|009|button.settab "Metadata"
-classic|settings@390x780|focus|010|button.settab "Playback"
-classic|settings@390x780|focus|011|button.settab "Analysis"
-classic|settings@390x780|focus|012|button.settab "Maintenance"
-classic|settings@390x780|focus|013|button.settab "Users"
-classic|settings@390x780|focus|014|button.settab "System"
-classic|settings@390x780|focus|015|button.settab "Cluster"
-classic|settings@390x780|focus|016|button.settab "Integrations"
-classic|settings@390x780|focus|017|button.settab "Developer"
-classic|settings@390x780|focus|018|button.ghost.sm "Scan every library for new & changed files"
-classic|settings@390x780|focus|019|button.ghost.sm "Re-fetch metadata & artwork for every libra
-classic|settings@390x780|focus|020|button.sm "+ Add library"
-classic|settings@390x780|focus|021|a "Add a free key in Metadata"
-classic|settings@390x780|focus|022|button.ghost.sm "Scan"
-classic|settings@390x780|focus|023|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-classic|settings@390x780|focus|024|button.ghost.sm "Configure ⌄"
-classic|settings@390x780|focus|025|button.ghost.sm "Scan"
-classic|settings@390x780|focus|026|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-classic|settings@390x780|focus|027|button.ghost.sm "Configure ⌄"
-classic|settings@390x780|focus|028|button.ghost.sm "Scan"
-classic|settings@390x780|focus|029|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-classic|settings@390x780|focus|030|button.ghost.sm "Configure ⌄"
-classic|settings@390x780|focus|031|<wrap>
+classic|settings@390x780|focus|010|button.settab "Live TV"
+classic|settings@390x780|focus|011|button.settab "Playback"
+classic|settings@390x780|focus|012|button.settab "Analysis"
+classic|settings@390x780|focus|013|button.settab "Maintenance"
+classic|settings@390x780|focus|014|button.settab "Users"
+classic|settings@390x780|focus|015|button.settab "System"
+classic|settings@390x780|focus|016|button.settab "Cluster"
+classic|settings@390x780|focus|017|button.settab "Integrations"
+classic|settings@390x780|focus|018|button.settab "Developer"
+classic|settings@390x780|focus|019|button.ghost.sm "Scan every library for new & changed files"
+classic|settings@390x780|focus|020|button.ghost.sm "Re-fetch metadata & artwork for every libra
+classic|settings@390x780|focus|021|button.sm "+ Add library"
+classic|settings@390x780|focus|022|a "Add a free key in Metadata"
+classic|settings@390x780|focus|023|button.ghost.sm "Scan"
+classic|settings@390x780|focus|024|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+classic|settings@390x780|focus|025|button.ghost.sm "Configure ⌄"
+classic|settings@390x780|focus|026|button.ghost.sm "Scan"
+classic|settings@390x780|focus|027|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+classic|settings@390x780|focus|028|button.ghost.sm "Configure ⌄"
+classic|settings@390x780|focus|029|button.ghost.sm "Scan"
+classic|settings@390x780|focus|030|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+classic|settings@390x780|focus|031|button.ghost.sm "Configure ⌄"
+classic|settings@390x780|focus|032|<wrap>
 classic|settings@390x780|req|GET /api/v1/activity|2
 classic|settings@390x780|req|GET /api/v1/dv-conversions|1
 classic|settings@390x780|req|GET /api/v1/libraries|1
@@ -7160,94 +7052,79 @@ theater|search@390x780|req|GET /api/v1/me|1
 theater|search@390x780|req|GET /api/v1/search|1
 theater|search@390x780|req|GET /api/v1/server|1
 theater|settings-developer@1280x860|dom|^ > div#app|1
+theater|settings-developer@1280x860|dom|a > span[text]|3
+theater|settings-developer@1280x860|dom|a > strong[text]|3
 theater|settings-developer@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.lookword[text]|1
 theater|settings-developer@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.tsw|1
 theater|settings-developer@1280x860|dom|button.ghost.profile.sm > span.caret[text]|1
 theater|settings-developer@1280x860|dom|button.ghost.profile.sm > span.pavatar[text]|1
 theater|settings-developer@1280x860|dom|button.ghost.profile.sm > span.pname[text]|1
-theater|settings-developer@1280x860|dom|div > div.hint[text]|1
+theater|settings-developer@1280x860|dom|details.setdetails > div.setdetails-body|3
+theater|settings-developer@1280x860|dom|details.setdetails > summary[text]|3
 theater|settings-developer@1280x860|dom|div > h1[text]|1
-theater|settings-developer@1280x860|dom|div > h2.section[text]|8
-theater|settings-developer@1280x860|dom|div > input#ltip|1
-theater|settings-developer@1280x860|dom|div > input#ltowner|1
-theater|settings-developer@1280x860|dom|div > label[text]|6
-theater|settings-developer@1280x860|dom|div > p.sub[text]|8
+theater|settings-developer@1280x860|dom|div > h2.section[text]|5
+theater|settings-developer@1280x860|dom|div > p.sub[text]|5
 theater|settings-developer@1280x860|dom|div > p[text]|1
-theater|settings-developer@1280x860|dom|div > select#ltghours|1
-theater|settings-developer@1280x860|dom|div > select#ltgsrc|1
-theater|settings-developer@1280x860|dom|div > select#ltheight|1
-theater|settings-developer@1280x860|dom|div > select#ltlimit|1
 theater|settings-developer@1280x860|dom|div#app > header.th-top|1
 theater|settings-developer@1280x860|dom|div#app > main#main|1
 theater|settings-developer@1280x860|dom|div#app > nav.th-pills[aria-label=*]|1
-theater|settings-developer@1280x860|dom|div#drcard.card.setcard > div#adrerr.err|1
+theater|settings-developer@1280x860|dom|div#drcard.card.setcard > details.setdetails|1
+theater|settings-developer@1280x860|dom|div#drcard.card.setcard > div#adrerr.err[role=alert]|1
 theater|settings-developer@1280x860|dom|div#drcard.card.setcard > div.cardhead|1
-theater|settings-developer@1280x860|dom|div#drcard.card.setcard > div.hint[text]|3
+theater|settings-developer@1280x860|dom|div#drcard.card.setcard > div.hint[text]|1
 theater|settings-developer@1280x860|dom|div#drcard.card.setcard > div.setfoot|1
-theater|settings-developer@1280x860|dom|div#drcard.card.setcard > div.tog|4
-theater|settings-developer@1280x860|dom|div#drcard.card.setcard > h2.section[text]|2
 theater|settings-developer@1280x860|dom|div#drcard.card.setcard > label.tog|1
-theater|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > div#ltgerr.err[role=alert]|1
-theater|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > div#ltgready[aria-live=polite]|1
-theater|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > div.cardhead|1
-theater|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > div.hint[text]|1
-theater|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > div.row|1
-theater|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > div.setfields|1
-theater|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > div.setfoot|1
-theater|settings-developer@1280x860|dom|div#live-tv-guide-settings.card.setcard > h2.section[text]|1
-theater|settings-developer@1280x860|dom|div#live-tv-settings.card.setcard > div#lterr.err[role=alert]|1
-theater|settings-developer@1280x860|dom|div#live-tv-settings.card.setcard > div#ltreadiness[aria-live=polite]|1
-theater|settings-developer@1280x860|dom|div#live-tv-settings.card.setcard > div.cardhead|1
-theater|settings-developer@1280x860|dom|div#live-tv-settings.card.setcard > div.row|1
-theater|settings-developer@1280x860|dom|div#live-tv-settings.card.setcard > div.setfields|1
-theater|settings-developer@1280x860|dom|div#live-tv-settings.card.setcard > div.setfoot|1
-theater|settings-developer@1280x860|dom|div#live-tv-settings.card.setcard > p.hint[text]|2
-theater|settings-developer@1280x860|dom|div#live-tv-settings.card.setcard > p[text]|1
-theater|settings-developer@1280x860|dom|div#ltgready[aria-live=polite] > div.hint[text]|1
-theater|settings-developer@1280x860|dom|div#ltgready[aria-live=polite] > div.tog|4
 theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div#drcard.card.setcard|1
-theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div#live-tv-guide-settings.card.setcard|1
-theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div#live-tv-settings.card.setcard|1
 theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div#vdcard.card.setcard|1
-theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div.card.setcard|4
+theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div.card.local.setcard|1
+theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div.card.setcard|2
 theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div.sethead|1
-theater|settings-developer@1280x860|dom|div#vdcard.card.setcard > div#dhqerr.err|1
+theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div.setsection|3
+theater|settings-developer@1280x860|dom|div#setbody.adminwrap > nav.setdestinations[aria-label=*]|1
+theater|settings-developer@1280x860|dom|div#vdcard.card.setcard > details.setdetails|1
+theater|settings-developer@1280x860|dom|div#vdcard.card.setcard > div#dhqerr.err[role=alert]|1
 theater|settings-developer@1280x860|dom|div#vdcard.card.setcard > div.cardhead|1
-theater|settings-developer@1280x860|dom|div#vdcard.card.setcard > div.hint[text]|3
+theater|settings-developer@1280x860|dom|div#vdcard.card.setcard > div.hint[text]|1
 theater|settings-developer@1280x860|dom|div#vdcard.card.setcard > div.setfoot|1
-theater|settings-developer@1280x860|dom|div#vdcard.card.setcard > div.tog|3
-theater|settings-developer@1280x860|dom|div#vdcard.card.setcard > h2.section[text]|1
 theater|settings-developer@1280x860|dom|div#vdcard.card.setcard > label.tog|1
-theater|settings-developer@1280x860|dom|div.card.setcard > div#dverr.err|1
-theater|settings-developer@1280x860|dom|div.card.setcard > div#dxerr.err|1
-theater|settings-developer@1280x860|dom|div.card.setcard > div#pqherr.err|1
-theater|settings-developer@1280x860|dom|div.card.setcard > div.cardhead|4
-theater|settings-developer@1280x860|dom|div.card.setcard > div.hint[text]|7
-theater|settings-developer@1280x860|dom|div.card.setcard > div.setfoot|3
-theater|settings-developer@1280x860|dom|div.card.setcard > div.tog|10
-theater|settings-developer@1280x860|dom|div.card.setcard > h2.section[text]|3
-theater|settings-developer@1280x860|dom|div.card.setcard > label.tog|4
-theater|settings-developer@1280x860|dom|div.cardhead > div.cardtools|6
-theater|settings-developer@1280x860|dom|div.cardhead > div|8
-theater|settings-developer@1280x860|dom|div.cardtools > span.pill[text]|6
-theater|settings-developer@1280x860|dom|div.hint[text] > b[text]|13
-theater|settings-developer@1280x860|dom|div.hint[text] > code[text]|2
-theater|settings-developer@1280x860|dom|div.row > a[text]|2
-theater|settings-developer@1280x860|dom|div.row > button#ltenable.primary.sm[text]|1
-theater|settings-developer@1280x860|dom|div.row > button.ghost.sm[text]|3
-theater|settings-developer@1280x860|dom|div.setfields > div|6
-theater|settings-developer@1280x860|dom|div.setfoot > button.primary.sm[disabled text]|7
-theater|settings-developer@1280x860|dom|div.setfoot > span.setstate[text]|7
+theater|settings-developer@1280x860|dom|div.card.local.setcard > div.cardhead|1
+theater|settings-developer@1280x860|dom|div.card.local.setcard > div.hint[text]|1
+theater|settings-developer@1280x860|dom|div.card.local.setcard > label.tog|1
+theater|settings-developer@1280x860|dom|div.card.setcard > details.setdetails|1
+theater|settings-developer@1280x860|dom|div.card.setcard > div#dverr.err[role=alert]|1
+theater|settings-developer@1280x860|dom|div.card.setcard > div#dxerr.err[role=alert]|1
+theater|settings-developer@1280x860|dom|div.card.setcard > div.cardhead|2
+theater|settings-developer@1280x860|dom|div.card.setcard > div.setfoot|2
+theater|settings-developer@1280x860|dom|div.card.setcard > label.tog|2
+theater|settings-developer@1280x860|dom|div.cardhead > div.cardtools|5
+theater|settings-developer@1280x860|dom|div.cardhead > div|5
+theater|settings-developer@1280x860|dom|div.cardtools > span.acc.pill[text]|1
+theater|settings-developer@1280x860|dom|div.cardtools > span.pill.warn[text]|1
+theater|settings-developer@1280x860|dom|div.cardtools > span.pill[text]|3
+theater|settings-developer@1280x860|dom|div.devcheck > div.devcheck-head|1
+theater|settings-developer@1280x860|dom|div.devcheck > p.devcheck-description[text]|1
+theater|settings-developer@1280x860|dom|div.devcheck > p.devcheck-evidence[text]|1
+theater|settings-developer@1280x860|dom|div.devcheck-head > span.devcheck-status|1
+theater|settings-developer@1280x860|dom|div.devcheck-head > strong[text]|1
+theater|settings-developer@1280x860|dom|div.hint[text] > a[text]|1
+theater|settings-developer@1280x860|dom|div.hint[text] > b[text]|4
+theater|settings-developer@1280x860|dom|div.setdetails-body > div.devcheck|1
+theater|settings-developer@1280x860|dom|div.setdetails-body > div.hint[text]|5
+theater|settings-developer@1280x860|dom|div.setdetails-body > div.tog|7
+theater|settings-developer@1280x860|dom|div.setdetails-body > h2.section[text]|3
+theater|settings-developer@1280x860|dom|div.setfoot > button.primary.sm[disabled text]|4
+theater|settings-developer@1280x860|dom|div.setfoot > span.setstate[text]|4
 theater|settings-developer@1280x860|dom|div.sethead > div|1
 theater|settings-developer@1280x860|dom|div.setlayout > div#setbody.adminwrap|1
 theater|settings-developer@1280x860|dom|div.setlayout > nav.settabs[aria-label=*]|1
+theater|settings-developer@1280x860|dom|div.setsection > h2[text]|3
+theater|settings-developer@1280x860|dom|div.setsection > p[text]|3
 theater|settings-developer@1280x860|dom|div.th-ctl > div.th-pop|2
 theater|settings-developer@1280x860|dom|div.th-pop > button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*]|1
 theater|settings-developer@1280x860|dom|div.th-pop > button.ghost.profile.sm|1
 theater|settings-developer@1280x860|dom|div.th-pop > div#lookmenu.amenu.lookmenu|1
 theater|settings-developer@1280x860|dom|div.th-pop > div#profilemenu.amenu|1
-theater|settings-developer@1280x860|dom|div.tog > span.pill[text]|2
-theater|settings-developer@1280x860|dom|div.tog > span[text]|21
+theater|settings-developer@1280x860|dom|div.tog > span[text]|7
 theater|settings-developer@1280x860|dom|header.th-top > a.logo[text]|1
 theater|settings-developer@1280x860|dom|header.th-top > div.th-ctl|1
 theater|settings-developer@1280x860|dom|header.th-top > input#q.search[aria-label=*]|1
@@ -7259,33 +7136,26 @@ theater|settings-developer@1280x860|dom|label.tog > input#dhqa[type=checkbox]|1
 theater|settings-developer@1280x860|dom|label.tog > input#pcpv1[type=checkbox]|1
 theater|settings-developer@1280x860|dom|label.tog > input#pdp[type=checkbox]|1
 theater|settings-developer@1280x860|dom|label.tog > input#phs[type=checkbox]|1
-theater|settings-developer@1280x860|dom|label.tog > input#pqh[type=checkbox]|1
-theater|settings-developer@1280x860|dom|label.tog > span[text]|6
+theater|settings-developer@1280x860|dom|label.tog > span[text]|5
 theater|settings-developer@1280x860|dom|main#main > div.setlayout|1
+theater|settings-developer@1280x860|dom|nav.setdestinations[aria-label=*] > a|3
 theater|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
-theater|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|9
+theater|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|10
 theater|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 theater|settings-developer@1280x860|dom|nav.th-nav[aria-label=*] > a.on[aria-current=page text]|1
 theater|settings-developer@1280x860|dom|nav.th-nav[aria-label=*] > a[text]|3
 theater|settings-developer@1280x860|dom|nav.th-pills[aria-label=*] > a.on[aria-current=page text]|1
 theater|settings-developer@1280x860|dom|nav.th-pills[aria-label=*] > a[text]|3
-theater|settings-developer@1280x860|dom|select#ltghours > option[text]|6
-theater|settings-developer@1280x860|dom|select#ltgsrc > option[text]|3
-theater|settings-developer@1280x860|dom|select#ltheight > option[text]|2
-theater|settings-developer@1280x860|dom|select#ltlimit > option[text]|4
 theater|settings-developer@1280x860|dom|small > code[text]|2
-theater|settings-developer@1280x860|dom|small[text] > b[text]|1
 theater|settings-developer@1280x860|dom|small[text] > br|4
 theater|settings-developer@1280x860|dom|small[text] > code[text]|6
-theater|settings-developer@1280x860|dom|small[text] > i[text]|5
-theater|settings-developer@1280x860|dom|span > span.pill.warn[text]|1
-theater|settings-developer@1280x860|dom|span > span.pill[text]|7
-theater|settings-developer@1280x860|dom|span[text] > small.hint[text]|8
-theater|settings-developer@1280x860|dom|span[text] > small[text]|25
+theater|settings-developer@1280x860|dom|small[text] > i[text]|1
+theater|settings-developer@1280x860|dom|span.devcheck-status > span.pill[text]|1
+theater|settings-developer@1280x860|dom|span[text] > small[text]|10
 theater|settings-developer@1280x860|dom|span[text] > small|2
-theater|settings-developer@1280x860|dom|span[text] > span.pill.warn[text]|4
-theater|settings-developer@1280x860|dom|span[text] > span.pill[text]|2
-theater|settings-developer@1280x860|dom|span[text] > span|8
+theater|settings-developer@1280x860|dom|span[text] > span.pill.warn[text]|1
+theater|settings-developer@1280x860|dom|span[text] > span.pill[text]|1
+theater|settings-developer@1280x860|dom|strong[text] > span[aria-hidden=true text]|3
 theater|settings-developer@1280x860|focus|000|a.logo "cinema"
 theater|settings-developer@1280x860|focus|001|a "Home"
 theater|settings-developer@1280x860|focus|002|a "Live TV"
@@ -7296,128 +7166,107 @@ theater|settings-developer@1280x860|focus|006|button.ghost.sm.lookbtn "Appearanc
 theater|settings-developer@1280x860|focus|007|button.ghost.sm.profile "Account"
 theater|settings-developer@1280x860|focus|008|button.settab "Libraries"
 theater|settings-developer@1280x860|focus|009|button.settab "Metadata"
-theater|settings-developer@1280x860|focus|010|button.settab "Playback"
-theater|settings-developer@1280x860|focus|011|button.settab "Analysis"
-theater|settings-developer@1280x860|focus|012|button.settab "Maintenance"
-theater|settings-developer@1280x860|focus|013|button.settab "Users"
-theater|settings-developer@1280x860|focus|014|button.settab "System"
-theater|settings-developer@1280x860|focus|015|button.settab "Cluster"
-theater|settings-developer@1280x860|focus|016|button.settab "Integrations"
-theater|settings-developer@1280x860|focus|017|button.settab.active "Developer"
-theater|settings-developer@1280x860|focus|018|input#ltip "192.168.4.100"
-theater|settings-developer@1280x860|focus|019|input#ltowner
-theater|settings-developer@1280x860|focus|020|select#ltlimit "1 2 3 4"
-theater|settings-developer@1280x860|focus|021|select#ltheight "720p 1080p"
-theater|settings-developer@1280x860|focus|022|button.ghost.sm "Check saved configuration"
-theater|settings-developer@1280x860|focus|023|button#ltenable.primary.sm "Enable Live TV"
-theater|settings-developer@1280x860|focus|024|a "Browse channels"
-theater|settings-developer@1280x860|focus|025|select#ltgsrc "Off HDHomeRun guide XMLTV"
-theater|settings-developer@1280x860|focus|026|select#ltghours "4 hours 8 hours 12 hours 24 hours 48 hours
-theater|settings-developer@1280x860|focus|027|button.ghost.sm "Check the guide"
-theater|settings-developer@1280x860|focus|028|button.ghost.sm "Refresh now"
-theater|settings-developer@1280x860|focus|029|a "Browse channels"
-theater|settings-developer@1280x860|focus|030|input#pcpv1
-theater|settings-developer@1280x860|focus|031|input#dhqa
-theater|settings-developer@1280x860|focus|032|input#adr
-theater|settings-developer@1280x860|focus|033|input#pqh
-theater|settings-developer@1280x860|focus|034|input#pdp
-theater|settings-developer@1280x860|focus|035|input#phs
-theater|settings-developer@1280x860|focus|036|<wrap>
+theater|settings-developer@1280x860|focus|010|button.settab "Live TV"
+theater|settings-developer@1280x860|focus|011|button.settab "Playback"
+theater|settings-developer@1280x860|focus|012|button.settab "Analysis"
+theater|settings-developer@1280x860|focus|013|button.settab "Maintenance"
+theater|settings-developer@1280x860|focus|014|button.settab "Users"
+theater|settings-developer@1280x860|focus|015|button.settab "System"
+theater|settings-developer@1280x860|focus|016|button.settab "Cluster"
+theater|settings-developer@1280x860|focus|017|button.settab "Integrations"
+theater|settings-developer@1280x860|focus|018|button.settab.active "Developer"
+theater|settings-developer@1280x860|focus|019|a "Live TV ↗ Tuner and guide"
+theater|settings-developer@1280x860|focus|020|a "Playback ↗ Quality and defaults"
+theater|settings-developer@1280x860|focus|021|a "Cluster ↗ Health and recovery"
+theater|settings-developer@1280x860|focus|022|input#pcpv1
+theater|settings-developer@1280x860|focus|023|summary "Client readiness"
+theater|settings-developer@1280x860|focus|024|input#pdp
+theater|settings-developer@1280x860|focus|025|a "Quality switching"
+theater|settings-developer@1280x860|focus|026|input#dhqa
+theater|settings-developer@1280x860|focus|027|summary "Cache impact and diagnostic evidence"
+theater|settings-developer@1280x860|focus|028|input#adr
+theater|settings-developer@1280x860|focus|029|summary "Recovery limits and diagnostic evidence"
+theater|settings-developer@1280x860|focus|030|input#phs
+theater|settings-developer@1280x860|focus|031|<wrap>
 theater|settings-developer@1280x860|req|GET /api/v1/activity|2
 theater|settings-developer@1280x860|req|GET /api/v1/developer/readiness|1
-theater|settings-developer@1280x860|req|GET /api/v1/live-tv/guide/readiness|1
 theater|settings-developer@1280x860|req|GET /api/v1/me|1
 theater|settings-developer@1280x860|req|GET /api/v1/server|1
 theater|settings-developer@1280x860|req|GET /api/v1/settings|1
 theater|settings-developer@390x780|dom|^ > div#app|1
+theater|settings-developer@390x780|dom|a > span[text]|3
+theater|settings-developer@390x780|dom|a > strong[text]|3
 theater|settings-developer@390x780|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.lookword[text]|1
 theater|settings-developer@390x780|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.tsw|1
 theater|settings-developer@390x780|dom|button.ghost.profile.sm > span.caret[text]|1
 theater|settings-developer@390x780|dom|button.ghost.profile.sm > span.pavatar[text]|1
 theater|settings-developer@390x780|dom|button.ghost.profile.sm > span.pname[text]|1
-theater|settings-developer@390x780|dom|div > div.hint[text]|1
+theater|settings-developer@390x780|dom|details.setdetails > div.setdetails-body|3
+theater|settings-developer@390x780|dom|details.setdetails > summary[text]|3
 theater|settings-developer@390x780|dom|div > h1[text]|1
-theater|settings-developer@390x780|dom|div > h2.section[text]|8
-theater|settings-developer@390x780|dom|div > input#ltip|1
-theater|settings-developer@390x780|dom|div > input#ltowner|1
-theater|settings-developer@390x780|dom|div > label[text]|6
-theater|settings-developer@390x780|dom|div > p.sub[text]|8
+theater|settings-developer@390x780|dom|div > h2.section[text]|5
+theater|settings-developer@390x780|dom|div > p.sub[text]|5
 theater|settings-developer@390x780|dom|div > p[text]|1
-theater|settings-developer@390x780|dom|div > select#ltghours|1
-theater|settings-developer@390x780|dom|div > select#ltgsrc|1
-theater|settings-developer@390x780|dom|div > select#ltheight|1
-theater|settings-developer@390x780|dom|div > select#ltlimit|1
 theater|settings-developer@390x780|dom|div#app > header.th-top|1
 theater|settings-developer@390x780|dom|div#app > main#main|1
 theater|settings-developer@390x780|dom|div#app > nav.th-pills[aria-label=*]|1
-theater|settings-developer@390x780|dom|div#drcard.card.setcard > div#adrerr.err|1
+theater|settings-developer@390x780|dom|div#drcard.card.setcard > details.setdetails|1
+theater|settings-developer@390x780|dom|div#drcard.card.setcard > div#adrerr.err[role=alert]|1
 theater|settings-developer@390x780|dom|div#drcard.card.setcard > div.cardhead|1
-theater|settings-developer@390x780|dom|div#drcard.card.setcard > div.hint[text]|3
+theater|settings-developer@390x780|dom|div#drcard.card.setcard > div.hint[text]|1
 theater|settings-developer@390x780|dom|div#drcard.card.setcard > div.setfoot|1
-theater|settings-developer@390x780|dom|div#drcard.card.setcard > div.tog|4
-theater|settings-developer@390x780|dom|div#drcard.card.setcard > h2.section[text]|2
 theater|settings-developer@390x780|dom|div#drcard.card.setcard > label.tog|1
-theater|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > div#ltgerr.err[role=alert]|1
-theater|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > div#ltgready[aria-live=polite]|1
-theater|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > div.cardhead|1
-theater|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > div.hint[text]|1
-theater|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > div.row|1
-theater|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > div.setfields|1
-theater|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > div.setfoot|1
-theater|settings-developer@390x780|dom|div#live-tv-guide-settings.card.setcard > h2.section[text]|1
-theater|settings-developer@390x780|dom|div#live-tv-settings.card.setcard > div#lterr.err[role=alert]|1
-theater|settings-developer@390x780|dom|div#live-tv-settings.card.setcard > div#ltreadiness[aria-live=polite]|1
-theater|settings-developer@390x780|dom|div#live-tv-settings.card.setcard > div.cardhead|1
-theater|settings-developer@390x780|dom|div#live-tv-settings.card.setcard > div.row|1
-theater|settings-developer@390x780|dom|div#live-tv-settings.card.setcard > div.setfields|1
-theater|settings-developer@390x780|dom|div#live-tv-settings.card.setcard > div.setfoot|1
-theater|settings-developer@390x780|dom|div#live-tv-settings.card.setcard > p.hint[text]|2
-theater|settings-developer@390x780|dom|div#live-tv-settings.card.setcard > p[text]|1
-theater|settings-developer@390x780|dom|div#ltgready[aria-live=polite] > div.hint[text]|1
-theater|settings-developer@390x780|dom|div#ltgready[aria-live=polite] > div.tog|4
 theater|settings-developer@390x780|dom|div#setbody.adminwrap > div#drcard.card.setcard|1
-theater|settings-developer@390x780|dom|div#setbody.adminwrap > div#live-tv-guide-settings.card.setcard|1
-theater|settings-developer@390x780|dom|div#setbody.adminwrap > div#live-tv-settings.card.setcard|1
 theater|settings-developer@390x780|dom|div#setbody.adminwrap > div#vdcard.card.setcard|1
-theater|settings-developer@390x780|dom|div#setbody.adminwrap > div.card.setcard|4
+theater|settings-developer@390x780|dom|div#setbody.adminwrap > div.card.local.setcard|1
+theater|settings-developer@390x780|dom|div#setbody.adminwrap > div.card.setcard|2
 theater|settings-developer@390x780|dom|div#setbody.adminwrap > div.sethead|1
-theater|settings-developer@390x780|dom|div#vdcard.card.setcard > div#dhqerr.err|1
+theater|settings-developer@390x780|dom|div#setbody.adminwrap > div.setsection|3
+theater|settings-developer@390x780|dom|div#setbody.adminwrap > nav.setdestinations[aria-label=*]|1
+theater|settings-developer@390x780|dom|div#vdcard.card.setcard > details.setdetails|1
+theater|settings-developer@390x780|dom|div#vdcard.card.setcard > div#dhqerr.err[role=alert]|1
 theater|settings-developer@390x780|dom|div#vdcard.card.setcard > div.cardhead|1
-theater|settings-developer@390x780|dom|div#vdcard.card.setcard > div.hint[text]|3
+theater|settings-developer@390x780|dom|div#vdcard.card.setcard > div.hint[text]|1
 theater|settings-developer@390x780|dom|div#vdcard.card.setcard > div.setfoot|1
-theater|settings-developer@390x780|dom|div#vdcard.card.setcard > div.tog|3
-theater|settings-developer@390x780|dom|div#vdcard.card.setcard > h2.section[text]|1
 theater|settings-developer@390x780|dom|div#vdcard.card.setcard > label.tog|1
-theater|settings-developer@390x780|dom|div.card.setcard > div#dverr.err|1
-theater|settings-developer@390x780|dom|div.card.setcard > div#dxerr.err|1
-theater|settings-developer@390x780|dom|div.card.setcard > div#pqherr.err|1
-theater|settings-developer@390x780|dom|div.card.setcard > div.cardhead|4
-theater|settings-developer@390x780|dom|div.card.setcard > div.hint[text]|7
-theater|settings-developer@390x780|dom|div.card.setcard > div.setfoot|3
-theater|settings-developer@390x780|dom|div.card.setcard > div.tog|10
-theater|settings-developer@390x780|dom|div.card.setcard > h2.section[text]|3
-theater|settings-developer@390x780|dom|div.card.setcard > label.tog|4
-theater|settings-developer@390x780|dom|div.cardhead > div.cardtools|6
-theater|settings-developer@390x780|dom|div.cardhead > div|8
-theater|settings-developer@390x780|dom|div.cardtools > span.pill[text]|6
-theater|settings-developer@390x780|dom|div.hint[text] > b[text]|13
-theater|settings-developer@390x780|dom|div.hint[text] > code[text]|2
-theater|settings-developer@390x780|dom|div.row > a[text]|2
-theater|settings-developer@390x780|dom|div.row > button#ltenable.primary.sm[text]|1
-theater|settings-developer@390x780|dom|div.row > button.ghost.sm[text]|3
-theater|settings-developer@390x780|dom|div.setfields > div|6
-theater|settings-developer@390x780|dom|div.setfoot > button.primary.sm[disabled text]|7
-theater|settings-developer@390x780|dom|div.setfoot > span.setstate[text]|7
+theater|settings-developer@390x780|dom|div.card.local.setcard > div.cardhead|1
+theater|settings-developer@390x780|dom|div.card.local.setcard > div.hint[text]|1
+theater|settings-developer@390x780|dom|div.card.local.setcard > label.tog|1
+theater|settings-developer@390x780|dom|div.card.setcard > details.setdetails|1
+theater|settings-developer@390x780|dom|div.card.setcard > div#dverr.err[role=alert]|1
+theater|settings-developer@390x780|dom|div.card.setcard > div#dxerr.err[role=alert]|1
+theater|settings-developer@390x780|dom|div.card.setcard > div.cardhead|2
+theater|settings-developer@390x780|dom|div.card.setcard > div.setfoot|2
+theater|settings-developer@390x780|dom|div.card.setcard > label.tog|2
+theater|settings-developer@390x780|dom|div.cardhead > div.cardtools|5
+theater|settings-developer@390x780|dom|div.cardhead > div|5
+theater|settings-developer@390x780|dom|div.cardtools > span.acc.pill[text]|1
+theater|settings-developer@390x780|dom|div.cardtools > span.pill.warn[text]|1
+theater|settings-developer@390x780|dom|div.cardtools > span.pill[text]|3
+theater|settings-developer@390x780|dom|div.devcheck > div.devcheck-head|1
+theater|settings-developer@390x780|dom|div.devcheck > p.devcheck-description[text]|1
+theater|settings-developer@390x780|dom|div.devcheck > p.devcheck-evidence[text]|1
+theater|settings-developer@390x780|dom|div.devcheck-head > span.devcheck-status|1
+theater|settings-developer@390x780|dom|div.devcheck-head > strong[text]|1
+theater|settings-developer@390x780|dom|div.hint[text] > a[text]|1
+theater|settings-developer@390x780|dom|div.hint[text] > b[text]|4
+theater|settings-developer@390x780|dom|div.setdetails-body > div.devcheck|1
+theater|settings-developer@390x780|dom|div.setdetails-body > div.hint[text]|5
+theater|settings-developer@390x780|dom|div.setdetails-body > div.tog|7
+theater|settings-developer@390x780|dom|div.setdetails-body > h2.section[text]|3
+theater|settings-developer@390x780|dom|div.setfoot > button.primary.sm[disabled text]|4
+theater|settings-developer@390x780|dom|div.setfoot > span.setstate[text]|4
 theater|settings-developer@390x780|dom|div.sethead > div|1
 theater|settings-developer@390x780|dom|div.setlayout > div#setbody.adminwrap|1
 theater|settings-developer@390x780|dom|div.setlayout > nav.settabs[aria-label=*]|1
+theater|settings-developer@390x780|dom|div.setsection > h2[text]|3
+theater|settings-developer@390x780|dom|div.setsection > p[text]|3
 theater|settings-developer@390x780|dom|div.th-ctl > div.th-pop|2
 theater|settings-developer@390x780|dom|div.th-pop > button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*]|1
 theater|settings-developer@390x780|dom|div.th-pop > button.ghost.profile.sm|1
 theater|settings-developer@390x780|dom|div.th-pop > div#lookmenu.amenu.lookmenu|1
 theater|settings-developer@390x780|dom|div.th-pop > div#profilemenu.amenu|1
-theater|settings-developer@390x780|dom|div.tog > span.pill[text]|2
-theater|settings-developer@390x780|dom|div.tog > span[text]|21
+theater|settings-developer@390x780|dom|div.tog > span[text]|7
 theater|settings-developer@390x780|dom|header.th-top > a.logo[text]|1
 theater|settings-developer@390x780|dom|header.th-top > div.th-ctl|1
 theater|settings-developer@390x780|dom|header.th-top > input#q.search[aria-label=*]|1
@@ -7429,73 +7278,60 @@ theater|settings-developer@390x780|dom|label.tog > input#dhqa[type=checkbox]|1
 theater|settings-developer@390x780|dom|label.tog > input#pcpv1[type=checkbox]|1
 theater|settings-developer@390x780|dom|label.tog > input#pdp[type=checkbox]|1
 theater|settings-developer@390x780|dom|label.tog > input#phs[type=checkbox]|1
-theater|settings-developer@390x780|dom|label.tog > input#pqh[type=checkbox]|1
-theater|settings-developer@390x780|dom|label.tog > span[text]|6
+theater|settings-developer@390x780|dom|label.tog > span[text]|5
 theater|settings-developer@390x780|dom|main#main > div.setlayout|1
+theater|settings-developer@390x780|dom|nav.setdestinations[aria-label=*] > a|3
 theater|settings-developer@390x780|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
-theater|settings-developer@390x780|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|9
+theater|settings-developer@390x780|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|10
 theater|settings-developer@390x780|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 theater|settings-developer@390x780|dom|nav.th-nav[aria-label=*] > a.on[aria-current=page text]|1
 theater|settings-developer@390x780|dom|nav.th-nav[aria-label=*] > a[text]|3
 theater|settings-developer@390x780|dom|nav.th-pills[aria-label=*] > a.on[aria-current=page text]|1
 theater|settings-developer@390x780|dom|nav.th-pills[aria-label=*] > a[text]|3
-theater|settings-developer@390x780|dom|select#ltghours > option[text]|6
-theater|settings-developer@390x780|dom|select#ltgsrc > option[text]|3
-theater|settings-developer@390x780|dom|select#ltheight > option[text]|2
-theater|settings-developer@390x780|dom|select#ltlimit > option[text]|4
 theater|settings-developer@390x780|dom|small > code[text]|2
-theater|settings-developer@390x780|dom|small[text] > b[text]|1
 theater|settings-developer@390x780|dom|small[text] > br|4
 theater|settings-developer@390x780|dom|small[text] > code[text]|6
-theater|settings-developer@390x780|dom|small[text] > i[text]|5
-theater|settings-developer@390x780|dom|span > span.pill.warn[text]|1
-theater|settings-developer@390x780|dom|span > span.pill[text]|7
-theater|settings-developer@390x780|dom|span[text] > small.hint[text]|8
-theater|settings-developer@390x780|dom|span[text] > small[text]|25
+theater|settings-developer@390x780|dom|small[text] > i[text]|1
+theater|settings-developer@390x780|dom|span.devcheck-status > span.pill[text]|1
+theater|settings-developer@390x780|dom|span[text] > small[text]|10
 theater|settings-developer@390x780|dom|span[text] > small|2
-theater|settings-developer@390x780|dom|span[text] > span.pill.warn[text]|4
-theater|settings-developer@390x780|dom|span[text] > span.pill[text]|2
-theater|settings-developer@390x780|dom|span[text] > span|8
+theater|settings-developer@390x780|dom|span[text] > span.pill.warn[text]|1
+theater|settings-developer@390x780|dom|span[text] > span.pill[text]|1
+theater|settings-developer@390x780|dom|strong[text] > span[aria-hidden=true text]|3
 theater|settings-developer@390x780|focus|000|a.logo "cinema"
 theater|settings-developer@390x780|focus|001|input#q.search "Search cinema"
 theater|settings-developer@390x780|focus|002|button.ghost.sm.lookbtn "Appearance"
 theater|settings-developer@390x780|focus|003|button.ghost.sm.profile "Account"
 theater|settings-developer@390x780|focus|004|button.settab "Libraries"
 theater|settings-developer@390x780|focus|005|button.settab "Metadata"
-theater|settings-developer@390x780|focus|006|button.settab "Playback"
-theater|settings-developer@390x780|focus|007|button.settab "Analysis"
-theater|settings-developer@390x780|focus|008|button.settab "Maintenance"
-theater|settings-developer@390x780|focus|009|button.settab "Users"
-theater|settings-developer@390x780|focus|010|button.settab "System"
-theater|settings-developer@390x780|focus|011|button.settab "Cluster"
-theater|settings-developer@390x780|focus|012|button.settab "Integrations"
-theater|settings-developer@390x780|focus|013|button.settab.active "Developer"
-theater|settings-developer@390x780|focus|014|input#ltip "192.168.4.100"
-theater|settings-developer@390x780|focus|015|input#ltowner
-theater|settings-developer@390x780|focus|016|select#ltlimit "1 2 3 4"
-theater|settings-developer@390x780|focus|017|select#ltheight "720p 1080p"
-theater|settings-developer@390x780|focus|018|button.ghost.sm "Check saved configuration"
-theater|settings-developer@390x780|focus|019|button#ltenable.primary.sm "Enable Live TV"
-theater|settings-developer@390x780|focus|020|a "Browse channels"
-theater|settings-developer@390x780|focus|021|select#ltgsrc "Off HDHomeRun guide XMLTV"
-theater|settings-developer@390x780|focus|022|select#ltghours "4 hours 8 hours 12 hours 24 hours 48 hours
-theater|settings-developer@390x780|focus|023|button.ghost.sm "Check the guide"
-theater|settings-developer@390x780|focus|024|button.ghost.sm "Refresh now"
-theater|settings-developer@390x780|focus|025|a "Browse channels"
-theater|settings-developer@390x780|focus|026|input#pcpv1
-theater|settings-developer@390x780|focus|027|input#dhqa
-theater|settings-developer@390x780|focus|028|input#adr
-theater|settings-developer@390x780|focus|029|input#pqh
-theater|settings-developer@390x780|focus|030|input#pdp
-theater|settings-developer@390x780|focus|031|input#phs
-theater|settings-developer@390x780|focus|032|a "Home"
-theater|settings-developer@390x780|focus|033|a "Live TV"
-theater|settings-developer@390x780|focus|034|a "Activity"
-theater|settings-developer@390x780|focus|035|a.on "Settings"
-theater|settings-developer@390x780|focus|036|<wrap>
+theater|settings-developer@390x780|focus|006|button.settab "Live TV"
+theater|settings-developer@390x780|focus|007|button.settab "Playback"
+theater|settings-developer@390x780|focus|008|button.settab "Analysis"
+theater|settings-developer@390x780|focus|009|button.settab "Maintenance"
+theater|settings-developer@390x780|focus|010|button.settab "Users"
+theater|settings-developer@390x780|focus|011|button.settab "System"
+theater|settings-developer@390x780|focus|012|button.settab "Cluster"
+theater|settings-developer@390x780|focus|013|button.settab "Integrations"
+theater|settings-developer@390x780|focus|014|button.settab.active "Developer"
+theater|settings-developer@390x780|focus|015|a "Live TV ↗ Tuner and guide"
+theater|settings-developer@390x780|focus|016|a "Playback ↗ Quality and defaults"
+theater|settings-developer@390x780|focus|017|a "Cluster ↗ Health and recovery"
+theater|settings-developer@390x780|focus|018|input#pcpv1
+theater|settings-developer@390x780|focus|019|summary "Client readiness"
+theater|settings-developer@390x780|focus|020|input#pdp
+theater|settings-developer@390x780|focus|021|a "Quality switching"
+theater|settings-developer@390x780|focus|022|input#dhqa
+theater|settings-developer@390x780|focus|023|summary "Cache impact and diagnostic evidence"
+theater|settings-developer@390x780|focus|024|input#adr
+theater|settings-developer@390x780|focus|025|summary "Recovery limits and diagnostic evidence"
+theater|settings-developer@390x780|focus|026|input#phs
+theater|settings-developer@390x780|focus|027|a "Home"
+theater|settings-developer@390x780|focus|028|a "Live TV"
+theater|settings-developer@390x780|focus|029|a "Activity"
+theater|settings-developer@390x780|focus|030|a.on "Settings"
+theater|settings-developer@390x780|focus|031|<wrap>
 theater|settings-developer@390x780|req|GET /api/v1/activity|2
 theater|settings-developer@390x780|req|GET /api/v1/developer/readiness|1
-theater|settings-developer@390x780|req|GET /api/v1/live-tv/guide/readiness|1
 theater|settings-developer@390x780|req|GET /api/v1/me|1
 theater|settings-developer@390x780|req|GET /api/v1/server|1
 theater|settings-developer@390x780|req|GET /api/v1/settings|1
@@ -7539,7 +7375,7 @@ theater|settings@1280x860|dom|header.th-top > span#activity.activity|1
 theater|settings@1280x860|dom|header.th-top > span.spacer|1
 theater|settings@1280x860|dom|main#main > div.setlayout|1
 theater|settings@1280x860|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
-theater|settings@1280x860|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|9
+theater|settings@1280x860|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|10
 theater|settings@1280x860|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 theater|settings@1280x860|dom|nav.th-nav[aria-label=*] > a.on[aria-current=page text]|1
 theater|settings@1280x860|dom|nav.th-nav[aria-label=*] > a[text]|3
@@ -7584,28 +7420,29 @@ theater|settings@1280x860|focus|006|button.ghost.sm.lookbtn "Appearance"
 theater|settings@1280x860|focus|007|button.ghost.sm.profile "Account"
 theater|settings@1280x860|focus|008|button.settab.active "Libraries 3"
 theater|settings@1280x860|focus|009|button.settab "Metadata"
-theater|settings@1280x860|focus|010|button.settab "Playback"
-theater|settings@1280x860|focus|011|button.settab "Analysis"
-theater|settings@1280x860|focus|012|button.settab "Maintenance"
-theater|settings@1280x860|focus|013|button.settab "Users"
-theater|settings@1280x860|focus|014|button.settab "System"
-theater|settings@1280x860|focus|015|button.settab "Cluster"
-theater|settings@1280x860|focus|016|button.settab "Integrations"
-theater|settings@1280x860|focus|017|button.settab "Developer"
-theater|settings@1280x860|focus|018|button.ghost.sm "Scan every library for new & changed files"
-theater|settings@1280x860|focus|019|button.ghost.sm "Re-fetch metadata & artwork for every libra
-theater|settings@1280x860|focus|020|button.sm "+ Add library"
-theater|settings@1280x860|focus|021|a "Add a free key in Metadata"
-theater|settings@1280x860|focus|022|button.ghost.sm "Scan"
-theater|settings@1280x860|focus|023|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-theater|settings@1280x860|focus|024|button.ghost.sm "Configure ⌄"
-theater|settings@1280x860|focus|025|button.ghost.sm "Scan"
-theater|settings@1280x860|focus|026|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-theater|settings@1280x860|focus|027|button.ghost.sm "Configure ⌄"
-theater|settings@1280x860|focus|028|button.ghost.sm "Scan"
-theater|settings@1280x860|focus|029|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-theater|settings@1280x860|focus|030|button.ghost.sm "Configure ⌄"
-theater|settings@1280x860|focus|031|<wrap>
+theater|settings@1280x860|focus|010|button.settab "Live TV"
+theater|settings@1280x860|focus|011|button.settab "Playback"
+theater|settings@1280x860|focus|012|button.settab "Analysis"
+theater|settings@1280x860|focus|013|button.settab "Maintenance"
+theater|settings@1280x860|focus|014|button.settab "Users"
+theater|settings@1280x860|focus|015|button.settab "System"
+theater|settings@1280x860|focus|016|button.settab "Cluster"
+theater|settings@1280x860|focus|017|button.settab "Integrations"
+theater|settings@1280x860|focus|018|button.settab "Developer"
+theater|settings@1280x860|focus|019|button.ghost.sm "Scan every library for new & changed files"
+theater|settings@1280x860|focus|020|button.ghost.sm "Re-fetch metadata & artwork for every libra
+theater|settings@1280x860|focus|021|button.sm "+ Add library"
+theater|settings@1280x860|focus|022|a "Add a free key in Metadata"
+theater|settings@1280x860|focus|023|button.ghost.sm "Scan"
+theater|settings@1280x860|focus|024|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+theater|settings@1280x860|focus|025|button.ghost.sm "Configure ⌄"
+theater|settings@1280x860|focus|026|button.ghost.sm "Scan"
+theater|settings@1280x860|focus|027|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+theater|settings@1280x860|focus|028|button.ghost.sm "Configure ⌄"
+theater|settings@1280x860|focus|029|button.ghost.sm "Scan"
+theater|settings@1280x860|focus|030|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+theater|settings@1280x860|focus|031|button.ghost.sm "Configure ⌄"
+theater|settings@1280x860|focus|032|<wrap>
 theater|settings@1280x860|req|GET /api/v1/activity|2
 theater|settings@1280x860|req|GET /api/v1/dv-conversions|1
 theater|settings@1280x860|req|GET /api/v1/libraries|1
@@ -7653,7 +7490,7 @@ theater|settings@390x780|dom|header.th-top > span#activity.activity|1
 theater|settings@390x780|dom|header.th-top > span.spacer|1
 theater|settings@390x780|dom|main#main > div.setlayout|1
 theater|settings@390x780|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
-theater|settings@390x780|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|9
+theater|settings@390x780|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|10
 theater|settings@390x780|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 theater|settings@390x780|dom|nav.th-nav[aria-label=*] > a.on[aria-current=page text]|1
 theater|settings@390x780|dom|nav.th-nav[aria-label=*] > a[text]|3
@@ -7694,32 +7531,33 @@ theater|settings@390x780|focus|002|button.ghost.sm.lookbtn "Appearance"
 theater|settings@390x780|focus|003|button.ghost.sm.profile "Account"
 theater|settings@390x780|focus|004|button.settab.active "Libraries"
 theater|settings@390x780|focus|005|button.settab "Metadata"
-theater|settings@390x780|focus|006|button.settab "Playback"
-theater|settings@390x780|focus|007|button.settab "Analysis"
-theater|settings@390x780|focus|008|button.settab "Maintenance"
-theater|settings@390x780|focus|009|button.settab "Users"
-theater|settings@390x780|focus|010|button.settab "System"
-theater|settings@390x780|focus|011|button.settab "Cluster"
-theater|settings@390x780|focus|012|button.settab "Integrations"
-theater|settings@390x780|focus|013|button.settab "Developer"
-theater|settings@390x780|focus|014|button.ghost.sm "Scan every library for new & changed files"
-theater|settings@390x780|focus|015|button.ghost.sm "Re-fetch metadata & artwork for every libra
-theater|settings@390x780|focus|016|button.sm "+ Add library"
-theater|settings@390x780|focus|017|a "Add a free key in Metadata"
-theater|settings@390x780|focus|018|button.ghost.sm "Scan"
-theater|settings@390x780|focus|019|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-theater|settings@390x780|focus|020|button.ghost.sm "Configure ⌄"
-theater|settings@390x780|focus|021|button.ghost.sm "Scan"
-theater|settings@390x780|focus|022|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-theater|settings@390x780|focus|023|button.ghost.sm "Configure ⌄"
-theater|settings@390x780|focus|024|button.ghost.sm "Scan"
-theater|settings@390x780|focus|025|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-theater|settings@390x780|focus|026|button.ghost.sm "Configure ⌄"
-theater|settings@390x780|focus|027|a "Home"
-theater|settings@390x780|focus|028|a "Live TV"
-theater|settings@390x780|focus|029|a "Activity"
-theater|settings@390x780|focus|030|a.on "Settings"
-theater|settings@390x780|focus|031|<wrap>
+theater|settings@390x780|focus|006|button.settab "Live TV"
+theater|settings@390x780|focus|007|button.settab "Playback"
+theater|settings@390x780|focus|008|button.settab "Analysis"
+theater|settings@390x780|focus|009|button.settab "Maintenance"
+theater|settings@390x780|focus|010|button.settab "Users"
+theater|settings@390x780|focus|011|button.settab "System"
+theater|settings@390x780|focus|012|button.settab "Cluster"
+theater|settings@390x780|focus|013|button.settab "Integrations"
+theater|settings@390x780|focus|014|button.settab "Developer"
+theater|settings@390x780|focus|015|button.ghost.sm "Scan every library for new & changed files"
+theater|settings@390x780|focus|016|button.ghost.sm "Re-fetch metadata & artwork for every libra
+theater|settings@390x780|focus|017|button.sm "+ Add library"
+theater|settings@390x780|focus|018|a "Add a free key in Metadata"
+theater|settings@390x780|focus|019|button.ghost.sm "Scan"
+theater|settings@390x780|focus|020|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+theater|settings@390x780|focus|021|button.ghost.sm "Configure ⌄"
+theater|settings@390x780|focus|022|button.ghost.sm "Scan"
+theater|settings@390x780|focus|023|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+theater|settings@390x780|focus|024|button.ghost.sm "Configure ⌄"
+theater|settings@390x780|focus|025|button.ghost.sm "Scan"
+theater|settings@390x780|focus|026|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+theater|settings@390x780|focus|027|button.ghost.sm "Configure ⌄"
+theater|settings@390x780|focus|028|a "Home"
+theater|settings@390x780|focus|029|a "Live TV"
+theater|settings@390x780|focus|030|a "Activity"
+theater|settings@390x780|focus|031|a.on "Settings"
+theater|settings@390x780|focus|032|<wrap>
 theater|settings@390x780|req|GET /api/v1/activity|2
 theater|settings@390x780|req|GET /api/v1/dv-conversions|1
 theater|settings@390x780|req|GET /api/v1/libraries|1
