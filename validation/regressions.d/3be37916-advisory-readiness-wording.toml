@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["3be37916"]
+points = ["web.experience"]
+checks = ["web-static", "history-regressions"]
+reason = "The retained shipped-page decoder-readiness contract and the settings-section regression both require the verified-artifact control to state that prerequisites are advisory and never disable the operator control."

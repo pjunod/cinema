@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["73921d6a"]
+reason = "This commit only records the retained host-independent decoder-evidence checks in a regressions.d fragment; it does not change runtime behavior."
+ignore = true

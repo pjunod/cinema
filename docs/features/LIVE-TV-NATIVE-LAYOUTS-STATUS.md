@@ -1,7 +1,7 @@
 # Native Live TV layouts — implementation status and evidence
 
 **Status:** implementation complete · **Effort:**
-`effort/live-tv-native-layouts` · **Base:** Forgejo `main` at `20057416` ·
+`effort/live-tv-native-layouts` · **Base:** Forgejo `main` at `7fabfbf2` ·
 **Updated:** 2026-09-10
 
 Companion to

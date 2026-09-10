@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["592deb8b"]
+reason = "This commit only records the retained settings save-race checks in a regressions.d fragment; it does not change runtime behavior."
+ignore = true
