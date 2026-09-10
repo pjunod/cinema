@@ -1944,10 +1944,7 @@ pub trait LibraryChannelStore: Send + Sync + 'static {
 
     async fn delete_library_channel(
         &self,
-        actor_user_id: i64,
-        actor_is_admin: bool,
-        channel_id: &str,
-        expected_revision: i64,
+        deletion: &crate::library_channels::LibraryChannelDelete,
     ) -> Result<crate::library_channels::ChannelMutation<()>, StoreError>;
 
     async fn set_library_channel_favourite(
@@ -1958,15 +1955,35 @@ pub trait LibraryChannelStore: Send + Sync + 'static {
         now_ms: i64,
     ) -> Result<bool, StoreError>;
 
-    async fn library_channel_catalog_page(
+    /// Read one bounded, coherent catalogue selection snapshot. Implementations
+    /// execute the item/file/ancestry projection as a single database query so
+    /// a channel build cannot combine pages from different catalogue states.
+    async fn library_channel_catalog_snapshot(
         &self,
-        after_item_id: i64,
         limit: i64,
     ) -> Result<Vec<crate::library_channels::ChannelCandidate>, StoreError>;
+
+    async fn list_library_channel_refresh_candidates(
+        &self,
+        after_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<crate::library_channels::LibraryChannel>, StoreError>;
+
+    async fn prune_library_channel_state(&self, now_ms: i64, limit: i64)
+        -> Result<i64, StoreError>;
 
     async fn claim_library_channel_build(
         &self,
         claim: &crate::library_channels::LibraryChannelBuildClaim,
+    ) -> Result<crate::library_channels::ChannelBuildMutation, StoreError>;
+
+    async fn renew_library_channel_build(
+        &self,
+        channel_id: &str,
+        generation_id: &str,
+        claim_id: &str,
+        now_ms: i64,
+        expires_at_ms: i64,
     ) -> Result<crate::library_channels::ChannelBuildMutation, StoreError>;
 
     async fn stage_library_channel_entries(

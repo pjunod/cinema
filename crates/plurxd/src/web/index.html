@@ -19363,7 +19363,7 @@ async function saveLibraryChannel(){
 }
 async function deleteLibraryChannel(){
   const draft=LIBRARY_CHANNELS.draft;if(!draft||!draft.id||!confirm(`Delete ${draft.name}? Media will not be deleted.`))return;
-  try{await api(`/library-channels/${encodeURIComponent(draft.id)}?expected_revision=${draft.expected_revision}`,{method:"DELETE"});clearLibraryChannelDraft();LIBRARY_CHANNELS.editor=false;LIBRARY_CHANNELS.draft=null;await viewLibraryChannels(PAGE_RENDER_GENERATION);}
+  try{await api(`/library-channels/${encodeURIComponent(draft.id)}?expected_revision=${draft.expected_revision}&request_id=${encodeURIComponent(newRequestId())}`,{method:"DELETE"});clearLibraryChannelDraft();LIBRARY_CHANNELS.editor=false;LIBRARY_CHANNELS.draft=null;await viewLibraryChannels(PAGE_RENDER_GENERATION);}
   catch(error){toast(error.message);}
 }
 async function toggleLibraryChannelFavourite(id,favourite){

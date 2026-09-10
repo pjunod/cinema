@@ -29,8 +29,12 @@ pub const CHANNEL_BUILD_RENEW_MS: i64 = 30_000;
 pub const CHANNEL_ACTIVATION_LEAD_MS: i64 = 30_000;
 pub const CHANNELS_PER_USER_MAX: i64 = 50;
 pub const CHANNELS_SERVER_MAX: i64 = 200;
+pub const CHANNEL_REQUESTS_PER_USER_MAX: i64 = 1_000;
 pub const CHANNEL_BUILD_QUEUE_MAX: usize = 200;
 pub const CHANNEL_GENERATION_STAGE_MAX: usize = 200;
+pub const CHANNEL_PRUNE_BATCH_MAX: i64 = 200;
+pub const CHANNEL_ABANDONED_BUILD_RETENTION_MS: i64 = 60 * 60 * 1_000;
+pub const CHANNEL_SUPERSEDED_RETENTION_MS: i64 = 24 * 60 * 60 * 1_000;
 
 /// Durable Library-channel entities, shared verbatim by both Store backends.
 /// All clock/random values are supplied by the application.
@@ -224,6 +228,17 @@ pub struct LibraryChannelUpdate {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibraryChannelDelete {
+    pub channel_id: String,
+    pub actor_user_id: i64,
+    pub actor_is_admin: bool,
+    pub expected_revision: i64,
+    pub request_id: String,
+    pub request_hash: String,
+    pub now_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChannelMutation<T> {
     Applied(T),
     Replay(T),
@@ -231,6 +246,7 @@ pub enum ChannelMutation<T> {
     Forbidden,
     Stale,
     RequestConflict,
+    RequestLedgerFull,
     LimitExceeded,
 }
 

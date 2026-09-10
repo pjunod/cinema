@@ -5597,6 +5597,9 @@ async fn control_inner(
             );
         }
     };
+    if let Some(refusal) = library_channel_control_refusal(&state, &route).await {
+        return refusal;
+    }
     let owner_epoch = match u64::try_from(route.owner_epoch)
         .ok()
         .filter(|epoch| *epoch > 0)
@@ -5775,6 +5778,119 @@ async fn control_inner(
         };
     }
     control_local(&state, &route, request, deadline_unix_ms).await
+}
+
+/// Revalidate a durable following purpose at every normal control exchange.
+/// The session UUID is still the bearer capability, but it cannot keep a
+/// deleted, disabled, or newly-hidden channel alive. Ordinary VOD response
+/// JSON has no `library_channel` member and pays only one object lookup.
+async fn library_channel_control_refusal(
+    state: &AppState,
+    route: &MediaSessionRoute,
+) -> Option<Response> {
+    let response = match serde_json::from_str::<serde_json::Value>(&route.response_json) {
+        Ok(response) => response,
+        Err(_) => return None, // The ordinary response parser reports this below.
+    };
+    let raw_purpose = response.get("library_channel")?;
+    let purpose = match serde_json::from_value::<
+        crate::http::library_channels::LibraryChannelPlaybackPurpose,
+    >(raw_purpose.clone())
+    {
+        Ok(purpose) => purpose,
+        Err(_) => {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Unavailable);
+            return Some(control_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "control_unavailable",
+                "the durable Library-channel purpose is unreadable",
+                Some(route.incarnation_id.clone()),
+                u64::try_from(route.owner_epoch).ok(),
+                Some(500),
+                None,
+            ));
+        }
+    };
+    let runtime_enabled = match state
+        .store
+        .get_setting(plurx_core::store::keys::LIBRARY_CHANNELS_ENABLED)
+        .await
+    {
+        Ok(value) => plurx_core::store::stored_switch(value.as_deref(), false),
+        Err(_) => {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Unavailable);
+            return Some(control_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "control_unavailable",
+                "Library-channel authority is temporarily unavailable",
+                Some(route.incarnation_id.clone()),
+                u64::try_from(route.owner_epoch).ok(),
+                Some(500),
+                None,
+            ));
+        }
+    };
+    if !runtime_enabled {
+        return Some(control_error(
+            StatusCode::GONE,
+            "channel_unavailable",
+            "Library-channel playback was disabled",
+            Some(route.incarnation_id.clone()),
+            u64::try_from(route.owner_epoch).ok(),
+            None,
+            None,
+        ));
+    }
+    let user = match state.store.get_user(route.user_id).await {
+        Ok(Some(user)) => user,
+        Ok(None) => {
+            return Some(control_error(
+                StatusCode::GONE,
+                "channel_unavailable",
+                "the Library-channel viewer no longer exists",
+                Some(route.incarnation_id.clone()),
+                u64::try_from(route.owner_epoch).ok(),
+                None,
+                None,
+            ));
+        }
+        Err(_) => {
+            return Some(control_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "control_unavailable",
+                "Library-channel authorization is temporarily unavailable",
+                Some(route.incarnation_id.clone()),
+                u64::try_from(route.owner_epoch).ok(),
+                Some(500),
+                None,
+            ));
+        }
+    };
+    match state
+        .store
+        .get_library_channel(user.id, user.is_admin, &purpose.channel_id)
+        .await
+    {
+        Ok(Some(channel)) if channel.enabled => None,
+        Ok(_) => Some(control_error(
+            StatusCode::GONE,
+            "channel_unavailable",
+            "the Library channel was deleted, disabled, or is no longer visible",
+            Some(route.incarnation_id.clone()),
+            u64::try_from(route.owner_epoch).ok(),
+            None,
+            None,
+        )),
+        Err(_) => Some(control_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "control_unavailable",
+            "Library-channel authorization is temporarily unavailable",
+            Some(route.incarnation_id.clone()),
+            u64::try_from(route.owner_epoch).ok(),
+            Some(500),
+            None,
+        )),
+    }
 }
 
 fn control_start_response(route: &MediaSessionRoute) -> Option<StartResponse> {

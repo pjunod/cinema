@@ -176,7 +176,7 @@ pub(crate) async fn readiness(
 /// These are diagnostic facts, never admission predicates: the settings write
 /// does not call this function and therefore cannot accidentally grow a gate.
 async fn library_channels(state: &AppState, enabled: bool) -> DeveloperEnableItem {
-    let catalogue = state.store.library_channel_catalog_page(0, 1).await;
+    let catalogue = state.store.library_channel_catalog_snapshot(1).await;
     let (store_status, store_evidence, media_status, media_evidence) = match catalogue {
         Ok(page) if page.is_empty() => (
             RequirementStatus::Met,

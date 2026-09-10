@@ -8,9 +8,10 @@ use crate::error::StoreError;
 use crate::library_channels::{
     ChannelBuildMutation, ChannelCandidate, ChannelGenerationEntry, ChannelItemKind,
     ChannelMutation, ChannelVisibility, LibraryChannel, LibraryChannelBuildClaim,
-    LibraryChannelGeneration, LibraryChannelPublication, LibraryChannelRecipe,
-    LibraryChannelUpdate, NewLibraryChannel, CHANNELS_PER_USER_MAX, CHANNELS_SERVER_MAX,
-    CHANNEL_GENERATION_STAGE_MAX,
+    LibraryChannelDelete, LibraryChannelGeneration, LibraryChannelPublication,
+    LibraryChannelRecipe, LibraryChannelUpdate, NewLibraryChannel, CHANNELS_PER_USER_MAX,
+    CHANNELS_SERVER_MAX, CHANNEL_ABANDONED_BUILD_RETENTION_MS, CHANNEL_GENERATION_STAGE_MAX,
+    CHANNEL_PRUNE_BATCH_MAX, CHANNEL_REQUESTS_PER_USER_MAX, CHANNEL_SUPERSEDED_RETENTION_MS,
 };
 use crate::store::LibraryChannelStore;
 
@@ -74,6 +75,23 @@ fn load_channel(
             channel_from_row,
         )
         .optional()?)
+}
+
+fn request_slot_available(
+    tx: &rusqlite::Transaction<'_>,
+    user_id: i64,
+    now_ms: i64,
+) -> Result<bool, StoreError> {
+    tx.execute(
+        "DELETE FROM library_channel_requests WHERE user_id = ?1 AND expires_at_ms <= ?2",
+        params![user_id, now_ms],
+    )?;
+    let live: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM library_channel_requests WHERE user_id = ?1",
+        [user_id],
+        |row| row.get(0),
+    )?;
+    Ok(live < CHANNEL_REQUESTS_PER_USER_MAX)
 }
 
 fn visible(channel: &LibraryChannel, actor_user_id: i64, actor_is_admin: bool) -> bool {
@@ -162,6 +180,9 @@ impl LibraryChannelStore for SqliteStore {
                     })?;
                 return Ok(ChannelMutation::Replay(result));
             }
+            if !request_slot_available(&tx, channel.owner_user_id, channel.now_ms)? {
+                return Ok(ChannelMutation::RequestLedgerFull);
+            }
             let owned: i64 = tx.query_row(
                 "SELECT COUNT(*) FROM library_channels WHERE owner_user_id = ?1",
                 [channel.owner_user_id],
@@ -246,6 +267,9 @@ impl LibraryChannelStore for SqliteStore {
                 }
                 return Ok(ChannelMutation::Stale);
             }
+            if !request_slot_available(&tx, update.actor_user_id, update.now_ms)? {
+                return Ok(ChannelMutation::RequestLedgerFull);
+            }
             if current.revision != update.expected_revision {
                 return Ok(ChannelMutation::Stale);
             }
@@ -296,33 +320,66 @@ impl LibraryChannelStore for SqliteStore {
 
     async fn delete_library_channel(
         &self,
-        actor_user_id: i64,
-        actor_is_admin: bool,
-        channel_id: &str,
-        expected_revision: i64,
+        deletion: &LibraryChannelDelete,
     ) -> Result<ChannelMutation<()>, StoreError> {
-        let channel_id = channel_id.to_owned();
+        let deletion = deletion.clone();
         self.with_conn(move |conn| {
-            let current = load_channel(conn, actor_user_id, &channel_id)?;
+            let tx = conn.unchecked_transaction()?;
+            let replay: Option<(String, String)> = tx
+                .query_row(
+                    "SELECT channel_id, operation_hash FROM library_channel_requests \
+                     WHERE user_id = ?1 AND request_id = ?2 AND expires_at_ms > ?3",
+                    params![deletion.actor_user_id, deletion.request_id, deletion.now_ms],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            if let Some((channel_id, operation_hash)) = replay {
+                if channel_id != deletion.channel_id || operation_hash != deletion.request_hash {
+                    return Ok(ChannelMutation::RequestConflict);
+                }
+                return Ok(ChannelMutation::Replay(()));
+            }
+            if !request_slot_available(&tx, deletion.actor_user_id, deletion.now_ms)? {
+                return Ok(ChannelMutation::RequestLedgerFull);
+            }
+            let current = load_channel(&tx, deletion.actor_user_id, &deletion.channel_id)?;
             let Some(current) = current else {
                 return Ok(ChannelMutation::NotFound);
             };
-            if current.owner_user_id != actor_user_id && !actor_is_admin {
+            if current.owner_user_id != deletion.actor_user_id && !deletion.actor_is_admin {
                 return Ok(ChannelMutation::Forbidden);
             }
-            if current.revision != expected_revision {
+            if current.revision != deletion.expected_revision {
                 return Ok(ChannelMutation::Stale);
             }
-            let changed = conn.execute(
+            let changed = tx.execute(
                 "DELETE FROM library_channels WHERE id = ?1 AND definition_revision = ?2 \
                  AND (owner_user_id = ?3 OR ?4)",
-                params![channel_id, expected_revision, actor_user_id, actor_is_admin],
+                params![
+                    deletion.channel_id,
+                    deletion.expected_revision,
+                    deletion.actor_user_id,
+                    deletion.actor_is_admin
+                ],
             )?;
-            Ok(if changed == 1 {
-                ChannelMutation::Applied(())
-            } else {
-                ChannelMutation::Stale
-            })
+            if changed != 1 {
+                return Ok(ChannelMutation::Stale);
+            }
+            tx.execute(
+                "INSERT INTO library_channel_requests \
+                 (user_id, request_id, operation_hash, channel_id, result_revision, \
+                  created_at_ms, expires_at_ms) VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6)",
+                params![
+                    deletion.actor_user_id,
+                    deletion.request_id,
+                    deletion.request_hash,
+                    deletion.channel_id,
+                    deletion.now_ms,
+                    deletion.now_ms + 86_400_000,
+                ],
+            )?;
+            tx.commit()?;
+            Ok(ChannelMutation::Applied(()))
         })
         .await
     }
@@ -362,12 +419,11 @@ impl LibraryChannelStore for SqliteStore {
         .await
     }
 
-    async fn library_channel_catalog_page(
+    async fn library_channel_catalog_snapshot(
         &self,
-        after_item_id: i64,
         limit: i64,
     ) -> Result<Vec<ChannelCandidate>, StoreError> {
-        let limit = limit.clamp(1, 500);
+        let limit = limit.clamp(1, 100_001);
         self.with_read(move |conn| {
             let mut statement = conn.prepare(
                 "SELECT i.id, f.id, f.size, f.mtime, f.duration_ms, i.library_id, i.kind, \
@@ -380,14 +436,13 @@ impl LibraryChannelStore for SqliteStore {
                  FROM items i \
                  LEFT JOIN items s ON i.kind = 'episode' AND s.id = i.parent_id AND s.kind = 'season' \
                  LEFT JOIN items sh ON i.kind = 'episode' AND sh.id = s.parent_id AND sh.kind = 'show' \
-                 JOIN files f ON f.id = ( \
-                    SELECT MIN(ef.id) FROM files ef WHERE ef.item_id = i.id \
-                      AND ef.probe_json IS NOT NULL AND ef.video_codec IS NOT NULL \
-                      AND ef.duration_ms > 0 AND ef.duration_ms <= 86400000) \
-                 WHERE i.id > ?1 AND i.kind IN ('movie','episode') \
-                 ORDER BY i.id LIMIT ?2",
+                 JOIN files f ON f.item_id = i.id \
+                    AND f.probe_json IS NOT NULL AND f.video_codec IS NOT NULL \
+                    AND f.duration_ms > 0 AND f.duration_ms <= 86400000 \
+                 WHERE i.kind IN ('movie','episode') \
+                 ORDER BY i.id, f.id LIMIT ?1",
             )?;
-            let rows = statement.query_map(params![after_item_id, limit], |row| {
+            let rows = statement.query_map([limit], |row| {
                 let kind_raw: String = row.get(6)?;
                 let kind = match kind_raw.as_str() {
                     "movie" => ChannelItemKind::Movie,
@@ -424,6 +479,71 @@ impl LibraryChannelStore for SqliteStore {
                 })
             })?;
             Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        })
+        .await
+    }
+
+    async fn list_library_channel_refresh_candidates(
+        &self,
+        after_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<LibraryChannel>, StoreError> {
+        let after_id = after_id.unwrap_or_default().to_owned();
+        self.with_read(move |conn| {
+            let sql = format!(
+                "SELECT {CHANNEL_COLS}, 0 AS favourite FROM library_channels c \
+                 WHERE c.id > ?1 AND c.enabled = 1 \
+                   AND COALESCE(json_extract(c.recipe_json, '$.auto_refresh'), 1) = 1 \
+                 ORDER BY c.id LIMIT ?2"
+            );
+            let mut statement = conn.prepare(&sql)?;
+            let rows =
+                statement.query_map(params![after_id, limit.clamp(1, 200)], channel_from_row)?;
+            Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        })
+        .await
+    }
+
+    async fn prune_library_channel_state(
+        &self,
+        now_ms: i64,
+        limit: i64,
+    ) -> Result<i64, StoreError> {
+        let limit = limit.clamp(1, CHANNEL_PRUNE_BATCH_MAX);
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            let requests = tx.execute(
+                "DELETE FROM library_channel_requests WHERE rowid IN (SELECT rowid \
+                 FROM library_channel_requests WHERE expires_at_ms <= ?1 ORDER BY expires_at_ms LIMIT ?2)",
+                params![now_ms, limit],
+            )? as i64;
+            let remaining = limit.saturating_sub(requests);
+            let abandoned = if remaining > 0 {
+                tx.execute(
+                    "DELETE FROM library_channel_generations WHERE id IN (SELECT id \
+                     FROM library_channel_generations WHERE state = 'building' \
+                       AND build_claim_expires_ms <= ?1 ORDER BY created_at_ms LIMIT ?2)",
+                    params![now_ms.saturating_sub(CHANNEL_ABANDONED_BUILD_RETENTION_MS), remaining],
+                )? as i64
+            } else {
+                0
+            };
+            let remaining = remaining.saturating_sub(abandoned);
+            let superseded = if remaining > 0 {
+                tx.execute(
+                    "DELETE FROM library_channel_generations WHERE id IN (SELECT g.id \
+                     FROM library_channel_generations g WHERE g.state = 'ready' \
+                       AND g.created_at_ms <= ?1 \
+                       AND NOT EXISTS(SELECT 1 FROM library_channels c \
+                         WHERE c.active_generation_id = g.id OR c.pending_generation_id = g.id) \
+                     ORDER BY g.created_at_ms LIMIT ?2)",
+                    params![now_ms.saturating_sub(CHANNEL_SUPERSEDED_RETENTION_MS), remaining],
+                )? as i64
+            } else {
+                0
+            };
+            tx.commit()?;
+            Ok(requests + abandoned + superseded)
         })
         .await
     }
@@ -479,6 +599,33 @@ impl LibraryChannelStore for SqliteStore {
             )?;
             tx.commit()?;
             Ok(ChannelBuildMutation::Applied)
+        })
+        .await
+    }
+
+    async fn renew_library_channel_build(
+        &self,
+        channel_id: &str,
+        generation_id: &str,
+        claim_id: &str,
+        now_ms: i64,
+        expires_at_ms: i64,
+    ) -> Result<ChannelBuildMutation, StoreError> {
+        let channel_id = channel_id.to_owned();
+        let generation_id = generation_id.to_owned();
+        let claim_id = claim_id.to_owned();
+        self.with_conn(move |conn| {
+            let changed = conn.execute(
+                "UPDATE library_channel_generations SET build_claim_expires_ms = ?1 \
+                 WHERE id = ?2 AND channel_id = ?3 AND state = 'building' \
+                   AND build_claim_id = ?4 AND build_claim_expires_ms > ?5",
+                params![expires_at_ms, generation_id, channel_id, claim_id, now_ms],
+            )?;
+            Ok(if changed == 1 {
+                ChannelBuildMutation::Applied
+            } else {
+                ChannelBuildMutation::Stale
+            })
         })
         .await
     }
@@ -542,6 +689,13 @@ impl LibraryChannelStore for SqliteStore {
         let publication = publication.clone();
         self.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
+            tx.execute(
+                "UPDATE library_channels SET active_generation_id = pending_generation_id, \
+                 active_epoch_ms = pending_epoch_ms, pending_generation_id = NULL, \
+                 pending_epoch_ms = NULL WHERE id = ?1 AND pending_generation_id IS NOT NULL \
+                   AND pending_epoch_ms <= ?2",
+                params![publication.channel_id, publication.now_ms],
+            )?;
             let facts: Option<(i64, i64, i64, Option<String>)> = tx
                 .query_row(
                     "SELECT g.definition_revision, COUNT(e.ordinal), \

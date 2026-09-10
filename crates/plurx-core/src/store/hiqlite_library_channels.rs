@@ -10,9 +10,10 @@ use crate::error::StoreError;
 use crate::library_channels::{
     ChannelBuildMutation, ChannelCandidate, ChannelGenerationEntry, ChannelItemKind,
     ChannelMutation, ChannelVisibility, LibraryChannel, LibraryChannelBuildClaim,
-    LibraryChannelGeneration, LibraryChannelPublication, LibraryChannelUpdate, NewLibraryChannel,
-    CHANNELS_PER_USER_MAX, CHANNELS_SERVER_MAX, CHANNEL_GENERATION_STAGE_MAX,
-    LIBRARY_CHANNELS_SCHEMA,
+    LibraryChannelDelete, LibraryChannelGeneration, LibraryChannelPublication,
+    LibraryChannelUpdate, NewLibraryChannel, CHANNELS_PER_USER_MAX, CHANNELS_SERVER_MAX,
+    CHANNEL_ABANDONED_BUILD_RETENTION_MS, CHANNEL_GENERATION_STAGE_MAX, CHANNEL_PRUNE_BATCH_MAX,
+    CHANNEL_REQUESTS_PER_USER_MAX, CHANNEL_SUPERSEDED_RETENTION_MS, LIBRARY_CHANNELS_SCHEMA,
 };
 
 pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), StoreError> {
@@ -121,6 +122,42 @@ struct RequestRow {
     channel_id: String,
     operation_hash: String,
     result_revision: i64,
+}
+
+struct CountRow {
+    count: i64,
+}
+
+impl From<&mut Row<'_>> for CountRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            count: row.get("count"),
+        }
+    }
+}
+
+async fn request_ledger_full(
+    store: &HiqliteAuthStore,
+    user_id: i64,
+    now_ms: i64,
+) -> Result<bool, StoreError> {
+    store
+        .execute(
+            "DELETE FROM library_channel_requests WHERE user_id = $1 AND expires_at_ms <= $2",
+            params!(user_id, now_ms),
+        )
+        .await?;
+    let count = store
+        .client()
+        .query_consistent_map::<CountRow, _>(
+            "SELECT COUNT(*) AS count FROM library_channel_requests WHERE user_id = $1",
+            params!(user_id),
+        )
+        .await?
+        .into_iter()
+        .next()
+        .map_or(0, |row| row.count);
+    Ok(count >= CHANNEL_REQUESTS_PER_USER_MAX)
 }
 
 impl From<&mut Row<'_>> for RequestRow {
@@ -346,6 +383,9 @@ impl LibraryChannelStore for HiqliteAuthStore {
                     StoreError::Database("channel request points to a missing channel".to_owned())
                 });
         }
+        if request_ledger_full(self, channel.owner_user_id, channel.now_ms).await? {
+            return Ok(ChannelMutation::RequestLedgerFull);
+        }
         let recipe = serde_json::to_string(&channel.recipe)
             .map_err(|error| StoreError::Database(error.to_string()))?;
         let results = self
@@ -357,7 +397,8 @@ impl LibraryChannelStore for HiqliteAuthStore {
                       definition_revision, recipe_json, seed, created_at_ms, updated_at_ms) \
                      SELECT $1, $2, $3, $4, $5, $6, 1, $7, $8, $9, $9 \
                      WHERE (SELECT COUNT(*) FROM library_channels WHERE owner_user_id = $2) < $10 \
-                       AND (SELECT COUNT(*) FROM library_channels) < $11",
+                       AND (SELECT COUNT(*) FROM library_channels) < $11 \
+                       AND (SELECT COUNT(*) FROM library_channel_requests WHERE user_id = $2) < $12",
                     params!(
                         channel.id.as_str(),
                         channel.owner_user_id,
@@ -369,7 +410,8 @@ impl LibraryChannelStore for HiqliteAuthStore {
                         channel.seed.as_slice(),
                         channel.now_ms,
                         CHANNELS_PER_USER_MAX,
-                        CHANNELS_SERVER_MAX
+                        CHANNELS_SERVER_MAX,
+                        CHANNEL_REQUESTS_PER_USER_MAX
                     ),
                 ),
                 (
@@ -377,14 +419,16 @@ impl LibraryChannelStore for HiqliteAuthStore {
                      (user_id, request_id, operation_hash, channel_id, result_revision, \
                       created_at_ms, expires_at_ms) \
                      SELECT $1, $2, $3, $4, 1, $5, $6 \
-                     WHERE EXISTS(SELECT 1 FROM library_channels WHERE id = $4)",
+                     WHERE EXISTS(SELECT 1 FROM library_channels WHERE id = $4) \
+                       AND (SELECT COUNT(*) FROM library_channel_requests WHERE user_id = $1) < $7",
                     params!(
                         channel.owner_user_id,
                         channel.request_id.as_str(),
                         channel.request_hash.as_str(),
                         channel.id.as_str(),
                         channel.now_ms,
-                        channel.now_ms + 86_400_000
+                        channel.now_ms + 86_400_000,
+                        CHANNEL_REQUESTS_PER_USER_MAX
                     ),
                 ),
             ])
@@ -393,7 +437,12 @@ impl LibraryChannelStore for HiqliteAuthStore {
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
             .map_err(database_error)?;
-        if counts.first().copied() != Some(1) {
+        if counts == [0, 0]
+            && request_ledger_full(self, channel.owner_user_id, channel.now_ms).await?
+        {
+            return Ok(ChannelMutation::RequestLedgerFull);
+        }
+        if counts != [1, 1] {
             return Ok(ChannelMutation::LimitExceeded);
         }
         query_channel(self, channel.owner_user_id, &channel.id)
@@ -437,6 +486,9 @@ impl LibraryChannelStore for HiqliteAuthStore {
             }
             return Ok(ChannelMutation::Stale);
         }
+        if request_ledger_full(self, update.actor_user_id, update.now_ms).await? {
+            return Ok(ChannelMutation::RequestLedgerFull);
+        }
         if current.revision != update.expected_revision {
             return Ok(ChannelMutation::Stale);
         }
@@ -449,12 +501,14 @@ impl LibraryChannelStore for HiqliteAuthStore {
                     "UPDATE library_channels SET name = $1, description = $2, visibility = $3, \
                      enabled = $4, definition_revision = definition_revision + 1, recipe_json = $5, \
                      seed = $6, updated_at_ms = $7 WHERE id = $8 AND definition_revision = $9 \
-                     AND (owner_user_id = $10 OR $11)",
+                     AND (owner_user_id = $10 OR $11) \
+                     AND (SELECT COUNT(*) FROM library_channel_requests WHERE user_id = $10) < $12",
                     params!(
                         update.name.as_str(), update.description.as_str(), update.visibility.as_str(),
                         update.enabled, recipe, update.seed.as_slice(), update.now_ms,
                         update.channel_id.as_str(), update.expected_revision, update.actor_user_id,
-                        update.actor_is_admin
+                        update.actor_is_admin,
+                        CHANNEL_REQUESTS_PER_USER_MAX
                     ),
                 ),
                 (
@@ -463,11 +517,13 @@ impl LibraryChannelStore for HiqliteAuthStore {
                       created_at_ms, expires_at_ms) \
                      SELECT $1, $2, $3, $4, $5, $6, $7 \
                      WHERE EXISTS(SELECT 1 FROM library_channels WHERE id = $4 \
-                       AND definition_revision = $5)",
+                       AND definition_revision = $5) \
+                       AND (SELECT COUNT(*) FROM library_channel_requests WHERE user_id = $1) < $8",
                     params!(
                         update.actor_user_id, update.request_id.as_str(), update.request_hash.as_str(),
                         update.channel_id.as_str(), update.expected_revision + 1, update.now_ms,
-                        update.now_ms + 86_400_000
+                        update.now_ms + 86_400_000,
+                        CHANNEL_REQUESTS_PER_USER_MAX
                     ),
                 ),
             ])
@@ -476,7 +532,7 @@ impl LibraryChannelStore for HiqliteAuthStore {
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
             .map_err(database_error)?;
-        if counts.first().copied() != Some(1) {
+        if counts != [1, 1] {
             return Ok(ChannelMutation::Stale);
         }
         query_channel(self, update.actor_user_id, &update.channel_id)
@@ -487,28 +543,87 @@ impl LibraryChannelStore for HiqliteAuthStore {
 
     async fn delete_library_channel(
         &self,
-        actor_user_id: i64,
-        actor_is_admin: bool,
-        channel_id: &str,
-        expected_revision: i64,
+        deletion: &LibraryChannelDelete,
     ) -> Result<ChannelMutation<()>, StoreError> {
-        let Some(current) = query_channel(self, actor_user_id, channel_id).await? else {
-            return Ok(ChannelMutation::NotFound);
-        };
-        if current.owner_user_id != actor_user_id && !actor_is_admin {
-            return Ok(ChannelMutation::Forbidden);
-        }
-        if current.revision != expected_revision {
-            return Ok(ChannelMutation::Stale);
-        }
-        let changed = self
-            .execute(
-                "DELETE FROM library_channels WHERE id = $1 AND definition_revision = $2 \
-                 AND (owner_user_id = $3 OR $4)",
-                params!(channel_id, expected_revision, actor_user_id, actor_is_admin),
+        let replays = self
+            .client()
+            .query_consistent_map::<RequestRow, _>(
+                "SELECT channel_id, operation_hash, result_revision \
+                 FROM library_channel_requests WHERE user_id = $1 AND request_id = $2 \
+                 AND expires_at_ms > $3",
+                params!(
+                    deletion.actor_user_id,
+                    deletion.request_id.as_str(),
+                    deletion.now_ms
+                ),
             )
             .await?;
-        Ok(if changed == 1 {
+        if let Some(replay) = replays.first() {
+            if replay.channel_id != deletion.channel_id
+                || replay.operation_hash != deletion.request_hash
+            {
+                return Ok(ChannelMutation::RequestConflict);
+            }
+            return Ok(ChannelMutation::Replay(()));
+        }
+        if request_ledger_full(self, deletion.actor_user_id, deletion.now_ms).await? {
+            return Ok(ChannelMutation::RequestLedgerFull);
+        }
+        let Some(current) =
+            query_channel(self, deletion.actor_user_id, &deletion.channel_id).await?
+        else {
+            return Ok(ChannelMutation::NotFound);
+        };
+        if current.owner_user_id != deletion.actor_user_id && !deletion.actor_is_admin {
+            return Ok(ChannelMutation::Forbidden);
+        }
+        if current.revision != deletion.expected_revision {
+            return Ok(ChannelMutation::Stale);
+        }
+        let results = self
+            .client()
+            .txn([
+                (
+                    "INSERT INTO library_channel_requests \
+                 (user_id, request_id, operation_hash, channel_id, result_revision, \
+                  created_at_ms, expires_at_ms) \
+                 SELECT $1, $2, $3, $4, 0, $5, $6 \
+                 WHERE EXISTS(SELECT 1 FROM library_channels WHERE id = $4 \
+                   AND definition_revision = $7 AND (owner_user_id = $1 OR $8)) \
+                   AND (SELECT COUNT(*) FROM library_channel_requests WHERE user_id = $1) < $9",
+                    params!(
+                        deletion.actor_user_id,
+                        deletion.request_id.as_str(),
+                        deletion.request_hash.as_str(),
+                        deletion.channel_id.as_str(),
+                        deletion.now_ms,
+                        deletion.now_ms + 86_400_000,
+                        deletion.expected_revision,
+                        deletion.actor_is_admin,
+                        CHANNEL_REQUESTS_PER_USER_MAX
+                    ),
+                ),
+                (
+                    "DELETE FROM library_channels WHERE id = $1 AND definition_revision = $2 \
+                 AND (owner_user_id = $3 OR $4) \
+                 AND EXISTS(SELECT 1 FROM library_channel_requests \
+                   WHERE user_id = $3 AND request_id = $5 AND operation_hash = $6)",
+                    params!(
+                        deletion.channel_id.as_str(),
+                        deletion.expected_revision,
+                        deletion.actor_user_id,
+                        deletion.actor_is_admin,
+                        deletion.request_id.as_str(),
+                        deletion.request_hash.as_str()
+                    ),
+                ),
+            ])
+            .await?;
+        let counts = results
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        Ok(if counts == [1, 1] {
             ChannelMutation::Applied(())
         } else {
             ChannelMutation::Stale
@@ -522,6 +637,14 @@ impl LibraryChannelStore for HiqliteAuthStore {
         favourite: bool,
         now_ms: i64,
     ) -> Result<bool, StoreError> {
+        let Some(channel) = query_channel(self, user_id, channel_id).await? else {
+            return Ok(false);
+        };
+        if channel.owner_user_id != user_id
+            && (channel.visibility != ChannelVisibility::Shared || !channel.enabled)
+        {
+            return Ok(false);
+        }
         let changed = if favourite {
             self.execute(
                 "INSERT INTO library_channel_favourites (user_id, channel_id, created_at_ms) \
@@ -541,9 +664,8 @@ impl LibraryChannelStore for HiqliteAuthStore {
         Ok(changed <= 1)
     }
 
-    async fn library_channel_catalog_page(
+    async fn library_channel_catalog_snapshot(
         &self,
-        after_item_id: i64,
         limit: i64,
     ) -> Result<Vec<ChannelCandidate>, StoreError> {
         let rows = self
@@ -561,11 +683,10 @@ impl LibraryChannelStore for HiqliteAuthStore {
              FROM items i \
              LEFT JOIN items s ON i.kind = 'episode' AND s.id = i.parent_id AND s.kind = 'season' \
              LEFT JOIN items sh ON i.kind = 'episode' AND sh.id = s.parent_id AND sh.kind = 'show' \
-             JOIN files f ON f.id = (SELECT MIN(ef.id) FROM files ef WHERE ef.item_id = i.id \
-               AND ef.probe_json IS NOT NULL AND ef.video_codec IS NOT NULL \
-               AND ef.duration_ms > 0 AND ef.duration_ms <= 86400000) \
-             WHERE i.id > $1 AND i.kind IN ('movie','episode') ORDER BY i.id LIMIT $2",
-                params!(after_item_id, limit.clamp(1, 500)),
+             JOIN files f ON f.item_id = i.id AND f.probe_json IS NOT NULL \
+               AND f.video_codec IS NOT NULL AND f.duration_ms > 0 AND f.duration_ms <= 86400000 \
+             WHERE i.kind IN ('movie','episode') ORDER BY i.id, f.id LIMIT $1",
+                params!(limit.clamp(1, 100_001)),
             )
             .await?;
         rows.into_iter()
@@ -615,6 +736,72 @@ impl LibraryChannelStore for HiqliteAuthStore {
             .collect()
     }
 
+    async fn list_library_channel_refresh_candidates(
+        &self,
+        after_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<LibraryChannel>, StoreError> {
+        self.client()
+            .query_consistent_map::<ChannelRow, _>(
+                format!(
+                    "SELECT {CHANNEL_COLS}, 0 AS favourite FROM library_channels c \
+                     WHERE c.id > $1 AND c.enabled = 1 \
+                       AND COALESCE(json_extract(c.recipe_json, '$.auto_refresh'), 1) = 1 \
+                     ORDER BY c.id LIMIT $2"
+                ),
+                params!(after_id.unwrap_or_default(), limit.clamp(1, 200)),
+            )
+            .await?
+            .into_iter()
+            .map(TryInto::try_into)
+            .collect::<Result<Vec<_>, _>>()
+    }
+
+    async fn prune_library_channel_state(
+        &self,
+        now_ms: i64,
+        limit: i64,
+    ) -> Result<i64, StoreError> {
+        let limit = limit.clamp(1, CHANNEL_PRUNE_BATCH_MAX);
+        let requests = self.execute(
+            "DELETE FROM library_channel_requests WHERE rowid IN (SELECT rowid \
+             FROM library_channel_requests WHERE expires_at_ms <= $1 ORDER BY expires_at_ms LIMIT $2)",
+            params!(now_ms, limit),
+        ).await?;
+        let requests = requests as i64;
+        let remaining = limit.saturating_sub(requests);
+        let abandoned = if remaining > 0 {
+            self.execute(
+                "DELETE FROM library_channel_generations WHERE id IN (SELECT id \
+                 FROM library_channel_generations WHERE state = 'building' \
+                   AND build_claim_expires_ms <= $1 ORDER BY created_at_ms LIMIT $2)",
+                params!(
+                    now_ms.saturating_sub(CHANNEL_ABANDONED_BUILD_RETENTION_MS),
+                    remaining
+                ),
+            )
+            .await? as i64
+        } else {
+            0
+        };
+        let remaining = remaining.saturating_sub(abandoned);
+        let superseded = if remaining > 0 {
+            self.execute(
+                "DELETE FROM library_channel_generations WHERE id IN (SELECT g.id \
+                 FROM library_channel_generations g WHERE g.state = 'ready' AND g.created_at_ms <= $1 \
+                   AND NOT EXISTS(SELECT 1 FROM library_channels c \
+                     WHERE c.active_generation_id = g.id OR c.pending_generation_id = g.id) \
+                 ORDER BY g.created_at_ms LIMIT $2)",
+                params!(now_ms.saturating_sub(CHANNEL_SUPERSEDED_RETENTION_MS), remaining),
+            ).await? as i64
+        } else {
+            0
+        };
+        Ok(requests
+            .saturating_add(abandoned)
+            .saturating_add(superseded))
+    }
+
     async fn claim_library_channel_build(
         &self,
         claim: &LibraryChannelBuildClaim,
@@ -634,6 +821,29 @@ impl LibraryChannelStore for HiqliteAuthStore {
             ChannelBuildMutation::Applied
         } else {
             ChannelBuildMutation::Busy
+        })
+    }
+
+    async fn renew_library_channel_build(
+        &self,
+        channel_id: &str,
+        generation_id: &str,
+        claim_id: &str,
+        now_ms: i64,
+        expires_at_ms: i64,
+    ) -> Result<ChannelBuildMutation, StoreError> {
+        let changed = self
+            .execute(
+                "UPDATE library_channel_generations SET build_claim_expires_ms = $1 \
+                 WHERE id = $2 AND channel_id = $3 AND state = 'building' \
+                   AND build_claim_id = $4 AND build_claim_expires_ms > $5",
+                params!(expires_at_ms, generation_id, channel_id, claim_id, now_ms),
+            )
+            .await?;
+        Ok(if changed == 1 {
+            ChannelBuildMutation::Applied
+        } else {
+            ChannelBuildMutation::Stale
         })
     }
 
@@ -717,6 +927,13 @@ impl LibraryChannelStore for HiqliteAuthStore {
             .client()
             .txn([
                 (
+                    "UPDATE library_channels SET active_generation_id = pending_generation_id, \
+                     active_epoch_ms = pending_epoch_ms, pending_generation_id = NULL, \
+                     pending_epoch_ms = NULL WHERE id = $1 AND pending_generation_id IS NOT NULL \
+                       AND pending_epoch_ms <= $2",
+                    params!(publication.channel_id.as_str(), publication.now_ms),
+                ),
+                (
                     pointer_sql,
                     params!(
                         publication.generation_id.as_str(),
@@ -748,7 +965,7 @@ impl LibraryChannelStore for HiqliteAuthStore {
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
             .map_err(database_error)?;
-        Ok(if counts == [1, 1] {
+        Ok(if counts.len() == 3 && counts[1..] == [1, 1] {
             ChannelBuildMutation::Applied
         } else {
             ChannelBuildMutation::Stale
