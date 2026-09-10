@@ -1,6 +1,6 @@
 # Native Live TV layouts — implementation status and evidence
 
-**Status:** building shared contracts and source metadata · **Effort:**
+**Status:** implementation complete; integration bookkeeping in progress · **Effort:**
 `effort/live-tv-native-layouts` · **Base:** Forgejo `main` at `4cef0da7` ·
 **Updated:** 2026-09-09
 
@@ -15,10 +15,10 @@ being built, and what remains unproved*.
 
 | Package | State | Evidence | Remaining |
 |---|---|---|---|
-| Shared input, metadata, and preference contracts | building | clean agent clone at current `main`; pinned Rust 1.97.1 compile loop established | source-format observation, cross-client DTOs/badges, generated input contract, focused regressions |
-| Apple TV and iOS | queued | existing player, guide reducer, and settings seams identified | three tvOS layouts, persistent player host, scoped remote input, compact touch layouts, Apple build counter and parity record |
-| Google TV and Android | queued | existing Media3 player, guide reducer, and settings seams identified | three TV layouts, exact-once D-pad routing, compact touch layouts, Android build counter and parity record |
-| Integrated promotion to `main` | queued | one effort branch; no feature gates; full suites reserved for the separate sweep | merge current `main`, exact-head compilation, one Astra adversarial review, address findings, ready + `fast-lane`, green promotion gate, merge |
+| Shared input, metadata, and preference contracts | built | bounded FFmpeg input parser/cache; cross-client DTO and badge cases; generated input tables; pinned Rust compile green | final single focused test run |
+| Apple TV and iOS | built | all three saved layouts, anchored/pinned guide, scoped input, compact schedule/grid, Apple build 129; iOS + tvOS compile green | final focused tests; physical Siri Remote unavailable |
+| Google TV and Android | built | all three saved layouts around one movable player, stable UTC-anchor D-pad navigation, false-on-delegate input, compact schedule/grid, Android build 79; Kotlin compile green | final focused tests; physical Google TV unavailable |
+| Integrated promotion to `main` | review queued | draft Forgejo PR [#229](http://192.168.4.7:3000/noirr/plurx/pulls/229); one effort branch; no feature gates; full suites reserved for the separate sweep | one Astra adversarial review, address findings, one focused test pass, ready + `fast-lane`, green promotion gate, merge |
 
 ## Contract — presentation moves, playback does not
 
@@ -42,6 +42,12 @@ hidden eligibility test is added.
 | 2026-09-09 | `main` at `4cef0da7` | `rustup run 1.97.1 rustc --version` | pinned compiler available: `rustc 1.97.1 (8bab26f4f 2026-07-14)` |
 | 2026-09-09 | `main` at `4cef0da7` | `rustup run 1.97.1 cargo check -p plurxd --all-targets` | passed in 1m 22s as the pre-edit compiler baseline |
 | 2026-09-09 | initial status-page change | `python3 -m unittest tests.operations.test_docs_index` | 4 passed in 0.925s before the instruction to reserve all further tests for the final integrated candidate; this check will not be repeated during implementation |
+| 2026-09-09 | implementation worktree | `rustup run 1.97.1 cargo check -p plurxd --all-targets` | passed in 31.24s; retained metadata tests were compiled but not executed |
+| 2026-09-09 | implementation worktree | `make apple-build` | iOS and tvOS compile-only builds passed; no simulator tests ran |
+| 2026-09-09 | implementation worktree | `./gradlew --no-daemon :app:compileDebugKotlin` | passed in 20s; no JVM or instrumentation tests ran |
+| 2026-09-09 | implementation worktree after D-pad wiring | `./gradlew --no-daemon :app:compileDebugKotlin` | passed in 9s; main sources only, with the retained real-KeyEvent instrumentation case neither compiled nor executed by this command |
+| 2026-09-09 | pre-review integrated tree on current `main` | `rustup run 1.97.1 cargo fmt --all -- --check` and `cargo clippy -p plurxd --all-targets -- -D warnings` | passed; Clippy completed in 1m 13s |
+| 2026-09-09 | pre-review integrated tree on current `main` | `make apple-build` | exact-tree iOS and tvOS compile-only builds passed in 13s |
 
 Compilation and static contracts are retained here as they pass. Physical
 Apple TV/Siri Remote and Google TV/D-pad walkthroughs will be recorded with
