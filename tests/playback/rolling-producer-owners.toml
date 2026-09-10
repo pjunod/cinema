@@ -10,7 +10,8 @@ module_root = "crates/plurxd/src"
 [[symbols]]
 id = "advancing-progress-stall"
 pattern = "PROGRESS_STALL"
-expected_occurrences = 9
+# +1 for the first-media publication deadline used by the HEVC init validator.
+expected_occurrences = 10
 kind = "recovery_timer"
 replacement = "the sole actor-owned rolling producer progress budget before and after first media"
 
@@ -22,7 +23,8 @@ pattern = "replacing_child"
 # leave the failed producer where the actor left it; the regression asserts
 # the mask is still clear at that point. No production reader was added and
 # nothing new elects a replacement.
-expected_occurrences = 30
+# +1 for the actor-transition regression assertion.
+expected_occurrences = 31
 kind = "recovery_election"
 replacement = "retained process-replacement serialization projection; actor decisions and exact attempts own transcode prepublication"
 
@@ -184,7 +186,8 @@ pattern = "tokio::time::sleep\\("
 # background producer that yields only after a live waiter is registered and
 # only at its next checkpoint, so a single non-blocking try turns "wait two
 # seconds" into "destroy the session".
-expected_occurrences = 37
+# +1 for the bounded test wait while the actor records the replacement attempt.
+expected_occurrences = 38
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
 
@@ -284,7 +287,7 @@ expected_occurrences = 0
 [[module_symbols]]
 id = "legacy-progress-stall"
 pattern = "PROGRESS_STALL"
-expected_occurrences = 9
+expected_occurrences = 10
 
 [[module_symbols]]
 id = "legacy-watchdog-poll"
@@ -311,7 +314,7 @@ id = "legacy-replacement-mask"
 pattern = "replacing_child"
 # 29 -> 30 with M5c3; the module-wide twin of `replacement-mask-flag` above,
 # and the same single test-only read.
-expected_occurrences = 30
+expected_occurrences = 31
 
 [[module_symbols]]
 id = "legacy-downgrade-owner"
@@ -519,7 +522,7 @@ expected_occurrences = 0
 [[module_symbols]]
 id = "m4-prepublication-ownership-projection"
 pattern = "actor_prepublication_producer"
-expected_occurrences = 18
+expected_occurrences = 21
 
 [[module_symbols]]
 id = "m4-decision-wake"
@@ -579,7 +582,7 @@ expected_occurrences = 4
 [[module_symbols]]
 id = "m4-typed-published-producer-end"
 pattern = "ProducerEnded"
-expected_occurrences = 21
+expected_occurrences = 22
 
 [[module_symbols]]
 id = "m4-bounded-terminal-command-admission"
@@ -1728,7 +1731,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # 711 -> 717: the review adds total deadlines for the shared probe, password
 # verification, and guide parsing, plus bounded test observations. These bounds
 # cancel no producer; blocking work keeps its admission until the OS task ends.
-expected_occurrences = 720
+# +4 for the bounded init/first-fragment publication reads added by the repair.
+expected_occurrences = 724
 
 [[module_structures]]
 id = "bare-time-constructor"
