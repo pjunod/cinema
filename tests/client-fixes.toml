@@ -1027,7 +1027,7 @@ test_anchor = "testPlatformRestartMarkerStoreCanRoundTrip"
 id = "android.streaming-promotion-build-counter"
 commits = ["fdbed69e"]
 source = "clients/android/app/build.gradle.kts"
-source_anchor = "versionCode = 78"
+source_anchor = "versionCode ="
 test = "tests/validation/test_mobile_versions.py"
 test_anchor = "test_android_counter_the_target_already_ships_fails_against_the_target"
 
@@ -1037,7 +1037,7 @@ test_anchor = "test_android_counter_the_target_already_ships_fails_against_the_t
 id = "live-tv.mobile-release-build-counters"
 commits = ["b2834adb"]
 source = "clients/android/app/build.gradle.kts"
-source_anchor = "versionCode = 78"
+source_anchor = "versionCode ="
 test = "tests/validation/test_mobile_versions.py"
 test_anchor = "test_each_changed_app_requires_only_its_own_build_counter"
 
@@ -1052,3 +1052,25 @@ source = "clients/apple/Sources/LiveTvView.swift"
 source_anchor = "private struct LiveTvChannelButtonStyle: ButtonStyle"
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "testTheTenFootSurfaceKeepsSomethingFocusableWhileTheOverlayIsHidden"
+
+[[fixes]]
+# Logout owns the captured server, bearer, and auth generation. A late
+# response cannot clear a newer login, and every outcome clears the old local
+# session only when that exact generation still owns it.
+id = "web.logout-captured-session-generation"
+commits = ["b1335e32"]
+source = "crates/plurxd/src/web/index.html"
+source_anchor = 'async function logout({revoke=true,notice=""}={})'
+test = "tests/web/page-read-budget.test.js"
+test_anchor = "logout revokes the captured bearer and cannot clear a newer login"
+
+[[fixes]]
+# Android local credential clearing survives cancellation, remains guarded by
+# the captured origin and bearer, and does not let optional package deletion
+# delay leaving the authenticated session.
+id = "android.logout-cancellation-safe-local-clear"
+commits = ["acc2acda"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/AppViewModel.kt"
+source_anchor = "withContext(NonCancellable)"
+test = "tests/operations/test_evidence_workflows.py"
+test_anchor = "test_native_sign_out_is_bounded_to_the_captured_session"

@@ -649,7 +649,7 @@ paths = [
   "crates/plurx-core/tests/decoder_selection.rs",
   "crates/plurx-pgs/**",
   "fuzz/**",
-  "crates/plurxd/src/{admission,copyseg,decode_facts,decoder_health,delivery,dvpipe,ffmpeg,fragindex,fragment_index_cluster,meter,pgs_overlay,pipeprobe,playback_control,playstart,prodexec,prodrun,prodsched,produce,progressive,renditiondir,subtitles,titlestore,transcode,vodencode,vodencode_manager_tests,vodencode_tests,vodgen,vodserve,waitpool}.rs",
+  "crates/plurxd/src/{admission,bounded_process,copyseg,decode_facts,decoder_health,delivery,dvpipe,ffmpeg,fragindex,fragment_index_cluster,meter,pgs_overlay,pipeprobe,playback_control,playstart,prodexec,prodrun,prodsched,produce,progressive,renditiondir,subtitles,titlestore,transcode,vodencode,vodencode_manager_tests,vodencode_tests,vodgen,vodserve,waitpool}.rs",
   "crates/plurxd/src/manifest_cache.rs",
   "crates/plurxd/src/media_sessions.rs",
   "crates/plurxd/src/http/internal_media_sessions.rs",

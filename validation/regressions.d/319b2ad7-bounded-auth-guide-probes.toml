@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["319b2ad7"]
+points = ["identity.access", "live-tv.integration", "playback.pipeline"]
+checks = ["rust-gate", "rust-gate-ci", "security-boundaries", "resource-bounds", "operations-contract"]
+reason = "Password work is covered by every_password_route_has_one_encoded_byte_ceiling and the bounded admission tests; guide publication ordering is pinned by an_older_guide_completion_cannot_replace_a_newer_publication plus the cancellation and retained-permit regressions; startup probes are pinned by excessive_output_is_drained_and_retained_at_the_cap, a_hanging_process_is_killed_within_its_wall_time, and a_descendant_cannot_hold_probe_pipes_past_the_wall_time. Removing admission, byte ceilings, generation fencing, total deadlines, group reaping, or pipe draining makes those checks fail."

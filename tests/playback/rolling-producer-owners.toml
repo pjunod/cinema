@@ -1390,7 +1390,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # diagnostic reader task feeds an advisory selected-stream fault and is joined
 # before the test returns. It owns no producer or process and cannot outlive
 # its fixture.
-expected_occurrences = 472
+# 472 -> 479 for the bounded review work: two joined pipe drains belong to the
+# exact short-lived probe child; one Drop fallback owns that child until reap;
+# three blocking authentication/guide parsers retain their admissions until
+# their OS work returns; and one test-only parser actor is awaited. None is a
+# competing rolling producer or playback clock.
+expected_occurrences = 479
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -1446,7 +1451,11 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # +1 after the immutable-input review: spawn_piped_output is the daemon-owned
 # stdout variant of the existing extractor owner. Its child stays kill-on-drop,
 # its copy and diagnostics are joined, and every terminal path awaits reap.
-expected_occurrences = 51
+# 51 -> 53: the shared bounded-probe helper performs the one real child spawn;
+# Live TV configuration uses one explicitly bounded Command spawn in its
+# startup validation. Each child is process-group killed and awaited by the
+# caller before its ownership is released.
+expected_occurrences = 53
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -1708,7 +1717,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # 710 -> 711 with the HEVC argv fixture correction: one test-only 30-second
 # deadline owns the tiny libx265 subprocess and fails the regression instead of
 # allowing a contended fixture encode to consume the fast-Rust job deadline.
-expected_occurrences = 711
+# 711 -> 717: the review adds total deadlines for the shared probe, password
+# verification, and guide parsing, plus bounded test observations. These bounds
+# cancel no producer; blocking work keeps its admission until the OS task ends.
+expected_occurrences = 717
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -1786,7 +1798,10 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # source fixtures; and one finite FFmpeg call creates an oversized attachment.
 # Shipped probes use bounded_command_output or BoundedDiagnosticChild; every
 # fixture awaits kill-on-drop output or the exact bounded child owner.
-expected_occurrences = 105
+# 105 -> 104: two direct decoder-health commands move behind one shared bounded
+# command construction. The replacement owns output caps, a total deadline,
+# process-group termination, and confirmed reap in one place.
+expected_occurrences = 104
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -1960,7 +1975,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # +2 net after the immutable-input review: the daemon-owned piped child adds an
 # explicit spawn and two finite media fixtures add awaited output calls, while
 # burn extraction removes its old direct output call in favor of that owner.
-expected_occurrences = 310
+# 310 -> 311: the bounded helper exposes one explicit child spawn in place of
+# implicit command output. HTTP and replicated-state `.status()` lookalikes are
+# unchanged; the new launch remains owned through exit or kill-and-reap.
+expected_occurrences = 311
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -2031,7 +2049,11 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # +2 after the immutable-input review: bounded sidecar output explicitly
 # start-kills on a cap or daemon I/O error and awaits the exact child before
 # returning. Ordinary completion uses the same wait.
-expected_occurrences = 346
+# 346 -> 352: the shared probe owner waits on ordinary exit, kill-and-reap, and
+# Drop fallback, while its two drains are joined before success. The remaining
+# matched waits are bounded test synchronization; no path releases admission
+# before its child or blocking work has actually ended.
+expected_occurrences = 352
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
@@ -2055,7 +2077,10 @@ pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3
 # off the merge rather than added up.
 # +2 final encoded review: test-only libc::kill(pid, 0) checks after confirmed
 # reaping. These observe exact fixture PIDs and deliver no signal.
-expected_occurrences = 39
+# 39 -> 42: the bounded helper sends SIGKILL to its owned process group from
+# explicit cleanup and Drop, and its descendant regression checks that the
+# total wall-time owner cannot be held open by a background child.
+expected_occurrences = 42
 
 [[module_structures]]
 id = "kill-on-drop-construction"
@@ -2093,7 +2118,9 @@ pattern = "kill_on_drop\\s*\\("
 # normal paths still await output or confirmed child reap.
 # 66 -> 67 with the HEVC argv fixture correction: the same awaited test-only
 # subprocess is killed if its owning deadline or test future is dropped.
-expected_occurrences = 67
+# 67 -> 68: the one shared short-lived probe command is kill-on-drop as the
+# cancellation backstop; normal and timed paths still explicitly reap it.
+expected_occurrences = 68
 
 [[module_structures]]
 id = "rolling-supervisor-construction"

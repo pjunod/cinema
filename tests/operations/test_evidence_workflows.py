@@ -141,7 +141,7 @@ class EvidenceWorkflowCase(unittest.TestCase):
             "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
         )
         android_poll = android.split("private fun pollPreparedReplacement()", 1)[1].split(
-            "private fun commitPreparedReplacement()", 1
+            "private fun commitPreparedReplacement", 1
         )[0]
         self.assertIn("preparedAlignedFilmMs", android_poll)
         self.assertIn("successor.seekTo(successorAttachPositionMs", android_poll)
@@ -165,7 +165,7 @@ class EvidenceWorkflowCase(unittest.TestCase):
         self.assertIn("preparedRollbackReopen", rollback)
         self.assertIn("predecessor.player.playbackParameters", rollback)
         self.assertIn("predecessor.player.playWhenReady", rollback)
-        commit = android.split("private fun commitPreparedReplacement()", 1)[1].split(
+        commit = android.split("private fun commitPreparedReplacement", 1)[1].split(
             "fun collectRetiredPlayer()", 1
         )[0]
         self.assertIn("previous.playbackParameters", commit)
@@ -201,15 +201,18 @@ class EvidenceWorkflowCase(unittest.TestCase):
         android = self.read(
             "clients/android/app/src/main/java/tv/plurx/app/ui/AppViewModel.kt"
         )
-        self.assertIn("val capturedOrigin = Session.origin", android)
-        self.assertIn("val capturedToken = Session.token", android)
-        self.assertIn("withTimeoutOrNull(5_000L)", android)
-        self.assertIn("Net.profileClient(capturedToken)", android)
-        self.assertIn("withContext(NonCancellable)", android)
-        self.assertIn("Session.origin == capturedOrigin", android)
-        self.assertIn("Session.token == capturedToken", android)
-        self.assertIn("OfflineDownloads.removeProfile(instance, user)", android)
-        self.assertNotIn("error.code() == 401 || error.code() == 403", android)
+        logout = android.split("private fun logout(removeDownloads: Boolean)", 1)[1].split(
+            "fun changeServer()", 1
+        )[0]
+        self.assertIn("val capturedOrigin = Session.origin", logout)
+        self.assertIn("val capturedToken = Session.token", logout)
+        self.assertIn("withTimeoutOrNull(5_000L)", logout)
+        self.assertIn("Net.profileClient(capturedToken)", logout)
+        self.assertIn("withContext(NonCancellable)", logout)
+        self.assertIn("Session.origin == capturedOrigin", logout)
+        self.assertIn("Session.token == capturedToken", logout)
+        self.assertIn("OfflineDownloads.removeProfile(instance, user)", logout)
+        self.assertNotIn("error.code() == 401 || error.code() == 403", logout)
 
     def test_android_final_alignment_completes_before_surface_transfer(self) -> None:
         controller = self.read(
