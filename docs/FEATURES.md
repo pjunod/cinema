@@ -466,7 +466,7 @@ not a DVR: nothing is recorded, nothing is scheduled, and nothing is kept.
   and its tuner is in use.
 
 - **One device, named by hand.** An administrator types the tuner's private
-  IPv4 into Settings → Developer. There is no broadcast discovery: a server
+  IPv4 into Settings → Live TV. There is no broadcast discovery: a server
   inside a Docker or VLAN network namespace cannot promise it will hear a
   multicast reply, and a "Find my tuner" button that silently finds nothing is
   worse than a field you fill in. The address must be private or link-local —
@@ -696,6 +696,16 @@ Kodi-family Plex clients (Composite, PKC), `python-plexapi`, and Home Assistant
 browse and play directly against plurx — validated end-to-end with
 `python-plexapi`. plex.tv is never contacted. Detail: [CLIENTS.md](CLIENTS.md),
 [ARCHITECTURE.md](ARCHITECTURE.md) §5.
+
+**Web settings:** Live TV has its own Content section for tuner enablement,
+owner recovery, and guide configuration. Playback owns experimental prepared
+quality switching ahead of the existing streaming defaults. Cluster owns the
+automatic transport-recovery guidance. Developer groups protocol
+compatibility, this-browser preparation, decoder experiments, and HLS delivery
+comparisons. Each server card saves only the setting it shows; the browser
+override saves locally. Readiness and device qualification are expandable,
+textual, and advisory: missing or failed evidence never disables a toggle,
+rejects its Save, or replaces the saved choice.
 
 **Operations:** `/healthz` (liveness), `/readyz` (storage reachable), Prometheus
 `/metrics` (uptime, streams, library/user counts, and bounded offline

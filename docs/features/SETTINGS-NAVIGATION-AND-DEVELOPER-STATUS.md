@@ -17,7 +17,7 @@ the settings navigation and Developer-page redesign.
 | Navigation and control ownership | complete | Live TV owns tuner and guide cards · Playback owns quality switching · Cluster owns transport guidance · Developer owns compatibility and experiments |
 | Readiness layout and responsive treatment | complete | Shared nonshrinking rows · neutral static throughput support · closed native disclosures · deliberate stacking below 360 CSS px |
 | Interaction and stale-response correctness | complete | Independent save payloads · returned-value badges · Live TV route fencing · card-local repaint and sibling-draft preservation |
-| Current-reference documentation | queued | `FEATURES.md` and `API.md` remain to be updated with final behavior |
+| Current-reference documentation | complete | `FEATURES.md` names each control owner and advisory semantics · `API.md` names all three readiness consumers and the moved fencing action |
 | Actual-app visual evidence | queued | Desktop, narrow, zoomed, and expanded-readiness captures remain to be recorded |
 | Adversarial review | queued | Exactly one review will run only after the branch is ready to merge |
 | Fast lane | queued | Runs only after review findings are addressed and the PR is marked ready |
