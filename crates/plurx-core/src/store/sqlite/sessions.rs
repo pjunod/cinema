@@ -961,7 +961,7 @@ impl MediaSessionStore for SqliteStore {
                         AND owner_node_id = ?6
                         AND ((state = 'starting' AND claim_expires_at_ms > ?7)
                           OR (state = 'resolved' AND response_json = ?8))
-                        AND (json_type(?9, '$.library_channel') IS NULL OR EXISTS (
+                        AND (COALESCE(json_type(?9, '$.library_channel'), 'null') = 'null' OR EXISTS (
                           SELECT 1 FROM library_channel_session_recipes
                            WHERE user_id = ?1 AND request_id = ?2 AND incarnation_id = ?3
                              AND recipe_json = ?9))",

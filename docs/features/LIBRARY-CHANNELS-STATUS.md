@@ -1,6 +1,6 @@
 # Library channels status — what is built and what remains
 
-**Status:** single review addressed · fast lane pending · **Effort:**
+**Status:** single review addressed · corrective fast-lane rerun pending · **Effort:**
 `effort/library-channels` · **Updated:** 2026-09-10 · **Base:** `7fabfbf2`
 
 Companion to [FEATURES.md](../FEATURES.md) (what Plurx supports),
@@ -19,7 +19,7 @@ proved, and what remains?*
 | M3 web | built; integration compile passed | responsive paginated browse/guide, three-step resumable editor, stable preview seed, admin management, fenced following playback, watch-from-start/return, and advisory Developer enablement |
 | M4 Apple | built; iOS and tvOS compile passed | native paginated guide, three persisted tvOS layouts, iPhone/iPad resumable preview/authoring from navigation or title detail, finite playback control, server-monotonic following, and ordinary watch-from-start/return; build 130 |
 | M5 Android | built; Android APK compile passed | native paginated guide, phone/tablet resumable authoring from navigation or title detail, three Google TV layouts, finite playback control, server-monotonic following, and ordinary watch-from-start/return; versionCode 79 |
-| M6 promotion | review addressed | exactly one adversarial review completed; author fixes compile; next is the current-head main-only fast lane and merge |
+| M6 promotion | corrective candidate ready | exactly one adversarial review completed; the first fast-lane run exposed promotion-census, ordinary-session ownership, replicated schema parsing, and sole-voter readdress bootstrap defects; each is fixed with focused evidence, and the 78-capture web structural baseline is current; next is the current-head main-only fast-lane rerun and merge |
 
 ## Current decision — the merged Live TV guide is the UI seam
 
@@ -75,12 +75,22 @@ from the playing occurrence. The diagnostic surface adds channel/programme
 activity plus bounded build, queue, catalogue, conflict, resolve, cache, and
 unavailable-slot metrics.
 
+The first promotion run then found four integration defects that compilation
+could not prove. Ordinary VOD requests now treat an absent or JSON-null channel
+purpose identically; channel refresh SQL binds placeholders in first-use order;
+the replicated channel migration keeps trigger bodies intact inside one atomic
+transaction; and a readdressed sole voter materializes a transferable database
+snapshot before its recovery marker is cleared and peers may join. The static
+schema, transaction, Store, import, readiness, downgrade, and UI inventories
+are updated to describe the shipped surface instead of the pre-feature tree.
+
 ## Evidence limits — compilation is not a device claim
 
-- Pinned Rust workspace check, iOS/tvOS generic-simulator compilation, and the
-  Android debug APK build pass on the implementation head. The repository's
-  requested full test suites were deliberately not run; the Main promotion
-  gate runs once, after the one review is addressed.
+- Pinned Rust workspace check and Clippy, iOS/tvOS generic-simulator
+  compilation, and the Android debug APK build pass on the implementation
+  head. Focused corrective contracts and the 78-capture UI baseline pass. The
+  repository's full device and sweep suites were deliberately not run; the
+  current-head Main promotion gate owns promotion evidence.
 - Physical two-device convergence, tune-to-frame and transition latency,
   phone/tablet rotation and PiP, and Siri Remote/D-pad focus observations need
   the named devices. They are not inferred from compilation and remain the

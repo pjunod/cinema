@@ -1272,6 +1272,13 @@ mod tests {
                 "DROP TRIGGER IF EXISTS cache_publication_generation_guard;
                  DROP TRIGGER IF EXISTS offline_claim_lifecycle_guard;
                  DROP TRIGGER IF EXISTS offline_recovery_guard;
+                 DROP TRIGGER IF EXISTS library_channel_session_recipes_request_delete;
+                 DROP TABLE IF EXISTS library_channel_session_recipes;
+                 DROP TABLE IF EXISTS library_channel_requests;
+                 DROP TABLE IF EXISTS library_channel_favourites;
+                 DROP TABLE IF EXISTS library_channel_entries;
+                 DROP TABLE IF EXISTS library_channel_generations;
+                 DROP TABLE IF EXISTS library_channels;
                  ALTER TABLE transcode_cache_locations DROP COLUMN publication_generation;
                  ALTER TABLE offline_packages DROP COLUMN alternate_recipe_hash;
                  ALTER TABLE offline_packages DROP COLUMN decoder_recovery_state;
@@ -1380,7 +1387,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 10] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 12] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1395,6 +1402,8 @@ mod tests {
             // existed. The `ADD COLUMN` text belongs to v52 alone.
             "ADD COLUMN recovery_epoch",
             "ADD COLUMN claim_generation",
+            "CREATE TABLE IF NOT EXISTS library_channels",
+            "CREATE INDEX IF NOT EXISTS library_channels_build_state",
         ];
 
         assert!(

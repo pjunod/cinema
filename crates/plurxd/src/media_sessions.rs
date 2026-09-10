@@ -980,7 +980,7 @@ pub(crate) struct RemoteStartRequest {
     /// This is in the worker envelope, not bolted onto the public response
     /// after placement, so takeover cannot silently turn a channel play into
     /// ordinary VOD.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library_channel: Option<serde_json::Value>,
     pub request: SessionRequest,
 }

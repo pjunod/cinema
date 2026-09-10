@@ -1550,7 +1550,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                          AND owner_node_id = $6
                          AND ((state = 'starting' AND claim_expires_at_ms > $11)
                            OR (state = 'resolved' AND response_json = $9))
-                         AND (json_type($8, '$.library_channel') IS NULL OR EXISTS (
+                         AND (COALESCE(json_type($8, '$.library_channel'), 'null') = 'null' OR EXISTS (
                            SELECT 1 FROM library_channel_session_recipes
                             WHERE user_id = $3 AND request_id = $15 AND incarnation_id = $1
                               AND recipe_json = $8))))
@@ -4940,7 +4940,7 @@ mod tests {
             "an already-current pointer must not rewrite its update timestamp"
         );
         assert!(
-            source.contains("OR (state = 'resolved' AND response_json = $9)))"),
+            source.contains("OR (state = 'resolved' AND response_json = $9))"),
             "an exact resolved request must remain eligible for read-only replay"
         );
         assert!(

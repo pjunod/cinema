@@ -513,15 +513,15 @@ impl LibraryChannelStore for SqliteStore {
                  WHERE c.id > ?1 AND c.enabled = 1 \
                    AND COALESCE(json_extract(c.recipe_json, '$.auto_refresh'), 1) = 1 \
                    AND (COALESCE(c.last_auto_build_ms, c.build_last_attempt_ms) IS NULL \
-                     OR COALESCE(c.last_auto_build_ms, c.build_last_attempt_ms) <= ?3) \
-                 ORDER BY c.id LIMIT ?2"
+                     OR COALESCE(c.last_auto_build_ms, c.build_last_attempt_ms) <= ?2) \
+                 ORDER BY c.id LIMIT ?3"
             );
             let mut statement = conn.prepare(&sql)?;
             let rows = statement.query_map(
                 params![
                     after_id,
-                    limit.clamp(1, 200),
-                    now_ms.saturating_sub(15 * 60 * 1_000)
+                    now_ms.saturating_sub(15 * 60 * 1_000),
+                    limit.clamp(1, 200)
                 ],
                 channel_from_row,
             )?;

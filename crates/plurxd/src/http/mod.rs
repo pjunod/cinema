@@ -4867,6 +4867,7 @@ mod tests {
         assert_eq!(
             ids,
             vec![
+                "library_channels",
                 "cluster_transport_recovery",
                 "playback_control_protocol_v1",
                 "prepared_quality_handoff",
@@ -4898,14 +4899,17 @@ mod tests {
             }
         }
 
-        // The server-prime row describes this build and is now the one fact a
-        // single node can prove without a deployment receipt.
+        // These two rows describe facts this single-node fixture can prove:
+        // the authoritative catalogue responds and server-side handoff exists.
         let green = seen
             .iter()
             .filter(|(_, status)| status.as_str() == "met")
             .map(|(id, _)| id.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(green, vec!["server_preparation_is_real"]);
+        assert_eq!(
+            green,
+            vec!["authoritative_store", "server_preparation_is_real"]
+        );
         // Order-independent because no row reachable here has a `met` branch a
         // sibling test could reach: the retained engine's two rows refuse
         // `met` by construction, and everything else is a roster or artifact

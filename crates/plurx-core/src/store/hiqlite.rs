@@ -6013,9 +6013,9 @@ mod tests {
             "v33 must advance exactly one step to the offline recovery-claim schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 29,
+            AUTH_SCHEMA_MIGRATION_SOURCE + 31,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v34 step"
+            "this implementation contains every additive v5→v36 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,

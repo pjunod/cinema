@@ -2799,7 +2799,7 @@ mod tests {
         assert!(names.contains(&"timeline_annotation_sets"));
         assert!(names.contains(&"timeline_manual_overrides"));
         assert!(names.contains(&"media_playback_desired"));
-        assert_eq!(names.len(), 40, "review every imported durable table");
+        assert_eq!(names.len(), 46, "review every imported durable table");
     }
 
     /// A source from before the pointer fence has no revision to attribute its

@@ -18,40 +18,78 @@ use crate::library_channels::{
 };
 
 pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), StoreError> {
-    validate_sql(LIBRARY_CHANNELS_SCHEMA)?;
     client
-        .batch(LIBRARY_CHANNELS_SCHEMA)
+        .txn(migration_statements()?)
         .await
-        .map_err(database_error)?
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()
         .map_err(database_error)?;
     Ok(())
 }
 
 pub(super) fn migration_statements() -> Result<Vec<(String, hiqlite::Params)>, StoreError> {
-    LIBRARY_CHANNELS_SCHEMA
-        .split(';')
-        .map(str::trim)
-        .filter(|statement| !statement.is_empty())
+    split_schema_statements(LIBRARY_CHANNELS_SCHEMA)
+        .into_iter()
         .map(|statement| {
-            validate_sql(statement)?;
-            Ok((statement.to_owned(), params!()))
+            validate_sql(&statement)?;
+            Ok((statement, params!()))
         })
         .collect()
 }
 
 pub(super) fn build_state_migration_statements(
 ) -> Result<Vec<(String, hiqlite::Params)>, StoreError> {
-    LIBRARY_CHANNEL_BUILD_STATE_SCHEMA
-        .split(';')
-        .map(str::trim)
-        .filter(|statement| !statement.is_empty())
+    split_schema_statements(LIBRARY_CHANNEL_BUILD_STATE_SCHEMA)
+        .into_iter()
         .map(|statement| {
-            validate_sql(statement)?;
-            Ok((statement.to_owned(), params!()))
+            validate_sql(&statement)?;
+            Ok((statement, params!()))
         })
         .collect()
+}
+
+/// Split the shared SQLite migration into the individual writes hiqlite's
+/// transaction API requires. A trigger body contains its own semicolon, so a
+/// plain `split(';')` silently truncates it before replication.
+fn split_schema_statements(schema: &str) -> Vec<String> {
+    let mut statements = Vec::new();
+    let mut current = String::new();
+    let mut in_trigger = false;
+
+    for line in schema.lines() {
+        let trimmed = line.trim();
+        if current.is_empty() && trimmed.is_empty() {
+            continue;
+        }
+        if !current.is_empty() {
+            current.push('\n');
+        }
+        current.push_str(line);
+
+        if !in_trigger
+            && current
+                .trim_start()
+                .to_ascii_uppercase()
+                .starts_with("CREATE TRIGGER")
+        {
+            in_trigger = true;
+        }
+        let complete = if in_trigger {
+            trimmed.eq_ignore_ascii_case("END;")
+        } else {
+            trimmed.ends_with(';')
+        };
+        if complete {
+            let statement = current.trim().strip_suffix(';').unwrap_or(current.trim());
+            statements.push(statement.to_owned());
+            current.clear();
+            in_trigger = false;
+        }
+    }
+
+    debug_assert!(
+        current.trim().is_empty(),
+        "schema statement lacks a terminator"
+    );
+    statements
 }
 
 const CHANNEL_COLS: &str = "c.id, c.owner_user_id, c.name, c.description, c.visibility, \
@@ -797,13 +835,13 @@ impl LibraryChannelStore for HiqliteAuthStore {
                      WHERE c.id > $1 AND c.enabled = 1 \
                        AND COALESCE(json_extract(c.recipe_json, '$.auto_refresh'), 1) = 1 \
                        AND (COALESCE(c.last_auto_build_ms, c.build_last_attempt_ms) IS NULL \
-                         OR COALESCE(c.last_auto_build_ms, c.build_last_attempt_ms) <= $3) \
-                     ORDER BY c.id LIMIT $2"
+                         OR COALESCE(c.last_auto_build_ms, c.build_last_attempt_ms) <= $2) \
+                     ORDER BY c.id LIMIT $3"
                 ),
                 params!(
                     after_id.unwrap_or_default(),
-                    limit.clamp(1, 200),
-                    now_ms.saturating_sub(15 * 60 * 1_000)
+                    now_ms.saturating_sub(15 * 60 * 1_000),
+                    limit.clamp(1, 200)
                 ),
             )
             .await?
@@ -1206,5 +1244,27 @@ impl LibraryChannelStore for HiqliteAuthStore {
             created_at_ms: row.created_at_ms,
             entries,
         }))
+    }
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::migration_statements;
+
+    #[test]
+    fn migration_keeps_trigger_body_in_one_statement() {
+        let statements = migration_statements().expect("valid replicated migration");
+        let trigger = statements
+            .iter()
+            .map(|(statement, _)| statement)
+            .find(|statement| {
+                statement.starts_with(
+                    "CREATE TRIGGER IF NOT EXISTS library_channel_session_recipes_request_delete",
+                )
+            })
+            .expect("request cleanup trigger");
+
+        assert!(trigger.contains("DELETE FROM library_channel_session_recipes"));
+        assert!(trigger.ends_with("END"));
     }
 }

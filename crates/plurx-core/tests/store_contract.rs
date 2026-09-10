@@ -272,6 +272,24 @@ const LIBRARY_METHODS: &[&str] = &[
     "get_library",
     "list_libraries",
 ];
+const LIBRARY_CHANNEL_METHODS: &[&str] = &[
+    "list_library_channels",
+    "get_library_channel",
+    "create_library_channel",
+    "update_library_channel",
+    "delete_library_channel",
+    "set_library_channel_favourite",
+    "library_channel_catalog_snapshot",
+    "list_library_channel_refresh_candidates",
+    "prune_library_channel_state",
+    "claim_library_channel_build",
+    "renew_library_channel_build",
+    "stage_library_channel_entries",
+    "publish_library_channel_generation",
+    "fail_library_channel_build",
+    "complete_library_channel_build_without_publication",
+    "read_library_channel_generation",
+];
 const MEDIA_METHODS: &[&str] = &[
     "item_by_external_id",
     "find_movie",
@@ -505,6 +523,7 @@ const MEDIA_SESSION_METHODS: &[&str] = &[
     "validation_playback_pointer_desired_revision",
     "validation_write_legacy_playback_pointer",
     "claim_media_session_request",
+    "record_library_channel_session_recipe",
     "assign_media_session_request_owner",
     "activate_media_session",
     "settle_media_session_activation",
@@ -14528,6 +14547,13 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
              DROP TRIGGER IF EXISTS cache_publication_generation_guard;
              DROP TRIGGER IF EXISTS offline_claim_lifecycle_guard;
              DROP TRIGGER IF EXISTS offline_recovery_guard;
+             DROP TRIGGER IF EXISTS library_channel_session_recipes_request_delete;
+             DROP TABLE IF EXISTS library_channel_session_recipes;
+             DROP TABLE IF EXISTS library_channel_requests;
+             DROP TABLE IF EXISTS library_channel_favourites;
+             DROP TABLE IF EXISTS library_channel_entries;
+             DROP TABLE IF EXISTS library_channel_generations;
+             DROP TABLE IF EXISTS library_channels;
              ALTER TABLE transcode_cache_locations DROP COLUMN publication_generation;
              ALTER TABLE offline_packages DROP COLUMN alternate_recipe_hash;
              ALTER TABLE offline_packages DROP COLUMN decoder_recovery_state;
@@ -16277,6 +16303,7 @@ fn contract_inventory_matches_every_store_method() {
         DV_CONVERSION_METHODS,
         USER_METHODS,
         LIBRARY_METHODS,
+        LIBRARY_CHANNEL_METHODS,
         MEDIA_METHODS,
         WATCH_METHODS,
         READING_METHODS,
@@ -16305,7 +16332,7 @@ fn contract_inventory_matches_every_store_method() {
     // Both independently reviewed method sets survive this integration. Read
     // the total from the merged trait rather than carrying either parent's
     // count across the promotion merge.
-    assert_eq!(declared.len(), 311, "review the Store method count");
+    assert_eq!(declared.len(), 328, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
