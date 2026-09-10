@@ -188,15 +188,15 @@ class LiveTvGuideTest {
             anchorTime = 3_000,
             direction = LiveTvGuideFocusDirection.Down,
         )
-        assertEquals(2_700, first.target?.programmeStart)
+        assertEquals(2_700L, first.target?.programmeStart)
         val second = LiveTvGuideReducer.moveGuideFocus(
             layout,
             checkNotNull(first.target),
             anchorTime = first.anchorTime,
             direction = LiveTvGuideFocusDirection.Down,
         )
-        assertEquals(2_400, second.target?.programmeStart)
-        assertEquals(3_000, second.anchorTime)
+        assertEquals(2_400L, second.target?.programmeStart)
+        assertEquals(3_000L, second.anchorTime)
     }
 
     @Test
