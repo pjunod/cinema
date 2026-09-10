@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["ed9fbe5d"]
+points = ["persistence.upgrades"]
+checks = ["rust-gate", "cluster-auth"]
+reason = "A restored/readdressed SQLite image has no writer-side applied-log metadata after Hiqlite deliberately resets `_metadata`, so a bare OpenRaft snapshot trigger is accepted but cannot publish a transferable snapshot. The local hook now commits `QueryWrite::RTT` first and returns that exact applied index for the publication wait. `readdress_completion_waits_for_a_transferable_database_snapshot` pins the ordering, and the separate-process `cluster_activation` scenario `subsequent_plurxd_run_reopens_the_completed_replicated_target` fails at the pre-fix 45-second snapshot deadline and passes with the anchored entry under `cluster-auth`."
