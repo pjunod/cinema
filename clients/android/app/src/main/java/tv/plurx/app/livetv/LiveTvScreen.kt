@@ -710,7 +710,7 @@ private fun TelevisionLiveTvBrowser(
     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         TextButton(
             onClick = { onBrowse(LiveTvBrowseView.Guide) },
-            modifier = Modifier.focusRequester(guideFocus).testTag("live-tv-guide-action"),
+            modifier = Modifier.focusRequester(guideFocus),
         ) { Text("Guide") }
         TextButton(onClick = { onBrowse(LiveTvBrowseView.List) }) { Text("On now") }
         if (browse == LiveTvBrowseView.Guide) {

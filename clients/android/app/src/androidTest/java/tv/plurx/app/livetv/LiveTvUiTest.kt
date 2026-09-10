@@ -16,6 +16,7 @@ import androidx.compose.ui.test.performTextClearance
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.printToString
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.test.platform.app.InstrumentationRegistry
 import java.net.InetAddress
 import java.net.ServerSocket
@@ -170,17 +171,22 @@ class LiveTvUiTest {
         compose.setContent { PlurxTheme { LiveTvScreen(origin) {} } }
         awaitText("7.1 · Fixture News")
         // Initial focus is the 10-foot navigation contract, and it is what the
-        // television profile must prove. The merged TV layout deliberately
-        // enters its guide action rather than the screen-level Back action so
-        // a remote starts inside the viewing workflow. On the phone profile
-        // Back was
+        // television profile must prove. The merged TV browser selects and
+        // focuses its first available channel so the remote starts inside the
+        // viewing workflow. On the phone profile Back was
         // observed with Focused = 'false': a touch device has no focus cursor to
         // place, and pinning one on Back would draw a focus ring nobody asked
         // for. Assert reachability there instead of a focus state the product
         // does not owe a touch screen. This has to precede search input, which
         // correctly moves focus into the field.
-        if (television) compose.onNodeWithTag("live-tv-guide-action").assertIsFocused()
-        else compose.onNodeWithText("Back").assertHasClickAction()
+        if (television) {
+            val firstChannel = compose.onNodeWithText("7.1 · Fixture News")
+            compose.waitUntil(timeoutMillis = 2_000) {
+                firstChannel.fetchSemanticsNode().config
+                    .getOrElse(SemanticsProperties.Focused) { false }
+            }
+            firstChannel.assertIsFocused()
+        } else compose.onNodeWithText("Back").assertHasClickAction()
         // The native schedule rows added by the TV-layout work are taller than
         // the old lineup-only rows. Select the protected result explicitly so
         // this contract does not depend on both fixture channels fitting in one
