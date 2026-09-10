@@ -1032,6 +1032,10 @@ struct LiveTvProcess {
 impl LiveTvSession {
     fn channel_with_source_format(&self) -> LiveTvChannel {
         let mut channel = self.channel.clone();
+        // `self.channel` can contain a cached observation copied from lineup
+        // at tune time. It is only the immutable channel baseline; freshness
+        // belongs to the separately expiring session observation below.
+        channel.source_format = None;
         if unix_seconds() <= self.source_format_expires_at.load(Ordering::Acquire) {
             if let Some(format) = self
                 .source_format
@@ -5671,6 +5675,34 @@ Output #0, hls, to 'index.m3u8':
         assert_eq!(observed.scan, None);
         assert_eq!(observed.audio_channels, None);
         assert_eq!(observed.audio_layout.as_deref(), Some("5.1"));
+    }
+
+    #[test]
+    fn live_tv_session_never_revives_an_expired_lineup_observation() {
+        let format = LiveTvSourceFormat {
+            video_width: Some(1920),
+            video_height: Some(1080),
+            scan: Some("interlaced".into()),
+            audio_channels: Some(2),
+            audio_layout: Some("stereo".into()),
+            observed_at: unix_seconds() - 60,
+        };
+        let mut session = test_session(PathBuf::from("unused"), 1);
+        Arc::get_mut(&mut session)
+            .expect("unshared test session")
+            .channel
+            .source_format = Some(format.clone());
+
+        assert_eq!(session.channel_with_source_format().source_format, None);
+
+        *session.source_format.lock().expect("source format") = Some(format.clone());
+        session
+            .source_format_expires_at
+            .store(unix_seconds() + 60, Ordering::Release);
+        assert_eq!(
+            session.channel_with_source_format().source_format,
+            Some(format)
+        );
     }
 
     #[tokio::test]

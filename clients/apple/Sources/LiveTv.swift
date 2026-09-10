@@ -99,6 +99,21 @@ struct LiveTvChannel: Codable, Identifiable, Equatable, Sendable {
         let parts: [String] = [codec, layout].compactMap { $0 }.filter { !$0.isEmpty }
         return parts.isEmpty ? nil : parts.joined(separator: " ")
     }
+
+    func removingSourceFormat() -> LiveTvChannel {
+        LiveTvChannel(
+            id: id,
+            guideNumber: guideNumber,
+            guideName: guideName,
+            favorite: favorite,
+            drm: drm,
+            support: support,
+            hd: hd,
+            videoCodec: videoCodec,
+            audioCodec: audioCodec,
+            sourceFormat: nil
+        )
+    }
 }
 
 struct LiveTvSourceFormat: Codable, Equatable, Sendable {

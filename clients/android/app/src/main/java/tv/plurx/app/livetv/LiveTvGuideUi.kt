@@ -178,18 +178,31 @@ fun LiveTvGuideGrid(
     onAiring: (LiveTvChannel) -> Unit,
     onFuture: (LiveTvChannel, LiveTvProgramme) -> Unit,
     dpadNavigation: Boolean = false,
-    onFocus: (LiveTvChannel) -> Unit = {},
+    navigationTarget: LiveTvGuideFocusTarget? = null,
+    navigationAnchorTime: Long? = null,
+    onNavigationState: (LiveTvGuideFocusTarget, Long?) -> Unit = { _, _ -> },
+    onFocus: (LiveTvChannel, LiveTvProgramme?) -> Unit = { _, _ -> },
     onToolbarBoundary: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val scroll = rememberScrollState()
     val rows = rememberLazyListState()
     val requesters = remember { mutableStateMapOf<LiveTvGuideFocusTarget, FocusRequester>() }
-    var focused by remember { mutableStateOf<LiveTvGuideFocusTarget?>(null) }
+    var focused by remember { mutableStateOf(navigationTarget) }
     var pending by remember { mutableStateOf<LiveTvGuideFocusTarget?>(null) }
     var preserveAnchorFor by remember { mutableStateOf<LiveTvGuideFocusTarget?>(null) }
-    var anchorTime by remember { mutableStateOf<Long?>(null) }
+    var anchorTime by remember { mutableStateOf(navigationAnchorTime) }
     val pendingRequester = pending?.let { requesters[it] }
+
+    LaunchedEffect(dpadNavigation, navigationTarget, navigationAnchorTime) {
+        val restored = navigationTarget ?: return@LaunchedEffect
+        anchorTime = navigationAnchorTime
+        if (dpadNavigation && focused != restored) {
+            focused = restored
+            pending = restored
+            preserveAnchorFor = restored
+        }
+    }
 
     LaunchedEffect(layout) {
         val current = focused ?: return@LaunchedEffect
@@ -207,6 +220,7 @@ fun LiveTvGuideGrid(
             pending = replacement?.let { LiveTvGuideFocusTarget(row.channel.id, it.programme.start) }
                 ?: LiveTvGuideFocusTarget(row.channel.id)
             preserveAnchorFor = pending
+            pending?.let { onNavigationState(it, anchorTime) }
         }
     }
     LaunchedEffect(pending, pendingRequester) {
@@ -226,7 +240,6 @@ fun LiveTvGuideGrid(
 
     fun receiveFocus(target: LiveTvGuideFocusTarget, channel: LiveTvChannel) {
         focused = target
-        onFocus(channel)
         if (preserveAnchorFor == target) {
             preserveAnchorFor = null
         } else if (target.programmeStart != null) {
@@ -234,6 +247,12 @@ fun LiveTvGuideGrid(
                 ?.cells?.firstOrNull { it.programme.start == target.programmeStart }
             anchorTime = cell?.programme?.let { it.start + (it.end - it.start).coerceAtLeast(1) / 2 }
         }
+        val programme = target.programmeStart?.let { start ->
+            layout.rows.firstOrNull { it.channel.id == target.channelId }
+                ?.cells?.firstOrNull { it.programme.start == start }?.programme
+        }
+        onNavigationState(target, anchorTime)
+        onFocus(channel, programme)
     }
 
     fun move(direction: LiveTvGuideFocusDirection) {
@@ -248,6 +267,7 @@ fun LiveTvGuideGrid(
             preserveAnchorFor = target
         }
         anchorTime = outcome.anchorTime
+        onNavigationState(target, anchorTime)
         if (target != current) pending = target
     }
 
@@ -273,8 +293,7 @@ fun LiveTvGuideGrid(
                 Row(Modifier.height(LiveTvGridMetrics.rowHeight)) {
                     val channelTarget = LiveTvGuideFocusTarget(row.channel.id, channelHeader = true)
                     TvTextButton(
-                        onClick = { onAiring(row.channel) },
-                        enabled = row.channel.watchable,
+                        onClick = { if (row.channel.watchable) onAiring(row.channel) },
                         modifier = Modifier
                             .width(LiveTvGridMetrics.channelColumnWidth)
                             .liveTvGuideFocusTarget(channelTarget, requesters) {
@@ -319,8 +338,7 @@ fun LiveTvGuideGrid(
                         if (row.cells.isEmpty()) {
                             val emptyTarget = LiveTvGuideFocusTarget(row.channel.id)
                             TvTextButton(
-                                onClick = { onAiring(row.channel) },
-                                enabled = row.channel.watchable,
+                                onClick = { if (row.channel.watchable) onAiring(row.channel) },
                                 modifier = Modifier
                                     .width(LiveTvGridMetrics.slotWidth * slots.size)
                                     .height(LiveTvGridMetrics.rowHeight)

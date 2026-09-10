@@ -36,7 +36,7 @@ enum AppBuildInfo {
 struct SettingsView: View {
     @EnvironmentObject var model: AppModel
     #if os(tvOS)
-    @State private var liveTvLayout = SettingsStore().liveTvLayout
+    @AppStorage("plurx.liveTvLayout") private var liveTvLayoutRaw = TvLiveLayout.guidePreview.rawValue
     #endif
     #if os(iOS)
     @State private var confirmingSignOut = false
@@ -157,13 +157,13 @@ struct SettingsView: View {
 
             #if os(tvOS)
             Section {
-                Picker("Live TV layout", selection: $liveTvLayout) {
+                Picker("Live TV layout", selection: Binding(
+                    get: { TvLiveLayout(rawValue: liveTvLayoutRaw) ?? .guidePreview },
+                    set: { liveTvLayoutRaw = $0.rawValue }
+                )) {
                     ForEach(TvLiveLayout.allCases) { layout in
                         Text(layout.label).tag(layout)
                     }
-                }
-                .onChange(of: liveTvLayout) { _, layout in
-                    SettingsStore().liveTvLayout = layout
                 }
             } header: {
                 Text("Live TV")

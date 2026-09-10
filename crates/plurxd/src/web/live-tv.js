@@ -51,9 +51,12 @@
     };
   }
 
-  function measuredSourceFormat(channel) {
+  function measuredSourceFormat(channel, nowSeconds = Math.floor(Date.now() / 1000), programmeEnd = null) {
     const raw = channel && channel.source_format;
-    if (!raw || typeof raw !== "object" || !Number.isInteger(raw.observed_at) || raw.observed_at <= 0) return null;
+    if (!raw || typeof raw !== "object" || !Number.isSafeInteger(raw.observed_at) || raw.observed_at <= 0) return null;
+    const expiry = Math.min(raw.observed_at + 20 * 60,
+      Number.isInteger(programmeEnd) ? programmeEnd : Number.MAX_SAFE_INTEGER);
+    if (Number.isFinite(nowSeconds) && nowSeconds >= expiry) return null;
     const dimension = value => Number.isInteger(value) && value >= 1 && value <= 16384 ? value : null;
     const channels = Number.isInteger(raw.audio_channels) && raw.audio_channels >= 1 && raw.audio_channels <= 32
       ? raw.audio_channels : null;
@@ -70,8 +73,8 @@
     };
   }
 
-  function pictureClass(channel) {
-    const height = measuredSourceFormat(channel)?.video_height;
+  function pictureClass(channel, nowSeconds, programmeEnd) {
+    const height = measuredSourceFormat(channel, nowSeconds, programmeEnd)?.video_height;
     if (height > 2160) return "4K+";
     if (height === 2160) return "4K";
     if (height >= 720) return "HD";
@@ -81,8 +84,8 @@
     return null;
   }
 
-  function audioDescription(channel) {
-    const format = measuredSourceFormat(channel);
+  function audioDescription(channel, nowSeconds, programmeEnd) {
+    const format = measuredSourceFormat(channel, nowSeconds, programmeEnd);
     const codec = typeof channel?.audio_codec === "string" ? channel.audio_codec.trim().toUpperCase() : "";
     const layout = format?.audio_layout;
     const layoutLabel = layout === "mono" ? "Mono" : layout === "stereo" ? "Stereo" : layout;
@@ -90,12 +93,12 @@
     return [codec, layoutLabel || count].filter(Boolean).join(" ");
   }
 
-  function sourceDetails(channel) {
+  function sourceDetails(channel, nowSeconds, programmeEnd) {
     if (!channel) return { compact: [], exact: [], observedAt: null };
-    const format = measuredSourceFormat(channel);
-    const picture = pictureClass(channel);
+    const format = measuredSourceFormat(channel, nowSeconds, programmeEnd);
+    const picture = pictureClass(channel, nowSeconds, programmeEnd);
     const video = typeof channel.video_codec === "string" ? channel.video_codec.trim().toUpperCase() : "";
-    const audio = audioDescription(channel);
+    const audio = audioDescription(channel, nowSeconds, programmeEnd);
     const scan = format?.scan === "progressive" ? "p" : format?.scan === "interlaced" ? "i" : "";
     const dimensions = format?.video_width && format?.video_height
       ? `${format.video_width}×${format.video_height}${scan}` : "";
@@ -108,8 +111,8 @@
 
   // Source facts from the tuner and the bounded FFmpeg input description.
   // Missing fields stay missing; codecs never imply resolution or layout.
-  function channelBadges(channel) {
-    const badges = sourceDetails(channel).compact;
+  function channelBadges(channel, nowSeconds, programmeEnd) {
+    const badges = sourceDetails(channel, nowSeconds, programmeEnd).compact;
     return badges.filter((badge, index) => badges.indexOf(badge) === index);
   }
 

@@ -103,14 +103,14 @@ async function main() {
         video_width: 3840, video_height: 2160, scan: "progressive",
         audio_channels: 6, audio_layout: "5.1", observed_at: 1788998400,
       },
-    }), ["4K", "HEVC", "AC3 5.1"]);
+    }, 1788998500), ["4K", "HEVC", "AC3 5.1"]);
     assert.deepEqual(liveTv.sourceDetails({
       video_codec: "mpeg2video", audio_codec: "ac3",
       source_format: {
         video_width: 1920, video_height: 1080, scan: "interlaced",
         audio_channels: 2, audio_layout: "stereo", observed_at: 1788998400,
       },
-    }), {
+    }, 1788998500), {
       compact: ["HD", "MPEG2VIDEO", "AC3 Stereo"],
       exact: ["1920×1080i", "MPEG2VIDEO", "AC3 Stereo"],
       observedAt: 1788998400,
@@ -121,7 +121,15 @@ async function main() {
         video_width: -1, video_height: 2160, scan: "made-up",
         audio_channels: 6, audio_layout: {}, observed_at: 1788998400,
       },
-    }), ["4K", "6 ch"]);
+    }, 1788998500), ["4K", "6 ch"]);
+    assert.deepEqual(liveTv.channelBadges({
+      hd: true,
+      source_format: { video_height: 2160, observed_at: 1788998400 },
+    }, 1788999600), ["HD"]);
+    assert.deepEqual(liveTv.channelBadges({
+      hd: false,
+      source_format: { video_height: 2160, observed_at: 1788998400 },
+    }, 1788998500, 1788998450), ["SD"]);
 
     const details = new Function("PlurxLiveTv", "esc",
       `${shipped("liveTvTechnicalDetails")} return liveTvTechnicalDetails;`)(liveTv, String);

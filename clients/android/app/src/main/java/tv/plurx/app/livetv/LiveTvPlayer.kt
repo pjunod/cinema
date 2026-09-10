@@ -195,6 +195,7 @@ class LiveTvPlayer private constructor(context: Context) {
                                             if (it.id == observed.id) observed else it
                                         },
                                     )
+                                    expireSourceFormats(System.currentTimeMillis() / 1000)
                                 }
                             } else if (watchdog.expired) {
                                 stopWithMessage("Live TV stopped after the 30-second no-progress budget. Select a channel to resume.")
@@ -348,6 +349,23 @@ class LiveTvPlayer private constructor(context: Context) {
 
     fun airing(channel: LiveTvChannel, now: Long = System.currentTimeMillis() / 1000): LiveTvAiring =
         LiveTvGuideReducer.airing(mutableState.value.guide, channel.id, now)
+
+    /** Drop observations at 20 minutes or the programme that owned them, whichever ends first. */
+    fun expireSourceFormats(now: Long) {
+        val latest = mutableState.value
+        fun fresh(channel: LiveTvChannel): LiveTvChannel {
+            val observed = channel.measuredSource?.observed_at ?: return channel
+            val programmeEnd = LiveTvGuideReducer.channel(latest.guide, channel.id)?.programmes
+                ?.firstOrNull { it.start <= observed && observed < it.end }?.end
+            val ttlEnd = if (observed > Long.MAX_VALUE - 20 * 60) Long.MAX_VALUE else observed + 20 * 60
+            val expiry = minOf(ttlEnd, programmeEnd ?: Long.MAX_VALUE)
+            return if (now < expiry) channel else channel.copy(source_format = null)
+        }
+        mutableState.value = latest.copy(
+            channels = latest.channels.map(::fresh),
+            watching = latest.watching?.let(::fresh),
+        )
+    }
 
     companion object {
         const val GUIDE_REFRESH_MS: Long = 20 * 60 * 1_000
