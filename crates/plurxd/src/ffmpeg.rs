@@ -352,10 +352,8 @@ fn ignore_optional_stream_field_omissions(
     stored: &mut serde_json::Value,
     held: &mut serde_json::Value,
 ) {
-    const OPTIONAL_CODEC_REPORT_FIELDS: [&str; 9] = [
-        "closed_captions",
-        "film_grain",
-        "refs",
+    const OPTIONAL_CODEC_REPORT_FIELDS: [&str; 3] = ["closed_captions", "film_grain", "refs"];
+    const OPTIONAL_AUDIO_REPORT_FIELDS: [&str; 6] = [
         "dmix_mode",
         "loro_cmixlev",
         "loro_surmixlev",
@@ -386,6 +384,23 @@ fn ignore_optional_stream_field_omissions(
             if !stored_stream.contains_key(field) || !held_stream.contains_key(field) {
                 stored_stream.remove(field);
                 held_stream.remove(field);
+            }
+        }
+        let matching_audio_stream = stored_stream.get("index") == held_stream.get("index")
+            && stored_stream
+                .get("codec_type")
+                .and_then(serde_json::Value::as_str)
+                == Some("audio")
+            && held_stream
+                .get("codec_type")
+                .and_then(serde_json::Value::as_str)
+                == Some("audio");
+        if matching_audio_stream {
+            for field in OPTIONAL_AUDIO_REPORT_FIELDS {
+                if !stored_stream.contains_key(field) || !held_stream.contains_key(field) {
+                    stored_stream.remove(field);
+                    held_stream.remove(field);
+                }
             }
         }
     }
@@ -1811,6 +1826,12 @@ mod tests {
             !probes_describe_same_input(scanned, &held.replace("\"index\":1", "\"index\":2"))
                 .expect("changed stream identity remains significant")
         );
+        let video_report = scanned.replace(
+            "\"height\":2160",
+            "\"height\":2160,\"mime_codec_string\":\"hvc1.2.4.L153.B0\"",
+        );
+        assert!(!probes_describe_same_input(&video_report, held)
+            .expect("video report fields are not covered by the audio exception"));
     }
 
     #[tokio::test]

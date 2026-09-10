@@ -97,6 +97,12 @@ fn x265_params(kind: &str) -> &'static str {
             "keyint=42:min-keyint=42:open-gop=1:bframes=0:scenecut=0:\
              repeat-headers=1:log-level=none"
         }
+        // Different reference structure produces a second encoder-authored,
+        // syntactically valid PPS for the multi-description fixture.
+        "alternate-pps" => {
+            "keyint=42:min-keyint=42:open-gop=0:bframes=0:ref=1:scenecut=0:\
+             repeat-headers=1:log-level=none"
+        }
         other => panic!("no x265 params for fixture {other}"),
     }
 }
@@ -153,7 +159,7 @@ fn scratch_path(dir: &Path, stem: &str) -> PathBuf {
 
 /// Path to a source fixture, generating it on first use.
 ///
-/// Known kinds: `open-gop`, `closed-gop`, `clean-cra`, `h264`, `vp9`.
+/// Known kinds: `open-gop`, `closed-gop`, `clean-cra`, `alternate-pps`, `h264`, `vp9`.
 pub fn source(kind: &str) -> PathBuf {
     require_ffmpeg();
     let dir = fixture_dir();
@@ -275,6 +281,7 @@ pub fn pipe_with_duplicate_hevc_sample_entry(kind: &str) -> Vec<u8> {
 /// their original default sample-description index.
 pub fn pipe_with_distinct_hevc_sample_entries(kind: &str) -> Vec<u8> {
     let feed = pipe(kind);
+    let donor_feed = pipe("alternate-pps");
     let mut reader = crate::fmp4::FragmentReader::new();
     reader.push(&feed);
     let Some(crate::fmp4::Unit::Init(mut init)) = reader.next_unit().expect("parsing fixture")
@@ -283,7 +290,14 @@ pub fn pipe_with_distinct_hevc_sample_entries(kind: &str) -> Vec<u8> {
     };
     let original_init_len = init.bytes.len();
     crate::fmp4::duplicate_hevc_sample_entry_for_fixture(&mut init);
-    crate::fmp4::differentiate_second_hevc_pps_for_fixture(&mut init);
+    let mut donor_reader = crate::fmp4::FragmentReader::new();
+    donor_reader.push(&donor_feed);
+    let Some(crate::fmp4::Unit::Init(donor_init)) =
+        donor_reader.next_unit().expect("parsing donor fixture")
+    else {
+        panic!("the donor pipe fixture must open with an initialization segment");
+    };
+    crate::fmp4::replace_second_hevc_configuration_for_fixture(&mut init, &donor_init);
     let mut expanded = init.bytes;
     expanded.extend_from_slice(&feed[original_init_len..]);
     expanded
