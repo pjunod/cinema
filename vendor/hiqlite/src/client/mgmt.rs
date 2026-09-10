@@ -147,6 +147,18 @@ pub(crate) async fn db_quorum_watermark_local(
 }
 
 impl Client {
+    /// Ask this embedded database voter to materialize its current state as a
+    /// Raft snapshot. The trigger returns after the command is accepted;
+    /// callers that need publication must observe [`Self::metrics_db`].
+    #[cfg(feature = "sqlite")]
+    pub async fn trigger_db_snapshot(&self) -> Result<(), Error> {
+        let state = self.inner.state.as_ref().ok_or_else(|| {
+            Error::Connect("database snapshot trigger requires a local node client".to_owned())
+        })?;
+        state.raft_db.raft.trigger().snapshot().await?;
+        Ok(())
+    }
+
     /// Subscribe to database Raft metrics only when this client owns the local
     /// node. Remote clients return an error; this method never performs IO.
     #[cfg(feature = "sqlite")]
