@@ -312,11 +312,11 @@ fn video_limit_supports(source: &LiveSourceFacts, limit: &LiveVideoLimit) -> boo
         return false;
     };
     normalized(&limit.codec) == normalized(codec)
-        && source.video_profile.as_deref().is_some_and(|profile| {
-            limit
-                .profile
+        && limit.profile.as_deref().is_none_or(|claimed| {
+            source
+                .video_profile
                 .as_deref()
-                .is_some_and(|claimed| normalized(claimed) == normalized(profile))
+                .is_some_and(|profile| normalized(claimed) == normalized(profile))
         })
         && width <= limit.max_width
         && height <= limit.max_height
@@ -336,10 +336,11 @@ fn device_video_supports(source: &LiveSourceFacts, caps: &DeviceCaps) -> bool {
     };
     caps.video.iter().any(|entry| {
         normalized(&entry.codec) == normalized(codec)
-            && entry
-                .profiles
-                .iter()
-                .any(|claimed| normalized(claimed) == normalized(profile))
+            && (entry.profiles.is_empty()
+                || entry
+                    .profiles
+                    .iter()
+                    .any(|claimed| normalized(claimed) == normalized(profile)))
             && entry
                 .max_height
                 .is_none_or(|maximum| i64::from(height) <= maximum)

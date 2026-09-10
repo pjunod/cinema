@@ -494,19 +494,6 @@ pub(crate) async fn channels(
             "Live TV is disabled; an administrator can enable it in Settings → Developer",
         ));
     }
-    let protocol_ready = state
-        .membership
-        .live_tv_protocol_pending_nodes()
-        .await
-        .map(|nodes| nodes.is_empty())
-        .unwrap_or(false);
-    if !protocol_ready {
-        return Err(ApiError::typed(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "live_tv_protocol_unready",
-            "Live TV is paused until every active cluster node runs the compatible protocol",
-        ));
-    }
     let snapshot = owner_snapshot(&state, &config, false, false)
         .await
         .map_err(api_error)?;
@@ -545,10 +532,12 @@ pub(crate) async fn readiness_for_config(
                 "Every active serving node publishes the live-TV v1 protocol".to_owned()
             }
             Ok(nodes) => format!(
-                "Start, restart, upgrade, or remove these unready nodes before enabling Live TV: {}",
+                "For consistent quality selection, start, restart, upgrade, or remove these nodes: {}. This check is advisory and does not block Live TV",
                 nodes.join(", ")
             ),
-            Err(error) => format!("Cannot prove live-TV cluster compatibility: {error}"),
+            Err(error) => format!(
+                "Cannot prove live-TV cluster compatibility: {error}. This check is advisory and does not block Live TV"
+            ),
         },
     });
 
@@ -651,24 +640,6 @@ pub(crate) async fn readiness_for_config(
         generation: config.generation,
         checks,
         snapshot,
-    }
-}
-
-async fn require_protocol(state: &AppState) -> Result<(), ApiError> {
-    if state
-        .membership
-        .live_tv_protocol_pending_nodes()
-        .await
-        .map(|nodes| nodes.is_empty())
-        .unwrap_or(false)
-    {
-        Ok(())
-    } else {
-        Err(ApiError::typed(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "live_tv_protocol_unready",
-            "Live TV is paused until every active cluster node runs the compatible protocol",
-        ))
     }
 }
 
@@ -1198,7 +1169,9 @@ pub(crate) fn api_error(error: LiveTvError) -> ApiError {
             code,
             sanitize_public_error(&message),
         ),
-        LiveTvError::Conflict(message) => ApiError::typed(StatusCode::CONFLICT, code, message),
+        LiveTvError::Conflict(message) | LiveTvError::SourceFormatChanged(message) => {
+            ApiError::typed(StatusCode::CONFLICT, code, message)
+        }
         LiveTvError::CapabilityExpired(message) => ApiError::typed(StatusCode::GONE, code, message),
     }
 }

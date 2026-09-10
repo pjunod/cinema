@@ -751,6 +751,7 @@ pub(crate) enum LiveTvError {
     DrmUnsupported(String),
     CodecUnsupported(String),
     StartupTimeout(String),
+    SourceFormatChanged(String),
     StreamFailed(String),
     Conflict(String),
     CapabilityExpired(String),
@@ -770,6 +771,7 @@ impl std::fmt::Display for LiveTvError {
             | Self::DrmUnsupported(message)
             | Self::CodecUnsupported(message)
             | Self::StartupTimeout(message)
+            | Self::SourceFormatChanged(message)
             | Self::StreamFailed(message)
             | Self::Conflict(message)
             | Self::CapabilityExpired(message) => message,
@@ -791,6 +793,7 @@ impl LiveTvError {
             Self::DrmUnsupported(_) => "drm_unsupported",
             Self::CodecUnsupported(_) => "codec_unsupported",
             Self::StartupTimeout(_) => "startup_timeout",
+            Self::SourceFormatChanged(_) => "source_format_changed",
             Self::StreamFailed(_) => "stream_failed",
             Self::Conflict(_) => "settings_conflict",
             Self::CapabilityExpired(_) => "capability_expired",
@@ -3724,7 +3727,10 @@ async fn run_live_session_inner(
         &LiveExecutionSupport {
             video_encode: !owner.system.ffmpeg.trim().is_empty(),
             audio_encode: !owner.system.ffmpeg.trim().is_empty(),
-            tone_map: owner.system.tone_map.ran,
+            // The VOD probe does not prove this live command applies that
+            // graph. Reject required HDR conversion honestly; compatible HDR
+            // copy routes remain available.
+            tone_map: false,
         },
     )
     .map_err(LiveTvError::CodecUnsupported)?;
@@ -3770,12 +3776,14 @@ async fn run_live_session_inner(
     )?;
     let mut child = spawn_live_ffmpeg(&owner.system, &transcode_plan, &session.directory)?;
     let stdin = child.stdin.take();
+    let source_format_changed = Arc::new(AtomicBool::new(false));
     let stderr = child.stderr.take().map(|stderr| {
         tokio::spawn(capture_live_stderr(
             stderr,
             Arc::clone(&session.decoder_unavailable),
             Arc::clone(&session.source_format),
             Arc::clone(&session.source_format_expires_at),
+            Arc::clone(&source_format_changed),
         ))
     });
     let Some(stdin) = stdin else {
@@ -3822,6 +3830,11 @@ async fn run_live_session_inner(
             if pump.is_finished() {
                 break Err(LiveTvError::StreamFailed(
                     "the tuner stream ended unexpectedly".into(),
+                ));
+            }
+            if source_format_changed.load(Ordering::Acquire) {
+                break Err(LiveTvError::SourceFormatChanged(
+                    "the broadcast changed format; start the channel again so a fresh delivery route can be selected".into(),
                 ));
             }
 
@@ -4591,6 +4604,7 @@ async fn capture_live_stderr(
     decoder_unavailable: Arc<AtomicBool>,
     source_format: Arc<StdMutex<Option<LiveTvSourceFormat>>>,
     source_format_expires_at: Arc<AtomicI64>,
+    source_format_changed: Arc<AtomicBool>,
 ) {
     // Drain forever without exposing device metadata. Retain only FFmpeg's
     // bounded initial input description and stop parsing at Stream mapping;
@@ -4635,6 +4649,13 @@ async fn capture_live_stderr(
             window.drain(..window.len() - 2048);
         }
         let text = String::from_utf8_lossy(&window).to_ascii_lowercase();
+        if descriptor_done
+            && (text.contains("new video stream")
+                || text.contains("new audio stream")
+                || text.contains("parameter change"))
+        {
+            source_format_changed.store(true, Ordering::Release);
+        }
         if text.contains("decoding requested, but no decoder found for:")
             || (text.contains("decoder (codec ") && text.contains(") not found for input stream"))
             // FFmpeg 8.1.2 can redact the requested map between the quotes in
@@ -6445,6 +6466,7 @@ exec /bin/cat >/dev/null
             Arc::clone(&detected),
             Arc::new(StdMutex::new(None)),
             Arc::new(AtomicI64::new(0)),
+            Arc::new(AtomicBool::new(false)),
         ));
         let mut stdin = child.stdin.take().expect("stdin");
         stdin
@@ -6491,6 +6513,7 @@ exec /bin/cat >/dev/null
                 Arc::clone(&detected),
                 Arc::new(StdMutex::new(None)),
                 Arc::new(AtomicI64::new(0)),
+                Arc::new(AtomicBool::new(false)),
             ));
             writer
                 .write_all(&vec![b'x'; 32 * 1024])

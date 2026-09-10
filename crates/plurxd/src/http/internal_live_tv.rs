@@ -26,14 +26,6 @@ pub(crate) async fn snapshot(
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
     authorize(&state, &headers, &body, SNAPSHOT_PATH).await?;
-    if !state
-        .membership
-        .live_tv_protocol_pending_nodes()
-        .await
-        .is_ok_and(|nodes| nodes.is_empty())
-    {
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
-    }
     let request =
         serde_json::from_slice::<SnapshotRequest>(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
     let config = state
@@ -300,13 +292,7 @@ pub(crate) async fn drain(
 }
 
 async fn require_start_authority(state: &AppState) -> Result<(), StatusCode> {
-    if !state.serving.is_ready()
-        || !state
-            .membership
-            .live_tv_protocol_pending_nodes()
-            .await
-            .is_ok_and(|nodes| nodes.is_empty())
-    {
+    if !state.serving.is_ready() {
         Err(StatusCode::SERVICE_UNAVAILABLE)
     } else {
         Ok(())
@@ -320,7 +306,7 @@ fn error_status(error: crate::live_tv::LiveTvError) -> StatusCode {
         | LiveTvError::InvalidResponse(_)
         | LiveTvError::ChannelNotFound(_)
         | LiveTvError::DrmUnsupported(_) => StatusCode::BAD_REQUEST,
-        LiveTvError::Conflict(_) => StatusCode::CONFLICT,
+        LiveTvError::Conflict(_) | LiveTvError::SourceFormatChanged(_) => StatusCode::CONFLICT,
         LiveTvError::CapabilityExpired(_) => StatusCode::GONE,
         LiveTvError::StartupTimeout(_) => StatusCode::REQUEST_TIMEOUT,
         LiveTvError::Disabled(_)
