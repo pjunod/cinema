@@ -15,7 +15,7 @@ internet, read [Non-goals](#non-goals--what-plurx-does-not-defend-against)
 first: several protections you'd expect at that boundary are the proxy's job,
 not plurx's, by design.
 
-Audited 2026-08-15. Where a claim below is exhaustive, the test that keeps it
+Audited 2026-09-09. Where a claim below is exhaustive, the test that keeps it
 honest is named inline.
 
 ## Authentication — one token bar, no anonymous back doors
@@ -54,6 +54,17 @@ level; there is no imperative "check the token here" a handler can forget.
 Login also verifies an unknown username against a **dummy Argon2 hash**
 (`plurxd/src/http/auth.rs`) so a wrong-user and a wrong-password response take
 the same time — a timing side channel can't enumerate who has an account.
+Login, setup, creation, and reset all reject encoded passwords above 1 KiB.
+Argon2 creation and verification run on the blocking pool behind two active
+slots, sixteen total admitted callers, and a two-second queue deadline; a
+cancelled request keeps its active permit until the blocking hash actually
+finishes.
+
+Sign Out attempts the authenticated server revocation for five seconds on web,
+Apple, and Android, then clears the local bearer on every outcome. Each request
+captures its origin, bearer, and credential generation, so its late completion
+cannot borrow or erase a newer login. The login screen distinguishes confirmed
+revocation from offline local cleanup without retaining the bearer.
 
 **Why `?token=` is not a step down.** It carries the same token as the header
 and is checked identically; it exists only because browsers won't attach
@@ -377,7 +388,10 @@ EPUB sections use, with the tuner as the thing being protected.
   a gzipped body is bounded again after inflation, so a compression bomb is
   refused rather than allocated — and every string in them is length-capped
   before it reaches a client, because a guide host is untrusted input in
-  exactly the way a tuner is.
+  exactly the way a tuner is. Manual and background refreshes share one active
+  slot and one 25-second whole-operation deadline. Parsing runs off the async
+  executor, and generation plus completion-sequence fences prevent a cancelled
+  or stale fetch from publishing over current settings.
 - **Programme artwork is passed through, never fetched.** A guide's image URLs
   are handed to clients as `https` links after validation; the server does not
   retrieve them, so the guide adds no image-proxy surface and no new artwork
@@ -425,7 +439,7 @@ to send its token. Kept honest by
 |---|---|---|
 | SQL injection | safe | every request value is a bound parameter; `format!` builds query strings from compile-time constants only |
 | Path traversal | safe | request→path is `file_name()`-collapsed and exact-matched, or an allow-listed segment name, or a numeric DB id |
-| Subprocess / arg injection | safe | ffmpeg/ffprobe run as argument vectors (no shell); request-derived args are numeric and range-clamped |
+| Subprocess / arg injection | safe | ffmpeg/ffprobe run as argument vectors (no shell); request-derived args are numeric and range-clamped; Live TV restores only a small loader/GPU environment allowlist |
 | Browser XSS | safe | all data into HTML is escaped; inline handlers get the two-layer `esc(JSON.stringify())` |
 
 **SQL — parameters, never string-built values.** Request-derived values go in
@@ -455,7 +469,10 @@ are numeric and bounded before they reach the command: transcode height is
 the audio-track index is `max(0)` and only ever embedded mid-token as
 `{input}:a:{i}?`, and a manual A/V sync offset is `clamp(-15_000, 15_000)` ms
 (`stream.rs`). None can present to ffmpeg as a standalone `-option`. The binary
-names themselves come from operator-set env vars, not from any request.
+names themselves come from operator-set env vars, not from any request. Short
+startup and decoder-identity probes additionally cap retained output and wall
+time, reap their child process group on timeout or cancellation, and refuse
+decoder artifacts above 512 MiB or hashing beyond ten seconds.
 
 ## The browser client — output escaping
 
@@ -542,14 +559,14 @@ the protections above believable. plurx does **not**:
   can impersonate an internal listener can capture those bearer secrets. Keep
   the cluster listeners on a trusted network; this milestone does not deliver
   managed peer certificates or pinning.
-- **Rate-limit login or cluster admission.** There is no per-IP throttle or
+- **Rate-limit login or cluster admission by identity.** There is no per-IP throttle or
   lockout on `/auth/login`, the voter join endpoints, or the corresponding
-  `/api/v1/cluster/learner/join/*` endpoints. Login brute-force resistance rests on
-  Argon2id's cost and 256-bit tokens; admission accepts only a 256-bit token
-  digest already present in replicated state. Invalid admission attempts still
-  cost one leader lookup. If either surface is reachable from an untrusted
-  network, put rate limiting at the proxy — the layer that can see the client
-  IP.
+  `/api/v1/cluster/learner/join/*` endpoints. Login's Argon2 work is globally
+  bounded as described above, but that is resource containment, not a
+  brute-force policy. Admission accepts only a 256-bit token digest already
+  present in replicated state. Invalid admission attempts still cost one leader
+  lookup. If either surface is reachable from an untrusted network, put rate
+  limiting at the proxy — the layer that can see the client IP.
 - **Recover a forgotten last-admin password from the console.** The legacy
   `plurxd reset-password` sidecar Store writer is refused because it cannot
   invalidate cache-only admin proofs inside every running daemon. A
@@ -561,15 +578,19 @@ the protections above believable. plurx does **not**:
   not user data; firewall it if that matters to you.
 - **Encrypt media at rest.** Files live on disk as-is; plurx assumes the host
   filesystem is the security boundary for the media itself.
-- **Sandbox ffmpeg.** The transcoder runs with the server's privileges. Inputs
+- **OS-sandbox ffmpeg.** The transcoder runs with the server's privileges. Live
+  TV clears inherited environment variables and unnecessary standard
+  descriptors, but this is containment hygiene rather than a syscall,
+  namespace, or user boundary. Inputs
   are scanner-discovered files under admin-configured roots, not arbitrary
   uploads, so the exposure is the media you chose to host — but run plurx as a
   low-privilege user regardless.
 - **Protect a stolen token.** Auth is a bearer token, not a cookie, so
   cross-site request forgery is not the exposure — but a token that leaks
   (shared URL with `?token=`, cleartext HTTP, a compromised client) is full
-  access until it's revoked. Rotate by signing out; an admin password reset
-  revokes that user's sessions.
+  access until it's revoked. Rotate by signing out while the server is
+  reachable; clients still clear locally after the bounded attempt, and an
+  admin password reset revokes that user's sessions.
 
 ## How this document stays honest
 

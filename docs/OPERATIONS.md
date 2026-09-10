@@ -196,6 +196,10 @@ validation fan-out, builds once on an X64 runner, verifies the immutable
 registry copy, and only then moves the fleet tag. It publishes
 `sha-<12hex>` for rollback and `main` for the newest qualified merge.
 Versioned releases own `latest`; fleet merges never overwrite that alias.
+Every external workflow action is resolved to a reviewed 40-character commit,
+and checkout drops its injected repository credential immediately after the
+fetch. Version comments preserve the human update trail without restoring a
+mutable execution input.
 
 If the automatic job must be recovered, run the same guarded publisher on
 nuc4 from the exact Forgejo commit. Supplying both identity variables makes a
@@ -1845,7 +1849,9 @@ therefore cannot republish a revoked credential. These mutations first acquire
 a separate replicated singleton lease that blocks join, promotion, removal,
 and planned-outage acquisition. They then bracket the Store write with signed
 begin/end messages to every member of a stable exact committed roster under one
-two-second aggregate bound. The Store mutation names the exact lease claim, so
+two-second aggregate bound. Both the request and the peer's exact status/body
+acknowledgement are signed; a transport-level `204` without that response proof
+is a failed revocation. The Store mutation names the exact lease claim, so
 a delayed write cannot commit after cancellation has released it. The lease
 remains owned until the terminal peer invalidation; heartbeat expiry creates a
 permanent receipt before cleanup after a crash.
@@ -4187,7 +4193,12 @@ here long before anyone notices an empty grid), and
 The guide cache lives in the owner's memory only. A restart refetches; nothing
 is written to the settings table, which is replicated on every write and copied
 whole into every snapshot and is therefore the wrong place for a blob that
-changes every twenty minutes.
+changes every twenty minutes. Manual and background refreshes share one active
+slot and one 25-second budget covering resolution, fetch, decompression, and
+parse. Shutdown cancels the in-flight refresh; a settings-generation change or
+older completion is discarded before cache and title publication. HDHomeRun
+extension pages stop at the shared deadline and retain the already useful bulk
+answer.
 | `drm_boundary` | informational; never blocks. Protected channels are listed and refused |
 
 Before it is enabled, expect exactly the enablement check to fail and every

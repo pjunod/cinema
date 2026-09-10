@@ -3430,7 +3430,8 @@ fn live_ffmpeg_command(
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
     // Keep only runtime selectors a packaged GPU stack may genuinely need.
-    // Loader injection, proxy, home and credential variables stay absent.
+    // Loader paths are explicit exceptions; proxy, home and credential
+    // variables stay absent.
     for name in [
         "PATH",
         "LD_LIBRARY_PATH",

@@ -1,6 +1,6 @@
 # Weekly review remediation — what is fixed, what remains, and why
 
-**Status:** implementation in progress · **Baseline:**
+**Status:** implementation complete; adversarial review pending · **Baseline:**
 `4cef0da740c797364023284520adad8a93b172cd` · **Branch:**
 `codex/weekly-review-remediation` · **Updated:** 2026-09-09
 
@@ -13,9 +13,10 @@ remains a separately scoped capability*.
 
 The baseline is the exact frozen review revision and was clean in a fresh clone.
 The repository-pinned Rust 1.97.1 compiler completed
-`cargo check -p plurxd --all-targets` before the first source edit. Full runtime
-tests are deliberately deferred to the main-bound fast lane; the separately
-scheduled sweep owns broader unit and hardware evidence.
+`cargo check -p plurxd --all-targets` before the first source edit and again on
+the completed source. Full runtime tests are deliberately deferred until after
+the fast lane; the separately scheduled sweep owns broader unit and hardware
+evidence.
 
 ## Outcome — small corrections ship without hiding the residual risk
 
@@ -63,12 +64,38 @@ availability still decide whether an individual operation succeeds.
 
 | Change | State | Evidence |
 |---|---|---|
-| Baseline and traceability | **In progress** | Exact reviewed SHA recorded; pinned compile-only baseline green. |
-| Client intent and sign-out | **Queued** | Source corrections and focused regressions not yet committed. |
-| Server work bounds | **Queued** | Hash, guide, and startup process contracts not yet committed. |
-| Peer, worker, and audit hardening | **Queued** | Narrow compatible changes not yet committed. |
-| Documentation and bookkeeping | **In progress** | This page and the docs index are maintained with the branch. |
-| Main promotion | **Not started** | Draft PR, exactly one adversarial review, findings addressed, then the fast lane. |
+| Baseline and traceability | **Complete** | Exact reviewed SHA recorded in `5fd8c2eb`; pinned compile-only baseline green. |
+| Client intent and sign-out | **Complete** | Web, Apple, and Android corrections plus focused regressions committed in `b1335e32`; Android Kotlin and both Apple targets compile. |
+| Server work bounds | **Complete** | Hash, guide, Live TV environment, and startup process bounds committed in `319b2ad7`; Rust 1.97.1 format, all-target check, and Clippy are green. |
+| Peer, worker, and audit hardening | **Complete** | Authenticated acknowledgements, immutable action inputs, checkout credential removal, and deterministic audit commands committed in `2b4d32fd`; workflow YAML parses. |
+| Documentation and bookkeeping | **Complete** | Security, operations, both client guides, this ledger, the docs index, and functionality ownership describe the changed contract. |
+| Main promotion | **Draft open** | Exactly one adversarial review, findings addressed, then the fast lane. |
+
+The compile-only verification also includes the shipped page's inline
+JavaScript syntax check. No unit, integration, browser, simulator, emulator,
+recovery, playback, package, or smoke suite ran before the fast lane.
+
+## Apple device trace — the evidence needed before changing the handoff
+
+Source inspection found one initial exact seek during preparation. At commit,
+the Apple path chooses the later of that requested position and the incumbent's
+current film time, then waits for an `AVPlayerItemVideoOutput` pixel buffer at
+that boundary within the existing 250 ms tolerance. It does not issue a second
+seek at commit. That is not evidence of a visible defect by itself: AVPlayer's
+asynchronous seek and decoded-frame timing need a physical reproduction.
+
+A qualifying trace must record, on one monotonic wall clock:
+
+1. the initial requested film position and the successor item's time when that
+   seek completes;
+2. the incumbent film position, play/pause state, and rate immediately before
+   replacement;
+3. the successor's first displayed item time and derived film position; and
+4. the first displayed frame's wall-clock delta from replacement.
+
+If that trace shows a repeat or skip outside 250 ms, the corrective change is a
+commit-boundary reseek with an explicit completion/timeout contract. Until
+then, the retained incumbent and bounded rollback remain the safer behavior.
 
 ## Decisions to review later — implementation may continue without blocking
 
