@@ -528,8 +528,8 @@ final class LiveTvAPI: LiveTvRequests, @unchecked Sendable {
         let body = try encoder.encode(["playback": LiveTvPlaybackEnvelope.current(
             compatibility: takeCompatibility()
         )])
-        try decode(LiveTvStarted.self, data: await request("live-tv/channels/\(Self.pathComponent(channel))/sessions",
-                                                       method: "POST", authenticated: true, body: body, session: transport))
+        return try decode(LiveTvStarted.self, data: await request("live-tv/channels/\(Self.pathComponent(channel))/sessions",
+                                                              method: "POST", authenticated: true, body: body, session: transport))
     }
 
     func release(_ capability: String) async throws {
