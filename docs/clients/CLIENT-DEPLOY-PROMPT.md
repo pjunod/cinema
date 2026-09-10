@@ -10,8 +10,10 @@ report it and stop rather than working around it.
 
 ## 0. What you need
 
-- Paul's Mac, unlocked, with Xcode signed in to team `YHK542LK23`
-  (`roles/mobile_release/defaults/main.yml`).
+- Paul's Mac, unlocked, with Xcode signed in to the Apple Developer team and
+  `PLURX_DEVELOPMENT_TEAM` set in the controller environment. The
+  `mobile_release` role reads it without storing the identifier in its tracked
+  defaults.
 - `~/code/plurx-agent/ansible/` — the playbooks. `ansible-playbook` must be
   installed on that machine; a cloud session does not have it, which is half
   of why this document exists.
