@@ -153,6 +153,36 @@ fn wait_for_bind(daemon: &mut Daemon, port: u16) {
     }
 }
 
+async fn wait_for_ready(daemon: &mut Daemon, port: u16) {
+    let client = reqwest::Client::new();
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        if let Some(status) = daemon.0.try_wait().expect("daemon status") {
+            panic!("daemon exited before readiness: {status}");
+        }
+        let last = match client
+            .get(format!("http://127.0.0.1:{port}/readyz"))
+            .send()
+            .await
+        {
+            Ok(response) => {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                if status.is_success() {
+                    return;
+                }
+                format!("{status} {}", body.trim())
+            }
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            Instant::now() < deadline,
+            "daemon readiness timed out; last /readyz answer was {last}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 async fn login_status(port: u16, username: &str, password: &str) -> reqwest::StatusCode {
     reqwest::Client::new()
         .post(format!("http://127.0.0.1:{port}/api/v1/auth/login"))
@@ -664,6 +694,7 @@ async fn sigkill_recovery_preserves_acknowledged_writes(advertise_host: &str) {
 
     let mut first = start();
     wait_for_bind(&mut first, server_port);
+    wait_for_ready(&mut first, server_port).await;
     let token = login_token(server_port, "recovery-owner", "password-before-kill").await;
     let update = reqwest::Client::new()
         .put(format!(
@@ -689,6 +720,7 @@ async fn sigkill_recovery_preserves_acknowledged_writes(advertise_host: &str) {
 
     let mut recovered = start();
     wait_for_bind(&mut recovered, server_port);
+    wait_for_ready(&mut recovered, server_port).await;
     assert_eq!(
         login_status(server_port, "recovery-owner", "password-after-kill").await,
         reqwest::StatusCode::OK,
