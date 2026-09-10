@@ -93,7 +93,9 @@ only what this hardware genuinely can't play.
 - **Connect & sign in**; the bearer token lives in the **Keychain** (so a new
   development build does not sign you out) and the session reconnects silently
   on next launch. Address and token are written together, so changing servers
-  cannot leave the previous server's credential on disk.
+  cannot leave the previous server's credential on disk. Sign Out gives the
+  captured server and bearer five seconds to confirm revocation, then clears
+  Keychain state even when offline; a late response cannot erase a newer login.
 - **Home** with Continue Watching / Next Up / Recently Added and your
   libraries. Hubs, libraries, and Coming Soon are fetched in parallel and each
   shelf paints as it arrives; a refresh never blanks a populated dashboard, and

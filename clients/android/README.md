@@ -328,7 +328,9 @@ icon'd app. For a native iOS / Apple TV build, see
    enough (`192.168.1.10:32400`); `http://` is assumed if you leave the scheme off.
 2. Sign in with your plurx username and password.
 3. That's it — the token is stored (DataStore) and reused until it stops working or you sign
-   out from Settings.
+   out from Settings. Sign Out sends the captured bearer to the captured server
+   for at most five seconds while offline cleanup proceeds, then clears local
+   state on every outcome; its late result cannot erase a newer login.
 
 ## How playback decides
 

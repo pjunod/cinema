@@ -35,6 +35,9 @@ internal const val PREPARED_READINESS_BOUND_MS = 20_000L
  */
 internal const val PREPARED_SWITCH_RUNWAY_MS = 3_000L
 
+/** Maximum film-time error accepted after the final pre-commit seek. */
+internal const val PREPARED_ALIGNMENT_SLACK_MS = 250L
+
 /**
  * How long a commit waits for the successor's own first rendered frame before
  * failing the prepared path and taking the ordinary reopen.

@@ -301,15 +301,45 @@ final class AppModel: ObservableObject {
         // Only after bootstrap: the launch paths clear their own token and
         // choose between `.needLogin` and `.reconnectFailed` themselves.
         guard case .ready = phase, Self.isSessionExpired(error) else { return false }
-        signOut()
+        signOutLocally()
         return true
     }
 
     func logout() {
-        signOut()
+        guard !busy else { return }
+        guard let token = Session.shared.token else {
+            signOutLocally(message: "Signed out on this device.")
+            return
+        }
+        let capturedOrigin = origin
+        busy = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let confirmed: Bool
+            do {
+                try await PlurxAPI(origin: capturedOrigin).logout(token: token)
+                confirmed = true
+            } catch APIError.http(let code) where code == 401 || code == 403 {
+                confirmed = true
+            } catch {
+                confirmed = false
+            }
+            // The result belongs only to the session that launched it. A login
+            // or server change while the request was in flight wins.
+            guard self.origin == capturedOrigin, Session.shared.token == token else {
+                self.busy = false
+                return
+            }
+            self.busy = false
+            self.signOutLocally(
+                message: confirmed
+                    ? "Sign-out was confirmed by the server."
+                    : "Signed out on this device. The server could not confirm revocation while it was offline."
+            )
+        }
     }
 
-    private func signOut() {
+    private func signOutLocally(message: String? = nil) {
         settings.clearToken()
         Session.shared.token = nil
         userId = nil
@@ -321,6 +351,7 @@ final class AppModel: ObservableObject {
         libraryPreviews = [:]
         homeLoading = true
         homeError = nil
+        authError = message
         phase = .needLogin
     }
 

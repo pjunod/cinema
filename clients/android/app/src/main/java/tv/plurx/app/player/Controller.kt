@@ -2184,6 +2184,8 @@ class Controller(
 
     private val preparedLedger = PreparedReplacementLedger()
     private var preparedPlayer: ExoPlayer? = null
+    /** Film position used for the readiness seek; commit samples again. */
+    private var preparedAlignedFilmMs: Long? = null
     private var preparedOrigin: ProgressiveMediaOrigin? = null
     private var preparedListener: Player.Listener? = null
     private var preparedStartedAtMs = 0L
@@ -2207,6 +2209,9 @@ class Controller(
         val encoder: String?,
         val sessionStatus: PlaybackSessionStatus?,
         val establishedPlayback: Boolean,
+        val playWhenReady: Boolean,
+        val playbackParameters: PlaybackParameters,
+        val volume: Float,
     )
 
     /** Retained until a real successor frame makes rollback unnecessary. */
@@ -2310,6 +2315,7 @@ class Controller(
         }
         preparedStartedAtMs = monotonicNowMs()
         preparedPlayer = built.player
+        preparedAlignedFilmMs = null
         preparedOrigin = built.progressiveMediaOrigin
         val successorListener = object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) {
@@ -2378,8 +2384,14 @@ class Controller(
         if (successor.currentTracks.groups.isEmpty()) return
         publishAcknowledgement(preparedLedger.metadataReady())
         val originMs = preparedLedger.action?.mediaOriginMs ?: return
+        val incumbentFilmMs = realPosition()
+        if (preparedAlignedFilmMs == null) {
+            preparedAlignedFilmMs = incumbentFilmMs
+            successor.seekTo(successorAttachPositionMs(originMs, incumbentFilmMs))
+            return
+        }
         val bufferedThrough = successorFilmPositionMs(originMs, successor.bufferedPosition)
-        if (!successorIsBuffered(bufferedThrough, realPosition())) return
+        if (!successorIsBuffered(bufferedThrough, incumbentFilmMs)) return
         publishAcknowledgement(preparedLedger.bufferReady(bufferedThrough))
         commitPreparedReplacement()
     }
@@ -2411,9 +2423,16 @@ class Controller(
         awaitingCommitFrameSinceMs = monotonicNowMs()
         val previous = player
         val previousVolume = previous.volume
+        val previousPlayWhenReady = previous.playWhenReady
+        val previousPlaybackParameters = previous.playbackParameters
+        val commitFilmMs = realPosition()
+        val successorFilmMs = successorFilmPositionMs(action.mediaOriginMs ?: 0L, successor.currentPosition)
+        if (kotlin.math.abs(successorFilmMs - commitFilmMs) > PREPARED_ALIGNMENT_SLACK_MS) {
+            successor.seekTo(successorAttachPositionMs(action.mediaOriginMs ?: 0L, commitFilmMs))
+        }
         val predecessor = PreparedPredecessor(
             player = previous,
-            filmPositionMs = realPosition(),
+            filmPositionMs = commitFilmMs,
             progressiveMediaOrigin = progressiveMediaOrigin,
             baseMs = baseMs,
             sessionId = sessionId,
@@ -2423,9 +2442,14 @@ class Controller(
             encoder = encoder,
             sessionStatus = sessionStatus,
             establishedPlayback = establishedPlayback,
+            playWhenReady = previousPlayWhenReady,
+            playbackParameters = previousPlaybackParameters,
+            volume = previousVolume,
         )
 
         successor.volume = previousVolume
+        successor.playbackParameters = previousPlaybackParameters
+        successor.playWhenReady = previousPlayWhenReady
         preparedOrigin?.let { progressiveMediaOrigin = it }
 
         preparedListener?.let { successor.removeListener(it) }
@@ -2546,7 +2570,9 @@ class Controller(
         establishedPlayback = predecessor.establishedPlayback
         predecessor.sessionId?.let(::startStatusPolling) ?: clearStatusPolling()
         sessionStatus = predecessor.sessionStatus
-        predecessor.player.playWhenReady = playbackIntent.playbackRequested
+        predecessor.player.volume = predecessor.volume
+        predecessor.player.playbackParameters = predecessor.playbackParameters
+        predecessor.player.playWhenReady = predecessor.playWhenReady
 
         preparedPredecessor = null
         preparedRollbackReopen = reopenAt to "prepared successor rendered no frame"
@@ -2611,6 +2637,7 @@ class Controller(
         preparedListener = null
         preparedPlayer = null
         preparedOrigin = null
+        preparedAlignedFilmMs = null
         successor.release()
     }
 

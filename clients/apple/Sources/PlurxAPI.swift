@@ -41,6 +41,15 @@ struct PlurxAPI {
         configuration.timeoutIntervalForResource = playbackPreparationTimeout
         return URLSession(configuration: configuration)
     }()
+    /// Sign Out is best effort, but never unbounded: a dead server must not
+    /// keep the viewer trapped in a session they are trying to leave.
+    private static let logoutSession: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.waitsForConnectivity = false
+        configuration.timeoutIntervalForRequest = 5
+        configuration.timeoutIntervalForResource = 5
+        return URLSession(configuration: configuration)
+    }()
     private var session: URLSession { Self.waitingSession }
 
     private static let decoder: JSONDecoder = {
@@ -108,6 +117,20 @@ struct PlurxAPI {
         req.httpMethod = "POST"
         Session.shared.authorize(&req)
         let (_, resp) = try await session.data(for: req)
+        try Self.check(resp)
+    }
+
+    /// Revoke one captured bearer at this API's captured origin.
+    ///
+    /// This deliberately bypasses `Session.authorize`: a late request must not
+    /// borrow a newer login's token or send the old token to a newly selected
+    /// server.
+    func logout(token: String) async throws {
+        guard let url = makeURL("auth/logout") else { throw APIError.badURL }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        let (_, resp) = try await Self.logoutSession.data(for: req)
         try Self.check(resp)
     }
 

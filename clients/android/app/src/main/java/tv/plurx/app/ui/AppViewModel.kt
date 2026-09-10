@@ -371,16 +371,56 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val instance = serverInstanceId
             val user = currentUserId
+            val capturedOrigin = Session.origin
+            val capturedToken = Session.token
+            _busy.value = true
+            val revocation = async {
+                if (capturedOrigin.isBlank() || capturedToken == null) return@async false
+                val boundApi = Net.api(capturedOrigin, Net.profileClient(capturedToken))
+                withTimeoutOrNull(5_000L) {
+                    try {
+                        boundApi.logout()
+                        true
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (error: HttpException) {
+                        error.code() == 401 || error.code() == 403
+                    } catch (_: Exception) {
+                        false
+                    }
+                } ?: false
+            }
             OfflineBooks.interruptProfile(instance, user)
-            if (removeDownloads && instance != null && user != null) {
-                OfflineDownloads.removeProfileNow(instance, user, api)
-                OfflineBooks.removeProfileNow(instance, user)
+            try {
+                if (removeDownloads && instance != null && user != null) {
+                    OfflineDownloads.removeProfileNow(instance, user, api)
+                    OfflineBooks.removeProfileNow(instance, user)
+                }
+            } catch (cancelled: CancellationException) {
+                revocation.cancel()
+                throw cancelled
+            } catch (_: Exception) {
+                // Sign Out still clears the local session. Offline cleanup can
+                // be retried independently and must not retain a bearer.
+            }
+            val confirmed = revocation.await()
+            // Never let a late response clear a newer login or a different
+            // server. The captured client above likewise never borrows it.
+            if (Session.origin != capturedOrigin || Session.token != capturedToken) {
+                _busy.value = false
+                return@launch
             }
             settings.clearToken()
             Session.token = null
             currentUser = null
             currentUserId = null
             _home.value = HomeState()
+            _authError.value = if (confirmed) {
+                "Sign-out was confirmed by the server."
+            } else {
+                "Signed out on this device. The server could not confirm revocation while it was offline."
+            }
+            _busy.value = false
             _phase.value = Phase.NeedLogin
         }
     }

@@ -27,6 +27,9 @@ interface PlurxApi {
     @POST("auth/login")
     suspend fun login(@Body body: LoginReq): LoginResp
 
+    @POST("auth/logout")
+    suspend fun logout()
+
     @GET("me")
     suspend fun me(): User
 

@@ -143,6 +143,8 @@ class EvidenceWorkflowCase(unittest.TestCase):
         android_poll = android.split("private fun pollPreparedReplacement()", 1)[1].split(
             "private fun commitPreparedReplacement()", 1
         )[0]
+        self.assertIn("preparedAlignedFilmMs", android_poll)
+        self.assertIn("successor.seekTo(successorAttachPositionMs", android_poll)
         self.assertIn("val restored = rollbackSwitchedReplacement()", android_poll)
         self.assertIn("failSwitchedReplacement()", android_poll)
         self.assertIn('restartAt(realPosition(), "prepared successor rendered no frame")', android_poll)
@@ -161,6 +163,14 @@ class EvidenceWorkflowCase(unittest.TestCase):
         )[0]
         self.assertIn("player = predecessor.player", rollback)
         self.assertIn("preparedRollbackReopen", rollback)
+        self.assertIn("predecessor.player.playbackParameters", rollback)
+        self.assertIn("predecessor.player.playWhenReady", rollback)
+        commit = android.split("private fun commitPreparedReplacement()", 1)[1].split(
+            "fun collectRetiredPlayer()", 1
+        )[0]
+        self.assertIn("previous.playbackParameters", commit)
+        self.assertIn("previous.playWhenReady", commit)
+        self.assertIn("PREPARED_ALIGNMENT_SLACK_MS", commit)
         release = android.split("fun release()", 1)[1].split("fun switchAudio", 1)[0]
         self.assertIn(
             "endPlaybackControl(settling) { endingSession?.let(vm::endHlsSession) }",
@@ -175,6 +185,27 @@ class EvidenceWorkflowCase(unittest.TestCase):
         )[0]
         self.assertIn("subject.settle(outerScope, settling, ending)", finish)
         self.assertLess(finish.index("subject.stop()"), finish.rindex("afterFinalExchange()"))
+
+    def test_native_sign_out_is_bounded_to_the_captured_session(self) -> None:
+        apple_model = self.read("clients/apple/Sources/AppModel.swift")
+        apple_api = self.read("clients/apple/Sources/PlurxAPI.swift")
+        self.assertIn("let capturedOrigin = origin", apple_model)
+        self.assertIn("Session.shared.token == token", apple_model)
+        self.assertIn(
+            "PlurxAPI(origin: capturedOrigin).logout(token: token)", apple_model
+        )
+        self.assertIn("configuration.timeoutIntervalForRequest = 5", apple_api)
+        self.assertIn('req.setValue("Bearer \\(token)"', apple_api)
+
+        android = self.read(
+            "clients/android/app/src/main/java/tv/plurx/app/ui/AppViewModel.kt"
+        )
+        self.assertIn("val capturedOrigin = Session.origin", android)
+        self.assertIn("val capturedToken = Session.token", android)
+        self.assertIn("withTimeoutOrNull(5_000L)", android)
+        self.assertIn("Net.profileClient(capturedToken)", android)
+        self.assertIn("Session.origin != capturedOrigin", android)
+        self.assertIn("Session.token != capturedToken", android)
 
     def test_apple_prepared_enablement_is_visible_and_advisory(self) -> None:
         view = self.read("clients/apple/Sources/LiveTvDeveloperView.swift")
