@@ -437,7 +437,7 @@ be marked passed until they have actually run against the implemented change.
 | Integrated startup and decode checks | Regressions written for production retry construction, native-HLS normalization, realistic distinct-PPS init validation, narrow probe comparison, and terminal browser errors. Per Paul’s direction, focused execution waits until after the one adversarial review |
 | Ownership and ordinary-playback controls | Existing actor-owned one-shot retry and first-media handoff remain authoritative; current-head focused controls wait until after review |
 | Pinned compilation and bookkeeping | `rustup run 1.97.1 cargo check --workspace --locked --all-targets` passed after the implementation on `94b46515` in 37 s; Rust formatted; path ownership updated. Clippy and deterministic bookkeeping remain before review |
-| Exactly one draft adversarial review; findings addressed | Not requested |
+| Exactly one draft adversarial review; findings addressed | Completed on draft PR #240 at `249ead8c`; four findings addressed in `35b9d4b4`: promised HEVC and description-index validation, actor transition coverage, encoder-produced distinct PPS, and audio-only probe normalization scope. No second review requested |
 | Current-head Main promotion gate and merge | Repair pending. Prerequisite CI trigger PR #239 merged as `94b46515` under Paul’s explicit syntax/lint-only exception; full runtime sweeps now manual/tag-only and fast lane remains separate |
 | Explicit deployment revision | Pending |
 | Real channel tune, audio, transition, restart/return | Not run on a repaired build |
