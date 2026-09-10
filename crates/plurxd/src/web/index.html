@@ -3142,6 +3142,16 @@
   [data-layout=theater] .poster .meta{opacity:1}
   [data-layout=theater] .th-pills{background:Canvas; border:1px solid CanvasText}
 }
+  /* Library channels reuse the guide card language, not the tuner controller. */
+  .lc-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}
+  .lc-card{display:flex;flex-direction:column;gap:10px;min-height:190px}
+  .lc-now{font-size:18px;font-weight:700}.lc-next,.lc-time{color:var(--muted);font-size:13px}
+  .lc-guide{display:grid;gap:8px}.lc-programme{display:grid;grid-template-columns:100px 1fr auto;gap:12px;align-items:center;padding:10px;border-top:1px solid var(--line)}
+  .lc-editor{display:grid;grid-template-columns:minmax(0,1fr) minmax(260px,.7fr);gap:16px}.lc-steps{display:flex;gap:8px;margin-bottom:14px}
+  .lc-steps .pill.on{border-color:var(--accent);color:var(--accent)}.lc-checks{display:flex;flex-wrap:wrap;gap:12px}.lc-checks label{display:flex;gap:6px;align-items:center}
+  .lc-preview{position:sticky;top:16px;align-self:start}.lc-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
+  .lc-following #ptimeline,.lc-following #pbback,.lc-following #pbforward{display:none!important}
+  @media(max-width:760px){.lc-editor{grid-template-columns:1fr}.lc-preview{position:static}.lc-programme{grid-template-columns:76px 1fr}.lc-programme>button{grid-column:2}.lc-grid{grid-template-columns:1fr}}
 </style>
 <script>
 // Theme engine. Runs in <head> before first paint so there's no flash of the
@@ -3380,10 +3390,12 @@ if(window.matchMedia){ try{ window.matchMedia("(prefers-color-scheme: dark)").ad
 <script src="/assets/reader.js"></script>
 <script src="/assets/hls.min.js"></script>
 <script src="/assets/live-tv.js"></script>
+<script src="/assets/library-channels.js"></script>
 <script>
 "use strict";
 const PlaybackPolicy = window.PlurxPlaybackPolicy;
 const ReaderCore = window.PlurxReaderCore;
+const LibraryChannelCore = window.PlurxLibraryChannels;
 const API = "/api/v1";
 // Native phone/tablet shells load this trusted page at the server origin, then
 // hand their bearer directly into this JavaScript realm. It never enters a
@@ -4113,6 +4125,8 @@ function artHtml(it, cls){
 // ---- auth flows -----------------------------------------------------------
 function logout(){
   stopLiveTv().catch(()=>{});
+  clearLibraryChannelDraft();
+  LIBRARY_CHANNEL_TUNE.stop();
   if(READER) destroyReader(false);
   PAGE_RENDER_GENERATION++;
   clearInterval(PAGE_TIMER); PAGE_TIMER=null;
@@ -4269,7 +4283,7 @@ function classicChrome(active, inner){
   document.getElementById("app").innerHTML=`
    <header class="top">
      <a href="#/" class="logo">${APP_NAME}</a>
-     <nav><a href="#/" class="${active==='home'?'active':''}">Home</a><a href="#/live-tv" class="${active==='live-tv'?'active':''}">Live TV</a><a href="#/activity" class="${active==='activity'?'active':''}">Activity</a>${admin}</nav>
+     <nav><a href="#/" class="${active==='home'?'active':''}">Home</a><a href="#/live-tv" class="${active==='live-tv'?'active':''}">Live TV</a><a href="#/library-channels" class="${active==='library-channels'?'active':''}">Library channels</a><a href="#/activity" class="${active==='activity'?'active':''}">Activity</a>${admin}</nav>
      <span class="spacer"></span>
      <span class="activity" id="activity" onclick="location.hash='#/activity'"></span>
      <input class="search" id="q" placeholder="Search…" aria-label="Search ${APP_NAME}" value="${esc(getQ())}">
@@ -6267,6 +6281,8 @@ async function viewItem(id){
 function classicItemBody(p){
   const d={files:p.files, ancestors:p.ancestors, children:p.children};
   const it=p.item, id=p.id, editable=p.editable;
+  const channelBtn=["movie","show","episode"].includes(it.kind)
+    ? `<button class="ghost" onclick='makeLibraryChannelFromItem(${it.id},${esc(JSON.stringify(it.kind))},${esc(JSON.stringify(it.title))})'>Make a channel</button>`:"";
   // Offered on every item, not only the ones that look broken: an admin who
   // wants a different poster than the one that landed has no other way to ask
   // for it short of refreshing the whole library.
@@ -6316,7 +6332,7 @@ function classicItemBody(p){
       body+=`<div class="actions">
         <button class="btnplay" onclick='${playCall(p,playable,start)}'>▶ ${resume?`Resume · ${fmtDur(resume)}`:'Play audiobook'}</button>
         ${resume?`<button class="ghost" onclick='${playCall(p,p.files.find(f=>f.available),0)}'>Start over</button>`:''}
-        ${watchBtn}</div>`;
+        ${watchBtn}${channelBtn}</div>`;
       const rem=resume?Math.max(0,runtime-resume):runtime, pend=endsAt(rem);
       if(rem) body+=`<div class="playinfo">${resume?fmtDur(rem)+" left":fmtDur(rem)}${pend?" · ends ~"+pend:""}</div>`;
     } else {
@@ -6339,12 +6355,12 @@ function classicItemBody(p){
       body+=`<div class="actions">
         <button class="btnplay" onclick='${playCall(p,playable,resume)}'>▶ ${resume?`Resume · ${fmtDur(resume)}`:'Play'}</button>
         ${resume?`<button class="ghost" onclick='${playCall(p,playable,0)}'>Start over</button>`:''}
-        ${watchBtn}</div>`;
+        ${watchBtn}${channelBtn}</div>`;
       const pdur=playable.duration_ms||runtime||0, prem=resume?Math.max(0,pdur-resume):pdur, pend=endsAt(prem);
       if(prem) body+=`<div class="playinfo">${resume?fmtDur(prem)+" left":fmtDur(prem)}${pend?" · ends ~"+pend:""}</div>`;
     } else {
       const p=best.missing_path;
-      body+=`<div class="filemissing">⚠ This file is missing on the server, so it can’t be played — its library path may be unmounted, moved, or renamed${ME.is_admin&&p?`:<br><code>${esc(p)}</code>`:'.'}</div><div class="actions">${watchBtn}</div>`;
+      body+=`<div class="filemissing">⚠ This file is missing on the server, so it can’t be played — its library path may be unmounted, moved, or renamed${ME.is_admin&&p?`:<br><code>${esc(p)}</code>`:'.'}</div><div class="actions">${watchBtn}${channelBtn}</div>`;
     }
     body+=d.files.map(v=>{
       const miss=!v.available;
@@ -6364,6 +6380,7 @@ function classicItemBody(p){
       <div class="eplist">${d.children.map(episodeRow).join("")}</div>`;
   } else if(p.shape==="children"){
     // Show, season, or a mirrored folder: children as a grid.
+    if(channelBtn)body+=`<div class="actions">${channelBtn}</div>`;
     const label = it.kind==='folder'? 'Contents'
                 : p.childLabel==='Seasons'? 'Seasons' : 'Episodes';
     const acts=watchControls(it);
@@ -6503,6 +6520,8 @@ async function setWatched(id, watched){
 //  remux       → progressive fMP4 from ffmpeg, server fast-seek for resume
 //  transcode   → HLS via hls.js (ffmpeg tone-maps/re-encodes), offset resume
 let PLAYER={fileId:null,timer:null,offset:0,hls:null,knownDur:0,durMs:0,markers:[],source:null,started:false,idleTimer:null,autoskip:false,deliveredRange:null,deliveredDvProfile:null,waitTimer:null,bookOffset:0,bookDuration:0,bookParts:null,_seekPreview:null,_seekPending:null,_lastFocusedControl:"pbplay",_opener:null,_openerClick:null};
+let PENDING_LIBRARY_CHANNEL_PLAYBACK=null;
+let LIBRARY_CHANNEL_RETURN=null;
 let PLAYER_WIRED=false;
 // Native HLS (`video.src = playlist.m3u8`) is for real Safari ONLY — it's what
 // makes AirPlay work (an MSE stream can't be flung to an Apple TV). The trap:
@@ -8288,6 +8307,17 @@ async function openSession(fileId, opts, signal=null){
   // A null height is the *absence* of a request, not a request for nothing:
   // sending the key would have the server clamp null to its floor.
   if(body.height==null) delete body.height;
+  const following=PLAYER&&PLAYER.libraryChannel;
+  if(following){
+    const result=await api(`/library-channels/${encodeURIComponent(following.channel_id)}/sessions`,{
+      method:"POST",signal,body:{generation_id:following.generation_id,
+        occurrence:following.occurrence,tune_sequence:following.tune_sequence,playback:body}});
+    if(!result||!result.playback||!result.library_channel
+      ||Number(result.library_channel.tune_sequence)!==Number(following.tune_sequence))
+      throw Object.assign(new Error("The channel tune response was stale."),{code:"channel_occurrence_changed"});
+    PLAYER.libraryChannel=Object.assign({},following,result.library_channel);
+    return result.playback;
+  }
   return api(`/files/${fileId}/hls/sessions`,{method:"POST",body,signal});
 }
 // Take on a newly-opened session's identity, and attach it.
@@ -8880,6 +8910,8 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
   // this is the missing half of that pair.
   if(typeof LIVE_TV_LEASE!=="undefined"&&(LIVE_TV_LEASE.current||LIVE_TV.starting)) stopLiveTv().catch(()=>{});
   const openAttempt=reservedOpenAttempt||PLAY_OPEN_GATE.begin("open");
+  const libraryChannel=PENDING_LIBRARY_CHANNEL_PLAYBACK;
+  PENDING_LIBRARY_CHANNEL_PLAYBACK=null;
   const openIsCurrent=()=>PLAY_OPEN_GATE.current(openAttempt);
   const predecessor=PLAYER?.mediaPredecessor||PLAYER;
   play.failedPreparation=null;
@@ -9098,7 +9130,7 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
     _markerOffers:new Set(),
     _seekPreview:null, _seekPending:null, _lastFocusedControl:playerLastFocused,
     _opener:playerOpener, _openerClick:playerOpenerClick,
-    idleTimer:null, autoskip:autoskipOn(), stallTimer:null, probeUrl:null, directUrl:null,
+    idleTimer:null, autoskip:libraryChannel?false:autoskipOn(), stallTimer:null, probeUrl:null, directUrl:null,
     triedFallback:false,
     refusedOriginal:false,
     aoffset:sessionAudioOffset, declared:decision.declared_offset_ms||0,
@@ -9142,7 +9174,7 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
     controlPresentedFrames:0,controlHasFrameCallbacks:false,
     wantsPlayback:fullIntent.wantsPlayback,
     mediaPredecessor:outgoing,
-    internalMediaReset:true,pendingOpenAttempt:openAttempt, };
+    internalMediaReset:true,pendingOpenAttempt:openAttempt,libraryChannel, };
   const openedPlayer=PLAYER;
   const openIsAttached=()=>openIsCurrent()&&PLAYER===openedPlayer
     &&PLAYER.openToken===openAttempt.token;
@@ -9153,6 +9185,7 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
   const player=document.getElementById("player");
   if(player){
     player.classList.toggle("audio",!!book);
+    player.classList.toggle("lc-following",!!libraryChannel);
     player.style.backgroundImage=book&&meta.poster?`linear-gradient(rgba(0,0,0,.28),rgba(0,0,0,.72)),url(${JSON.stringify(tok(meta.poster)).slice(1,-1)})`:"";
   }
   setupTrackMenus();
@@ -9178,6 +9211,10 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
   const nativeHls=useNativeHls(video);
   const segmentedRemux=segmentedRemuxOk(decision,video);
   let initialRoute=playbackInitialRoute(decision,initialAudio,nativeHls,segmentedRemux,sessionAudioOffset);
+  // Following always uses the finite-HLS session boundary where its durable
+  // purpose and history isolation are enforced. Copy-HLS retains source video
+  // when the decision does not require an encode.
+  if(libraryChannel) initialRoute=decision.method==='transcode'?'transcode_hls':'copy_hls';
   // A burn is a transcode whatever the plan said. The server's plan is a remux
   // (or a direct play) when the PGS application overlay is enabled — a delivery
   // this player does not implement, so `prePlayBurnNeeded()` said yes where the
@@ -9300,7 +9337,7 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
   PLAYER.timer=setInterval(()=>{
     if(!playbackOwnsAttachedMedia(openedPlayer)) return;
     reportProgress(fileId); reportHitches(); maybeDecodeRescue();
-    autoControllerTick().catch(()=>{}); refreshSegTimes();
+    autoControllerTick().catch(()=>{}); refreshSegTimes(); libraryChannelTick();
   }, PlaybackPolicy.AUTO_DEFAULTS.sampleMs);
   video.onended=()=>{ handleEnded(fileId).catch(()=>{}); };
   pbTick(); pbSyncPlayIcon();   // seed the transport (total time, play icon) at once
@@ -10931,7 +10968,9 @@ function renderPlayerInfo(){
   c.innerHTML=`<h3>${head.join(' <i>·</i> ')}</h3>`
     +(facts?`<div class="vbadges pifacts">${facts}</div>`:``)
     +(bits.length?`<div class="pimeta">${bits.join(' <i>·</i> ')}</div>`:``)
-    +(m.overview?`<p>${esc(m.overview)}</p>`:``);
+    +(m.overview?`<p>${esc(m.overview)}</p>`:``)
+    +(PLAYER&&PLAYER.libraryChannel?`<div class="lc-actions"><button onclick="libraryChannelWatchFromStart()">Watch from start</button><span class="pill">FOLLOWING</span></div>`:``)
+    +(m.return_channel_id?`<div class="lc-actions"><button onclick="returnToLibraryChannel()">Return to channel</button></div>`:``);
 }
 // Build the panel's payload from an item (plus its ancestors, so an episode can
 // name its show). Kept next to the renderer so the two stay in step.
@@ -11154,7 +11193,7 @@ function pbTick(){
   if(playbackOwnsAttachedMedia(PLAYER)&&!PLAYER.controlSeek&&PLAYER.curSub>=0 && PLAYER._subOff!=null && PLAYER._subOff!==(PLAYER.offset||0)) setSub(PLAYER.curSub);
 }
 function pbSyncPlayIcon(){ const v=document.getElementById("video"), b=document.getElementById("pbplay");
-  if(b&&v){ const paused=(v.paused||v.ended); b.textContent=paused?"▶":"❚❚"; b.setAttribute("aria-label", paused?"Play":"Pause"); } }
+  if(b&&v){ const paused=(v.paused||v.ended),following=!!(PLAYER&&PLAYER.libraryChannel); b.textContent=paused?"▶":"❚❚"; b.setAttribute("aria-label", paused&&following?"Resume live":paused?"Play":"Pause"); b.title=paused&&following?"Resume live":"Play / Pause (space)"; } }
 // A control generation is terminal once the server accepts demand=end. The
 // ended media element can technically be played again, but that would reuse a
 // reporter which has deliberately stopped and, for HLS, a completed session.
@@ -11176,6 +11215,10 @@ function replayEnded(){
 }
 function togglePlay(){
   const v=document.getElementById("video"); if(!v) return;
+  if(PLAYER&&PLAYER.libraryChannel&&v.paused
+    &&LIBRARY_CHANNEL_CLOCK.now()>=Number(PLAYER.libraryChannel.ends_at_ms||0)){
+    libraryChannelBoundary().catch(()=>{}); return;
+  }
   endWait(false);
   supersedePlaybackControlIntent(PLAYER);
   const pending=typeof play==='function'&&play.pendingIntent;
@@ -11214,6 +11257,7 @@ function cancelPendingSeek(){
 }
 function nudge(d){
   const me=PLAYER; if(!me) return;
+  if(me.libraryChannel){ toast("Resume live or Watch from start to change position."); return; }
   const total=pbTotalSec();
   const base=me._seekPending!=null?me._seekPending:pbPosSec();
   let t=Math.max(0,base+d); if(total>0) t=Math.min(total,t);
@@ -11484,6 +11528,7 @@ function markerAutoSkipEligible(m){
   return m.chapter!==false;
 }
 function playbackMarkersUsable(p){
+  if(p&&p.libraryChannel)return false;
   return playbackOwnsAttachedMedia(p)&&!p.controlSeek;
 }
 function checkMarkers(){
@@ -11699,6 +11744,7 @@ async function playNextAudiobookPart(){
 // next episode if autoplay is on, otherwise fall back to prior behavior.
 async function finishPlayback(closeIfNoNext){
   const current=playbackContinuation(PLAYER);
+  if(PLAYER&&PLAYER.libraryChannel){ await libraryChannelBoundary(); return; }
   if(PLAYER&&PLAYER.bookParts){ closePlayer(); return; }
   if(autoNextOn()){
     setLoading(true,"Up next…","finding the next episode");
@@ -12689,6 +12735,7 @@ setInterval(()=>{ pollSessionHealth().catch(()=>{}); }, 2000);
 async function reportProgress(fileId, ended, attachedOwner){
   const p=attachedOwner||PLAYER;
   if(!p||p.fileId!==fileId||(!attachedOwner&&!playbackOwnsAttachedMedia(p)))return;
+  if(p.libraryChannel)return;
   const video=document.getElementById("video");
   const posMs=Math.round((p.bookOffset||0)+((p.offset||0)+ (video.currentTime||0))*1000);
   // The file's probed duration is the truth. Only direct play's own
@@ -12712,6 +12759,10 @@ function closePlayer(){
   if(progressPlayer?.fileId){
     reportProgress(progressPlayer.fileId,false,progressPlayer);
   }
+  if(PLAYER&&PLAYER.libraryChannel&&!PLAYER.libraryChannelReplacing){
+    LIBRARY_CHANNEL_RETURN={channelId:PLAYER.libraryChannel.channel_id};
+    LIBRARY_CHANNEL_TUNE.stop();
+  }
   beginPlaybackPreparation.active?.cancel();
   beginPlaybackPreparation.active?.finish();
   play.failedPreparation=null;
@@ -12722,7 +12773,7 @@ function closePlayer(){
   const opener=PLAYER&&PLAYER._opener;
   const openerClick=PLAYER&&PLAYER._openerClick;
   const closingFileId=PLAYER&&PLAYER.fileId;
-  if(player){ player.classList.remove("audio"); player.style.backgroundImage=""; }
+  if(player){ player.classList.remove("audio","lc-following"); player.style.backgroundImage=""; }
   // First, before anything is torn down: give the screen back. Hiding `#modal`
   // sets `display:none` on an ancestor, which draws nothing but does not end
   // the browser's fullscreen — `#player` stays the fullscreen element, so the
@@ -15553,6 +15604,13 @@ function applyDeveloperReadiness(readiness){
 
 function developerPanel(settings,readiness){
   const advisory=`<div class="hint">Each reading below says what <b>this server</b> can currently see. It is advisory: no result disables a switch, and “not observable” means the fact lives somewhere the running daemon cannot inspect.</div>`;
+  const libraryChannels=setCard(`${cardHead("Library channels","Build always-on schedules from probed movies and episodes. The feature is compiled into every ordinary server build.",settings.library_channels_enabled?`<span class="pill" style="color:var(--good);border-color:var(--good)">enabled</span>`:`<span class="pill">disabled</span>`)}
+      ${togRow("lcenabled","Enable Library-channel playback","This checkbox is the enable path. Listing, preview and authoring stay available while off so readiness can be inspected and repaired.",settings.library_channels_enabled)}
+      <h2 class="section">What must be true first, and whether it is</h2>${advisory}
+      ${devReq(readiness,"library_channels","authoritative_store","The authoritative channel Store is readable","Definitions, schedules and favourites must come from current authority rather than a stale node-local copy.")}
+      ${devReq(readiness,"library_channels","eligible_video","At least one schedulable video exists","A successful probe, video stream and positive duration are needed to publish a non-empty rotation. A draft may still be saved without one.")}
+      ${devReq(readiness,"library_channels","compatible_clients","Deployed clients understand following playback","Old clients retain VOD and Live TV, but do not know the dedicated channel-session purpose or boundary controller.")}
+      <div class="hint"><b>Advisory only:</b> no result above disables the checkbox or overrides your saved choice. Library channels require no tuner, metadata service, AI key, or external provider.</div>${setCardFoot("saveDeveloper")}`);
   const transportRecovery=setCard(`${cardHead("Enable cluster transport recovery","The corrected transport is compiled in and activates automatically on clustered nodes; there is no hidden production feature flag.",`<span class="pill" style="color:var(--good);border-color:var(--good)">automatic</span>`)}
       <div class="hint"><b>Safe enablement means deployment qualification, not flipping a code gate.</b> Keep a ready voter majority, deploy one node at a time, and leave the cluster API listener reachable only on the trusted cluster network. Cache-only recovery authorization stays disabled until every current committed node has heartbeat-proven the cache revocation capability and the automatic guarded activation has cleared cached proofs cluster-wide; a rollback closes it again.</div>
       <h2 class="section">What must be true first</h2>
@@ -15598,7 +15656,7 @@ function developerPanel(settings,readiness){
       ${togRow("phs",`Typeless sliding HLS <span class="pill warn">experimental</span>`,"Only for the iPad control comparison.",settings.hls_typeless_sliding)}
       <div class="err" id="dxerr"></div>
       ${setCardFoot("saveExperimental")}`);
-  return `${setHead("Developer","Runtime controls with the requirements needed to use each feature safely. Readiness is advisory and never overrides your choice.")}${transportRecovery}${liveTvSettingsCard(settings)}${liveTvGuideCard(settings)}${preview}${verifiedDecodeCard(settings)}${decodeRecoveryCard(settings)}${prepared}${experimental}`;
+  return `${setHead("Developer","Runtime controls with the requirements needed to use each feature safely. Readiness is advisory and never overrides your choice.")}${libraryChannels}${transportRecovery}${liveTvSettingsCard(settings)}${liveTvGuideCard(settings)}${preview}${verifiedDecodeCard(settings)}${decodeRecoveryCard(settings)}${prepared}${experimental}`;
 }
 // Automatic decode recovery.
 //
@@ -17372,6 +17430,7 @@ async function saveDeveloper(btn){
   if(btn) btn.disabled=true;
   try{
     cacheSettings(await api("/settings",{method:"PUT",body:{
+      library_channels_enabled:document.getElementById("lcenabled").checked,
       playback_control_protocol_v1:document.getElementById("pcpv1").checked,
       prepared_quality_handoff:document.getElementById("pqh").checked}}));
     toast("Developer settings saved"); if(btn) setCardSaved(btn);
@@ -17762,6 +17821,7 @@ function catalogTabsHtml(active, homeOn){
   const on=b=>b?' class="px-tab on" aria-current="page"':' class="px-tab"';
   return `<nav class="px-tabs" aria-label="Sections">
     <a href="#/" data-tab="home"${on(homeOn)}>${catalogIcon("home")}<span>Home</span></a>
+    <a href="#/library-channels" data-tab="library-channels"${on(active==="library-channels")}>${catalogIcon("film")}<span>Channels</span></a>
     <button type="button" data-tab="libs" class="px-tab" aria-expanded="false" aria-controls="pxnav" onclick="catalogToggleLibs(event)">${catalogIcon("stack")}<span>Libraries</span></button>
     <button type="button" data-tab="search" class="px-tab" onclick="catalogFocusSearch(event)">${catalogIcon("search")}<span>Search</span></button>
     <a href="#/activity" data-tab="activity"${on(active==="activity")}>${catalogIcon("act")}<span>Activity</span></a>
@@ -17807,6 +17867,7 @@ function catalogChrome(active, inner){
          <nav class="px-nav" aria-label="Main">
            <a href="#/" class="${homeOn?"on":""}"${homeOn?' aria-current="page"':""}>${catalogIcon("home")}<span class="px-lbl">Home</span></a>
            <a href="#/live-tv" class="${active==="live-tv"?"on":""}"${active==="live-tv"?' aria-current="page"':""}>${catalogIcon("tv")}<span class="px-lbl">Live TV</span></a>
+           <a href="#/library-channels" class="${active==="library-channels"?"on":""}"${active==="library-channels"?' aria-current="page"':""}>${catalogIcon("film")}<span class="px-lbl">Library channels</span></a>
          </nav>
          <div id="pxlibs"></div>
          <div class="px-sec">Manage</div>
@@ -18299,6 +18360,7 @@ function theaterNavItems(active){
   const homeOn = active==="home" && (hash==="#/"||hash==="#"||hash==="");
   const items=[{tab:"home", href:"#/", label:"Home", on:homeOn},
                {tab:"live-tv", href:"#/live-tv", label:"Live TV", on:active==="live-tv"},
+               {tab:"library-channels", href:"#/library-channels", label:"Library channels", on:active==="library-channels"},
                {tab:"activity", href:"#/activity", label:"Activity", on:active==="activity"}];
   // Settings appears for admins only, and nowhere else in the shell — a
   // non-admin sees no Settings anywhere in theater's chrome. (The account
@@ -19102,11 +19164,273 @@ async function viewReader(itemId,fileId){
 document.addEventListener("visibilitychange",()=>{ if(document.visibilityState==="hidden"&&READER) readerFlushKeepalive(READER); });
 window.addEventListener("beforeunload",()=>{ if(READER){ readerFlushKeepalive(READER); closeReaderSession(READER); } });
 
+// ---- Library channels ----------------------------------------------------
+// One source adapter over the shared finite player. It owns schedule/tune
+// intent; the existing player continues to own HLS lifecycle and controls.
+const LIBRARY_CHANNEL_TUNE=new LibraryChannelCore.TuneFence();
+const LIBRARY_CHANNEL_CLOCK=new LibraryChannelCore.ServerClock();
+let LIBRARY_CHANNELS={channels:[],guide:[],draft:null,libs:[],search:[],editor:false,error:null};
+let LIBRARY_CHANNEL_TRANSITION=false;
+
+function libraryChannelDraftKey(){
+  const server=(SERVER&&SERVER.instance_id)||location.origin;
+  return `plurx_library_channel_draft_v1:${server}:${ME&&ME.id||"unknown"}`;
+}
+function loadLibraryChannelDraft(){
+  try{
+    const parsed=JSON.parse(sessionStorage.getItem(libraryChannelDraftKey())||"null");
+    if(parsed&&parsed.server===String((SERVER&&SERVER.instance_id)||location.origin)
+      &&parsed.user===String(ME&&ME.id||"")) return parsed;
+  }catch(e){}
+  return LibraryChannelCore.emptyDraft({server:(SERVER&&SERVER.instance_id)||location.origin,user:ME&&ME.id});
+}
+function saveLibraryChannelDraft(){
+  const draft=LIBRARY_CHANNELS.draft;if(!draft)return;
+  try{sessionStorage.setItem(libraryChannelDraftKey(),JSON.stringify(draft));}catch(e){}
+}
+function clearLibraryChannelDraft(){
+  try{sessionStorage.removeItem(libraryChannelDraftKey());}catch(e){}
+}
+function makeLibraryChannelFromItem(itemId,kind,title){
+  const draft=LibraryChannelCore.emptyDraft({server:(SERVER&&SERVER.instance_id)||location.origin,user:ME&&ME.id});
+  draft.name=String(title||"New channel").slice(0,80);
+  if(kind==="show")draft.recipe.include_show_ids=[Number(itemId)];
+  else draft.recipe.include_item_ids=[Number(itemId)];
+  draft.dirty=true;LIBRARY_CHANNELS.draft=draft;saveLibraryChannelDraft();
+  LIBRARY_CHANNELS.openEditorOnLoad=true;location.hash="#/library-channels";
+}
+function lcTime(value){return new Date(Number(value)).toLocaleTimeString([],{hour:"numeric",minute:"2-digit"});}
+function lcDuration(ms){return fmtDur(Number(ms)||0);}
+function lcNowFor(channel){return channel&&channel.now||null;}
+
+async function viewLibraryChannels(generation=PAGE_RENDER_GENERATION){
+  layoutChrome("library-channels",`<div class="empty">Loading Library channels…</div>`);
+  setPagePhase("#/library-channels",generation,"shell");
+  try{
+    const channels=await api("/library-channels/");
+    if(generation!==PAGE_RENDER_GENERATION)return;
+    LIBRARY_CHANNELS.channels=channels||[];
+    const ids=LIBRARY_CHANNELS.channels.map(channel=>channel.id);
+    LIBRARY_CHANNELS.guide=ids.length
+      ? await api(`/library-channels/guide?channel_ids=${encodeURIComponent(ids.slice(0,20).join(","))}`)
+      : [];
+    if(generation!==PAGE_RENDER_GENERATION)return;
+    if(LIBRARY_CHANNELS.openEditorOnLoad){
+      LIBRARY_CHANNELS.openEditorOnLoad=false;
+      await openLibraryChannelEditor();
+      return;
+    }
+    libraryChannelsPaint();
+    setPagePhase("#/library-channels",generation,"content");
+    setPageTimer(()=>refreshLibraryChannels(generation),30000,generation);
+    setPagePhase("#/library-channels",generation,"settled");
+  }catch(error){
+    if(generation!==PAGE_RENDER_GENERATION)return;
+    const view=LibraryChannelCore.errorView(error);
+    layoutChrome("library-channels",`<div class="empty"><b>${esc(view.title)}</b><br>${esc(view.detail)}<div class="lc-actions"><button onclick="viewLibraryChannels()">Retry</button></div></div>`);
+    setPageFailure("#/library-channels",generation,view.code);
+  }
+}
+async function refreshLibraryChannels(generation){
+  if(location.hash!=="#/library-channels"||generation!==PAGE_RENDER_GENERATION||LIBRARY_CHANNELS.editor)return;
+  try{
+    LIBRARY_CHANNELS.channels=await api("/library-channels/");
+    const ids=LIBRARY_CHANNELS.channels.map(channel=>channel.id).slice(0,20);
+    LIBRARY_CHANNELS.guide=ids.length?await api(`/library-channels/guide?channel_ids=${encodeURIComponent(ids.join(","))}`):[];
+    if(location.hash==="#/library-channels"&&generation===PAGE_RENDER_GENERATION)libraryChannelsPaint();
+  }catch(error){LIBRARY_CHANNELS.error=error;}
+}
+function libraryChannelsPaint(){
+  const main=document.getElementById("main");if(!main)return;
+  if(LIBRARY_CHANNELS.editor){main.innerHTML=libraryChannelEditorHtml();return;}
+  const channels=LIBRARY_CHANNELS.channels||[];
+  const tools=`<button class="primary" onclick="openLibraryChannelEditor()">Create channel</button>`;
+  if(!channels.length){
+    main.innerHTML=`${setHead("Library channels","Turn movies and episodes into a shared, always-on schedule.",tools)}<div class="empty">No Library channels yet.<br>Create one from a subject, a library, or selected titles. No tuner, metadata key, or AI service is required.</div>`;
+    return;
+  }
+  const cards=channels.map(channel=>{
+    const now=lcNowFor(channel),next=channel.next;
+    return `<article class="card lc-card"><div class="row"><span class="pill">LIBRARY</span>${channel.favourite?'<span title="Favourite">★</span>':''}<span class="spacer"></span><button class="ghost sm" onclick="toggleLibraryChannelFavourite('${esc(channel.id)}',${!channel.favourite})">${channel.favourite?'Unfavourite':'Favourite'}</button></div>
+      <h2>${esc(channel.name)}</h2><div class="lc-now">${esc(now?now.title:"No schedule yet")}</div>
+      <div class="lc-time">${now?`${lcTime(now.starts_at_ms)}–${lcTime(now.ends_at_ms)}`:"Preview or edit the selection"}</div>
+      <div class="lc-next">${next?`Next: ${esc(next.title)} · ${lcTime(next.starts_at_ms)}`:""}</div>
+      <div class="lc-actions">${now&&channel.enabled?`<button class="primary" onclick="libraryChannelTune('${esc(channel.id)}')">Tune in</button><button class="ghost" onclick="libraryChannelWatchProgramme('${esc(channel.id)}',${now.file_id},${now.item_id})">Watch from start</button>`:""}${channel.can_edit?`<button class="ghost" onclick="openLibraryChannelEditor('${esc(channel.id)}')">Edit</button>${now?`<button class="ghost" onclick="rebuildLibraryChannel('${esc(channel.id)}',${channel.revision},'next_programme',false)">Apply after this programme</button><button class="ghost" onclick="rebuildLibraryChannel('${esc(channel.id)}',${channel.revision},'next_rotation',true)">Reshuffle next rotation</button>`:""}`:""}</div></article>`;
+  }).join("");
+  const guide=(LIBRARY_CHANNELS.guide||[]).map(programme=>`<div class="lc-programme"><time>${lcTime(programme.starts_at_ms)}</time><span><b>${esc(programme.title)}</b><small>${esc((channels.find(channel=>channel.id===programme.channel_id)||{}).name||"")}</small></span><button class="ghost sm" onclick="libraryChannelWatchProgramme('${esc(programme.channel_id)}',${programme.file_id},${programme.item_id})">Watch from start</button></div>`).join("");
+  main.innerHTML=`${setHead("Library channels","What is on now and what follows. Channel viewing does not change watch history.",tools)}<div class="lc-grid">${cards}</div><h2 class="section">Guide</h2><div class="card lc-guide">${guide||'<div class="empty">No scheduled programmes.</div>'}</div>`;
+}
+
+async function openLibraryChannelEditor(id=null){
+  let draft=id?null:loadLibraryChannelDraft();
+  if(id){
+    const channel=await api(`/library-channels/${encodeURIComponent(id)}`);
+    draft={server:String((SERVER&&SERVER.instance_id)||location.origin),user:String(ME&&ME.id||""),step:"content",dirty:false,
+      id:channel.id,expected_revision:channel.revision,request_id:null,name:channel.name,
+      description:channel.description,visibility:channel.visibility,enabled:channel.enabled,
+      recipe:channel.recipe,preview:null};
+  }
+  LIBRARY_CHANNELS.draft=draft;LIBRARY_CHANNELS.editor=true;
+  try{LIBRARY_CHANNELS.libs=await api("/libraries");}catch(e){LIBRARY_CHANNELS.libs=[];}
+  await previewLibraryChannel(false);
+  libraryChannelsPaint();
+}
+function closeLibraryChannelEditor(){
+  const draft=LIBRARY_CHANNELS.draft;
+  if(draft&&draft.dirty&&!confirm("Discard unsaved channel changes?"))return;
+  LIBRARY_CHANNELS.editor=false;LIBRARY_CHANNELS.draft=null;libraryChannelsPaint();
+}
+function lcReadEditor(){
+  const draft=LIBRARY_CHANNELS.draft;if(!draft)return;
+  const value=id=>document.getElementById(id)?.value;
+  let touched=false;
+  for(const id of ["lc-name","lc-description","lc-visibility","lc-enabled","lc-order","lc-specials","lc-refresh","lc-all","lc-movies","lc-episodes","lc-genres","lc-tags","lc-keywords","lc-year-min","lc-year-max"])
+    if(document.getElementById(id)){touched=true;break;}
+  if(document.getElementById("lc-name"))draft.name=value("lc-name")||"";
+  if(document.getElementById("lc-description"))draft.description=value("lc-description")||"";
+  if(document.getElementById("lc-visibility"))draft.visibility=value("lc-visibility")||"personal";
+  if(document.getElementById("lc-enabled"))draft.enabled=!!document.getElementById("lc-enabled").checked;
+  if(document.getElementById("lc-order"))draft.recipe.ordering=value("lc-order");
+  for(const [id,key] of [["lc-specials","include_specials"],["lc-refresh","auto_refresh"],["lc-all","match_all_in_scope"]])
+    if(document.getElementById(id))draft.recipe[key]=!!document.getElementById(id).checked;
+  if(document.getElementById("lc-movies"))draft.recipe.kinds=[...(document.getElementById("lc-movies").checked?["movie"]:[]),...(document.getElementById("lc-episodes").checked?["episode"]:[])];
+  for(const [id,key] of [["lc-genres","genres_any"],["lc-tags","tags_any"],["lc-keywords","keywords_any"]])
+    if(document.getElementById(id))draft.recipe[key]=LibraryChannelCore.cleanStrings(value(id));
+  if(document.getElementById("lc-year-min"))draft.recipe.year_min=value("lc-year-min")?Number(value("lc-year-min")):null;
+  if(document.getElementById("lc-year-max"))draft.recipe.year_max=value("lc-year-max")?Number(value("lc-year-max")):null;
+  const libraryChecks=document.querySelectorAll("[data-lc-library]");
+  if(libraryChecks.length)draft.recipe.library_ids=Array.from(libraryChecks).filter(node=>node.checked).map(node=>Number(node.dataset.lcLibrary));
+  if(touched)draft.dirty=true;
+  saveLibraryChannelDraft();
+}
+function lcStep(step){lcReadEditor();LIBRARY_CHANNELS.draft.step=step;saveLibraryChannelDraft();libraryChannelsPaint();}
+async function previewLibraryChannel(paint=true){
+  lcReadEditor();const draft=LIBRARY_CHANNELS.draft;if(!draft)return;
+  try{draft.preview=await api("/library-channels/preview",{method:"POST",body:{recipe:draft.recipe,limit:50}});draft.previewError=null;}
+  catch(error){draft.previewError=error.message;}
+  saveLibraryChannelDraft();if(paint)libraryChannelsPaint();
+}
+async function lcSearchTitles(){
+  const q=document.getElementById("lc-search")?.value.trim();if(!q)return;
+  try{const result=await api(`/search?q=${encodeURIComponent(q)}`);LIBRARY_CHANNELS.search=(result.results||result.items||result||[]).filter(item=>["movie","show","episode"].includes(item.kind)).slice(0,12);libraryChannelsPaint();}
+  catch(error){toast(error.message);}
+}
+function lcAddTitle(id,kind){
+  const recipe=LIBRARY_CHANNELS.draft.recipe,key=kind==="show"?"include_show_ids":"include_item_ids";
+  if(!recipe[key].includes(Number(id)))recipe[key].push(Number(id));
+  LIBRARY_CHANNELS.draft.dirty=true;saveLibraryChannelDraft();previewLibraryChannel();
+}
+function lcExcludeTitle(id,kind){
+  const recipe=LIBRARY_CHANNELS.draft.recipe,key=kind==="show"?"exclude_show_ids":"exclude_item_ids";
+  if(!recipe[key].includes(Number(id)))recipe[key].push(Number(id));
+  LIBRARY_CHANNELS.draft.dirty=true;saveLibraryChannelDraft();previewLibraryChannel();
+}
+function lcPreset(name){
+  lcReadEditor();const recipe=LIBRARY_CHANNELS.draft.recipe;
+  recipe.match_all_in_scope=false;recipe.genres_any=[];recipe.tags_any=[];recipe.keywords_any=[];recipe.year_min=null;recipe.year_max=null;
+  if(name==="space"){recipe.genres_any=["Documentary"];recipe.keywords_any=["space","astronomy","mars"];}
+  else if(name==="nineties"){recipe.genres_any=["Comedy"];recipe.year_min=1990;recipe.year_max=1999;}
+  else if(name==="noir"){recipe.genres_any=["Film Noir","Crime"];recipe.keywords_any=["noir"];}
+  else if(name==="all")recipe.match_all_in_scope=true;
+  LIBRARY_CHANNELS.draft.dirty=true;saveLibraryChannelDraft();previewLibraryChannel();
+}
+function lcRemoveTitle(id,key){
+  LIBRARY_CHANNELS.draft.recipe[key]=LIBRARY_CHANNELS.draft.recipe[key].filter(value=>Number(value)!==Number(id));
+  LIBRARY_CHANNELS.draft.dirty=true;saveLibraryChannelDraft();previewLibraryChannel();
+}
+function libraryChannelEditorHtml(){
+  const draft=LIBRARY_CHANNELS.draft,step=draft.step||"content",recipe=draft.recipe;
+  const steps=LibraryChannelCore.STEPS.map(name=>`<button class="pill ${name===step?'on':''}" onclick="lcStep('${name}')">${esc(name)}</button>`).join("");
+  const libs=(LIBRARY_CHANNELS.libs||[]).filter(lib=>lib.kind==="movies"||lib.kind==="shows").map(lib=>`<label><input type="checkbox" data-lc-library="${lib.id}" ${recipe.library_ids.includes(Number(lib.id))?'checked':''}>${esc(lib.name)}</label>`).join("")||"<span class=\"muted\">No movie or TV libraries.</span>";
+  let fields="";
+  if(step==="content")fields=`<div class="lc-actions"><button class="ghost sm" onclick="lcPreset('space')">Space documentaries</button><button class="ghost sm" onclick="lcPreset('nineties')">'90s comedy</button><button class="ghost sm" onclick="lcPreset('noir')">Film noir</button><button class="ghost sm" onclick="lcPreset('all')">All titles in scope</button></div><div class="lc-checks"><label><input id="lc-movies" type="checkbox" ${recipe.kinds.includes("movie")?'checked':''}>Movies</label><label><input id="lc-episodes" type="checkbox" ${recipe.kinds.includes("episode")?'checked':''}>Episodes</label><label><input id="lc-all" type="checkbox" ${recipe.match_all_in_scope?'checked':''}>All titles in scope</label></div><h2 class="section">Libraries</h2><div class="lc-checks">${libs}</div><div class="formgrid"><div><label>Genres, comma separated</label><input id="lc-genres" value="${esc(recipe.genres_any.join(', '))}"></div><div><label>Tags, comma separated</label><input id="lc-tags" value="${esc(recipe.tags_any.join(', '))}"></div><div class="wide"><label>Literal title or overview keywords</label><input id="lc-keywords" value="${esc(recipe.keywords_any.join(', '))}"></div><div><label>Year from</label><input id="lc-year-min" type="number" value="${recipe.year_min||''}"></div><div><label>Year through</label><input id="lc-year-max" type="number" value="${recipe.year_max||''}"></div></div><h2 class="section">Explicit titles and exclusions</h2><div class="row"><input id="lc-search" placeholder="Search movies, series, episodes"><button onclick="lcSearchTitles()">Search</button></div><div>${(LIBRARY_CHANNELS.search||[]).map(item=>`<span><button class="ghost sm" onclick="lcAddTitle(${item.id},'${esc(item.kind)}')">+ ${esc(item.title)}</button><button class="ghost sm" onclick="lcExcludeTitle(${item.id},'${esc(item.kind)}')">Exclude</button></span>`).join(' ')}</div><div class="hint">Included item IDs: ${recipe.include_item_ids.map(id=>`<button class="ghost sm" onclick="lcRemoveTitle(${id},'include_item_ids')">${id} ×</button>`).join(' ')||'none'}<br>Included series IDs: ${recipe.include_show_ids.map(id=>`<button class="ghost sm" onclick="lcRemoveTitle(${id},'include_show_ids')">${id} ×</button>`).join(' ')||'none'}<br>Excluded item IDs: ${recipe.exclude_item_ids.map(id=>`<button class="ghost sm" onclick="lcRemoveTitle(${id},'exclude_item_ids')">${id} ×</button>`).join(' ')||'none'}<br>Excluded series IDs: ${recipe.exclude_show_ids.map(id=>`<button class="ghost sm" onclick="lcRemoveTitle(${id},'exclude_show_ids')">${id} ×</button>`).join(' ')||'none'}</div>`;
+  else if(step==="playback")fields=`<div class="formgrid"><div><label>Order</label><select id="lc-order"><option value="balanced_shuffle" ${recipe.ordering==='balanced_shuffle'?'selected':''}>Balanced shuffle</option><option value="release_order" ${recipe.ordering==='release_order'?'selected':''}>Release year; keep episodes in order</option></select></div></div><div class="lc-checks"><label><input id="lc-specials" type="checkbox" ${recipe.include_specials?'checked':''}>Include specials</label><label><input id="lc-refresh" type="checkbox" ${recipe.auto_refresh?'checked':''}>Refresh automatically</label></div><div class="hint">Normal changes begin at the next full rotation. “Apply after this programme” is available after saving.</div>`;
+  else fields=`<div class="formgrid"><div><label>Name</label><input id="lc-name" maxlength="80" value="${esc(draft.name)}"></div><div><label>Visibility</label><select id="lc-visibility"><option value="personal">Personal</option>${ME&&ME.is_admin?'<option value="shared" '+(draft.visibility==='shared'?'selected':'')+'>Shared</option>':''}</select></div><div class="wide"><label>Description</label><textarea id="lc-description" maxlength="500">${esc(draft.description)}</textarea></div></div><label><input id="lc-enabled" type="checkbox" ${draft.enabled?'checked':''}> Enable channel</label><div class="hint">Enablement is your explicit choice. Settings → Developer shows advisory Store, media, and client readiness without blocking it.</div>`;
+  const preview=draft.preview;
+  const previewHtml=preview?`<h2>${preview.eligible_count} eligible title${preview.eligible_count===1?'':'s'}</h2><p>${esc(preview.repeat_description)}</p>${(preview.matches||[]).slice(0,10).map(match=>`<div class="lc-programme"><span>${esc(match.candidate.title)}</span><small>${esc((match.reasons||[]).join(' · '))}</small></div>`).join('')}`:`<div class="empty">${esc(draft.previewError||'Preview the recipe to see its schedule.')}</div>`;
+  const errors=LibraryChannelCore.validateDraft(draft),errorHtml=Object.entries(errors).map(([field,message])=>`<div class="err">${esc(field)}: ${esc(message)}</div>`).join('');
+  return `${setHead(draft.id?"Edit channel":"Create channel","Three resumable steps; your draft is scoped to this server and account.",'<button class="ghost" onclick="closeLibraryChannelEditor()">Close</button>')}<div class="lc-editor"><section class="card"><div class="lc-steps">${steps}</div>${fields}${errorHtml}<div class="lc-actions"><button class="ghost" onclick="previewLibraryChannel()">Refresh preview</button>${step!=="content"?`<button class="ghost" onclick="lcStep('${LibraryChannelCore.nextStep(step,-1)}')">Back</button>`:''}${step!=="channel"?`<button onclick="lcStep('${LibraryChannelCore.nextStep(step,1)}')">Next</button>`:`<button class="primary" onclick="saveLibraryChannel()">${draft.id?'Save':'Create'}</button>`}${draft.id?'<button class="ghost" onclick="deleteLibraryChannel()">Delete</button>':''}</div><div class="err" id="lc-error"></div></section><aside class="card lc-preview"><span class="pill">PREVIEW</span>${previewHtml}</aside></div>`;
+}
+async function saveLibraryChannel(){
+  lcReadEditor();const draft=LIBRARY_CHANNELS.draft,fields=LibraryChannelCore.validateDraft(draft);
+  if(Object.keys(fields).length){libraryChannelsPaint();return;}
+  const body={request_id:newRequestId(),name:draft.name.trim(),description:draft.description.trim(),visibility:draft.visibility,enabled:draft.enabled,recipe:draft.recipe};
+  try{
+    if(draft.id)await api(`/library-channels/${encodeURIComponent(draft.id)}`,{method:"PUT",body:Object.assign({expected_revision:draft.expected_revision},body)});
+    else await api("/library-channels/",{method:"POST",body});
+    clearLibraryChannelDraft();LIBRARY_CHANNELS.editor=false;LIBRARY_CHANNELS.draft=null;toast(draft.id?"Channel saved":"Channel created");await viewLibraryChannels(PAGE_RENDER_GENERATION);
+  }catch(error){const node=document.getElementById("lc-error");if(node)node.textContent=error.message;}
+}
+async function deleteLibraryChannel(){
+  const draft=LIBRARY_CHANNELS.draft;if(!draft||!draft.id||!confirm(`Delete ${draft.name}? Media will not be deleted.`))return;
+  try{await api(`/library-channels/${encodeURIComponent(draft.id)}?expected_revision=${draft.expected_revision}`,{method:"DELETE"});clearLibraryChannelDraft();LIBRARY_CHANNELS.editor=false;LIBRARY_CHANNELS.draft=null;await viewLibraryChannels(PAGE_RENDER_GENERATION);}
+  catch(error){toast(error.message);}
+}
+async function toggleLibraryChannelFavourite(id,favourite){
+  try{await api(`/library-channels/${encodeURIComponent(id)}/favourite`,{method:"PUT",body:{favourite}});await refreshLibraryChannels(PAGE_RENDER_GENERATION);}
+  catch(error){toast(error.message);}
+}
+async function rebuildLibraryChannel(id,expectedRevision,activation,reshuffle){
+  try{
+    const result=await api(`/library-channels/${encodeURIComponent(id)}/rebuild`,{method:"POST",body:{expected_revision:expectedRevision,request_id:newRequestId(),activation,reshuffle}});
+    toast(result.pending_activation_ms?`Changes begin ${new Date(result.pending_activation_ms).toLocaleString()}`:"Schedule rebuilt");
+    await refreshLibraryChannels(PAGE_RENDER_GENERATION);
+  }catch(error){toast(error.message);}
+}
+
+async function libraryChannelTune(channelId){
+  if(LIBRARY_CHANNEL_TRANSITION)return;
+  LIBRARY_CHANNEL_TRANSITION=true;
+  const current=PLAYER&&PLAYER.libraryChannel;
+  if(current){PLAYER.libraryChannelReplacing=true;closePlayer();}
+  else if(document.getElementById("modal")?.classList.contains("open"))closePlayer();
+  const intent=LIBRARY_CHANNEL_TUNE.begin(channelId),sent=performance.now();
+  try{
+    const resolved=await api(`/library-channels/${encodeURIComponent(channelId)}/resolve`,{method:"POST",signal:intent.signal});
+    const received=performance.now();LIBRARY_CHANNEL_CLOCK.observe(resolved.server_now_ms,sent,received);
+    if(!LIBRARY_CHANNEL_TUNE.current(intent))return;
+    const channel=LIBRARY_CHANNELS.channels.find(row=>row.id===channelId)||{};
+    const programme=(LIBRARY_CHANNELS.guide||[]).find(row=>row.channel_id===channelId&&row.generation_id===resolved.generation_id&&row.ordinal===resolved.occurrence.ordinal)||{};
+    const tune={channel_id:channelId,generation_id:resolved.generation_id,occurrence:resolved.occurrence,
+      tune_sequence:intent.sequence,starts_at_ms:resolved.starts_at_ms,ends_at_ms:resolved.ends_at_ms,
+      item_id:resolved.item_id,file_id:resolved.file_id,title:programme.title||channel.name||"Library channel"};
+    LIBRARY_CHANNEL_RETURN={channelId};PENDING_LIBRARY_CHANNEL_PLAYBACK=tune;
+    ITEM_FOR_FILE[resolved.file_id]=resolved.item_id;
+    await play(resolved.file_id,tune.title,resolved.position_ms,resolved.ends_at_ms-resolved.starts_at_ms,
+      {title:tune.title,overview:`Following ${channel.name||'Library channel'}. Channel viewing doesn't change your watch history.`,runtime_ms:resolved.ends_at_ms-resolved.starts_at_ms});
+  }catch(error){if(error.name!=="AbortError"){const view=LibraryChannelCore.errorView(error);toast(`${view.title}: ${view.detail}`);}}
+  finally{LIBRARY_CHANNEL_TRANSITION=false;}
+}
+function libraryChannelTick(){
+  if(!PLAYER||!PLAYER.libraryChannel||LIBRARY_CHANNEL_TRANSITION)return;
+  if(LIBRARY_CHANNEL_CLOCK.now()>=Number(PLAYER.libraryChannel.ends_at_ms||0))libraryChannelBoundary().catch(()=>{});
+}
+async function libraryChannelBoundary(){
+  const channelId=PLAYER&&PLAYER.libraryChannel&&PLAYER.libraryChannel.channel_id;
+  if(channelId)await libraryChannelTune(channelId);
+}
+function libraryChannelWatchProgramme(channelId,fileId,itemId,titleOverride){
+  const scheduled=(LIBRARY_CHANNELS.guide||[]).find(row=>row.channel_id===channelId&&Number(row.file_id)===Number(fileId));
+  const title=titleOverride||(scheduled&&scheduled.title)||(LIBRARY_CHANNELS.channels.find(row=>row.id===channelId)||{}).name||"Library channel";
+  LIBRARY_CHANNEL_RETURN={channelId};ITEM_FOR_FILE[fileId]=itemId;
+  if(PLAYER&&PLAYER.libraryChannel){PLAYER.libraryChannelReplacing=true;closePlayer();}
+  return play(fileId,title,0,0,{title,overview:"Personal playback from a Library channel. Return to channel rejoins what is on now.",return_channel_id:channelId});
+}
+function libraryChannelWatchFromStart(){
+  const context=PLAYER&&PLAYER.libraryChannel;if(!context)return;
+  return libraryChannelWatchProgramme(context.channel_id,PLAYER.fileId,context.item_id,PLAYER.title);
+}
+function returnToLibraryChannel(){
+  const channelId=(PLAYER&&PLAYER.meta&&PLAYER.meta.return_channel_id)||(LIBRARY_CHANNEL_RETURN&&LIBRARY_CHANNEL_RETURN.channelId);
+  if(channelId)return libraryChannelTune(channelId);
+}
+
 // ---- router ---------------------------------------------------------------
 // One page-scoped poller at a time; routing away always clears it.
 let PAGE_TIMER=null, PAGE_RENDER_GENERATION=0;
 function pagePhaseName(route){
   if(route==="#/live-tv") return "live-tv";
+  if(route==="#/library-channels") return "library-channels";
   if(route==="#/activity") return "activity";
   if(route==="#/analysis") return "analysis";
   if(isSettingsRoute(route)) return "settings";
@@ -19186,6 +19510,7 @@ async function render(){
     else if(h.startsWith("#/search/")) await viewSearch(decodeURIComponent(h.split("/")[2]||""));
     else if(h==="#/activity") await viewActivity(generation);
     else if(h==="#/live-tv") await viewLiveTv(generation);
+    else if(h==="#/library-channels") await viewLibraryChannels(generation);
     else if(h==="#/analysis") await viewAnalysis(generation);
     else if(isSettingsRoute(h)) await viewSettings(generation,!stayingInSettings);
     else await viewHome(generation);

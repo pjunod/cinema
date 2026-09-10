@@ -2562,7 +2562,7 @@ returns `learner_route_ineligible` (§3.2).
 |---|---|---|---|
 | GET | `/` | none | The app shell, or the Plex container (§20) |
 | GET | `/assets/hls.min.js` | none | `public, max-age=604800` |
-| GET | `/assets/{cluster-panel,playback-policy,playback-control,live-tv,reader}.js` | none | `no-cache` |
+| GET | `/assets/{cluster-panel,playback-policy,playback-control,live-tv,library-channels,reader}.js` | none | `no-cache` |
 | GET | `/assets/reader.css` | none | `no-cache` |
 | GET | `/connect.svg` | none | QR code of the server origin, taken from `?origin=`. Refuses anything that is not a bare `http`/`https` origin, and carries no credential |
 | GET | `/manifest.webmanifest` | none | `public, max-age=86400` |

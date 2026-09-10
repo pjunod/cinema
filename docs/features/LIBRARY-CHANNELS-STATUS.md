@@ -16,7 +16,7 @@ proved, and what remains?*
 | M0 isolated base and compiler | complete | clean independent clone at `4cef0da7`; Rust 1.97.1 baseline `cargo check -p plurxd --all-targets` passed in 1m14s |
 | M1 recipes, schedules, and durable storage | built; integration compile passed | one normalized evaluator and deterministic clock/order implementation; SQLite v55 and Hiqlite v35 entities, authorization-at-write, idempotent definitions, bounded staging, guarded publication, catalogue projection, and import census |
 | M2 API and playback purpose | built; integration compile passed | bounded authenticated CRUD/preview/guide/resolve routes, pinned-occurrence finite-HLS starts, durable purpose binding, and following-mode start/history isolation |
-| M3 web | in progress | browse, guide, creator, tune/restart/return, and Developer enablement advice; server setting/readiness contract is built |
+| M3 web | built; integration compile passed | responsive browse/guide, three-step resumable editor, preview and management actions, fenced following playback, watch-from-start/return, and advisory Developer enablement |
 | M4 Apple | queued | iPhone/iPad authoring plus Apple TV layouts and following playback |
 | M5 Android | queued | phone/tablet authoring plus Google TV layouts and following playback |
 | M6 promotion | queued | documentation, one adversarial review, review fixes, fast lane, and merge |
