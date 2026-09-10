@@ -56,7 +56,11 @@ interface PlurxApi {
     suspend fun updateLibraryChannel(@Path("id") id: String, @Body body: LibraryChannelUpdate): LibraryChannelMutation
 
     @DELETE("library-channels/{id}")
-    suspend fun deleteLibraryChannel(@Path("id") id: String, @Query("expected_revision") revision: Long)
+    suspend fun deleteLibraryChannel(
+        @Path("id") id: String,
+        @Query("expected_revision") revision: Long,
+        @Query("request_id") requestId: String = java.util.UUID.randomUUID().toString(),
+    )
 
     @PUT("library-channels/{id}/favourite")
     suspend fun setLibraryChannelFavourite(@Path("id") id: String, @Body body: LibraryChannelFavourite)

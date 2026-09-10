@@ -3,6 +3,7 @@
 package tv.plurx.app.librarychannels
 
 import android.content.Context
+import android.os.SystemClock
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
@@ -61,12 +62,23 @@ class LibraryChannelPlayer private constructor(context: Context) {
     private var sessionId: String? = null
     private var tuneSequence = 0L
     private var boundary: Job? = null
+    private var clockRefresh: Job? = null
+    private var serverBaseMs = 0L
+    private var monotonicBaseMs = 0L
 
     init {
         player.addListener(object : Player.Listener {
             override fun onPlaybackStateChanged(playbackState: Int) {
                 if (playbackState != Player.STATE_ENDED) return
-                mutableState.value.watching?.let(::tune)
+                val current = mutableState.value
+                val channel = current.watching ?: return
+                if ((current.resolved?.ends_at_ms ?: 0) > serverNowMs()) {
+                    mutableState.value = current.copy(
+                        message = "This programme ended early. Waiting for its scheduled boundary.",
+                    )
+                } else {
+                    tune(channel)
+                }
             }
 
             override fun onPlayerError(error: PlaybackException) {
@@ -123,7 +135,9 @@ class LibraryChannelPlayer private constructor(context: Context) {
         mutableState.value = mutableState.value.copy(busy = true, message = "Joining ${channel.name}…")
         scope.launch {
             try {
+                val resolveStarted = SystemClock.elapsedRealtime()
                 val resolved = client.resolveLibraryChannel(channel.id)
+                recordServerClock(resolved.server_now_ms, resolveStarted)
                 if (expected != tuneSequence) return@launch
                 val caps = Caps.snapshot(appContext).document
                 val started = client.createLibraryChannelSession(
@@ -166,6 +180,17 @@ class LibraryChannelPlayer private constructor(context: Context) {
                 player.prepare()
                 player.playWhenReady = true
                 scheduleBoundary(channel, resolved, expected)
+                scheduleClockRefresh(channel, expected)
+                scope.launch {
+                    delay(2_000)
+                    if (expected != tuneSequence) return@launch
+                    val origin = started.playback.media_origin_ms ?: resolved.position_ms
+                    val scheduledPosition = (serverNowMs() - resolved.starts_at_ms).coerceAtLeast(0)
+                    val playerPosition = origin + player.currentPosition
+                    if (scheduledPosition - playerPosition > 2_000) {
+                        player.seekTo((scheduledPosition - origin).coerceAtLeast(0))
+                    }
+                }
             } catch (_: kotlinx.coroutines.CancellationException) {
             } catch (error: Exception) {
                 if (expected == tuneSequence) {
@@ -182,7 +207,7 @@ class LibraryChannelPlayer private constructor(context: Context) {
         val current = mutableState.value
         val channel = current.watching ?: return
         if (current.paused) {
-            if ((current.resolved?.ends_at_ms ?: Long.MAX_VALUE) <= System.currentTimeMillis()) {
+            if ((current.resolved?.ends_at_ms ?: Long.MAX_VALUE) <= serverNowMs()) {
                 tune(channel)
             } else {
                 player.play()
@@ -216,6 +241,8 @@ class LibraryChannelPlayer private constructor(context: Context) {
         tuneSequence += 1
         boundary?.cancel()
         boundary = null
+        clockRefresh?.cancel()
+        clockRefresh = null
         player.stop()
         player.clearMediaItems()
         val retiring = sessionId
@@ -234,13 +261,43 @@ class LibraryChannelPlayer private constructor(context: Context) {
     private fun scheduleBoundary(channel: LibraryChannel, resolved: LibraryChannelResolved, expected: Long) {
         boundary?.cancel()
         boundary = scope.launch {
-            delay((resolved.ends_at_ms - System.currentTimeMillis()).coerceAtLeast(0))
+            delay((resolved.ends_at_ms - serverNowMs()).coerceAtLeast(0))
             if (expected != tuneSequence) return@launch
             if (mutableState.value.paused) {
                 mutableState.value = mutableState.value.copy(
                     message = "The programme changed while paused. Resume to rejoin live.",
                 )
             } else tune(channel)
+        }
+    }
+
+    private fun recordServerClock(serverNowMs: Long, requestStartedMs: Long) {
+        val received = SystemClock.elapsedRealtime()
+        serverBaseMs = serverNowMs + (received - requestStartedMs).coerceAtLeast(0) / 2
+        monotonicBaseMs = received
+    }
+
+    private fun serverNowMs(): Long = if (serverBaseMs == 0L) System.currentTimeMillis()
+    else serverBaseMs + (SystemClock.elapsedRealtime() - monotonicBaseMs).coerceAtLeast(0)
+
+    private fun scheduleClockRefresh(channel: LibraryChannel, expected: Long) {
+        clockRefresh?.cancel()
+        val client = api ?: return
+        clockRefresh = scope.launch {
+            while (expected == tuneSequence) {
+                delay(30_000)
+                if (expected != tuneSequence || mutableState.value.paused) continue
+                val started = SystemClock.elapsedRealtime()
+                val fresh = runCatching { client.resolveLibraryChannel(channel.id) }.getOrNull() ?: continue
+                recordServerClock(fresh.server_now_ms, started)
+                val current = mutableState.value.resolved
+                if (current == null || current.generation_id != fresh.generation_id || current.occurrence != fresh.occurrence) {
+                    tune(channel)
+                    return@launch
+                }
+                mutableState.value = mutableState.value.copy(resolved = fresh)
+                scheduleBoundary(channel, fresh, expected)
+            }
         }
     }
 

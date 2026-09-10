@@ -28,13 +28,16 @@ import androidx.compose.material3.Text
 import tv.plurx.app.ui.components.TvButton as Button
 import tv.plurx.app.ui.components.TvTextButton as TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -73,6 +76,7 @@ fun LibraryChannelsScreen(
     val television = currentFormFactor() == FormFactor.Television
     var editor by remember { mutableStateOf<LibraryChannel?>(null) }
     var creating by remember { mutableStateOf(false) }
+    var tvLayout by rememberSaveable { mutableStateOf("guide_preview") }
     BackHandler(onBack = onBack)
 
     LaunchedEffect(vm.origin) {
@@ -82,6 +86,7 @@ fun LibraryChannelsScreen(
             controller.refresh()
         }
     }
+    DisposableEffect(controller) { onDispose { controller.stop() } }
 
     Column(
         Modifier.fillMaxSize().windowInsetsPadding(safeDisplayInsets()).padding(16.dp),
@@ -89,16 +94,44 @@ fun LibraryChannelsScreen(
     ) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             TextButton(onClick = onBack) { Text("Back") }
-            if (!television && vm.currentUser?.is_admin == true) {
+            if (!television) {
                 Button(onClick = { creating = true }) { Text("Make a channel") }
+            } else {
+                TextButton(onClick = {
+                    tvLayout = when (tvLayout) {
+                        "guide_preview" -> "guide_over_picture"
+                        "guide_over_picture" -> "channel_browser"
+                        else -> "guide_preview"
+                    }
+                }) {
+                    Text("Layout · ${when (tvLayout) {
+                        "guide_preview" -> "Guide + preview"
+                        "guide_over_picture" -> "Guide over picture"
+                        else -> "Channel browser"
+                    }}")
+                }
             }
         }
         Text("Library channels", style = MaterialTheme.typography.headlineMedium)
         Text(state.message, style = MaterialTheme.typography.bodySmall)
         if (television) {
-            Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(18.dp)) {
-                LibraryChannelPlayerPane(controller, state, onOpenItem, Modifier.weight(1.35f))
-                LibraryChannelList(controller, state.channels, state.programmes, false, { editor = it }, Modifier.weight(1f))
+            when (tvLayout) {
+                "guide_over_picture" -> Box(Modifier.fillMaxSize()) {
+                    LibraryChannelPlayerPane(controller, state, onOpenItem, Modifier.fillMaxSize())
+                    LibraryChannelList(
+                        controller, state.channels, state.programmes, false, { editor = it },
+                        Modifier.align(Alignment.CenterStart).fillMaxWidth(0.42f).fillMaxHeight()
+                            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.9f)).padding(12.dp),
+                    )
+                }
+                "channel_browser" -> Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(18.dp)) {
+                    LibraryChannelList(controller, state.channels, state.programmes, false, { editor = it }, Modifier.weight(1.35f))
+                    LibraryChannelPlayerPane(controller, state, onOpenItem, Modifier.weight(0.8f))
+                }
+                else -> Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(18.dp)) {
+                    LibraryChannelPlayerPane(controller, state, onOpenItem, Modifier.weight(1.35f))
+                    LibraryChannelList(controller, state.channels, state.programmes, false, { editor = it }, Modifier.weight(1f))
+                }
             }
         } else {
             LibraryChannelPlayerPane(controller, state, onOpenItem, Modifier.fillMaxWidth().height(280.dp))
@@ -204,6 +237,7 @@ private fun LibraryChannelEditor(
     onCancel: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
+    val home by vm.home.collectAsStateWithLifecycle()
     var name by remember(channel) { mutableStateOf(channel?.name.orEmpty()) }
     var description by remember(channel) { mutableStateOf(channel?.description.orEmpty()) }
     var shared by remember(channel) { mutableStateOf(channel?.visibility == LibraryChannelVisibility.shared) }
@@ -218,9 +252,18 @@ private fun LibraryChannelEditor(
     var ordering by remember(channel) { mutableStateOf(channel?.recipe?.ordering ?: LibraryChannelOrdering.balanced_shuffle) }
     var specials by remember(channel) { mutableStateOf(channel?.recipe?.include_specials ?: false) }
     var autoRefresh by remember(channel) { mutableStateOf(channel?.recipe?.auto_refresh ?: true) }
+    var libraryIds by remember(channel) { mutableStateOf(channel?.recipe?.library_ids ?: emptyList()) }
+    var includeItemIds by remember(channel) { mutableStateOf(channel?.recipe?.include_item_ids ?: emptyList()) }
+    var includeShowIds by remember(channel) { mutableStateOf(channel?.recipe?.include_show_ids ?: emptyList()) }
+    var excludeItemIds by remember(channel) { mutableStateOf(channel?.recipe?.exclude_item_ids ?: emptyList()) }
+    var excludeShowIds by remember(channel) { mutableStateOf(channel?.recipe?.exclude_show_ids ?: emptyList()) }
+    var searchText by remember { mutableStateOf("") }
+    var searchResults by remember { mutableStateOf(emptyList<tv.plurx.app.data.Item>()) }
     var preview by remember { mutableStateOf<LibraryChannelPreview?>(null) }
     var busy by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
+    var step by remember { mutableStateOf(0) }
+    val canShare = vm.currentUser?.is_admin == true
 
     fun words(value: String) = value.split(',').map(String::trim).filter(String::isNotEmpty)
     fun recipe(): LibraryChannelRecipe {
@@ -231,6 +274,7 @@ private fun LibraryChannelEditor(
         val min = yearMin.toIntOrNull()
         val max = yearMax.toIntOrNull()
         return old.copy(
+            library_ids = libraryIds,
             kinds = buildList { if (movies) add("movie"); if (episodes) add("episode") },
             genres_any = genresAny,
             tags_any = tagsAny,
@@ -240,8 +284,14 @@ private fun LibraryChannelEditor(
             ordering = ordering,
             include_specials = specials,
             auto_refresh = autoRefresh,
-            match_all_in_scope = old.library_ids.isEmpty() && genresAny.isEmpty() && tagsAny.isEmpty() &&
-                keywordsAny.isEmpty() && min == null && max == null && old.include_item_ids.isEmpty() && old.include_show_ids.isEmpty(),
+            include_item_ids = includeItemIds,
+            include_show_ids = includeShowIds,
+            exclude_item_ids = excludeItemIds,
+            exclude_show_ids = excludeShowIds,
+            // An empty form is an editable draft, not an implicit request for
+            // every video on the server. Preserve only an explicit existing
+            // all-in-scope recipe until a dedicated library preset changes it.
+            match_all_in_scope = old.match_all_in_scope,
         )
     }
     val valid = name.trim().isNotEmpty() && name.length <= 80 && description.length <= 500 && (movies || episodes)
@@ -251,8 +301,18 @@ private fun LibraryChannelEditor(
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Text(if (channel == null) "Make a channel" else "Edit channel", style = MaterialTheme.typography.headlineSmall)
+        if (step == 0) {
         Text("1 · Content", style = MaterialTheme.typography.titleMedium)
         Row { Checkbox(movies, { movies = it }); Text("Movies", Modifier.padding(top = 12.dp)); Checkbox(episodes, { episodes = it }); Text("Episodes", Modifier.padding(top = 12.dp)) }
+        Text("Libraries", style = MaterialTheme.typography.labelLarge)
+        home.libraries.filter { it.kind == "movies" || it.kind == "shows" }.forEach { library ->
+            Row {
+                Checkbox(library.id in libraryIds, { checked ->
+                    libraryIds = if (checked) (libraryIds + library.id).distinct() else libraryIds - library.id
+                })
+                Text(library.name, Modifier.padding(top = 12.dp))
+            }
+        }
         OutlinedTextField(genres, { genres = it }, label = { Text("Genres, comma separated") }, modifier = Modifier.fillMaxWidth())
         OutlinedTextField(tags, { tags = it }, label = { Text("Tags, comma separated") }, modifier = Modifier.fillMaxWidth())
         OutlinedTextField(keywords, { keywords = it }, label = { Text("Title keywords, comma separated") }, modifier = Modifier.fillMaxWidth())
@@ -260,7 +320,35 @@ private fun LibraryChannelEditor(
             OutlinedTextField(yearMin, { yearMin = it }, label = { Text("From year") }, modifier = Modifier.weight(1f))
             OutlinedTextField(yearMax, { yearMax = it }, label = { Text("Through year") }, modifier = Modifier.weight(1f))
         }
-        Button(enabled = valid && !busy, onClick = {
+        Text("Explicit titles and exclusions", style = MaterialTheme.typography.labelLarge)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedTextField(searchText, { searchText = it }, label = { Text("Search movies, series, episodes") }, modifier = Modifier.weight(1f))
+            Button(enabled = searchText.trim().isNotEmpty() && !busy, onClick = {
+                scope.launch {
+                    runCatching { vm.api().search(searchText.trim(), 30).results }
+                        .onSuccess { searchResults = it.filter { item -> item.kind in setOf("movie", "show", "episode") } }
+                        .onFailure { message = it.message }
+                }
+            }) { Text("Search") }
+        }
+        searchResults.take(12).forEach { item ->
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text(item.title, modifier = Modifier.weight(1f), maxLines = 1)
+                TextButton(onClick = {
+                    if (item.kind == "show") includeShowIds = (includeShowIds + item.id).distinct()
+                    else includeItemIds = (includeItemIds + item.id).distinct()
+                }) { Text("Include") }
+                TextButton(onClick = {
+                    if (item.kind == "show") excludeShowIds = (excludeShowIds + item.id).distinct()
+                    else excludeItemIds = (excludeItemIds + item.id).distinct()
+                }) { Text("Exclude") }
+            }
+        }
+        if (includeItemIds.isNotEmpty() || includeShowIds.isNotEmpty() || excludeItemIds.isNotEmpty() || excludeShowIds.isNotEmpty()) {
+            Text("Included items ${includeItemIds.joinToString()} · series ${includeShowIds.joinToString()}", style = MaterialTheme.typography.bodySmall)
+            Text("Excluded items ${excludeItemIds.joinToString()} · series ${excludeShowIds.joinToString()}", style = MaterialTheme.typography.bodySmall)
+        }
+        Button(enabled = (movies || episodes) && !busy, onClick = {
             busy = true
             scope.launch {
                 try { preview = vm.api().previewLibraryChannel(LibraryChannelPreviewRequest(recipe())); message = null }
@@ -274,14 +362,23 @@ private fun LibraryChannelEditor(
                 Text("${match.candidate.title} — ${match.reasons.joinToString(" · ")}", style = MaterialTheme.typography.bodySmall)
             }
         }
+        }
+        if (step == 1) {
         Text("2 · Playback", style = MaterialTheme.typography.titleMedium)
         ChoicePicker("Order", ordering, LibraryChannelOrdering.entries, { if (it == LibraryChannelOrdering.balanced_shuffle) "Balanced shuffle" else "Release order" }, { ordering = it })
         Row { Checkbox(specials, { specials = it }); Text("Include specials", Modifier.padding(top = 12.dp)) }
         Row { Checkbox(autoRefresh, { autoRefresh = it }); Text("Refresh future rotations automatically", Modifier.padding(top = 12.dp)) }
+        preview?.let { Text("${it.eligible_count} titles · ${it.repeat_description}") }
+        }
+        if (step == 2) {
         Text("3 · Channel", style = MaterialTheme.typography.titleMedium)
         OutlinedTextField(name, { name = it }, label = { Text("Name") }, modifier = Modifier.fillMaxWidth())
         OutlinedTextField(description, { description = it }, label = { Text("Description") }, modifier = Modifier.fillMaxWidth())
-        Row { Checkbox(shared, { shared = it }); Text("Shared with every viewer", Modifier.padding(top = 12.dp)) }
+        if (canShare) {
+            Row { Checkbox(shared, { shared = it }); Text("Shared with every viewer", Modifier.padding(top = 12.dp)) }
+        } else {
+            Text("Personal channel · an administrator can make it shared", style = MaterialTheme.typography.bodySmall)
+        }
         Row { Checkbox(enabled, { enabled = it }); Text("Enabled", Modifier.padding(top = 12.dp)) }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(enabled = valid && !busy, onClick = {
@@ -290,7 +387,7 @@ private fun LibraryChannelEditor(
                     try {
                         val definition = LibraryChannelDefinition(
                             name = name.trim(), description = description.trim(),
-                            visibility = if (shared) LibraryChannelVisibility.shared else LibraryChannelVisibility.personal,
+                            visibility = if (canShare && shared) LibraryChannelVisibility.shared else LibraryChannelVisibility.personal,
                             enabled = enabled, recipe = recipe(),
                         )
                         if (channel == null) vm.api().createLibraryChannel(definition)
@@ -306,7 +403,6 @@ private fun LibraryChannelEditor(
                     } catch (error: Exception) { message = error.message; busy = false }
                 }
             }) { Text("Save") }
-            TextButton(onClick = onCancel) { Text("Cancel") }
         }
         channel?.let { existing ->
             Button(enabled = !busy, onClick = {
@@ -329,6 +425,12 @@ private fun LibraryChannelEditor(
                         .onSuccess { onSaved() }.onFailure { message = it.message }
                 }
             }) { Text("Delete channel") }
+        }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (step > 0) TextButton(onClick = { step -= 1 }) { Text("Back") }
+            if (step < 2) Button(enabled = step != 0 || movies || episodes, onClick = { step += 1 }) { Text("Next") }
+            TextButton(onClick = onCancel) { Text("Cancel") }
         }
         message?.let { Text(it, color = MaterialTheme.colorScheme.error) }
     }

@@ -236,6 +236,9 @@ final class LibraryChannelPlayerController: ObservableObject {
     private var playbackId = UUID().uuidString
     private var sessionId: String?
     private var boundary: Task<Void, Never>?
+    private var clockRefresh: Task<Void, Never>?
+    private var serverBaseMs: Int64 = 0
+    private var monotonicBaseMs: Int64 = 0
     private var endObserver: NSObjectProtocol?
 
     deinit {
@@ -284,7 +287,9 @@ final class LibraryChannelPlayerController: ObservableObject {
         busy = true
         message = "Joining \(channel.name)…"
         do {
+            let resolveStarted = monotonicMs()
             let occurrence = try await api.resolveLibraryChannel(channel.id)
+            recordServerClock(occurrence.serverNowMs, requestStartedMs: resolveStarted)
             guard expected == tuneSequence else { return }
             var request = CreateSessionRequest(
                 playbackId: playbackId,
@@ -325,6 +330,17 @@ final class LibraryChannelPlayerController: ObservableObject {
             player.play()
             message = "Following live · seeking and watch history are off"
             scheduleBoundary(channel: channel, occurrence: occurrence, sequence: expected)
+            scheduleClockRefresh(channel: channel, sequence: expected)
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard let self, self.tuneSequence == expected else { return }
+                let origin = Int64(started.playback.mediaOriginMs ?? Int(occurrence.positionMs))
+                let scheduled = max(0, self.serverNowMs() - occurrence.startsAtMs)
+                let playerPosition = origin + Int64(self.player.currentTime().seconds * 1_000)
+                if scheduled - playerPosition > 2_000 {
+                    await self.player.seek(to: CMTime(seconds: Double(max(0, scheduled - origin)) / 1_000, preferredTimescale: 1_000))
+                }
+            }
         } catch is CancellationError {
         } catch {
             if expected == tuneSequence { message = error.localizedDescription }
@@ -336,7 +352,7 @@ final class LibraryChannelPlayerController: ObservableObject {
         guard let channel = watching else { return }
         if paused {
             if let resolved,
-               Int64(Date().timeIntervalSince1970 * 1_000) >= resolved.endsAtMs {
+               serverNowMs() >= resolved.endsAtMs {
                 await tune(channel)
             } else {
                 paused = false
@@ -354,6 +370,8 @@ final class LibraryChannelPlayerController: ObservableObject {
         tuneSequence &+= 1
         boundary?.cancel()
         boundary = nil
+        clockRefresh?.cancel()
+        clockRefresh = nil
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
         endObserver = nil
         player.pause()
@@ -377,7 +395,7 @@ final class LibraryChannelPlayerController: ObservableObject {
 
     private func scheduleBoundary(channel: LibraryChannel, occurrence: LibraryChannelResolved, sequence: UInt64) {
         boundary?.cancel()
-        let delayMs = max(0, occurrence.endsAtMs - Int64(Date().timeIntervalSince1970 * 1_000))
+        let delayMs = max(0, occurrence.endsAtMs - serverNowMs())
         boundary = Task { @MainActor [weak self] in
             do { try await Task.sleep(nanoseconds: UInt64(delayMs) * 1_000_000) } catch { return }
             guard let self, self.tuneSequence == sequence else { return }
@@ -385,6 +403,41 @@ final class LibraryChannelPlayerController: ObservableObject {
                 self.message = "The programme changed while paused. Resume to rejoin live."
             } else {
                 await self.tune(channel)
+            }
+        }
+    }
+
+    private func monotonicMs() -> Int64 {
+        Int64(ProcessInfo.processInfo.systemUptime * 1_000)
+    }
+
+    private func recordServerClock(_ serverNowMs: Int64, requestStartedMs: Int64) {
+        let received = monotonicMs()
+        serverBaseMs = serverNowMs + max(0, received - requestStartedMs) / 2
+        monotonicBaseMs = received
+    }
+
+    private func serverNowMs() -> Int64 {
+        guard serverBaseMs != 0 else { return Int64(Date().timeIntervalSince1970 * 1_000) }
+        return serverBaseMs + max(0, monotonicMs() - monotonicBaseMs)
+    }
+
+    private func scheduleClockRefresh(channel: LibraryChannel, sequence: UInt64) {
+        clockRefresh?.cancel()
+        guard let api else { return }
+        clockRefresh = Task { @MainActor [weak self] in
+            while let self, self.tuneSequence == sequence {
+                do { try await Task.sleep(nanoseconds: 30_000_000_000) } catch { return }
+                guard self.tuneSequence == sequence, !self.paused else { continue }
+                let started = self.monotonicMs()
+                guard let fresh = try? await api.resolveLibraryChannel(channel.id) else { continue }
+                self.recordServerClock(fresh.serverNowMs, requestStartedMs: started)
+                if self.resolved?.generationId != fresh.generationId || self.resolved?.occurrence != fresh.occurrence {
+                    await self.tune(channel)
+                    return
+                }
+                self.resolved = fresh
+                self.scheduleBoundary(channel: channel, occurrence: fresh, sequence: sequence)
             }
         }
     }
@@ -398,7 +451,11 @@ final class LibraryChannelPlayerController: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor in
                 guard let self, self.tuneSequence == sequence, !self.paused else { return }
-                await self.tune(channel)
+                if let resolved = self.resolved, resolved.endsAtMs > self.serverNowMs() {
+                    self.message = "This programme ended early. Waiting for its scheduled boundary."
+                } else {
+                    await self.tune(channel)
+                }
             }
         }
     }
@@ -411,11 +468,32 @@ struct LibraryChannelsView: View {
     @StateObject private var controller = LibraryChannelPlayerController.shared
     @State private var editing: LibraryChannel?
     @State private var creating = false
+    @AppStorage("libraryChannelTVLayout") private var tvLayout = "guide_preview"
 
     var body: some View {
         GeometryReader { proxy in
             let wide = proxy.size.width >= 900
             Group {
+                #if os(tvOS)
+                switch tvLayout {
+                case "guide_over_picture":
+                    ZStack(alignment: .leading) {
+                        playerPane
+                        channelList.frame(maxWidth: proxy.size.width * 0.42)
+                            .padding().background(Palette.surface.opacity(0.92))
+                    }
+                case "channel_browser":
+                    HStack(spacing: 24) {
+                        channelList
+                        playerPane.frame(width: proxy.size.width * 0.38)
+                    }
+                default:
+                    HStack(spacing: 24) {
+                        playerPane.frame(width: proxy.size.width * 0.58)
+                        channelList
+                    }
+                }
+                #else
                 if wide {
                     HStack(spacing: 24) {
                         playerPane.frame(width: proxy.size.width * 0.58)
@@ -427,6 +505,7 @@ struct LibraryChannelsView: View {
                         channelList
                     }
                 }
+                #endif
             }
             .padding()
         }
@@ -435,6 +514,13 @@ struct LibraryChannelsView: View {
             #if os(iOS)
             ToolbarItem(placement: .primaryAction) {
                 Button { creating = true } label: { Label("Make a channel", systemImage: "plus") }
+            }
+            #else
+            ToolbarItem(placement: .primaryAction) {
+                Button(layoutLabel) {
+                    tvLayout = tvLayout == "guide_preview" ? "guide_over_picture"
+                        : (tvLayout == "guide_over_picture" ? "channel_browser" : "guide_preview")
+                }
             }
             #endif
         }
@@ -450,6 +536,15 @@ struct LibraryChannelsView: View {
                 do { try await Task.sleep(nanoseconds: 30_000_000_000) } catch { return }
                 await controller.refresh()
             }
+        }
+        .onDisappear { Task { await controller.stop() } }
+    }
+
+    private var layoutLabel: String {
+        switch tvLayout {
+        case "guide_over_picture": "Layout · Guide over picture"
+        case "channel_browser": "Layout · Channel browser"
+        default: "Layout · Guide + preview"
         }
     }
 
@@ -540,20 +635,55 @@ private struct LibraryChannelEditor: View {
     @State private var ordering: LibraryChannelOrdering = .balancedShuffle
     @State private var includeSpecials = false
     @State private var autoRefresh = true
+    @State private var libraryIds: [Int] = []
+    @State private var includeItemIds: [Int] = []
+    @State private var includeShowIds: [Int] = []
+    @State private var excludeItemIds: [Int] = []
+    @State private var excludeShowIds: [Int] = []
+    @State private var searchText = ""
+    @State private var searchResults: [Item] = []
     @State private var preview: LibraryChannelPreview?
     @State private var busy = false
     @State private var message: String?
+    @State private var canShare = false
+    @State private var step = 0
 
     var body: some View {
         Form {
-            Section("1 · Content") {
+            if step == 0 { Section("1 · Content") {
                 Toggle("Movies", isOn: $movies)
                 Toggle("Episodes", isOn: $episodes)
+                ForEach(model.libraries.filter { $0.kind == "movies" || $0.kind == "shows" }) { library in
+                    Toggle(library.name, isOn: Binding(
+                        get: { libraryIds.contains(library.id) },
+                        set: { selected in
+                            if selected { libraryIds = Array(Set(libraryIds + [library.id])).sorted() }
+                            else { libraryIds.removeAll { $0 == library.id } }
+                        }
+                    ))
+                }
                 TextField("Genres, comma separated", text: $genres)
                 TextField("Tags, comma separated", text: $tags)
                 TextField("Title keywords, comma separated", text: $keywords)
                 HStack { TextField("From year", text: $yearMin); TextField("Through year", text: $yearMax) }
-                Button("Preview matches") { Task { await loadPreview() } }.disabled(busy || !valid)
+                TextField("Search movies, series, episodes", text: $searchText)
+                Button("Search titles") { Task { await searchTitles() } }
+                    .disabled(busy || searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                ForEach(searchResults.prefix(12)) { item in
+                    HStack {
+                        Text(item.title).lineLimit(1)
+                        Spacer()
+                        Button("Include") { include(item) }
+                        Button("Exclude") { exclude(item) }
+                    }
+                }
+                if !includeItemIds.isEmpty || !includeShowIds.isEmpty || !excludeItemIds.isEmpty || !excludeShowIds.isEmpty {
+                    Text("Included items \(includeItemIds.map(String.init).joined(separator: ", ")) · series \(includeShowIds.map(String.init).joined(separator: ", "))")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Text("Excluded items \(excludeItemIds.map(String.init).joined(separator: ", ")) · series \(excludeShowIds.map(String.init).joined(separator: ", "))")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Button("Preview matches") { Task { await loadPreview() } }.disabled(busy || (!movies && !episodes))
                 if let preview {
                     Text("\(preview.eligibleCount) titles · \(preview.repeatDescription)")
                     ForEach(preview.matches.prefix(10)) { match in
@@ -563,24 +693,30 @@ private struct LibraryChannelEditor: View {
                         }
                     }
                 }
-            }
-            Section("2 · Playback") {
+            } }
+            if step == 1 { Section("2 · Playback") {
                 Picker("Order", selection: $ordering) {
                     ForEach(LibraryChannelOrdering.allCases) { Text($0.label).tag($0) }
                 }
                 Toggle("Include specials", isOn: $includeSpecials)
                 Toggle("Refresh future rotations automatically", isOn: $autoRefresh)
-            }
-            Section("3 · Channel") {
+                if let preview { Text("\(preview.eligibleCount) titles · \(preview.repeatDescription)") }
+            } }
+            if step == 2 { Section("3 · Channel") {
                 TextField("Name", text: $name)
                 TextField("Description", text: $description, axis: .vertical)
-                Picker("Visibility", selection: $visibility) {
-                    ForEach(LibraryChannelVisibility.allCases) { Text($0.label).tag($0) }
+                if canShare {
+                    Picker("Visibility", selection: $visibility) {
+                        ForEach(LibraryChannelVisibility.allCases) { Text($0.label).tag($0) }
+                    }
+                } else {
+                    Text("Personal channel · an administrator can make it shared")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 Toggle("Enabled", isOn: $enabled)
-            }
+            } }
             if let message { Text(message).foregroundStyle(.secondary) }
-            if channel != nil {
+            if step == 2, channel != nil {
                 Section {
                     Button("Apply after this programme") { Task { await rebuild(afterProgramme: true, reshuffle: false) } }
                     Button("Reshuffle next rotation") { Task { await rebuild(afterProgramme: false, reshuffle: true) } }
@@ -590,10 +726,21 @@ private struct LibraryChannelEditor: View {
         }
         .navigationTitle(channel == nil ? "Make a channel" : "Edit channel")
         .toolbar {
-            ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
-            ToolbarItem(placement: .confirmationAction) { Button("Save") { Task { await save() } }.disabled(busy || !valid) }
+            ToolbarItem(placement: .cancellationAction) {
+                Button(step == 0 ? "Cancel" : "Back") { if step == 0 { dismiss() } else { step -= 1 } }
+            }
+            ToolbarItem(placement: .confirmationAction) {
+                if step < 2 { Button("Next") { step += 1 }.disabled(busy || (step == 0 && !movies && !episodes)) }
+                else { Button("Save") { Task { await save() } }.disabled(busy || !valid) }
+            }
         }
         .onAppear { loadChannel() }
+        .task {
+            if let user = try? await model.requireAPI().me() {
+                canShare = user.isAdmin == true
+            }
+            if !canShare { visibility = .personal }
+        }
         .interactiveDismissDisabled(dirty)
     }
 
@@ -611,6 +758,7 @@ private struct LibraryChannelEditor: View {
 
     private var recipe: LibraryChannelRecipe {
         var value = channel?.recipe ?? LibraryChannelRecipe()
+        value.libraryIds = libraryIds
         value.kinds = (movies ? ["movie"] : []) + (episodes ? ["episode"] : [])
         value.genresAny = list(genres)
         value.tagsAny = list(tags)
@@ -620,9 +768,13 @@ private struct LibraryChannelEditor: View {
         value.ordering = ordering
         value.includeSpecials = includeSpecials
         value.autoRefresh = autoRefresh
-        value.matchAllInScope = value.libraryIds.isEmpty && value.genresAny.isEmpty && value.tagsAny.isEmpty
-            && value.keywordsAny.isEmpty && value.yearMin == nil && value.yearMax == nil
-            && value.includeItemIds.isEmpty && value.includeShowIds.isEmpty
+        value.includeItemIds = includeItemIds
+        value.includeShowIds = includeShowIds
+        value.excludeItemIds = excludeItemIds
+        value.excludeShowIds = excludeShowIds
+        // Empty criteria remain an editable draft. Only a previously explicit
+        // all-in-scope preset retains that affirmative selection.
+        value.matchAllInScope = channel?.recipe.matchAllInScope ?? false
         return value
     }
 
@@ -631,7 +783,7 @@ private struct LibraryChannelEditor: View {
             requestId: UUID().uuidString,
             name: name.trimmingCharacters(in: .whitespacesAndNewlines),
             description: description.trimmingCharacters(in: .whitespacesAndNewlines),
-            visibility: visibility,
+            visibility: canShare ? visibility : .personal,
             enabled: enabled,
             recipe: recipe
         )
@@ -657,6 +809,31 @@ private struct LibraryChannelEditor: View {
         ordering = channel.recipe.ordering
         includeSpecials = channel.recipe.includeSpecials
         autoRefresh = channel.recipe.autoRefresh
+        libraryIds = channel.recipe.libraryIds
+        includeItemIds = channel.recipe.includeItemIds
+        includeShowIds = channel.recipe.includeShowIds
+        excludeItemIds = channel.recipe.excludeItemIds
+        excludeShowIds = channel.recipe.excludeShowIds
+    }
+
+    private func searchTitles() async {
+        busy = true
+        do {
+            let response = try await model.requireAPI().search(searchText, limit: 30)
+            searchResults = (response.results ?? []).filter { ["movie", "show", "episode"].contains($0.kind) }
+            message = nil
+        } catch { message = error.localizedDescription }
+        busy = false
+    }
+
+    private func include(_ item: Item) {
+        if item.kind == "show" { includeShowIds = Array(Set(includeShowIds + [item.id])).sorted() }
+        else { includeItemIds = Array(Set(includeItemIds + [item.id])).sorted() }
+    }
+
+    private func exclude(_ item: Item) {
+        if item.kind == "show" { excludeShowIds = Array(Set(excludeShowIds + [item.id])).sorted() }
+        else { excludeItemIds = Array(Set(excludeItemIds + [item.id])).sorted() }
     }
 
     private func loadPreview() async {

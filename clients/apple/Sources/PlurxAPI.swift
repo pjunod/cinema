@@ -407,6 +407,7 @@ struct PlurxAPI {
     func deleteLibraryChannel(_ channel: LibraryChannel) async throws {
         try await deleteNoContent("library-channels/\(channel.id)", query: [
             URLQueryItem(name: "expected_revision", value: String(channel.revision)),
+            URLQueryItem(name: "request_id", value: UUID().uuidString),
         ])
     }
 
