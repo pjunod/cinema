@@ -15647,7 +15647,7 @@ function developerPanel(settings,readiness){
 function decodeRecoveryCard(s){
   const q=s.decoder_health_qualification||{};
   // FFmpeg's strings again — a build banner and decoder names.
-  const list=v=>(v&&v.length)?v.map(x=>`<code>${esc(x)}</code>`).join(" "):"<i>none</i>";
+  const list=v=>`<code>${v&&v.length?v.map(esc).join(" · "):"none"}</code>`;
   const covered=q.covered_paths_v2||q.covered_decoders||[];
   const paths=covered.map(value=>{
     const fields=String(value).split("/");
@@ -15697,7 +15697,7 @@ function verifiedDecodeCard(s){
             : `<span class="pill">Off</span>`));
   // Everything below comes from FFmpeg — a version banner and decoder names —
   // so it is somebody else's string in this page's markup.
-  const list=v=>(v&&v.length)?v.map(x=>`<code>${esc(x)}</code>`).join(" "):"<i>none</i>";
+  const list=v=>`<code>${v&&v.length?v.map(esc).join(" · "):"none"}</code>`;
   const ok=b=>b?"✓":"✗";
   const checks=`
       <h2 class="section">What this node measured</h2>

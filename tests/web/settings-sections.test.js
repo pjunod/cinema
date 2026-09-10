@@ -649,7 +649,7 @@ test("Verified decode states its cost, its prerequisites, and what this node mea
   assert.match(refused, /Enabled · covered paths/);
   assert.match(refused, /Coverage advisory/);
   assert.match(refused, /No retained diagnostic contract covers/);
-  assert.match(refused, /<code>h264\/software\/h264<\/code>/, "what it did measure is still shown");
+  assert.match(refused, /<code>h264\/software\/h264 · hevc\/software\/hevc<\/code>/, "what it did measure is still shown in one host-independent container");
   assert.equal((refused.match(/✓/g) || []).length, 2);
   assert.equal((refused.match(/✗/g) || []).length, 1);
 

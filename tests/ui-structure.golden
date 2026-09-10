@@ -2502,8 +2502,8 @@ catalog|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > button.setta
 catalog|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 catalog|settings-developer@1280x860|dom|small > code[text]|2
 catalog|settings-developer@1280x860|dom|small[text] > br|4
-catalog|settings-developer@1280x860|dom|small[text] > code[text]|12
-catalog|settings-developer@1280x860|dom|small[text] > i[text]|2
+catalog|settings-developer@1280x860|dom|small[text] > code[text]|6
+catalog|settings-developer@1280x860|dom|small[text] > i[text]|1
 catalog|settings-developer@1280x860|dom|span.devcheck-status > span.pill[text]|1
 catalog|settings-developer@1280x860|dom|span[text] > small[text]|10
 catalog|settings-developer@1280x860|dom|span[text] > small|2
@@ -2667,8 +2667,8 @@ catalog|settings-developer@390x780|dom|nav.settabs[aria-label=*] > button.settab
 catalog|settings-developer@390x780|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 catalog|settings-developer@390x780|dom|small > code[text]|2
 catalog|settings-developer@390x780|dom|small[text] > br|4
-catalog|settings-developer@390x780|dom|small[text] > code[text]|12
-catalog|settings-developer@390x780|dom|small[text] > i[text]|2
+catalog|settings-developer@390x780|dom|small[text] > code[text]|6
+catalog|settings-developer@390x780|dom|small[text] > i[text]|1
 catalog|settings-developer@390x780|dom|span.devcheck-status > span.pill[text]|1
 catalog|settings-developer@390x780|dom|span[text] > small[text]|10
 catalog|settings-developer@390x780|dom|span[text] > small|2
@@ -4825,8 +4825,8 @@ classic|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > button.setta
 classic|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 classic|settings-developer@1280x860|dom|small > code[text]|2
 classic|settings-developer@1280x860|dom|small[text] > br|4
-classic|settings-developer@1280x860|dom|small[text] > code[text]|12
-classic|settings-developer@1280x860|dom|small[text] > i[text]|2
+classic|settings-developer@1280x860|dom|small[text] > code[text]|6
+classic|settings-developer@1280x860|dom|small[text] > i[text]|1
 classic|settings-developer@1280x860|dom|span.devcheck-status > span.pill[text]|1
 classic|settings-developer@1280x860|dom|span[text] > small[text]|10
 classic|settings-developer@1280x860|dom|span[text] > small|2
@@ -4964,8 +4964,8 @@ classic|settings-developer@390x780|dom|nav.settabs[aria-label=*] > button.settab
 classic|settings-developer@390x780|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 classic|settings-developer@390x780|dom|small > code[text]|2
 classic|settings-developer@390x780|dom|small[text] > br|4
-classic|settings-developer@390x780|dom|small[text] > code[text]|12
-classic|settings-developer@390x780|dom|small[text] > i[text]|2
+classic|settings-developer@390x780|dom|small[text] > code[text]|6
+classic|settings-developer@390x780|dom|small[text] > i[text]|1
 classic|settings-developer@390x780|dom|span.devcheck-status > span.pill[text]|1
 classic|settings-developer@390x780|dom|span[text] > small[text]|10
 classic|settings-developer@390x780|dom|span[text] > small|2
@@ -7148,8 +7148,8 @@ theater|settings-developer@1280x860|dom|nav.th-pills[aria-label=*] > a.on[aria-c
 theater|settings-developer@1280x860|dom|nav.th-pills[aria-label=*] > a[text]|3
 theater|settings-developer@1280x860|dom|small > code[text]|2
 theater|settings-developer@1280x860|dom|small[text] > br|4
-theater|settings-developer@1280x860|dom|small[text] > code[text]|12
-theater|settings-developer@1280x860|dom|small[text] > i[text]|2
+theater|settings-developer@1280x860|dom|small[text] > code[text]|6
+theater|settings-developer@1280x860|dom|small[text] > i[text]|1
 theater|settings-developer@1280x860|dom|span.devcheck-status > span.pill[text]|1
 theater|settings-developer@1280x860|dom|span[text] > small[text]|10
 theater|settings-developer@1280x860|dom|span[text] > small|2
@@ -7290,8 +7290,8 @@ theater|settings-developer@390x780|dom|nav.th-pills[aria-label=*] > a.on[aria-cu
 theater|settings-developer@390x780|dom|nav.th-pills[aria-label=*] > a[text]|3
 theater|settings-developer@390x780|dom|small > code[text]|2
 theater|settings-developer@390x780|dom|small[text] > br|4
-theater|settings-developer@390x780|dom|small[text] > code[text]|12
-theater|settings-developer@390x780|dom|small[text] > i[text]|2
+theater|settings-developer@390x780|dom|small[text] > code[text]|6
+theater|settings-developer@390x780|dom|small[text] > i[text]|1
 theater|settings-developer@390x780|dom|span.devcheck-status > span.pill[text]|1
 theater|settings-developer@390x780|dom|span[text] > small[text]|10
 theater|settings-developer@390x780|dom|span[text] > small|2
