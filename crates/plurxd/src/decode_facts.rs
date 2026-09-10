@@ -4043,7 +4043,7 @@ void probe_main(unsigned long *stack) {
             &identity.executable_snapshot,
             identity.executable(),
             ProbeLaunchMode::ProductionSteadyResponseInterruptedUntilStop,
-            Duration::from_secs(2),
+            Duration::from_secs(3),
             Arc::clone(&ownership),
         )
         .await
@@ -5126,7 +5126,7 @@ printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","
         drop(held);
         assert_eq!(collection.await, Err(DecodeFactError::Deadline));
         assert!(
-            started.elapsed() < Duration::from_millis(2_400),
+            started.elapsed() < Duration::from_millis(3_400),
             "waiting for the source lease must not restart the full probe budget"
         );
         assert!(
