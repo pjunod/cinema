@@ -864,6 +864,16 @@ test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "testTheTenFootSurfaceKeepsSomethingFocusableWhileTheOverlayIsHidden"
 
 [[fixes]]
+# The review hardening keeps release-time input out of a shell escape and
+# refuses a cached app signed by a different team before physical delivery.
+id = "apple.injected-signing-team"
+commits = ["3c3df886"]
+source = "scripts/ship-physical"
+source_anchor = '[[ "$DEVELOPMENT_TEAM" =~ ^[A-Z0-9]{10}$ ]]'
+test = "tests/operations/test_contracts.py"
+test_anchor = "test_apple_developer_team_is_injected_instead_of_tracked"
+
+[[fixes]]
 # Entering picture-in-picture backgrounds the app, and the release rule read
 # only the scene phase — so the one case picture-in-picture exists for would
 # have released the tuner underneath its own window. Every release path now
