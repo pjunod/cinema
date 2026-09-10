@@ -1,6 +1,6 @@
 # Native Live TV layouts — implementation status and evidence
 
-**Status:** implementation and one adversarial review complete; final verification pending · **Effort:**
+**Status:** ready for the main promotion fast lane · **Effort:**
 `effort/live-tv-native-layouts` · **Base:** Forgejo `main` at `20057416` ·
 **Updated:** 2026-09-10
 
@@ -15,10 +15,10 @@ being built, and what remains unproved*.
 
 | Package | State | Evidence | Remaining |
 |---|---|---|---|
-| Shared input, metadata, and preference contracts | built | bounded FFmpeg input parser/cache; cross-client DTO and badge cases; generated input tables; pinned Rust compile green | final single focused test run |
-| Apple TV and iOS | built | all three saved layouts, anchored/pinned guide, scoped input, compact schedule/grid, Apple build 129; iOS + tvOS compile green | final focused tests; physical Siri Remote unavailable |
-| Google TV and Android | built | all three saved layouts around one movable player, stable UTC-anchor D-pad navigation, false-on-delegate input, compact schedule/grid, Android build 79; Kotlin compile green | final focused tests; physical Google TV unavailable |
-| Integrated promotion to `main` | review addressed | draft Forgejo PR [#229](http://192.168.4.7:3000/noirr/plurx/pulls/229); exactly one Astra adversarial review of head `f5e67fe9`; all findings addressed on the author branch; no feature gates; full suites reserved for the separate sweep | commit the review fixes, one focused test pass, ready + `fast-lane`, green promotion gate, merge |
+| Shared input, metadata, and preference contracts | verified | bounded FFmpeg input parser/cache; cross-client DTO and badge cases; generated input tables; pinned Rust compile plus 3 focused server and 39 web checks green | promotion gate |
+| Apple TV and iOS | verified | all three saved layouts, anchored/pinned guide, scoped input, compact schedule/grid, Apple build 129; iOS and tvOS compile green; 28 focused Live TV tests green on each platform | physical Siri Remote walkthrough remains unproved; promotion gate |
+| Google TV and Android | verified | all three saved layouts around one movable player, stable UTC-anchor D-pad navigation, false-on-delegate input, compact schedule/grid, Android build 79; Kotlin compile and 35 JVM checks green; real D-pad case green on Google TV Streamer | broader physical walkthrough remains unproved; promotion gate |
+| Integrated promotion to `main` | ready for fast lane | draft Forgejo PR [#229](http://192.168.4.7:3000/noirr/plurx/pulls/229); exactly one Astra adversarial review of head `f5e67fe9`; all findings addressed; final focused pass green; no feature gates; full suites reserved for the separate sweep | mark ready, apply `fast-lane`, require green current-head `Main promotion gate`, merge |
 
 ## Contract — presentation moves, playback does not
 
@@ -51,19 +51,23 @@ hidden eligibility test is added.
 | 2026-09-10 | post-review remediation worktree | `xcrun swiftc -parse clients/apple/Sources/*.swift` and `make apple-build` | Swift parse plus iOS and tvOS compile-only builds passed; no simulator tests ran |
 | 2026-09-10 | post-review remediation worktree | `./gradlew :app:compileDebugKotlin` | Android main-source compile passed in 2s; no JVM or instrumentation tests ran |
 | 2026-09-10 | post-review remediation worktree | pinned Rust `fmt --check`, `cargo check -p plurxd --all-targets`, and Clippy with denied warnings | passed; retained regression tests compiled but did not execute |
+| 2026-09-10 | merged-base final pass | focused Rust source-format tests and `tests/web/live-tv.test.js` | 3 Rust tests and 39 web checks passed |
+| 2026-09-10 | merged-base final pass | Android `tv.plurx.app.livetv.*` JVM tests | 34 passed; one equal-value boxed `Int`/`Long` assertion failed, was corrected to the reducer's UTC `Long`, and its sole targeted retry passed — 35/35 covered |
+| 2026-09-10 | Google TV Streamer, Android 14 | `LiveTvGuideFocusTest` real D-pad event instrumentation | first attempt lost its Compose activity when the sleeping display stopped it; after waking the device, 1/1 passed and normal sleep behavior was restored |
+| 2026-09-10 | Apple simulators, OS 26.5 | focused `LiveTvTests` | iOS 28/28 passed; tvOS passed 26 initially and the two corrected stale source-contract assertions on their sole retry — 28/28 covered |
 
-Compilation and static contracts are retained here as they pass. Physical
-Apple TV/Siri Remote and Google TV/D-pad walkthroughs will be recorded with
-the exact device and build; absence of either device will be recorded as a
-limit, never replaced by a simulator claim.
+Compilation and static contracts are retained here as they pass. The focused
+Google TV D-pad path has physical-device evidence; the complete Google TV and
+Apple TV/Siri Remote walkthroughs still need the release build and are not
+replaced by simulator claims.
 
 ## One adversarial review — disposition
 
 The required single review ran in Astra task
 `01a088d3-145d-7ea3-af07-4240406efcef` against draft head `f5e67fe9`. No
 second review or approval pass will be requested. The author verified the
-remediation through source inspection and compile/static checks; the final
-focused tests remain deliberately batched into one run.
+remediation through source inspection, compile/static checks, and the final
+focused test pass recorded above.
 
 | Findings | Resolution |
 |---|---|
