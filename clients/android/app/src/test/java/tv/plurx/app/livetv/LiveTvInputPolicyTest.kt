@@ -66,17 +66,17 @@ class LiveTvInputPolicyTest {
         ).forEach {
             assertEquals(
                 LiveTvInputOutcome.Reveal,
-                LiveTvInputPolicy.route(LiveTvInputSurface.TenFoot, LiveTvInputState.Hidden, it),
+                LiveTvInputPolicy.route(LiveTvInputSurface.TenFoot, LiveTvInputState.FullscreenHidden, it),
             )
         }
         // The channel list is preview-then-commit.
         assertEquals(
-            LiveTvInputOutcome.FocusRow,
-            LiveTvInputPolicy.route(LiveTvInputSurface.TenFoot, LiveTvInputState.Overlay, LiveTvContractInput.Up),
+            LiveTvInputOutcome.FocusControl,
+            LiveTvInputPolicy.route(LiveTvInputSurface.TenFoot, LiveTvInputState.FullscreenControls, LiveTvContractInput.Up),
         )
         assertEquals(
             LiveTvInputOutcome.Activate,
-            LiveTvInputPolicy.route(LiveTvInputSurface.TenFoot, LiveTvInputState.Overlay, LiveTvContractInput.Select),
+            LiveTvInputPolicy.route(LiveTvInputSurface.TenFoot, LiveTvInputState.FullscreenControls, LiveTvContractInput.Select),
         )
         // Nothing on this surface seeks: the outcomes do not exist.
         assertFalse(LiveTvInputOutcome.entries.any { it.contractName in setOf("skip", "preview", "commit") })
@@ -109,7 +109,7 @@ class LiveTvScreenWiringTest {
     fun `every press goes through the shared table`() {
         // Key spellings and the handler both live in LiveTvKeyAdapter, which is
         // the only file `scripts/player-input-fence` lets hold them.
-        assertTrue(screen.contains(".liveTvInputAdapter(enabled = state.playing && !isInPip)"))
+        assertTrue(screen.contains(".liveTvInputAdapter(enabled = fullscreen && state.playing && !isInPip)"))
         assertTrue(screen.contains("applyOutcome(LiveTvInputPolicy.route(surface, inputState(), input))"))
         val adapter = java.io.File(
             "src/main/java/tv/plurx/app/livetv/LiveTvKeyAdapter.kt",
@@ -118,9 +118,9 @@ class LiveTvScreenWiringTest {
         // Key-up is never an input: the contract is written in presses, and
         // routing both edges would double every outcome.
         assertTrue(adapter.contains("if (event.type != KeyEventType.KeyDown) return null"))
-        // And a hidden overlay is `Hidden`, which is the state whose direction
+        // And hidden controls are `FullscreenHidden`, whose direction
         // rows say `reveal` and nothing else.
-        assertTrue(screen.contains("else -> LiveTvInputState.Hidden"))
+        assertTrue(screen.contains("else -> LiveTvInputState.FullscreenHidden"))
     }
 
     @Test
@@ -130,8 +130,16 @@ class LiveTvScreenWiringTest {
     }
 
     @Test
-    fun `a television is fullscreen without anyone pressing a button`() {
-        assertTrue(screen.contains("if (television) fullscreen = state.playing"))
+    fun `tuning and layout changes do not force television fullscreen`() {
+        assertFalse(screen.contains("if (television) fullscreen = state.playing"))
+        assertTrue(screen.contains("TelevisionLiveTvBrowser("))
+    }
+
+    @Test
+    fun `delegated focus and activation reach Compose exactly once`() {
+        assertTrue(screen.contains("LiveTvInputOutcome.Delegate,"))
+        assertTrue(screen.contains("LiveTvInputOutcome.Activate,"))
+        assertTrue(screen.contains("-> return false"))
     }
 
     @Test

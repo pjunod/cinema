@@ -97,6 +97,31 @@ async function main() {
     assert.deepEqual(liveTv.channelBadges({ hd: false, video_codec: " h264 ", audio_codec: "H264" }),
       ["SD", "H264"]);
     assert.deepEqual(liveTv.channelBadges({}), []);
+    assert.deepEqual(liveTv.channelBadges({
+      hd: true, video_codec: "hevc", audio_codec: "ac3",
+      source_format: {
+        video_width: 3840, video_height: 2160, scan: "progressive",
+        audio_channels: 6, audio_layout: "5.1", observed_at: 1788998400,
+      },
+    }), ["4K", "HEVC", "AC3 5.1"]);
+    assert.deepEqual(liveTv.sourceDetails({
+      video_codec: "mpeg2video", audio_codec: "ac3",
+      source_format: {
+        video_width: 1920, video_height: 1080, scan: "interlaced",
+        audio_channels: 2, audio_layout: "stereo", observed_at: 1788998400,
+      },
+    }), {
+      compact: ["HD", "MPEG2VIDEO", "AC3 Stereo"],
+      exact: ["1920×1080i", "MPEG2VIDEO", "AC3 Stereo"],
+      observedAt: 1788998400,
+    });
+    assert.deepEqual(liveTv.channelBadges({
+      hd: false,
+      source_format: {
+        video_width: -1, video_height: 2160, scan: "made-up",
+        audio_channels: 6, audio_layout: {}, observed_at: 1788998400,
+      },
+    }), ["4K", "6 ch"]);
 
     const details = new Function("PlurxLiveTv", "esc",
       `${shipped("liveTvTechnicalDetails")} return liveTvTechnicalDetails;`)(liveTv, String);
@@ -106,7 +131,7 @@ async function main() {
         signal: { strength_percent: 96, quality_percent: 89, symbol_quality_percent: 100 } },
     );
     assert.match(markup, /Source[\s\S]*HD · HEVC · AC4/);
-    assert.match(markup, /Delivery[\s\S]*H\.264 · 720p · AAC · VAAPI encoder/);
+    assert.match(markup, /Playing[\s\S]*H\.264 · 720p · AAC · VAAPI encoder/);
     assert.match(markup, /Strength[\s\S]*96%[\s\S]*Quality[\s\S]*89%[\s\S]*Symbol[\s\S]*100%/);
   });
 

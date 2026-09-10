@@ -51,19 +51,66 @@
     };
   }
 
-  // Facts the tuner put in lineup.json. Missing fields stay missing: absence
-  // of `HD` is not evidence that a channel is SD, and codec names are labels,
-  // not guesses from the channel number or ATSC generation.
+  function measuredSourceFormat(channel) {
+    const raw = channel && channel.source_format;
+    if (!raw || typeof raw !== "object" || !Number.isInteger(raw.observed_at) || raw.observed_at <= 0) return null;
+    const dimension = value => Number.isInteger(value) && value >= 1 && value <= 16384 ? value : null;
+    const channels = Number.isInteger(raw.audio_channels) && raw.audio_channels >= 1 && raw.audio_channels <= 32
+      ? raw.audio_channels : null;
+    const scan = raw.scan === "progressive" || raw.scan === "interlaced" ? raw.scan : null;
+    const layout = typeof raw.audio_layout === "string" && /^[a-z0-9._+ -]{1,32}$/.test(raw.audio_layout)
+      ? raw.audio_layout.trim() || null : null;
+    return {
+      video_width: dimension(raw.video_width),
+      video_height: dimension(raw.video_height),
+      scan,
+      audio_channels: channels,
+      audio_layout: layout,
+      observed_at: raw.observed_at,
+    };
+  }
+
+  function pictureClass(channel) {
+    const height = measuredSourceFormat(channel)?.video_height;
+    if (height > 2160) return "4K+";
+    if (height === 2160) return "4K";
+    if (height >= 720) return "HD";
+    if (height > 0) return "SD";
+    if (channel && channel.hd === true) return "HD";
+    if (channel && channel.hd === false) return "SD";
+    return null;
+  }
+
+  function audioDescription(channel) {
+    const format = measuredSourceFormat(channel);
+    const codec = typeof channel?.audio_codec === "string" ? channel.audio_codec.trim().toUpperCase() : "";
+    const layout = format?.audio_layout;
+    const layoutLabel = layout === "mono" ? "Mono" : layout === "stereo" ? "Stereo" : layout;
+    const count = !layoutLabel && format?.audio_channels ? `${format.audio_channels} ch` : "";
+    return [codec, layoutLabel || count].filter(Boolean).join(" ");
+  }
+
+  function sourceDetails(channel) {
+    if (!channel) return { compact: [], exact: [], observedAt: null };
+    const format = measuredSourceFormat(channel);
+    const picture = pictureClass(channel);
+    const video = typeof channel.video_codec === "string" ? channel.video_codec.trim().toUpperCase() : "";
+    const audio = audioDescription(channel);
+    const scan = format?.scan === "progressive" ? "p" : format?.scan === "interlaced" ? "i" : "";
+    const dimensions = format?.video_width && format?.video_height
+      ? `${format.video_width}×${format.video_height}${scan}` : "";
+    return {
+      compact: [picture, video, audio].filter(Boolean),
+      exact: [dimensions || picture, video, audio].filter(Boolean),
+      observedAt: format?.observed_at || null,
+    };
+  }
+
+  // Source facts from the tuner and the bounded FFmpeg input description.
+  // Missing fields stay missing; codecs never imply resolution or layout.
   function channelBadges(channel) {
-    if (!channel) return [];
-    const badges = [];
-    if (channel.hd === true) badges.push("HD");
-    else if (channel.hd === false) badges.push("SD");
-    for (const raw of [channel.video_codec, channel.audio_codec]) {
-      const badge = typeof raw === "string" ? raw.trim().toUpperCase() : "";
-      if (badge && !badges.includes(badge)) badges.push(badge);
-    }
-    return badges;
+    const badges = sourceDetails(channel).compact;
+    return badges.filter((badge, index) => badges.indexOf(badge) === index);
   }
 
   function capability(info) {
@@ -361,6 +408,8 @@
     StartBarrier,
     channelView,
     channelBadges,
+    measuredSourceFormat,
+    sourceDetails,
     errorView,
     programmeAt,
     gridLayout,

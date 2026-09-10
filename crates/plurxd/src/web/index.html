@@ -14790,13 +14790,14 @@ function liveTvFormatBadges(channel){
 }
 function liveTvTechnicalDetails(channel,status){
   if(!channel) return "";
-  const badges=PlurxLiveTv.channelBadges(channel);
+  const source=PlurxLiveTv.sourceDetails(channel);
   const rows=[];
-  if(badges.length) rows.push(`<div class="lt-tech-row"><b>Source</b><span>${esc(badges.join(" · "))}</span></div>`);
+  if(source.exact.length) rows.push(`<div class="lt-tech-row"><b>Source</b><span>${esc(source.exact.join(" · "))}</span></div>`);
+  if(source.observedAt) rows.push(`<div class="lt-tech-row"><b>Observed</b><span>${esc(new Date(source.observedAt*1000).toLocaleString())}</span></div>`);
   if(status){
     const delivery=["H.264",status.output_height?`${status.output_height}p`:null,"AAC"].filter(Boolean).join(" · ");
     const encoder=status.encoder&&status.encoder!=="pending"?` · ${String(status.encoder).toUpperCase()} encoder`:"";
-    rows.push(`<div class="lt-tech-row"><b>Delivery</b><span>${esc(delivery+encoder)}</span></div>`);
+    rows.push(`<div class="lt-tech-row"><b>Playing</b><span>${esc(delivery+encoder)}</span></div>`);
     const signal=status.signal;
     if(signal){
       const metric=(label,value)=>Number.isFinite(value)
@@ -15403,6 +15404,9 @@ async function watchLiveTv(index){
         const status=await LIVE_TV_LEASE.status();
         if(status&&status.state!=="active") await failed({code:"stream_failed"});
         else if(status){
+          if(status.channel&&status.channel.id===LIVE_TV.selected){
+            LIVE_TV.channels=LIVE_TV.channels.map(channel=>channel.id===status.channel.id?{...channel,...status.channel}:channel);
+          }
           LIVE_TV.status=status;
           if(typeof liveTvRefreshTechnicalDetails==="function") liveTvRefreshTechnicalDetails();
           if(typeof liveTvPaint==="function") liveTvPaint();

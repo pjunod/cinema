@@ -34,6 +34,8 @@ struct SettingsStore {
         static let offlineQuality = "plurx.offlineQuality"
         static let offlineNetwork = "plurx.offlineNetwork"
         static let preparedHandoff = "plurx.preparedHandoff"
+        static let liveTvLayout = "plurx.liveTvLayout"
+        static let liveTvMobileGuide = "plurx.liveTvMobileGuide"
     }
 
     /// Read-only on purpose. Every write goes through `setServer`, which is
@@ -168,6 +170,22 @@ struct SettingsStore {
     var preparedHandoffEnabled: Bool {
         get { defaults.object(forKey: Key.preparedHandoff) as? Bool ?? true }
         nonmutating set { defaults.set(newValue, forKey: Key.preparedHandoff) }
+    }
+
+    /// Television presentation only. The phone's list/grid preference remains
+    /// independent, so opening the same profile on a phone cannot rewrite the
+    /// layout someone chose for the sofa.
+    var liveTvLayout: TvLiveLayout {
+        get {
+            TvLiveLayout(rawValue: defaults.string(forKey: Key.liveTvLayout) ?? "")
+                ?? .guidePreview
+        }
+        nonmutating set { defaults.set(newValue.rawValue, forKey: Key.liveTvLayout) }
+    }
+
+    var liveTvMobileGuideUsesGrid: Bool {
+        get { defaults.string(forKey: Key.liveTvMobileGuide) == "grid" }
+        nonmutating set { defaults.set(newValue ? "grid" : "schedule", forKey: Key.liveTvMobileGuide) }
     }
 
     /// Drop the token (sign out) but keep the origin so login stays pre-filled.
