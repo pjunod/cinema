@@ -76,6 +76,8 @@ Assets and generated records also live at this level:
 note per Apple build, read by `validation/apple_build.py`) ·
 [`mockups/`](mockups/) · [`evidence/`](evidence/).
 
+Apple build 136: [Live TV playback method](apple-builds/245-live-tv-playback-method.md).
+
 ---
 
 ## playback-control/ — the playback control rewrite

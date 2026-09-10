@@ -284,6 +284,34 @@ struct LiveTvDelivery: Decodable, Sendable {
     let videoAction: String
     let audioAction: String
     let packaging: String
+
+    var playbackMethod: String {
+        switch (videoAction, audioAction) {
+        case ("copy", "copy"): return "Direct stream · no transcoding"
+        case ("copy", "encode"): return "Audio transcoding · original video"
+        case ("encode", "copy"): return "Video transcoding · original audio"
+        case ("encode", "encode"): return "Video and audio transcoding"
+        default: return "Playback method unavailable"
+        }
+    }
+
+    var videoDescription: String {
+        "\(Self.actionDescription(videoAction)) · \(output.videoCodec.uppercased()) · \(output.width)×\(output.height)"
+    }
+
+    var audioDescription: String {
+        let channels = output.audioChannels == 1 ? "Mono"
+            : output.audioChannels == 2 ? "Stereo" : "\(output.audioChannels) channels"
+        return "\(Self.actionDescription(audioAction)) · \(output.audioCodec.uppercased()) · \(channels)"
+    }
+
+    private static func actionDescription(_ action: String) -> String {
+        switch action {
+        case "copy": return "Copied unchanged"
+        case "encode": return "Transcoded"
+        default: return "Unknown method"
+        }
+    }
 }
 
 struct LiveTvStarted: Decodable, Sendable {
