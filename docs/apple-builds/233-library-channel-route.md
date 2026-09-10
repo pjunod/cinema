@@ -1,6 +1,6 @@
 # Use the canonical Library-channel collection route
 
-Build: 133
+Build: 134
 Issue: #233
 
 The Apple client lists and creates Library channels through the canonical
