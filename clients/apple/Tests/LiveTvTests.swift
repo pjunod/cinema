@@ -5,6 +5,26 @@ import XCTest
 
 @MainActor
 final class LiveTvTests: XCTestCase {
+    func testTypedPlaybackConflictShowsReasonWithoutChangingAuthHandling() throws {
+        let data = Data(#"{"code":"vod_source_rescan_required","message":"The source probe needs refreshing."}"#.utf8)
+        let url = try XCTUnwrap(URL(string: "http://127.0.0.1/api/v1/library-channels/test/sessions"))
+        let conflict = try XCTUnwrap(HTTPURLResponse(url: url, statusCode: 409, httpVersion: nil, headerFields: nil))
+        XCTAssertThrowsError(try PlurxAPI.check(conflict, data: data)) { error in
+            XCTAssertEqual(error.localizedDescription,
+                           "The source probe needs refreshing. (vod_source_rescan_required, HTTP 409)")
+        }
+        for status in [400, 401, 403, 404, 503] {
+            let response = try XCTUnwrap(HTTPURLResponse(url: url, statusCode: status, httpVersion: nil, headerFields: nil))
+            XCTAssertThrowsError(try PlurxAPI.check(response, data: data)) { error in
+                guard case APIError.http(let code) = error else { return XCTFail("HTTP classification changed") }
+                XCTAssertEqual(code, status)
+            }
+        }
+        XCTAssertThrowsError(try PlurxAPI.check(conflict, data: Data("not JSON".utf8))) { error in
+            guard case APIError.http(409) = error else { return XCTFail("untyped conflict classification changed") }
+        }
+    }
+
     func testDeliveryLabelsDistinguishCopiedAndTranscodedTracks() throws {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase

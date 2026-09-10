@@ -2,6 +2,14 @@ version = 1
 enforce_after = "e8a910f"
 
 [[fixes]]
+id = "apple.live-tv-delivery-and-probe-schema"
+commits = ["fc3c8fbb"]
+source = "clients/apple/Sources/LiveTv.swift"
+source_anchor = "var playbackMethod: String"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testDeliveryLabelsDistinguishCopiedAndTranscodedTracks"
+
+[[fixes]]
 id = "clients.atomic-control-capture-envelope"
 commits = ["fc544fad"]
 source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackControlReporter.kt"

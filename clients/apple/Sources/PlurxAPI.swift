@@ -3,12 +3,14 @@ import Foundation
 enum APIError: Error, LocalizedError {
     case badURL
     case http(Int)
+    case conflict(code: String, message: String)
     case transport(String)
 
     var errorDescription: String? {
         switch self {
         case .badURL: return "Invalid server address"
         case .http(let code): return "Server returned \(code)"
+        case .conflict(let code, let message): return "\(message) (\(code), HTTP 409)"
         case .transport(let message): return message
         }
     }
@@ -170,7 +172,7 @@ struct PlurxAPI {
         let resp: URLResponse
         do { (data, resp) = try await (session ?? self.session).data(for: req) }
         catch { throw Self.transportError(from: error) }
-        try Self.check(resp)
+        try Self.check(resp, data: data)
         return try Self.decoder.decode(T.self, from: data)
     }
 
@@ -187,8 +189,18 @@ struct PlurxAPI {
         return APIError.transport(error.localizedDescription)
     }
 
-    private static func check(_ resp: URLResponse) throws {
+    static func check(_ resp: URLResponse, data: Data? = nil) throws {
         if let http = resp as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            // Playback conflicts carry actionable server reasons. Retain the
+            // numeric error for untyped responses and authentication handling.
+            if http.statusCode == 409, let data, data.count <= 16_384 {
+                struct Conflict: Decodable { let code: String; let message: String }
+                if let detail = try? JSONDecoder().decode(Conflict.self, from: data),
+                   !detail.code.isEmpty, !detail.message.isEmpty {
+                    throw APIError.conflict(code: String(detail.code.prefix(80)),
+                                            message: String(detail.message.prefix(512)))
+                }
+            }
             throw APIError.http(http.statusCode)
         }
     }
