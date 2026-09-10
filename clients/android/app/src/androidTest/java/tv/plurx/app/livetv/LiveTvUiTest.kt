@@ -169,6 +169,15 @@ class LiveTvUiTest {
     @Test fun channelsAreSearchableAndProtectedChannelsCannotStart() {
         compose.setContent { PlurxTheme { LiveTvScreen(origin) {} } }
         awaitText("7.1 · Fixture News")
+        // Initial focus is the 10-foot navigation contract, and it is what the
+        // television profile must prove. On the phone profile this node was
+        // observed with Focused = 'false': a touch device has no focus cursor to
+        // place, and pinning one on Back would draw a focus ring nobody asked
+        // for. Assert reachability there instead of a focus state the product
+        // does not owe a touch screen. This has to precede search input, which
+        // correctly moves focus into the field.
+        if (television) compose.onNodeWithText("Back").assertIsFocused()
+        else compose.onNodeWithText("Back").assertHasClickAction()
         // The native schedule rows added by the TV-layout work are taller than
         // the old lineup-only rows. Select the protected result explicitly so
         // this contract does not depend on both fixture channels fitting in one
@@ -177,14 +186,6 @@ class LiveTvUiTest {
         search.performTextInput("Protected")
         awaitText("DRM unsupported")
         compose.onNodeWithText("DRM unsupported").assertIsNotEnabled()
-        // Initial focus is the 10-foot navigation contract, and it is what the
-        // television profile must prove. On the phone profile this node was
-        // observed with Focused = 'false': a touch device has no focus cursor to
-        // place, and pinning one on Back would draw a focus ring nobody asked
-        // for. Assert reachability there instead of a focus state the product
-        // does not owe a touch screen.
-        if (television) compose.onNodeWithText("Back").assertIsFocused()
-        else compose.onNodeWithText("Back").assertHasClickAction()
         // The field's label says what search now matches. It used to read
         // "Find a channel"; since the guide landed it also matches the
         // programme on now, and the label says so.
