@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["3bcfe4b6", "9532f745"]
+points = ["library.channels", "web.experience"]
+checks = ["rust-gate-ci", "operations-contract", "web-static"]
+reason = "The retained router regression constructs the complete application and drives both Library-channel collection spellings through unauthenticated and authenticated GET, invalid POST, and oversized POST requests while asserting authentication, the 64 KiB ceiling, and private no-store headers; its response-part assertions preserve that evidence without introducing process-launch-shaped `.status()` calls. The operations contract binds the compatibility route to the canonical web, Apple, and Android paths and scopes untyped 404 route diagnosis to collection-page loading; web-static parses the shipped JavaScript."

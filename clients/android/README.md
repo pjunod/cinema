@@ -20,8 +20,10 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `81` — native viewer parity across phone, foldable,
-> and TV. Build 81 adds Library channel browsing and authoring plus fenced
+> Status: **v0.3.0**, build `82` — native viewer parity across phone, foldable,
+> and TV. Build 82 uses the canonical Library-channel collection route while
+> the server preserves the first native spelling during rollout. Build 81 adds
+> Library channel browsing and authoring plus fenced
 > finite-HLS following; Library-channel readiness remains advisory in Settings
 > → Developer and never overrides the explicit enable. Build 80 makes sign-out
 > revoke the captured server session within a five-second bound, clear the
