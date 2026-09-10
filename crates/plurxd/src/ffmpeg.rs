@@ -352,7 +352,17 @@ fn ignore_optional_stream_field_omissions(
     stored: &mut serde_json::Value,
     held: &mut serde_json::Value,
 ) {
-    const OPTIONAL_CODEC_REPORT_FIELDS: [&str; 3] = ["closed_captions", "film_grain", "refs"];
+    const OPTIONAL_CODEC_REPORT_FIELDS: [&str; 9] = [
+        "closed_captions",
+        "film_grain",
+        "refs",
+        "dmix_mode",
+        "loro_cmixlev",
+        "loro_surmixlev",
+        "ltrt_cmixlev",
+        "ltrt_surmixlev",
+        "mime_codec_string",
+    ];
     let (Some(stored_streams), Some(held_streams)) = (
         stored
             .get_mut("streams")
@@ -1767,6 +1777,40 @@ mod tests {
         let reported_change = scanned.replace("\"refs\":1", "\"refs\":2");
         assert!(!probes_describe_same_input(scanned, &reported_change)
             .expect("compare reported codec facts"));
+    }
+
+    #[test]
+    fn channel_playback_repair_ignores_measured_optional_audio_report_omissions() {
+        let scanned = r#"{
+          "streams":[
+            {"index":0,"codec_type":"video","codec_name":"hevc","width":3840,"height":2160},
+            {"index":1,"codec_type":"audio","codec_name":"eac3","channels":6,
+             "dmix_mode":"ltrt","loro_cmixlev":"-3.000000","loro_surmixlev":"-3.000000",
+             "ltrt_cmixlev":"-3.000000","ltrt_surmixlev":"-3.000000",
+             "mime_codec_string":"ec-3"}
+          ],
+          "format":{"filename":"/media/leave-the-world-behind.mkv","duration":"8460.000000"}
+        }"#;
+        let held = r#"{
+          "streams":[
+            {"index":0,"codec_type":"video","codec_name":"hevc","width":3840,"height":2160},
+            {"index":1,"codec_type":"audio","codec_name":"eac3","channels":6}
+          ],
+          "format":{"filename":"/dev/fd/3","duration":"8460.000000"}
+        }"#;
+
+        assert!(
+            probes_describe_same_input(scanned, held).expect("compare the measured schema drift"),
+            "optional FFmpeg report availability is not a source replacement"
+        );
+        assert!(
+            !probes_describe_same_input(scanned, &held.replace("3840", "1920"))
+                .expect("changed geometry remains significant")
+        );
+        assert!(
+            !probes_describe_same_input(scanned, &held.replace("\"index\":1", "\"index\":2"))
+                .expect("changed stream identity remains significant")
+        );
     }
 
     #[tokio::test]
