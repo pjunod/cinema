@@ -267,11 +267,13 @@ final class LibraryChannelPlayerController: ObservableObject {
     private var endObserver: NSObjectProtocol?
     private var failedObserver: NSObjectProtocol?
     private var itemStatusObservation: NSKeyValueObservation?
+    private var progressObserver: Any?
     private let playbackControl = PlaybackControlSession()
     private var mediaOriginMs: Int64 = 0
     private var mediaDurationMs: Int = 0
 
     deinit {
+        if let progressObserver { player.removeTimeObserver(progressObserver) }
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
         if let failedObserver { NotificationCenter.default.removeObserver(failedObserver) }
     }
@@ -361,6 +363,7 @@ final class LibraryChannelPlayerController: ObservableObject {
             player.replaceCurrentItem(with: item)
             observeEnd(item, channel: channel, sequence: expected)
             observeFailure(item, sequence: expected)
+            observeProgress(item, sequence: expected)
             player.play()
             mediaOriginMs = Int64(started.playback.mediaOriginMs ?? Int(occurrence.positionMs))
             mediaDurationMs = started.playback.durationMs ?? 0
@@ -453,6 +456,8 @@ final class LibraryChannelPlayerController: ObservableObject {
         if let failedObserver { NotificationCenter.default.removeObserver(failedObserver) }
         failedObserver = nil
         itemStatusObservation = nil
+        if let progressObserver { player.removeTimeObserver(progressObserver) }
+        progressObserver = nil
         playbackError = nil
         player.pause()
         playbackControl.end()
@@ -541,6 +546,29 @@ final class LibraryChannelPlayerController: ObservableObject {
                     await self.tune(channel)
                 }
             }
+        }
+    }
+
+    private func observeProgress(_ item: AVPlayerItem, sequence: UInt64) {
+        if let progressObserver { player.removeTimeObserver(progressObserver) }
+        let capture = makeProgressObservation(item, sequence: sequence) { [weak self] in
+            self?.playbackControl.playerChanged()
+        }
+        progressObserver = player.addPeriodicTimeObserver(
+            forInterval: CMTime(seconds: 1, preferredTimescale: 2), queue: .main
+        ) { _ in
+            MainActor.assumeIsolated { capture() }
+        }
+    }
+
+    /// The reporter reads an immutable snapshot; playback must keep publishing
+    /// progress or the server keeps budgeting production from the join point.
+    func makeProgressObservation(
+        _ item: AVPlayerItem, sequence: UInt64, notify: @escaping @MainActor () -> Void
+    ) -> @MainActor () -> Void {
+        { [weak self] in
+            guard let self, self.tuneSequence == sequence, self.player.currentItem === item else { return }
+            notify()
         }
     }
 
