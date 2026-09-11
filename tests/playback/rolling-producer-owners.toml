@@ -1822,7 +1822,11 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # process-group termination, and confirmed reap in one place.
 # +1 constructs the finite-sample Live TV ffprobe command; it never receives a
 # tuner URL and is owned through bounded output collection and reap.
-expected_occurrences = 105
+# +2: the legacy chapter regression constructs a fixture muxer and scanner.
+# Both are test-only synthetic inputs, owned by bounded_command_output with
+# capped output, timeout, kill-on-drop, and awaited reaping. Neither survives
+# the bounded await or enters a shipped binary.
+expected_occurrences = 107
 
 [[module_structures]]
 id = "process-capable-launch-method"
