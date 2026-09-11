@@ -5,6 +5,54 @@ import XCTest
 
 @MainActor
 final class LiveTvTests: XCTestCase {
+    func testTypedPlaybackConflictShowsReasonWithoutChangingAuthHandling() throws {
+        let data = Data(#"{"code":"vod_source_rescan_required","message":"The source probe needs refreshing."}"#.utf8)
+        let url = try XCTUnwrap(URL(string: "http://127.0.0.1/api/v1/library-channels/test/sessions"))
+        let conflict = try XCTUnwrap(HTTPURLResponse(url: url, statusCode: 409, httpVersion: nil, headerFields: nil))
+        XCTAssertThrowsError(try PlurxAPI.check(conflict, data: data)) { error in
+            XCTAssertEqual(error.localizedDescription,
+                           "The source probe needs refreshing. (vod_source_rescan_required, HTTP 409)")
+        }
+        for status in [400, 401, 403, 404, 503] {
+            let response = try XCTUnwrap(HTTPURLResponse(url: url, statusCode: status, httpVersion: nil, headerFields: nil))
+            XCTAssertThrowsError(try PlurxAPI.check(response, data: data)) { error in
+                guard case APIError.http(let code) = error else { return XCTFail("HTTP classification changed") }
+                XCTAssertEqual(code, status)
+            }
+        }
+        XCTAssertThrowsError(try PlurxAPI.check(conflict, data: Data("not JSON".utf8))) { error in
+            guard case APIError.http(409) = error else { return XCTFail("untyped conflict classification changed") }
+        }
+    }
+
+    func testDeliveryLabelsDistinguishCopiedAndTranscodedTracks() throws {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let wire = #"{"output":{"container":"mpegts","video_codec":"h264","audio_codec":"aac","width":1920,"height":1080,"audio_channels":2},"video_action":"copy","audio_action":"copy","packaging":"mpegts"}"#
+        func delivery(video: String, audio: String) throws -> LiveTvDelivery {
+            let data = wire.replacingOccurrences(of: "\"video_action\":\"copy\"", with: "\"video_action\":\"\(video)\"")
+                .replacingOccurrences(of: "\"audio_action\":\"copy\"", with: "\"audio_action\":\"\(audio)\"")
+            return try decoder.decode(LiveTvDelivery.self, from: Data(data.utf8))
+        }
+        let copied = try delivery(video: "copy", audio: "copy")
+        XCTAssertEqual(copied.playbackMethod, "Direct stream · no transcoding")
+        XCTAssertEqual(copied.videoDescription, "Copied unchanged · H264 · 1920×1080")
+        XCTAssertEqual(copied.audioDescription, "Copied unchanged · AAC · Stereo")
+        let audio = try delivery(video: "copy", audio: "encode")
+        XCTAssertEqual(audio.playbackMethod, "Audio transcoding · original video")
+        XCTAssertEqual(audio.audioDescription, "Transcoded · AAC · Stereo")
+        XCTAssertEqual(try delivery(video: "encode", audio: "copy").playbackMethod,
+                       "Video transcoding · original audio")
+        XCTAssertEqual(try delivery(video: "encode", audio: "encode").playbackMethod,
+                       "Video and audio transcoding")
+        XCTAssertEqual(try delivery(video: "future", audio: "copy").playbackMethod,
+                       "Playback method unavailable")
+        XCTAssertTrue(liveTvTechnicalSummary(channel, status: nil, delivery: audio)
+            .hasPrefix("Audio transcoding · original video"))
+        XCTAssertTrue(liveTvTechnicalSummary(channel, status: nil)
+            .hasPrefix("Playback method unavailable"))
+    }
+
     func testPlatformRestartMarkerStoreCanRoundTrip() throws {
         let store = LiveTvFileBarrierStore()
         try store.setPending(false)

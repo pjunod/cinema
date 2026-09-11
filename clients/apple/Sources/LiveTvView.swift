@@ -36,6 +36,7 @@ final class LiveTvPlayerController: ObservableObject {
     @Published private(set) var guide: LiveTvGuide?
     @Published private(set) var watching: LiveTvChannel?
     @Published private(set) var status: LiveTvStatus?
+    @Published private(set) var delivery: LiveTvDelivery?
     let player = AVPlayer()
     private var api: LiveTvAPI?
     private var lease: LiveTvLease?
@@ -116,7 +117,8 @@ final class LiveTvPlayerController: ObservableObject {
             // but the AAC track is inaudible.
             beginAudioSession()
             title = channel.title
-            watching = channel
+            watching = info.channel
+            delivery = info.delivery
             playing = true
             player.play()
             message = "Playing live · no recording or rewind"
@@ -142,6 +144,7 @@ final class LiveTvPlayerController: ObservableObject {
                                 }
                             }
                             self.status = status
+                            self.delivery = status.delivery ?? info.delivery
                             self.expireSourceFormats(now: Int(Date().timeIntervalSince1970))
                         } else if progress.expired {
                             if self.paused {
@@ -305,6 +308,7 @@ final class LiveTvPlayerController: ObservableObject {
         channelChange = nil
         watching = nil
         status = nil
+        delivery = nil
         player.pause()
         player.replaceCurrentItem(with: nil)
         title = nil
@@ -377,9 +381,10 @@ func liveTvTime(_ unix: Int) -> String {
     liveTvClock.string(from: Date(timeIntervalSince1970: TimeInterval(unix)))
 }
 
-func liveTvTechnicalSummary(_ channel: LiveTvChannel, status: LiveTvStatus?) -> String {
+func liveTvTechnicalSummary(_ channel: LiveTvChannel, status: LiveTvStatus?, delivery: LiveTvDelivery? = nil) -> String {
     var facts = [String]()
-    if let source = channel.sourceFormatDescription { facts.append(source) }
+    facts.append((status?.delivery ?? delivery)?.playbackMethod ?? "Playback method unavailable")
+    if let source = channel.sourceFormatDescription { facts.append("Source: \(source)") }
     if let value = status?.signal?.strengthPercent { facts.append("strength \(value)%") }
     if let value = status?.signal?.qualityPercent { facts.append("quality \(value)%") }
     if let value = status?.signal?.symbolQualityPercent { facts.append("symbol \(value)%") }
@@ -409,18 +414,9 @@ struct LiveTvFormatBadges: View {
 struct LiveTvTechnicalDetails: View {
     let channel: LiveTvChannel
     let status: LiveTvStatus?
+    var delivery: LiveTvDelivery? = nil
 
-    private var delivery: String? {
-        guard let status else { return nil }
-        if let plan = status.delivery {
-            let video = plan.videoAction == "copy" ? "Original video" : "\(plan.output.videoCodec.uppercased()) video"
-            let audio = plan.audioAction == "copy" ? "Original audio" : "\(plan.output.audioCodec.uppercased()) audio"
-            let picture = "\(plan.output.width)×\(plan.output.height)"
-            return "\(video) · \(audio) · \(picture) · \(plan.packaging.uppercased())"
-        }
-        let encoder = status.encoder == "pending" ? "" : " · \(status.encoder.uppercased()) encoder"
-        return "H.264 · \(status.outputHeight)p · AAC\(encoder)"
-    }
+    private var plan: LiveTvDelivery? { status?.delivery ?? delivery }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
@@ -433,7 +429,15 @@ struct LiveTvTechnicalDetails: View {
                     Date(timeIntervalSince1970: TimeInterval(observed)).formatted(date: .abbreviated, time: .shortened)
                 )
             }
-            if let delivery { detailRow("Playing", delivery) }
+            detailRow("Method", plan?.playbackMethod ?? "Playback method unavailable")
+            if let plan {
+                detailRow("Video", plan.videoDescription)
+                detailRow("Audio", plan.audioDescription)
+                detailRow("Stream", "HLS · \(plan.packaging.uppercased())")
+                if plan.videoAction == "encode", let encoder = status?.encoder, encoder != "pending" {
+                    detailRow("Encoder", encoder)
+                }
+            }
             if let signal = status?.signal {
                 VStack(alignment: .leading, spacing: 5) {
                     Text("SIGNAL").font(.system(size: 9, weight: .bold)).foregroundStyle(Palette.muted)
@@ -1045,7 +1049,7 @@ struct LiveTvView: View {
         }
         .sheet(isPresented: $showingInfo) {
             if let channel = live.watching {
-                LiveTvTechnicalDetails(channel: channel, status: live.status)
+                LiveTvTechnicalDetails(channel: channel, status: live.status, delivery: live.delivery)
                     .padding(48)
                     .frame(minWidth: 420, minHeight: 260, alignment: .topLeading)
                     .background(Palette.bg)
@@ -1481,8 +1485,12 @@ struct LiveTvView: View {
             .aspectRatio(16 / 9, contentMode: .fit)
             .overlay(alignment: .topLeading) {
                 if let watching = live.watching {
-                    Text("WATCHING \(watching.guideNumber)")
-                        .font(.caption.weight(.bold))
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("WATCHING \(watching.guideNumber)")
+                            .font(.caption.weight(.bold))
+                        Text(live.delivery?.playbackMethod ?? "Playback method unavailable")
+                            .font(.caption2).lineLimit(2)
+                    }
                         .padding(.horizontal, 10).padding(.vertical, 6)
                         .background(.black.opacity(0.72), in: Capsule())
                         .padding(12)
@@ -1743,6 +1751,8 @@ struct LiveTvView: View {
                     .font(.caption).foregroundStyle(Palette.muted).lineLimit(1)
             }
             if let channel { LiveTvFormatBadges(channel: channel) }
+            Text(live.delivery?.playbackMethod ?? "Playback method unavailable")
+                .font(.caption).foregroundStyle(Palette.muted)
             HStack {
                 Button(live.paused ? "Play live" : "Pause") { live.togglePause() }
                 Button(muted ? "Unmute" : "Mute") { muted.toggle(); live.player.isMuted = muted }
@@ -1795,7 +1805,7 @@ struct LiveTvView: View {
                                 .font(.title3.weight(.semibold))
                             Text(channel?.title ?? "").font(.caption)
                             if let channel {
-                                Text(liveTvTechnicalSummary(channel, status: live.status))
+                                Text(liveTvTechnicalSummary(channel, status: live.status, delivery: live.delivery))
                                     .font(.caption2).opacity(0.78)
                             }
                             if let now = airing.now {
