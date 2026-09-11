@@ -1704,3 +1704,12 @@ android-publish: android ## Build the APK + serve it from the web UI (ANDROID_DA
 clean: ## Remove build artifacts and coverage output
 	$(CARGO) clean
 	@rm -f lcov.info
+
+# Explicit agent navigation setup; no existing target depends on Ripwire.
+.PHONY: ripwire-setup ripwire-doctor ripwire-smoke
+ripwire-setup:
+	./scripts/ripwire setup
+ripwire-doctor:
+	./scripts/ripwire doctor
+ripwire-smoke:
+	./scripts/ripwire-smoke

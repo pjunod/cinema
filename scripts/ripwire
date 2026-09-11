@@ -1,0 +1,459 @@
+#!/usr/bin/env python3
+"""Explicit, clone-local Ripwire navigation. Python standard library only."""
+from __future__ import annotations
+
+import argparse
+from contextlib import contextmanager
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import platform
+import re
+import selectors
+import shutil
+import signal
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+import urllib.request
+
+SCHEMA = 1
+MAX_ARCHIVE = MAX_BINARY = 256 * 1024 * 1024
+MAX_SOURCE = 4 * 1024 * 1024
+STDOUT_LIMIT, STDERR_LIMIT = 128 * 1024, 64 * 1024
+SCRATCH = ['./tmp', './Claude outputs', './target', './.swarm']
+HISTORY = ['./docs/archive', './docs/evidence', './docs/apple-builds']
+FLAGS = ['--max-tokens', '--top-k', '--for', '--format', '--outline',
+         '--expand', '--callers', '--impact', '--pr-context', '--token-budget',
+         '--skipped', '--cache', '--no-cache', '--exclude', '--max-file-size']
+LIMITATIONS = ('Heuristic graph; empty results do not establish absent consumers. '
+               'Rust traits/macros, Swift callbacks, Kotlin and HTML-embedded JS '
+               'require source verification. Excluded subtrees have unknown contents.')
+
+
+class Refusal(Exception):
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
+
+
+def digest(path):
+    h = hashlib.sha256()
+    with Path(path).open('rb') as handle:
+        for block in iter(lambda: handle.read(65536), b''):
+            h.update(block)
+    return h.hexdigest()
+
+
+def bounded(argv, cwd, timeout=60, out_limit=STDOUT_LIMIT, err_limit=STDERR_LIMIT):
+    """Drain both pipes concurrently; never emit partial artifacts on refusal."""
+    started = time.monotonic()
+    output = [bytearray(), bytearray()]
+    refused = None
+    cancelled = None
+    proc = None
+
+    def cancel(signum, frame):
+        # Defer the exception until Popen has returned and cleanup owns the PID.
+        nonlocal cancelled
+        cancelled = signum
+
+    previous = {sig: signal.signal(sig, cancel) for sig in (signal.SIGTERM, signal.SIGINT)}
+    try:
+        proc = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, start_new_session=True)
+        with selectors.DefaultSelector() as poll:
+            for index, pipe in enumerate((proc.stdout, proc.stderr)):
+                os.set_blocking(pipe.fileno(), False)
+                poll.register(pipe, selectors.EVENT_READ, index)
+            while poll.get_map() or proc.poll() is None:
+                if cancelled:
+                    refused = Refusal(128 + cancelled, 'cancelled; process group terminated')
+                    break
+                remaining = timeout - (time.monotonic() - started)
+                if remaining <= 0:
+                    refused = Refusal(124, 'deadline exceeded; process group terminated')
+                    break
+                for key, _ in poll.select(min(remaining, 0.1)):
+                    block = os.read(key.fd, 65536)
+                    if not block:
+                        poll.unregister(key.fileobj)
+                        continue
+                    index = key.data
+                    limit = (out_limit, err_limit)[index]
+                    if len(output[index]) + len(block) > limit:
+                        refused = Refusal(3, 'output size limit exceeded; entire artifact withheld')
+                        break
+                    output[index].extend(block)
+                if refused:
+                    break
+    finally:
+        # Also clean up children which closed their inherited output pipes.
+        if proc is not None:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.wait()
+            proc.stdout.close()
+            proc.stderr.close()
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+    if cancelled:
+        raise Refusal(128 + cancelled, 'cancelled; process group terminated')
+    if refused:
+        raise refused
+    return proc.returncode, bytes(output[0]), bytes(output[1])
+
+
+def git(root, *args):
+    code, out, err = bounded(['git', *args], root, timeout=10)
+    if code:
+        raise Refusal(2, 'git refused input: ' + err.decode(errors='replace').strip())
+    return out.decode().strip()
+
+
+def repo_root():
+    root = Path(__file__).resolve().parent.parent
+    actual = Path(git(root, 'rev-parse', '--show-toplevel')).resolve()
+    if root != actual:
+        raise Refusal(2, 'adapter must live in this checkout scripts directory')
+    return root
+
+
+def host_platform():
+    system = {'Darwin': 'macos', 'Linux': 'linux'}.get(platform.system())
+    arch = {'arm64': 'arm64', 'aarch64': 'arm64', 'x86_64': 'x64',
+            'AMD64': 'x64'}.get(platform.machine())
+    if not system or not arch:
+        raise Refusal(2, 'unsupported host; use ordinary source navigation')
+    return system + '-' + arch
+
+
+def read_lock(root):
+    try:
+        lock = json.loads((root / 'scripts/ripwire.lock.json').read_text())
+        version = lock['version']
+        assert lock['schema_version'] == SCHEMA
+        assert lock['upstream'] == 'redhat-et/ripwire'
+        assert re.fullmatch(r'\d+\.\d+\.\d+', version)
+        assert lock['tag'] == 'v' + version
+        assert re.fullmatch(r'[a-f0-9]{40}', lock['source_commit'])
+        assert set(lock['platforms']) == {'linux-arm64', 'linux-x64', 'macos-arm64', 'macos-x64'}
+        for key, entry in lock['platforms'].items():
+            assert entry['asset'] == f'ripwire-{version}-{key}.tar.gz'
+            assert entry['binary_member'] == entry['asset'][:-7] + '/ripwire'
+            assert re.fullmatch(r'[a-f0-9]{64}', entry['archive_sha256'])
+        return lock
+    except (OSError, ValueError, KeyError, TypeError, AssertionError) as exc:
+        raise Refusal(2, 'invalid release lock: ' + str(exc)) from exc
+
+
+@contextmanager
+def tool_lock(state):
+    state.mkdir(parents=True, exist_ok=True)
+    with (state / 'run.lock').open('a') as handle:
+        deadline = time.monotonic() + 2
+        while True:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise Refusal(75, 'clone tool lock busy; fall back or retry once')
+                time.sleep(0.05)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def compatible(binary, root, lock):
+    code, out, err = bounded([str(binary), '--version'], root, timeout=10)
+    text = (out + err).decode(errors='replace')
+    if code or not re.search(r'\bripwire ' + re.escape(lock['version']) + r'\b', text):
+        raise Refusal(2, 'incompatible Ripwire version')
+    code, out, err = bounded([str(binary), '--help'], root, timeout=10, out_limit=256 * 1024)
+    text = (out + err).decode(errors='replace')
+    missing = [flag for flag in FLAGS if not re.search(re.escape(flag) + r'(?:=|\s)', text)]
+    if code or missing:
+        raise Refusal(2, 'incompatible Ripwire CLI; missing: ' + ', '.join(missing))
+
+
+def installed(root, lock, key, check_cli=False):
+    directory = root / 'target/ripwire/tools' / lock['version'] / key
+    binary = directory / 'ripwire'
+    if not directory.exists():
+        raise Refusal(69, 'Ripwire absent; use rg or explicitly run scripts/ripwire setup')
+    try:
+        metadata = json.loads((directory / 'install.json').read_text())
+        if (metadata['version'] != lock['version'] or metadata['platform'] != key
+                or metadata['archive_sha256'] != lock['platforms'][key]['archive_sha256']
+                or metadata['source_commit'] != lock['source_commit']
+                or metadata['binary_sha256'] != digest(binary)):
+            raise ValueError('installed executable differs from its verified installation')
+        if not os.access(binary, os.X_OK):
+            raise ValueError('installed binary is not executable')
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise Refusal(2, 'corrupt installation; run explicit setup: ' + str(exc)) from exc
+    if check_cli:
+        compatible(binary, root, lock)
+    return binary, metadata
+
+
+@contextmanager
+def deadline(seconds):
+    def expired(signum, frame):
+        raise Refusal(124, 'setup download deadline exceeded')
+    previous = signal.signal(signal.SIGALRM, expired)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+def download(url, destination):
+    # SIGALRM also bounds redirects and slow trickle responses, not just sockets.
+    with deadline(120):
+        with urllib.request.urlopen(url, timeout=120) as response, destination.open('wb') as output:
+            if response.status != 200:
+                raise Refusal(2, 'unexpected release HTTP status')
+            total = 0
+            while True:
+                block = response.read(65536)
+                if not block:
+                    break
+                total += len(block)
+                if total > MAX_ARCHIVE:
+                    raise Refusal(2, 'release archive exceeds 256 MiB')
+                output.write(block)
+
+
+def extract_binary(archive, destination, entry):
+    if archive.stat().st_size > MAX_ARCHIVE or digest(archive) != entry['archive_sha256']:
+        raise Refusal(2, 'release archive checksum/size mismatch')
+    found = 0
+    with tarfile.open(archive, 'r|gz') as bundle:
+        for member in bundle:
+            if member.name != entry['binary_member']:
+                continue
+            found += 1
+            if found != 1 or not member.isfile() or member.size > MAX_BINARY:
+                raise Refusal(2, 'duplicate, non-regular, or oversized binary archive member')
+            with bundle.extractfile(member) as source, destination.open('wb') as target:
+                shutil.copyfileobj(source, target, 65536)
+    if found != 1:
+        raise Refusal(2, 'release binary member missing')
+    destination.chmod(0o700)
+
+
+def setup(root, lock, key):
+    try:
+        binary, _ = installed(root, lock, key, check_cli=True)
+        return {'outcome': 'already-installed', 'binary': str(binary)}
+    except Refusal as exc:
+        if exc.code not in (2, 69):
+            raise
+    parent = root / 'target/ripwire/tools' / lock['version']
+    parent.mkdir(parents=True, exist_ok=True)
+    final = parent / key
+    # An atomic directory symlink publishes the executable and metadata together.
+    # A failed download/verification never changes the previous generation.
+    if final.exists() and not final.is_symlink():
+        raise Refusal(2, 'installation path is not an adapter-owned generation link')
+    old = final.resolve() if final.is_symlink() else None
+    stage = Path(tempfile.mkdtemp(prefix='.' + key + '-', dir=parent))
+    link = parent / (stage.name + '.link')
+    published = False
+    try:
+        entry = lock['platforms'][key]
+        archive = stage / 'release.tar.gz'
+        url = f"https://github.com/{lock['upstream']}/releases/download/{lock['tag']}/{entry['asset']}"
+        download(url, archive)
+        binary = stage / 'ripwire'
+        with deadline(120):
+            extract_binary(archive, binary, entry)
+        compatible(binary, root, lock)
+        metadata = {'schema_version': SCHEMA, 'version': lock['version'], 'platform': key,
+                    'source_commit': lock['source_commit'],
+                    'archive_sha256': entry['archive_sha256'], 'binary_sha256': digest(binary)}
+        (stage / 'install.json').write_text(json.dumps(metadata, sort_keys=True) + '\n')
+        archive.unlink()
+        link.symlink_to(stage.name, target_is_directory=True)
+        os.replace(link, final)
+        published = True
+        result = {'outcome': 'installed', 'binary': str(final / 'ripwire'), **metadata}
+        if old and old.parent == parent and old.name.startswith('.' + key + '-'):
+            try:
+                shutil.rmtree(old)
+            except OSError as exc:
+                # Publication already succeeded. Report cleanup separately so
+                # an operator does not mistake the active binary for the old one.
+                result['cleanup_pending'] = {'path': str(old), 'error': str(exc)}
+        return result
+    finally:
+        link.unlink(missing_ok=True)
+        if not published:
+            shutil.rmtree(stage)
+
+
+def excludes(profile):
+    return SCRATCH + (HISTORY if profile == 'default' else [])
+
+
+def query_args(root, args, lock, key, record):
+    flags = ['.', f'--max-file-size={MAX_SOURCE}']
+    flags += ['--exclude=' + value for value in excludes(args.profile)]
+    family = 'rich' if args.mode == 'find' else 'lean'
+    config = {'root': str(root.resolve()), 'platform': key, 'version': lock['version'],
+              'profile': args.profile, 'exclusions': excludes(args.profile),
+              'max_source_bytes': MAX_SOURCE, 'adapter_sha256': digest(Path(__file__))}
+    fingerprint = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
+    record.update(config_fingerprint=fingerprint, exclusions=excludes(args.profile),
+                  cache_family=family, max_source_bytes=MAX_SOURCE)
+    if args.cold:
+        flags.append('--no-cache')
+    else:
+        directory = root / 'target/ripwire/cache' / lock['version'] / args.profile
+        directory.mkdir(parents=True, exist_ok=True)
+        metadata = directory / 'config.json'
+        desired = json.dumps(config, sort_keys=True) + '\n'
+        if not metadata.exists() or metadata.read_text() != desired:
+            for path in directory.glob('*.ripwirecache'):
+                path.unlink()
+            metadata.write_text(desired)
+        flags.append('--cache=' + str(directory / (family + '.ripwirecache')))
+    mode = args.mode
+    if mode == 'map':
+        flags += [f'--max-tokens={args.budget}', '--top-k=40']
+    elif mode == 'find':
+        flags += ['--for=' + args.selector, '--format=candidates', '--top-k=12']
+    elif mode in ('outline', 'body'):
+        flags += [('--outline=' if mode == 'outline' else '--expand=') + args.selector, '--top-k=0']
+    elif mode in ('callers', 'impact'):
+        flags.append('--' + mode + '=' + args.selector)
+    elif mode == 'coverage':
+        flags.append('--skipped')
+    elif mode == 'pr-context':
+        if record['dirty']:
+            raise Refusal(2, 'pr-context requires a clean tree, including staged and untracked files')
+        resolved = git(root, 'rev-parse', '--verify', '--end-of-options', args.base + '^{commit}')
+        merge_base = git(root, 'merge-base', 'HEAD', resolved)
+        record.update(requested_ref=args.base, resolved_ref=resolved, merge_base=merge_base)
+        flags += ['--pr-context=' + resolved, f'--token-budget={args.budget}']
+    return flags
+
+
+def query(root, args, lock, key, record):
+    binary, metadata = installed(root, lock, key)
+    record.update(binary_sha256=metadata['binary_sha256'])
+    record['head'] = git(root, 'rev-parse', 'HEAD')
+    record['dirty'] = bool(git(root, 'status', '--porcelain', '--untracked-files=all'))
+    argv = [str(binary)] + query_args(root, args, lock, key, record)
+    code, out, err = bounded(argv, root, args.timeout)
+    record.update(upstream_exit=code, stdout_bytes=len(out), stderr_bytes=len(err))
+    # Upstream itself rebuilds incompatible/corrupt caches. Preserve its bounded
+    # diagnostics verbatim; do not infer recovery by parsing arbitrary XML.
+    result = 0 if code == 0 else 3 if code == 3 else 1
+    record['outcome'] = 'completed' if code == 0 else 'upstream-refused'
+    return result, out if code == 0 else b'', err
+
+
+def integer_between(low, high):
+    def parse(value):
+        try:
+            number = int(value)
+        except ValueError:
+            raise argparse.ArgumentTypeError('expected an integer')
+        if not low <= number <= high:
+            raise argparse.ArgumentTypeError(f'expected {low}–{high}')
+        return number
+    return parse
+
+
+def arguments(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    modes = parser.add_subparsers(dest='mode', required=True)
+    for mode in ('setup', 'doctor', 'map', 'find', 'outline', 'body', 'callers', 'impact', 'pr-context', 'coverage'):
+        child = modes.add_parser(mode, allow_abbrev=False)
+        if mode in ('setup', 'doctor'):
+            continue
+        child.add_argument('--profile', choices=['default', 'history'], default='default')
+        child.add_argument('--cold', action='store_true')
+        child.add_argument('--budget', type=integer_between(500, 8000), default=3000)
+        child.add_argument('--timeout', type=integer_between(1, 120), default=60)
+        if mode in ('find', 'outline', 'body', 'callers', 'impact'):
+            child.add_argument('selector')
+        if mode == 'pr-context':
+            child.add_argument('--base', required=True)
+    args = parser.parse_args(argv)
+    value = getattr(args, 'selector', getattr(args, 'base', ''))
+    if '\0' in value or (args.mode == 'find' and len(value.encode('utf-8')) > 4096):
+        parser.error('text contains NUL or task text exceeds 4096 UTF-8 bytes')
+    return args
+
+
+def main(argv=None):
+    args = arguments(argv)
+    started = time.monotonic()
+    record = dict(schema_version=SCHEMA, tool_version=None, binary_sha256=None,
+                  head=None, dirty=None, profile=getattr(args, 'profile', None),
+                  mode=args.mode, cache_mode='cold' if getattr(args, 'cold', False) else 'warm',
+                  budget=getattr(args, 'budget', None), budget_enforced=args.mode in ('map', 'pr-context'),
+                  elapsed_ms=0, stdout_bytes=0, upstream_exit=None, outcome='refused',
+                  coverage_limitations=LIMITATIONS)
+    out = err = b''
+    code = 0
+    try:
+        disabled = os.environ.get('PLURX_RIPWIRE_DISABLED') == '1'
+        if disabled and args.mode not in ('setup', 'doctor'):
+            raise Refusal(69, 'Ripwire locally disabled; use ordinary source navigation')
+        root = repo_root()
+        record['root'] = str(root)
+        lock = read_lock(root)
+        record['tool_version'] = lock['version']
+        key = host_platform()
+        with tool_lock(root / 'target/ripwire'):
+            if args.mode == 'setup':
+                out = (json.dumps(setup(root, lock, key), sort_keys=True) + '\n').encode()
+                record['outcome'] = 'setup-completed'
+            elif args.mode == 'doctor':
+                report = dict(root=str(root), lock_pin=lock, platform=key,
+                              cache_root=str(root / 'target/ripwire/cache'),
+                              activation='disabled' if disabled else 'available-after-setup',
+                              exclusions={p: excludes(p) for p in ('default', 'history')},
+                              limits=dict(stdout=STDOUT_LIMIT, stderr=STDERR_LIMIT,
+                                          source=MAX_SOURCE, timeout=60, download_seconds=120),
+                              coverage_limitations=LIMITATIONS)
+                try:
+                    binary, metadata = installed(root, lock, key, check_cli=True)
+                    report.update(binary=str(binary), install=metadata,
+                                  activation='disabled' if disabled else 'enabled')
+                    code = 69 if disabled else 0
+                except Refusal as exc:
+                    report.update(problem=str(exc), activation='disabled' if disabled else 'unavailable')
+                    code = 69 if disabled else exc.code
+                out = (json.dumps(report, sort_keys=True) + '\n').encode()
+                record['outcome'] = 'doctor-completed'
+            else:
+                code, out, err = query(root, args, lock, key, record)
+    except Refusal as exc:
+        code, err = exc.code, (str(exc) + '\n').encode()
+    except (OSError, ValueError, tarfile.TarError) as exc:
+        code, err = 2, (str(exc) + '\n').encode()
+    record['elapsed_ms'] = round((time.monotonic() - started) * 1000)
+    sys.stderr.write(json.dumps(record, sort_keys=True) + '\n')
+    sys.stderr.flush()
+    sys.stderr.buffer.write(err)
+    sys.stdout.buffer.write(out)
+    return code
+
+
+if __name__ == '__main__':
+    sys.exit(main())
