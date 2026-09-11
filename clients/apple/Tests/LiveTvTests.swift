@@ -6,6 +6,24 @@ import XCTest
 
 @MainActor
 final class LiveTvTests: XCTestCase {
+    func testLibraryChannelProgressCallbacksFollowCurrentAttachment() async {
+        let controller = LibraryChannelPlayerController()
+        let item = AVPlayerItem(asset: AVMutableComposition())
+        controller.player.replaceCurrentItem(with: item)
+        var captures = 0
+        let update = controller.makeProgressObservation(item, sequence: 0) { captures += 1 }
+        update()
+        update()
+        XCTAssertEqual(captures, 2, "ongoing progress must refresh the reporter's stored snapshot")
+        controller.player.replaceCurrentItem(with: AVPlayerItem(asset: AVMutableComposition()))
+        update()
+        XCTAssertEqual(captures, 2, "a queued predecessor callback cannot report a successor's position")
+        controller.player.replaceCurrentItem(with: item)
+        await controller.stop()
+        update()
+        XCTAssertEqual(captures, 2, "stop revokes queued progress callbacks")
+    }
+
     func testLibraryChannelBufferingKeepsProductionActive() async throws {
         let controller = LibraryChannelPlayerController()
         controller.player.replaceCurrentItem(with: AVPlayerItem(asset: AVMutableComposition()))

@@ -1214,3 +1214,10 @@ source = "clients/apple/Sources/LibraryChannels.swift"
 source_anchor = "isPaused: paused,"
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "testLibraryChannelBufferingKeepsProductionActive"
+[[fixes]]
+id = "apple.library-channel-progress-reporting"
+commits = ["d311882b"]
+source = "clients/apple/Sources/LibraryChannels.swift"
+source_anchor = "progressObserver = player.addPeriodicTimeObserver("
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testLibraryChannelProgressCallbacksFollowCurrentAttachment"
