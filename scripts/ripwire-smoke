@@ -18,8 +18,17 @@ def identities(output):
     # This diagnostic deliberately reads the release's observed XML; it is
     # not used by the adapter or exposed as an upstream compatibility API.
     tree = ET.fromstring(output)
-    return sorted(tuple(row.get(key, '') for key in ('p', 'n', 'l', 'id'))
-                  for row in tree.iter() if row.get('p'))
+    rows = []
+    def visit(row, parent_path=''):
+        path = row.get('p', parent_path)
+        # Map symbols inherit their <f> path; find candidates carry their own.
+        # Call edges have names too, but are not definition identities.
+        if row.get('p') or (row.tag == 's' and path):
+            rows.append((path, *(row.get(key, '') for key in ('n', 'l', 'id'))))
+        for child in row:
+            visit(child, path)
+    visit(tree)
+    return sorted(rows)
 
 
 def main():
@@ -29,6 +38,9 @@ def main():
     key = API['host_platform']()
     state = ROOT / 'target/ripwire'
     report = {'source_commit': API['git'](ROOT, 'rev-parse', 'HEAD'),
+              'source_dirty': bool(API['git'](ROOT, 'status', '--porcelain')),
+              'adapter_sha256': API['digest'](ROOT / 'scripts/ripwire'),
+              'smoke_sha256': API['digest'](Path(__file__)),
               'tool_version': lock['version'], 'commands': [], 'freshness': []}
     with API['tool_lock'](state):
         binary, meta = API['installed'](ROOT, lock, key, check_cli=True)
@@ -101,6 +113,24 @@ def main():
                     (evidence / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
                     if not a or a != b:
                         raise RuntimeError(f'freshness disagreement after {label} ({mode})')
+                    if mode == 'map':
+                        names = {(row[0], row[1]) for row in a if row[1]}
+                        expected = {
+                            'initial': ('lib/engine.rs', 'accept_frame'),
+                            'edit': ('lib/engine.rs', 'accept_frame_edited'),
+                            'rename': ('lib/renamed.rs', 'accept_frame_edited'),
+                            'branch-change': ('lib/engine.rs', 'accept_frame'),
+                            'corrupt-cache': ('lib/engine.rs', 'accept_frame'),
+                        }.get(label)
+                        if expected and expected not in names:
+                            raise RuntimeError(f'expected mutated/restored symbol missing after {label}')
+                        if label == 'edit' and ('lib/engine.rs', 'accept_frame') in names:
+                            raise RuntimeError('old symbol survived edit')
+                        if label == 'rename' and any(p == 'lib/engine.rs' for p, _ in names):
+                            raise RuntimeError('old path survived rename')
+                        if label == 'delete' and any(p in ('lib/engine.rs', 'lib/renamed.rs') for p, _ in names):
+                            raise RuntimeError('deleted source symbols survived')
+
             compare('initial')
             source = root / 'lib/engine.rs'
             source.write_text(source.read_text().replace('accept_frame', 'accept_frame_edited'))

@@ -52,16 +52,28 @@ def digest(path):
 def bounded(argv, cwd, timeout=60, out_limit=STDOUT_LIMIT, err_limit=STDERR_LIMIT):
     """Drain both pipes concurrently; never emit partial artifacts on refusal."""
     started = time.monotonic()
-    proc = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, start_new_session=True)
     output = [bytearray(), bytearray()]
     refused = None
+    cancelled = None
+    proc = None
+
+    def cancel(signum, frame):
+        # Defer the exception until Popen has returned and cleanup owns the PID.
+        nonlocal cancelled
+        cancelled = signum
+
+    previous = {sig: signal.signal(sig, cancel) for sig in (signal.SIGTERM, signal.SIGINT)}
     try:
+        proc = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, start_new_session=True)
         with selectors.DefaultSelector() as poll:
             for index, pipe in enumerate((proc.stdout, proc.stderr)):
                 os.set_blocking(pipe.fileno(), False)
                 poll.register(pipe, selectors.EVENT_READ, index)
-            while poll.get_map():
+            while poll.get_map() or proc.poll() is None:
+                if cancelled:
+                    refused = Refusal(128 + cancelled, 'cancelled; process group terminated')
+                    break
                 remaining = timeout - (time.monotonic() - started)
                 if remaining <= 0:
                     refused = Refusal(124, 'deadline exceeded; process group terminated')
@@ -79,21 +91,20 @@ def bounded(argv, cwd, timeout=60, out_limit=STDOUT_LIMIT, err_limit=STDERR_LIMI
                     output[index].extend(block)
                 if refused:
                     break
-            if not refused:
-                remaining = timeout - (time.monotonic() - started)
-                try:
-                    proc.wait(timeout=max(0, remaining))
-                except subprocess.TimeoutExpired:
-                    refused = Refusal(124, 'deadline exceeded; process group terminated')
     finally:
         # Also clean up children which closed their inherited output pipes.
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        proc.wait()
-        proc.stdout.close()
-        proc.stderr.close()
+        if proc is not None:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.wait()
+            proc.stdout.close()
+            proc.stderr.close()
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+    if cancelled:
+        raise Refusal(128 + cancelled, 'cancelled; process group terminated')
     if refused:
         raise refused
     return proc.returncode, bytes(output[0]), bytes(output[1])

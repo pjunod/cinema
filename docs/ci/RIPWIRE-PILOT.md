@@ -123,30 +123,39 @@ JS and Python direct callers, found a Swift direct caller but omitted the
 callback, and omitted the Rust qualified cross-module caller. A duplicate
 Rust name resolves two definitions; qualify the path and still inspect source.
 
-The smoke was tightened after its first successful run to compare complete
-path/name/line/id tuples and exercise both cache families. The second run
-passed all twelve comparisons:
+The original two smoke runs passed twelve comparisons but the single
+adversarial review found that map extraction retained only file paths and
+omitted nested symbol names. Their 9/8-row lean results establish file-list
+agreement only. The corrected run `smoke-20260910-204536` associates each
+symbol with its parent path and asserts the actual edit, rename, deletion,
+and restoration. It passes all twelve comparisons below; 32 rows represent
+9 files plus 23 symbols, and deletion leaves 8 files plus 16 symbols.
 
 | Mutation | Rich find warm versus cold | Lean map warm versus cold |
 |---|---|---|
-| Initial source | equal, 12 rows | equal, 9 file rows |
-| Definition edit | equal, 12 rows | equal, 9 file rows |
-| Rename | equal, 12 rows | equal, 9 file rows |
-| Deletion | equal, 12 rows | equal, 8 file rows |
-| Branch switch | equal, 12 rows | equal, 9 file rows |
-| Corrupt cache | equal, 12 rows | equal, 9 file rows |
+| Initial source | equal, 12 rows | equal, 32 file/symbol rows |
+| Definition edit | equal, 12 rows | equal, 32 file/symbol rows |
+| Rename | equal, 12 rows | equal, 32 file/symbol rows |
+| Deletion | equal, 12 rows | equal, 24 file/symbol rows |
+| Branch switch | equal, 12 rows | equal, 32 file/symbol rows |
+| Corrupt cache | equal, 12 rows | equal, 32 file/symbol rows |
 
 Corrupt caches were overwritten with `corrupt-cache`; upstream reported
 `truncated` and source rebuild. A warm/cold agreement does not prove parsing
 correctness; the separately observed graph omissions remain.
 
-Nineteen focused adapter tests pass without network or a real executable.
+Twenty-one focused adapter tests pass without network or a real executable.
 They cover argv data, nested invocation, profiles, cache families, missing
 and disabled tools, corrupt installation, invalid refs/unrelated histories,
 dirty PR context, preserved exits, bounded output, both pipes, process-group
 timeout, lock contention, archive members/checksums/size, version/flags,
 failed-setup preservation, atomic publication, idempotence, and reporting
 a cleanup failure separately after the new generation is already active.
+The two review regressions prove SIGTERM/SIGINT cancellation terminates
+detached children before lock release and nested map-symbol changes are
+visible to the freshness comparison. The corrected smoke capture records
+the dirty source state and exact adapter/smoke hashes alongside its base
+commit, rather than attributing an uncommitted fix to the older snapshot.
 
 ## Paired navigation — completion and source-backed limitations
 

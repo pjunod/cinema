@@ -66,6 +66,7 @@ Absent values on preflight failures are `null`, not invented measurements.
 | 3 | Upstream budget refusal or output exceeded a byte limit | Entire stdout is withheld; narrow the request. |
 | 69 | Missing or locally disabled | Use `rg` and bounded source reads. |
 | 75 | Another setup/query holds this clone's lock | Fall back or retry once. |
+| 130 / 143 | Interrupted / terminated; owned process group cleaned up | Resume source navigation or explicitly retry. |
 | 124 | Deadline exceeded; owned process group terminated | Record the timeout and use source search. |
 
 Query options are `--profile default|history`, `--cold`, `--budget 500–8000`
@@ -75,7 +76,8 @@ the upstream budget. Other verbs report `budget_enforced=false`; their
 budget is best effort. PR context can exceed its shaping request at the
 upstream structural floor, disclosed in its output. Every query has independent limits of 128 KiB stdout
 and 64 KiB stderr. The adapter buffers both pipes concurrently and withholds
-all stdout on failure, timeout, or overflow. Setup's help check allows
+all stdout on failure, timeout, cancellation, or overflow. SIGINT and
+SIGTERM cancel through process-group cleanup before releasing the clone lock. Setup's help check allows
 256 KiB because the pinned release's help is 180,172 bytes.
 
 A task may contain at most 4096 UTF-8 bytes. NUL is refused. Use `--` before

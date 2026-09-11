@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import runpy
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
@@ -164,6 +165,50 @@ class RipwireTest(unittest.TestCase):
         self.assertEqual(124, result.returncode)
         time.sleep(1.2)
         self.assertFalse((self.root / 'LEAK').exists())
+
+    def test_cancellation_reaps_detached_children_before_unlock(self):
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            with self.subTest(signal=sig):
+                ready = self.root / 'READY'
+                ready.unlink(missing_ok=True)
+                self.install('import subprocess\nsubprocess.Popen([sys.executable, "-c", '
+                             '"import time; from pathlib import Path; time.sleep(1); Path(\'LEAK\').touch()"]); '
+                             'open("READY", "w").close(); time.sleep(20)\n')
+                proc = subprocess.Popen([sys.executable, str(self.root / 'scripts/ripwire'), 'map'],
+                                        cwd=self.root, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                        env={**os.environ, 'PLURX_RIPWIRE_DISABLED': '0'})
+                try:
+                    deadline = time.monotonic() + 5
+                    while not ready.exists() and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    self.assertTrue(ready.exists(), 'query did not start')
+                    state = self.root / 'target/ripwire'
+                    with (state / 'run.lock').open('a') as handle:
+                        with self.assertRaises(BlockingIOError):
+                            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    proc.send_signal(sig)
+                    out, err = proc.communicate(timeout=3)
+                    self.assertEqual(128 + sig, proc.returncode, err)
+                    self.assertEqual(b'', out)
+                    with (state / 'run.lock').open('a') as handle:
+                        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    time.sleep(1.1)
+                    self.assertFalse((self.root / 'LEAK').exists())
+                finally:
+                    if proc.poll() is None:
+                        proc.kill()
+                    proc.communicate()
+
+    def test_smoke_identities_include_nested_map_symbols(self):
+        smoke = runpy.run_path(str(ROOT / 'scripts/ripwire-smoke'))
+        identities = smoke['identities']
+        old = b'<r><f p="lib/a.rs"><s n="old" id="a::old"/><c n="edge"/></f></r>'
+        new = b'<r><f p="lib/a.rs"><s n="new" id="a::new"/></f></r>'
+        self.assertIn(('lib/a.rs', 'old', '', 'a::old'), identities(old))
+        self.assertNotEqual(identities(old), identities(new))
+        self.assertNotIn(('lib/a.rs', 'edge', '', ''), identities(old))
+        self.assertEqual([('a.rs', 'f', '2', 'a::f')],
+                         identities(b'<r><s p="a.rs" n="f" l="2" id="a::f"/></r>'))
 
     def test_lock_contention_is_bounded(self):
         self.install()
