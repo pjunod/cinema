@@ -1,10 +1,33 @@
 import AVFoundation
+import Combine
 import Foundation
 import XCTest
 @testable import plurx
 
 @MainActor
 final class LiveTvTests: XCTestCase {
+    func testLibraryChannelCapturesFailureNotificationError() async {
+        let controller = LibraryChannelPlayerController()
+        let item = AVPlayerItem(asset: AVMutableComposition())
+        controller.player.replaceCurrentItem(with: item)
+        controller.observeFailure(item, sequence: 0)
+        let received = expectation(description: "notification failure is visible")
+        let observation = controller.$playbackError.compactMap { $0 }.first().sink { message in
+            XCTAssertTrue(message.contains("NSOSStatusErrorDomain -12880"))
+            received.fulfill()
+        }
+        let error = NSError(domain: "NSOSStatusErrorDomain", code: -12880)
+        XCTAssertNil(item.error, "a failure notification can arrive without item.error")
+        NotificationCenter.default.post(name: .AVPlayerItemFailedToPlayToEndTime, object: item,
+                                        userInfo: [AVPlayerItemFailedToPlayToEndTimeErrorKey: error])
+        await fulfillment(of: [received], timeout: 2)
+        observation.cancel()
+        controller.handleItemFailure(item, sequence: 0)
+        XCTAssertTrue(controller.playbackError?.contains("NSOSStatusErrorDomain -12880") == true,
+                      "a later callback without an error must not erase the notification's code")
+        await controller.stop()
+    }
+
     func testLibraryChannelExecutesPlaybackDecision() throws {
         let caps = Caps.snapshot().document
         func request(_ decision: Decision) -> CreateSessionRequest {
