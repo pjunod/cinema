@@ -323,13 +323,14 @@ final class LibraryChannelPlayerController: ObservableObject {
             let occurrence = try await api.resolveLibraryChannel(channel.id)
             recordServerClock(occurrence.serverNowMs, requestStartedMs: resolveStarted)
             guard expected == tuneSequence else { return }
-            var request = CreateSessionRequest(
+            let plan = try await model.playbackDecision(fileId: occurrence.fileId)
+            guard expected == tuneSequence, !Task.isCancelled else { return }
+            let request = Self.playbackRequest(
+                decision: plan.decision,
+                caps: plan.caps,
                 playbackId: playbackId,
-                start: Double(occurrence.positionMs) / 1_000,
-                nativeSubtitles: true,
-                caps: model.caps()
+                positionMs: occurrence.positionMs
             )
-            request.presentation = "vod"
             let started = try await api.createLibraryChannelSession(
                 channelId: channel.id,
                 resolved: occurrence,
@@ -396,6 +397,30 @@ final class LibraryChannelPlayerController: ObservableObject {
             if expected == tuneSequence { message = error.localizedDescription }
         }
         if expected == tuneSequence { busy = false }
+    }
+
+    /// Channels retain their scheduled-session endpoint, but execute the same
+    /// per-file decision and capability snapshot as ordinary library playback.
+    nonisolated static func playbackRequest(
+        decision: Decision, caps: DeviceCaps, playbackId: String, positionMs: Int64
+    ) -> CreateSessionRequest {
+        let mode = PlayerController.playbackMode(decision)
+        let copy = mode == "direct" || mode == "remux"
+        let audio = decision.delivery?.audio ?? decision.selection?.audioIndex
+            ?? decision.audio?.first(where: { $0.default })?.index
+        return CreateSessionRequest(
+            playbackId: playbackId,
+            start: Double(positionMs) / 1_000,
+            audio: audio,
+            nativeSubtitles: true,
+            copy: copy ? true : nil,
+            aac: copy ? PlayerController.needsAAC(audioIndex: audio, decision: decision) : nil,
+            preserveDolbyVision: copy ? PlayerController.shouldPreserveDolbyVision(decision) : nil,
+            hdr10: PlayerController.sessionHDR10Request(
+                copy: copy, deliveredRange: decision.deliveredDynamicRange, forcesSDR: false
+            ),
+            caps: caps
+        )
     }
 
     func togglePause() async {
@@ -534,11 +559,24 @@ final class LibraryChannelPlayerController: ObservableObject {
 
     func handleItemFailure(_ item: AVPlayerItem, sequence: UInt64) {
         guard sequence == tuneSequence, player.currentItem === item else { return }
-        playbackError = item.error?.localizedDescription ?? "The channel stream could not be played. Try Watch live again."
+        playbackError = Self.playbackFailureDescription(item.error)
         busy = false
         boundary?.cancel()
         clockRefresh?.cancel()
         playbackControl.playerChanged()
+    }
+
+    nonisolated static func playbackFailureDescription(_ error: Error?) -> String {
+        guard let error = error as NSError? else {
+            return "The channel stream could not be played. Try Watch live again."
+        }
+        // Keep capability URLs and userInfo out of the UI while retaining the
+        // useful decoder/transport codes hidden by Apple's generic message.
+        var codes = "\(error.domain) \(error.code)"
+        if let underlying = error.userInfo[NSUnderlyingErrorKey] as? NSError {
+            codes += "; \(underlying.domain) \(underlying.code)"
+        }
+        return "\(error.localizedDescription) (\(codes))"
     }
 
     private func controlObservation() -> PlayerControlObservation? {
