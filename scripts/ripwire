@@ -277,9 +277,15 @@ def setup(root, lock, key):
         link.symlink_to(stage.name, target_is_directory=True)
         os.replace(link, final)
         published = True
+        result = {'outcome': 'installed', 'binary': str(final / 'ripwire'), **metadata}
         if old and old.parent == parent and old.name.startswith('.' + key + '-'):
-            shutil.rmtree(old)
-        return {'outcome': 'installed', 'binary': str(final / 'ripwire'), **metadata}
+            try:
+                shutil.rmtree(old)
+            except OSError as exc:
+                # Publication already succeeded. Report cleanup separately so
+                # an operator does not mistake the active binary for the old one.
+                result['cleanup_pending'] = {'path': str(old), 'error': str(exc)}
+        return result
     finally:
         link.unlink(missing_ok=True)
         if not published:

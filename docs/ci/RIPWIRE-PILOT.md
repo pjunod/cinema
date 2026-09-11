@@ -6,9 +6,9 @@
 Companion to [the usage guide](RIPWIRE.md) and
 [implementation status](RIPWIRE-STATUS.md). The adapter is implemented on
 `effort/ripwire`; this report does not authorize main promotion or default
-agent adoption. Four of sixteen navigation sessions returned results, one only after
-resuming an account-limit interruption. Three playback sessions remain
-failed at that limit; nine navigation sessions have not been dispatched. The independent adversarial review has
+agent adoption. Six of sixteen navigation sessions have returned results, three only after
+resuming account-limit interruptions. The next sessions remain interrupted
+or undispatched; the account limit still prevents completing the trial. The independent adversarial review has
 not been requested. Do not count the benchmark sessions as that review.
 
 ## Fixed source and environment
@@ -140,14 +140,15 @@ Corrupt caches were overwritten with `corrupt-cache`; upstream reported
 `truncated` and source rebuild. A warm/cold agreement does not prove parsing
 correctness; the separately observed graph omissions remain.
 
-Eighteen focused adapter tests pass without network or a real executable.
+Nineteen focused adapter tests pass without network or a real executable.
 They cover argv data, nested invocation, profiles, cache families, missing
 and disabled tools, corrupt installation, invalid refs/unrelated histories,
 dirty PR context, preserved exits, bounded output, both pipes, process-group
 timeout, lock contention, archive members/checksums/size, version/flags,
-failed-setup preservation, atomic publication, and idempotence.
+failed-setup preservation, atomic publication, idempotence, and reporting
+a cleanup failure separately after the new generation is already active.
 
-## Paired navigation — four returned sessions, no adoption inference
+## Paired navigation — six returned sessions, no adoption inference
 
 Freeze these tasks and expected contracts before either arm runs:
 
@@ -169,10 +170,11 @@ clones; do not use their elapsed time as an isolated latency benchmark.
 | SQL candidate 1 | returned | 5/5 | 24 | 11 | 114, after instructions | 2 / 0 | source reads and catalog |
 | SQL candidate 2 | returned | 5/5 | 20 | 9 | 67.453, partial | 2 / 0 | source reads and catalog |
 | SQL baseline 2 | returned after interruption | 4/5; owner not explicit | 29 | 11 | 66.907, partial | 0 / 0 | ordinary source tools |
-| Playback baseline 1 | account usage limit | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable |
-| Playback candidate 1 | account usage limit | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable |
+| Playback baseline 1 | returned after interruption | 5/5 | 24, excluding instructions | 10 | 817 including interruption | 0 / 0 | ordinary source tools |
+| Playback candidate 1 | returned after interruption | 5/5 | 19 | 9 | 799 including interruption | 1 / 0 | source reads and catalog |
 | Playback candidate 2 | account usage limit | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable |
-| Remaining nine navigation sessions | not dispatched | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable |
+| Playback baseline 2 / decode baseline 1 | interrupted or pending | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable |
+| Remaining seven navigation sessions | not dispatched | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable |
 
 Read operations are agent-reported explicit cat/sed file inspections;
 search scans are excluded. Instruction inclusion and timing start points
@@ -188,6 +190,16 @@ source fallback and reported graph limitations. The first three returned answers
 Baseline 2 returned implementation, regression, backend and proof details
 but did not explicitly name the functionality-point owner. No required
 SQL execution consumer was omitted from these bounded answers.
+
+The recovered playback pair traced server, web, Apple, Android and relay
+serialization. Both found the bounded startup grant that temporarily permits
+production under hold, superseding older demand-lease prose. Candidate
+source fallback also found concrete native HTTP serializers and VOD marker
+prewarm consumption. Baseline explicitly left concrete native encoders and
+Android button notification incompletely traced. Neither answer claimed
+complete actor/replay/device verification. Candidate used one query (4160
+stdout bytes) then source fallback. Their 817/799-second wall intervals
+include unknown interruptions and are invalid as speed comparisons.
 
 The SQL read counts are lower with Ripwire, but counting/timing were not
 fully consistent and the other tasks remain incomplete. Do not compute an adoption

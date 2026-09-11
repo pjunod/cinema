@@ -116,7 +116,10 @@ freshness contract. Heuristic call counts are floors, not complete totals.
 All generated state is under this clone's `target/ripwire/`. Installations
 use `tools/<version>/<platform>/` as an atomic symlink to an adjacent private
 generation containing the executable and metadata. Failed setup preserves
-the old generation. Successful replacement removes its predecessor.
+the old generation. Successful replacement removes its predecessor. If removal fails after
+publication, setup still reports the new installation as active and returns
+`cleanup_pending` with the exact unused generation path and removal error;
+resolve that local permission problem and remove only that unused path.
 Cache paths are `cache/<version>/<profile>/{lean,rich}.ripwirecache`.
 Find uses rich; other exposed verbs use lean. Metadata binds caches to the
 canonical root, architecture, adapter bytes, version, profile, and exclusions.

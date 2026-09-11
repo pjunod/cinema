@@ -291,6 +291,33 @@ class RipwireTest(unittest.TestCase):
             self.assertEqual('already-installed', setup(self.root, lock, self.key)['outcome'])
         self.assertEqual(contents, installed.read_bytes())
 
+    def test_cleanup_failure_reports_the_published_installation(self):
+        binary = self.install()
+        directory = binary.parent
+        old = directory.with_name('.' + self.key + '-old')
+        directory.rename(old)
+        directory.symlink_to(old.name, target_is_directory=True)
+        contents = binary.read_bytes() + b'# replacement generation\n'
+        member = self.lock['platforms'][self.key]['binary_member']
+        archive, entry = self.archive([(member, tarfile.REGTYPE, contents)])
+        lock = json.loads(json.dumps(self.lock))
+        lock['platforms'][self.key]['archive_sha256'] = entry['archive_sha256']
+        setup = API['setup']
+        remove = shutil.rmtree
+        def removal(path, *args, **kwargs):
+            if path == old.resolve():
+                raise PermissionError('fixture cleanup refusal')
+            return remove(path, *args, **kwargs)
+        with patch.dict(setup.__globals__, download=lambda url, target: shutil.copy2(archive, target)):
+            with patch('shutil.rmtree', side_effect=removal):
+                result = setup(self.root.resolve(), lock, self.key)
+        self.assertEqual('installed', result['outcome'])
+        self.assertEqual(str(old.resolve()), result['cleanup_pending']['path'])
+        self.assertTrue(old.exists())
+        installed, metadata = API['installed'](self.root, lock, self.key, check_cli=True)
+        self.assertEqual(contents, installed.read_bytes())
+        self.assertEqual(hashlib.sha256(contents).hexdigest(), metadata['binary_sha256'])
+
     def test_unsupported_host_and_invalid_lock(self):
         with patch('platform.system', return_value='Unsupported'):
             with self.assertRaises(API['Refusal']):
