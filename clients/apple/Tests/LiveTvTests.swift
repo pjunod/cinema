@@ -1,10 +1,63 @@
 import AVFoundation
+import Combine
 import Foundation
 import XCTest
 @testable import plurx
 
 @MainActor
 final class LiveTvTests: XCTestCase {
+    func testLibraryChannelProgressCallbacksFollowCurrentAttachment() async {
+        let controller = LibraryChannelPlayerController()
+        let item = AVPlayerItem(asset: AVMutableComposition())
+        controller.player.replaceCurrentItem(with: item)
+        var captures = 0
+        let update = controller.makeProgressObservation(item, sequence: 0) { captures += 1 }
+        update()
+        update()
+        XCTAssertEqual(captures, 2, "ongoing progress must refresh the reporter's stored snapshot")
+        controller.player.replaceCurrentItem(with: AVPlayerItem(asset: AVMutableComposition()))
+        update()
+        XCTAssertEqual(captures, 2, "a queued predecessor callback cannot report a successor's position")
+        controller.player.replaceCurrentItem(with: item)
+        await controller.stop()
+        update()
+        XCTAssertEqual(captures, 2, "stop revokes queued progress callbacks")
+    }
+
+    func testLibraryChannelBufferingKeepsProductionActive() async throws {
+        let controller = LibraryChannelPlayerController()
+        controller.player.replaceCurrentItem(with: AVPlayerItem(asset: AVMutableComposition()))
+        XCTAssertEqual(controller.player.rate, 0)
+        let observation = try XCTUnwrap(controller.controlObservation())
+        XCTAssertFalse(observation.isPaused, "a zero decoder rate is not a viewer pause")
+        XCTAssertEqual(PlaybackControlMapping.demand(observation, terminallyEnded: false), .active,
+                       "buffering must keep the server producing fresh playlist segments")
+        await controller.stop()
+        XCTAssertNil(controller.controlObservation())
+    }
+
+    func testLibraryChannelCapturesFailureNotificationError() async {
+        let controller = LibraryChannelPlayerController()
+        let item = AVPlayerItem(asset: AVMutableComposition())
+        controller.player.replaceCurrentItem(with: item)
+        controller.observeFailure(item, sequence: 0)
+        let received = expectation(description: "notification failure is visible")
+        let observation = controller.$playbackError.compactMap { $0 }.first().sink { message in
+            XCTAssertTrue(message.contains("NSOSStatusErrorDomain -12880"))
+            received.fulfill()
+        }
+        let error = NSError(domain: "NSOSStatusErrorDomain", code: -12880)
+        XCTAssertNil(item.error, "a failure notification can arrive without item.error")
+        NotificationCenter.default.post(name: .AVPlayerItemFailedToPlayToEndTime, object: item,
+                                        userInfo: [AVPlayerItemFailedToPlayToEndTimeErrorKey: error])
+        await fulfillment(of: [received], timeout: 2)
+        observation.cancel()
+        controller.handleItemFailure(item, sequence: 0)
+        XCTAssertTrue(controller.playbackError?.contains("NSOSStatusErrorDomain -12880") == true,
+                      "a later callback without an error must not erase the notification's code")
+        await controller.stop()
+    }
+
     func testLibraryChannelExecutesPlaybackDecision() throws {
         let caps = Caps.snapshot().document
         func request(_ decision: Decision) -> CreateSessionRequest {

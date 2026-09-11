@@ -1190,7 +1190,7 @@ test_anchor = "liveStartWireIncludesRequiredProtocolVersions"
 id = "apple.library-channel-visible-failure"
 commits = ["32d88825"]
 source = "clients/apple/Sources/LibraryChannels.swift"
-source_anchor = "func handleItemFailure(_ item: AVPlayerItem, sequence: UInt64)"
+source_anchor = "func handleItemFailure(_ item: AVPlayerItem, sequence: UInt64,"
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "testLibraryChannelFailureIsVisibleAndFenced"
 [[fixes]]
@@ -1200,3 +1200,24 @@ source = "clients/apple/Sources/LibraryChannels.swift"
 source_anchor = "let plan = try await model.playbackDecision(fileId: occurrence.fileId)"
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "testLibraryChannelExecutesPlaybackDecision"
+[[fixes]]
+id = "apple.library-channel-notification-error"
+commits = ["fbddb917"]
+source = "clients/apple/Sources/LibraryChannels.swift"
+source_anchor = "notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey]"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testLibraryChannelCapturesFailureNotificationError"
+[[fixes]]
+id = "apple.library-channel-buffering-demand"
+commits = ["323eaf77"]
+source = "clients/apple/Sources/LibraryChannels.swift"
+source_anchor = "isPaused: paused,"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testLibraryChannelBufferingKeepsProductionActive"
+[[fixes]]
+id = "apple.library-channel-progress-reporting"
+commits = ["d311882b"]
+source = "clients/apple/Sources/LibraryChannels.swift"
+source_anchor = "progressObserver = player.addPeriodicTimeObserver("
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testLibraryChannelProgressCallbacksFollowCurrentAttachment"

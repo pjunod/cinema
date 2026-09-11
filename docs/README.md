@@ -78,6 +78,7 @@ note per Apple build, read by `validation/apple_build.py`) ·
 
 Apple build 137: [Library channel startup and contrast](apple-builds/245-library-channel-start-and-contrast.md).
 Apple build 138: [Library channel playback decision](apple-builds/245-library-channel-playback-decision.md).
+Apple build 141: [Library channel buffering demand](apple-builds/245-library-channel-buffering-demand.md).
 
 Previous: [Live TV playback method](apple-builds/245-live-tv-playback-method.md).
 

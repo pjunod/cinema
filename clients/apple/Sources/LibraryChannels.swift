@@ -267,11 +267,13 @@ final class LibraryChannelPlayerController: ObservableObject {
     private var endObserver: NSObjectProtocol?
     private var failedObserver: NSObjectProtocol?
     private var itemStatusObservation: NSKeyValueObservation?
+    private var progressObserver: Any?
     private let playbackControl = PlaybackControlSession()
     private var mediaOriginMs: Int64 = 0
     private var mediaDurationMs: Int = 0
 
     deinit {
+        if let progressObserver { player.removeTimeObserver(progressObserver) }
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
         if let failedObserver { NotificationCenter.default.removeObserver(failedObserver) }
     }
@@ -361,6 +363,7 @@ final class LibraryChannelPlayerController: ObservableObject {
             player.replaceCurrentItem(with: item)
             observeEnd(item, channel: channel, sequence: expected)
             observeFailure(item, sequence: expected)
+            observeProgress(item, sequence: expected)
             player.play()
             mediaOriginMs = Int64(started.playback.mediaOriginMs ?? Int(occurrence.positionMs))
             mediaDurationMs = started.playback.durationMs ?? 0
@@ -453,6 +456,8 @@ final class LibraryChannelPlayerController: ObservableObject {
         if let failedObserver { NotificationCenter.default.removeObserver(failedObserver) }
         failedObserver = nil
         itemStatusObservation = nil
+        if let progressObserver { player.removeTimeObserver(progressObserver) }
+        progressObserver = nil
         playbackError = nil
         player.pause()
         playbackControl.end()
@@ -544,7 +549,30 @@ final class LibraryChannelPlayerController: ObservableObject {
         }
     }
 
-    private func observeFailure(_ item: AVPlayerItem, sequence: UInt64) {
+    private func observeProgress(_ item: AVPlayerItem, sequence: UInt64) {
+        if let progressObserver { player.removeTimeObserver(progressObserver) }
+        let capture = makeProgressObservation(item, sequence: sequence) { [weak self] in
+            self?.playbackControl.playerChanged()
+        }
+        progressObserver = player.addPeriodicTimeObserver(
+            forInterval: CMTime(seconds: 1, preferredTimescale: 2), queue: .main
+        ) { _ in
+            MainActor.assumeIsolated { capture() }
+        }
+    }
+
+    /// The reporter reads an immutable snapshot; playback must keep publishing
+    /// progress or the server keeps budgeting production from the join point.
+    func makeProgressObservation(
+        _ item: AVPlayerItem, sequence: UInt64, notify: @escaping @MainActor () -> Void
+    ) -> @MainActor () -> Void {
+        { [weak self] in
+            guard let self, self.tuneSequence == sequence, self.player.currentItem === item else { return }
+            notify()
+        }
+    }
+
+    func observeFailure(_ item: AVPlayerItem, sequence: UInt64) {
         itemStatusObservation = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
             guard item.status == .failed else { return }
             Task { @MainActor in self?.handleItemFailure(item, sequence: sequence) }
@@ -552,22 +580,33 @@ final class LibraryChannelPlayerController: ObservableObject {
         if let failedObserver { NotificationCenter.default.removeObserver(failedObserver) }
         failedObserver = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemFailedToPlayToEndTime, object: item, queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in self?.handleItemFailure(item, sequence: sequence) }
+        ) { [weak self] notification in
+            let error = notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? NSError
+            Task { @MainActor in self?.handleItemFailure(item, sequence: sequence, notificationError: error) }
         }
     }
 
-    func handleItemFailure(_ item: AVPlayerItem, sequence: UInt64) {
+    func handleItemFailure(_ item: AVPlayerItem, sequence: UInt64, notificationError: NSError? = nil) {
         guard sequence == tuneSequence, player.currentItem === item else { return }
-        playbackError = Self.playbackFailureDescription(item.error)
+        let error = notificationError ?? (item.error as NSError?)
+        let event = item.errorLog()?.events.last
+        if playbackError == nil || error != nil || event != nil {
+            playbackError = Self.playbackFailureDescription(error, eventDomain: event?.errorDomain,
+                                                            eventStatus: event?.errorStatusCode)
+        }
         busy = false
         boundary?.cancel()
         clockRefresh?.cancel()
         playbackControl.playerChanged()
     }
 
-    nonisolated static func playbackFailureDescription(_ error: Error?) -> String {
+    nonisolated static func playbackFailureDescription(
+        _ error: Error?, eventDomain: String? = nil, eventStatus: Int? = nil
+    ) -> String {
         guard let error = error as NSError? else {
+            if let eventDomain, let eventStatus {
+                return "The channel stream could not be played. (\(eventDomain) \(eventStatus))"
+            }
             return "The channel stream could not be played. Try Watch live again."
         }
         // Keep capability URLs and userInfo out of the UI while retaining the
@@ -579,7 +618,7 @@ final class LibraryChannelPlayerController: ObservableObject {
         return "\(error.localizedDescription) (\(codes))"
     }
 
-    private func controlObservation() -> PlayerControlObservation? {
+    func controlObservation() -> PlayerControlObservation? {
         guard let item = player.currentItem else { return nil }
         let local = player.currentTime().seconds
         let position = mediaOriginMs + Int64((local.isFinite ? max(0, local) : 0) * 1_000)
@@ -589,7 +628,9 @@ final class LibraryChannelPlayerController: ObservableObject {
             bufferedFromMs: nil,
             bufferedThroughMs: nil,
             rate: Double(player.rate),
-            isPaused: paused || player.rate == 0,
+            // A decoder waiting for bytes has zero rate too. Reporting that
+            // as Hold stops the producer whose next segment would unblock it.
+            isPaused: paused,
             isEnded: item.status == .failed || (resolved?.endsAtMs ?? Int64.max) <= serverNowMs(),
             isSeeking: false,
             hasStarted: player.timeControlStatus == .playing,
