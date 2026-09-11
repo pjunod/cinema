@@ -1,6 +1,6 @@
 # Ripwire — bounded navigation in one agent checkout
 
-**Status:** built on effort; promotion deferred · **Owner:** validation.framework
+**Status:** implemented; opt-in only · **Owner:** validation.framework
 
 Companion to [the measured pilot](RIPWIRE-PILOT.md),
 [the implementation status](RIPWIRE-STATUS.md), and

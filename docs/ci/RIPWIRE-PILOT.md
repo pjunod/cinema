@@ -1,15 +1,15 @@
-# Ripwire pilot — measured speed, graph omissions, and unfinished adoption evidence
+# Ripwire pilot — measured speed, graph omissions, and opt-in verdict
 
-**Status:** incomplete; agent capacity blocked · **Verdict:** defer ·
+**Status:** trial complete with measurement limits · **Verdict:** opt-in only ·
 **Measured:** 2026-09-10 · **Owner:** validation.framework
 
 Companion to [the usage guide](RIPWIRE.md) and
 [implementation status](RIPWIRE-STATUS.md). The adapter is implemented on
-`effort/ripwire`; this report does not authorize main promotion or default
-agent adoption. Six of sixteen navigation sessions have returned results, three only after
-resuming account-limit interruptions. The next sessions remain interrupted
-or undispatched; the account limit still prevents completing the trial. The independent adversarial review has
-not been requested. Do not count the benchmark sessions as that review.
+`effort/ripwire`. All sixteen navigation sessions and both blind correction exercises have
+returned. The results support explicit use with source fallback, without
+default worker prompt additions.
+Recovered account-limit interruptions remain recorded. The independent
+adversarial review has not been requested; navigation is not that review.
 
 ## Fixed source and environment
 
@@ -35,9 +35,9 @@ contracts before dispatch. Navigation agents were limited to five minutes
 and sixteen shell navigation calls, with no source edits, tests, network,
 installation, or further agents. They used `rg`, bounded reads, Git and
 catalog plans; candidate sessions additionally used the installed wrapper.
-Exact model metadata and full-session timing must be captured when the
-paired trial is resumed. Current measurements cannot satisfy a strict
-model/settings-controlled adoption claim.
+Exact model metadata was unavailable and several full-session clocks were
+interrupted. These measurements cannot satisfy a strict model/settings-
+controlled adoption claim. No unavailable values are inferred.
 
 ## Query cost — all 24 completed samples
 
@@ -89,7 +89,7 @@ Language file counts are symbol-bearing floors, not complete file totals.
 |---|---|---|
 | Rust direct | `hiqlite.rs:3992` validator has one known direct caller, `validate_sql` at 3981; graph returned 1/1. | Read validation and binding semantics. |
 | Rust cross-module | `hiqlite.rs:validate_sql` returned 121 caller symbols, paged to 40. The page includes `hiqlite_catalog.rs:178` `install_schema` as well as local TimedClient accessors. Complete denominator was not established. | Inspect the Store slices and catalog; do not equate a page to all callers. |
-| Rust decode | `transcode.rs:2391` definition returned four caller symbols, including production `start_with_audio_offset` at 18747 and three tests. Literal search finds eight call sites; symbols and sites are different denominators. | Inspect calls around 19057 and tests around 35273–35671. |
+| Rust decode | `transcode.rs:2391` definition returned four caller symbols, including production `start_with_audio_offset` at 18747 and three tests. Literal search finds seven call sites; symbols and sites are different denominators. | Inspect calls around 19057 and tests around 35273–35671. |
 | Rust traits | `playback_control.rs:stage_preparation_for_owner` resolves four definitions and returns six caller symbols, including `activate_reserved` at 5406. The trait call at 5412 is visible, but dispatch identity remains ambiguous. | Read trait, implementations and `.control` wiring. |
 | Rust macros | `hiqlite.rs:4487` `dump_row` returned zero callers despite twelve top-level invocations beginning at 4500. These are macro invocation sites, not twelve ordinary function callers. | Inspect macro expansion and invocation sites. |
 | Rust closures | Fixture closure consumer is returned; real SQL sessions located a renewal closure in `state.rs` through source reads. A complete real closure-edge set was not measured. | Direct reads/reference tooling. |
@@ -148,7 +148,7 @@ timeout, lock contention, archive members/checksums/size, version/flags,
 failed-setup preservation, atomic publication, idempotence, and reporting
 a cleanup failure separately after the new generation is already active.
 
-## Paired navigation — six returned sessions, no adoption inference
+## Paired navigation — completion and source-backed limitations
 
 Freeze these tasks and expected contracts before either arm runs:
 
@@ -161,7 +161,8 @@ Freeze these tasks and expected contracts before either arm runs:
 
 Two paired repetitions per task are required (sixteen fresh sessions).
 Dispatch order for SQL was baseline-1, candidate-1, candidate-2, baseline-2.
-Playback-1 began baseline then candidate. Trials were concurrent on separate
+Every other task used the same baseline-1, candidate-1, candidate-2,
+baseline-2 dispatch order. Trials were concurrent on separate
 clones; do not use their elapsed time as an isolated latency benchmark.
 
 | Session | Outcome | Required groups located | Read operations | Shell calls | Recorded elapsed s | Wrapper queries / refusals | Fallback |
@@ -172,20 +173,27 @@ clones; do not use their elapsed time as an isolated latency benchmark.
 | SQL baseline 2 | returned after interruption | 4/5; owner not explicit | 29 | 11 | 66.907, partial | 0 / 0 | ordinary source tools |
 | Playback baseline 1 | returned after interruption | 5/5 | 24, excluding instructions | 10 | 817 including interruption | 0 / 0 | ordinary source tools |
 | Playback candidate 1 | returned after interruption | 5/5 | 19 | 9 | 799 including interruption | 1 / 0 | source reads and catalog |
-| Playback candidate 2 | account usage limit | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable |
-| Playback baseline 2 / decode baseline 1 | interrupted or pending | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable |
-| Remaining seven navigation sessions | not dispatched | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable |
+| Playback candidate 2 | returned after interruption | 5/5 | 24 | 9 | 1155.717 including interruption | 1 / 0 | source reads and catalog |
+| Playback baseline 2 | returned | 5/5 | 27 | 9 | 147 | 0 / 0 | ordinary source tools |
+| Decode baseline 1 | returned after interruption | 4/5; owner not explicit | 20 | 7 | 82, resumed segment | 0 / 0 | ordinary source tools |
+| Decode candidate 1 | returned after interruption | 5/5 | 14 bounded reads; 20 with searches | 8 | unavailable | 4 / 0 | source reads and catalog |
+| Decode candidate 2 | returned | 5/5 | 22 | 9 | 151 | 3 / 0 | source reads and catalog |
+| Decode baseline 2 | returned | 4/5; owner not explicit | 29 | 9 | 187 | 0 / 0 | ordinary source tools |
+| Correction baseline 1 | returned | 5/5 | 21 including search/diff reads | 6 | 106.59 | 0 / 0 | ordinary source tools |
+| Correction candidate 1 | returned | 5/5 | 12 including Git diff reads | 6 | unavailable | 1 / 0 | source reads and catalog |
+| Correction candidate 2 | returned | 5/5 | 14 including Git diff reads | 6 | 51.374, partial | 1 / 0 | source reads and catalog |
+| Correction baseline 2 | findings returned; artifact refused | 5/5 | 13 including Git diff reads | 7 | unavailable | 0 / 0 | ordinary source tools |
 
 Read operations are agent-reported explicit cat/sed file inspections;
 search scans are excluded. Instruction inclusion and timing start points
 were not fully consistent, so these are descriptive counts rather than a
-valid median comparison. Returned shell-output character counts were
+valid median comparison. The first three SQL shell-output character counts were
 135533, 154575, and 112470 respectively, with one/two/two truncated tool
-outputs. Those are not UTF-8 byte or model-token measurements. Both completed
+outputs. Those are not UTF-8 byte or model-token measurements. Both SQL
 candidate sessions measured 9029 total Ripwire stdout bytes from two queries.
 SQL baseline 2 measured 85,976 output bytes for calls 6–11 only. Actual
 model tokens and billing are unavailable. One coordinator resume request
-recovered SQL baseline 2 after its account-limit failure; both candidate sessions used
+recovered SQL baseline 2 after its account-limit failure; both SQL candidates used
 source fallback and reported graph limitations. The first three returned answers covered the five required SQL groups.
 Baseline 2 returned implementation, regression, backend and proof details
 but did not explicitly name the functionality-point owner. No required
@@ -201,20 +209,54 @@ complete actor/replay/device verification. Candidate used one query (4160
 stdout bytes) then source fallback. Their 817/799-second wall intervals
 include unknown interruptions and are invalid as speed comparisons.
 
-The SQL read counts are lower with Ripwire, but counting/timing were not
-fully consistent and the other tasks remain incomplete. Do not compute an adoption
-threshold from that partial sample or treat agent self-scoring as a review.
+All four decode answers locate the production caller, the four direct
+helper tests, the shared offline validator, and the prepublication recovery
+constraints. Both candidate answers recover the graph's omitted no-op test
+through literal source search. Both baseline answers omit explicit catalog
+ownership but propose relevant validation. This is bookkeeping incompleteness,
+not a missing execution consumer. Current implementation and regression
+permit structurally safe unqualified recovery; older qualification comments
+are stale. Complete postpublication client wiring is outside this bounded
+helper trace and was explicitly left unverified by both arms.
 
-## Historical correction — retained proof is ready, blind replay is not
+Decode candidate 1 lost a tool response to an instrumentation error and
+repeated the read; that query is counted. Its 14 bounded file reads plus six
+search inspections must not be presented as 20 reads under the other
+sessions' cat/sed convention. Decode candidate 2 includes one Ripwire body
+in its 22 reads. Correction baseline 1 includes visible search and Git diff
+reads. These inconsistent definitions prevent a strict cross-task adoption
+comparison. No candidate answer is treated as complete solely because the
+graph returned success.
+
+All correction answers identify the script's child environment, retained
+regressions, historical pre-fix proof and `validation.framework` ownership.
+Both candidate broad queries require source fallback to find the actual
+extensionless implementation; candidate 2 ranks a relevant test tenth.
+Candidate output was 3269/3760 stdout bytes, with no wrapper refusals.
+One baseline agent's artifact write was rejected by automatic approval
+review; its findings were returned directly instead. This is an output
+artifact limitation, not a failed navigation result.
+
+The descriptive median read counts are SQL 30.5 baseline versus 22 candidate
+(27.9% fewer), playback 25.5 versus 21.5 (15.7% fewer), and decode 24.5 versus
+18 (26.5% fewer using candidate 1's 14 bounded reads). These are not valid
+controlled improvement estimates because read definitions, instruction
+inclusion, and interruptions differ. Correction is 17 versus 13 (23.5% fewer), also with differing search-read
+counting. Playback does not reach 20% even on
+these descriptive counts. Missing model metadata further prevents a strict
+default-adoption conclusion. Tokens and billing remain unavailable.
+
+## Historical correction — blind replay and retained proof
 
 Selected correction: `ea89956823bf61f68091ee025b9f6a3fa1992316`, which isolates
 prove-fix's `CARGO_TARGET_DIR` from the normal gate's target. Pre-fix source
 is `aae5ba9a230e54e3973dfdb6a390f29c4bdd7621`. Scratch repositories were
 initialized from that source archive with no later Git history; both received
 the same adapter source overlay and only the candidate has it installed.
-No implementation session was dispatched before capacity was exhausted.
-Retrying navigation recovered one final result, then playback agents hit
-the same limit again; the initial failures remain recorded.
+Both fresh implementation sessions were dispatched after navigation finished.
+Their task names the observed contamination and required target policy but
+withholds the later correction diff and retained tests. They may edit only
+the Python proof script; no product patch is promoted from the exercise.
 
 The coordinator loaded the retained four Python tests from the correction
 commit, pointed them at the historical pre-fix script, and observed the two
@@ -224,11 +266,30 @@ Its Git blob is `29838b3a9f93736fe61926fa7cceadab4abfb9a6`, identical to the
 original correction's script. An initial harness attempt used a relative
 executable path and produced setup errors; it was corrected before the
 reported red/green runs. No Rust compilation or product edit was involved.
-This establishes retained regression sensitivity, not blind implementation
-success. Keep the correction diff and held tests hidden from both replay
-agents until their patches are complete.
+Both blind patches changed only the child target environment. Each used
+`Path.resolve()` before appending `-prove-fix`. Retained tests in the default
+macOS temporary directory passed 3/4 for both arms: the inherited-target
+assertion compared `/var/...` with canonical `/private/var/...` and failed.
+This is a real path-spelling mismatch against the retained contract, not an
+all-green implementation result. Neither arm overwrote the ordinary target.
+A diagnostic rerun with `TMPDIR=/private/tmp` passed 4/4 for both unchanged
+patches (2.350/1.281 s), confirming the symlink spelling distinction. The
+original failures and patches remain retained; this rerun does not replace
+the blind score. No candidate correctness regression versus baseline was
+observed, and neither patch is promoted.
 
-## Reproduce and resume
+| Arm | Navigation calls | Explicit reads | Elapsed s | Ripwire bytes / refusals | Blind retained result |
+|---|---|---|---|---|---|
+| Baseline | 7 | 3 source/doc reads plus final diff | 91.175, after initial discovery | 0 / 0 | 3/4; inherited path spelling mismatch |
+| Candidate | 9 | 4 source/doc reads plus final diff | 47, through patch inspection | 3915 / 0 | 3/4; same mismatch |
+
+The candidate read the wrapper and ran one broad query before source fallback;
+its extra reads did not improve this small implementation task. Timing start
+and end boundaries differ, so 91/47 is not a controlled speed comparison.
+The historical archive predates AGENTS and the docs index; both agents
+reported their absence and read the relevant validation guide instead.
+
+## Reproduce the evidence and interpret the verdict
 
 Use a new clone at the frozen source, explicit setup, and the settings above.
 For every command, capture stdout and stderr separately and retain failures.
@@ -238,8 +299,8 @@ warm samples without clearing it. Use `/usr/bin/time -l` on macOS and record
 its exit separately from the wrapper provenance. Use equivalent documented
 resource instrumentation on other hosts.
 
-Disposable trial clones have been removed. Their reconstruction helpers
-are retained under `pilot/harness/` alongside the explicit local evidence.
+Disposable trial clones were removed after all sessions finished.
+Their reconstruction helpers are retained under `pilot/harness/` alongside the explicit local evidence.
 The current local evidence root is `target/ripwire/evidence/` in the own clone
 `/private/tmp/plurx-ripwire`. It contains `smoke-20260910-193051/`, the first
 smoke capture, and `pilot/` with `latency.json`, the separately retained
@@ -248,16 +309,19 @@ and documentation-profile captures, frozen expected contracts, session
 summaries, and retained exercise proof. These are ignored local records;
 this report contains durable summaries, not copied source or transcripts.
 
-Resume with a capacity-enabled fresh session, capture exact model/reasoning
-identities and consistent full-session metrics, and complete the missing
-navigation pairs plus blind historical replay. Preserve the failed sessions.
-Only repeat already-completed sessions if needed to repair the declared
-measurement inconsistency, and keep their original observations.
-
 Default adoption requires no worse correctness on all four tasks, at least
 three tasks improving median reads or measured context by 20%, and no worse
-correction exercise. Those conditions have not been established. Verdict is
-**defer**: keep the implementation and report on the effort; no default
-worker prompt addition and no main promotion yet. The complete trial may
-support `opt-in only` even if performance is useful. No feature gate or
-product enablement UI is introduced by this development-tool experiment.
+correction exercise. The complete answers show no additional required
+consumer omission from the candidate arms, and the blind patches have the
+same retained failure. However, inconsistent read definitions, interruptions
+and unavailable exact model metadata prevent establishing the improvement
+threshold. No token, cost or statistically significant speed claim is made.
+
+Verdict: **opt-in only**. Ship the explicit installed commands and usage guide.
+Warm medians are below two seconds, source fallback recovers measured graph
+omissions, and the candidate trial did not worsen the selected correctness
+contracts. Add no default worker guidance: its prompt cost is **0 bytes**.
+SCIP and unexecuted release platforms remain documented follow-ups. A future
+default-adoption study needs consistent instrumented reads and exact model
+settings; it must preserve these original observations. No feature gate or
+product enablement UI is introduced by this development-tool integration.
