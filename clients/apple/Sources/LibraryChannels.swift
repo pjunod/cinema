@@ -544,7 +544,7 @@ final class LibraryChannelPlayerController: ObservableObject {
         }
     }
 
-    private func observeFailure(_ item: AVPlayerItem, sequence: UInt64) {
+    func observeFailure(_ item: AVPlayerItem, sequence: UInt64) {
         itemStatusObservation = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
             guard item.status == .failed else { return }
             Task { @MainActor in self?.handleItemFailure(item, sequence: sequence) }
@@ -552,22 +552,33 @@ final class LibraryChannelPlayerController: ObservableObject {
         if let failedObserver { NotificationCenter.default.removeObserver(failedObserver) }
         failedObserver = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemFailedToPlayToEndTime, object: item, queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in self?.handleItemFailure(item, sequence: sequence) }
+        ) { [weak self] notification in
+            let error = notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? NSError
+            Task { @MainActor in self?.handleItemFailure(item, sequence: sequence, notificationError: error) }
         }
     }
 
-    func handleItemFailure(_ item: AVPlayerItem, sequence: UInt64) {
+    func handleItemFailure(_ item: AVPlayerItem, sequence: UInt64, notificationError: NSError? = nil) {
         guard sequence == tuneSequence, player.currentItem === item else { return }
-        playbackError = Self.playbackFailureDescription(item.error)
+        let error = notificationError ?? (item.error as NSError?)
+        let event = item.errorLog()?.events.last
+        if playbackError == nil || error != nil || event != nil {
+            playbackError = Self.playbackFailureDescription(error, eventDomain: event?.errorDomain,
+                                                            eventStatus: event?.errorStatusCode)
+        }
         busy = false
         boundary?.cancel()
         clockRefresh?.cancel()
         playbackControl.playerChanged()
     }
 
-    nonisolated static func playbackFailureDescription(_ error: Error?) -> String {
+    nonisolated static func playbackFailureDescription(
+        _ error: Error?, eventDomain: String? = nil, eventStatus: Int? = nil
+    ) -> String {
         guard let error = error as NSError? else {
+            if let eventDomain, let eventStatus {
+                return "The channel stream could not be played. (\(eventDomain) \(eventStatus))"
+            }
             return "The channel stream could not be played. Try Watch live again."
         }
         // Keep capability URLs and userInfo out of the UI while retaining the
