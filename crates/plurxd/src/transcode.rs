@@ -25578,6 +25578,29 @@ pub(crate) mod tests {
         assert!(matches!(error, CopyInitValidationError::Invalid(_)));
     }
 
+    #[tokio::test]
+    async fn copy_init_wait_without_completed_media_respects_the_request_deadline() {
+        let dir = crate::test_tempdir().expect("copy init directory");
+        tokio::fs::write(dir.path().join("init.mp4"), b"")
+            .await
+            .expect("muxer opened an incomplete init");
+        let session = test_session(dir.path().to_path_buf());
+        session.actor_prepublication_producer.store(true, Release);
+        let attempt = session.control.current_producer_attempt();
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            validate_copy_init_before_publication(
+                &session,
+                attempt,
+                Instant::now() + Duration::from_millis(30),
+            ),
+        )
+        .await
+        .expect("an unpublished copy cannot hold the HTTP request indefinitely");
+        assert!(matches!(result, Err(CopyInitValidationError::StateChanged)));
+        assert!(copy_init_attempt_is_current(&session, attempt));
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn prepared_plan_is_not_reprobed_during_producer_execution() {

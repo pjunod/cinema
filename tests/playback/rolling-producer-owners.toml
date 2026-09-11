@@ -154,7 +154,8 @@ pattern = "tokio::spawn\\("
 # real sink, handle and actor. It is joined by the test before any assertion —
 # without it, replacing `DecodeFaultSink::report` with an empty body left the
 # whole workspace green and the feature dead in production.
-expected_occurrences = 80
+# The copy-init regression adds one joined synthetic producer; it publishes fixture bytes after a 100 ms delay.
+expected_occurrences = 81
 kind = "structural_task_scan"
 replacement = "every detached task requires ownership-catalog review; published failure, completion, and executor-loss cleanup transfer exact child ownership before awaiting, while the removed published-transcode watchdog contributes no task"
 
@@ -187,7 +188,8 @@ pattern = "tokio::time::sleep\\("
 # only at its next checkpoint, so a single non-blocking try turns "wait two
 # seconds" into "destroy the session".
 # +1 for the bounded test wait while the actor records the replacement attempt.
-expected_occurrences = 38
+# The copy-init regression delays fixture publication by 100 ms to reproduce the empty-init window; no runtime timer is added.
+expected_occurrences = 39
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
 
@@ -522,7 +524,8 @@ expected_occurrences = 0
 [[module_symbols]]
 id = "m4-prepublication-ownership-projection"
 pattern = "actor_prepublication_producer"
-expected_occurrences = 21
+# The deadline regression marks its synthetic session as prepublication; it adds no runtime owner.
+expected_occurrences = 22
 
 [[module_symbols]]
 id = "m4-decision-wake"
@@ -1404,7 +1407,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # competing rolling producer or playback clock.
 # +1 for Live TV's stderr drain. The session retains and joins its handle; it
 # only records decoder/source facts and never owns producer policy.
-expected_occurrences = 481
+# One joined copy-init fixture producer is added in transcode.rs tests.
+expected_occurrences = 482
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -1739,7 +1743,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # +4 for Live TV: first-byte and replay-write bounds, a total local ffprobe
 # deadline, and the existing tuner-read deadline clamped while collecting the
 # finite prefix. Each is held by the foreground session owner.
-expected_occurrences = 728
+# Copy-init tests add one 100 ms fixture delay and one outer timeout guarding the HTTP deadline assertion; no runtime timer is added.
+expected_occurrences = 730
 
 [[module_structures]]
 id = "bare-time-constructor"

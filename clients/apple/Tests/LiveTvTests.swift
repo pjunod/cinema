@@ -5,6 +5,27 @@ import XCTest
 
 @MainActor
 final class LiveTvTests: XCTestCase {
+    func testLibraryChannelFailureIsVisibleAndFenced() async {
+        let controller = LibraryChannelPlayerController()
+        let current = AVPlayerItem(asset: AVMutableComposition())
+        let predecessor = AVPlayerItem(asset: AVMutableComposition())
+        controller.player.replaceCurrentItem(with: current)
+
+        controller.handleItemFailure(predecessor, sequence: 0)
+        XCTAssertNil(controller.playbackError, "an old item must not overwrite the current channel")
+        controller.handleItemFailure(current, sequence: 1)
+        XCTAssertNil(controller.playbackError, "an old tune callback must be ignored")
+        controller.handleItemFailure(current, sequence: 0)
+        XCTAssertEqual(controller.playbackError,
+                       "The channel stream could not be played. Try Watch live again.")
+        XCTAssertFalse(controller.busy)
+
+        await controller.stop()
+        XCTAssertNil(controller.playbackError)
+        controller.handleItemFailure(current, sequence: 0)
+        XCTAssertNil(controller.playbackError, "a stopped tune cannot restore its failure")
+    }
+
     func testTypedPlaybackConflictShowsReasonWithoutChangingAuthHandling() throws {
         let data = Data(#"{"code":"vod_source_rescan_required","message":"The source probe needs refreshing."}"#.utf8)
         let url = try XCTUnwrap(URL(string: "http://127.0.0.1/api/v1/library-channels/test/sessions"))
