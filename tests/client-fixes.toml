@@ -1207,3 +1207,10 @@ source = "clients/apple/Sources/LibraryChannels.swift"
 source_anchor = "notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey]"
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "testLibraryChannelCapturesFailureNotificationError"
+[[fixes]]
+id = "apple.library-channel-buffering-demand"
+commits = ["323eaf77"]
+source = "clients/apple/Sources/LibraryChannels.swift"
+source_anchor = "isPaused: paused,"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testLibraryChannelBufferingKeepsProductionActive"

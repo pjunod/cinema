@@ -6,6 +6,18 @@ import XCTest
 
 @MainActor
 final class LiveTvTests: XCTestCase {
+    func testLibraryChannelBufferingKeepsProductionActive() async throws {
+        let controller = LibraryChannelPlayerController()
+        controller.player.replaceCurrentItem(with: AVPlayerItem(asset: AVMutableComposition()))
+        XCTAssertEqual(controller.player.rate, 0)
+        let observation = try XCTUnwrap(controller.controlObservation())
+        XCTAssertFalse(observation.isPaused, "a zero decoder rate is not a viewer pause")
+        XCTAssertEqual(PlaybackControlMapping.demand(observation, terminallyEnded: false), .active,
+                       "buffering must keep the server producing fresh playlist segments")
+        await controller.stop()
+        XCTAssertNil(controller.controlObservation())
+    }
+
     func testLibraryChannelCapturesFailureNotificationError() async {
         let controller = LibraryChannelPlayerController()
         let item = AVPlayerItem(asset: AVMutableComposition())
