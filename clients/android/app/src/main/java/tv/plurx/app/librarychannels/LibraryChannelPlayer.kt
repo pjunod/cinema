@@ -167,6 +167,10 @@ class LibraryChannelPlayer private constructor(context: Context) {
     }
 
     fun tune(channel: LibraryChannel) {
+        tune(channel, retryOccurrenceChange = true)
+    }
+
+    private fun tune(channel: LibraryChannel, retryOccurrenceChange: Boolean) {
         if (!channel.enabled) return
         val client = api ?: return
         tuneSequence += 1
@@ -181,7 +185,7 @@ class LibraryChannelPlayer private constructor(context: Context) {
                 val capabilitySnapshot = Caps.snapshot(appContext)
                 val caps = capabilitySnapshot.document
                 controlCaps = controlCapabilities(capabilitySnapshot.legacyQuery)
-                val started = client.createLibraryChannelSession(
+                val response = client.createLibraryChannelSession(
                     channel.id,
                     LibraryChannelSessionRequest(
                         generation_id = resolved.generation_id,
@@ -196,6 +200,17 @@ class LibraryChannelPlayer private constructor(context: Context) {
                         ),
                     ),
                 )
+                if (!response.isSuccessful) {
+                    val responseText = runCatching { response.errorBody()?.string() }.getOrNull()
+                    val failure = libraryChannelStartFailure(response.code(), responseText)
+                    if (expected == tuneSequence && shouldRetryLibraryChannelStart(failure, retryOccurrenceChange)) {
+                        tune(channel, retryOccurrenceChange = false)
+                        return@launch
+                    }
+                    throw failure
+                }
+                val started = response.body()
+                    ?: throw libraryChannelStartFailure(response.code(), null)
                 if (expected != tuneSequence || started.library_channel.tune_sequence != expected) {
                     runCatching { client.endHlsSession(started.playback.session_id) }
                     return@launch
