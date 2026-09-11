@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["ff56f96f"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "Legacy scans predate -show_chapters: production files 1323 and 2 match their fresh probes when the unmeasured chapter list and descriptor filename are excluded. The comparison regression accepts unknown chapter metadata while rejecting added, removed, or retimed chapters when both reports measured them, and rejects malformed values. The real FFprobe test creates chapterless and chaptered PCM sources, runs old scanner flags and the current held-descriptor probe, and requires equality. No stored media or probe records were modified."

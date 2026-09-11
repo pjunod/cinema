@@ -1898,6 +1898,77 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn legacy_scan_without_chapters_matches_the_real_held_source_probe() {
+        plurx_core::testfixtures::require_ffmpeg();
+        let directory = crate::test_tempdir().expect("source fixture");
+        let path = directory.path().join("no-chapters.wav");
+        // One second of mono 8 kHz PCM, with no chapter metadata.
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&16036u32.to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&8000u32.to_le_bytes());
+        wav.extend_from_slice(&16000u32.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&16000u32.to_le_bytes());
+        wav.resize(16044, 0);
+        std::fs::write(&path, wav).expect("write source");
+        let metadata = directory.path().join("chapters.txt");
+        std::fs::write(
+            &metadata,
+            ";FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=1000\ntitle=Chapter one\n",
+        )
+        .expect("chapter metadata");
+        let chaptered = directory.path().join("with-chapters.mka");
+        let mut muxer = tokio::process::Command::new(ffmpeg_bin());
+        muxer
+            .args(["-v", "error", "-i"])
+            .arg(&path)
+            .arg("-i")
+            .arg(&metadata)
+            .args(["-map_metadata", "1", "-c", "copy"])
+            .arg(&chaptered);
+        bounded_command_output(muxer)
+            .await
+            .expect("chapter fixture");
+        for (path, chapter_count) in [(&path, 0), (&chaptered, 1)] {
+            let mut scanner = tokio::process::Command::new(ffprobe_bin());
+            scanner
+                .args([
+                    "-v",
+                    "error",
+                    "-print_format",
+                    "json",
+                    "-show_format",
+                    "-show_streams",
+                ])
+                .arg(path);
+            let scanned = bounded_command_output(scanner)
+                .await
+                .expect("legacy scanner probe");
+            let scanned = String::from_utf8(scanned.stdout).expect("probe JSON");
+            let stored: serde_json::Value = serde_json::from_str(&scanned).expect("stored probe");
+            assert!(stored.get("chapters").is_none());
+            let source = std::fs::File::open(path).expect("hold source");
+            let held = held_source_probe_json(&source)
+                .await
+                .expect("descriptor-bound probe");
+            let current: serde_json::Value = serde_json::from_str(&held).expect("held probe");
+            assert_eq!(
+                current["chapters"].as_array().expect("chapter array").len(),
+                chapter_count
+            );
+            assert!(probes_describe_same_input(&scanned, &held).expect("legacy source accepted"));
+        }
+    }
+
     #[test]
     fn held_probe_comparison_ignores_descriptor_and_optional_schema_drift() {
         let scanned = r#"{"streams":[{"codec_type":"video","width":1920,"closed_captions":0,"film_grain":0,"refs":1}],"format":{"filename":"/media/a.mkv","duration":"60.0"}}"#;
