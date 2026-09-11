@@ -1035,7 +1035,7 @@ test_anchor = "testPlatformRestartMarkerStoreCanRoundTrip"
 id = "android.streaming-promotion-build-counter"
 commits = ["fdbed69e"]
 source = "clients/android/app/build.gradle.kts"
-source_anchor = "versionCode = 83"
+source_anchor = "versionCode ="
 test = "tests/validation/test_mobile_versions.py"
 test_anchor = "test_android_counter_the_target_already_ships_fails_against_the_target"
 
@@ -1045,7 +1045,7 @@ test_anchor = "test_android_counter_the_target_already_ships_fails_against_the_t
 id = "live-tv.mobile-release-build-counters"
 commits = ["b2834adb"]
 source = "clients/android/app/build.gradle.kts"
-source_anchor = "versionCode = 83"
+source_anchor = "versionCode ="
 test = "tests/validation/test_mobile_versions.py"
 test_anchor = "test_each_changed_app_requires_only_its_own_build_counter"
 
@@ -1177,3 +1177,11 @@ source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvScreen.kt"
 source_anchor = "testTag(\"live-tv-channel-search\")"
 test = "clients/android/app/src/androidTest/java/tv/plurx/app/livetv/LiveTvUiTest.kt"
 test_anchor = "onNodeWithTag(\"live-tv-channel-search\")"
+
+[[fixes]]
+id = "android.live-tv-required-protocol-version"
+commits = ["6d72a4d4"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvApi.kt"
+source_anchor = "v = 1,"
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvTest.kt"
+test_anchor = "liveStartWireIncludesRequiredProtocolVersions"
