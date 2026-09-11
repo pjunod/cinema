@@ -1193,3 +1193,10 @@ source = "clients/apple/Sources/LibraryChannels.swift"
 source_anchor = "func handleItemFailure(_ item: AVPlayerItem, sequence: UInt64)"
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "testLibraryChannelFailureIsVisibleAndFenced"
+[[fixes]]
+id = "apple.library-channel-playback-decision"
+commits = ["e97a9c13"]
+source = "clients/apple/Sources/LibraryChannels.swift"
+source_anchor = "let plan = try await model.playbackDecision(fileId: occurrence.fileId)"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testLibraryChannelExecutesPlaybackDecision"

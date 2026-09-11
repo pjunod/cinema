@@ -5,6 +5,66 @@ import XCTest
 
 @MainActor
 final class LiveTvTests: XCTestCase {
+    func testLibraryChannelExecutesPlaybackDecision() throws {
+        let caps = Caps.snapshot().document
+        func request(_ decision: Decision) -> CreateSessionRequest {
+            LibraryChannelPlayerController.playbackRequest(
+                decision: decision, caps: caps, playbackId: "channel-player", positionMs: 3_217_072
+            )
+        }
+        var decision = Decision(fileId: 5355, method: "direct_play", playUrl: "/file")
+        decision.audio = [AudioTrack(index: 3, codec: "ac3", default: true)]
+        let direct = request(decision)
+        XCTAssertEqual(direct.copy, true, "scheduled sessions must copy a direct-play source")
+        XCTAssertEqual(direct.aac, false)
+        XCTAssertEqual(direct.audio, 3, "carry the server's default track, not the muxer's first track")
+        XCTAssertEqual(direct.caps, caps)
+        XCTAssertEqual(direct.start, 3217.072)
+        XCTAssertEqual(direct.presentation, "vod")
+        XCTAssertNil(direct.height, "Auto quality remains server-owned")
+
+        decision.delivery = Delivery(mode: "remux", aac: true, preserveDolbyVision: true, audio: 5)
+        decision.audio?.append(AudioTrack(index: 5, codec: "truehd", default: false))
+        let remux = request(decision)
+        XCTAssertEqual(remux.copy, true)
+        XCTAssertEqual(remux.aac, true, "unsupported audio must not force a video transcode")
+        XCTAssertEqual(remux.audio, 5, "the explicit delivery plan outranks the default track")
+        XCTAssertEqual(remux.preserveDolbyVision, true)
+        XCTAssertNil(remux.hdr10)
+
+        decision.delivery = Delivery(mode: "transcode")
+        decision.deliveredDynamicRange = "hdr10"
+        let transcode = request(decision)
+        XCTAssertNil(transcode.copy, "an incompatible source still follows the transcode verdict")
+        XCTAssertNil(transcode.aac)
+        XCTAssertNil(transcode.preserveDolbyVision)
+        XCTAssertEqual(transcode.hdr10, true)
+        XCTAssertEqual(transcode.caps, caps)
+        decision.deliveredDynamicRange = "sdr"
+        XCTAssertNil(request(decision).hdr10)
+
+        // Inspect the actual wire fields; nil copy must remain absent while
+        // direct/remux must explicitly opt into the copy route.
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        let wire = try XCTUnwrap(JSONSerialization.jsonObject(with: encoder.encode(remux)) as? [String: Any])
+        XCTAssertEqual(wire["copy"] as? Bool, true)
+        XCTAssertEqual(wire["aac"] as? Bool, true)
+        XCTAssertEqual(wire["preserve_dolby_vision"] as? Bool, true)
+        XCTAssertEqual(wire["playback_id"] as? String, "channel-player")
+    }
+
+    func testLibraryChannelFailureIncludesAppleCodes() {
+        let underlying = NSError(domain: "NSOSStatusErrorDomain", code: -12880,
+                                 userInfo: ["URL": "private-capability"])
+        let error = NSError(domain: "AVFoundationErrorDomain", code: -11800, userInfo: [
+            NSLocalizedDescriptionKey: "Cannot Complete Action",
+            NSUnderlyingErrorKey: underlying
+        ])
+        XCTAssertEqual(LibraryChannelPlayerController.playbackFailureDescription(error),
+                       "Cannot Complete Action (AVFoundationErrorDomain -11800; NSOSStatusErrorDomain -12880)")
+    }
+
     func testLibraryChannelFailureIsVisibleAndFenced() async {
         let controller = LibraryChannelPlayerController()
         let current = AVPlayerItem(asset: AVMutableComposition())

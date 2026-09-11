@@ -3474,7 +3474,7 @@ final class PlayerController: ObservableObject {
                 plan: decision.delivery?.audio,
                 selected: selectedAudio
             )
-            let aac = copy ? needsAAC(audioIndex: chosenAudio, decision: decision)
+            let aac = copy ? Self.needsAAC(audioIndex: chosenAudio, decision: decision)
                 : nil
             let reporterControlSequence = await readControlSequence(playbackControl)
             guard !Task.isCancelled, isCurrentLifecycle(lifecycle), !isSuperseded(generation) else { return }
@@ -4776,7 +4776,7 @@ final class PlayerController: ObservableObject {
         playbackError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
     }
 
-    private func needsAAC(audioIndex: Int?, decision: Decision) -> Bool {
+    nonisolated static func needsAAC(audioIndex: Int?, decision: Decision) -> Bool {
         guard let audioIndex,
               let codec = decision.audio?.first(where: { $0.index == audioIndex })?.codec.lowercased()
         else { return decision.delivery?.aac ?? decision.transcodeAudio ?? false }
