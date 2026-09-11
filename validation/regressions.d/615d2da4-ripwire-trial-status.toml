@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["615d2da4"]
+reason = "Documentation-only recovery of a completed SQL navigation result and trial status; the commit changes no executable behavior or validation policy. The recovered wording describes benchmark progress, not a product correction."
+ignore = true
