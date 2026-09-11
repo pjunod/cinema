@@ -1,8 +1,9 @@
 # Ripwire — bounded navigation in one agent checkout
 
-**Status:** live adapter; pilot pending · **Owner:** validation.framework
+**Status:** implemented; opt-in only · **Owner:** validation.framework
 
-Companion to [the implementation status](RIPWIRE-STATUS.md) and
+Companion to [the measured pilot](RIPWIRE-PILOT.md),
+[the implementation status](RIPWIRE-STATUS.md), and
 [the development pipeline](../DEVELOPMENT_PIPELINE.md). Ripwire locates
 candidate symbols and heuristic callers. Read source and the validation
 catalog before deciding what a change affects. Empty results cannot prove
@@ -71,7 +72,8 @@ Query options are `--profile default|history`, `--cold`, `--budget 500–8000`
 (default 3000), and `--timeout 1–120` seconds (default 60). Setup and doctor
 accept none of these options. Map and PR context shape their output using
 the upstream budget. Other verbs report `budget_enforced=false`; their
-budget is best effort. Every query has independent limits of 128 KiB stdout
+budget is best effort. PR context can exceed its shaping request at the
+upstream structural floor, disclosed in its output. Every query has independent limits of 128 KiB stdout
 and 64 KiB stderr. The adapter buffers both pipes concurrently and withholds
 all stdout on failure, timeout, or overflow. Setup's help check allows
 256 KiB because the pinned release's help is 180,172 bytes.
@@ -114,7 +116,10 @@ freshness contract. Heuristic call counts are floors, not complete totals.
 All generated state is under this clone's `target/ripwire/`. Installations
 use `tools/<version>/<platform>/` as an atomic symlink to an adjacent private
 generation containing the executable and metadata. Failed setup preserves
-the old generation. Successful replacement removes its predecessor.
+the old generation. Successful replacement removes its predecessor. If removal fails after
+publication, setup still reports the new installation as active and returns
+`cleanup_pending` with the exact unused generation path and removal error;
+resolve that local permission problem and remove only that unused path.
 Cache paths are `cache/<version>/<profile>/{lean,rich}.ripwirecache`.
 Find uses rich; other exposed verbs use lean. Metadata binds caches to the
 canonical root, architecture, adapter bytes, version, profile, and exclusions.
