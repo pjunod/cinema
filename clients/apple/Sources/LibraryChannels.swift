@@ -590,7 +590,7 @@ final class LibraryChannelPlayerController: ObservableObject {
         return "\(error.localizedDescription) (\(codes))"
     }
 
-    private func controlObservation() -> PlayerControlObservation? {
+    func controlObservation() -> PlayerControlObservation? {
         guard let item = player.currentItem else { return nil }
         let local = player.currentTime().seconds
         let position = mediaOriginMs + Int64((local.isFinite ? max(0, local) : 0) * 1_000)
@@ -600,7 +600,9 @@ final class LibraryChannelPlayerController: ObservableObject {
             bufferedFromMs: nil,
             bufferedThroughMs: nil,
             rate: Double(player.rate),
-            isPaused: paused || player.rate == 0,
+            // A decoder waiting for bytes has zero rate too. Reporting that
+            // as Hold stops the producer whose next segment would unblock it.
+            isPaused: paused,
             isEnded: item.status == .failed || (resolved?.endsAtMs ?? Int64.max) <= serverNowMs(),
             isSeeking: false,
             hasStarted: player.timeControlStatus == .playing,
