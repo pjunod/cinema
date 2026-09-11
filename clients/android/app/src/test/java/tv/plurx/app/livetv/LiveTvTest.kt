@@ -10,12 +10,28 @@ import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.encodeToJsonElement
+import kotlinx.serialization.json.int
 import org.junit.Assert.*
 import org.junit.Test
 import tv.plurx.app.data.Net
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class LiveTvTest {
+    @Test fun liveStartWireIncludesRequiredProtocolVersions() {
+        val caps = Net.json.decodeFromString<tv.plurx.app.data.DeviceCaps>("""{
+            "v":2,"client":{"kind":"android","build":"test","ua":"fixture"},
+            "video":[{"codec":"h264","present":["sdr"]}],
+            "audio":["aac","ac3"],"containers":["ts"],"transports":["hls"],
+            "display":{"hdr":false,"dolby_vision":false}
+        }""")
+        val wire = Net.json.encodeToJsonElement(LiveTvPlaybackEnvelope.from(caps)).jsonObject
+        assertEquals("The start protocol version is required even with default omission", 1,
+            wire["v"]?.jsonPrimitive?.int)
+        assertEquals(2, wire.getValue("caps").jsonObject.getValue("v").jsonPrimitive.int)
+        assertFalse(wire.containsKey("compatibility"))
+    }
+
     private val channel = LiveTvChannel("one", "7.1", "Fixture News")
     private class Store : LiveTvBarrierStore {
         var value = false
