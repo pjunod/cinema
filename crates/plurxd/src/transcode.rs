@@ -8835,10 +8835,10 @@ async fn read_bounded_copy_object(
     Ok(bytes)
 }
 
-/// Read and validate the immutable init object immediately before the actor's
-/// first-media handoff. FFmpeg publishes the file through `temp_file`, so a
-/// successful rename makes this bounded read a stable view of the exact bytes
-/// that the response path is about to authorize.
+/// Validate the copy output immediately before the actor's first-media handoff.
+/// FFmpeg creates init.mp4 empty and writes it in place even with `temp_file`.
+/// The first completed segment is renamed only after the init is finished, so
+/// wait for that publication before reading the decoder configuration.
 async fn validate_copy_init_before_publication(
     session: &Session,
     producer_attempt: u64,
@@ -8854,6 +8854,15 @@ async fn validate_copy_init_before_publication(
             .map(|takeover| takeover.owner_epoch),
     );
     let deadline = tokio::time::Instant::from_std(deadline);
+    let first_index = session
+        .takeover
+        .as_ref()
+        .map_or(0, |takeover| takeover.media_sequence);
+    let first_index = u64::try_from(first_index)
+        .map_err(|_| CopyInitValidationError::Invalid("negative first media sequence".into()))?;
+    let segment_name = plurx_core::fmp4::segment_name(first_index);
+    let segment =
+        read_bounded_copy_object(session, producer_attempt, &segment_name, deadline).await?;
     let bytes = read_bounded_copy_object(session, producer_attempt, &init_name, deadline).await?;
 
     let mut reader = plurx_core::fmp4::FragmentReader::new();
@@ -8884,16 +8893,6 @@ async fn validate_copy_init_before_publication(
         ));
     }
     if expects_hevc {
-        let first_index = session
-            .takeover
-            .as_ref()
-            .map_or(0, |takeover| takeover.media_sequence);
-        let first_index = u64::try_from(first_index).map_err(|_| {
-            CopyInitValidationError::Invalid("negative first media sequence".into())
-        })?;
-        let segment_name = plurx_core::fmp4::segment_name(first_index);
-        let segment =
-            read_bounded_copy_object(session, producer_attempt, &segment_name, deadline).await?;
         reader.push(&segment);
         let first = match reader.next_unit().map_err(|error| {
             CopyInitValidationError::Invalid(format!(
@@ -25513,15 +25512,25 @@ pub(crate) mod tests {
         else {
             panic!("fixture init must be followed by media");
         };
-        tokio::fs::write(dir.path().join("init.mp4"), &init.bytes)
+        // FFmpeg opens init.mp4 before it has enough packets to write moov.
+        // Only the first segment rename establishes that the init is complete.
+        tokio::fs::write(dir.path().join("init.mp4"), b"")
             .await
-            .expect("write emitted init");
-        tokio::fs::write(
-            dir.path().join(plurx_core::fmp4::segment_name(0)),
-            &first.bytes,
-        )
-        .await
-        .expect("write first emitted media segment");
+            .expect("open still-empty emitted init");
+        let output = dir.path().to_path_buf();
+        let producer = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::fs::write(output.join("init.mp4"), &init.bytes)
+                .await
+                .expect("finish emitted init");
+            let temporary = output.join("seg00000.m4s.tmp");
+            tokio::fs::write(&temporary, &first.bytes)
+                .await
+                .expect("write first media privately");
+            tokio::fs::rename(&temporary, output.join(plurx_core::fmp4::segment_name(0)))
+                .await
+                .expect("publish completed first media");
+        });
 
         let mut session = test_session(dir.path().to_path_buf());
         session.kind = SessionKind::Copy {
@@ -25549,7 +25558,8 @@ pub(crate) mod tests {
             Instant::now() + Duration::from_secs(5),
         )
         .await
-        .expect("two complete, distinct configurations are publishable");
+        .expect("wait for complete media before validating the distinct configurations");
+        producer.await.expect("producer finished");
         assert_eq!(
             layout,
             plurx_core::fmp4::HevcSampleEntryLayout::Multiple { count: 2 }
