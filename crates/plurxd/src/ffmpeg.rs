@@ -345,21 +345,63 @@ fn normalized_probe_document(raw: &str) -> Result<serde_json::Value, String> {
         // used /dev/fd/3. The spelling is not a media fact.
         format.remove("filename");
     }
+    // New FFprobe releases report explicit defaults which older scans omit.
+    // Canonicalize only the measured empty/zero values; non-default media
+    // facts must still invalidate the stored probe.
+    if let Some(format) = value.get_mut("format") {
+        remove_probe_default(format, "nb_stream_groups", &serde_json::json!(0));
+    }
+    if let Some(streams) = value
+        .get_mut("streams")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for stream in streams {
+            remove_probe_default(stream, "initial_padding", &serde_json::json!(0));
+            remove_probe_default(stream, "view_ids_available", &serde_json::json!(""));
+            remove_probe_default(stream, "view_pos_available", &serde_json::json!(""));
+            if let Some(disposition) = stream.get_mut("disposition") {
+                remove_probe_default(disposition, "multilayer", &serde_json::json!(0));
+                remove_probe_default(disposition, "non_diegetic", &serde_json::json!(0));
+            }
+            if let Some(side_data) = stream
+                .get_mut("side_data_list")
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                for item in side_data {
+                    if item
+                        .get("side_data_type")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("DOVI configuration record")
+                    {
+                        remove_probe_default(item, "dv_md_compression", &serde_json::json!("none"));
+                    }
+                }
+            }
+        }
+    }
     Ok(value)
+}
+
+fn remove_probe_default(value: &mut serde_json::Value, key: &str, default: &serde_json::Value) {
+    if let Some(fields) = value.as_object_mut() {
+        if fields.get(key) == Some(default) {
+            fields.remove(key);
+        }
+    }
 }
 
 fn ignore_optional_stream_field_omissions(
     stored: &mut serde_json::Value,
     held: &mut serde_json::Value,
 ) {
-    const OPTIONAL_CODEC_REPORT_FIELDS: [&str; 3] = ["closed_captions", "film_grain", "refs"];
-    const OPTIONAL_AUDIO_REPORT_FIELDS: [&str; 6] = [
+    const OPTIONAL_CODEC_REPORT_FIELDS: [&str; 4] =
+        ["closed_captions", "film_grain", "refs", "mime_codec_string"];
+    const OPTIONAL_AUDIO_REPORT_FIELDS: [&str; 5] = [
         "dmix_mode",
         "loro_cmixlev",
         "loro_surmixlev",
         "ltrt_cmixlev",
         "ltrt_surmixlev",
-        "mime_codec_string",
     ];
     let (Some(stored_streams), Some(held_streams)) = (
         stored
@@ -401,6 +443,31 @@ fn ignore_optional_stream_field_omissions(
                     stored_stream.remove(field);
                     held_stream.remove(field);
                 }
+            }
+            // Older FFprobe omitted this derived TrueHD profile even for the
+            // same Atmos stream. Keep codec identity and any reported profile
+            // disagreement significant.
+            if stored_stream
+                .get("codec_name")
+                .and_then(serde_json::Value::as_str)
+                == Some("truehd")
+                && held_stream
+                    .get("codec_name")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("truehd")
+                && ((!stored_stream.contains_key("profile")
+                    && held_stream
+                        .get("profile")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("Dolby TrueHD + Dolby Atmos"))
+                    || (!held_stream.contains_key("profile")
+                        && stored_stream
+                            .get("profile")
+                            .and_then(serde_json::Value::as_str)
+                            == Some("Dolby TrueHD + Dolby Atmos")))
+            {
+                stored_stream.remove("profile");
+                held_stream.remove("profile");
             }
         }
     }
@@ -1830,8 +1897,89 @@ mod tests {
             "\"height\":2160",
             "\"height\":2160,\"mime_codec_string\":\"hvc1.2.4.L153.B0\"",
         );
-        assert!(!probes_describe_same_input(&video_report, held)
-            .expect("video report fields are not covered by the audio exception"));
+        assert!(probes_describe_same_input(&video_report, held)
+            .expect("MIME codec labels are optional for video as well as audio"));
+    }
+
+    #[test]
+    fn held_probe_comparison_accepts_added_video_mime_label_but_detects_media_changes() {
+        // File 5405 was scanned before FFmpeg reported a video MIME label.
+        // The held-descriptor probe adds avc1.640029 to the same H.264 bytes.
+        let scanned = r#"{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","profile":"High","width":1920,"height":1080,"level":41}],"format":{"duration":"5542.000000"}}"#;
+        let held = scanned.replace(
+            "\"level\":41",
+            "\"level\":41,\"mime_codec_string\":\"avc1.640029\"",
+        );
+        assert!(probes_describe_same_input(scanned, &held).expect("compare probes"));
+        assert!(probes_describe_same_input(&held, scanned).expect("compare probes"));
+        for replacement in [
+            held.replace("h264", "hevc"),
+            held.replace("1920", "1280"),
+            held.replace("\"index\":0", "\"index\":1"),
+            held.replace("\"level\":41", "\"level\":40"),
+            held.replace("5542.000000", "5543.000000"),
+        ] {
+            assert!(!probes_describe_same_input(scanned, &replacement).expect("compare probes"));
+        }
+        assert!(
+            !probes_describe_same_input(&held, &held.replace("avc1.640029", "avc1.640028"))
+                .expect("compare probes")
+        );
+    }
+
+    #[test]
+    fn held_probe_comparison_accepts_measured_ffprobe_defaults_but_not_nondefaults() {
+        let scanned = serde_json::json!({
+            "format": {"duration": "7920.0"},
+            "streams": [
+                {"index": 0, "codec_type": "video", "codec_name": "hevc", "disposition": {"default": 1},
+                 "side_data_list": [{"side_data_type": "DOVI configuration record", "dv_profile": 8}]},
+                {"index": 1, "codec_type": "audio", "codec_name": "truehd", "channels": 8, "disposition": {"default": 1}}
+            ]
+        });
+        let mut held = scanned.clone();
+        held["format"]["nb_stream_groups"] = serde_json::json!(0);
+        held["streams"][0]["view_ids_available"] = serde_json::json!("");
+        held["streams"][0]["view_pos_available"] = serde_json::json!("");
+        held["streams"][0]["side_data_list"][0]["dv_md_compression"] = serde_json::json!("none");
+        held["streams"][1]["initial_padding"] = serde_json::json!(0);
+        held["streams"][1]["profile"] = serde_json::json!("Dolby TrueHD + Dolby Atmos");
+        for stream in held["streams"].as_array_mut().expect("streams") {
+            stream["disposition"]["multilayer"] = serde_json::json!(0);
+            stream["disposition"]["non_diegetic"] = serde_json::json!(0);
+        }
+        let scanned_json = scanned.to_string();
+        let held_json = held.to_string();
+        assert!(probes_describe_same_input(&scanned_json, &held_json).expect("new probe schema"));
+        assert!(probes_describe_same_input(&held_json, &scanned_json).expect("old probe schema"));
+        for (pointer, value) in [
+            ("/format/nb_stream_groups", serde_json::json!(1)),
+            ("/streams/0/view_ids_available", serde_json::json!("1")),
+            ("/streams/0/disposition/multilayer", serde_json::json!(1)),
+            ("/streams/0/disposition/non_diegetic", serde_json::json!(1)),
+            (
+                "/streams/0/side_data_list/0/dv_md_compression",
+                serde_json::json!("limited"),
+            ),
+            (
+                "/streams/0/side_data_list/0/dv_profile",
+                serde_json::json!(5),
+            ),
+            ("/streams/1/initial_padding", serde_json::json!(1024)),
+            (
+                "/streams/1/profile",
+                serde_json::json!("unrecognized profile"),
+            ),
+            ("/streams/1/channels", serde_json::json!(6)),
+        ] {
+            let mut changed = held.clone();
+            *changed.pointer_mut(pointer).expect("measured field") = value;
+            assert!(
+                !probes_describe_same_input(&scanned_json, &changed.to_string())
+                    .expect("changed media"),
+                "{pointer}"
+            );
+        }
     }
 
     #[tokio::test]

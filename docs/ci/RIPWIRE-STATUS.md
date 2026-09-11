@@ -10,7 +10,8 @@ This page tracks the bounded navigation adapter requested by Paul.
 Own clone: `/private/tmp/plurx-ripwire`. Integration: `effort/ripwire`.
 [Adapter task PR #244](http://192.168.4.7:3000/noirr/plurx/pulls/244) merged
 into the effort. [Pilot task PR #247](http://192.168.4.7:3000/noirr/plurx/pulls/247)
-is a draft into that effort; main promotion has not started.
+merged into the effort. Task merges are frozen. Main `d9c15581` is
+integrated; the complete effort is ready for its one adversarial review.
 Initial main: `4519f87aa17def278dc4ad6c08a411e7829c2ec4`.
 The user's working tree is untouched. No hooks installed.
 
@@ -32,7 +33,7 @@ scope decisions are recorded for Paul to revisit.
 | M1: installer and bounded runner | complete | Explicit setup passed; 19 focused fake-tool tests passed (16.442 s). |
 | M2: queries and coverage | complete | All verbs executed in real fixtures; both cache families checked after edit, rename, deletion, branch change, and corruption. Kotlin/embedded-JS selectors are refused; Swift callback and Rust qualified cross-module edges are omitted. |
 | M3: measured pilot | complete with limits | Frozen `da51ffb7`; 24 timing/RSS samples complete. Warm medians: find 494 ms, callers 325 ms, coverage 318 ms. All sixteen navigation sessions returned across all four tasks; interrupted timing is excluded from adoption claims. Both blind patches scored 3/4 against retained tests (same macOS symlink-spelling mismatch); diagnostic canonical-temp runs pass 4/4. Verdict: opt-in only; no default prompt additions. See [pilot](RIPWIRE-PILOT.md). |
-| M4: promotion | pending | No adversarial review requested and no main PR/fast-lane activation. Integrate current main, then exactly one review, fixes, fast lane, merge. |
+| M4: promotion | pending | No adversarial review requested and no main PR/fast-lane activation. Current main integrated. Next: exactly one review, fixes, fast lane, merge. |
 
 ## Scope and remaining limitations
 
@@ -42,7 +43,7 @@ are supplied pins pending setup on those platforms. The pilot records
 measured results and omissions; default adoption is
 not justified by the inconsistent trial metrics. Earlier account-limit interruptions were recovered; their timing remains
 invalid for speed comparisons. Main advanced to `d9c15581` during the trial
-and will be integrated before final review. Full suites have not run. The source-only
+and was integrated before final review. Full suites have not run. The source-only
 fixture Rust is parser input, not a workspace/product Rust change.
 
 Disposable trial clones were removed after capturing completed trial patches and findings.
