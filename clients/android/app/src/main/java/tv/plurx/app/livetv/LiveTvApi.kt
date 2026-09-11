@@ -183,7 +183,8 @@ data class LiveTvLineup(val channels: List<LiveTvChannel>, val freshness: String
     val failed_container: Boolean = false,
 )
 @Serializable data class LiveTvPlaybackEnvelope(
-    val v: Int = 1,
+    // Required on the wire; default-valued fields are omitted by Net.json.
+    val v: Int,
     val caps: DeviceCaps,
     val hls_formats: List<LiveTvHlsFormat>,
     val video_limits: List<LiveTvVideoLimit>,
@@ -209,6 +210,7 @@ data class LiveTvLineup(val channels: List<LiveTvChannel>, val freshness: String
                 }
             }
             return LiveTvPlaybackEnvelope(
+                v = 1,
                 caps = caps,
                 hls_formats = formats,
                 video_limits = limits,

@@ -20,8 +20,8 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `83` — native viewer parity across phone, foldable,
-> and TV. Build 83 sends the active Live TV playback envelope, preserves
+> Status: **v0.3.0**, build `84` — native viewer parity across phone, foldable,
+> and TV. Build 84 includes the required Live TV protocol version in every start request. Build 83 sends the active Live TV playback envelope, preserves
 > compatible broadcast tracks, and reports the selected delivery. Build 82 uses the canonical Library-channel collection route while
 > the server preserves the first native spelling during rollout. Build 81 adds
 > Library channel browsing and authoring plus fenced

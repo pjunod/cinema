@@ -4,7 +4,7 @@ The Android client is the native plurx **viewer** for phones, foldables,
 tablets, Android TV, and Google TV. This page records what “web parity” means
 for that viewer and keeps server administration out of the comparison.
 
-> Status (2026-09-10): source is v0.3.0, Android build 82. Library-channel
+> Status (2026-09-10): source is v0.3.0, Android build 84. Live TV starts include the required protocol version even when the JSON serializer omits defaults. Library-channel
 > browsing, mobile authoring, server-clock following, and all three television
 > presentation preferences are compiled alongside the existing viewer.
 
