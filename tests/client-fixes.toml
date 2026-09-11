@@ -2,6 +2,14 @@ version = 1
 enforce_after = "e8a910f"
 
 [[fixes]]
+id = "android.library-channel-start-failure"
+commits = ["4dd00603"]
+source = "clients/android/app/src/main/java/tv/plurx/app/librarychannels/LibraryChannelStartFailure.kt"
+source_anchor = "internal fun shouldRetryLibraryChannelStart("
+test = "clients/android/app/src/test/java/tv/plurx/app/librarychannels/LibraryChannelStartFailureTest.kt"
+test_anchor = "occurrenceChangeRetriesOnlyOnce"
+
+[[fixes]]
 id = "apple.live-tv-delivery-and-probe-schema"
 commits = ["fc3c8fbb"]
 source = "clients/apple/Sources/LiveTv.swift"
