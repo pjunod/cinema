@@ -476,6 +476,20 @@ fn ignore_optional_stream_field_omissions(
 pub(crate) fn probes_describe_same_input(stored: &str, held: &str) -> Result<bool, String> {
     let mut stored = normalized_probe_document(stored)?;
     let mut held = normalized_probe_document(held)?;
+    // Before the scanner requested -show_chapters, omission meant unmeasured,
+    // not an empty chapter list. Compare chapter arrays when both probes
+    // measured them, including empty-to-populated changes. A malformed value
+    // is never treated as an optional report.
+    if stored.get("chapters").is_none() && held.get("chapters").is_some_and(|v| v.is_array()) {
+        if let Some(fields) = held.as_object_mut() {
+            fields.remove("chapters");
+        }
+    } else if held.get("chapters").is_none() && stored.get("chapters").is_some_and(|v| v.is_array())
+    {
+        if let Some(fields) = stored.as_object_mut() {
+            fields.remove("chapters");
+        }
+    }
     ignore_optional_stream_field_omissions(&mut stored, &mut held);
     Ok(stored == held)
 }
@@ -1847,6 +1861,41 @@ mod tests {
             .await
             .expect("text renderer attestation");
         assert!(engine.is_current().await);
+    }
+
+    #[test]
+    fn held_probe_comparison_accepts_empty_chapters_but_detects_chapter_changes() {
+        // Production file 1323 has no chapters. Its older scan omitted the
+        // chapters key, while the held-source probe explicitly reports [].
+        let scanned = r#"{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","width":1920}],"format":{"duration":"3660.0"}}"#;
+        let mut held: serde_json::Value = serde_json::from_str(scanned).expect("fixture");
+        held["chapters"] = serde_json::json!([]);
+        let without_chapters = held.to_string();
+        assert!(probes_describe_same_input(scanned, &held.to_string()).expect("empty chapters"));
+        assert!(probes_describe_same_input(&held.to_string(), scanned).expect("omitted chapters"));
+
+        held["chapters"] = serde_json::json!([{
+            "id": 0, "time_base": "1/1000", "start": 0, "end": 60000
+        }]);
+        let with_chapter = held.to_string();
+        // Production file 2 has 24 chapters, but its old scan measured none.
+        assert!(probes_describe_same_input(scanned, &with_chapter).expect("unmeasured chapters"));
+        assert!(probes_describe_same_input(&with_chapter, scanned).expect("unmeasured chapters"));
+        assert!(
+            !probes_describe_same_input(&without_chapters, &with_chapter).expect("added chapter")
+        );
+        assert!(
+            !probes_describe_same_input(&with_chapter, &without_chapters).expect("removed chapter")
+        );
+        held["chapters"][0]["end"] = serde_json::json!(61000);
+        assert!(
+            !probes_describe_same_input(&with_chapter, &held.to_string())
+                .expect("changed chapter timing")
+        );
+        held["chapters"] = serde_json::json!(null);
+        assert!(
+            !probes_describe_same_input(scanned, &held.to_string()).expect("malformed chapters")
+        );
     }
 
     #[test]
