@@ -1185,3 +1185,11 @@ source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvApi.kt"
 source_anchor = "v = 1,"
 test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvTest.kt"
 test_anchor = "liveStartWireIncludesRequiredProtocolVersions"
+
+[[fixes]]
+id = "apple.library-channel-visible-failure"
+commits = ["32d88825"]
+source = "clients/apple/Sources/LibraryChannels.swift"
+source_anchor = "func handleItemFailure(_ item: AVPlayerItem, sequence: UInt64)"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testLibraryChannelFailureIsVisibleAndFenced"

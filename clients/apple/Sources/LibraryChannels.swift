@@ -251,6 +251,7 @@ final class LibraryChannelPlayerController: ObservableObject {
     @Published private(set) var message = "Choose a channel to join its schedule."
     @Published private(set) var busy = false
     @Published private(set) var paused = false
+    @Published private(set) var playbackError: String?
 
     let player = AVPlayer()
     private var api: PlurxAPI?
@@ -264,12 +265,15 @@ final class LibraryChannelPlayerController: ObservableObject {
     private var serverBaseMs: Int64 = 0
     private var monotonicBaseMs: Int64 = 0
     private var endObserver: NSObjectProtocol?
+    private var failedObserver: NSObjectProtocol?
+    private var itemStatusObservation: NSKeyValueObservation?
     private let playbackControl = PlaybackControlSession()
     private var mediaOriginMs: Int64 = 0
     private var mediaDurationMs: Int = 0
 
     deinit {
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
+        if let failedObserver { NotificationCenter.default.removeObserver(failedObserver) }
     }
 
     func load(model: AppModel) async {
@@ -312,6 +316,7 @@ final class LibraryChannelPlayerController: ObservableObject {
         tuneSequence &+= 1
         let expected = tuneSequence
         busy = true
+        playbackError = nil
         message = "Joining \(channel.name)…"
         do {
             let resolveStarted = monotonicMs()
@@ -354,6 +359,7 @@ final class LibraryChannelPlayerController: ObservableObject {
             item.preferredForwardBufferDuration = 60
             player.replaceCurrentItem(with: item)
             observeEnd(item, channel: channel, sequence: expected)
+            observeFailure(item, sequence: expected)
             player.play()
             mediaOriginMs = Int64(started.playback.mediaOriginMs ?? Int(occurrence.positionMs))
             mediaDurationMs = started.playback.durationMs ?? 0
@@ -377,7 +383,10 @@ final class LibraryChannelPlayerController: ObservableObject {
                 guard let self, self.tuneSequence == expected else { return }
                 let origin = Int64(started.playback.mediaOriginMs ?? Int(occurrence.positionMs))
                 let scheduled = max(0, self.serverNowMs() - occurrence.startsAtMs)
-                let playerPosition = origin + Int64(self.player.currentTime().seconds * 1_000)
+                let currentSeconds = self.player.currentTime().seconds
+                guard self.player.currentItem === item, item.status == .readyToPlay,
+                      currentSeconds.isFinite else { return }
+                let playerPosition = origin + Int64(currentSeconds * 1_000)
                 if scheduled - playerPosition > 2_000 {
                     await self.player.seek(to: CMTime(seconds: Double(max(0, scheduled - origin)) / 1_000, preferredTimescale: 1_000))
                 }
@@ -416,6 +425,10 @@ final class LibraryChannelPlayerController: ObservableObject {
         clockRefresh = nil
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
         endObserver = nil
+        if let failedObserver { NotificationCenter.default.removeObserver(failedObserver) }
+        failedObserver = nil
+        itemStatusObservation = nil
+        playbackError = nil
         player.pause()
         playbackControl.end()
         player.replaceCurrentItem(with: nil)
@@ -506,6 +519,28 @@ final class LibraryChannelPlayerController: ObservableObject {
         }
     }
 
+    private func observeFailure(_ item: AVPlayerItem, sequence: UInt64) {
+        itemStatusObservation = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
+            guard item.status == .failed else { return }
+            Task { @MainActor in self?.handleItemFailure(item, sequence: sequence) }
+        }
+        if let failedObserver { NotificationCenter.default.removeObserver(failedObserver) }
+        failedObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemFailedToPlayToEndTime, object: item, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.handleItemFailure(item, sequence: sequence) }
+        }
+    }
+
+    func handleItemFailure(_ item: AVPlayerItem, sequence: UInt64) {
+        guard sequence == tuneSequence, player.currentItem === item else { return }
+        playbackError = item.error?.localizedDescription ?? "The channel stream could not be played. Try Watch live again."
+        busy = false
+        boundary?.cancel()
+        clockRefresh?.cancel()
+        playbackControl.playerChanged()
+    }
+
     private func controlObservation() -> PlayerControlObservation? {
         guard let item = player.currentItem else { return nil }
         let local = player.currentTime().seconds
@@ -591,6 +626,9 @@ struct LibraryChannelsView: View {
             }
             .padding()
         }
+        #if os(tvOS)
+        .buttonStyle(TVReadableButtonStyle(prominent: false))
+        #endif
         .navigationTitle("Library channels")
         .toolbar {
             #if os(iOS)
@@ -603,6 +641,7 @@ struct LibraryChannelsView: View {
                     tvLayout = tvLayout == "guide_preview" ? "guide_over_picture"
                         : (tvLayout == "guide_over_picture" ? "channel_browser" : "guide_preview")
                 }
+                .buttonStyle(TVReadableButtonStyle(prominent: false))
             }
             #endif
         }
@@ -635,7 +674,12 @@ struct LibraryChannelsView: View {
                     onPlaybackStopped: { _ in }
                 ).environmentObject(model)
                 Button("Return to channel") { personalPlayback = nil }
-                    .buttonStyle(.borderedProminent).padding()
+                    #if os(tvOS)
+                    .buttonStyle(TVReadableButtonStyle(prominent: true))
+                    #else
+                    .buttonStyle(.borderedProminent)
+                    #endif
+                    .padding()
             }
         }
         .task {
@@ -688,6 +732,13 @@ struct LibraryChannelsView: View {
                     Button("Stop") { Task { await controller.stop() } }
                 }
             }
+            if let error = controller.playbackError {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout).foregroundStyle(Palette.onBg)
+                    .padding().frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Palette.surfaceHi, in: RoundedRectangle(cornerRadius: 12))
+                    .accessibilityIdentifier("library-channel-playback-error")
+            }
             Text(controller.message).font(.caption).foregroundStyle(.secondary)
         }
     }
@@ -730,8 +781,12 @@ struct LibraryChannelsView: View {
                                         }
                                         .frame(width: min(360, max(120, CGFloat(programme.endsAtMs - programme.startsAtMs) / 300_000 * 80)), alignment: .leading)
                                     }
+                                    #if os(tvOS)
+                                    .buttonStyle(TVReadableButtonStyle(prominent: isPlaying))
+                                    #else
                                     .buttonStyle(.bordered)
                                     .tint(isPlaying ? Palette.accent : nil)
+                                    #endif
                                     .accessibilityValue(focusedProgrammeId == programme.id ? "Focused programme" : "")
                                 }
                             }
