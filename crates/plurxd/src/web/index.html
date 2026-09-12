@@ -3826,6 +3826,7 @@ function beginWait(v){
   if(p.waitAt) return;                       // already hungry; not a second one
   p.waitAt=performance.now();
   p.waitRunway=bufferRunway(v);
+  p.waitNudgedAt=null;
   p.waitReported=false;
   const began=p.waitAt;
   const generation=p._seekToken||0;
@@ -3867,7 +3868,7 @@ function endWait(resumed){
   const ms=Math.round(performance.now()-began);
   const runway=p.waitRunway;
   const reported=!!p.waitReported;
-  p.waitAt=null; p.waitRunway=null; p.waitReported=false;
+  p.waitAt=null; p.waitRunway=null; p.waitNudgedAt=null; p.waitReported=false;
   if(reported) return;                       // persistentWait already emitted it
   if(!resumed || ms<STALL_MIN_MS) return;    // a hitch, not a stall
   const kind=(runway!=null && runway<SUPPLY_RUNWAY_SECS)?"supply":"decode";
@@ -3895,12 +3896,29 @@ async function persistentWait(v,p,began,generation,actionGeneration){
   const controlObservation=kind==="supply"
     ? {decoder_state:"starved"}
     : {decoder_state:"failed",error_code:"decoder",error_detail:"persistent_decode_stall"};
+  // Presentation recovery belongs to this client, not to the producer
+  // verdict. Spend the one harmless browser reevaluation before the bounded
+  // ask so a hold suppressed to `none` receives the same treatment.
+  let nativeReevaluated=false;
+  if(kind==="decode"&&p.waitNudgedAt!==began){
+    p.waitNudgedAt=began;
+    nativeReevaluated=true;
+    try{
+      const nudge=v.play();
+      if(nudge&&typeof nudge.catch==="function") nudge.catch(()=>{});
+    }catch(e){}
+  }
   // Both the initial ask and any extension share the absolute stall deadline.
   // A callback near the boundary gets only the remaining control budget.
   const ask=ms>=CONTROL_STALL_DEFER_DEADLINE_MS
     ? {trigger:null,action:Promise.resolve(null)}
     : askPlaybackControl("stalled",controlObservation,began+CONTROL_STALL_DEFER_DEADLINE_MS);
   const controlTrigger=ask.trigger;
+  if(nativeReevaluated){
+    clientLog({level:"info",event:"stall_recovery",detail:"native_reevaluation:wait",
+      message:"loaded media remained waiting — native playback reevaluated before recovery",
+      control_trigger:controlTrigger});
+  }
   if(firstReport) recordWaitStall(p,kind,ms,runway,`${kind}-persistent`,began,controlTrigger);
   p.stallFrom=p.controlSeek?.targetMs!=null
     ? (p.controlSeek.targetMs+(p.bookOffset||0))/1000 : pbPosSec();
@@ -3973,6 +3991,16 @@ async function persistentWait(v,p,began,generation,actionGeneration){
         message:"server hold reached the client recovery deadline — recovering anyway",
         control_trigger:controlTrigger});
     }
+  }
+  if(kind==="decode"&&p.waitNudgedAt===began&&
+     (!verdict||verdict.type==="none")&&controlElapsedMs<CONTROL_STALL_DEFER_DEADLINE_MS){
+    // `none` is passive: it means production has no authoritative action for
+    // this presentation wait. Observe the native reevaluation under the same
+    // absolute episode deadline instead of treating absence of a server
+    // command as an instruction to replace media immediately.
+    p.waitTimer=setTimeout(()=>persistentWait(v,p,began,generation,actionGeneration).catch(()=>{}),
+      Math.min(PERSISTENT_STALL_MS,CONTROL_STALL_DEFER_DEADLINE_MS-controlElapsedMs));
+    return;
   }
   if(verdict&&verdict.type==="retry_resource"&&(p.stallDeferrals||0)<CONTROL_DEFER_LIMIT
      &&controlElapsedMs<CONTROL_STALL_DEFER_DEADLINE_MS){

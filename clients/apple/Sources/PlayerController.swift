@@ -4466,8 +4466,10 @@ final class PlayerController: ObservableObject {
     /// published, so the question a hold answers — why the producer paused —
     /// has no bearing on whether this client may reconnect and fetch them.
     ///
-    /// A `.silent` freeze keeps the hold: that decoder has bytes in hand and is
-    /// starved of nothing, and the HDR ladder owns the case.
+    /// A loaded buffering wait and a `.silent` freeze both have native media
+    /// in hand. The recovery monitor already spent its one harmless play
+    /// reevaluation before it asks for a verdict; a producer hold cannot then
+    /// postpone the bounded decoder/attachment recovery.
     nonisolated static func holdMayDecideStall(
         kind: PlaybackStallKind,
         publishedEndMs: Int?,
@@ -4480,8 +4482,12 @@ final class PlayerController: ObservableObject {
         case .delivery:
             return false
         case .silent:
-            return true
+            return false
         case .buffering:
+            if let runwaySeconds,
+               runwaySeconds > DeliveryStarvationDetector.runwayCeilingSeconds {
+                return false
+            }
             // Numbers the poll never carried are not evidence of a wedge, and
             // an unevidenced reopen is worse than honouring the server.
             guard let publishedEndMs, let fetchedEndMs else { return true }

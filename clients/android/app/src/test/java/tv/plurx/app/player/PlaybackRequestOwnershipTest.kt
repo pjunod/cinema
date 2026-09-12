@@ -16,6 +16,13 @@ import tv.plurx.app.data.PlaybackQuality
  * boundary used by Controller. Only the server and Media3 mutations are fake. */
 class PlaybackRequestOwnershipTest {
     @Test
+    fun loadedWaitReevaluatesNativePlaybackBeforeAControlHoldCanDeferRecovery() {
+        assertTrue(loadedWaitNeedsNativeReevaluation(142_000, 120_000))
+        assertFalse(loadedWaitNeedsNativeReevaluation(130_000, 120_000))
+        assertFalse(loadedWaitNeedsNativeReevaluation(119_000, 120_000))
+    }
+
+    @Test
     fun delayedRecipeCreateSurvivesPauseAndAttachesPausedBeforeResume() = runBlocking {
         for (stall in listOf(false, true)) {
             val budget = StallReopenBudget()

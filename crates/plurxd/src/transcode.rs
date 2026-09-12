@@ -31055,7 +31055,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_stall_manufactures_its_own_hold_and_is_not_answered_with_it() {
+    fn lifecycle_refill_empty_and_loaded_waits_are_not_answered_with_their_hold() {
         // The whole loop, joined: the freeze produces the hold, and the
         // resolver must not hand that hold back as the answer to the freeze.
         //
@@ -31153,6 +31153,80 @@ pub(crate) mod tests {
             ),
             crate::playback_control::ControlAction::None,
             "the hold the stall manufactured must not be the answer to the stall",
+        );
+
+        // The second incident shape: AVPlayer reported about twenty-two
+        // seconds of contiguous loaded media while the same producer was
+        // time-held. That hold is normal source pacing; it is not authority
+        // over a decoder that has bytes and still presents nothing. Remove the
+        // fetch gap so this assertion can pass only through the loaded-media
+        // boundary rather than accidentally repeating the empty-buffer case.
+        let mut loaded_demand = demand.clone();
+        loaded_demand.buffered_through_ms = 142_000;
+        let loaded_flow = evaluate_flow(FlowInputs {
+            physical_ahead: Some(Ahead {
+                seconds: 60,
+                bytes: 1_000,
+            }),
+            published_end_ms: Some(80_000),
+            startup_grant_spent: true,
+            media_origin_ms: 100_000,
+            lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
+            demand: Some(&loaded_demand),
+            global_live_bytes: 1_000,
+            global_ahead_bytes: 1_000,
+            limits,
+            currently_suspended: false,
+        });
+        assert_eq!(loaded_flow.production_target_seconds, Some(52));
+        assert_eq!(
+            loaded_flow.hold.map(|hold| hold.reason),
+            Some(AheadHoldReason::Time),
+            "the producer is correctly paced while already-loaded media waits downstream"
+        );
+        let mut loaded_wait = wedged.clone();
+        loaded_wait.client_runway_ms = 22_000;
+        loaded_wait.fetched_through_ms = loaded_wait
+            .produced_through_ms
+            .expect("known published frontier");
+        let loaded_stall = control_request(
+            &loaded_demand,
+            crate::playback_control::RenderState::Stalled,
+            true,
+        );
+        assert_eq!(
+            crate::playback_control::resolve_action(
+                &crate::playback_control::ControlAction::None,
+                &loaded_wait,
+                &loaded_stall,
+            ),
+            crate::playback_control::ControlAction::None,
+            "a producer hold cannot own a loaded-but-unpresented wait"
+        );
+
+        // The opposite supply boundary already has a reachable exit: when the
+        // published frontier is below the fixed demand target, time pacing is
+        // not holding the producer. No refill credit or second policy is
+        // needed to make this state progress.
+        let supply_pending = evaluate_flow(FlowInputs {
+            physical_ahead: Some(Ahead {
+                seconds: 20,
+                bytes: 1_000,
+            }),
+            published_end_ms: Some(20_000),
+            startup_grant_spent: true,
+            media_origin_ms: 100_000,
+            lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
+            demand: Some(&demand),
+            global_live_bytes: 1_000,
+            global_ahead_bytes: 1_000,
+            limits,
+            currently_suspended: true,
+        });
+        assert_eq!(supply_pending.production_target_seconds, Some(30));
+        assert_eq!(
+            supply_pending.hold, None,
+            "fixed-position supply below target must reach the existing resume operation"
         );
 
         // The same production hold, to a client that is playing with a full

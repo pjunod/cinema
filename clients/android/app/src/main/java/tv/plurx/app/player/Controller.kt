@@ -1388,6 +1388,24 @@ class Controller(
         // time this ask itself costs. M5.5 exists to measure exactly that, and
         // an instrument that excludes it cannot.
         val observedAtMs = monotonicNowMs()
+        val nativeReevaluation = event.controlMayDefer &&
+            loadedWaitNeedsNativeReevaluation(
+                bufferedPositionMs = player.bufferedPosition,
+                currentPositionMs = player.currentPosition,
+            ) && openStallTracker.claimNativeReevaluation()
+        if (nativeReevaluation) {
+            // Presentation recovery belongs to this client, not to the
+            // producer verdict. Spend the one harmless Media3 reevaluation
+            // before the bounded ask so even a suppressed hold (`none`) gets
+            // the same chance under this episode's existing deadline.
+            player.play()
+            playbackTelemetry.report(
+                event = "stall_recovery",
+                level = "info",
+                message = "Loaded media remained waiting; Media3 reevaluated playback.",
+                detail = "action=native_reevaluation duration_ms=${event.durationMs}",
+            )
+        }
         val verdict = if (event.controlMayDefer) {
             playbackControl.askForAction(
                 boundMs = CONTROL_ASK_MS,
@@ -1416,6 +1434,7 @@ class Controller(
         if (!player.playWhenReady || player.playbackState == Player.STATE_ENDED) return
         if (kotlin.math.abs(realPosition() - positionMs) >= 250L) return
         if (verdict != null && applyStallVerdict(verdict, event)) return
+        if (nativeReevaluation && openStallTracker.defer(monotonicNowMs())) return
         // A reopen is a new recovery episode. If the replacement freezes at
         // the same playhead, it must receive its own bounded deadline rather
         // than inheriting the fired latch from the item it replaced.
@@ -2729,6 +2748,18 @@ class Controller(
 internal const val CONTROL_ASK_MS = 1_500L
 internal const val CONTROL_ASK_CAP_MS = 3_000L
 internal const val SEEK_COALESCE_MS = 100L
+
+/**
+ * Whether this wait has crossed from supply into native presentation.
+ *
+ * Ten seconds is the shared client/server starvation ceiling. A smaller
+ * runway can still be a fetch boundary; more than this is complete contiguous
+ * media that a producer hold cannot make Media3 present.
+ */
+internal fun loadedWaitNeedsNativeReevaluation(
+    bufferedPositionMs: Long,
+    currentPositionMs: Long,
+): Boolean = bufferedPositionMs - currentPositionMs > 10_000L
 
 /**
  * The verdict that ends an unchanged retry, or null to take it anyway.

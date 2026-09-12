@@ -2181,25 +2181,30 @@ pub(crate) const STARVED_RUNWAY_MS: i64 = 10_000;
 /// fetch. The Apple detector's `pendingMediaThresholdMs`.
 pub(crate) const FETCHABLE_GAP_MS: i64 = 10_000;
 
-/// The one fact that outranks every advisory hold: this client is stalled,
-/// starved, out of runway, and the server has already published media it has
-/// not fetched. Production state cannot veto fetching served bytes.
+/// The two facts that outrank every advisory hold while active playback is
+/// stalled: the client either has complete contiguous media it is not
+/// presenting, or the server has published media it has not fetched.
+/// Production state owns neither serving nor native presentation.
 ///
-/// Conjunctive on purpose. `client_runway_ms` reads 0 for an unknown runway,
-/// so the client's own `stalled` and `starved` reports are the positive
-/// evidence; the gap is the proof there is something to fetch; an unknown
-/// produced frontier proves nothing and fails the predicate.
+/// `client_runway_ms` reads 0 for an unknown runway, so a loaded-media recovery
+/// needs more than the shared starvation ceiling. The fetch-wedge arm retains
+/// its independent published frontier requirement. Both arms require the
+/// client's explicit stalled decoder evidence; a quiet or paused player must
+/// still receive the producer hold it asked for.
 pub(crate) fn recovery_outranks_hold(delivery: &DeliveryView, request: &ControlRequestV1) -> bool {
-    request.render_state == RenderState::Stalled
-        && request
-            .observation
-            .as_ref()
-            .and_then(|observation| observation.decoder_state)
-            == Some(DecoderState::Starved)
-        && delivery.client_runway_ms <= STARVED_RUNWAY_MS
-        && delivery.produced_through_ms.is_some_and(|produced| {
-            produced.saturating_sub(delivery.fetched_through_ms) >= FETCHABLE_GAP_MS
-        })
+    let decoder_waiting = request
+        .observation
+        .as_ref()
+        .and_then(|observation| observation.decoder_state)
+        .is_some_and(|state| matches!(state, DecoderState::Starved | DecoderState::Failed));
+    let loaded_but_waiting = delivery.client_runway_ms > STARVED_RUNWAY_MS;
+    let published_but_unfetched = delivery.produced_through_ms.is_some_and(|produced| {
+        produced.saturating_sub(delivery.fetched_through_ms) >= FETCHABLE_GAP_MS
+    });
+    request.demand == PlaybackDemand::Active
+        && request.render_state == RenderState::Stalled
+        && decoder_waiting
+        && (loaded_but_waiting || published_but_unfetched)
 }
 
 pub(crate) fn resolve_action(
@@ -15185,13 +15190,16 @@ mod tests {
     }
 
     #[test]
-    fn the_serving_predicate_is_conjunctive() {
-        // Four facts, and no three of them are enough. `client_runway_ms`
-        // reads 0 for an unknown runway, so without the client's own stalled
-        // and starved reports a quiet client would look starved to us.
-        /// One conjunct, removed.
+    fn the_serving_predicate_requires_an_active_stall_and_a_recoverable_boundary() {
+        // Active stalled decoder evidence is shared by both recovery arms.
+        // The final fact may be either published-but-unfetched supply or a
+        // substantial contiguous loaded runway; neither depends on a producer
+        // hold to make progress.
         type BreakOne = fn(&mut DeliveryView, &mut ControlRequestV1);
-        let cases: [(&str, BreakOne); 6] = [
+        let cases: [(&str, BreakOne); 5] = [
+            ("not active", |_, request| {
+                request.demand = PlaybackDemand::Hold;
+            }),
             ("not stalled", |_, request| {
                 request.render_state = RenderState::Rendering;
             }),
@@ -15206,15 +15214,10 @@ mod tests {
             ("no observation", |_, request| {
                 request.observation = None;
             }),
-            ("runway above the ceiling", |delivery, _| {
-                delivery.client_runway_ms = STARVED_RUNWAY_MS + 1;
-            }),
-            ("gap below the threshold", |delivery, _| {
+            ("no recoverable boundary", |delivery, _| {
+                delivery.client_runway_ms = STARVED_RUNWAY_MS;
                 delivery.fetched_through_ms =
                     delivery.produced_through_ms.expect("produced") - (FETCHABLE_GAP_MS - 1);
-            }),
-            ("unknown produced frontier", |delivery, _| {
-                delivery.produced_through_ms = None;
             }),
         ];
         for (name, break_one) in cases {
@@ -15230,6 +15233,28 @@ mod tests {
             );
             assert!(!recovery_outranks_hold(&delivery, &request), "{name}");
         }
+    }
+
+    #[test]
+    fn lifecycle_refill_loaded_native_wait_outranks_a_producer_hold() {
+        let (mut delivery, request) = stalled_starved();
+        delivery.client_runway_ms = 22_000;
+        delivery.fetched_through_ms = delivery.produced_through_ms.expect("produced");
+        assert!(
+            recovery_outranks_hold(&delivery, &request),
+            "loaded native media is a presentation boundary even with no fetch gap"
+        );
+        assert_eq!(
+            resolve_action(&ControlAction::None, &delivery, &request),
+            ControlAction::None,
+            "a production hold cannot defer the client's bounded native recovery"
+        );
+
+        delivery.produced_through_ms = None;
+        assert!(
+            recovery_outranks_hold(&delivery, &request),
+            "known contiguous client media does not become unknown with publication"
+        );
     }
 
     #[test]
