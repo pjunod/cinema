@@ -1,6 +1,6 @@
 # Playback lifecycle — implementation status
 
-**Status:** one adversarial review addressed; PR #259 fast lane correcting preflight ·
+**Status:** one adversarial review addressed; PR #259 fast lane correcting ownership inventory ·
 **Updated:** 2026-09-12 · **Base:** `30cd51afc` · **Effort:**
 `effort/playback-lifecycle` at `5b28ae7e` before this receipt · **Latest task:**
 `codex/playback-lifecycle-p3-p4` at `139ad01f`
@@ -23,7 +23,7 @@ sweep actually executes them.
 | P3 / S06–S07 prepared handoff | built and compiled; runtime deferred | successor planning reuses create-time capabilities; Original, grade, audio, offset, subtitle, and compound changes produce one recipe; VOD and rolling prime through their distinct engines; proof/headroom/direction vetoes and session-wide failure suppression are removed | include in current-main integration |
 | P4 / S08 owner transition | built and compiled; runtime deferred | restart/maintenance fences cause the next accepted local control exchange to reserve and prime one remote successor; durable identity precedes resource allocation; cancellation is checked before reserve, after reserve, after prime, and before commit | compile and inspect current-main integration |
 | P5 / S09 closeout | complete | obsolete proof/headroom authority is removed from code comments, superseded M6 briefs are marked as such, and Developer settings expose explicit advisory enablement | preserve receipts through promotion |
-| Main promotion | fast lane correcting preflight on PR #259 | Apple build 143 and Android versionCode 86 are claimed once; final Astra handoff commit is integrated; the one adversarial review's six blockers are addressed; corrected Rust and Android sources compile; the first lane accepted scope/version bookkeeping and identified stale client regression anchors | publish the anchor correction, retrigger `fast-lane`, and merge only its current green head |
+| Main promotion | fast lane correcting ownership inventory on PR #259 | Apple build 143 and Android versionCode 86 are claimed once; final Astra handoff commit is integrated; the one adversarial review's six blockers are addressed; history and catalogue bookkeeping now pass; the next preflight identified five reviewed-count deltas from the new exact-owner lifecycle | publish the reviewed-count correction, retrigger `fast-lane`, and merge only its current green head |
 
 The original plan allowed two main promotions. No implementation slice reached
 `main` before P3–P4 completed, so one integrated promotion is smaller in CI and
@@ -157,8 +157,12 @@ two superseded client-fix anchors plus missing anchor rows for `7c21d238` and
 `88066364`. Commit `5b28ae7e` updated that ledger and removed the stale Apple
 test expectation that a failed attempt disables later preparation; the second
 preflight then correctly required `5b28ae7e` itself to join that Apple anchor
-row. Merge still requires a green `Main promotion gate` for the corrected
-exact head.
+row. At `3fd3ea5c`, history and the functionality catalogue passed; the
+ownership inventory then reported the exact admission-token, publication-fence,
+blocked-sentinel, task-owner, and timer-constructor deltas introduced by the
+prepared lifecycle. Those counts are reconciled to their concrete owners in
+the inventory. Merge still requires a green `Main promotion gate` for the
+corrected exact head.
 
 ## Cleanup — keep only reusable build state
 

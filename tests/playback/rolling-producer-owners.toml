@@ -670,7 +670,10 @@ expected_occurrences = 15
 [[module_symbols]]
 id = "m4-serving-authority-admission-token"
 pattern = "admitted_serving_generation"
-expected_occurrences = 24
+# 24 -> 28 with prepared rolling relocation: the existing admitted generation
+# is threaded through the ordinary and speculative cluster-start wrappers and
+# rechecked by the same owner. No second serving token or authority is minted.
+expected_occurrences = 28
 
 [[module_symbols]]
 id = "m4-owner-bound-status-publication"
@@ -832,7 +835,10 @@ pattern = "publication_ready_at_ms"
 # 79 -> 80 with the drain-release test: one test-only activation, built the
 # way every other fixture in that file builds one, so the predecessor it
 # drains is a published row rather than a hand-written one.
-expected_occurrences = 85
+# 85 -> 86 with remote prepared activation: the target reads the durable
+# successor's publication fence before asking its existing actor slot to
+# activate it. This is a validation read; it writes no fence.
+expected_occurrences = 86
 
 [[module_symbols]]
 id = "m4-durable-projection-safety-window"
@@ -862,7 +868,9 @@ pattern = "MEDIA_SESSION_PUBLICATION_BLOCKED"
 # 24 -> 25 with M6 §3.4c's staged-row reader, for the same read-only validation
 # described in `m4-activation-publication-handoff-fence` above. The actor slot
 # remains the sole authority that decides whether the row may be announced.
-expected_occurrences = 26
+# 26 -> 27 with the same remote prepared-activation validation. The target
+# compares the durable row with the blocked sentinel and does not publish it.
+expected_occurrences = 27
 
 [[module_symbols]]
 id = "m4-terminal-projection-safety-window"
@@ -1408,7 +1416,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # +1 for Live TV's stderr drain. The session retains and joins its handle; it
 # only records decoder/source facts and never owns producer policy.
 # One joined copy-init fixture producer is added in transcode.rs tests.
-expected_occurrences = 482
+# 482 -> 486 with cancellation-safe prepared work: one watcher cancels an
+# exact speculative successor when foreground waits, one detached settlement
+# owns cleanup to completion, and reservation plus actor activation each
+# transfer their exact guard through an owned task. The registry/cancellation
+# token bounds every task; none owns an untracked producer or process.
+expected_occurrences = 486
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -1744,7 +1757,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # deadline, and the existing tuner-read deadline clamped while collecting the
 # finite prefix. Each is held by the foreground session owner.
 # Copy-init tests add one 100 ms fixture delay and one outer timeout guarding the HTTP deadline assertion; no runtime timer is added.
-expected_occurrences = 730
+# 730 -> 733 net with prepared-work cancellation safety. Foreground-wait
+# observation, guard-transfer bounds, and exact cleanup backoff replace the
+# older candidate/deadline shapes. They bound ownership transfer and cleanup;
+# they do not create another playback-progress or producer-recovery clock.
+expected_occurrences = 733
 
 [[module_structures]]
 id = "bare-time-constructor"
