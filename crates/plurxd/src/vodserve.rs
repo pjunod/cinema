@@ -324,8 +324,6 @@ pub struct RecoveredVod {
 }
 
 /// The facts a stall-reopen's normalization checks against its predecessor.
-// TODO(m3-wire): the allow comes out when the stall-reopen wiring lands.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct ReopenFacts {
     pub supersession_user: String,
@@ -3792,8 +3790,6 @@ impl VodServe {
 
     /// Session ids still live (tombstoned excluded) — what the durable lease
     /// loop may renew.
-    // TODO(m3-wire): the allow comes out when the lease loop wiring lands.
-    #[allow(dead_code)]
     pub async fn live_session_ids(&self) -> Vec<String> {
         self.shared
             .sessions
@@ -3808,8 +3804,6 @@ impl VodServe {
     /// What a lease renewal reports for one live session: the film-time end,
     /// in ms, of the last segment it was served (0 before the first). `None`
     /// for unknown/tombstoned.
-    // TODO(m3-wire): the allow comes out when the lease loop wiring lands.
-    #[allow(dead_code)]
     pub async fn frontier_ms(&self, session_id: &str) -> Option<i64> {
         let rendition = {
             let sessions = self.shared.sessions.lock().await;
@@ -4465,8 +4459,6 @@ impl VodServe {
 
     /// The facts a stall-reopen's normalization checks against its
     /// predecessor. `None` for unknown/tombstoned.
-    // TODO(m3-wire): the allow comes out when the stall-reopen wiring lands.
-    #[allow(dead_code)]
     pub async fn reopen_facts(&self, session_id: &str) -> Option<ReopenFacts> {
         let sessions = self.shared.sessions.lock().await;
         let session = sessions.get(session_id)?;
