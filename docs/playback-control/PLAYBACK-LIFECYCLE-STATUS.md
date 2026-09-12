@@ -1,8 +1,8 @@
 # Playback lifecycle — implementation status
 
-**Status:** P1–P5 built and exact integrated tree compiled; PR #259 is draft ·
+**Status:** one adversarial review addressed; PR #259 remains draft ·
 **Updated:** 2026-09-12 · **Base:** `30cd51afc` · **Effort:**
-`effort/playback-lifecycle` at `856761df` before this receipt · **Latest task:**
+`effort/playback-lifecycle` at `88066364` before this receipt · **Latest task:**
 `codex/playback-lifecycle-p3-p4` at `139ad01f`
 
 Companion to the
@@ -23,7 +23,7 @@ sweep actually executes them.
 | P3 / S06–S07 prepared handoff | built and compiled; runtime deferred | successor planning reuses create-time capabilities; Original, grade, audio, offset, subtitle, and compound changes produce one recipe; VOD and rolling prime through their distinct engines; proof/headroom/direction vetoes and session-wide failure suppression are removed | include in current-main integration |
 | P4 / S08 owner transition | built and compiled; runtime deferred | restart/maintenance fences cause the next accepted local control exchange to reserve and prime one remote successor; durable identity precedes resource allocation; cancellation is checked before reserve, after reserve, after prime, and before commit | compile and inspect current-main integration |
 | P5 / S09 closeout | complete | obsolete proof/headroom authority is removed from code comments, superseded M6 briefs are marked as such, and Developer settings expose explicit advisory enablement | preserve receipts through promotion |
-| Main promotion | draft PR #259 | Apple build 143 and Android versionCode 86 are claimed once; final Astra handoff commit is integrated; exact effort tree compiled; no implementation review or fast lane has run | freeze this receipt as the review boundary, obtain one adversarial review, address it, then run one fast lane |
+| Main promotion | review addressed on draft PR #259 | Apple build 143 and Android versionCode 86 are claimed once; final Astra handoff commit is integrated; the one adversarial review's six blockers are addressed; corrected Rust and Android sources compile; no fast lane has run | publish this receipt, mark ready, apply `fast-lane`, and merge only its current green head |
 
 The original plan allowed two main promotions. No implementation slice reached
 `main` before P3–P4 completed, so one integrated promotion is smaller in CI and
@@ -51,6 +51,8 @@ remain separate history inside the effort branch.
 | `180ddcdd` tree | `make apple-build` | passed for iOS and tvOS at Apple build 143 |
 | `180ddcdd` tree | iOS and tvOS `xcodebuild ... build-for-testing` | passed; changed XCTest sources compiled without execution |
 | `180ddcdd` tree | `ANDROID_HOME=/Users/pjunod/Library/Android/sdk ./gradlew :app:assembleDebug :app:compileDebugUnitTestKotlin --no-daemon` | passed in 6 seconds at Android versionCode 86; no tests executed |
+| `88066364` tree | pinned Rust fmt, `cargo check -p plurxd --locked --all-targets`, and Clippy with `-D warnings` | passed in 2, 8, and 15 seconds respectively; test targets compiled without execution |
+| `88066364` tree | `ANDROID_HOME=/Users/pjunod/Library/Android/sdk ./gradlew :app:assembleDebug :app:compileDebugUnitTestKotlin --no-daemon` | passed in 11 seconds at Android versionCode 86; changed app and test sources compiled without execution |
 
 The compiler loop will be repeated only if `main` moves before review or review
 corrections change compiled source. No unit,
@@ -133,14 +135,25 @@ R09 fleet breadth remains evidence debt for the manual sweep. R07 fallback
 retirement and R10 semantic/prewarm expansion remain separate product
 decisions; neither keeps this implementation open.
 
-## Review and delivery — evidence must name the exact head
+## Review and delivery — one review, author-verified corrections
 
-No adversarial implementation review has been requested. Main-bound PR #259 is
-draft against unchanged base `30cd51afc`; this receipt freezes its review
-boundary. Exactly one adversarial agent will review that diff. The author will
-address every finding without requesting re-review; only afterward will the PR
-become ready and receive `fast-lane`. Merge requires a green
-`Main promotion gate` for the current head.
+The one adversarial implementation review examined draft PR #259 at
+`69b2e2b2` and requested six corrections. Commit `88066364` addresses all six;
+no second review or re-review was requested.
+
+| Finding | Disposition |
+|---|---|
+| Android native reevaluation survived presentation progress | progress now resets the per-wait allowance; the retained multi-episode regression directly covers it |
+| Original overrode explicit codec/grade policy | the compound policy is resolved against source facts; matching sources may copy, required conversions transcode, and unsupported outputs receive a typed refusal |
+| planned-outage cancellation could cross the durable commit | the exact planned fence is retained with the successor and its operation guard is held from the current-token predicate through the Store pointer CAS |
+| reserve or actor-activation timeout could lose cleanup ownership | detached reservation and activation tasks transfer one cancellation-safe guard; a late answer without a receiver aborts the exact row, slot, and worker |
+| prepared work competed as foreground and ignored incumbent starvation | speculative admission uses only spare capacity, never registers ahead of foreground, and both an admission waiter and an accepted Waiting/Stalled exchange cancel the exact successor |
+| saving prepared handoff off left in-flight or staged work alive | the settings transition wakes current candidates, serializes the final setting read with reservation, and settles every unswitched registered successor before reopening |
+
+The stale Android and Rust phase comments called out by the reviewer were also
+removed. PR #259 remains draft until this receipt is pushed. It will then be
+marked ready and receive `fast-lane`; merge still requires a green
+`Main promotion gate` for that exact head.
 
 ## Cleanup — keep only reusable build state
 
