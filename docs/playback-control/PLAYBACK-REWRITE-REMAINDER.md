@@ -14,6 +14,12 @@ Companion to [PLAYBACK-LIFECYCLE-COVERAGE.md](PLAYBACK-LIFECYCLE-COVERAGE.md)
 (the historical execution record). Use this dated reconciliation to interpret
 conflicting old status paragraphs. Re-verify source before implementation.
 
+The [implementation contract](PLAYBACK-LIFECYCLE-IMPLEMENTATION.md) now supplies
+the bounded build sequence and current policy. Historical proof/headroom
+restrictions below describe audited source, not the desired enablement rule:
+remove empirical vetoes, keep Developer advice nonbinding, and use the revised
+fast lane. Evidence gaps are not software permission gates.
+
 ## 1. The answer — yes, but the intersections are different
 
 The strongest intersection is **steady-state buffer coordination and its

@@ -16,6 +16,11 @@ The companion [rewrite remainder](PLAYBACK-REWRITE-REMAINDER.md) separates
 unimplemented work, restricted coverage, physical evidence debt, and stale
 status claims, and maps their intersection with these lifecycle cases.
 
+Build from the [implementation contract](PLAYBACK-LIFECYCLE-IMPLEMENTATION.md):
+four bounded packages, advisory Developer settings, and the revised CI/CD
+process. Its current no-software-gating policy supersedes historical rollout
+prerequisites; the coverage/evidence inventory here is not runtime permission.
+
 ## 1. The current implementation is a hybrid, with incomplete acceptance
 
 All three client implementations contain playback-control reporters and action
