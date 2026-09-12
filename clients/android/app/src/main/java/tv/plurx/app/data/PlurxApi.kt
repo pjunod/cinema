@@ -83,7 +83,7 @@ interface PlurxApi {
     suspend fun createLibraryChannelSession(
         @Path("id") id: String,
         @Body body: LibraryChannelSessionRequest,
-    ): LibraryChannelSession
+    ): Response<LibraryChannelSession>
 
     @GET("developer/readiness")
     suspend fun developerReadiness(): DeveloperReadiness

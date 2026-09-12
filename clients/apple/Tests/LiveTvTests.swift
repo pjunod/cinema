@@ -139,6 +139,22 @@ final class LiveTvTests: XCTestCase {
         XCTAssertNil(controller.playbackError, "a stopped tune cannot restore its failure")
     }
 
+    func testAppleTvLibraryChannelsOfferFullscreenWithoutRetuning() throws {
+        let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let source = try String(
+            contentsOf: testsDirectory.appendingPathComponent("../Sources/LibraryChannels.swift").standardizedFileURL,
+            encoding: .utf8)
+        XCTAssertTrue(source.contains("Button(\"Fullscreen\") { fullscreen = true }"))
+        XCTAssertTrue(source.contains(".fullScreenCover(isPresented: $fullscreen)"))
+        XCTAssertTrue(source.contains("VideoPlayer(player: controller.player).ignoresSafeArea()"),
+                      "fullscreen must reuse the active channel player instead of opening another session")
+        XCTAssertTrue(source.contains("if controller.watching != nil && !fullscreen {"),
+                      "only one surface should render the shared player while fullscreen is open")
+        XCTAssertTrue(source.contains("Button(\"Return to channels\") { fullscreen = false }"))
+        XCTAssertTrue(source.contains("if !fullscreen { Task { await controller.stop() } }"),
+                      "presenting the cover must not stop the session it displays")
+    }
+
     func testTypedPlaybackConflictShowsReasonWithoutChangingAuthHandling() throws {
         let data = Data(#"{"code":"vod_source_rescan_required","message":"The source probe needs refreshing."}"#.utf8)
         let url = try XCTUnwrap(URL(string: "http://127.0.0.1/api/v1/library-channels/test/sessions"))
