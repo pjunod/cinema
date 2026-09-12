@@ -110,7 +110,7 @@ transferring, and (c) loaded media not presenting. Trace which current source
 condition would violate each assertion; do not execute this fixture now.
 If source already satisfies a case, retain its assertion and do not change
 producer policy just to match a proposed formula. Name new regressions consistently
-with `lifecycle_refill_` in Rust so they can be run together in §11.
+with `lifecycle_refill_` in Rust so the separate sweep can select them together.
 
 **Finish:** a compilable behavioral regression for the identified defect, or an
 explicit record that only the observed coexistence is modeled and the
@@ -327,9 +327,10 @@ marker prewarm stays subordinate to foreground demand. R10 is explicitly
 deferred. Retirement of rolling fallback is a separate product decision.
 
 **Time discipline:** aim for two main promotions, not one PR per transition:
-P1–P2 first, then P3–P4 plus closeout. Start with one bounded reproduction and
-source-tracing session. If it cannot reproduce the initiating freeze, finish
-the joined diagnostics and falsifiable regressions for the observed states;
+P1–P2 first, then P3–P4 plus closeout. Start with one bounded source-tracing and
+regression-construction session, with execution deferred under §0. If it cannot
+identify the initiating freeze, finish joined diagnostics and falsifiable
+regressions for the observed states;
 record the uncertainty instead of spending days tuning speculative timers.
 Any new decoder feature, cluster scheduler redesign, or protocol redesign gets
 a separate issue with a concrete reason it is required. A defect in a package
@@ -562,8 +563,8 @@ if it fails, the existing recovery owner decides the next bounded action.
 empty-buffer and substantial-buffer waits; verify reachable supply or a named
 downstream action, bounded resources, no duplicate action, and resumed
 presentation. Healthy refill must finish on the same session; eventual reopen
-alone is not a pass. Keep a failing reproduction if the initiating cause is
-still unknown, and do not label that incident fixed.
+alone is not a pass. Preserve the modeled case and state its unexecuted status
+if the initiating cause is still unknown; do not label that incident fixed.
 
 ## 5. P2 — consolidate the client lifecycle and remove duplicate authority
 
@@ -948,7 +949,23 @@ rustup run 1.97.1 cargo clippy -p plurxd --locked --all-targets -- -D warnings
 After edits, format and repeat check/Clippy on affected crates. Include
 `-p plurx-core` when its planner/store code changes; use the repository's wider
 workspace compile requirements before main promotion. `--all-targets` checks
-test code without running it. If the clone host cannot use the pin, follow the
+test code enabled by the selected features without running it; it does not
+activate feature-gated fixtures. P4 changes to replicated store contracts or
+separate-process cluster fixtures additionally require these compile-only checks:
+
+```bash
+rustup run 1.97.1 cargo check -p plurx-core --locked --all-targets \
+  --features hiqlite-contract-tests
+rustup run 1.97.1 cargo check -p plurxd --locked --all-targets \
+  --features cluster-integration-tests
+```
+
+Use the corresponding feature selection in Clippy when those fixtures change.
+The features enable compilation here, not runtime execution or feature rollout.
+Record which feature-specific command compiled each changed fixture; do not
+credit a default-feature build as coverage for a skipped target.
+
+If the clone host cannot use the pin, follow the
 [source-only compile loop](../ci/AGENT-COMPILE-LOOP.md). Archive committed
 source, retain a warm target directory, and verify again on the final merged
 base. Do not copy credentials or `.git` to the compiler host.
