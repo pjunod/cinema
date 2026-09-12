@@ -7,7 +7,8 @@
 > replacement AGENTS.md requires focused local tests and current qualification
 > for the new effort. Historical receipts below remain unchanged.
 
-**Status:** combined B01–B05 candidate frozen for adversarial review ·
+**Status:** combined B01–B05 candidate reviewed and focused-regression green;
+fast lane pending ·
 **Updated:** 2026-09-12 · **Current base:**
 `10f2afe6` · **Current effort:** `effort/playback-rewrite-remainder`
 
@@ -21,19 +22,20 @@ sweep actually executes them.
 
 ## Remainder execution — B01–B05 integrated
 
-**Status:** source complete; post-review focused matrix and fast lane pending · **Started:**
+**Status:** source complete; one adversarial review addressed; focused matrix
+green; fast lane pending · **Started:**
 2026-09-12 · **Base:** `10f2afe60b3d177866fdcc5741acd9f494525d73` ·
 **Effort:** `effort/playback-rewrite-remainder` · **Clone:**
 `/private/tmp/plurx-sol-remainder-20260912`
 
 | Package | State | Current evidence | Next action |
 |---|---|---|---|
-| B01 · buffer observability/UI | integrated | server PR #262 and client PR #264 are merged through `effort/buffer-observability`; its complete focused receipts remain in `PLAYBACK-BUFFER-OBSERVABILITY-STATUS.md` | include in the combined review and current-main promotion |
-| B02 · refill and operation races | source-complete; not run | Apple rechecks session/open generation and viewer-action epoch after its ask; Android binds media-request and transport generations; web binds player, wait timestamp, playback generation, and control-intent generation | execute the focused matrix after review; repair only demonstrated failures |
-| B03 · prepared transition | source-complete; not run | recipe planning, both engines, exact settlement, timeout, supersession, readiness, and terminal cleanup anchors are named below | execute the focused matrix after review; repair only demonstrated failures |
-| B04 · relocation and alternate ingress | source-complete; not run | planned-fence cancellation, takeover, relay ingress, ownership settlement, and cleanup anchors are named below | execute the focused matrix after review; keep destructive physical fault injection as an explicit evidence gap |
-| B05 · subtitle and compatibility | source-complete; not run | subtitle windows/retry, seek coalescing, VOD/rolling identity, and compatibility owners are named below; `eb8fb452` puts authoritative prepared-handoff enablement and advisory readiness together in web Developer settings | execute the focused matrix after review and retain every justified adapter |
-| Final promotion | review next | B01 effort merged into this candidate at `247ba3d7`; no combined review, fast lane, or merge receipt exists yet | obtain one adversarial review, address findings, run the focused matrix and single broad fast lane, and merge only its green current head |
+| B01 · buffer observability/UI | integrated; green | server PR #262 and client PR #264 are merged through `effort/buffer-observability`; its complete focused receipts remain in `PLAYBACK-BUFFER-OBSERVABILITY-STATUS.md` | preserve through current-main promotion |
+| B02 · refill and operation races | source-complete; focused green | Apple rechecks session/open generation and viewer-action epoch after its ask; Android binds media-request and transport generations; web binds player, wait timestamp, playback generation, and control-intent generation | preserve through fast lane |
+| B03 · prepared transition | source-complete; focused green | recipe planning, both engines, exact settlement, timeout, supersession, readiness, and terminal cleanup anchors are named below | preserve through fast lane |
+| B04 · relocation and alternate ingress | source-complete; focused green | planned-fence cancellation, takeover, relay ingress, ownership settlement, and cleanup anchors are named below; destructive physical fault injection remains an explicit evidence gap | preserve through fast lane |
+| B05 · subtitle and compatibility | source-complete; focused green | subtitle windows/retry, seek coalescing, VOD/rolling identity, and compatibility owners are named below; `eb8fb452` puts authoritative prepared-handoff enablement and advisory readiness together in web Developer settings | preserve through fast lane |
+| Final promotion | review addressed; focused green | B01 merged at `247ba3d7`; the one combined adversarial review of `83693106` reported four findings, addressed by `09cd99c4` and the test-phase repair `4e0991f0` | run one broad fast lane on the current head and merge only that green head |
 
 ### Current decisions and boundaries
 
@@ -69,18 +71,45 @@ executor or new timer is required.
 
 ### Remainder regression matrix
 
-Every row is `not run` until the post-review execution phase. The representative
-anchors name the real fixture that covers the package; no row treats source
-presence as a pass.
+The representative anchors name the real fixture that covers the package; no
+row treats source presence as a pass. These focused results were collected only
+after the one adversarial review, in the requested final validation phase.
 
 | Package | Representative retained anchors | Result |
 |---|---|---|
-| B02 · server refill | `lifecycle_refill_empty_and_loaded_waits_are_not_answered_with_their_hold` · `lifecycle_refill_loaded_native_wait_outranks_a_producer_hold` | not run |
-| B02 · client ownership | Apple `testAViewerCommandRacingAStallDropsTheStallBinding` and `testStartStopStartRestoresOnlyTheNewTitlesPlaybackIntent` · Android `lifecycleRefillLoadedWaitClaimsOneReevaluationAndKeepsTheAbsoluteDeadline` and `transportLocalSelectionAndVisibilityRearmAnAskSuspendedAcrossTheWholeChange` · `tests/playback/web-control.test.js` | not run |
-| B03 · server transaction | `prepared_candidate_reuses_the_ordinary_plan_for_original_and_compound_changes` · `concurrent_exact_acknowledgements_join_one_canonical_settlement` · `a_timed_out_settlement_finishes_detached_and_replays_durably` · `a_failed_preparation_acknowledgement_aborts_and_frees_the_slot` | not run |
-| B03 · clients and stores | Apple `PreparedReplacementTests` · Android `PreparedReplacementTest` · web prepared-replacement cases · `media_session_prepare_stages_a_successor_that_changes_nothing` and the preparation expiry/commit contracts on both stores | not run |
-| B04 · ownership and ingress | `a_fresh_takeover_engine_discards_the_departed_owners_preparation` · `preparation_capacity_and_serving_loss_refuse_before_acknowledgement_acceptance` · `a_switch_releases_the_drain_through_the_relay_and_only_when_accepted` · `the_ingress_control_gate_answers_a_lost_owner_gone` · `release_reconciliation_elects_once_and_retries_with_one_fence` | not run |
-| B05 · subtitle, seek, engines | `a_twenty_seek_storm_starts_work_only_for_the_settled_target` · `one_session_traverses_anchors_joins_refuses_and_releases` · `real_subtitle_playlist_rebinds_after_video_attempt_handoff` · `a_prepared_successor_publishes_the_vod_engine_identity` · `a_rolling_preparation_commit_reaches_the_store` · native client readiness-retry cases | not run |
+| B02 · server refill | `lifecycle_refill_empty_and_loaded_waits_are_not_answered_with_their_hold` · `lifecycle_refill_loaded_native_wait_outranks_a_producer_hold` | green: 2 Rust tests |
+| B02 · client ownership | Apple `testAViewerCommandRacingAStallDropsTheStallBinding` and `testStartStopStartRestoresOnlyTheNewTitlesPlaybackIntent` · Android `PlaybackTelemetryTest` and `PlaybackRequestOwnershipTest` · `tests/playback/web-control.test.js` | green: included in 37 Apple, 22 Android, and the complete web-control run |
+| B03 · server transaction | `prepared_candidate_reuses_the_ordinary_plan_for_original_and_compound_changes` · retained settlement/timeout/abort anchors | green: representative Rust transaction test plus complete prepared client groups |
+| B03 · clients and stores | Apple prepared-replacement groups · Android `Prepared*` and `PlaybackControlPrepared*` groups · web prepared-replacement cases | green: 34 Apple prepared tests, 50 Android prepared tests, and complete web-control run |
+| B04 · ownership and ingress | `a_fresh_takeover_engine_discards_the_departed_owners_preparation` and retained relocation/relay reconciliation anchors | green: representative takeover test; destructive live-cluster fault injection not run |
+| B05 · subtitle, seek, engines | `server_ready_uses_absolute_origin_and_does_not_cross_pruned_media` · `a_far_seek_reports_the_frontier_the_client_can_actually_fetch` · `a_twenty_seek_storm_starts_work_only_for_the_settled_target` · client readiness-retry cases | green: 3 focused Rust tests plus complete selected client/web runs |
+
+### Combined adversarial review
+
+The one requested adversarial review examined frozen candidate `83693106`
+without running tests. All four findings are resolved; no second review was
+requested.
+
+| Finding | Disposition |
+|---|---|
+| Web prepared switches left predecessor health and presentation age attached to the successor | switch now clears those observations, and rollback restores the predecessor snapshot |
+| Apple and Android treated the first position sample as presentation progress | both trackers keep progress age unavailable until a later sample proves real movement |
+| Rolling and immutable VOD could publish an anchored or behind run as the later-ready island | both engines now require a strictly later materialized interval |
+| Android painted paused Media3 buffering as an active playback wait | waiting now also requires the user's play intent; the overlay consumes that shared predicate |
+
+The final test phase found one misplaced Swift field that prevented the Apple
+test bundle from compiling and two stale web fixtures. Commit `4e0991f0`
+corrects those demonstrated failures. The rebuilt Apple bundle and every
+selected test then passed.
+
+### Final focused validation receipt
+
+| Surface | Command scope | Result |
+|---|---|---|
+| Rust 1.97.1 | two refill tests plus one representative each for rolling readiness, VOD frontier, prepared planning, takeover, and seek coalescing | green: 7 passed, 0 failed |
+| Web | playback policy, input contract, player DOM, full playback-control reporter, and settings sections | green; settings sections reported 26/26 |
+| Android | `PlaybackTelemetryTest`, `PlaybackRequestOwnershipTest`, all `Prepared*`, and both `PlaybackControlPrepared*` groups | green: 72 passed, 0 failed |
+| Apple iOS simulator | exact-head `build-for-testing`, two telemetry/ownership cases, one operation-ownership case, and four prepared-replacement groups | green: 37 passed, 0 failed |
 
 ### B05 action-making caller reconciliation
 
