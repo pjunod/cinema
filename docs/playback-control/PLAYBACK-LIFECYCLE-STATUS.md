@@ -7,8 +7,8 @@
 > replacement AGENTS.md requires focused local tests and current qualification
 > for the new effort. Historical receipts below remain unchanged.
 
-**Status:** rewrite remainder active; B02–B05 source-complete, B01 client
-presentation in progress · **Updated:** 2026-09-12 · **Current base:**
+**Status:** combined B01–B05 candidate frozen for adversarial review ·
+**Updated:** 2026-09-12 · **Current base:**
 `10f2afe6` · **Current effort:** `effort/playback-rewrite-remainder`
 
 Companion to the
@@ -19,21 +19,21 @@ this is the one execution ledger for *what is built, compiled, reviewed, and
 merged*. Runtime and physical observations stay `not run` until the separate
 sweep actually executes them.
 
-## Remainder execution — B02–B05 are active
+## Remainder execution — B01–B05 integrated
 
-**Status:** B02–B05 source reconciliation complete; B01 client presentation in progress · **Started:**
+**Status:** source complete; post-review focused matrix and fast lane pending · **Started:**
 2026-09-12 · **Base:** `10f2afe60b3d177866fdcc5741acd9f494525d73` ·
 **Effort:** `effort/playback-rewrite-remainder` · **Clone:**
 `/private/tmp/plurx-sol-remainder-20260912`
 
 | Package | State | Current evidence | Next action |
 |---|---|---|---|
-| B01 · buffer observability/UI | reserved to task `01a095b1-0e77-72f1-8b48-b04da47f8f10` | server telemetry is published in PR #262; its separate ledger is `PLAYBACK-BUFFER-OBSERVABILITY-STATUS.md` | integrate its final receipt without duplicating its wire, stats, or UI work |
+| B01 · buffer observability/UI | integrated | server PR #262 and client PR #264 are merged through `effort/buffer-observability`; its complete focused receipts remain in `PLAYBACK-BUFFER-OBSERVABILITY-STATUS.md` | include in the combined review and current-main promotion |
 | B02 · refill and operation races | source-complete; not run | Apple rechecks session/open generation and viewer-action epoch after its ask; Android binds media-request and transport generations; web binds player, wait timestamp, playback generation, and control-intent generation | execute the focused matrix after review; repair only demonstrated failures |
-| B03 · prepared transition | mapped; not run | recipe planning, both engines, exact settlement, timeout, supersession, readiness, and terminal cleanup anchors are named below | execute the focused matrix after review; repair only demonstrated failures |
-| B04 · relocation and alternate ingress | mapped; not run | planned-fence cancellation, takeover, relay ingress, ownership settlement, and cleanup anchors are named below | execute the focused matrix after review; keep destructive physical fault injection as an explicit evidence gap |
+| B03 · prepared transition | source-complete; not run | recipe planning, both engines, exact settlement, timeout, supersession, readiness, and terminal cleanup anchors are named below | execute the focused matrix after review; repair only demonstrated failures |
+| B04 · relocation and alternate ingress | source-complete; not run | planned-fence cancellation, takeover, relay ingress, ownership settlement, and cleanup anchors are named below | execute the focused matrix after review; keep destructive physical fault injection as an explicit evidence gap |
 | B05 · subtitle and compatibility | source-complete; not run | subtitle windows/retry, seek coalescing, VOD/rolling identity, and compatibility owners are named below; `eb8fb452` puts authoritative prepared-handoff enablement and advisory readiness together in web Developer settings | execute the focused matrix after review and retain every justified adapter |
-| Final promotion | not started | no remainder review, fast lane, or merge receipt exists | freeze the candidate, obtain one adversarial review, address findings, run the single broad fast lane, and merge only its green current head |
+| Final promotion | review next | B01 effort merged into this candidate at `247ba3d7`; no combined review, fast lane, or merge receipt exists yet | obtain one adversarial review, address findings, run the focused matrix and single broad fast lane, and merge only its green current head |
 
 ### Current decisions and boundaries
 
