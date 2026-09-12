@@ -830,6 +830,25 @@ struct PlayerView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
 
+                if controller.isPlaybackWaiting && !findingNext {
+                    let waiting = PlaybackWaitPresentation.make(
+                        runwaySeconds: controller.bufferedRunwaySeconds(),
+                        httpWaitCount: controller.sessionStatus?.httpWaitCount
+                    )
+                    VStack(spacing: 10) {
+                        ProgressView().tint(.white)
+                        Text(waiting.title)
+                            .font(.system(.callout, design: .monospaced).weight(.semibold))
+                        Text(waiting.detail)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundColor(.white.opacity(0.72))
+                    }
+                    .foregroundColor(.white)
+                    .padding(18)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+
                 if findingNext {
                     VStack(spacing: 10) {
                         ProgressView().tint(.white)
@@ -2485,6 +2504,30 @@ enum PlaybackLedgerColumn: Equatable {
     case right
 }
 
+struct PlaybackWaitPresentation: Equatable {
+    let title: String
+    let detail: String
+
+    static func make(runwaySeconds: Double?, httpWaitCount: Int?) -> Self {
+        let runway = max(0, runwaySeconds ?? 0)
+        let waitText: String
+        if let httpWaitCount {
+            let waits = max(0, httpWaitCount)
+            switch waits {
+            case 0: waitText = "no server HTTP waits"
+            case 1: waitText = "1 server HTTP wait"
+            default: waitText = "\(waits) server HTTP waits"
+            }
+        } else {
+            waitText = "server wait state unavailable"
+        }
+        return Self(
+            title: "Presentation waiting…",
+            detail: String(format: "%.1f s client loaded · %@", runway, waitText)
+        )
+    }
+}
+
 /// Whether a row belongs in the two-column grid or in the notes strip that
 /// spans the panel underneath it. Sentence-shaped values leave the grid so
 /// they can never stretch a column.
@@ -2664,24 +2707,37 @@ let applePlaybackInfoFields: [ApplePlaybackInfoField] = [
     .init("decode_resolution", "Resolution", "NOW DECODING", [.mini, .standard, .debug]),
     .init("dynamic_range", "Dynamic range", "NOW DECODING", [.mini, .standard, .debug], placement: .notes),
     .init("decode_audio", "Audio", "NOW DECODING", [.debug], placement: .notes),
-    .init("buffer", "Buffer", "NOW DECODING", [.mini, .standard, .debug]),
     .init("player_state", "Player state", "NOW DECODING", [.debug]),
     .init("waiting_reason", "Waiting reason", "NOW DECODING", [.debug], placement: .notes),
     .init("stalls", "Stalls", "NOW DECODING", [.standard, .debug]),
     .init("subtitles", "Subtitles", "NOW DECODING", [.standard, .debug]),
-    .init("delivery_rate", "Delivery rate", "NETWORK", [.mini, .standard, .debug]),
+    .init("source_read", "Source read", "BUFFERING / DELIVERY", [.debug], always: true),
+    .init("server_ready", "Server ready", "BUFFERING / DELIVERY", [.standard, .debug], always: true),
+    .init("ready_state", "Ready state", "BUFFERING / DELIVERY", [.debug], always: true),
+    .init("ready_anchor", "Ready anchor", "BUFFERING / DELIVERY", [.debug]),
+    .init("ready_end", "Ready end", "BUFFERING / DELIVERY", [.debug]),
+    .init("later_ready", "Later ready", "BUFFERING / DELIVERY", [.debug], placement: .notes),
+    .init("http_wait", "HTTP wait", "BUFFERING / DELIVERY", [.standard, .debug]),
+    .init("client_loaded", "Client loaded", "BUFFERING / DELIVERY", [.mini, .standard, .debug]),
+    .init("presentation", "Presentation", "BUFFERING / DELIVERY", [.standard, .debug]),
+    .init("presentation_age", "Last advance", "BUFFERING / DELIVERY", [.standard, .debug]),
+    .init("delivery_rate", "Delivery rate", "BUFFERING / DELIVERY", [.mini, .standard, .debug]),
+    .init("delivered", "Delivered", "BUFFERING / DELIVERY", [.standard, .debug]),
+    .init("delivery_idle", "Delivery idle", "BUFFERING / DELIVERY", [.debug]),
+    .init("status_age", "Status sample age", "BUFFERING / DELIVERY", [.debug]),
     .init("observed_rate", "Observed rate", "NETWORK", [.debug]),
     .init("stream_rate", "Stream rate", "NETWORK", [.debug]),
-    .init("delivered", "Delivered", "NETWORK", [.standard, .debug]),
     .init("transferred", "Transferred", "NETWORK", [.debug]),
     .init("requests", "Requests", "NETWORK", [.debug]),
-    .init("delivery_idle", "Delivery idle", "NETWORK", [.debug]),
     .init("started_in", "Started in", "NETWORK", [.debug]),
     .init("status", "Status", "SERVER", [.standard, .debug], always: true),
     .init("encoder", "Encoder", "SERVER", [.standard, .debug]),
     .init("encode_speed", "Encode speed", "SERVER", [.standard, .debug]),
-    .init("server_ahead", "Server ahead", "SERVER", [.standard, .debug]),
-    .init("ahead_bytes", "Ahead bytes", "SERVER", [.debug]),
+    .init("production_actual", "Production actual", "SERVER", [.standard, .debug]),
+    .init("production_target", "Production target", "SERVER", [.standard, .debug]),
+    .init("producer_state", "Producer", "SERVER", [.standard, .debug]),
+    .init("fetch_reserve", "Fetch reserve", "SERVER", [.debug]),
+    .init("ahead_bytes", "Fetch reserve bytes", "SERVER", [.debug]),
     .init("produced", "Produced", "SERVER", [.debug]),
     .init("pacing", "Pacing", "SERVER", [.debug]),
     .init("held", "Held", "SERVER", [.debug]),
@@ -2905,7 +2961,7 @@ struct PlaybackStatsView: View {
                 tone: playbackTone
             ))
         }
-        rows.append(PlaybackLedgerRow(label: "Buffer", value: miniBufferSummary, tone: bufferTone))
+        rows.append(PlaybackLedgerRow(label: "Client loaded", value: miniClientLoadedSummary, tone: bufferTone))
         rows.append(PlaybackLedgerRow(
             label: "Delivery rate",
             value: miniNetworkSummary,
@@ -2947,7 +3003,7 @@ struct PlaybackStatsView: View {
         .accessibilityElement(children: .combine)
     }
 
-    private var miniBufferSummary: String {
+    private var miniClientLoadedSummary: String {
         if let runway = controller.bufferedRunwaySeconds() {
             return String(format: "%.1f s", runway)
         }
@@ -3487,7 +3543,10 @@ struct PlaybackStatsView: View {
 
     private func contractSections(for requestedMode: PlaybackStatsMode) -> [PlaybackLedgerSection] {
         let definitions = applePlaybackInfoFields.filter { $0.modes.contains(requestedMode) }
-        let sectionOrder = ["PLAYBACK", "SOURCE", "NOW DECODING", "NETWORK", "SERVER"]
+        let sectionOrder = [
+            "PLAYBACK", "SOURCE", "NOW DECODING",
+            "BUFFERING / DELIVERY", "NETWORK", "SERVER",
+        ]
         return sectionOrder.compactMap { sectionName in
             let fields = definitions.filter { $0.section == sectionName }
             let rows = fields.flatMap { field -> [PlaybackLedgerRow] in
@@ -3603,9 +3662,59 @@ struct PlaybackStatsView: View {
             return ContractFieldValue(value: range)
         case "decode_audio":
             return selectedAudioDescription.map { ContractFieldValue(value: $0) }
-        case "buffer":
+        case "source_read":
+            return ContractFieldValue(value: "Unavailable", tone: .muted)
+        case "server_ready":
+            switch status?.serverReadyState?.lowercased() {
+            case "missing":
+                return ContractFieldValue(value: "0.0 s", tone: .critical)
+            case "ready":
+                guard let seconds = status?.serverReadySeconds else {
+                    return ContractFieldValue(value: "Unavailable", tone: .muted)
+                }
+                return ContractFieldValue(
+                    value: String(format: "%.1f s", max(0, seconds)),
+                    tone: runwayTone(seconds)
+                )
+            default:
+                return ContractFieldValue(value: "Unavailable", tone: .muted)
+            }
+        case "ready_state":
+            let state = status?.serverReadyState?.lowercased()
+            let value = state == "ready" ? "Ready" : state == "missing" ? "Missing" : "Unavailable"
+            let tone: PlaybackStatTone = state == "ready" ? .good : state == "missing" ? .critical : .muted
+            return ContractFieldValue(value: value, tone: tone)
+        case "ready_anchor":
+            return status?.serverReadyAnchorMs.map { ContractFieldValue(value: "\($0) ms") }
+        case "ready_end":
+            return status?.serverReadyEndMs.map { ContractFieldValue(value: "\($0) ms") }
+        case "later_ready":
+            guard let start = status?.serverNextReadyStartMs,
+                  let end = status?.serverNextReadyEndMs else { return nil }
+            return ContractFieldValue(value: "\(start)–\(end) ms")
+        case "http_wait":
+            guard let count = status?.httpWaitCount else { return nil }
+            let note = count > 0 ? [
+                status?.httpWaitOldestMs.map { "oldest \($0) ms" },
+                status?.httpWaitSegment.map { "segment \($0)" },
+            ].compactMap { $0 }.joined(separator: " · ") : nil
+            return ContractFieldValue(
+                value: "\(max(0, count)) active",
+                tone: count > 0 ? .warning : .good,
+                note: note
+            )
+        case "client_loaded":
             guard let runway = snapshot.runway else { return nil }
             return ContractFieldValue(value: String(format: "%.1f s", runway), tone: runwayTone(runway))
+        case "presentation":
+            let playerState = normalizedPlayerState(snapshot.timeControlStatus)
+            return ContractFieldValue(
+                value: playerState == "Playing" ? "Advancing" : playerState,
+                tone: playerStateTone(snapshot.timeControlStatus)
+            )
+        case "presentation_age":
+            guard let age = controller.presentationProgressAgeMs else { return nil }
+            return ContractFieldValue(value: "\(age) ms", tone: idleTone(age))
         case "player_state":
             return ContractFieldValue(
                 value: normalizedPlayerState(snapshot.timeControlStatus),
@@ -3640,6 +3749,10 @@ struct PlaybackStatsView: View {
             return status?.deliveredIdleMs.map {
                 ContractFieldValue(value: "\($0) ms", tone: idleTone($0, suspended: status?.suspended ?? false))
             }
+        case "status_age":
+            return controller.sessionStatusAgeMs.map {
+                ContractFieldValue(value: "\($0) ms", tone: idleTone($0))
+            }
         case "started_in":
             return controller.lastTTFFMs.map {
                 ContractFieldValue(value: String(format: "%.1f s", Double($0) / 1_000.0))
@@ -3656,14 +3769,25 @@ struct PlaybackStatsView: View {
                 return ContractFieldValue(value: String(format: "%.2f× (avg)", average), tone: encodeTone(speed: average, status: status!))
             }
             return nil
-        case "server_ahead":
+        case "production_actual":
+            return status?.productionAheadSeconds.map {
+                ContractFieldValue(value: String(format: "%.1f s", Double(max(0, $0))))
+            }
+        case "production_target":
+            return status?.productionTargetSeconds.map {
+                ContractFieldValue(value: String(format: "%.1f s", Double(max(0, $0))))
+            }
+        case "producer_state":
+            return status?.producerState.map {
+                ContractFieldValue(value: $0.replacingOccurrences(of: "_", with: " ").capitalized)
+            }
+        case "fetch_reserve":
             guard let seconds = status?.aheadSeconds else { return nil }
             let note = status?.suspended == true
                 ? "Holding buffer\(status.map(holdReleaseDescription) ?? "")"
                 : nil
             return ContractFieldValue(
                 value: String(format: "%.1f s", Double(max(0, seconds))),
-                tone: runwayTone(Double(seconds), suspended: status?.suspended ?? false),
                 note: note
             )
         case "ahead_bytes":

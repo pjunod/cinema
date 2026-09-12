@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["c16d99c6"]
+reason = "This commit adds only the regression-evidence metadata required for the preceding wait-pool fixture correction; it changes no runtime behavior."
+ignore = true

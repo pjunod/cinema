@@ -20,7 +20,9 @@ class PlaybackInfoContractTest {
         fileId = 42,
         delivery = "Transcode · nvenc · 1080p",
         position = "1:00 / 2:00",
-        buffer = "12.3 s",
+        clientLoadedSeconds = 12.3,
+        presentationAgeMs = 320,
+        statusAgeMs = 85,
         frames = "2 / 4,380 frames",
         sourceFile = "fixture.mkv",
         sourceVideo = "HEVC · Main 10 · 10-bit · HDR10",
@@ -52,12 +54,25 @@ class PlaybackInfoContractTest {
             published_end_ms = 90_000,
             fetched_end_ms = 88_000,
             playlist_shape = "VOD",
+            server_ready_state = "ready",
+            server_ready_anchor_ms = 60_000,
+            server_ready_end_ms = 74_500,
+            server_ready_seconds = 14.5,
+            server_next_ready_start_ms = 78_000,
+            server_next_ready_end_ms = 82_000,
+            production_policy = "adaptive target",
+            production_ahead_seconds = 18,
+            production_target_seconds = 24,
+            producer_state = "Producing",
             ahead_seconds = 12,
             ahead_bytes = 8_600_000,
             hold_reason = "runway",
             delivered_bytes = 86_000_000,
             delivered_bps = 12_300_000,
             delivered_idle_ms = 250,
+            http_wait_count = 1,
+            http_wait_oldest_ms = 180,
+            http_wait_segment = 13,
             readrate = 1.05,
             suspended = true,
             suspend_count = 2,
@@ -105,8 +120,23 @@ class PlaybackInfoContractTest {
             .filter { PlaybackStatsMode.Mini in it.modes }
             .map(InfoRow::id)
         assertEquals(
-            listOf("method", "position", "decode_resolution", "dynamic_range", "buffer", "delivery_rate"),
+            listOf("method", "position", "decode_resolution", "dynamic_range", "client_loaded", "delivery_rate"),
             mini,
+        )
+    }
+
+    @Test
+    fun waitingCopyDoesNotCallServerWaitsClientBuffering() {
+        assertEquals(
+            PlaybackWaitPresentation(
+                title = "Presentation waiting",
+                detail = "3.3 s client loaded · 2 server HTTP waits",
+            ),
+            playbackWaitPresentation(3.25, 2),
+        )
+        assertEquals(
+            "0.0 s client loaded · server wait state unavailable",
+            playbackWaitPresentation(0.0, null).detail,
         )
     }
 

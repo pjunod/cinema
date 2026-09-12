@@ -19921,7 +19921,8 @@ mod tests {
     }
 
     /// A control envelope that will be admitted for preparation: a client that
-    /// can hold two pipelines, on a link with headroom, naming the action.
+    /// explicitly offers two pipelines and names the action. The throughput
+    /// value remains rollout evidence; it is not an admission gate.
     fn preparing_control_request(
         route: &MediaSessionRoute,
     ) -> crate::playback_control::ControlRequestV1 {

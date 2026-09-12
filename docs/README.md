@@ -88,16 +88,18 @@ Previous: [Live TV playback method](apple-builds/245-live-tv-playback-method.md)
 ## playback-control/ — the playback control rewrite
 
 Explicit demand, one owner per stream, prepared handoffs. The largest single
-thread in the repo: a protocol plan, its milestone contracts M1–M4, and the
-M5–M7 handoffs that carry the remainder. Start at the plan, then the status
-page; the milestone files are contracts an executing agent works from.
+thread in the repo: a protocol plan, milestone contracts and implementation
+receipts. Start at the current rewrite remainder, then the lifecycle coverage
+map; older milestone files are historical contracts, not a fresh missing-work
+list.
 
 | File | Answers | |
 |---|---|---|
 | [PLAYBACK-LIFECYCLE-COVERAGE.md](playback-control/PLAYBACK-LIFECYCLE-COVERAGE.md) | Playback states and transitions, buffer handoffs, communication contracts, existing test anchors, and open acceptance gaps. | open |
-| [PLAYBACK-REWRITE-REMAINDER.md](playback-control/PLAYBACK-REWRITE-REMAINDER.md) | Which source gaps closed in the lifecycle effort, what finite device evidence remains, and how each item intersects with playback freezes. | open |
+| [PLAYBACK-REWRITE-REMAINDER.md](playback-control/PLAYBACK-REWRITE-REMAINDER.md) | Current Sol handoff: merged lifecycle foundations, assigned buffer observability, remaining regression/repair packages, compatibility cleanup and current workflow requirements. | open |
 | [PLAYBACK-LIFECYCLE-IMPLEMENTATION.md](playback-control/PLAYBACK-LIFECYCLE-IMPLEMENTATION.md) | Completed S01–S09 implementation contract: code entry points, lifecycle/buffer contracts, compiler commands, deferred regression coverage, advisory Developer settings and batched fast-lane delivery. | built |
 | [PLAYBACK-LIFECYCLE-STATUS.md](playback-control/PLAYBACK-LIFECYCLE-STATUS.md) | Live execution ledger for the lifecycle implementation: package state, compilation, deferred tests, review, fast lane, decisions and cleanup. | open |
+| [PLAYBACK-BUFFER-OBSERVABILITY-STATUS.md](playback-control/PLAYBACK-BUFFER-OBSERVABILITY-STATUS.md) | Live execution ledger and measurement contract for playhead-anchored server readiness, HTTP delivery, client loaded ranges, and presentation progress. | open |
 | [Retained playback observations](evidence/playback-lifecycle-observation-2026-09-11.json) | Sanitized September 11 Apple TV observations used by the lifecycle audit; diagnostic evidence, not a runnable test fixture or acceptance result. | done |
 | [PLAYBACK-CONTROL-PROTOCOL-PLAN.md](playback-control/PLAYBACK-CONTROL-PROTOCOL-PLAN.md) | The whole design: explicit demand, one owner, prepared handoffs. | open |
 | [PLAYBACK-CONTROL-STATUS.md](playback-control/PLAYBACK-CONTROL-STATUS.md) | What is actually built and merged, milestone by milestone. | open |

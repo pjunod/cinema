@@ -7625,6 +7625,8 @@ function commitPreparedReplacement(p,state){
   };
   state.predecessor={hls:predecessor,element:retired,sessionId:p.sessionId,
     probeUrl:p.probeUrl,offset:p.offset,wantsPlayback:p.wantsPlayback,
+    health:p.health,healthObservedAt:p.healthObservedAt,
+    presentationAdvancedAt:p.presentationAdvancedAt,
     muted:retired.muted,volume:retired.volume,playbackRate:retired.playbackRate,
     defaultPlaybackRate:retired.defaultPlaybackRate};
   // Authoritative before visible, so anything that reads PLAYER.hls during the
@@ -7633,6 +7635,9 @@ function commitPreparedReplacement(p,state){
   p.sessionId=state.sessionId;
   p.probeUrl=state.playlistUrl;
   p.offset=state.mediaOriginMs/1000;
+  p.health=null;
+  p.healthObservedAt=null;
+  p.presentationAdvancedAt=null;
   p.prepared=null;
   // Still this player's business until its first frame settles: the watchdog
   // below has to be cancellable by a teardown, or it fires eight seconds after
@@ -7729,6 +7734,9 @@ function rollbackPreparedReplacement(p,state,successor){
   p.probeUrl=predecessor.probeUrl;
   p.offset=predecessor.offset;
   p.wantsPlayback=predecessor.wantsPlayback;
+  p.health=predecessor.health;
+  p.healthObservedAt=predecessor.healthObservedAt;
+  p.presentationAdvancedAt=predecessor.presentationAdvancedAt;
   successor.id="";
   retired.id="video";
   successor.id="video-prepared";
@@ -11241,6 +11249,7 @@ function playbackProgressTick(v,p){
   const moved=clock>watch.clock+0.01 && (frames==null||frames>watch.frames);
   if(moved){
     watch.clock=clock; watch.frames=frames; watch.at=now;
+    p.presentationAdvancedAt=now;
     if(!pending){
       watch.fired=false;
       if(p.waitAt!=null){
@@ -11529,8 +11538,9 @@ function wirePlayerMedia(v){
       started:PLAYER.started, stallPrompt:PLAYER.stallPrompt
     });
     if(action!=='buffer') return;
-    setLoading(true,"Buffering…","");
     beginWait(v);
+    const copy=playbackWaitCopy(bufferRunway(v),PLAYER.health&&PLAYER.health.http_wait_count);
+    setLoading(true,copy.title,copy.detail);
     notifyPlaybackControl();
   });
   // Pausing during a wait means the viewer stopped it, not the stream.
@@ -12502,7 +12512,7 @@ async function switchAudio(idx){
 // ---- playback stats overlay (press i, or the Stats button) ----------------
 // ---- generated from tests/playback/playback-info-fields.json by
 // scripts/player-contract-table --embed; do not edit by hand ----
-const PLAYBACK_INFO_FIELDS=[{"id":"method","label":"Method","section":"PLAYBACK","modes":["mini","standard","debug"],"format":"text","note":"The delivery verdict — the same vocabulary on every client: Direct play · Remux · Transcode · Transcode · cached; the encoder and rung follow as a clause (\"Transcode · nvenc · 1080p\")."},{"id":"playback_mode","label":"Playback mode","section":"PLAYBACK","modes":["debug"],"format":"text","available_on":["web"],"note":"Live HLS / VOD HLS / progressive — the web presentation kind. Native players have one presentation."},{"id":"position","label":"Position","section":"PLAYBACK","modes":["mini","standard","debug"],"format":"position"},{"id":"reason","label":"Reason","section":"PLAYBACK","modes":["standard","debug"],"format":"list","placement":"notes","note":"Why the server chose this method."},{"id":"build","label":"Build","section":"PLAYBACK","modes":["debug"],"format":"text","always":true},{"id":"transport","label":"Transport","section":"PLAYBACK","modes":["debug"],"format":"text","placement":"notes"},{"id":"file_id","label":"File ID","section":"PLAYBACK","modes":["debug"],"format":"text"},{"id":"session","label":"Session","section":"PLAYBACK","modes":["debug"],"format":"text","placement":"notes"},{"id":"switched","label":"Switched","section":"PLAYBACK","modes":["debug"],"format":"list","placement":"notes","available_on":["web"],"note":"Auto-quality moves this session."},{"id":"source_video","label":"Video","section":"SOURCE","modes":["standard","debug"],"format":"list","placement":"notes","note":"codec · profile · bit depth · HDR format."},{"id":"source_resolution","label":"Resolution","section":"SOURCE","modes":["standard","debug"],"format":"resolution"},{"id":"source_bitrate","label":"Bitrate","section":"SOURCE","modes":["standard","debug"],"format":"bitrate"},{"id":"container","label":"Container","section":"SOURCE","modes":["standard","debug"],"format":"text"},{"id":"source_audio","label":"Audio","section":"SOURCE","modes":["standard","debug"],"format":"list","placement":"notes","note":"codec · channels · language, \"+N tracks\" when more exist."},{"id":"source_file","label":"File","section":"SOURCE","modes":["debug"],"format":"text","placement":"notes"},{"id":"av_offset","label":"AV offset","section":"SOURCE","modes":["debug"],"format":"millis","always":true,"note":"Applied offset; the container-declared value follows in parentheses when it differs."},{"id":"decode_resolution","label":"Resolution","section":"NOW DECODING","modes":["mini","standard","debug"],"format":"resolution"},{"id":"dynamic_range","label":"Dynamic range","section":"NOW DECODING","modes":["mini","standard","debug"],"format":"text","placement":"notes","note":"Mini shows the chip form (\"DV P7 → HDR10\"); the ledger shows the sentence."},{"id":"decode_audio","label":"Audio","section":"NOW DECODING","modes":["debug"],"format":"list","placement":"notes","note":"What the player's audio output actually is (route-aware where the platform says)."},{"id":"buffer","label":"Buffer","section":"NOW DECODING","modes":["mini","standard","debug"],"format":"seconds","note":"Runway ahead of the playhead. Seconds only — no clock form, no percentage."},{"id":"frames","label":"Frames","section":"NOW DECODING","modes":["standard","debug"],"format":"fraction","available_on":["web","android"],"note":"dropped / total. AVPlayer does not expose it."},{"id":"frame_rate","label":"Frame rate","section":"NOW DECODING","modes":["debug"],"format":"text","available_on":["web"]},{"id":"player_state","label":"Player state","section":"NOW DECODING","modes":["debug"],"format":"text","note":"One vocabulary: Playing · Paused · Buffering · Ended · Failed."},{"id":"waiting_reason","label":"Waiting reason","section":"NOW DECODING","modes":["debug"],"format":"text","placement":"notes","available_on":["apple"]},{"id":"decoder","label":"Decoder","section":"NOW DECODING","modes":["debug"],"format":"text","available_on":["web","android"],"note":"hardware / software, with the reason when software."},{"id":"stalls","label":"Stalls","section":"NOW DECODING","modes":["standard","debug"],"format":"text","note":"\"2 (1 supply · 1 decode)\" — player-side stall count this session."},{"id":"subtitles","label":"Subtitles","section":"NOW DECODING","modes":["standard","debug"],"format":"text","note":"Track name; the delivery clause (native · burned · overlay) is a note under the same label."},{"id":"delivery_rate","label":"Delivery rate","section":"NETWORK","modes":["mini","standard","debug"],"format":"bitrate","note":"Server-reported delivered rate; \"· idle\" appended when delivery has gone quiet. One label — not Delivery in one mode and Delivery rate in another."},{"id":"observed_rate","label":"Observed rate","section":"NETWORK","modes":["debug"],"format":"bitrate","note":"The player's own throughput estimate."},{"id":"stream_rate","label":"Stream rate","section":"NETWORK","modes":["debug"],"format":"bitrate","note":"The declared rate of the rendition being played."},{"id":"delivered","label":"Delivered","section":"NETWORK","modes":["standard","debug"],"format":"bytes","note":"Server-reported bytes for this session. Never labelled Transferred."},{"id":"transferred","label":"Transferred","section":"NETWORK","modes":["debug"],"format":"bytes","available_on":["apple"],"note":"Client access-log bytes — a different number from Delivered, so a different label."},{"id":"requests","label":"Requests","section":"NETWORK","modes":["debug"],"format":"count","available_on":["apple"]},{"id":"delivery_idle","label":"Delivery idle","section":"NETWORK","modes":["debug"],"format":"millis"},{"id":"started_in","label":"Started in","section":"NETWORK","modes":["debug"],"format":"seconds","note":"Time to first frame."},{"id":"status","label":"Status","section":"SERVER","modes":["standard","debug"],"format":"text","always":true,"note":"One vocabulary: No server-side session · Active · Holding buffer · Served from cache (+ the VOD states on the web). Debug shows it too."},{"id":"encoder","label":"Encoder","section":"SERVER","modes":["standard","debug"],"format":"text"},{"id":"encode_speed","label":"Encode speed","section":"SERVER","modes":["standard","debug"],"format":"speed","note":"\"(avg)\" appended when only the cumulative figure exists. Never abbreviated to Encode."},{"id":"server_ahead","label":"Server ahead","section":"SERVER","modes":["standard","debug"],"format":"seconds","note":"Produced beyond the playhead. Held state and time-release are a note under the same label, never inlined into the value. One label — not Ahead / Buffer ahead / Server ahead."},{"id":"ahead_bytes","label":"Ahead bytes","section":"SERVER","modes":["debug"],"format":"bytes"},{"id":"produced","label":"Produced","section":"SERVER","modes":["debug"],"format":"clock"},{"id":"pacing","label":"Pacing","section":"SERVER","modes":["debug"],"format":"speed"},{"id":"held","label":"Held","section":"SERVER","modes":["debug"],"format":"yesno"},{"id":"hold_reason","label":"Hold reason","section":"SERVER","modes":["debug"],"format":"text"},{"id":"suspend_count","label":"Suspend count","section":"SERVER","modes":["debug"],"format":"count"},{"id":"demand_window","label":"Demand window","section":"SERVER","modes":["debug"],"format":"text","available_on":["web"]},{"id":"request_idle","label":"Request idle","section":"SERVER","modes":["debug"],"format":"seconds"},{"id":"last_request","label":"Last request","section":"SERVER","modes":["debug"],"format":"text","placement":"notes"},{"id":"playlist","label":"Playlist","section":"SERVER","modes":["debug"],"format":"text"},{"id":"published_end","label":"Published end","section":"SERVER","modes":["debug"],"format":"millis"},{"id":"fetched_end","label":"Fetched end","section":"SERVER","modes":["debug"],"format":"millis"},{"id":"control","label":"Control","section":"SERVER","modes":["standard","debug"],"format":"text","note":"Playback-control session owner and state; timing and failure are notes under the same label in Debug."}];
+const PLAYBACK_INFO_FIELDS=[{"id":"method","label":"Method","section":"PLAYBACK","modes":["mini","standard","debug"],"format":"text","note":"The delivery verdict — the same vocabulary on every client: Direct play · Remux · Transcode · Transcode · cached; the encoder and rung follow as a clause (\"Transcode · nvenc · 1080p\")."},{"id":"playback_mode","label":"Playback mode","section":"PLAYBACK","modes":["debug"],"format":"text","available_on":["web"],"note":"Live HLS / VOD HLS / progressive — the web presentation kind. Native players have one presentation."},{"id":"position","label":"Position","section":"PLAYBACK","modes":["mini","standard","debug"],"format":"position"},{"id":"reason","label":"Reason","section":"PLAYBACK","modes":["standard","debug"],"format":"list","placement":"notes","note":"Why the server chose this method."},{"id":"build","label":"Build","section":"PLAYBACK","modes":["debug"],"format":"text","always":true},{"id":"transport","label":"Transport","section":"PLAYBACK","modes":["debug"],"format":"text","placement":"notes"},{"id":"file_id","label":"File ID","section":"PLAYBACK","modes":["debug"],"format":"text"},{"id":"session","label":"Session","section":"PLAYBACK","modes":["debug"],"format":"text","placement":"notes"},{"id":"switched","label":"Switched","section":"PLAYBACK","modes":["debug"],"format":"list","placement":"notes","available_on":["web"],"note":"Auto-quality moves this session."},{"id":"source_video","label":"Video","section":"SOURCE","modes":["standard","debug"],"format":"list","placement":"notes","note":"codec · profile · bit depth · HDR format."},{"id":"source_resolution","label":"Resolution","section":"SOURCE","modes":["standard","debug"],"format":"resolution"},{"id":"source_bitrate","label":"Bitrate","section":"SOURCE","modes":["standard","debug"],"format":"bitrate"},{"id":"container","label":"Container","section":"SOURCE","modes":["standard","debug"],"format":"text"},{"id":"source_audio","label":"Audio","section":"SOURCE","modes":["standard","debug"],"format":"list","placement":"notes","note":"codec · channels · language, \"+N tracks\" when more exist."},{"id":"source_file","label":"File","section":"SOURCE","modes":["debug"],"format":"text","placement":"notes"},{"id":"av_offset","label":"AV offset","section":"SOURCE","modes":["debug"],"format":"millis","always":true,"note":"Applied offset; the container-declared value follows in parentheses when it differs."},{"id":"decode_resolution","label":"Resolution","section":"NOW DECODING","modes":["mini","standard","debug"],"format":"resolution"},{"id":"dynamic_range","label":"Dynamic range","section":"NOW DECODING","modes":["mini","standard","debug"],"format":"text","placement":"notes","note":"Mini shows the chip form (\"DV P7 → HDR10\"); the ledger shows the sentence."},{"id":"decode_audio","label":"Audio","section":"NOW DECODING","modes":["debug"],"format":"list","placement":"notes","note":"What the player's audio output actually is (route-aware where the platform says)."},{"id":"frames","label":"Frames","section":"NOW DECODING","modes":["standard","debug"],"format":"fraction","available_on":["web","android"],"note":"dropped / total. AVPlayer does not expose it."},{"id":"frame_rate","label":"Frame rate","section":"NOW DECODING","modes":["debug"],"format":"text","available_on":["web"]},{"id":"player_state","label":"Player state","section":"NOW DECODING","modes":["debug"],"format":"text","note":"One vocabulary: Playing · Paused · Buffering · Ended · Failed."},{"id":"waiting_reason","label":"Waiting reason","section":"NOW DECODING","modes":["debug"],"format":"text","placement":"notes","available_on":["apple"]},{"id":"decoder","label":"Decoder","section":"NOW DECODING","modes":["debug"],"format":"text","available_on":["web","android"],"note":"hardware / software, with the reason when software."},{"id":"stalls","label":"Stalls","section":"NOW DECODING","modes":["standard","debug"],"format":"text","note":"\"2 (1 supply · 1 decode)\" — player-side stall count this session."},{"id":"subtitles","label":"Subtitles","section":"NOW DECODING","modes":["standard","debug"],"format":"text","note":"Track name; the delivery clause (native · burned · overlay) is a note under the same label."},{"id":"source_read","label":"Source read","section":"BUFFERING / DELIVERY","modes":["debug"],"format":"text","always":true,"note":"Measured source read activity only. Configured input pacing is not a measurement; unsupported clients show Unavailable."},{"id":"server_ready","label":"Server ready","section":"BUFFERING / DELIVERY","modes":["standard","debug"],"format":"seconds","always":true,"note":"Contiguous complete media beginning at the latest accepted absolute playhead or seek anchor. Missing is 0.0 s; unobservable or evicted coverage is Unavailable."},{"id":"ready_state","label":"Ready state","section":"BUFFERING / DELIVERY","modes":["debug"],"format":"text","always":true,"note":"Ready · Missing · Unavailable; kept separate so unknown is never rendered as zero."},{"id":"ready_anchor","label":"Ready anchor","section":"BUFFERING / DELIVERY","modes":["debug"],"format":"millis"},{"id":"ready_end","label":"Ready end","section":"BUFFERING / DELIVERY","modes":["debug"],"format":"millis"},{"id":"later_ready","label":"Later ready","section":"BUFFERING / DELIVERY","modes":["debug"],"format":"text","placement":"notes","note":"A later contiguous ready island is diagnostic context, never runway at the current playhead."},{"id":"http_wait","label":"HTTP wait","section":"BUFFERING / DELIVERY","modes":["standard","debug"],"format":"text","note":"Active server-side media responses waiting for publication. This does not describe client buffering."},{"id":"client_loaded","label":"Client loaded","section":"BUFFERING / DELIVERY","modes":["mini","standard","debug"],"format":"seconds","note":"Contiguous native/browser loaded media ahead of the attached current playhead. Prepared successors never contribute."},{"id":"presentation","label":"Presentation","section":"BUFFERING / DELIVERY","modes":["standard","debug"],"format":"text","note":"The player's observed presentation state; it does not infer a server or network cause."},{"id":"presentation_age","label":"Last advance","section":"BUFFERING / DELIVERY","modes":["standard","debug"],"format":"millis","note":"Age of the last observed film-clock or frame advance. Unavailable until an advance has been observed."},{"id":"delivery_rate","label":"Delivery rate","section":"BUFFERING / DELIVERY","modes":["mini","standard","debug"],"format":"bitrate","note":"Server-reported completed-response rate; \"· idle\" appended when delivery has gone quiet. Completion is not proof of receipt or decode."},{"id":"delivered","label":"Delivered","section":"BUFFERING / DELIVERY","modes":["standard","debug"],"format":"bytes","note":"Server-reported completed response bytes for this session. Never labelled Transferred."},{"id":"delivery_idle","label":"Delivery idle","section":"BUFFERING / DELIVERY","modes":["debug"],"format":"millis"},{"id":"status_age","label":"Status sample age","section":"BUFFERING / DELIVERY","modes":["debug"],"format":"millis","note":"Age since this client received the currently displayed server sample."},{"id":"observed_rate","label":"Observed rate","section":"NETWORK","modes":["debug"],"format":"bitrate","note":"The player's own throughput estimate."},{"id":"stream_rate","label":"Stream rate","section":"NETWORK","modes":["debug"],"format":"bitrate","note":"The declared rate of the rendition being played."},{"id":"transferred","label":"Transferred","section":"NETWORK","modes":["debug"],"format":"bytes","available_on":["apple"],"note":"Client access-log bytes — a different number from Delivered, so a different label."},{"id":"requests","label":"Requests","section":"NETWORK","modes":["debug"],"format":"count","available_on":["apple"]},{"id":"started_in","label":"Started in","section":"NETWORK","modes":["debug"],"format":"seconds","note":"Time to first frame."},{"id":"status","label":"Status","section":"SERVER","modes":["standard","debug"],"format":"text","always":true,"note":"One vocabulary: No server-side session · Active · Holding buffer · Served from cache (+ the VOD states on the web). Debug shows it too."},{"id":"encoder","label":"Encoder","section":"SERVER","modes":["standard","debug"],"format":"text"},{"id":"encode_speed","label":"Encode speed","section":"SERVER","modes":["standard","debug"],"format":"speed","note":"\"(avg)\" appended when only the cumulative figure exists. Never abbreviated to Encode."},{"id":"production_actual","label":"Production actual","section":"SERVER","modes":["standard","debug"],"format":"seconds","note":"Actor-owned media produced beyond accepted client demand. This is producer control, not a client or server-ready buffer."},{"id":"production_target","label":"Production target","section":"SERVER","modes":["standard","debug"],"format":"seconds","note":"Actor-owned pacing target. Advisory policy is never relabelled as measured buffer."},{"id":"producer_state","label":"Producer","section":"SERVER","modes":["standard","debug"],"format":"text"},{"id":"fetch_reserve","label":"Fetch reserve","section":"SERVER","modes":["debug"],"format":"seconds","note":"Compatibility frontier measured beyond the last fetched segment, not beyond the playhead."},{"id":"ahead_bytes","label":"Fetch reserve bytes","section":"SERVER","modes":["debug"],"format":"bytes"},{"id":"produced","label":"Produced","section":"SERVER","modes":["debug"],"format":"clock"},{"id":"pacing","label":"Pacing","section":"SERVER","modes":["debug"],"format":"speed"},{"id":"held","label":"Held","section":"SERVER","modes":["debug"],"format":"yesno"},{"id":"hold_reason","label":"Hold reason","section":"SERVER","modes":["debug"],"format":"text"},{"id":"suspend_count","label":"Suspend count","section":"SERVER","modes":["debug"],"format":"count"},{"id":"demand_window","label":"Demand window","section":"SERVER","modes":["debug"],"format":"text","available_on":["web"]},{"id":"request_idle","label":"Request idle","section":"SERVER","modes":["debug"],"format":"seconds"},{"id":"last_request","label":"Last request","section":"SERVER","modes":["debug"],"format":"text","placement":"notes"},{"id":"playlist","label":"Playlist","section":"SERVER","modes":["debug"],"format":"text"},{"id":"published_end","label":"Published end","section":"SERVER","modes":["debug"],"format":"millis"},{"id":"fetched_end","label":"Fetched end","section":"SERVER","modes":["debug"],"format":"millis"},{"id":"control","label":"Control","section":"SERVER","modes":["standard","debug"],"format":"text","note":"Playback-control session owner and state; timing and failure are notes under the same label in Debug."}];
 // ---- end playback info fields ----
 const STATS_ROWS=Object.freeze(Object.fromEntries(PLAYBACK_INFO_FIELDS.map(field=>[
   field.id,Object.freeze({
@@ -12542,7 +12552,7 @@ function playbackInfoMarkup(mode,rows,healthWord,healthStatus){
       sectionRows.map(row=>`<div class="r" data-stats-id="${row.id}"><b>${esc(row.label)}</b><span class="v"></span></div>`).join("")+`</div>`;
   };
   const left=["PLAYBACK","SOURCE","NOW DECODING"].map(gridSection).join("");
-  const right=["NETWORK","SERVER"].map(gridSection).join("");
+  const right=["BUFFERING / DELIVERY","NETWORK","SERVER"].map(gridSection).join("");
   const noteHtml=rows.length?`<div class="snotes">`+rows.map(row=>
     `<div class="snote" ${row.placement==="notes"?`data-stats-id="${row.id}"`:`data-stats-note="${row.id}"`}><b>${esc(row.label)}</b><span class="v"></span></div>`
   ).join("")+`</div>`:"";
@@ -12708,6 +12718,31 @@ function playbackModeDetail(player){
 function statsCount(value){
   return String(Math.max(0,Math.trunc(Number(value)||0))).replace(/\B(?=(\d{3})+(?!\d))/g," ");
 }
+function statsServerReady(health){
+  if(!health||health.server_ready_state==null) return {value:"Unavailable",state:"Unavailable"};
+  const state=String(health.server_ready_state).toLowerCase();
+  if(state==="missing") return {value:"0.0 s",state:"Missing"};
+  if(state==="ready"&&Number.isFinite(Number(health.server_ready_seconds))){
+    return {value:`${Math.max(0,Number(health.server_ready_seconds)).toFixed(1)} s`,state:"Ready"};
+  }
+  return {value:"Unavailable",state:"Unavailable"};
+}
+function statsHttpWait(health){
+  if(!health||health.http_wait_count==null) return null;
+  const count=Math.max(0,Math.trunc(Number(health.http_wait_count)||0));
+  const note=count>0?[
+    health.http_wait_oldest_ms==null?null:`oldest ${Math.max(0,Math.round(health.http_wait_oldest_ms))} ms`,
+    health.http_wait_segment==null?null:`segment ${health.http_wait_segment}`
+  ].filter(Boolean).join(" · ")||null:null;
+  return {value:`${count} active`,note};
+}
+function playbackWaitCopy(runwaySeconds,httpWaitCount){
+  const runway=Number.isFinite(Number(runwaySeconds))?Math.max(0,Number(runwaySeconds)):0;
+  const waits=httpWaitCount==null?null:Math.max(0,Math.trunc(Number(httpWaitCount)||0));
+  const waitText=waits==null?"server wait state unavailable":waits===0?"no server HTTP waits":
+    `${waits} server HTTP ${waits===1?"wait":"waits"}`;
+  return {title:"Presentation waiting…",detail:`${runway.toFixed(1)} s client loaded · ${waitText}`};
+}
 function playbackStatsTelemetry(){
   const v=document.getElementById("video"),p=PLAYER||{},s=p.source||{},h=p.health||null;
   const audio=p.audio&&p.audio[p.curAudio];
@@ -12723,8 +12758,8 @@ function playbackStatsTelemetry(){
     audio.channels?fmtChannels(audio.channels):null,
     audio.language?(langName(audio.language)||audio.language):null,
     p.audio&&p.audio.length>1?`+${p.audio.length-1} tracks`:null].filter(Boolean).join(" · "):null;
-  let bufferSeconds=0;
-  try{ bufferSeconds=bufferRunway(v); }catch(e){}
+  let clientLoadedSeconds=0;
+  try{ clientLoadedSeconds=bufferRunway(v); }catch(e){}
   let frames=null,droppedCount=null,frameRate=p._fpsVal==null?null:p._fpsVal;
   try{
     const quality=v&&v.getVideoPlaybackQuality&&v.getVideoPlaybackQuality();
@@ -12768,6 +12803,10 @@ function playbackStatsTelemetry(){
   const controlNote=controlStatus&&STATS_MODE==="debug"?
     `${(controlStatus.next_exchange_ms/1000).toFixed(1)} s cadence · ${Math.round(controlStatus.lease_timeout_ms/1000)} s ${lease.label} lease`+
       (p.controlLastError?` · ${p.controlLastError.message}`:""):null;
+  const ready=statsServerReady(h),httpWait=statsHttpWait(h);
+  const presentationAge=p.presentationAdvancedAt==null?null:
+    Math.max(0,Math.round(performance.now()-p.presentationAdvancedAt));
+  const presentation=playbackState==="Playing"?"Advancing":playbackState;
   return {
     method,playback_mode:playbackModeDetail(p),position:`${clockFromSec(position)} / ${total>0?clockFromSec(total):"—"}`+
       (v&&v.playbackRate&&v.playbackRate!==1?` · ${v.playbackRate}×`:""),
@@ -12782,20 +12821,36 @@ function playbackStatsTelemetry(){
     av_offset:`${p.aoffset||0} ms`,av_offset_note:p.declared&&p.declared!==(p.aoffset||0)?`container ${p.declared>0?"+":""}${p.declared} ms`:null,
     decode_resolution:v&&v.videoWidth?`${v.videoWidth}×${v.videoHeight}`:null,
     dynamic_range:range?range.panel:null,dynamic_range_mini:range?range.text:null,
-    decode_audio:sourceAudio,buffer:`${Math.max(0,bufferSeconds).toFixed(1)} s`,
+    decode_audio:sourceAudio,
     frames,frames_tone:droppedCount==null?"muted":droppedCount===0?"good":droppedCount<3?"warn":"bad",
     frame_rate:frameRate==null?null:`${frameRate.toFixed(1)} fps`,player_state:playbackState,
     decoder:p.decodeInfo?(p.decodeInfo.hw?"hardware":"software · this machine has no GPU path for this stream"):null,
     stalls:`${stalls}${stallParts.length?` (${stallParts.join(" · ")})`:""}`,
     subtitles:subtitle,subtitles_note:subtitleDelivery,
+    source_read:"Unavailable",server_ready:ready.value,ready_state:ready.state,
+    ready_anchor:h&&h.server_ready_anchor_ms!=null?`${Math.round(h.server_ready_anchor_ms)} ms`:null,
+    ready_end:h&&h.server_ready_end_ms!=null?`${Math.round(h.server_ready_end_ms)} ms`:null,
+    later_ready:h&&h.server_next_ready_start_ms!=null&&h.server_next_ready_end_ms!=null?
+      `${Math.round(h.server_next_ready_start_ms)}–${Math.round(h.server_next_ready_end_ms)} ms`:null,
+    http_wait:httpWait&&httpWait.value,http_wait_note:httpWait&&httpWait.note,
+    client_loaded:`${Math.max(0,clientLoadedSeconds).toFixed(1)} s`,
+    client_loaded_tone:statsRunwayTone(clientLoadedSeconds,false),
+    presentation,presentation_tone:playbackState==="Playing"?"good":
+      playbackState==="Buffering"?"warn":playbackState==="Failed"?"bad":"",
+    presentation_age:presentationAge==null?null:`${presentationAge} ms`,
+    presentation_age_tone:presentationAge==null?"muted":presentationAge>8000?"bad":presentationAge>2000?"warn":"good",
     delivery_rate:delivery,observed_rate:p.hls&&p.hls.bandwidthEstimate?fmtMbps(p.hls.bandwidthEstimate):null,
     stream_rate:level&&level.bitrate?fmtMbps(level.bitrate):null,
     delivered:h&&h.delivered_bytes!=null?(fmtBytes(h.delivered_bytes)||"0 B"):null,
     delivery_idle:h&&h.delivered_idle_ms!=null?`${Math.round(h.delivered_idle_ms)} ms`:null,
+    status_age:h&&p.healthObservedAt!=null?`${Math.max(0,Math.round(performance.now()-p.healthObservedAt))} ms`:null,
     started_in:p.ttffMs!=null?`${(p.ttffMs/1000).toFixed(1)} s`:null,
     status,encoder,encode_speed:speed==null?null:`${speed.toFixed(2)}×${h&&h.recent_speed==null?" (avg)":""}`,
-    server_ahead:h&&h.ahead_seconds!=null?`${Math.max(0,h.ahead_seconds).toFixed(1)} s`:null,
-    server_ahead_note:serverAheadNote,ahead_bytes:h&&h.ahead_bytes!=null?(fmtBytes(h.ahead_bytes)||"0 B"):null,
+    production_actual:h&&h.production_ahead_seconds!=null?`${Math.max(0,h.production_ahead_seconds).toFixed(1)} s`:null,
+    production_target:h&&h.production_target_seconds!=null?`${Math.max(0,h.production_target_seconds).toFixed(1)} s`:null,
+    producer_state:h&&h.producer_state?String(h.producer_state):null,
+    fetch_reserve:h&&h.ahead_seconds!=null?`${Math.max(0,h.ahead_seconds).toFixed(1)} s`:null,
+    fetch_reserve_note:serverAheadNote,ahead_bytes:h&&h.ahead_bytes!=null?(fmtBytes(h.ahead_bytes)||"0 B"):null,
     produced:h&&h.out_time_ms!=null?clockFromSec(h.out_time_ms/1000):null,
     pacing:h&&h.readrate!=null?`${Number(h.readrate).toFixed(2)}×`:null,
     held:h? (h.suspended?"Yes":"No"):null,hold_reason:h&&h.hold_reason||null,
@@ -12840,10 +12895,22 @@ async function pollSessionHealth(force){
   // a file is being read, and the browser is the only one who knows how fast.
   const url = p.sessionId? `/hls/${p.sessionId}/status`
             : p.streamId? `/stream/${p.streamId}/status` : null;
-  if(!url){ if(p.health){ p.health=null; updateStats(); } return; }
+  if(!url){
+    if(p.health||p.healthObservedAt!=null){ p.health=null; p.healthObservedAt=null; updateStats(); }
+    return;
+  }
   try{
     const h=await api(url);
-    if(current()) { p.health=h; updateStats(); }
+    if(current()) {
+      p.health=h;
+      p.healthObservedAt=performance.now();
+      if(p.waitAt!=null&&!p.stallPrompt){
+        const video=document.getElementById("video");
+        const copy=playbackWaitCopy(video?bufferRunway(video):0,h.http_wait_count);
+        setLoading(true,copy.title,copy.detail);
+      }
+      updateStats();
+    }
   }catch(e){
     // A stream that has finished deregisters, and a short film's remux finishes
     // long before the viewer does. Blanking the panel at that moment is exactly
@@ -14285,7 +14352,7 @@ function renderSettings(){
 }
 function settingsPanel(tab,d){
   if(tab==="metadata")     return metadataPanel(d.settings);
-  if(tab==="playback")     return playbackPanel(d.settings,d.developerReadiness);
+  if(tab==="playback")     return playbackPanel(d.settings);
   if(tab==="livetv")       return liveTvPanel(d.settings);
   if(tab==="analysis")     return analysisSettingsPanel(d.settings,d.analysis);
   if(tab==="maintenance")  return maintenancePanel(d.settings,d.dvConversions);
@@ -14696,7 +14763,7 @@ function analysisSettingsPanel(settings,snapshot){
       <div class="analysis-diag-grid"><b>1 · Verify</b><span>Read and hash the exact source without blocking playback.</span><b>2 · Index</b><span>Build a complete fragment timeline on an eligible media worker.</span><b>3 · Publish</b><span>Store the content-addressed artifact and mark the file VOD HLS ready.</span></div>
     </div>`;
 }
-function playbackPanel(settings,readiness){
+function playbackPanel(settings){
   const vodWorking=Number(settings.vod_working_set_bytes)||(8*1024*1024*1024);
   const vodMaterialize=Number(settings.vod_materialize_budget_secs)||30;
   const vodBlockedGets=Number(settings.vod_blocked_get_cap)||64;
@@ -14740,7 +14807,7 @@ function playbackPanel(settings,readiness){
       ${togRow("autonext","Auto-play the next episode when one finishes","",autoNextOn(),'onchange="setAutoNext(this.checked)"')}
       <div class="tog"><span>Measured playback limits<small>When an original stream loses visible frames, this browser remembers that exact media load — codec/profile, resolution, bit depth, dynamic range, and a 10 Mb/s bitrate band — and lets <b>Auto</b> transcode it next time instead of stuttering first. A measurement expires after 30 days; <b>Quality → Original</b> always bypasses it.</small></span></div>
       <div class="row" id="dlrow">${decodeLimitsSummary()}</div>`,{local:true});
-  return `${setHead("Playback","How streams start, how they are delivered, and what every player picks by default.")}${defaults}${preparedQualityCard(settings,readiness)}${streaming}${local}`;
+  return `${setHead("Playback","How streams start, how they are delivered, and what every player picks by default.")}${defaults}${streaming}${local}`;
 }
 // Live TV owns its own media element and capability. It never enters PLAYER,
 // file progress, playback-control, watched state, autoskip, or Trakt.
@@ -15806,7 +15873,7 @@ function clusterTransportRecoveryCard(readiness){
 function preparedQualityCard(settings,readiness){
   return setCard(`${cardHead("Quality switching","Prepare the next stream before replacing the one you are watching.",`<span class="pill" id="pqhstate">${settings.prepared_quality_handoff?"Enabled":"Disabled"}</span>`)}
       ${togRow("pqh",`Prepare quality changes <span class="pill warn">experimental</span>`,`Uses a second player and temporary server capacity to reduce interruptions. Applies after saving to the next eligible quality change.`,settings.prepared_quality_handoff)}
-      <div class="hint">Still experimental. Readiness is advisory and never overrides your choice. <a href="#/settings/developer">Browser compatibility controls</a> are in Developer.</div>
+      <div class="hint">Still experimental. This saved switch is authoritative; readiness is advisory and never overrides your choice. The browser-specific capability control is below.</div>
       <details class="setdetails"><summary>Readiness and device qualification</summary><div class="setdetails-body">
       <p class="hint">These readings describe this server. Missing evidence does not disable the setting.</p>
       <h3 class="devcheck-group">Server readiness</h3>
@@ -15850,7 +15917,8 @@ function developerPanel(settings,readiness){
   return `${setHead("Developer","Compatibility controls, experimental playback and device diagnostics.")}
       ${destinations}
       <div class="setsection"><h2>Library channels</h2><p>Explicit playback enablement with advisory deployment facts.</p></div>${libraryChannels}
-      <div class="setsection"><h2>Compatibility</h2><p>Protocol and browser preparation controls.</p></div>${protocol}${browser}
+      <div class="setsection"><h2>Prepared quality handoff</h2><p>Explicit server and browser enablement with advisory safety evidence.</p></div>${preparedQualityCard(settings,readiness)}${browser}
+      <div class="setsection"><h2>Compatibility</h2><p>Protocol controls for compatible playback clients.</p></div>${protocol}
       <div class="setsection"><h2>Decoder experiments</h2><p>Recovery and cache-policy experiments. Evidence is advisory; saved choices remain authoritative.</p></div>${verifiedDecodeCard(settings)}${decodeRecoveryCard(settings)}
       <div class="setsection"><h2>Delivery experiments</h2><p>Use these overrides for controlled comparisons.</p></div>${experimental}`;
 }

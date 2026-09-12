@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["83693106"]
+ignore = true
+reason = "This documentation-only commit froze the integrated B01–B05 candidate for its one final adversarial review. It changed no runtime behavior; the later status receipt records the review corrections and exact focused validation results."

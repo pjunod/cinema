@@ -324,8 +324,6 @@ pub struct RecoveredVod {
 }
 
 /// The facts a stall-reopen's normalization checks against its predecessor.
-// TODO(m3-wire): the allow comes out when the stall-reopen wiring lands.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct ReopenFacts {
     pub supersession_user: String,
@@ -419,6 +417,18 @@ pub struct VodSessionInfo {
     /// reads; this is the only part a client can act on, because
     /// `producer_state` flattens every failure to the word `failed`.
     pub producer_decision: Option<&'static str>,
+    pub control_demand: Option<&'static str>,
+    pub reported_position_ms: Option<i64>,
+    pub client_runway_ms: Option<i64>,
+    pub render_state: Option<&'static str>,
+    /// Playhead-anchored, contiguous materialized media. This is deliberately
+    /// separate from the fetch-anchored compatibility frontier below.
+    pub server_ready_state: &'static str,
+    pub server_ready_anchor_ms: Option<i64>,
+    pub server_ready_end_ms: Option<i64>,
+    pub server_ready_seconds: Option<f64>,
+    pub server_next_ready_start_ms: Option<i64>,
+    pub server_next_ready_end_ms: Option<i64>,
     pub published_end_ms: Option<i64>,
     /// The end of the contiguous materialized run measured from the segment
     /// this client was last served, rather than from segment 0.
@@ -468,6 +478,10 @@ pub struct VodSessionInfo {
     /// needs it.
     #[serde(skip)]
     pub delivered_idle_ms: i64,
+    pub http_wait_count: usize,
+    pub http_wait_oldest_ms: Option<i64>,
+    pub http_wait_segment: Option<i64>,
+    pub status_generated_unix_ms: i64,
     pub suspended: bool,
     #[serde(rename = "final")]
     pub final_: bool,
@@ -3792,8 +3806,6 @@ impl VodServe {
 
     /// Session ids still live (tombstoned excluded) — what the durable lease
     /// loop may renew.
-    // TODO(m3-wire): the allow comes out when the lease loop wiring lands.
-    #[allow(dead_code)]
     pub async fn live_session_ids(&self) -> Vec<String> {
         self.shared
             .sessions
@@ -3808,8 +3820,6 @@ impl VodServe {
     /// What a lease renewal reports for one live session: the film-time end,
     /// in ms, of the last segment it was served (0 before the first). `None`
     /// for unknown/tombstoned.
-    // TODO(m3-wire): the allow comes out when the lease loop wiring lands.
-    #[allow(dead_code)]
     pub async fn frontier_ms(&self, session_id: &str) -> Option<i64> {
         let rendition = {
             let sessions = self.shared.sessions.lock().await;
@@ -3851,7 +3861,7 @@ impl VodServe {
         &self,
         session_id: &str,
     ) -> Option<VodPublication<VodSessionInfo>> {
-        let (rendition, target_height, owner, delivery) = {
+        let (rendition, target_height, owner, delivery, control_snapshot) = {
             let sessions = self.shared.sessions.lock().await;
             let session = sessions.get(session_id)?;
             if session.tombstone.is_some() {
@@ -3862,8 +3872,10 @@ impl VodServe {
                 session.target_height,
                 session.response_owner(),
                 Arc::clone(&session.delivery),
+                session.last_control_snapshot.clone(),
             )
         };
+        let init_present = rendition.dir.has_init().await;
         let last_served = rendition
             .readers
             .lock()
@@ -3878,6 +3890,12 @@ impl VodServe {
             admitted,
             published_end_ms,
             ready_ahead_end_ms,
+            server_ready_state,
+            server_ready_anchor_ms,
+            server_ready_end_ms,
+            server_ready_seconds,
+            server_next_ready_start_ms,
+            server_next_ready_end_ms,
         ) = {
             let manifest = rendition.manifest.lock().await;
             let end_of_contiguous_run = |start: u32| {
@@ -3896,6 +3914,53 @@ impl VodServe {
             // reported as hours of runway; only contiguous bytes count.
             let published = end_of_contiguous_run(0);
             let ready_ahead = end_of_contiguous_run(last_served.unwrap_or(0));
+            let ready_anchor = control_snapshot
+                .as_ref()
+                .map(crate::playback_control::PlaybackDemandSnapshot::buffer_anchor_ms);
+            let anchor_index = ready_anchor.and_then(|anchor| {
+                let index = entry_containing(&rendition.plan, anchor as f64 / 1_000.0);
+                let entry = rendition.plan.entry(index)?;
+                let start_ms = ticks_to_ms(entry.start_ticks, rendition.timescale);
+                let end_ms = ticks_to_ms(entry.end_ticks(), rendition.timescale);
+                (start_ms <= anchor && anchor < end_ms).then_some(index)
+            });
+            let anchored_end = anchor_index
+                .filter(|index| {
+                    init_present
+                        && manifest
+                            .state(*index)
+                            .is_some_and(SegState::is_materialized)
+                })
+                .and_then(end_of_contiguous_run);
+            let ready_state = if ready_anchor.is_none() {
+                "unavailable"
+            } else if anchored_end.is_some() {
+                "ready"
+            } else {
+                "missing"
+            };
+            let later_floor = anchored_end.or(ready_anchor);
+            let next_index = init_present
+                .then(|| {
+                    (0..manifest.len() as u32).find(|index| {
+                        let Some(entry) = rendition.plan.entry(*index) else {
+                            return false;
+                        };
+                        let start_ms = ticks_to_ms(entry.start_ticks, rendition.timescale);
+                        manifest
+                            .state(*index)
+                            .is_some_and(SegState::is_materialized)
+                            && later_floor.is_some_and(|floor| start_ms > floor)
+                    })
+                })
+                .flatten();
+            let next_interval = next_index.and_then(|index| {
+                let start = rendition.plan.entry(index)?;
+                Some((
+                    ticks_to_ms(start.start_ticks, rendition.timescale),
+                    end_of_contiguous_run(index)?,
+                ))
+            });
             (
                 manifest.materialized_count(),
                 manifest.len(),
@@ -3904,8 +3969,19 @@ impl VodServe {
                 manifest.is_admitted(),
                 published,
                 ready_ahead,
+                ready_state,
+                ready_anchor,
+                anchored_end
+                    .or_else(|| (ready_state == "missing").then_some(ready_anchor).flatten()),
+                anchored_end
+                    .zip(ready_anchor)
+                    .map(|(end, anchor)| end.saturating_sub(anchor) as f64 / 1_000.0)
+                    .or_else(|| (ready_state == "missing").then_some(0.0)),
+                next_interval.map(|(start, _)| start),
+                next_interval.map(|(_, end)| end),
             )
         };
+        let wait = self.shared.pool.session_snapshot(session_id);
         let failed = rendition.failure();
         let belief = rendition.slot.belief().await;
         let complete = planned_segments > 0 && materialized_segments == planned_segments;
@@ -3944,6 +4020,24 @@ impl VodServe {
             .and_then(|index| rendition.plan.entry(index))
             .map(|entry| ticks_to_ms(entry.end_ticks(), rendition.timescale))
             .unwrap_or(0);
+        let control_demand = control_snapshot
+            .as_ref()
+            .map(|snapshot| match snapshot.demand {
+                crate::playback_control::PlaybackDemand::Active => "active",
+                crate::playback_control::PlaybackDemand::Hold => "hold",
+                crate::playback_control::PlaybackDemand::End => "end",
+            });
+        let render_state = control_snapshot
+            .as_ref()
+            .map(|snapshot| match snapshot.render_state {
+                crate::playback_control::RenderState::Starting => "starting",
+                crate::playback_control::RenderState::Rendering => "rendering",
+                crate::playback_control::RenderState::Waiting => "waiting",
+                crate::playback_control::RenderState::Stalled => "stalled",
+                crate::playback_control::RenderState::Seeking => "seeking",
+                crate::playback_control::RenderState::Ended => "ended",
+                crate::playback_control::RenderState::Failed => "failed",
+            });
         Some(VodPublication {
             result: Ok(VodSessionInfo {
                 id: session_id.to_owned(),
@@ -3955,6 +4049,20 @@ impl VodServe {
                 producer_hold,
                 producer_failed: failed.as_ref().map(|f| f.cause.clone()),
                 producer_decision: failed.as_ref().map(|f| f.decision.status()),
+                control_demand,
+                reported_position_ms: control_snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.position_ms),
+                client_runway_ms: control_snapshot
+                    .as_ref()
+                    .map(crate::playback_control::PlaybackDemandSnapshot::runway_ms),
+                render_state,
+                server_ready_state,
+                server_ready_anchor_ms,
+                server_ready_end_ms,
+                server_ready_seconds,
+                server_next_ready_start_ms,
+                server_next_ready_end_ms,
                 published_end_ms,
                 ready_ahead_end_ms,
                 fetched_end_ms,
@@ -3973,6 +4081,10 @@ impl VodServe {
                 delivered_bytes: delivery.total_bytes(),
                 delivered_bps: delivery.recent_bps().map(|bytes| bytes * 8),
                 delivered_idle_ms: delivery.idle_for_ms(),
+                http_wait_count: wait.count,
+                http_wait_oldest_ms: wait.oldest_ms,
+                http_wait_segment: wait.oldest_segment.map(i64::from),
+                status_generated_unix_ms: crate::media_sessions::unix_ms(),
                 suspended,
                 final_: complete,
             }),
@@ -4465,8 +4577,6 @@ impl VodServe {
 
     /// The facts a stall-reopen's normalization checks against its
     /// predecessor. `None` for unknown/tombstoned.
-    // TODO(m3-wire): the allow comes out when the stall-reopen wiring lands.
-    #[allow(dead_code)]
     pub async fn reopen_facts(&self, session_id: &str) -> Option<ReopenFacts> {
         let sessions = self.shared.sessions.lock().await;
         let session = sessions.get(session_id)?;
@@ -12187,6 +12297,11 @@ mod tests {
         let base = crate::test_tempdir().expect("base");
         let serve = bare_serve(base.path());
         let rendition = synthetic_rendition(base.path()).await;
+        rendition
+            .dir
+            .write_init(b"fixture-init")
+            .await
+            .expect("init");
         rendition.attach_reader("sess-a", 20).await;
         {
             let mut manifest = rendition.manifest.lock().await;
@@ -12202,6 +12317,17 @@ mod tests {
             .get_mut("sess-a")
             .expect("reader")
             .last_served = Some(20);
+        let anchor_ms = rendition
+            .plan
+            .entry(20)
+            .map(|entry| ticks_to_ms(entry.start_ticks, rendition.timescale) + 1)
+            .expect("seek entry");
+        let mut control_snapshot = crate::playback_control::PlaybackDemandSnapshot::test_default(
+            crate::playback_control::ClientPlatform::Apple,
+        );
+        control_snapshot.position_ms = anchor_ms;
+        control_snapshot.buffered_from_ms = Some(anchor_ms);
+        control_snapshot.buffered_through_ms = anchor_ms;
         serve.shared.sessions.lock().await.insert(
             "sess-a".into(),
             Session {
@@ -12222,7 +12348,7 @@ mod tests {
                 delivery: Arc::new(crate::meter::Meter::new()),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
                 marker_destinations: Vec::new(),
-                last_control_snapshot: None,
+                last_control_snapshot: Some(control_snapshot),
                 control_end: None,
                 control_end_snapshot: None,
                 terminal_cleanup: None,
@@ -12249,6 +12375,15 @@ mod tests {
             "the run from this client's own segment does not",
         );
         assert_eq!(status.fetched_end_ms, end_of(20));
+        assert_eq!(status.server_ready_state, "ready");
+        assert_eq!(status.server_ready_anchor_ms, Some(anchor_ms));
+        assert_eq!(status.server_ready_end_ms, Some(end_of(22)));
+        assert_eq!(status.server_next_ready_start_ms, None);
+        assert_eq!(status.server_next_ready_end_ms, None);
+        assert_eq!(
+            status.server_ready_seconds,
+            Some((end_of(22) - anchor_ms) as f64 / 1_000.0)
+        );
         assert!(
             status.published_end_ms < Some(status.fetched_end_ms),
             "and the title's frontier is behind this client, which is the trap",
@@ -12264,6 +12399,23 @@ mod tests {
         }
         let filled = serve.status("sess-a").await.expect("live VOD status");
         assert_eq!(filled.published_end_ms, filled.ready_ahead_end_ms);
+
+        let beyond_end = end_of((rendition.plan.entries.len() - 1) as u32) + 1_000;
+        {
+            let mut sessions = serve.shared.sessions.lock().await;
+            let snapshot = sessions
+                .get_mut("sess-a")
+                .and_then(|session| session.last_control_snapshot.as_mut())
+                .expect("control snapshot");
+            snapshot.position_ms = beyond_end;
+            snapshot.buffered_from_ms = Some(beyond_end);
+            snapshot.buffered_through_ms = beyond_end;
+        }
+        let beyond = serve.status("sess-a").await.expect("live VOD status");
+        assert_eq!(beyond.server_ready_state, "missing");
+        assert_eq!(beyond.server_ready_seconds, Some(0.0));
+        assert_eq!(beyond.server_next_ready_start_ms, None);
+        assert_eq!(beyond.server_next_ready_end_ms, None);
     }
 
     #[tokio::test]

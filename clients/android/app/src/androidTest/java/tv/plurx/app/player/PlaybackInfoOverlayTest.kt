@@ -30,7 +30,7 @@ class PlaybackInfoOverlayTest {
                         fileId = 42,
                         delivery = "Transcode · nvenc · 1080p",
                         position = "0:31:04 / 2:03:04",
-                        buffer = "12.3 s",
+                        clientLoadedSeconds = 12.3,
                         frames = "2 / 12,342 frames",
                         sourceFile = "Example.2160p.mkv",
                         sourceVideo = "HEVC · Main 10 · 10-bit · HDR10",
