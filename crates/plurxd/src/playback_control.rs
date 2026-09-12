@@ -24378,9 +24378,10 @@ mod tests {
 
         let status =
             || RollingResponsePublication::attempt_status(RollingResponseObject::SessionStatus, 1);
-        assert!(actor
+        let before_media = actor
             .authorize_response_publication_at(started, status())
-            .is_ok());
+            .expect("status before first media");
+        assert!(!before_media.first_producer_media_publication);
         assert_eq!(
             actor.authorize_response_publication_at(
                 started,
@@ -24420,19 +24421,49 @@ mod tests {
             Err(ResponsePublicationRejection::InvalidBinding)
         );
 
-        assert!(actor
+        actor.apply_producer_flow_applied_at(
+            started + Duration::from_millis(1),
+            ProducerFlowApplied {
+                revision: 1,
+                producer_attempt: 1,
+                state: ProducerPhysicalFlowState::Held,
+                published_at: started + Duration::from_millis(1),
+            },
+        );
+        let held_at = started + Duration::from_millis(2);
+        let held_before = actor.snapshot_at(held_at);
+        let while_held = actor
+            .authorize_response_publication_at(held_at, status())
+            .expect("status while held");
+        let held_after = actor.snapshot_at(held_at);
+        assert!(!while_held.first_producer_media_publication);
+        assert_eq!(
+            held_after, held_before,
+            "status must be fully observational"
+        );
+
+        let first_media = actor
             .authorize_response_publication_at(
-                started,
+                held_at,
                 RollingResponsePublication::attempt_media(
                     RollingResponseObject::VideoMediaPlaylist,
                     1,
                     None,
                 ),
             )
-            .is_ok());
-        assert!(actor
-            .authorize_response_publication_at(started, status())
-            .is_ok());
+            .expect("first media while held");
+        assert!(first_media.first_producer_media_publication);
+        let published_at = started + Duration::from_millis(3);
+        let published_before = actor.snapshot_at(published_at);
+        let after_media = actor
+            .authorize_response_publication_at(published_at, status())
+            .expect("status after first media");
+        let published_after = actor.snapshot_at(published_at);
+        assert!(!after_media.first_producer_media_publication);
+        assert_eq!(
+            published_after, published_before,
+            "status cannot mutate retry, frontier, decision, recovery, or lease state"
+        );
     }
 
     #[tokio::test(start_paused = true)]

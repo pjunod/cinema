@@ -14307,7 +14307,24 @@ mod tests {
         let before_json: serde_json::Value =
             serde_json::from_slice(&before_body).expect("status JSON before media");
         assert!(before_json.get("producer_state").is_some());
-        assert_eq!(fixture.last_renewal_kind().await, "test-start");
+        assert!(matches!(
+            fixture.last_renewal_kind().await,
+            "test-transcode-start" | "test-copy-start"
+        ));
+
+        fixture.hold_actor_managed_producer().await;
+        let held_before = fixture.actor_snapshot().await;
+        assert_eq!(held_before.producer_control.physical_flow, "held");
+        let held = status(
+            State(fixture.state.clone()),
+            AxPath(session_id.to_owned()),
+            HeaderMap::new(),
+        )
+        .await
+        .expect("status while producer held");
+        assert_eq!(held.status(), StatusCode::OK);
+        let held_after = fixture.actor_snapshot().await;
+        assert_status_snapshot_is_observational(held_before, held_after);
 
         let segment_name = "seg00000.m4s";
         let segment_bytes = b"published-media";
@@ -14329,6 +14346,7 @@ mod tests {
             .wait_for_delivery_projection("media-segment", Some(0))
             .await;
 
+        let published_before = fixture.actor_snapshot().await;
         let after = status(
             State(fixture.state.clone()),
             AxPath(session_id.to_owned()),
@@ -14351,13 +14369,66 @@ mod tests {
             "media-segment",
             "status remains observational after publication"
         );
+        let published_after = fixture.actor_snapshot().await;
+        assert_status_snapshot_is_observational(published_before, published_after);
+    }
+
+    fn assert_status_snapshot_is_observational(
+        mut before: crate::playback_control::RollingLeaseSnapshot,
+        mut after: crate::playback_control::RollingLeaseSnapshot,
+    ) {
+        before.delivery.producer_progress_idle_ms = 0;
+        after.delivery.producer_progress_idle_ms = 0;
+        if let Some(exit) = before.delivery.producer_exit.as_mut() {
+            exit.observed_idle_ms = 0;
+        }
+        if let Some(exit) = after.delivery.producer_exit.as_mut() {
+            exit.observed_idle_ms = 0;
+        }
+        before.producer_control.deadline_remaining_ms =
+            before.producer_control.deadline_remaining_ms.map(|_| 0);
+        after.producer_control.deadline_remaining_ms =
+            after.producer_control.deadline_remaining_ms.map(|_| 0);
+        before.producer_control.due_overdue_ms = before.producer_control.due_overdue_ms.map(|_| 0);
+        after.producer_control.due_overdue_ms = after.producer_control.due_overdue_ms.map(|_| 0);
+        before.producer_control.executor_pending_decision_age_ms = before
+            .producer_control
+            .executor_pending_decision_age_ms
+            .map(|_| 0);
+        after.producer_control.executor_pending_decision_age_ms = after
+            .producer_control
+            .executor_pending_decision_age_ms
+            .map(|_| 0);
+        before.producer_control.pending_probe_deadline_remaining_ms = before
+            .producer_control
+            .pending_probe_deadline_remaining_ms
+            .map(|_| 0);
+        after.producer_control.pending_probe_deadline_remaining_ms = after
+            .producer_control
+            .pending_probe_deadline_remaining_ms
+            .map(|_| 0);
+        // The read is itself an actor command, so its ingress coordinate must
+        // advance. It is ordering evidence, not playback-state mutation.
+        before.producer_control.last_applied_sequence = 0;
+        after.producer_control.last_applied_sequence = 0;
+
+        assert_eq!(after.mode, before.mode);
+        assert_eq!(after.last_renewal_kind, before.last_renewal_kind);
+        assert_eq!(after.demand, before.demand);
+        assert_eq!(after.settled_target, before.settled_target);
+        assert_eq!(after.delivery, before.delivery);
+        assert_eq!(after.retired, before.retired);
+        assert_eq!(after.terminal, before.terminal);
+        assert_eq!(after.expiration_claimed, before.expiration_claimed);
+        assert_eq!(after.producer_control, before.producer_control);
     }
 
     #[tokio::test]
     async fn rolling_status_authz_covers_live_transcode_and_remux() {
         let transcode_dir = crate::test_tempdir().expect("transcode status directory");
         let transcode_id = uuid::Uuid::new_v4().to_string();
-        let transcode = HlsDeliveryFixture::publish(transcode_dir.path(), &transcode_id).await;
+        let transcode =
+            HlsDeliveryFixture::publish_actor_managed(transcode_dir.path(), &transcode_id).await;
         assert_rolling_status_before_and_after_media(
             &transcode,
             transcode_dir.path(),
@@ -14367,7 +14438,19 @@ mod tests {
 
         let remux_dir = crate::test_tempdir().expect("remux status directory");
         let remux_id = uuid::Uuid::new_v4().to_string();
-        let remux = HlsDeliveryFixture::publish_copy(remux_dir.path(), &remux_id).await;
+        let feed = plurx_core::testfixtures::pipe_with_distinct_hevc_sample_entries("closed-gop");
+        let mut reader = plurx_core::fmp4::FragmentReader::new();
+        reader.push(&feed);
+        let Some(plurx_core::fmp4::Unit::Init(init)) =
+            reader.next_unit().expect("parse remux init fixture")
+        else {
+            panic!("remux fixture must begin with init");
+        };
+        tokio::fs::write(remux_dir.path().join("init.mp4"), init.bytes)
+            .await
+            .expect("write complete remux init");
+        let remux =
+            HlsDeliveryFixture::publish_copy_actor_managed(remux_dir.path(), &remux_id).await;
         assert_rolling_status_before_and_after_media(&remux, remux_dir.path(), &remux_id).await;
     }
 
