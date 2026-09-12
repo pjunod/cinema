@@ -35,7 +35,6 @@ import androidx.compose.ui.semantics.SemanticsPropertyReceiver
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import kotlinx.coroutines.delay
 import tv.plurx.app.ui.FormFactor
@@ -124,28 +123,21 @@ fun Modifier.tvFocusRing(
  */
 internal val TvCompactContentPadding = PaddingValues(horizontal = 10.dp, vertical = 5.dp)
 internal val TvCompactMinHeight = 24.dp
-internal val TvCompactFontSize = 11.sp
 
 @Composable
 fun TvButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
-    compact: Boolean = false,
     content: @Composable RowScope.() -> Unit,
 ) {
     val shape = MaterialTheme.shapes.extraLarge
     TightTvButtonFocusBounds {
         Button(
             onClick = onClick,
-            modifier = if (compact) {
-                modifier.tvFocusRing(shape).defaultMinSize(minHeight = TvCompactMinHeight)
-            } else {
-                modifier.tvFocusRing(shape)
-            },
+            modifier = modifier.tvFocusRing(shape),
             enabled = enabled,
             shape = shape,
-            contentPadding = if (compact) TvCompactContentPadding else ButtonDefaults.ContentPadding,
             content = content,
         )
     }

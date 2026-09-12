@@ -13,10 +13,12 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -142,14 +144,19 @@ object LiveTvTypography {
         if (currentFormFactor() == FormFactor.Television) television else phone()
 
     @Composable
-    private fun phone(): LiveTvTypeScale = LiveTvTypeScale(
-        title = MaterialTheme.typography.titleMedium,
-        primary = MaterialTheme.typography.titleSmall,
-        cell = MaterialTheme.typography.labelSmall,
-        secondary = MaterialTheme.typography.bodyMedium,
-        tertiary = MaterialTheme.typography.labelSmall,
-        badge = MaterialTheme.typography.labelSmall,
-        eyebrow = MaterialTheme.typography.labelSmall,
+    private fun phone(): LiveTvTypeScale {
+        val typography = MaterialTheme.typography
+        return remember(typography) { phoneScale(typography) }
+    }
+
+    private fun phoneScale(typography: androidx.compose.material3.Typography) = LiveTvTypeScale(
+        title = typography.titleMedium,
+        primary = typography.titleSmall,
+        cell = typography.labelSmall,
+        secondary = typography.bodyMedium,
+        tertiary = typography.labelSmall,
+        badge = typography.labelSmall,
+        eyebrow = typography.labelSmall,
     )
 }
 
@@ -219,10 +226,11 @@ fun LiveTvChannelRow(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
             modifier = Modifier
                 .size(width = 52.dp, height = 32.dp)
                 .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(6.dp))
-                .padding(horizontal = 4.dp, vertical = 8.dp),
+                .wrapContentHeight(),
         )
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -400,7 +408,9 @@ fun LiveTvGuideGrid(
 
     val type = LiveTvTypography.current()
     Column(modifier) {
-        Row(Modifier.height(17.dp)) {
+        // 24 dp, not 17: `TvTextButton(compact = true)` has a 24 dp minimum
+        // and 5 dp of vertical padding, so a 17 dp parent clipped the chips.
+        Row(Modifier.heightIn(min = 24.dp)) {
             // Earlier / Now / Later live in the header's channel column
             // rather than as three more full-height buttons in the toolbar.
             Row(
