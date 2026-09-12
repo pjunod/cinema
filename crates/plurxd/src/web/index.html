@@ -14285,7 +14285,7 @@ function renderSettings(){
 }
 function settingsPanel(tab,d){
   if(tab==="metadata")     return metadataPanel(d.settings);
-  if(tab==="playback")     return playbackPanel(d.settings,d.developerReadiness);
+  if(tab==="playback")     return playbackPanel(d.settings);
   if(tab==="livetv")       return liveTvPanel(d.settings);
   if(tab==="analysis")     return analysisSettingsPanel(d.settings,d.analysis);
   if(tab==="maintenance")  return maintenancePanel(d.settings,d.dvConversions);
@@ -14696,7 +14696,7 @@ function analysisSettingsPanel(settings,snapshot){
       <div class="analysis-diag-grid"><b>1 · Verify</b><span>Read and hash the exact source without blocking playback.</span><b>2 · Index</b><span>Build a complete fragment timeline on an eligible media worker.</span><b>3 · Publish</b><span>Store the content-addressed artifact and mark the file VOD HLS ready.</span></div>
     </div>`;
 }
-function playbackPanel(settings,readiness){
+function playbackPanel(settings){
   const vodWorking=Number(settings.vod_working_set_bytes)||(8*1024*1024*1024);
   const vodMaterialize=Number(settings.vod_materialize_budget_secs)||30;
   const vodBlockedGets=Number(settings.vod_blocked_get_cap)||64;
@@ -14740,7 +14740,7 @@ function playbackPanel(settings,readiness){
       ${togRow("autonext","Auto-play the next episode when one finishes","",autoNextOn(),'onchange="setAutoNext(this.checked)"')}
       <div class="tog"><span>Measured playback limits<small>When an original stream loses visible frames, this browser remembers that exact media load — codec/profile, resolution, bit depth, dynamic range, and a 10 Mb/s bitrate band — and lets <b>Auto</b> transcode it next time instead of stuttering first. A measurement expires after 30 days; <b>Quality → Original</b> always bypasses it.</small></span></div>
       <div class="row" id="dlrow">${decodeLimitsSummary()}</div>`,{local:true});
-  return `${setHead("Playback","How streams start, how they are delivered, and what every player picks by default.")}${defaults}${preparedQualityCard(settings,readiness)}${streaming}${local}`;
+  return `${setHead("Playback","How streams start, how they are delivered, and what every player picks by default.")}${defaults}${streaming}${local}`;
 }
 // Live TV owns its own media element and capability. It never enters PLAYER,
 // file progress, playback-control, watched state, autoskip, or Trakt.
@@ -15806,7 +15806,7 @@ function clusterTransportRecoveryCard(readiness){
 function preparedQualityCard(settings,readiness){
   return setCard(`${cardHead("Quality switching","Prepare the next stream before replacing the one you are watching.",`<span class="pill" id="pqhstate">${settings.prepared_quality_handoff?"Enabled":"Disabled"}</span>`)}
       ${togRow("pqh",`Prepare quality changes <span class="pill warn">experimental</span>`,`Uses a second player and temporary server capacity to reduce interruptions. Applies after saving to the next eligible quality change.`,settings.prepared_quality_handoff)}
-      <div class="hint">Still experimental. Readiness is advisory and never overrides your choice. <a href="#/settings/developer">Browser compatibility controls</a> are in Developer.</div>
+      <div class="hint">Still experimental. This saved switch is authoritative; readiness is advisory and never overrides your choice. The browser-specific capability control is below.</div>
       <details class="setdetails"><summary>Readiness and device qualification</summary><div class="setdetails-body">
       <p class="hint">These readings describe this server. Missing evidence does not disable the setting.</p>
       <h3 class="devcheck-group">Server readiness</h3>
@@ -15850,7 +15850,8 @@ function developerPanel(settings,readiness){
   return `${setHead("Developer","Compatibility controls, experimental playback and device diagnostics.")}
       ${destinations}
       <div class="setsection"><h2>Library channels</h2><p>Explicit playback enablement with advisory deployment facts.</p></div>${libraryChannels}
-      <div class="setsection"><h2>Compatibility</h2><p>Protocol and browser preparation controls.</p></div>${protocol}${browser}
+      <div class="setsection"><h2>Prepared quality handoff</h2><p>Explicit server and browser enablement with advisory safety evidence.</p></div>${preparedQualityCard(settings,readiness)}${browser}
+      <div class="setsection"><h2>Compatibility</h2><p>Protocol controls for compatible playback clients.</p></div>${protocol}
       <div class="setsection"><h2>Decoder experiments</h2><p>Recovery and cache-policy experiments. Evidence is advisory; saved choices remain authoritative.</p></div>${verifiedDecodeCard(settings)}${decodeRecoveryCard(settings)}
       <div class="setsection"><h2>Delivery experiments</h2><p>Use these overrides for controlled comparisons.</p></div>${experimental}`;
 }

@@ -318,7 +318,12 @@ test("an older quality save never overwrites a newer draft", async () => {
   assert.deepEqual(notices, ["Earlier quality change saved; newer edit remains unsaved"]);
 });
 
-test("everyday settings move out of Developer while experiments retain advisory evidence", () => {
+test("Developer owns experimental enablement and keeps readiness advisory", () => {
+  assert.doesNotMatch(
+    shippedSource("playbackPanel"),
+    /preparedQualityCard/,
+    "the server-wide experimental enable must not remain in everyday Playback settings",
+  );
   const panels = new Function(
     "setHead", "setCard", "cardHead", "togRow", "setCardFoot", "esc",
     // Joined with newlines, never bare interpolation: `shippedSource` here
@@ -364,13 +369,16 @@ test("everyday settings move out of Developer while experiments retain advisory 
     live_tv_guide_hours: 24,
   };
   const html = panels.developerPanel(settings, readiness);
-  for (const id of ["pcpv1", "pdp", "phs", "dhqa", "adr"])
+  for (const id of ["pqh", "pcpv1", "pdp", "phs", "dhqa", "adr"])
     assert.match(html, new RegExp(`TOG:${id}\\|`), `Developer retains ${id}`);
-  assert.doesNotMatch(html, /TOG:pqh\||HDHomeRun Live TV|CARDHEAD:Programme guide/);
+  assert.doesNotMatch(html, /HDHomeRun Live TV|CARDHEAD:Programme guide/);
   for (const route of ["livetv", "playback", "cluster"])
     assert.ok(html.includes(`href="#/settings/${route}"`), `${route} has a destination link`);
   assert.match(html, /FOOT:saveDeveloper/);
+  assert.match(html, /FOOT:savePreparedQuality/);
   assert.match(html, /FOOT:saveExperimental/);
+  assert.match(html, /Explicit server and browser enablement with advisory safety evidence/);
+  assert.match(html, /This saved switch is authoritative; readiness is advisory and never overrides your choice/);
   // The switch has to be wired to something. A control that renders and does
   // nothing is worse than no control: it reports a capability to the operator
   // that the server never hears about.
