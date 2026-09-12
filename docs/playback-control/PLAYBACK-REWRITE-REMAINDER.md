@@ -218,7 +218,7 @@ correct ordinary playback.
 
 ## 4. What tonight's trace does and does not connect
 
-The [retained observation receipt](../../tests/playback/lifecycle-observation-2026-09-11.json)
+The [retained observation receipt](../evidence/playback-lifecycle-observation-2026-09-11.json)
 records Ronny Chieng: Speakeasy on Apple AVPlayer, identified by the viewer as
 Apple TV, with rolling/sliding HLS and explicit demand.
 

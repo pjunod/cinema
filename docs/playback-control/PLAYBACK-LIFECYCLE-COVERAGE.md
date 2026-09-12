@@ -115,7 +115,7 @@ The buffering phases have different exit conditions:
 | Rebuffer | Enough usable, aligned data for the framework to resume | Framework resume policy followed by actual presentation |
 | Paused | Retained buffer may remain; new production is not ordinary active demand | Viewer resume intent, then authority and buffer revalidation |
 | Seeking | Buffer around the latest destination | Target landing on the current intent/item generation |
-| Successor preparation | Separate successor buffer covering the switch interval | Readiness and commit transaction, then first successor presentation |
+| Successor preparation | Separate successor buffer covering the switch interval | Readiness, local switch and first successor presentation, then committed acknowledgement and durable settlement |
 | Stopping/draining | No new consumer demand; only authorized in-flight work remains | Exact terminal/retirement owner and confirmed resource release |
 
 The rolling startup grant is a specific exception: before the one-time
@@ -228,8 +228,8 @@ regressions exist; it does not claim every path/client combination passes.
 | L18 | Current → reserve successor | Keep predecessor and buffer alive; reserve second recipe/worker without freeing occupied resources | One durable preparation/action identity; reject unadmitted pair without breaking current playback | C14/C15, partial |
 | L19 | Reserved → primed | Reservation does not imply bytes; attach successor producer and expose only authorized staged media | Server prime/ledger precedes `prepare`; predecessor remains current | C14/C15, partial |
 | L20 | Primed → client ready | Load metadata, align timeline, fill successor's own contiguous buffer to switch point | Matching action acknowledgement: readiness stages; no first-frame claim from metadata alone | C16, partial |
-| L21 | Ready → committed → switched | Change durable/current ownership exactly once; retain predecessor until successor presentation/drain contract permits release | Fenced commit/first-frame and supported switched acknowledgement; lost reply replay is idempotent | C15/C16, partial; physical switch evidence open |
-| L22 | Preparing → aborted/expired/refused | Free only successor resources; current buffered playback survives; stop cancels both | Failed/aborted acknowledgement or expiry; durable cleanup settles slot before reuse | C14/C16, partial |
+| L21 | Ready → local switch/first presentation → durable commit → drain settlement | First presentation precedes committed acknowledgement; server changes current ownership exactly once, then releases predecessor drain. Local display may precede durable ownership | Fenced committed acknowledgement with frame time/origin, then supported switched finalization; lost reply replays the same settlement. Rejected commit after local switch requires reconciliation | C15/C16, partial; physical switch evidence open |
+| L22 | Preparing → aborted/expired/refused | Before local switch, free only successor and retain current playback; after local switch, reconcile durable ownership and use one fallback if predecessor is no longer usable; stop settles then ends the winner | Failed/aborted acknowledgement or expiry; cleanup settles slot before reuse. Do not assume local predecessor survived a switch | C14/C16, partial |
 | L23 | Current → restart/reopen | Carry current position, pause, tracks, quality/HDR intent; discard only obsolete item buffer; prevent old replies attaching | New idempotent request, typed cause/predecessor where required; new bootstrap and first-frame receipt | C02/C10/C13, partial |
 | L24 | Quality/audio/subtitle change | In-place operation when supported; otherwise prepare or bounded reopen; subtitle work cannot stall video unnecessarily | Desired/effective selection, capability/admission facts, preparation or replacement result | Routing inventory + C16/C17, partial |
 | L25 | Any live state → stop/end | Fence fresh media/control actions immediately; dispose client buffer; reap child before returning its permits | Final `end`/DELETE, idempotent settlement; cancel reporter, observers, pending starts/preparations | C02/C18, partial |
@@ -371,7 +371,7 @@ Every exclusion records why that transition cannot occur on that path.
 
 ## 7. Tonight's failure is an acceptance case, not a guessed root cause
 
-[Sanitized retained observations](../../tests/playback/lifecycle-observation-2026-09-11.json)
+[Sanitized retained observations](../evidence/playback-lifecycle-observation-2026-09-11.json)
 contain 17 events for **Ronny Chieng: Speakeasy** on m6, including 13 stall
 reports. Multiple reports may describe one episode; 13 is not a count of
 independent freezes. The viewer identifies Apple TV; telemetry identifies

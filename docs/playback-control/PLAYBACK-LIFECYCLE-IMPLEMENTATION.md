@@ -90,9 +90,10 @@ Use the existing [setting keys](../../crates/plurx-core/src/store/mod.rs),
 [Apple settings](../../clients/apple/Sources/SettingsStore.swift),
 [Android settings](../../clients/android/app/src/main/java/tv/plurx/app/data/SettingsStore.kt),
 and web Developer tab. Do not broaden this package into unrelated feature
-settings. Disabling preparation prevents new reservations; abort an uncommitted
-successor and finish cleanup, but finish settlement of an already committed
-successor. The active player's demand and media lease remain valid.
+settings. Disabling preparation prevents new reservations; abort a successor
+that has not switched locally. If the local switch or durable commit is already
+in flight, finish its settlement and cleanup before ending preparation. The
+active player's demand and media lease remain valid.
 
 ## 3. Keep one owner for each decision and one clock for each frontier
 
@@ -348,15 +349,22 @@ already starts real successor production. Do not replace it with a new session
 manager or regard a durable staged row as ready media.
 
 ```text
- current ── reserve ──> staged successor ── prime ──> client ready
-    │                        │                         │
-    │               cancel/fail/expire                │ commit once
-    │                        v                         v
-    └──── keep playing <── abort/cleanup       successor current
-                                                       │
-                                        present boundary, settle/drain
-                                                       v
-                                           predecessor released
+ reserve ──> prime ──> metadata/buffer ready
+                          │
+                          v
+                LOCAL switch to successor
+                          │ observe first qualifying presentation
+                          v
+             committed acknowledgement (frame timestamp + origin)
+                          │ durable compare-and-set succeeds
+                          v
+                successor current on server
+                          │ settle/release predecessor drain
+                          v
+                         done
+
+ before local switch: abort successor and retain predecessor
+ after local switch: reconcile settlement; local display is not durable owner
 ```
 
 | Step | Buffer / ownership / message contract |
@@ -364,21 +372,60 @@ manager or regard a durable staged row as ready media.
 | Reserve | One outstanding successor per current intent; reserve actual existing admission resources; predecessor stays current and receives priority. |
 | Prime | Produce/serve complete media at intended film boundary, including selected audio and required burned subtitles; client loads successor without consuming predecessor ownership. |
 | Ready | Metadata, seek alignment and contiguous media covering the switch boundary are usable; readiness timeout is finite. File availability alone is insufficient. |
-| Commit | Existing fenced durable transaction decides current successor once; acknowledgement replay returns the same result. Client switches only the matching intent/action. |
-| Present / drain | Observe first successor presentation near film boundary; retain predecessor resources for the existing bounded settlement interval. Do not promise seamlessness from commit alone. |
-| Abort / failure | Before commit, discard successor and retain predecessor. After commit, reconcile durable ownership and recover current successor; never locally resurrect a fenced predecessor. |
+| Local switch / presentation | Matching client adapter makes the successor visible and observes its first qualifying presentation near the film boundary. The local predecessor may already be retired; the server pointer has not moved yet. |
+| Commit acknowledgement | Client sends `committed` with observed `first_frame_unix_ms` and the offered `committed_media_origin_ms`. This acknowledgement initiates the existing fenced durable compare-and-set; replay returns the settled result. |
+| Settle / drain | After durable commit, successor ownership/control becomes current and the existing finalization path releases predecessor drain, including `switched` where used. Keep presentation and durable settlement as separate measurements. |
+| Abort / failure | Before local switch, discard successor and retain predecessor. After local switch, reconcile the durable outcome before recovery; never assume the predecessor is still attached or resurrect a fenced incarnation. |
 
-On a lost commit response, query/replay the existing settlement before starting
-another replacement. On stop during commit, finish settlement and end whichever
-incarnation won; do not leak both players or end only the predecessor.
+This is the existing v1 order in the
+[wire contract](M6-CLIENT-REPLACEMENT-CONTRACT.md) and
+[Apple adapter](../../clients/apple/Sources/PreparedReplacement.swift): local
+switch and first presentation precede the acknowledgement that starts durable
+commit. There is no server “commit now” action. Do not fabricate a frame
+timestamp to reverse this order or treat `buffer_ready` as durable commit.
+
+The locally-switched, not-yet-settled window needs explicit handling:
+
+- Lost response: replay/reconcile the same acknowledgement and action ID;
+  retain usable successor media while settlement is unknown. Do not create
+  another successor or infer success from a timed-out exchange.
+- Rejected/expired commit: release the rejected successor and reconcile the
+  current durable incarnation. Return to the predecessor only if it is still
+  usable and authoritative; otherwise perform one normal replacement for the
+  latest intent. Do not claim this fallback is seamless.
+- Stop during switch/commit: halt local presentation immediately, settle the
+  in-flight acknowledgement, then end the winning incarnation and release both
+  local pipelines. A `committed` acknowledgement cannot be combined with
+  `demand: end`; serialize through the existing bounded finalization path.
+- Successful commit followed by loss: recover the authoritative successor,
+  never the now-fenced predecessor. Deadlines still own abandoned cleanup.
 
 ### 6.2 Replace proof vetoes with bounded work and real outcomes
 
-Remove admission restrictions listed in §2. Resolve audio, subtitle burn,
-delivery method, dynamic range and resolution changes into one actual candidate
-recipe. The candidate is tested by constructing/preparing it, with the existing
-codec negotiation and resource accounting. Unsupported output returns a typed
-runtime failure; it does not add the device to a persistent blacklist.
+Remove admission restrictions listed in §2 **together with candidate
+re-planning**. The current `candidate_request` in
+[playback_control.rs](../../crates/plurxd/src/playback_control.rs) clones codec
+and HDR conversion policy and keeps an existing transcode as a transcode even
+for `Original`. Removing allowlists alone cannot implement the reverse-method
+or grade transitions promised here.
+
+In `process_preparation_candidate`, replace that construction limitation by
+reusing `review_client_plan` and the ordinary capability-aware playback planner
+in [http/hls.rs](../../crates/plurxd/src/http/hls.rs). Retain the source facts
+and full client planning capabilities needed by ordinary create; the reduced
+dynamic preparation capability is not a substitute. Resolve the newest
+explicit intent over the retained current policy, preserving omitted fields.
+Do not invent a grade/codec request from a selection field that cannot express
+it. Use existing full-intent/create ingress for such changes, or explicitly
+wire that existing intent to this planner rather than add unknown v1 fields.
+
+Resolve audio, subtitle burn, delivery method, dynamic range and resolution
+into one candidate, then derive its effective selection and grade from that
+planned request. An `Original` request may return to copy/remux when source,
+client and track requirements permit; it is not a promise to bypass a required
+transcode. Stage the planned recipe, never a stale clone decorated with a new
+quality label. Unsupported output returns a typed runtime failure; it does not
+add the device to a persistent blacklist.
 
 Preparation is speculative. Allow one successor, use existing admission limits
 and preparation deadline, and schedule its I/O/production behind current
@@ -398,18 +445,25 @@ does not silently change the user's enablement preference.
 
 Apple and Android should reuse native readiness/presentation callbacks.
 On web, `requestVideoFrameCallback` provides the stronger observation when
-available. When absent, use existing readiness plus advancing media position
-and playing events with a finite deadline; record presentation precision as
-limited rather than refusing feature enablement. Never report a frame-accurate
-or seamless result from this weaker observation. A real inability to initialize
-or present the second player ends that attempt through the same abort path.
+available. When absent, attempt preparation and use an available presented-frame
+counter/observation with a finite deadline. Readiness, playing events and
+advancing media position help diagnose progress but must not fabricate
+`first_frame_unix_ms`. If a qualifying observation cannot be obtained, end that
+attempt through the normal fallback; do not disable future attempts or the
+user's setting. Record observation precision and never claim frame-accurate
+continuity from an inferred progress signal. Audio-only media retains its
+appropriate existing presentation adapter.
 
 **P3 acceptance:** exercise both directions of delivery-method change, compound
 recipe change, unknown/low throughput, actual decoder/allocation failure,
 foreground starvation during prime, rapid new intent, duplicate ready/commit,
 lost commit response, stop during commit and preparation disabled mid-flight.
-Assert no proof-based refusal, no double commit, no leaked player/worker, and
-correct fallback. Measure first successor presentation separately from ready.
+Assert the actual planned kind/codec/grade/tracks and resulting media, including
+transcode-to-Original and a capability-permitted grade change; an admitted
+decision alone is insufficient. Also assert no proof-based refusal, no double
+commit, no leaked player/worker, and correct fallback. Measure first successor
+presentation separately from ready and durable settlement. Include explicit
+commit rejection after a successful local switch.
 
 ## 7. P4 — complete planned drain without promising zero-gap abrupt failover
 
@@ -433,12 +487,16 @@ today. Do not bolt on a process-local redirect that bypasses its compare-and-set
 The old owner remains authoritative until commit. Afterwards it drains only
 the predecessor and cannot overwrite the new route on rejoin.
 
-Before committing relocation, prime the successor at the latest valid film
-boundary and receive client readiness. Preserve current buffered media while
-that happens. If planned preparation expires, retain the predecessor for the
-existing drain grace period; at its deadline use the ordinary bounded recovery
-path and record the interruption. Never extend drain indefinitely for a client
-that vanished or treat a not-yet-ready successor as playable.
+Relocation follows the same v1 order: prime at the latest valid film boundary,
+client readiness, local switch/first presentation, committed acknowledgement,
+then durable owner/route publication. Staged media must therefore be reachable
+on the target before it becomes authoritative for control. Preserve current
+buffered media during preparation. A lost/rejected commit after local switch
+uses §6.1 settlement recovery; it must not redirect blindly to the old owner.
+If preparation expires before local switch, retain the predecessor for the
+existing drain grace period; at its deadline use ordinary bounded recovery
+and record the interruption. Never extend drain indefinitely for a vanished
+client or treat a not-yet-ready successor as playable.
 
 For abrupt owner loss there may be nothing available to prime. Continue using
 already loaded media while existing cluster routing/lease takeover resolves
@@ -470,8 +528,8 @@ claims that tests already exist or pass.
 | T03 loaded native wait | Client adapter test with media already loaded and server held | Active intent survives; one reevaluation; hold cannot reset deadline; presentation ends episode |
 | T04 delivery fault | Existing body/attempt fixture with delayed chunk and truncated EOF | Retry exact resource; partial body never counted complete; old attempt cannot commit |
 | T05 lifecycle races | Existing per-client ownership/intent suites with controlled callback ordering | Stop/restart/seek/pause/recipe changes preserve latest intent and one attachment |
-| T06 prepared lifecycle | Existing transaction plus adapter fixtures | Reserve/prime/ready/commit/drain and abort/lost reply are bounded and idempotent |
-| T07 no software proof veto | Server decision and settings/client tests | Unknown measurements and unmeasured axis combinations remain enabled and attempt preparation; actual failure cleans up |
+| T06 prepared lifecycle | Existing transaction plus adapter fixtures | Reserve/prime/ready/local switch/first presentation/commit/drain, rejected commit after local switch, and lost reply/stop are bounded and idempotent |
+| T07 candidate planning and no software proof veto | Existing planner + server decision and settings/client tests | Unknown measurements and unmeasured axis combinations remain enabled; actual Original/grade/compound output matches the capability-aware plan; omitted intent survives; failure cleans up |
 | T08 contention | Foreground refill + successor/prewarm fixture at real allocation limit | Foreground progresses; speculative attempt terminates; no leaked permit or restart loop |
 | T09 owner transition | Existing cluster coordinator/relay fixtures | One epoch, correct route, bounded drain/failover and no stale-owner mutation |
 | T10 two-engine and special paths | Routing fixture explicitly asserts returned presentation, then lifecycle cases | VOD and rolling both execute; direct/progressive/live/channel cases preserve their distinct semantics |
