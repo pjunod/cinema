@@ -1,6 +1,6 @@
 # Playback lifecycle — implementation status
 
-**Status:** one adversarial review addressed; PR #259 remains draft ·
+**Status:** one adversarial review addressed; PR #259 fast lane correcting preflight ·
 **Updated:** 2026-09-12 · **Base:** `30cd51afc` · **Effort:**
 `effort/playback-lifecycle` at `88066364` before this receipt · **Latest task:**
 `codex/playback-lifecycle-p3-p4` at `139ad01f`
@@ -23,7 +23,7 @@ sweep actually executes them.
 | P3 / S06–S07 prepared handoff | built and compiled; runtime deferred | successor planning reuses create-time capabilities; Original, grade, audio, offset, subtitle, and compound changes produce one recipe; VOD and rolling prime through their distinct engines; proof/headroom/direction vetoes and session-wide failure suppression are removed | include in current-main integration |
 | P4 / S08 owner transition | built and compiled; runtime deferred | restart/maintenance fences cause the next accepted local control exchange to reserve and prime one remote successor; durable identity precedes resource allocation; cancellation is checked before reserve, after reserve, after prime, and before commit | compile and inspect current-main integration |
 | P5 / S09 closeout | complete | obsolete proof/headroom authority is removed from code comments, superseded M6 briefs are marked as such, and Developer settings expose explicit advisory enablement | preserve receipts through promotion |
-| Main promotion | review addressed on draft PR #259 | Apple build 143 and Android versionCode 86 are claimed once; final Astra handoff commit is integrated; the one adversarial review's six blockers are addressed; corrected Rust and Android sources compile; no fast lane has run | publish this receipt, mark ready, apply `fast-lane`, and merge only its current green head |
+| Main promotion | fast lane correcting preflight on PR #259 | Apple build 143 and Android versionCode 86 are claimed once; final Astra handoff commit is integrated; the one adversarial review's six blockers are addressed; corrected Rust and Android sources compile; the first lane accepted scope/version bookkeeping and identified stale client regression anchors | publish the anchor correction, retrigger `fast-lane`, and merge only its current green head |
 
 The original plan allowed two main promotions. No implementation slice reached
 `main` before P3–P4 completed, so one integrated promotion is smaller in CI and
@@ -151,9 +151,12 @@ no second review or re-review was requested.
 | saving prepared handoff off left in-flight or staged work alive | the settings transition wakes current candidates, serializes the final setting read with reservation, and settles every unswitched registered successor before reopening |
 
 The stale Android and Rust phase comments called out by the reviewer were also
-removed. PR #259 remains draft until this receipt is pushed. It will then be
-marked ready and receive `fast-lane`; merge still requires a green
-`Main promotion gate` for that exact head.
+removed. PR #259 moved ready and received `fast-lane` at `af02d539`. Its first
+preflight accepted validation scope and mobile-version bookkeeping, then found
+two superseded client-fix anchors plus missing anchor rows for `7c21d238` and
+`88066364`. This correction updates that ledger and removes the stale Apple
+test expectation that a failed attempt disables later preparation. Merge still
+requires a green `Main promotion gate` for the corrected exact head.
 
 ## Cleanup — keep only reusable build state
 

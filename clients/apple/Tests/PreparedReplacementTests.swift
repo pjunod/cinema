@@ -743,21 +743,21 @@ final class PreparedReplacementCoordinatorTests: XCTestCase {
         XCTAssertTrue(coordinator.readinessBoundElapsed())
     }
 
-    /// The whole cost of a server that stages a successor it never primes,
-    /// paid once instead of on every tap.
-    func testASuccessorThatNeverBecomesPlayableStopsTheAskingForThisPlayer() {
+    /// A failed transaction is evidence about that attempt, never a hidden
+    /// feature gate for the rest of the playback.
+    func testASuccessorThatNeverBecomesPlayableAllowsAnotherOfferForThisPlayer() {
         let host = RecordingHost()
         let coordinator = PreparedReplacementCoordinator(host: host)
         XCTAssertTrue(coordinator.shouldAskForPreparation)
         coordinator.offer(preparedAction(), filmPositionMs: 1_000)
         coordinator.abandon(.failed)
-        XCTAssertFalse(
-            coordinator.shouldAskForPreparation,
-            "the viewer already paid to find out that nothing can be primed here"
-        )
-        // A new player is a new server, a new device state and a new source.
-        coordinator.playerIsEnding()
         XCTAssertTrue(coordinator.shouldAskForPreparation)
+        let next = preparedAction(actionId: "7c2e3b55-3c8f-4b2d-8a4f-3d6b8c9e0f12")
+        XCTAssertEqual(
+            coordinator.offer(next, filmPositionMs: 1_000),
+            .build(next),
+            "one failed action cannot suppress the viewer's next explicit change"
+        )
     }
 
     /// A successor that *did* produce media and then failed says nothing about
