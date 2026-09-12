@@ -20,6 +20,38 @@ this is the one execution ledger for *what is built, compiled, reviewed, and
 merged*. Runtime and physical observations stay `not run` until the separate
 sweep actually executes them.
 
+## Remainder execution — B02–B05 are active
+
+**Status:** source and regression inventory in progress · **Started:**
+2026-09-12 · **Base:** `10f2afe60b3d177866fdcc5741acd9f494525d73` ·
+**Effort:** `effort/playback-rewrite-remainder` · **Clone:**
+`/private/tmp/plurx-sol-remainder-20260912`
+
+| Package | State | Current evidence | Next action |
+|---|---|---|---|
+| B01 · buffer observability/UI | reserved to task `01a095b1-0e77-72f1-8b48-b04da47f8f10` | server telemetry is published in PR #262; its separate ledger is `PLAYBACK-BUFFER-OBSERVABILITY-STATUS.md` | integrate its final receipt without duplicating its wire, stats, or UI work |
+| B02 · refill and operation races | inventorying | lifecycle implementation is on main through PR #259; focused runtime results for this effort are `not run` | map each required case to an existing fixture, add only missing assertions, then repair demonstrated failures |
+| B03 · prepared transition | inventorying | prepared server/client transactions and planning are present; focused runtime results for this effort are `not run` | audit terminal cleanup, lost/duplicate settlement, recipe coverage, and both engines |
+| B04 · relocation and alternate ingress | inventorying | planned relocation source is present; focused runtime results for this effort are `not run` | audit real-route authorization, phase cancellation, replicated ownership, and cleanup |
+| B05 · subtitle and compatibility | inventorying | subtitle, VOD/rolling, and mixed-client paths are present; focused runtime results for this effort are `not run` | map action-making callers and close only demonstrated coverage or ownership gaps |
+| Final promotion | not started | no remainder review, fast lane, or merge receipt exists | freeze the candidate, obtain one adversarial review, address findings, run the single broad fast lane, and merge only its green current head |
+
+### Current decisions and boundaries
+
+1. **Use one substantial effort branch and one main-bound pull request.**
+   Logical commits remain reviewable without paying for multiple broad gates.
+2. **Keep the repository's focused pre-push proofs narrow.** The current user
+   request defers tests until final review, while `AGENTS.md` requires the
+   smallest changed-behavior regression before a push. Only that focused proof
+   runs when a source commit needs it; the broad fast lane runs once, after the
+   adversarial review is addressed.
+3. **Treat all enablement requirements as advisory.** Missing device, fleet,
+   throughput, or runtime evidence is shown in Developer settings and in this
+   ledger, but it never rewrites or rejects the user's enable choice.
+4. **Do not overlap B01.** Any needed edit to shared player-input fixtures,
+   `PlaybackSessionStatus` wire models, or stats rendering is coordinated with
+   the B01 owner before commit.
+
 ## Progress — one integrated promotion, one review, one fast lane
 
 | Package | State | Current evidence | Next action |
