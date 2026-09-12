@@ -1286,6 +1286,19 @@ test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "testPresentationProgressAgeKeepsUnavailableDistinctFromZero"
 
 [[fixes]]
+# The adversarial review found the guide's new paging chips focusable inside
+# the remote adapter with no focus key of their own. `onMoveCommand` consumes
+# every direction it is handed, so a chip could not be left in any direction,
+# and the inline page has no root adapter to answer Back with. Every focusable
+# inside the adapter now owns a key, and the arrangement contract asserts it.
+id = "apple.live-tv-paging-chips-own-a-focus-key"
+commits = ["d572c565"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = "private func movePagingFocus"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testTheLiveTvArrangementIsWiredToTheDerivedGeometry"
+
+[[fixes]]
 # The adversarial review found the Over picture layout a D-pad dead end: the
 # picture became a focus target drawn `fillMaxSize`, so its focus rect was the
 # whole screen and nothing in the guide panel was below, left or right of it.

@@ -114,6 +114,10 @@ enum Palette {
 /// instead of turning the entire control into a bright white plate.
 struct TVReadableButtonStyle: ButtonStyle {
     let prominent: Bool
+    /// A ten-foot page can afford one row of chrome, not three. The compact
+    /// pair is the toolbar size (48 pt) — the default 66 pt pair stays the
+    /// sheet size, where a button is the only thing on the line.
+    var compact: Bool = false
 
     static func foregroundColor(prominent: Bool, focused: Bool) -> Color {
         prominent ? Palette.buttonInk : Palette.onBg
@@ -124,35 +128,39 @@ struct TVReadableButtonStyle: ButtonStyle {
     }
 
     func makeBody(configuration: Configuration) -> Body {
-        Body(configuration: configuration, prominent: prominent)
+        Body(configuration: configuration, prominent: prominent, compact: compact)
     }
 
     struct Body: View {
         let configuration: ButtonStyle.Configuration
         let prominent: Bool
+        var compact: Bool = false
         @Environment(\.isFocused) private var isFocused
         @Environment(\.isEnabled) private var isEnabled
 
+        private var radius: CGFloat { compact ? 10 : 14 }
+
         var body: some View {
             configuration.label
+                .font(compact ? Font.system(size: 22, weight: .semibold) : nil)
                 .foregroundStyle(
                     TVReadableButtonStyle.foregroundColor(
                         prominent: prominent,
                         focused: isFocused
                     )
                 )
-                .padding(.horizontal, 28)
-                .padding(.vertical, 16)
-                .frame(minHeight: 66)
+                .padding(.horizontal, compact ? 20 : 28)
+                .padding(.vertical, compact ? 10 : 16)
+                .frame(minHeight: compact ? 48 : 66)
                 .background(
                     TVReadableButtonStyle.backgroundColor(
                         prominent: prominent,
                         focused: isFocused
                     ),
-                    in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    in: RoundedRectangle(cornerRadius: radius, style: .continuous)
                 )
                 .overlay {
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    RoundedRectangle(cornerRadius: radius, style: .continuous)
                         .stroke(
                             isFocused ? Palette.accent : Palette.outline,
                             lineWidth: isFocused ? 4 : 1

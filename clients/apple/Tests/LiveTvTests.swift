@@ -882,7 +882,7 @@ final class LiveTvTests: XCTestCase {
         XCTAssertTrue(source.contains(".sheet(isPresented: $showingSearch)"))
         // tvOS 26's default tint can make a label and its capsule the same
         // accent colour. Page actions and rows own their focus contrast.
-        XCTAssertTrue(source.contains(".buttonStyle(TVReadableButtonStyle(prominent: favoritesOnly))"))
+        XCTAssertTrue(source.contains(".buttonStyle(TVReadableButtonStyle(prominent: favoritesOnly, compact: true))"))
         XCTAssertTrue(source.contains(".buttonStyle(LiveTvChannelButtonStyle())"))
     }
 
@@ -892,8 +892,14 @@ final class LiveTvTests: XCTestCase {
             contentsOf: testsDirectory.appendingPathComponent("../Sources/LiveTvView.swift").standardizedFileURL,
             encoding: .utf8)
 
-        XCTAssertTrue(source.contains("List(visibleChannels) { channel in"),
-                      "On now should use the platform's focus-scrolling container")
+        // A tvOS `List` row stretches to its container and fights a fixed
+        // column, so the 620 pt On now list is a LazyVStack that keeps the
+        // row width — and keeps the focus binding the restore coordinator
+        // keys on.
+        XCTAssertTrue(source.contains("LazyVStack(spacing: 4)"),
+                      "the television list owns its own width")
+        XCTAssertTrue(source.contains(".focused($focusedChannelId, equals: channel.id)"),
+                      "the restore coordinator keys on the row's focus binding")
         XCTAssertTrue(source.contains("private struct LiveTvGuideButtonStyle: ButtonStyle"),
                       "the selected programme needs visible focus chrome")
         XCTAssertTrue(source.contains(".offset(x: -scrollOrigin.x)"),
@@ -913,7 +919,7 @@ final class LiveTvTests: XCTestCase {
             let upper = try XCTUnwrap(source.range(of: end, range: lower..<source.endIndex)?.lowerBound)
             return String(source[lower..<upper])
         }
-        let more = try section("private var morePanel", "private var actionBar")
+        let more = try section("private var morePanel", "private var liveToolbar")
         XCTAssertEqual(more.components(separatedBy: "Button(").count - 1, 8)
         XCTAssertEqual(more.components(separatedBy: ".buttonStyle(TVReadableButtonStyle").count - 1, 8,
                        "every More action owns a readable foreground/background pair")
@@ -962,6 +968,120 @@ final class LiveTvTests: XCTestCase {
         try await Task.sleep(nanoseconds: UInt64(LiveTvInputRouting.channelCoalesceMilliseconds + 250) * 1_000_000)
         XCTAssertEqual(requests.starts, 1, "three presses inside the window are one tuner start")
         XCTAssertEqual(LiveTvInputRouting.channelCoalesceMilliseconds, 350)
+    }
+
+    /// A hard-coded 300 pt slot filled 58% of a 1920 pt screen and could never
+    /// show two hours. The television's slot width follows the width the grid
+    /// actually got; the phone's fixed columns do not move.
+    func testGuideSlotWidthFollowsTheScreenOnTelevisionAndNotOnThePhone() throws {
+        #if os(tvOS)
+        XCTAssertEqual(LiveTvGridMetrics.pxPerSlot(contentWidth: 1776), 390, accuracy: 0.001)
+        XCTAssertEqual(LiveTvGridMetrics.channelColumnWidth, 200)
+        XCTAssertEqual(LiveTvGridMetrics.rowHeight, 74)
+        XCTAssertEqual(LiveTvGridMetrics.visibleSlots, 4)
+        let dimensions = LiveTvGridMetrics.dimensions(contentWidth: 1776)
+        XCTAssertEqual(dimensions.slotWidth, 390, accuracy: 0.001)
+        // The grid pads its own content by 8 pt on each side, so what the
+        // slots and the channel column share is the content width less that
+        // inset. Getting this wrong is how the fourth half-hour ends up 16 pt
+        // off the right edge with a horizontal scroll nobody asked for.
+        XCTAssertEqual(
+            LiveTvGridMetrics.horizontalInset
+                + dimensions.channelColumnWidth
+                + dimensions.slotWidth * Double(LiveTvGridMetrics.visibleSlots),
+            1776, accuracy: 0.001,
+            "the inset, the channel column and the visible slots must be exactly the content width")
+        // Four half-hour slots is the two-hour page the paging chips move by.
+        let window = LiveTvGridMetrics.window(start: 1_700_000_000)
+        XCTAssertEqual(window.end - window.start, 4 * LiveTvGridMetrics.slotSeconds)
+        #else
+        XCTAssertEqual(LiveTvGridMetrics.pxPerSlot(contentWidth: 1776), 160, accuracy: 0.001)
+        XCTAssertEqual(LiveTvGridMetrics.pxPerSlot(contentWidth: 390), 160, accuracy: 0.001)
+        XCTAssertEqual(LiveTvGridMetrics.rowHeight, 56)
+        XCTAssertEqual(LiveTvGridMetrics.channelColumnWidth, 128)
+        XCTAssertEqual(LiveTvGridMetrics.visibleSlots, 8)
+        #endif
+        // Six hours still covers a two-hour page, the server's hour of
+        // backfill and the partial slot.
+        XCTAssertEqual(LiveTvGridMetrics.requestedHours, 6)
+    }
+
+    /// Two entries, three stored values. An existing `channel_browser`
+    /// preference must keep decoding and must keep its raw value.
+    func testTheChannelBrowserLayoutIsPresentedAsPreviewWithoutRewritingIt() throws {
+        let stored = try XCTUnwrap(TvLiveLayout(rawValue: "channel_browser"))
+        XCTAssertEqual(stored.presented, .guidePreview)
+        XCTAssertEqual(TvLiveLayout.guidePreview.presented, .guidePreview)
+        XCTAssertEqual(TvLiveLayout.guideOverlay.presented, .guideOverlay)
+        XCTAssertEqual(TvLiveLayout.offered, [.guidePreview, .guideOverlay])
+        XCTAssertEqual(TvLiveLayout.offered.map(\.label), ["Preview", "Over picture"])
+        XCTAssertEqual(TvLiveLayout.allCases.count, 3, "the third case still decodes")
+        // Nothing writes the aliased value back. The sheet only ever assigns a
+        // member of `offered`, so a stored `channel_browser` survives until the
+        // viewer deliberately picks a layout.
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "live-tv-layout-alias"))
+        defaults.removePersistentDomain(forName: "live-tv-layout-alias")
+        defaults.set("channel_browser", forKey: "plurx.liveTvLayout")
+        let read = TvLiveLayout(rawValue: defaults.string(forKey: "plurx.liveTvLayout") ?? "")
+        XCTAssertEqual(read?.presented, .guidePreview)
+        XCTAssertEqual(defaults.string(forKey: "plurx.liveTvLayout"), "channel_browser")
+        defaults.removePersistentDomain(forName: "live-tv-layout-alias")
+    }
+
+    /// tvOS resolves the semantic text styles two to two and a half times
+    /// larger than iOS does — `.subheadline` is 38 pt there, `.title2` 57 —
+    /// which is what made the channel rows three feet long. Live TV sizes
+    /// itself through `LiveTvType` instead.
+    func testLiveTvTextGoesThroughItsOwnScaleRatherThanSemanticStyles() throws {
+        let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let source = try String(
+            contentsOf: testsDirectory.appendingPathComponent("../Sources/LiveTvView.swift").standardizedFileURL,
+            encoding: .utf8)
+        for style in [".font(.subheadline", ".font(.title2", ".font(.title3",
+                      ".font(.callout", ".font(.headline"] {
+            XCTAssertFalse(source.contains(style),
+                           "\(style) inflates on tvOS — use LiveTvType")
+        }
+        XCTAssertTrue(source.contains("enum LiveTvType"))
+        XCTAssertTrue(source.contains(".font(LiveTvType."))
+        // The toolbar is one row of compact buttons; sheets keep the tall pair.
+        XCTAssertTrue(source.contains("TVReadableButtonStyle(prominent: false, compact: true)"))
+    }
+
+    /// The arrangement itself, not just the constants behind it: each of these
+    /// would still be true if the numbers changed, and each is false if the
+    /// rewrite is reverted.
+    func testTheLiveTvArrangementIsWiredToTheDerivedGeometry() throws {
+        let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let source = try String(
+            contentsOf: testsDirectory.appendingPathComponent("../Sources/LiveTvView.swift").standardizedFileURL,
+            encoding: .utf8)
+        // The grid draws from the dimensions it is handed, never from the
+        // statics — that is what makes the slot width follow the screen.
+        let gridStart = try XCTUnwrap(source.range(of: "struct LiveTvGuideGrid: View")?.lowerBound)
+        let gridEnd = try XCTUnwrap(source.range(of: "struct LiveTvView: View")?.lowerBound)
+        let grid = String(source[gridStart..<gridEnd])
+        XCTAssertTrue(grid.contains("dimensions.slotWidth"))
+        XCTAssertTrue(grid.contains("dimensions.rowHeight"))
+        XCTAssertTrue(grid.contains("dimensions.channelColumnWidth"))
+        XCTAssertFalse(grid.contains("LiveTvGridMetrics.pxPerSlot"),
+                       "the grid must not reach past its own dimensions")
+        XCTAssertFalse(grid.contains("LiveTvGridMetrics.rowHeight"))
+        // The list owns its width, the picture is a focus target, and the
+        // fixed grid frame that pushed rows off the bottom is gone.
+        XCTAssertTrue(source.contains("static let tvListColumnWidth: CGFloat = 620"))
+        XCTAssertTrue(source.contains("Button { fullscreen = true } label: {"))
+        XCTAssertFalse(source.contains("LiveTvGridMetrics.rowHeight + 54"))
+        // One toolbar, one status line, and none of the bands they replaced.
+        XCTAssertTrue(source.contains("private var liveToolbar: some View"))
+        XCTAssertTrue(source.contains("accessibilityIdentifier(\"live-tv-status\")"))
+        XCTAssertFalse(source.contains("private var nowBar"))
+        XCTAssertFalse(source.contains("private var actionBar"))
+        XCTAssertFalse(source.contains("private var filterBar"))
+        // Every focusable inside the guide's remote adapter owns a focus key,
+        // or a direction press on it is swallowed with nowhere to go.
+        XCTAssertTrue(source.contains("private func movePagingFocus"))
+        XCTAssertTrue(source.contains("channelHeader: false, paging: index"))
     }
 }
 

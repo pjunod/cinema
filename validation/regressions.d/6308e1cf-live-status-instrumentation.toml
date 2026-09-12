@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["6308e1cf"]
+points = ["server.api", "playback.pipeline"]
+checks = ["rust-gate"]
+reason = "rolling_status_authz_keeps_its_exact_attempt_and_binding proves that status reads stay bound to the exact live attempt, reject stale attempts and wrong publication bindings, and remain observational before media, while held, and after media publication. rolling_status_authz_maps_to_attempt_status pins the typed SessionStatus mapping without making ordinary protocol responses legal for AttemptStatus. rolling_status_authz_covers_live_transcode_and_remux drives the public HTTP status handler through actor-managed live transcode and remux sessions before media, during a physical hold, and after media publication. rolling_status_authz_does_not_change_vod_status_publication preserves the existing VOD publication contract."
