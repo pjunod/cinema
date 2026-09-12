@@ -2925,19 +2925,10 @@ final class PlayerController: ObservableObject {
     /// Returns true when the prepared path has taken ownership of this change,
     /// in which case the caller must not also reopen in place.
     ///
-    /// **VOD is not excluded, and an earlier draft of this excluded it.** The
-    /// contract says `DeliveryView::from_status` leaves `delivered_bps` `None`
-    /// on every VOD session, so the throughput floor can never be met there.
-    /// That was true when it was written and `f2fecc98` — "measure what a VOD
-    /// session actually delivers", an ancestor of `main` — fixed it, saying in
-    /// as many words that a `None` there "is what made preparation unreachable
-    /// on the primary presentation". Excluding VOD would have disabled this on
-    /// the presentation the server had just enabled it for. The code is the
-    /// authority; the contract is stale, and is corrected beside its claim.
-    ///
-    /// What bounds the cost instead is `canOfferPreparation`, which is about
-    /// evidence rather than presentation: a playback that proves it cannot
-    /// prime a successor stops asking, whatever it is playing.
+    /// VOD is not excluded. A prepared replacement is controlled by the
+    /// explicit runtime capability and the server's real resource outcomes;
+    /// delivery-rate telemetry may still be unknown on a new session without
+    /// overriding the viewer's saved choice.
     ///
     /// The bound is the one this platform already uses for "publish evidence
     /// and wait briefly for the verdict", and the contract records how long a
@@ -2948,9 +2939,6 @@ final class PlayerController: ObservableObject {
     /// session whose client declares the capability.
     private func offerPreparedQualityChange() async -> Bool {
         guard Caps.controlCapabilities().dualPlayerPreparation,
-              // A successor that never became playable once will not become
-              // playable on the next tap either, and the viewer already paid
-              // for finding that out. See `canOfferPreparation`.
               preparedReplacement.shouldAskForPreparation,
               // A paused viewer's change cannot be committed — no rate means
               // no new frame to prove the switch — so it is not worth a wait.
@@ -2987,12 +2975,8 @@ final class PlayerController: ObservableObject {
 
     /// The link rate AVFoundation itself measured, in bits per second.
     ///
-    /// The server's second-pipeline floor wants the client's *observed*
-    /// throughput — twice what this session is already delivering — and until
-    /// now this client sent nothing, so the floor refused every transition on a
-    /// missing input rather than on a tight link. Shadow mode read exactly that
-    /// on 2026-09-03: the one transition that reached the throughput check
-    /// answered `throughput_unreported`.
+    /// The server records the client's *observed* throughput as advisory
+    /// evidence about link conditions. It is not a prepared-handoff gate.
     ///
     /// `observedBitrate` on the newest access-log event is AVFoundation's own
     /// empirical download rate, not the variant's declared
@@ -3001,10 +2985,9 @@ final class PlayerController: ObservableObject {
     ///
     /// Nil rather than a number whenever AVFoundation has not measured one:
     /// the access log is empty before the first segment lands, and it reports
-    /// `-1` for "unknown". A refusal on a missing value is the server's
-    /// documented behaviour and the honest answer; inventing a rate here would
-    /// let a prepared handoff fire on a link nobody measured, which is the one
-    /// thing the floor exists to prevent.
+    /// `-1` for "unknown". The server retains the reading as advisory
+    /// telemetry; inventing a rate would make the observation dishonest even
+    /// though missing or low values no longer gate prepared handoff.
     private func observedDownloadBitsPerSecond(_ item: AVPlayerItem) -> Int64? {
         guard let event = item.accessLog()?.events.last else { return nil }
         return Self.observedDownloadBps(fromObservedBitrate: event.observedBitrate)
@@ -4466,8 +4449,10 @@ final class PlayerController: ObservableObject {
     /// published, so the question a hold answers — why the producer paused —
     /// has no bearing on whether this client may reconnect and fetch them.
     ///
-    /// A `.silent` freeze keeps the hold: that decoder has bytes in hand and is
-    /// starved of nothing, and the HDR ladder owns the case.
+    /// A loaded buffering wait and a `.silent` freeze both have native media
+    /// in hand. The recovery monitor already spent its one harmless play
+    /// reevaluation before it asks for a verdict; a producer hold cannot then
+    /// postpone the bounded decoder/attachment recovery.
     nonisolated static func holdMayDecideStall(
         kind: PlaybackStallKind,
         publishedEndMs: Int?,
@@ -4480,8 +4465,12 @@ final class PlayerController: ObservableObject {
         case .delivery:
             return false
         case .silent:
-            return true
+            return false
         case .buffering:
+            if let runwaySeconds,
+               runwaySeconds > DeliveryStarvationDetector.runwayCeilingSeconds {
+                return false
+            }
             // Numbers the poll never carried are not evidence of a wedge, and
             // an unevidenced reopen is worse than honouring the server.
             guard let publishedEndMs, let fetchedEndMs else { return true }

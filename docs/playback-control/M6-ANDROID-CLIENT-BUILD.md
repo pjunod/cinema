@@ -1,5 +1,9 @@
 # M6 Android client — the platform whose evidence points two ways
 
+> **Superseded 2026-09-12:** use the current
+> [lifecycle contract](PLAYBACK-LIFECYCLE-IMPLEMENTATION.md) and
+> [status](PLAYBACK-LIFECYCLE-STATUS.md). Qualification evidence is advisory.
+
 **Status:** ready to build · **Executes:** the Android half of M6 ·
 **Written:** 2026-09-07 · **Baseline:** effort head `e3b11182` on
 `effort/decoder-selection-recovery`

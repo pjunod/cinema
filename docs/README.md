@@ -79,6 +79,7 @@ note per Apple build, read by `validation/apple_build.py`) ·
 Apple build 137: [Library channel startup and contrast](apple-builds/245-library-channel-start-and-contrast.md).
 Apple build 138: [Library channel playback decision](apple-builds/245-library-channel-playback-decision.md).
 Apple build 141: [Library channel buffering demand](apple-builds/245-library-channel-buffering-demand.md).
+Apple build 143: [Playback lifecycle recovery and prepared handoff](apple-builds/257-playback-lifecycle.md).
 
 Previous: [Live TV playback method](apple-builds/245-live-tv-playback-method.md).
 
@@ -94,8 +95,9 @@ page; the milestone files are contracts an executing agent works from.
 | File | Answers | |
 |---|---|---|
 | [PLAYBACK-LIFECYCLE-COVERAGE.md](playback-control/PLAYBACK-LIFECYCLE-COVERAGE.md) | Playback states and transitions, buffer handoffs, communication contracts, existing test anchors, and open acceptance gaps. | open |
-| [PLAYBACK-REWRITE-REMAINDER.md](playback-control/PLAYBACK-REWRITE-REMAINDER.md) | What remains unfinished in the rewrite, which old backlog claims are stale, and how each gap intersects with playback freezes. | open |
-| [PLAYBACK-LIFECYCLE-IMPLEMENTATION.md](playback-control/PLAYBACK-LIFECYCLE-IMPLEMENTATION.md) | Bounded implementation packages for refill, client recovery, prepared handoff and owner transitions, with advisory Developer settings and the revised fast-lane workflow. | open |
+| [PLAYBACK-REWRITE-REMAINDER.md](playback-control/PLAYBACK-REWRITE-REMAINDER.md) | Which source gaps closed in the lifecycle effort, what finite device evidence remains, and how each item intersects with playback freezes. | open |
+| [PLAYBACK-LIFECYCLE-IMPLEMENTATION.md](playback-control/PLAYBACK-LIFECYCLE-IMPLEMENTATION.md) | Completed S01–S09 implementation contract: code entry points, lifecycle/buffer contracts, compiler commands, deferred regression coverage, advisory Developer settings and batched fast-lane delivery. | built |
+| [PLAYBACK-LIFECYCLE-STATUS.md](playback-control/PLAYBACK-LIFECYCLE-STATUS.md) | Live execution ledger for the lifecycle implementation: package state, compilation, deferred tests, review, fast lane, decisions and cleanup. | open |
 | [Retained playback observations](evidence/playback-lifecycle-observation-2026-09-11.json) | Sanitized September 11 Apple TV observations used by the lifecycle audit; diagnostic evidence, not a runnable test fixture or acceptance result. | done |
 | [PLAYBACK-CONTROL-PROTOCOL-PLAN.md](playback-control/PLAYBACK-CONTROL-PROTOCOL-PLAN.md) | The whole design: explicit demand, one owner, prepared handoffs. | open |
 | [PLAYBACK-CONTROL-STATUS.md](playback-control/PLAYBACK-CONTROL-STATUS.md) | What is actually built and merged, milestone by milestone. | open |
@@ -119,21 +121,21 @@ page; the milestone files are contracts an executing agent works from.
 | [M5.5-PREPARATION-FEASIBILITY-SPIKE.md](playback-control/M5.5-PREPARATION-FEASIBILITY-SPIKE.md) | Can a client hold two pipelines at once? The spike that decides. | open |
 | [M5.5-SPIKE-EXECUTION-HANDOFF.md](playback-control/M5.5-SPIKE-EXECUTION-HANDOFF.md) | Running that spike on real hardware, without Paul. | open |
 | [M5.5-STAGED-GENERATIONS-HANDOFF.md](playback-control/M5.5-STAGED-GENERATIONS-HANDOFF.md) | A successor stream that exists without being current. | open |
-| [M6-CALLER-HANDOFF.md](playback-control/M6-CALLER-HANDOFF.md) | M6: where the preparation decision is made, and by whom. | open |
-| [M6-IMPLEMENTATION-HANDOFF.md](playback-control/M6-IMPLEMENTATION-HANDOFF.md) | M6: the prepared-recipe contract, with its measured numbers. | open |
+| [M6-CALLER-HANDOFF.md](playback-control/M6-CALLER-HANDOFF.md) | Historical M6 caller design; its proof/headroom admission rules are superseded by the lifecycle implementation contract. | superseded |
+| [M6-IMPLEMENTATION-HANDOFF.md](playback-control/M6-IMPLEMENTATION-HANDOFF.md) | Historical M6 prepared-recipe contract and measurements; use the lifecycle contract for current policy. | superseded |
 | [M6-AXIS-CASE-HANDOFF.md](playback-control/M6-AXIS-CASE-HANDOFF.md) | The one measurement M6 waits on, and how to take it. | done |
 | [M6-AXIS-CASE-RESULTS.md](playback-control/M6-AXIS-CASE-RESULTS.md) | The 30 Mbit/s axis run, below the throughput floor and superseded the same day by a 40 Mbit/s re-run that admitted the pair. Read the correction at the top. | superseded |
-| [M6-CLIENT-REPLACEMENT-CONTRACT.md](playback-control/M6-CLIENT-REPLACEMENT-CONTRACT.md) | The byte-level wire contract all three clients implement against. | open |
+| [M6-CLIENT-REPLACEMENT-CONTRACT.md](playback-control/M6-CLIENT-REPLACEMENT-CONTRACT.md) | Historical v1 client-wire snapshot; the lifecycle contract supersedes its software proof and throughput gates. | superseded |
 | [CLIENT-PREPARED-SWITCH-CONTRACT.md](playback-control/CLIENT-PREPARED-SWITCH-CONTRACT.md) | The streaming-reliability prepared-switch adapter contract shared by Apple, Android, and web. | built |
 | [CLIENT-APPLE-HANDOFF.md](playback-control/CLIENT-APPLE-HANDOFF.md) | The implementation handoff for Apple prepared-switch message adaptation. | built |
 | [CLIENT-ANDROID-HANDOFF.md](playback-control/CLIENT-ANDROID-HANDOFF.md) | The implementation handoff for Android prepared-switch message adaptation. | built |
 | [CLIENT-WEB-HANDOFF.md](playback-control/CLIENT-WEB-HANDOFF.md) | The implementation handoff for web prepared-switch message adaptation. | built |
-| [M6-APPLE-CLIENT-BUILD.md](playback-control/M6-APPLE-CLIENT-BUILD.md) | Building the Apple half of M6 — the only one a viewer sees. | open |
-| [M6-WEB-CLIENT-BUILD.md](playback-control/M6-WEB-CLIENT-BUILD.md) | Building the web half of M6, proven by tests until a measurement lands. | open |
-| [M6-ANDROID-CLIENT-BUILD.md](playback-control/M6-ANDROID-CLIENT-BUILD.md) | Building the Android half of M6, proven by tests until a measurement lands. | open |
-| [M6-ANDROID-CLIENT-STATUS.md](playback-control/M6-ANDROID-CLIENT-STATUS.md) | M6: what the Android client does with a staged successor, and how an operator turns it on. | built |
-| [M6-APPLE-HARDWARE-ACCEPTANCE.md](playback-control/M6-APPLE-HARDWARE-ACCEPTANCE.md) | The two M6 numbers a simulator cannot supply, and the prompt that takes them. | open |
-| [M6-WEB-CLIENT.md](playback-control/M6-WEB-CLIENT.md) | M6: what the browser does with a staged successor, and how an operator turns it on. | built |
+| [M6-APPLE-CLIENT-BUILD.md](playback-control/M6-APPLE-CLIENT-BUILD.md) | Historical Apple M6 build brief; current enablement and retry policy lives in the lifecycle status. | superseded |
+| [M6-WEB-CLIENT-BUILD.md](playback-control/M6-WEB-CLIENT-BUILD.md) | Historical web M6 build brief; current enablement and first-frame fallback lives in the lifecycle status. | superseded |
+| [M6-ANDROID-CLIENT-BUILD.md](playback-control/M6-ANDROID-CLIENT-BUILD.md) | Historical Android M6 build brief; current enablement and retry policy lives in the lifecycle status. | superseded |
+| [M6-ANDROID-CLIENT-STATUS.md](playback-control/M6-ANDROID-CLIENT-STATUS.md) | Historical Android implementation record; its qualification prose is not current admission policy. | superseded |
+| [M6-APPLE-HARDWARE-ACCEPTANCE.md](playback-control/M6-APPLE-HARDWARE-ACCEPTANCE.md) | Historical hardware procedure; the lifecycle status contains the current finite sweep card. | superseded |
+| [M6-WEB-CLIENT.md](playback-control/M6-WEB-CLIENT.md) | Historical web implementation record; its throughput qualification prose is not current admission policy. | superseded |
 | [M6-SERVER-PRIME-HANDOFF.md](playback-control/M6-SERVER-PRIME-HANDOFF.md) | Phase 3 — the reserve/prime constraints and the implementation that now attaches the staged VOD worker. | built |
 | [M7-REMAINDER-HANDOFF.md](playback-control/M7-REMAINDER-HANDOFF.md) | M7: subtitle readiness, bounded materialization, seek coalescing, burn-join, prewarm. | open |
 | [M7-R-M3-CLAUDE-HANDOFF.md](playback-control/M7-R-M3-CLAUDE-HANDOFF.md) | Finish M2, then build seek coalescing. | open |

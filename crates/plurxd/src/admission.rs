@@ -60,6 +60,11 @@ pub const SOFTWARE: &str = "software";
 pub enum Priority {
     /// Somebody pressed play and is looking at a spinner.
     Live,
+    /// A make-before-break successor. It may use capacity left beside current
+    /// playback, but never queues as foreground and cannot jump ahead of an
+    /// already-waiting viewer. Once granted, its permit is accounted as live:
+    /// committing the successor therefore needs no unsafe permit swap.
+    Speculative,
     /// The pre-transcode producer. Takes what is spare, gives it back the
     /// moment a live start wants it, and does not take it again until every
     /// live encoder permit has been released.
@@ -75,7 +80,7 @@ enum PermitOwner {
 impl From<Priority> for PermitOwner {
     fn from(priority: Priority) -> Self {
         match priority {
-            Priority::Live => PermitOwner::Live,
+            Priority::Live | Priority::Speculative => PermitOwner::Live,
             Priority::Background => PermitOwner::Background,
         }
     }
@@ -212,6 +217,9 @@ impl SwPool {
             Priority::Background if permits.live_waiting > 0 || permits.live_active() => {
                 return None;
             }
+            Priority::Speculative if permits.live_waiting > 0 || permits.background_active() => {
+                return None;
+            }
             _ => {}
         }
         let used = permits.software_used();
@@ -219,7 +227,7 @@ impl SwPool {
             return None;
         }
         match priority {
-            Priority::Live => {
+            Priority::Live | Priority::Speculative => {
                 permits.software_live_permits += 1;
                 permits.software_live_used += weight;
             }
@@ -502,6 +510,9 @@ impl Admissions {
             Priority::Background if permits.live_waiting > 0 || permits.live_active() => {
                 return None;
             }
+            Priority::Speculative if permits.live_waiting > 0 || permits.background_active() => {
+                return None;
+            }
             _ => {}
         }
         if estimate.hardware_slot && permits.hardware_used() >= hardware_max {
@@ -517,13 +528,13 @@ impl Admissions {
         // caller can observe one half without the other.
         if estimate.hardware_slot {
             match priority {
-                Priority::Live => permits.hardware_live += 1,
+                Priority::Live | Priority::Speculative => permits.hardware_live += 1,
                 Priority::Background => permits.hardware_background += 1,
             }
         }
         if estimate.cpu_threads > 0 {
             match priority {
-                Priority::Live => {
+                Priority::Live | Priority::Speculative => {
                     permits.software_live_permits += 1;
                     permits.software_live_used += estimate.cpu_threads;
                 }
@@ -603,13 +614,16 @@ impl Admissions {
             Priority::Background if permits.live_waiting > 0 || permits.live_active() => {
                 return None;
             }
+            Priority::Speculative if permits.live_waiting > 0 || permits.background_active() => {
+                return None;
+            }
             _ => {}
         }
         if permits.hardware_used() >= max {
             return None;
         }
         match priority {
-            Priority::Live => permits.hardware_live += 1,
+            Priority::Live | Priority::Speculative => permits.hardware_live += 1,
             Priority::Background => permits.hardware_background += 1,
         }
         drop(permits);
@@ -650,8 +664,21 @@ impl Admissions {
     }
 
     /// Decide what a live start that wanted hardware actually gets.
+    #[cfg(test)]
     pub fn admit(&self, max: usize, work: Workload<'_>) -> Admission {
-        if let Some(slot) = self.try_acquire(max, Priority::Live) {
+        self.admit_with_priority(max, work, Priority::Live)
+    }
+
+    /// Decide what a start gets without changing the workload policy. A
+    /// speculative caller uses the same measured fallback rules, but its
+    /// capacity claim cannot queue ahead of foreground playback.
+    pub(crate) fn admit_with_priority(
+        &self,
+        max: usize,
+        work: Workload<'_>,
+        priority: Priority,
+    ) -> Admission {
+        if let Some(slot) = self.try_acquire(max, priority) {
             return Admission::Hardware(slot);
         }
         // `try_acquire` performs the authoritative owner check together with
@@ -1270,6 +1297,30 @@ mod tests {
             other => panic!("live did not acquire after the race settled: {other:?}"),
         };
         assert!(a.try_acquire(2, Priority::Background).is_none());
+        drop(live);
+    }
+
+    #[test]
+    fn speculative_capacity_uses_spare_room_but_never_jumps_a_live_waiter() {
+        let admissions = Admissions::new();
+        let live = admissions
+            .try_acquire(2, Priority::Live)
+            .expect("the incumbent owns one slot");
+        let speculative = admissions
+            .try_acquire(2, Priority::Speculative)
+            .expect("the successor may use genuinely spare capacity");
+        drop(speculative);
+
+        let waiting = admissions.wait_for_slot();
+        assert!(
+            admissions.try_acquire(3, Priority::Speculative).is_none(),
+            "a foreground waiter outranks preparation even when a slot is numerically free",
+        );
+        drop(waiting);
+        assert!(
+            admissions.try_acquire(3, Priority::Speculative).is_some(),
+            "preparation may try again after foreground demand settles",
+        );
         drop(live);
     }
 

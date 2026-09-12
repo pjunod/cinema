@@ -3190,10 +3190,24 @@ pub async fn update_settings(
             .await?;
     }
     if let Some(on) = req.prepared_quality_handoff {
+        if !on {
+            // Wake any long-running prime before waiting for the transition's
+            // write side. Tokio's fair lock then keeps later candidates behind
+            // this save while current owners transfer to exact cleanup.
+            super::hls::cancel_prepared_handoff_work();
+        }
+        let _transition = super::hls::prepared_handoff_write_guard().await;
         state
             .store
             .put_setting(keys::PREPARED_QUALITY_HANDOFF, if on { "1" } else { "0" })
             .await?;
+        if !on {
+            // Advisory readiness never rewrites this choice. Turning the
+            // choice off is nevertheless an explicit lifecycle command: no
+            // detached candidate may reserve after this write, and every
+            // unswitched successor is settled before the transition reopens.
+            super::hls::abort_disabled_prepared_handoffs().await;
+        }
     }
     if let Some(on) = req.automatic_decoder_recovery {
         state

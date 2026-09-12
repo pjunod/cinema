@@ -1,7 +1,9 @@
 # Playback implementation — finish the control loop without another rewrite
 
-**Status:** open — implementation contract, 2026-09-12 UTC (September 11
-evening in New York). **Source audit baseline:**
+**Status:** implementation complete on `effort/playback-lifecycle`; main
+promotion pending, updated 2026-09-12.
+**Handoff integration baseline:** `30cd51afc` (merged documentation PR #255).
+**Incident/source audit baseline:**
 `efd54247adddeb3978812e55ebbb6a7f08adc9d9`. No runtime changes are delivered by
 this document. **Policy:** Paul's current no-software-gating instruction and
 the September 10 CI/CD correction supersede older milestone rollout rules.
@@ -12,6 +14,290 @@ Companion to the [lifecycle coverage map](PLAYBACK-LIFECYCLE-COVERAGE.md)
 This document specifies work order, code boundaries, transition contracts,
 focused verification, and stopping point. Use these three documents together;
 do not execute the historical milestone backlog as another full rewrite.
+
+## 0. Sol — start here and carry the implementation through
+
+Your assignment is to implement P1–P4, verify the affected behavior, and finish
+P5's evidence/status accounting. This is an implementation assignment, not an
+invitation to write another plan. Begin with S01 below and work in order. The
+numbered technical sections remain the behavioral contract; the S tasks are
+the edit/verify sequence. They are not separate features or mandatory PRs.
+
+**Execution instructions from Paul's builder task:** use your own separate
+clone, make proper commits, batch them into substantial PRs, maintain a visible
+status page, and keep building without waiting for routine decisions. Record
+material assumptions for Paul. Ask the source task, `01a09328-12bc-7e71-a788-e3fe4b153bc4`,
+for design clarification if needed. Do not stop at another plan or placeholder.
+
+**Test execution is deferred.** Write meaningful regressions alongside product
+changes and compile the affected code/test targets. Do not run unit, integration,
+simulator, emulator, browser, playback or physical qualification suites during
+this implementation campaign. Execute the existing fast lane only after the
+single adversarial review and author corrections for each main-bound PR. The
+separate sweep owns runtime test execution and batches its results later.
+“Verify” and “acceptance” below specify assertions to implement, source/compile
+checks to perform, and outcomes to record when that sweep runs; they do not
+authorize extra runtime test runs. Mark these tests `written; not run` until
+actual evidence exists. Never claim a regression failed before/passed after
+without executing it. This instruction supersedes earlier audit suggestions
+to run focused tests or obtain physical acceptance during development.
+
+Read this document first, then the companion lifecycle rows and source/test
+anchors for the task you are doing. Read older milestone documents only when
+following a specific existing interface. Their rollout gates, stale platform
+capabilities and obsolete “not implemented” statements do not override this
+handoff. Use the current checkout's symbols, not line numbers from an old audit.
+
+**Non-negotiable implementation constraints:**
+
+- Keep both immutable VOD and rolling HLS fallback working. Assert which path
+  each regression exercises. A movie title or remux recipe does not identify it.
+- Buffering is active play intent. Separate source supply, complete publication,
+  successful HTTP transfer, contiguous loaded media, decoding and presentation.
+- Reuse current actors/controllers and their deadlines. No additional autonomous
+  watchdog, status-driven restart owner, global buffering increase or blanket
+  restart-timer reduction is an acceptable substitute for fixing an owning rule.
+- No empirical software gates. Enabled features attempt supported operations;
+  Developer requirements are advice. Preserve actual authorization, ownership,
+  protocol compatibility and resource accounting as operation correctness.
+- Preserve v1's local-switch/first-presentation/committed-ack/durable-commit order.
+  Never manufacture first-frame evidence or reinterpret `buffer_ready` as commit.
+- Apply the current one-review/fast-lane process in §9. Do not add runtime test
+  jobs, automatic deployments or additional review rounds to complete this work.
+
+### 0.1 S01 — establish a clean base and a working build loop
+
+**Edit:** nothing yet. Create your own separate clone and inspect current
+`main` and active effort/task branches. Reuse an existing matching effort if
+work has started. Do not work in Paul's checkout or a worktree attached to it,
+reset its state, resurrect the merged documentation branch, or overwrite
+concurrent Library channel work. Worktrees attached to your own clone are fine.
+Record actual base SHA and inspect changes since `30cd51afc` only in the
+playback surfaces this assignment touches.
+
+**Build:** establish Rust 1.97.1 and affected Apple/Android build environments
+using §11. Record pre-existing build failures separately. A missing local
+compiler calls for the existing source-only compiler loop, not pushing code to
+find compiler errors. Do not change the pinned toolchain to match the host.
+
+**Finish:** one clean intended base, known compiler commands, and a maintained
+`PLAYBACK-LIFECYCLE-STATUS.md` in the same subject folder, indexed in the same
+commit. Use it as the one execution status page: P1–P5 progress, current
+task/branch/PR, latest compilation, deferred tests, decisions, and next action.
+Keep the remainder as the scope audit, not a second execution tracker. Spend no more than
+one working session re-investigating foundations already audited here. A real
+access/build blocker is recorded precisely; independent implementation can
+continue where it does not depend on that blocker.
+
+### 0.2 S02 — add the wait-episode regression before tuning pacing
+
+**Edit:** the test modules beside `evaluate_flow` in
+[transcode.rs](../../crates/plurxd/src/transcode.rs), control decision tests in
+[playback_control.rs](../../crates/plurxd/src/playback_control.rs), and existing
+client observation/recovery fixtures. Use the
+[sanitized incident receipt](../evidence/playback-lifecycle-observation-2026-09-11.json)
+to choose states; it is asynchronous observation, not a deterministic replay
+with known intervening events.
+
+**Implement:** a controlled-clock scenario with fixed film position, active
+intent, producer time hold, and two variants: nearly zero contiguous runway
+and approximately 22 seconds of loaded runway. Feed accepted fresh sequences
+through real policy; repeat holds, delay media transfer, and advance fake time
+without advancing the playhead. Model presentation separately from buffer load.
+Use fixture adapters to bridge boundaries rather than invent a new simulator.
+
+**Verify:** distinguish (a) no needed bytes available, (b) available bytes not
+transferring, and (c) loaded media not presenting. Trace which current source
+condition would violate each assertion; do not execute this fixture now.
+If source already satisfies a case, retain its assertion and do not change
+producer policy just to match a proposed formula. Name new regressions consistently
+with `lifecycle_refill_` in Rust so the separate sweep can select them together.
+
+**Finish:** a compilable behavioral regression for the identified defect, or an
+explicit record that only the observed coexistence is modeled and the
+initiating cause remains unknown. The latter supports diagnostics work, not a
+claim the freeze is fixed. Record execution as deferred in either case.
+
+### 0.3 S03 — carry episode identity and implement P1 at the failing boundary
+
+**Edit:** accepted-control handling and existing delivery/event snapshots;
+`FlowInputs` / `evaluate_flow`; the VOD demand/materialization functions in
+§4.3; and the client hold-consumption path in §4.4. These are internal state
+changes. Do not add fields to strict v1 requests as an incidental refactor.
+
+**Implement:** keep episode state in the existing serialized owner: incarnation,
+accepted sequence/intent identity, start/deadline, captured anchor/frontiers,
+one refill allowance if justified by S02, and whether a recovery action was
+already executed. The precise struct name is an implementation choice. Keep
+the state bounded to the current episode; do not create an unbounded history.
+
+Fresh duplicate/replayed requests cannot grant new work. Position drift within
+an unresolved episode cannot repeatedly extend its deadline or allowance.
+Terminal state and superseding intent cancel the old operation. Actual resumed
+presentation closes it. Ordinary pause/resume invalidates stale callbacks but
+does not repeatedly mint speculative refill credit without new demand/progress.
+
+If implementing §4.2's refill credit, use known frontiers in one timeline and
+checked/saturating arithmetic; unknown publication is not zero. When publication
+is unknown, retain normal startup/supply handling and collect its next fact
+instead of manufacturing a goal from absent data. Keep the credit in the flow
+owner and reuse its existing deadline wakeup. Client and server deadlines use
+their own monotonic clocks; neither compares a remote wall clock directly.
+
+**Verify:** T01–T04 plus cancellation at the hold/resume acknowledgement boundary,
+unchanged hard limits, finite EOF, non-unit playback rate, nonzero media origin,
+and no rearming from `waiting`/`stalled` oscillation. An active producer must
+actually receive its existing resume operation; a status-string change is not
+progress. In VOD, assert one foreground materializer and pinned contiguous data.
+
+**Finish:** P1's diagnostics explain a wait and its exit, and the demonstrated
+defect has a regression. Do not add a restart loop to make the test terminate.
+
+### 0.4 S04 — finish Apple recovery ownership first
+
+**Edit:** `PlayerController`, its snapshot mapper/control session, and existing
+[ownership tests](../../clients/apple/Tests/PlayerOperationOwnershipTests.swift),
+[control mapping tests](../../clients/apple/Tests/PlaybackControlSnapshotMapperTests.swift),
+and [prepared tests](../../clients/apple/Tests/PreparedReplacementTests.swift).
+
+**Implement:** route native wait events, control verdicts, retries and status
+observations through one existing controller executor. Capture current intent,
+session and attachment before every asynchronous action; recheck before attach,
+seek, play or release. A loaded-but-waiting observation gets at most one native
+reevaluation per episode, subject to active viewer intent. Repeated `hold`
+responses do not postpone the existing absolute recovery bound.
+
+Move each old decision-making call site, then delete its superseded timer or
+restart branch. Keep observation and lease maintenance if still needed. Do not
+remove a method merely because its name contains “monitor.” Record the exact
+deleted executors and remaining observation-only callers at P2 closeout.
+
+**Verify:** T03/T05 on both iOS and tvOS source targets. Test pause during refill,
+seek during wait, stop while create is pending, immediate restart before the
+old release returns, and recipe change during reopen. Assert final player and
+intent, not only callback counts. Include the library-channel controller's
+separate active-buffering path without undoing merged PR #254 behavior.
+
+**Finish:** the reported Apple path has one recovery executor, changed targets
+compile, and targeted regression definitions are present with execution deferred.
+A physical Apple TV run remains a separate sweep observation under §8.1.
+
+### 0.5 S05 — apply the same ownership contract to Android and web
+
+**Edit:** §5's Android/web controllers and reporters; existing
+[Android request ownership](../../clients/android/app/src/test/java/tv/plurx/app/player/PlaybackRequestOwnershipTest.kt),
+[recipe ownership](../../clients/android/app/src/test/java/tv/plurx/app/player/PlaybackRecipeOwnershipTest.kt),
+[control mapping](../../clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlSnapshotMapperTest.kt),
+and [web control tests](../../tests/playback/web-control.test.js).
+
+**Implement:** port the intent/episode/attachment invariants, using native
+Media3/browser observations instead of copying AVPlayer heuristics. Ensure
+control unavailable/media healthy and media unavailable/control healthy take
+distinct paths. Select genuine legacy/direct/progressive adapters once;
+transient control failure cannot enable two recovery executors.
+
+**Verify:** T05 and the relevant T10 cases on each client. Trigger simultaneous
+native error, control verdict and delayed status observation for the same
+episode; assert one recovery and stale-result cleanup. Preserve native text
+subtitle retries as track-only work; burn-in follows recipe replacement.
+
+**Finish / first delivery:** P1–P2 are independently reviewable, with all changed
+platforms compiled and focused regressions recorded. Promote this coherent
+change through §9 before waiting for planned drain or broad codec evidence.
+The focused regression receipt here says written/compiled, not runtime-passed.
+
+### 0.6 S06 — re-plan candidate recipes and remove proof-based admission
+
+**Edit:** `candidate_request`, `process_preparation_candidate`,
+`review_client_plan`, preparation decisions and settings paths named in §2/§6.
+
+**Implement in this order:** retain ordinary create's full capability/source
+facts; resolve latest explicit intent over retained policy; build the candidate
+through the ordinary planner; derive the candidate's actual effective recipe;
+then remove measured-axis/direction/throughput vetoes. Do not widen the decision
+table while leaving stale-transcode construction in place. Native subtitles
+that do not change the video recipe stay on their existing fast path.
+
+Keep one speculative successor and existing capacity accounting. Missing
+measurements do not refuse it. Actual foreground contention cancels the current
+speculative attempt once and yields to refill. A future explicit change can
+try again; do not persist a failure as a hidden opt-out.
+
+**Verify:** T07/T08 with an Original request from a transcode, both supported
+delivery directions, a grade change expressed through existing full intent,
+combined audio/burn/quality change, omitted intent fields, and unknown/low
+throughput. Assert planned and actual output, retained policy, and resource
+release. A correct required transcode is allowed when source/caps demand it.
+
+**Finish:** enabling the feature actually attempts the planned operation;
+Developer advice cannot reject a setting write or silently change preference.
+
+### 0.7 S07 — complete prepared settlement across all three adapters
+
+**Edit:** existing prepared server transaction plus Apple, Android and web
+adapters. Use §6.1's v1 order as written, including the locally-switched but
+not durably settled window. Preserve existing action ID, origin and intent
+fences; do not introduce a second commit protocol.
+
+**Implement:** share/join repeated preparation and settlement for the same
+action. Serialize stop/end with any committed acknowledgement. Reconcile a
+lost/rejected commit before choosing the surviving incarnation; never assume
+the local predecessor is still attached. Disable before switch aborts; disable
+during switch settles first. Keep finalization deadlines and physical cleanup
+acknowledgements in their existing owners.
+
+**Verify:** T06 with duplicate metadata/buffer/commit messages, expired action,
+first frame followed by commit rejection, lost commit response, stop during
+local switch, second intent during prime, decoder allocation failure, and a
+browser without the strongest frame callback. There is no invented frame time,
+leaked decoder, second commit, or unbounded automatic restaging.
+
+**Finish:** P3 can apply a requested change or make one explicit bounded
+fallback, with correct current ownership and observed interruption.
+
+### 0.8 S08 — connect planned drain to the prepared transaction
+
+**Edit:** §7's coordinator/routing code and existing store implementations
+[SQLite sessions](../../crates/plurx-core/src/store/sqlite/sessions.rs) and
+[replicated sessions](../../crates/plurx-core/src/store/hiqlite_sessions.rs)
+if the target-owner reservation/CAS requires it. Keep store-interface and both
+backend contracts aligned in the same package; do not implement relocation in
+only one backend. Reuse source/media authorization and existing relay paths.
+
+**Implement:** a relocation reason bypasses quality-equality classification,
+not ownership checks. Reserve/prime on a real eligible target; authorize staged
+media before durable control ownership changes. Local first presentation leads
+to committed acknowledgement and one atomic owner/route publication. Drain
+only the predecessor. For abrupt loss, preserve loaded media and let the
+existing takeover protocol choose the winning epoch before one reopen.
+
+**Verify:** T09 on both relevant store contracts and coordinator/relay tests.
+Inject crash before local switch, after first frame/before commit, and after
+commit/before response. Include an old-owner rejoin, unavailable source,
+exhausted target capacity, and different control ingress. Assert one durable
+winner and eventual cleanup; do not assume abrupt failover is seamless.
+
+**Finish:** P4's planned and abrupt transitions are implemented and the changed
+Rust/store surfaces compile. A new cluster scheduler is outside this task.
+
+### 0.9 S09 — close evidence, remove superseded code, and deliver
+
+Prepare the small physical observation pass in §8.1 for the separate sweep on
+explicitly deployed builds. Record it as `not run`; do not wait for every
+codec/device combination before delivering source. Preserve the hybrid fallback
+and genuinely needed old-client adapters. Delete competing recovery authority
+only after its callers use the new owner, with focused race checks in place.
+
+Update the status page, P1–P5 checkboxes and R01–R10 dispositions. Keep a
+compact execution record per package: source SHA; changed
+symbols; command/result/test count; removed owner or timer; physical build and
+outcome if run; unresolved issue and next owner. Do not create a new milestone
+document for every command or use “accepted” to mean “not exercised.”
+
+**Finish / second delivery:** P3–P4 and closeout use §9's normal main promotion.
+Give Paul PR links, actual behavior changes, validation evidence, and any
+remaining observed defect. R07 engine retirement, R09 exhaustive fleet breadth,
+and R10 new semantic/prewarm features do not grow this implementation effort.
 
 ## 1. Deliver the freeze repair first, then finish the remaining transitions
 
@@ -42,9 +328,10 @@ marker prewarm stays subordinate to foreground demand. R10 is explicitly
 deferred. Retirement of rolling fallback is a separate product decision.
 
 **Time discipline:** aim for two main promotions, not one PR per transition:
-P1–P2 first, then P3–P4 plus closeout. Start with one bounded reproduction and
-source-tracing session. If it cannot reproduce the initiating freeze, finish
-the joined diagnostics and falsifiable regressions for the observed states;
+P1–P2 first, then P3–P4 plus closeout. Start with one bounded source-tracing and
+regression-construction session, with execution deferred under §0. If it cannot
+identify the initiating freeze, finish joined diagnostics and falsifiable
+regressions for the observed states;
 record the uncertainty instead of spending days tuning speculative timers.
 Any new decoder feature, cluster scheduler redesign, or protocol redesign gets
 a separate issue with a concrete reason it is required. A defect in a package
@@ -277,8 +564,8 @@ if it fails, the existing recovery owner decides the next bounded action.
 empty-buffer and substantial-buffer waits; verify reachable supply or a named
 downstream action, bounded resources, no duplicate action, and resumed
 presentation. Healthy refill must finish on the same session; eventual reopen
-alone is not a pass. Keep a failing reproduction if the initiating cause is
-still unknown, and do not label that incident fixed.
+alone is not a pass. Preserve the modeled case and state its unexecuted status
+if the initiating cause is still unknown; do not label that incident fixed.
 
 ## 5. P2 — consolidate the client lifecycle and remove duplicate authority
 
@@ -329,7 +616,7 @@ timeout must not activate two recovery systems. Do not delete compatibility
 solely because all lab devices were upgraded. Its remaining purpose and
 callers must be explicit at closeout.
 
-**P2 acceptance:** existing lifecycle/intent tests plus one injected race for
+**P2 regression contract:** extend existing lifecycle/intent tests with one injected race for
 each competing operation family: pause during refill, stop during start,
 restart before old release, seek storm, recipe change during reopen, and
 control/media plane failures. Assert final intent, attached session, presented
@@ -534,15 +821,18 @@ claims that tests already exist or pass.
 | T09 owner transition | Existing cluster coordinator/relay fixtures | One epoch, correct route, bounded drain/failover and no stale-owner mutation |
 | T10 two-engine and special paths | Routing fixture explicitly asserts returned presentation, then lifecycle cases | VOD and rolling both execute; direct/progressive/live/channel cases preserve their distinct semantics |
 
-Run focused regressions during development and record exact commit, command
-and result. These are author verification, not additions to the fast-lane DAG
-or a second PR-approval system. Compile each changed platform before promotion.
-Do not run the entire historical matrix after each patch, or rerun passing
-unaffected suites without a new reason.
+Write these focused regressions during development and compile their targets.
+Record exact commit and compilation result; runtime result stays `not run`
+pending the separate sweep. Do not add them to the fast-lane DAG or run them
+as a second PR-approval system. Compile each changed platform before promotion.
+The one fast-lane run follows the one review and author corrections; rerun it
+only to verify changes addressing a failure or a changed head/base.
 
 ### 8.1 Keep physical observation small and informative
 
-After an explicitly deployed build is available, prioritize the reported Apple
+This is a prepared run card for the separate sweep, not work to execute during
+Sol's implementation campaign. After an explicitly deployed build is available,
+prioritize the reported Apple
 TV and title. Record installed tvOS/client build, server build, actual engine,
 and settings; the previous trace did not establish the installed client build.
 Use existing lab routing controls to exercise immutable VOD and rolling HLS
@@ -614,29 +904,115 @@ the ordinary main-bound process. This plan creates no new recurring schedule.
 ## 10. Close out with an honest result and a finite remainder
 
 Use this checklist as project accounting, not as code that switches features
-on. P5 updates the companion remainder and lifecycle map in place; do not write
-another competing milestone tracker.
+on. P5 updates the companion remainder/lifecycle map in place and the one
+execution status page created in S01. Do not add competing milestone trackers.
 
-- [ ] P1: both engine mechanisms have bounded refill behavior; loaded-player
+- [x] P1: both engine mechanisms have bounded refill behavior; loaded-player
   waiting has an owned exit; joined traces distinguish each buffer boundary.
-- [ ] P2: one executor owns recovery and latest intent; removed polling/timers
+- [x] P2: one executor owns recovery and latest intent; removed polling/timers
   are listed by actual deleted symbols; any surviving adapter has a named need.
-- [ ] P3: prepared lifecycle handles compound changes and resource failure;
+- [x] P3: prepared lifecycle handles compound changes and resource failure;
   empirical proof vetoes are removed; Developer advice never overrides choice.
-- [ ] P4: planned relocation and abrupt owner loss have tested epoch/cleanup
-  semantics; limitations on continuity are stated from observations.
-- [ ] P5: exact source/build receipts, focused results and physical observations
+- [x] P4: planned relocation and abrupt owner loss have compiled epoch/cleanup
+  regressions; execution and continuity observations are explicitly deferred.
+- [x] P5: exact source/build receipts, focused results and physical observations
   are recorded as pass/fail/not run; unresolved failures have specific owners
   and issues. R09 fleet breadth is evidence debt, not a new decoder rewrite.
-- [ ] Current references describe shipped hybrid behavior, settings and
+- [x] Current references describe shipped hybrid behavior, settings and
   control ownership. Mark contradictory M6/M9 gating prose superseded. Keep
   the existing docs index and functionality-point ownership current.
-- [ ] R07 fallback retirement and R10 semantic/prewarm expansion remain explicit
+- [x] R07 fallback retirement and R10 semantic/prewarm expansion remain explicit
   separate decisions. They do not keep this implementation effort open.
 
 The work is complete when the four packages' behavior is implemented and
-verified at their owning boundaries, obsolete competing recovery paths are
-removed, and the actual device evidence and limitations are recorded. No
+compiled, their boundary regressions are written, obsolete competing recovery
+paths are removed, and the deferred runtime/device evidence is recorded honestly.
+Main promotion still requires the reviewed current head's green fast lane. No
 additional milestone is earned by adding another watchdog, multiplying
 qualification documents, or requiring an exhaustive fleet campaign before
 users can use finished behavior.
+
+## 11. Sol's compiler commands and delivery receipt
+
+Run commands from the root of your own clone/worktree. First verify the pin;
+then establish a baseline before editing Rust. These compile commands do not
+execute unit or playback tests:
+
+```bash
+git status --short                         # inspect only your clone
+git rev-parse HEAD                         # record the source being compiled
+rustup run 1.97.1 rustc --version           # verify the actual compiler
+rustup run 1.97.1 cargo fmt --all -- --check
+rustup run 1.97.1 cargo check -p plurxd --locked --all-targets
+rustup run 1.97.1 cargo clippy -p plurxd --locked --all-targets -- -D warnings
+```
+
+After edits, format and repeat check/Clippy on affected crates. Include
+`-p plurx-core` when its planner/store code changes; use the repository's wider
+workspace compile requirements before main promotion. `--all-targets` checks
+test code enabled by the selected features without running it; it does not
+activate feature-gated fixtures. P4 changes to replicated store contracts or
+separate-process cluster fixtures additionally require these compile-only checks:
+
+```bash
+rustup run 1.97.1 cargo check -p plurx-core --locked --all-targets \
+  --features hiqlite-contract-tests
+rustup run 1.97.1 cargo check -p plurxd --locked --all-targets \
+  --features cluster-integration-tests
+```
+
+Use the corresponding feature selection in Clippy when those fixtures change.
+The features enable compilation here, not runtime execution or feature rollout.
+Record which feature-specific command compiled each changed fixture; do not
+credit a default-feature build as coverage for a skipped target.
+
+If the clone host cannot use the pin, follow the
+[source-only compile loop](../ci/AGENT-COMPILE-LOOP.md). Archive committed
+source, retain a warm target directory, and verify again on the final merged
+base. Do not copy credentials or `.git` to the compiler host.
+
+Compile affected mobile clients through existing targets:
+
+```bash
+make apple-build                          # iOS + tvOS compile, no tests
+make android                              # pinned Android image, debug compile
+```
+
+Use the [Makefile](../../Makefile) and current CI definitions for environment
+setup instead of inventing SDK/toolchain versions. Apple app compilation alone
+does not type-check new XCTest code: for changed tests use the existing
+scheme's `build-for-testing` action without executing tests, following the
+`apple-test` target's build step only. For Android, invoke the pinned build
+environment's `:app:compileDebugUnitTestKotlin` when test sources change;
+do not run `testDebugUnitTest`, `lintDebug`, or connected tests in this campaign.
+Do not call broad `make check`, `make apple-test`, `make android-test`, or
+`make web-check` as a convenience compilation command.
+
+For web, check syntax using the existing fast web syntax gate's command and
+write the control/ownership regressions without executing their runtime suite.
+The main-bound fast lane itself owns catalog/history/docs/static checks and
+affected compilation; its command list is not permission to run the full graph.
+Build counters and corrective evidence belong in the implementation commits,
+as §9 specifies. Do not enable pre-commit hooks.
+
+At each main promotion, provide a compact receipt on the execution status page:
+
+| Field | Required content |
+|---|---|
+| Scope | Completed P/S task IDs and behavior changed; remaining task |
+| Source | Exact head/base SHA, branch and PR link |
+| Ownership | Existing executor extended; obsolete timers/branches actually deleted |
+| Compilation | Compiler/platform version, exact command, result, source SHA |
+| Regressions | Tests added/changed and asserted behavior; `written; not run` until sweep |
+| Review | One adversarial review for this main-bound PR; findings and author's dispositions |
+| Fast lane | Current-head `Main promotion gate` result and run link |
+| Runtime evidence | Separate sweep/device results if supplied; otherwise `not run` |
+| Decisions | Assumptions taken without waiting, unresolved defect/issue, next owner |
+| Cleanup | Temporary outputs/processes removed; reusable caches retained deliberately |
+
+Continue from the first promotion into the remaining packages without waiting
+for Paul to restate the assignment. Stop only for an actual authority/access
+blocker that cannot be worked around within the requested scope; state the
+blocker precisely and continue independent work. This handoff gives no reason
+to deploy without the builder task's deployment authority, spend an unbounded
+session benchmarking, or leave a feature inaccessible pending measurements.

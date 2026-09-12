@@ -1,5 +1,9 @@
 # M6 client replacement contract — the wire, exactly as the server speaks it
 
+> **Superseded in part 2026-09-12:** the wire/state ordering remains useful
+> history, but the current [lifecycle contract](PLAYBACK-LIFECYCLE-IMPLEMENTATION.md)
+> removes the axis-set, direction, software-proof, and throughput gates below.
+
 **Status:** normative reference · **Describes:** shipped `main` behaviour, not
 proposed behaviour · **Written:** 2026-09-07 · **Baseline:** effort head
 `e3b11182` on `effort/decoder-selection-recovery`

@@ -33,6 +33,7 @@ use crate::transcode::{
 };
 
 pub(crate) const START_PATH: &str = "/internal/cluster/media/sessions/start";
+pub(crate) const PREPARE_PATH: &str = "/internal/cluster/media/sessions/prepare";
 pub(crate) const ACTIVATE_PATH: &str = "/internal/cluster/media/sessions/activate";
 pub(crate) const ABORT_PATH: &str = "/internal/cluster/media/sessions/abort";
 pub(crate) const RELAY_PATH: &str = "/internal/cluster/media/sessions/relay";
@@ -1074,6 +1075,30 @@ pub(crate) struct RemoteStartResponse {
     /// original wire shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation_generation: Option<u64>,
+}
+
+/// Attach a worker to a successor that the shared preparation ledger already
+/// reserved for this target. The recipe stays in the durable row; the wire
+/// carries only exact identity, so a peer cannot ask the target to prime bytes
+/// that Store did not authorize first.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RemotePrepareRequest {
+    pub protocol_version: i64,
+    pub incarnation_id: String,
+    pub session_id: String,
+    pub user_id: i64,
+    pub expected_owner_epoch: i64,
+}
+
+impl RemotePrepareRequest {
+    pub(crate) fn is_valid(&self) -> bool {
+        self.protocol_version == crate::media_pool::PROTOCOL_VERSION
+            && uuid::Uuid::parse_str(&self.incarnation_id).is_ok()
+            && uuid::Uuid::parse_str(&self.session_id).is_ok()
+            && self.user_id > 0
+            && self.expected_owner_epoch == 1
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2362,6 +2387,39 @@ impl MediaSessionCoordinator {
             response.status,
             reqwest::StatusCode::NO_CONTENT | reqwest::StatusCode::ACCEPTED
         ) {
+            Ok(())
+        } else if response.status == reqwest::StatusCode::REQUEST_TIMEOUT {
+            Err(PeerTransportError::TimedOut)
+        } else {
+            Err(PeerTransportError::InvalidResponse)
+        }
+    }
+
+    pub(crate) async fn prepare_remote(
+        &self,
+        owner_node_id: &str,
+        request: &RemotePrepareRequest,
+        deadline: tokio::time::Instant,
+    ) -> Result<(), PeerTransportError> {
+        let body = serde_json::to_vec(request).map_err(|_| PeerTransportError::InvalidResponse)?;
+        if body.len() > MAX_CONTROL_REQUEST_BYTES || tokio::time::Instant::now() >= deadline {
+            return Err(PeerTransportError::InvalidResponse);
+        }
+        let base = self.peer_base(owner_node_id, deadline).await?;
+        let response = self
+            .transport
+            .request(
+                owner_node_id,
+                &base,
+                reqwest::Method::POST,
+                PREPARE_PATH,
+                body,
+                deadline,
+                4 * 1024,
+                PeerAuthMode::ExactRequest,
+            )
+            .await?;
+        if response.status == reqwest::StatusCode::NO_CONTENT {
             Ok(())
         } else if response.status == reqwest::StatusCode::REQUEST_TIMEOUT {
             Err(PeerTransportError::TimedOut)
@@ -5397,6 +5455,39 @@ mod tests {
                 block_budget_secs: None,
             },
         }
+    }
+
+    fn valid_prepare_request() -> RemotePrepareRequest {
+        RemotePrepareRequest {
+            protocol_version: crate::media_pool::PROTOCOL_VERSION,
+            incarnation_id: "00000000-0000-4000-8000-0000000000a1".to_owned(),
+            session_id: "00000000-0000-4000-8000-0000000000b1".to_owned(),
+            user_id: 7,
+            expected_owner_epoch: 1,
+        }
+    }
+
+    #[test]
+    fn remote_prepare_names_only_an_exact_reserved_identity() {
+        let request = valid_prepare_request();
+        assert!(request.is_valid());
+
+        let value = serde_json::to_value(&request).expect("prepare request JSON");
+        let object = value.as_object().expect("prepare request object");
+        assert_eq!(object.len(), 5, "the recipe must stay in the durable row");
+        assert!(!object.contains_key("request"));
+        assert!(!object.contains_key("recipe_json"));
+
+        let mut wrong_epoch = request.clone();
+        wrong_epoch.expected_owner_epoch = 2;
+        assert!(!wrong_epoch.is_valid());
+
+        let mut extended = value;
+        extended
+            .as_object_mut()
+            .expect("prepare request object")
+            .insert("recipe_json".to_owned(), serde_json::json!("forged"));
+        assert!(serde_json::from_value::<RemotePrepareRequest>(extended).is_err());
     }
 
     fn valid_start_response() -> RemoteStartResponse {

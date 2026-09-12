@@ -146,34 +146,8 @@ internal class PreparedReplacementLedger {
     val isSwitched: Boolean
         get() = phase == PreparationPhase.SWITCHED
 
-    /**
-     * Whether this playback is still willing to be offered a preparation.
-     *
-     * Learned, not configured, and deliberately not a flag anyone sets: it goes
-     * false the first time a successor dies **before it was ever playable**,
-     * and it is forgotten with the ledger when the player ends.
-     *
-     * The case it exists for is not hypothetical. `stage_prepared_successor` is
-     * stage-only — its own comment says "a durable row and the actor's one
-     * successor slot, nothing produced yet" — and the third of the roadmap's
-     * eight phases, *reserve and prime*, is not implemented. The staged row
-     * carries `publication_ready_at_ms = MEDIA_SESSION_PUBLICATION_BLOCKED`, so
-     * a GET of the successor's playlist answers `503 media_owner_transition`
-     * until the pointer moves, and commit does not publish it either. A client
-     * that keeps trying therefore builds a second pipeline that can never
-     * become playable, on *every* selection change, for the whole film.
-     *
-     * One attempt is evidence about this playback, not about this attempt.
-     */
-    var canOfferPreparation: Boolean = true
-        private set
-
     fun offer(inbound: ControlAction): PreparationOffer {
         if (!inbound.preparedPayloadIsValid) return PreparationOffer.Refuse
-        // A successor already died before it was ever playable on this
-        // playback. The server will go on offering, and the honest answer is
-        // to stop building.
-        if (!canOfferPreparation) return PreparationOffer.Refuse
         // Nothing replaces a preparation the viewer is already watching. Without
         // this the switched-but-unsettled window takes the "supersedes" branch,
         // where `terminal()` correctly refuses to abort it and the branch then
@@ -276,10 +250,7 @@ internal class PreparedReplacementLedger {
      * an ordinary failure and the next offer is still worth taking.
      */
     fun failed(): ActionAcknowledgement? {
-        val neverPlayable = phase == PreparationPhase.STAGED && isLive
-        val settlement = terminal(PreparationPhase.FAILED)
-        if (neverPlayable) canOfferPreparation = false
-        return settlement
+        return terminal(PreparationPhase.FAILED)
     }
 
     /**
@@ -376,10 +347,9 @@ internal data class PreparedReplacementRequirement(
 /**
  * The requirement list, derived rather than typed twice.
  *
- * [isTelevision] is the axis M5.5's only hard failure sat on: both phones
- * passed same-codec dual prime 20/20, and the tunneled Google TV failed it 0/3
- * with two successor-prime timeouts and an `ERROR_CODE_AUDIO_TRACK_WRITE_FAILED`
- * — and same-codec is the only kind of change the server ever prepares.
+ * [isTelevision] is the axis M5.5's only observed hard failure sat on: both
+ * phones passed dual prime 20/20, and the tunneled Google TV failed it 0/3
+ * with two successor-prime timeouts and an `ERROR_CODE_AUDIO_TRACK_WRITE_FAILED`.
  * [tunnelingEnabled] is the suspected cause rather than a measured one: the
  * re-run that would name it (same-codec dual prime with tunneling forced off)
  * has not been taken.
@@ -395,9 +365,9 @@ internal fun preparedReplacementRequirements(
         label = "Device class measured to pass",
         met = !isTelevision,
         detail = if (isTelevision) {
-            "Televisions are the class that failed. A tunneled Google TV failed " +
-                "same-codec dual preparation 0 of 3 — and same-codec is the only " +
-                "change the server ever prepares. Phones passed 20 of 20."
+            "Televisions are the measured class that failed. A tunneled Google " +
+                "TV failed dual preparation 0 of 3. Phones passed 20 of 20. " +
+                "This observation is advice, not an enablement gate."
         } else {
             "Both measured phones passed same-codec and codec/HDR dual " +
                 "preparation, 20 of 20."
@@ -417,20 +387,17 @@ internal fun preparedReplacementRequirements(
         },
     ),
     PreparedReplacementRequirement(
-        label = "Server reports delivered throughput",
+        label = "Server delivery telemetry",
         met = sessionIsLive,
         detail = when (sessionIsLive) {
             true -> "The server is reporting delivered throughput for this " +
-                "session, which is half of what the preparation floor needs."
+                "session. It informs fleet analysis but does not gate handoff."
             false -> "This server reports no delivered throughput for the " +
-                "session you are watching, and the preparation floor needs " +
-                "both that number and this device's. Nothing on this screen " +
-                "changes that."
-            null -> "The preparation floor needs a delivered-throughput " +
-                "number from the server as well as this device's. A server " +
-                "that does not measure it for the presentation you are " +
-                "watching will never offer a handoff, whatever this switch " +
-                "says."
+                "session you are watching. Preparation remains eligible; the " +
+                "fleet evidence is incomplete."
+            null -> "Settings has no active session to inspect. The server " +
+                "records delivery telemetry during playback when available; " +
+                "unknown evidence does not disable this switch."
         },
     ),
     PreparedReplacementRequirement(
@@ -439,16 +406,14 @@ internal fun preparedReplacementRequirements(
         detail = when {
             !throughputKnown ->
                 "This device counts bytes off the wire over a rolling window " +
-                    "and reports the rate on every exchange. The server wants " +
-                    "at least twice what the session is already delivering " +
-                    "before it will prime a second pipeline."
+                    "and reports the rate on every exchange. The reading is " +
+                    "advisory and is not a handoff admission rule."
             observedDownloadBps != null && observedDownloadBps > 0 ->
                 "Measuring ${observedDownloadBps / 1_000_000} Mbit/s off the " +
-                    "wire. The server wants at least twice what this session " +
-                    "is already delivering."
+                    "wire. This is fleet evidence, not permission to prepare."
             else ->
-                "Nothing measured yet. A client that reports no throughput is " +
-                    "never offered a preparation, whatever its capability says."
+                "Nothing measured yet. The explicit client capability and real " +
+                    "resource outcomes still decide whether an attempt proceeds."
         },
     ),
 )

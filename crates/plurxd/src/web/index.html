@@ -3826,6 +3826,7 @@ function beginWait(v){
   if(p.waitAt) return;                       // already hungry; not a second one
   p.waitAt=performance.now();
   p.waitRunway=bufferRunway(v);
+  p.waitNudgedAt=null;
   p.waitReported=false;
   const began=p.waitAt;
   const generation=p._seekToken||0;
@@ -3867,7 +3868,7 @@ function endWait(resumed){
   const ms=Math.round(performance.now()-began);
   const runway=p.waitRunway;
   const reported=!!p.waitReported;
-  p.waitAt=null; p.waitRunway=null; p.waitReported=false;
+  p.waitAt=null; p.waitRunway=null; p.waitNudgedAt=null; p.waitReported=false;
   if(reported) return;                       // persistentWait already emitted it
   if(!resumed || ms<STALL_MIN_MS) return;    // a hitch, not a stall
   const kind=(runway!=null && runway<SUPPLY_RUNWAY_SECS)?"supply":"decode";
@@ -3895,12 +3896,29 @@ async function persistentWait(v,p,began,generation,actionGeneration){
   const controlObservation=kind==="supply"
     ? {decoder_state:"starved"}
     : {decoder_state:"failed",error_code:"decoder",error_detail:"persistent_decode_stall"};
+  // Presentation recovery belongs to this client, not to the producer
+  // verdict. Spend the one harmless browser reevaluation before the bounded
+  // ask so a hold suppressed to `none` receives the same treatment.
+  let nativeReevaluated=false;
+  if(kind==="decode"&&p.waitNudgedAt!==began){
+    p.waitNudgedAt=began;
+    nativeReevaluated=true;
+    try{
+      const nudge=v.play();
+      if(nudge&&typeof nudge.catch==="function") nudge.catch(()=>{});
+    }catch(e){}
+  }
   // Both the initial ask and any extension share the absolute stall deadline.
   // A callback near the boundary gets only the remaining control budget.
   const ask=ms>=CONTROL_STALL_DEFER_DEADLINE_MS
     ? {trigger:null,action:Promise.resolve(null)}
     : askPlaybackControl("stalled",controlObservation,began+CONTROL_STALL_DEFER_DEADLINE_MS);
   const controlTrigger=ask.trigger;
+  if(nativeReevaluated){
+    clientLog({level:"info",event:"stall_recovery",detail:"native_reevaluation:wait",
+      message:"loaded media remained waiting — native playback reevaluated before recovery",
+      control_trigger:controlTrigger});
+  }
   if(firstReport) recordWaitStall(p,kind,ms,runway,`${kind}-persistent`,began,controlTrigger);
   p.stallFrom=p.controlSeek?.targetMs!=null
     ? (p.controlSeek.targetMs+(p.bookOffset||0))/1000 : pbPosSec();
@@ -3973,6 +3991,16 @@ async function persistentWait(v,p,began,generation,actionGeneration){
         message:"server hold reached the client recovery deadline — recovering anyway",
         control_trigger:controlTrigger});
     }
+  }
+  if(kind==="decode"&&p.waitNudgedAt===began&&
+     (!verdict||verdict.type==="none")&&controlElapsedMs<CONTROL_STALL_DEFER_DEADLINE_MS){
+    // `none` is passive: it means production has no authoritative action for
+    // this presentation wait. Observe the native reevaluation under the same
+    // absolute episode deadline instead of treating absence of a server
+    // command as an instruction to replace media immediately.
+    p.waitTimer=setTimeout(()=>persistentWait(v,p,began,generation,actionGeneration).catch(()=>{}),
+      Math.min(PERSISTENT_STALL_MS,CONTROL_STALL_DEFER_DEADLINE_MS-controlElapsedMs));
+    return;
   }
   if(verdict&&verdict.type==="retry_resource"&&(p.stallDeferrals||0)<CONTROL_DEFER_LIMIT
      &&controlElapsedMs<CONTROL_STALL_DEFER_DEADLINE_MS){
@@ -7249,22 +7277,10 @@ const PREPARED_SETTLED_MEMORY=8;
 // server's durable deadline owns cleanup after this; the browser must not keep
 // a player closure and retry timers alive forever after the viewer leaves.
 const PREPARED_FINALIZATION_MS=3000;
-// Whether this browser will OFFER to prepare, right now.
-//
-// The switch is the operator's answer; this is the player's. A successor that
-// died before it was ever playable is evidence about this playback rather than
-// about that attempt — and while staging starts no worker, that is every
-// attempt — so the offer is withdrawn for the rest of the playback instead of
-// building a doomed second pipeline on every quality change. Learned, and
-// forgotten when the player ends: no flag, nothing persisted, and nothing an
-// operator has to reset.
+// Whether this browser will offer preparation for the current explicit ask.
+// A failed action settles once; it never becomes a hidden session-wide gate.
 function preparedHandoffOffered(p){
-  if(!p||p.preparedRefused) return false;
-  let element=null;
-  try{ element=document.getElementById("video"); }catch(e){ return false; }
-  const presentationProof=!streamHasVideo(p,element)
-    ||!!(element&&typeof element.requestVideoFrameCallback==="function");
-  return preparedHandoffEnabled() && presentationProof;
+  return !!p&&preparedHandoffEnabled();
 }
 function preparedHandoffEnabled(){
   // Default on. Only a stored opt-out turns it off; a scope that refuses
@@ -7454,7 +7470,7 @@ function beginPreparedReplacement(p,action){
     selection:action.effective_selection,
     startAtSec:preparedLocalPositionMs(filmMs,originMs)/1000,
     state:"building",hls:null,metadata:false,buffered:false,
-    frameTimer:null,frameListener:null,startedAt:Date.now()};
+    frameTimer:null,framePollTimer:null,frameListener:null,startedAt:Date.now()};
   p.prepared=state;
   clientLog(Object.assign({level:"info",event:"prepared_replacement",detail:"staged",
     message:`preparing ${action.session_id} at film ${Math.round(filmMs/1000)}s `+
@@ -7792,22 +7808,38 @@ function preparedFirstFrame(p,state,element,onFrame,onTimeout){
       try{ element.removeEventListener("timeupdate",state.frameListener); }catch(e){}
       state.frameListener=null;
     }
+    if(state.framePollTimer!=null){ clearTimeout(state.framePollTimer); state.framePollTimer=null; }
     state.frameCallbackId=null;
     state.frameElement=null;
     run();
   };
   state.frameTimer=setTimeout(()=>finish(onTimeout),PREPARED_FIRST_FRAME_MS);
   const done=()=>finish(()=>onFrame(Date.now()));
-  // `requestVideoFrameCallback` is the only available API that proves video
-  // presentation. A video browser without it advertises no prepared capability;
-  // this defensive branch rolls back rather than turning clock movement into
-  // a fabricated picture. Audio-only playback has no frame to prove, so its
-  // first advancing `timeupdate` remains the honest presentation signal.
+  // Prefer the frame callback. Older engines expose a monotonic presented or
+  // decoded-frame counter instead; an increment after the local switch is
+  // still an observation of video progress, unlike metadata, `playing`, or a
+  // moving media clock. The finite outer timer owns engines with neither.
   if(streamHasVideo(p,element)){
     if(typeof element.requestVideoFrameCallback==="function"){
       try{ state.frameCallbackId=element.requestVideoFrameCallback(()=>done()); return; }catch(e){}
     }
-    finish(onTimeout);
+    const frameCount=()=>{
+      try{
+        const quality=typeof element.getVideoPlaybackQuality==="function"
+          ?element.getVideoPlaybackQuality():null;
+        const count=Number(quality?.totalVideoFrames??element.webkitDecodedFrameCount);
+        return Number.isFinite(count)?count:null;
+      }catch(e){ return null; }
+    };
+    const initial=frameCount();
+    if(initial==null) return;
+    const observe=()=>{
+      if(settled||state.frameCancelled) return;
+      const current=frameCount();
+      if(current!=null&&current>initial){ done(); return; }
+      state.framePollTimer=setTimeout(observe,50);
+    };
+    observe();
     return;
   }
   state.frameListener=()=>done();
@@ -7817,11 +7849,6 @@ function preparedFirstFrame(p,state,element,onFrame,onTimeout){
 function failPreparedReplacement(p,state,detail){
   if(preparedState(p)!==state) return;
   state.state="failed";
-  // Never playable, so stop asking for the next one. `buffered` is the line: a
-  // successor that reached its buffer target and then failed says something
-  // about that successor; one that never got there says the server cannot hand
-  // this playback a usable second pipeline at all.
-  if(!state.buffered) p.preparedRefused=true;
   queuePlaybackControlAcknowledgement(p,state.actionId,"failed");
   clientLog(Object.assign({level:"warn",event:"prepared_replacement",detail:"failed",
     message:`preparation of ${state.sessionId} failed: ${detail}`},playbackContext()));
@@ -7851,6 +7878,7 @@ function freePreparedReplacement(p,state){
   markPreparedSettlement(p,state.actionId);
   const spare=preparedVideoElement();
   if(state.frameTimer!=null){ clearTimeout(state.frameTimer); state.frameTimer=null; }
+  if(state.framePollTimer!=null){ clearTimeout(state.framePollTimer); state.framePollTimer=null; }
   if(state.frameListener&&spare){
     try{ spare.removeEventListener("timeupdate",state.frameListener); }catch(e){}
   }
@@ -7928,6 +7956,7 @@ function cancelPreparedFirstFrame(p){
   p.preparedCommitting=null;
   state.frameCancelled=true;
   if(state.frameTimer!=null){ clearTimeout(state.frameTimer); state.frameTimer=null; }
+  if(state.framePollTimer!=null){ clearTimeout(state.framePollTimer); state.framePollTimer=null; }
   const spare=state.frameElement||document.getElementById("video");
   if(state.frameListener&&spare){
     try{ spare.removeEventListener("timeupdate",state.frameListener); }catch(e){}
@@ -15786,7 +15815,7 @@ function preparedQualityCard(settings,readiness){
       ${devStaticReq("Throughput measurement","supported","Client and server reporting exists. This is implementation support, not proof that a particular session has enough measured throughput.","")}
       <h3 class="devcheck-group">Device qualification</h3>
       ${devReq(readiness,"prepared_quality_handoff","client_two_player_handoff","Client handoff","Apple, Android, and web contain the adapter. Physical-device evidence must still demonstrate aligned playback and a visible first frame.")}
-      ${devReq(readiness,"prepared_quality_handoff","fleet_receipt","Fleet validation","Qualification needs consecutive handoffs with stable memory and a measured fallback interruption on physical clients.")}
+      ${devReq(readiness,"prepared_quality_handoff","fleet_receipt","Fleet observation","Consecutive physical-client handoffs, stable memory, and measured fallback interruption improve confidence; they do not unlock or block the switch.")}
       <p class="devcheck-note">Missing qualification does not disable the feature or override the saved choice. A failed preparation falls back to reopening the stream.</p>
       </div></details>
       <div class="err" id="pqherr" role="alert"></div>

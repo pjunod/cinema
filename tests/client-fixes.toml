@@ -906,12 +906,12 @@ test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "testTheLiveSurfaceAllowsPictureInPictureAndReleasesOnlyWhenItIsNotActive"
 
 [[fixes]]
-id = "apple.prepared-successor-that-cannot-be-primed"
-commits = ["a9b4933f"]
+id = "apple.prepared-successor-failure-is-retryable"
+commits = ["a9b4933f", "5b28ae7e"]
 source = "clients/apple/Sources/PreparedReplacement.swift"
-source_anchor = "private(set) var canOfferPreparation = true"
+source_anchor = "var shouldAskForPreparation: Bool"
 test = "clients/apple/Tests/PreparedReplacementTests.swift"
-test_anchor = "testASuccessorThatNeverBecomesPlayableStopsTheAskingForThisPlayer"
+test_anchor = "testAFailedStagingDoesNotSuppressTheNextExplicitChange"
 
 [[fixes]]
 id = "apple.commit-carries-the-compared-origin"
@@ -954,12 +954,12 @@ test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlRep
 test_anchor = "a teardown across an in-flight exchange sends the snapshot it was handed"
 
 [[fixes]]
-id = "android.prepared-offer-is-learned"
+id = "android.prepared-successor-failure-is-retryable"
 commits = ["96a1be44"]
 source = "clients/android/app/src/main/java/tv/plurx/app/player/PreparedReplacement.kt"
-source_anchor = "if (!canOfferPreparation) return PreparationOffer.Refuse"
+source_anchor = "fun offer(inbound: ControlAction): PreparationOffer {"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedReplacementTest.kt"
-test_anchor = "a successor that was never playable ends the offers for this playback"
+test_anchor = "a successor that was never playable does not suppress a later explicit change"
 
 [[fixes]]
 id = "android.observed-throughput-is-headroom"
@@ -1229,3 +1229,24 @@ source = "clients/apple/Sources/LibraryChannels.swift"
 source_anchor = "progressObserver = player.addPeriodicTimeObserver("
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "testLibraryChannelProgressCallbacksFollowCurrentAttachment"
+
+[[fixes]]
+# The loaded-wait correction and its adversarial follow-up share one current
+# invariant: only real presentation progress resets the single native
+# reevaluation allowance for a bounded wait episode.
+id = "android.loaded-wait-native-reevaluation-episode"
+commits = ["7c21d238", "88066364"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackTelemetry.kt"
+source_anchor = "nativeReevaluationSpent = false"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackTelemetryTest.kt"
+test_anchor = "lifecycleRefillLoadedWaitClaimsOneReevaluationAndKeepsTheAbsoluteDeadline"
+
+[[fixes]]
+# Readiness truth is advisory: an unmet fleet/link observation must be visible
+# beside the switch and must never disable it.
+id = "apple.prepared-handoff-readiness-truth-is-advisory"
+commits = ["491aac64"]
+source = "clients/apple/Sources/LiveTvDeveloperView.swift"
+source_anchor = "Fleet and link evidence: Not met · Checked during playback"
+test = "tests/operations/test_evidence_workflows.py"
+test_anchor = "test_apple_prepared_enablement_is_visible_and_advisory"

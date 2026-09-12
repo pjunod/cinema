@@ -1070,10 +1070,9 @@ impl DeliveryView {
                 // like rolling delivery. `None` until a window has closed, and
                 // never substituted from the encoder's configured target.
                 //
-                // This is what made preparation unreachable on the primary
-                // presentation: `headroom_refusal` needs a delivered rate, and
-                // a `None` here refused every VOD exchange with
-                // `throughput_unreported` — which is most of them.
+                // This once made preparation unreachable on the primary
+                // presentation because admission required a delivered rate.
+                // It is now advisory, but still reports only measured data.
                 delivered_bps: info.delivered_bps,
                 delivered_idle_ms: Some(info.delivered_idle_ms),
                 recent_producer_speed: None,
@@ -1187,13 +1186,9 @@ impl EffectiveSelection {
 /// * **The client's codec and dynamic-range *policies* are not the server's
 ///   answers.** `hdr10`, `preserve_dolby_vision` and `convert_dolby_vision`
 ///   come from the caps document through `review_client_plan`, which a
-///   selection does not carry, so they are carried through untouched. A
-///   selection change on those axes means *re-review*, which nothing does yet
-///   — and nothing is lost today, because `decide_preparation` still refuses
-///   every set containing `DynamicRange`, and admits `DeliveryMethod` only
-///   alongside a resolution change toward a server-selected successor. It
-///   will matter the moment either the capability is narrowed or a grade row
-///   earns a receipt.
+///   selection does not carry, so this legacy edit helper carries them through
+///   untouched. Production preparation re-runs the ordinary planner from the
+///   retained create-time capability snapshot instead of using this helper.
 /// * **Only `SubtitleMode::Burn` is a burn.** Off, Native and Overlay are not
 ///   video replacements at all (plan §5.2). Mapping a track into
 ///   `subtitle_burn` for any of them would turn every native-subtitle change
@@ -1202,12 +1197,8 @@ impl EffectiveSelection {
 ///   height.** A copy has no rung — asking for one is asking for something a
 ///   copy cannot be. The source height is the exception because that *is* what
 ///   a copy delivers: asking for it is asking for what you already have. The
-///   resulting `DeliveryMethod` crossing is then the decision's to rule on,
-///   which is the point: the candidate says what was asked for, and
-///   `PREPARED_AXIS_SETS` says whether that transition has a receipt. Since
-///   2026-09-03 it does, in this direction — a copy dropping to a transcoded
-///   rung crosses `{ResolutionOrBitrate, DeliveryMethod}`, which is the
-///   measured pair.
+///   resulting `DeliveryMethod` crossing is visible to diagnostics while the
+///   client's declared preparation capability remains the admission signal.
 ///
 ///   The comparison is against `source_height`, **never** against the resolved
 ///   `height`. A 1080 ask on a 2160 source resolves to 1080 — it is already a
@@ -1300,33 +1291,6 @@ pub(crate) enum FallbackReason {
     /// No retained `dual_player_preparation`. See [`decide_preparation`] on
     /// why this must be the *retained* capability rather than this exchange's.
     ClientCannotPrepare,
-    /// The client can prepare, but not across this axis.
-    AxisNotProven,
-    /// More than one axis moves at once. Each is separately measured; a
-    /// combination is measured by nothing.
-    MultipleAxes,
-    /// Nobody measured the link, so there is nothing to refuse on. Separate
-    /// from `ThroughputInsufficient` because the two are opposite findings
-    /// that a single `throughput_unproven` would report as one number.
-    ///
-    /// This was the common case and is no longer, which matters because the
-    /// sentence it replaces was read by a client author as a reason to
-    /// disable the capability on VOD. Both halves have since been filled: all
-    /// three clients report `observed_download_bps` — web from
-    /// `hls.bandwidthEstimate`, Apple from
-    /// `AVPlayerItem.accessLog().observedBitrate`, Android from its own
-    /// observed rate — and `DeliveryView::from_status` no longer leaves
-    /// `delivered_bps` `None` on VOD, which is what the arm above says in as
-    /// many words. What is left is the honest reading: a window that has not
-    /// closed yet, and a client that cannot measure. A counter that booked
-    /// those as "the link was too tight" would read as evidence for the
-    /// throughput rule while measuring only its own missing inputs.
-    ThroughputUnreported,
-    /// The link *was* measured and does not carry a second pipeline. M6
-    /// handoff §8: dual preparation doubles network demand and the constrained
-    /// link is exactly the case M5.5 did not test. **This** is the reading
-    /// that speaks to the throughput rule.
-    ThroughputInsufficient,
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -1334,10 +1298,6 @@ impl FallbackReason {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::ClientCannotPrepare => "client_cannot_prepare",
-            Self::AxisNotProven => "axis_not_proven",
-            Self::MultipleAxes => "multiple_axes",
-            Self::ThroughputUnreported => "throughput_unreported",
-            Self::ThroughputInsufficient => "throughput_insufficient",
         }
     }
 }
@@ -1370,13 +1330,11 @@ pub(crate) enum PreparationDecision {
     },
 }
 
-/// What the client has shown about the link it is on.
+/// Link observations retained for preparation diagnostics.
 ///
-/// Present because M6's handoff §8 asks for it by name: *"treat a prepared
-/// handoff on a contended link as unproven and gate it on the client's own
-/// observed throughput rather than on the capability alone."* The whole spike
-/// ran on a steady shaped 80 Mbit/s link, so the constrained case — the one
-/// where doubling demand hurts — is measured by nothing.
+/// These values are advisory. Admission is governed by the client's explicit
+/// capability and actual bounded resource acquisition; a missing or low
+/// throughput estimate never vetoes the viewer's request.
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PreparationConditions {
@@ -1384,43 +1342,6 @@ pub(crate) struct PreparationConditions {
     pub observed_download_bps: Option<u64>,
     /// What this session is currently delivering, as the server measured it.
     pub delivered_bps: Option<i64>,
-}
-
-impl PreparationConditions {
-    /// Whether the link has shown room for a second pipeline.
-    ///
-    /// The rule is a floor, not a model: **observed throughput at least twice
-    /// what this session is already delivering.** A prime runs a second
-    /// pipeline beside the first, so twice the current rate is the least that
-    /// could carry it; the successor's own rate is not knowable from
-    /// [`EffectiveSelection`], which carries a height and no bitrate, so a
-    /// tighter rule would be a guess wearing a number.
-    ///
-    /// **Either value missing is a refusal, not a pass.** A client that has
-    /// not reported its throughput has not shown headroom, and M5.5 measured
-    /// nothing about contended links — so the honest default is the fallback
-    /// the fleet already takes. This is also the residual worth re-reading if
-    /// prepared handoffs turn out never to fire: on a healthy link the ratio
-    /// is comfortable, but a session whose `delivered_bps` is not yet measured
-    /// refuses on that alone.
-    ///
-    /// Both refusals are still refusals; they are separated because *why* is
-    /// the entire operator question. `None` returns a pass.
-    fn headroom_refusal(&self) -> Option<FallbackReason> {
-        let (Some(observed), Some(delivered)) = (self.observed_download_bps, self.delivered_bps)
-        else {
-            return Some(FallbackReason::ThroughputUnreported);
-        };
-        let Ok(delivered) = u64::try_from(delivered) else {
-            // A negative or absurd delivered rate is not a measurement.
-            return Some(FallbackReason::ThroughputUnreported);
-        };
-        if delivered == 0 {
-            // Nothing has been delivered yet, so there is no rate to double.
-            return Some(FallbackReason::ThroughputUnreported);
-        }
-        (observed < delivered.saturating_mul(2)).then_some(FallbackReason::ThroughputInsufficient)
-    }
 }
 
 /// The grade a recipe *asks for*, which is the only grade two recipes can be
@@ -1433,13 +1354,10 @@ impl PreparationConditions {
 /// wrong thing for a *candidate*, because a recipe that will never be built
 /// has no encoder and therefore no such grade.
 ///
-/// Comparing an encoder's answer against a request would fail in one of two
-/// ways, both bad: a candidate given no grade lets a real grade change
-/// classify as resolution-only and be **prepared**, which is exactly what
-/// `PREPARED_AXIS_SETS` exists to prevent; a candidate given the grade its body
-/// asked for reads as a crossing on *every* exchange of a session whose HDR10
-/// rung the encoder refused, so that viewer never gets a prepared handoff at
-/// all.
+/// Comparing an encoder's answer against a request would classify the same
+/// transition differently before and after the successor starts. Both sides
+/// therefore use request intent, leaving the axis useful as diagnostics even
+/// though it does not veto preparation.
 ///
 /// So the grade axis is read off the request on both sides. Both are available
 /// where the decision is made: the exchange holds the session's own
@@ -1494,162 +1412,6 @@ pub(crate) struct RecipeView<'a> {
     pub grade: GradeIntent,
 }
 
-/// A set of axes a transition crosses, as a bitmask over `PreparationAxis`.
-///
-/// Small and `Copy` because it is built inside `decide_preparation`'s closure
-/// and compared against a fixed table; five axes never need more.
-#[cfg_attr(not(test), allow(dead_code))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct PreparationAxisSet(u8);
-
-#[cfg_attr(not(test), allow(dead_code))]
-impl PreparationAxisSet {
-    const EMPTY: Self = Self(0);
-
-    const fn bit(axis: PreparationAxis) -> u8 {
-        1 << (axis as u8)
-    }
-
-    const fn of(axes: &[PreparationAxis]) -> Self {
-        let mut mask = 0;
-        let mut index = 0;
-        while index < axes.len() {
-            mask |= Self::bit(axes[index]);
-            index += 1;
-        }
-        Self(mask)
-    }
-
-    fn with(self, axis: PreparationAxis) -> Self {
-        Self(self.0 | Self::bit(axis))
-    }
-
-    fn holds(self, axis: PreparationAxis) -> bool {
-        self.0 & Self::bit(axis) != 0
-    }
-}
-
-/// A `u8` holds eight axes and `PreparationAxis` has five, but a ninth variant
-/// would be a *silent* defect rather than a loud one: `of` is `const` and would
-/// fail to compile, while `with` shifts at runtime — a panic under
-/// debug assertions, and in release Rust masks the shift amount, so axis 8
-/// would alias `ResolutionOrBitrate` and a single crossing on the new axis
-/// would compare equal to the first row and be **prepared**. So assert the
-/// ceiling here, where adding the variant is what breaks the build.
-const _: () = assert!(
-    (PreparationAxis::DynamicRange as u8) < 8,
-    "PreparationAxisSet is a u8 bitmask; the hardest axis must fit in it"
-);
-
-/// Why M6 prepares across a fixed table of axis *combinations* rather than a
-/// rule, and why the table is short.
-///
-/// M5.5 measured every platform **recipe- and device-dependent**, and in both
-/// directions: Safari passes same-codec and fails codec/HDR, while the
-/// tunneled Google TV passes codec/HDR 20/20 and fails same-codec 0/3 — the
-/// *harder* case works and the easier one does not. So no single axis is safe
-/// on every device that reports `true`, and the capability cannot say which,
-/// because a bare boolean cannot express "yes for this recipe on this device".
-///
-/// The decision, made deliberately per M6's handoff §3 rather than
-/// discovered: **honour the boolean and additionally restrict the server to
-/// resolution/bitrate.**
-///
-/// * It is the only axis plan §5.2 expects to be transparent, so the only one
-///   where "prepared" and "seamless" can be the same claim.
-/// * It is the common case — a quality change on the same source.
-/// * Both required Apple devices passed it 20/20.
-///
-/// **The residual, which is not small.** Apple passed *both* cases 20/20, so
-/// on the only platform that will report `true` in the foreseeable future this
-/// restriction discriminates nothing and its whole effect is to refuse
-/// codec/grade transitions that were measured twice on two devices. And on the
-/// device with the only hard failure it points the wrong way: the Google TV's
-/// 0/3 was on *same-codec*, and M5.5's own leading explanation is two
-/// identical tunneled pipelines contending for one decoder or audio track. If
-/// that reading is right, restricting to same-method-same-grade selects that
-/// precondition rather than avoiding it — and an
-/// `ERROR_CODE_AUDIO_TRACK_WRITE_FAILED` is a fault in the shared audio path,
-/// which is worse than the 2,246 ms this is trading against.
-///
-/// Android's platform-wide `false` is what holds that device back today. The
-/// capability keyed by axis **and device class** is therefore not a nice-to-
-/// have for unlocking Android's two phones; it is what has to exist before
-/// this table is safe for the television class. Recorded here rather than
-/// argued around, because this table is the entire server-side expression
-/// of the restriction and whoever narrows the capability will read it.
-///
-/// **The table itself.** Each row is a measurement, not a rule.
-///
-/// **`{ResolutionOrBitrate}`** — M5.5's same-codec, same-grade case, "a
-/// resolution/bitrate change only". Apple 20/20 on both required devices,
-/// 2026-09-01.
-///
-/// **`{ResolutionOrBitrate, DeliveryMethod}`** — the product the fleet
-/// actually produces, measured 2026-09-03 on the Apple TV 4K (3rd generation):
-/// a 2160p direct-play source against a 1080p server-selected transcode, so
-/// height and delivery method move together. 20/20 clean commits, zero failed
-/// admissions, zero predecessor and post-commit stalls, on a 40 Mbit/s link —
-/// 2.20× the predecessor's 18.183 Mbit/s, above the floor
-/// `headroom_refusal` enforces. See
-/// [`M6-AXIS-CASE-HANDOFF.md`](../../../docs/playback-control/M6-AXIS-CASE-HANDOFF.md).
-///
-/// **Why this list and not a rule.** Shadow mode measured that a pure
-/// resolution change does not occur on a real library at all — the top rung
-/// direct-plays and the lower rungs transcode, so the delivery method moves
-/// with the height every time. Widening on that observation *alone* would have
-/// been the reasoning shadow mode exists to replace; the entry above exists
-/// because someone ran the case on hardware and it passed.
-///
-/// **What is deliberately absent.** The grade axis: the 2026-09-03 run was SDR
-/// H.264 throughout, so `{ResolutionOrBitrate, DeliveryMethod, DynamicRange}`
-/// — which is what an HDR or Dolby Vision title's quality change actually
-/// crosses — remains unmeasured and stays under `multiple_axes`. Audio and
-/// burned subtitles were never measured in combination with anything. Add a
-/// row here only with a receipt, and say which run.
-///
-/// The device cohort is a second, unexpressed restriction: both entries were
-/// proven on Apple only, and the capability document cannot yet say *yes for
-/// this recipe on this device class* — M6 handoff §3. Android's platform-wide
-/// `false` is what holds that device back today, and narrowing the capability
-/// by axis and device class is what has to exist before this table is safe for
-/// the television class generally.
-const PREPARED_AXIS_SETS: [PreparationAxisSet; 2] = [
-    PreparationAxisSet::of(&[PreparationAxis::ResolutionOrBitrate]),
-    PreparationAxisSet::of(&[
-        PreparationAxis::ResolutionOrBitrate,
-        PreparationAxis::DeliveryMethod,
-    ]),
-];
-
-/// A set has no direction, and the delivery-method row was measured in one.
-///
-/// [`PreparationConditions::headroom_refusal`] computes its floor entirely
-/// from the **predecessor's** delivered rate, because the successor's rate is
-/// not knowable from an [`EffectiveSelection`] — it carries a height and no
-/// bitrate. That concession was written when the only admitted axis was
-/// resolution/bitrate, where both sides are ladder rungs and the successor is
-/// bounded by the encoder's own target. Admitting `DeliveryMethod` breaks it
-/// in one direction: a successor that **direct-plays** carries the source
-/// file's bitrate, which nothing bounds. A 1080p transcode delivering
-/// 4 Mbit/s clears a 8 Mbit/s floor and then asks a 10 Mbit/s link to carry a
-/// 40 Mbit/s remux beside it — the stall this feature exists to prevent.
-///
-/// The 2026-09-03 run measured the other direction: a 2160p direct play
-/// (18.183 Mbit/s, the predecessor) against a 1080p server-selected transcode.
-/// There the successor is a rung the server chose, so the predecessor's rate
-/// is the conservative side of the comparison.
-///
-/// So the pair is admitted **toward** a server-selected successor and refused
-/// away from one, which is the direction that was run. The reverse — a viewer
-/// raising quality back to a direct-playing source — books `axis_not_proven`
-/// until either someone runs it or the floor learns the successor's rate.
-/// Pure `{ResolutionOrBitrate}` is unaffected: it never changes the method, so
-/// whatever the successor is, the predecessor already is.
-fn successor_rate_is_bounded(crossed: PreparationAxisSet, candidate: &EffectiveSelection) -> bool {
-    !crossed.holds(PreparationAxis::DeliveryMethod) || candidate.codec == "server_selected"
-}
-
 /// Decide, from the delivered selection and a candidate one, whether M6
 /// prepares.
 ///
@@ -1682,21 +1444,9 @@ pub(crate) fn decide_preparation(
 
 /// The same decision with the client capability **assumed satisfied**.
 ///
-/// Counterfactual only, retained because web and Android still report
-/// `dual_player_preparation=false`. For those clients,
-/// `client_cannot_prepare` is checked before the axis and throughput and
-/// therefore absorbs *every* single-axis transition. The first
-/// production datapoint (m6, 2026-09-02, one `resolution_or_bitrate` change)
-/// read `client_cannot_prepare`, and so would every datapoint after it — so
-/// the shadow as first shipped can report which axes viewers cross, but cannot
-/// report the thing it was built to report: whether `AxisNotProven` and
-/// the throughput floor would refuse so often that the prepared path would
-/// never fire even after a coordinated client release.
-///
-/// Recorded as its own counter rather than by reordering `decide_preparation`,
-/// because that ordering is deliberate — see the `MultipleAxes` comment — and
-/// will be the production decision once M6 stages. This answers a strictly
-/// counterfactual question; nothing reads it but the metric.
+/// Advisory counterfactual retained for fleet rollout visibility. It answers
+/// what the same transition would do if the client declared preparation
+/// support; proof receipts and link estimates do not participate.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn decide_preparation_after_client_release(
     delivered: RecipeView<'_>,
@@ -1710,23 +1460,17 @@ fn decide_preparation_given_client(
     delivered: RecipeView<'_>,
     candidate: RecipeView<'_>,
     client_can_prepare: bool,
-    conditions: PreparationConditions,
+    _conditions: PreparationConditions,
 ) -> PreparationDecision {
     let (delivered_grade, candidate_grade) = (delivered.grade, candidate.grade);
     let (delivered, candidate) = (delivered.selection, candidate.selection);
     let mut crossed: Option<PreparationAxis> = None;
-    let mut multiple = false;
-    // The *set* that moved, not only the hardest member. A combination is
-    // admitted or refused as a whole, because that is how it was measured.
-    let mut crossed_set = PreparationAxisSet::EMPTY;
     // The hardest axis wins, by the enum's own ordering rather than by the
     // order these happen to be written. Both plan §5.2 and roadmap §3.3 rank
     // resolution/bitrate most transparent, then audio and burned subtitles,
     // then the delivery method and the grade — so `max` is the ranking, and
     // regrouping these statements cannot silently change an operator metric.
     let mut cross = |axis: PreparationAxis| {
-        multiple |= crossed.is_some();
-        crossed_set = crossed_set.with(axis);
         crossed = Some(crossed.map_or(axis, |held: PreparationAxis| held.max(axis)));
     };
 
@@ -1755,39 +1499,11 @@ fn decide_preparation_given_client(
     let Some(axis) = crossed else {
         return PreparationDecision::Unchanged;
     };
-    let admitted = PREPARED_AXIS_SETS.contains(&crossed_set)
-        && successor_rate_is_bounded(crossed_set, candidate);
-    if multiple && !admitted {
-        // A combination nobody measured is measured by nothing. M5.5 ran two
-        // single-axis cases, not their product, and the Google TV's inversion
-        // is exactly the evidence that axes do not compose the way reasoning
-        // would predict.
-        //
-        // Ranked above the capability deliberately: this is the fact that
-        // would still be true after a coordinated client release flipped the
-        // literal, so the metric stays stable across that release. The cost is
-        // that a fleet whose clients all report `false` books its multi-axis
-        // transitions here rather than under `client_cannot_prepare`, which
-        // understates how much of the fallback volume is the literals'.
-        return PreparationDecision::Fallback {
-            axis,
-            reason: FallbackReason::MultipleAxes,
-        };
-    }
     if !client_can_prepare {
         return PreparationDecision::Fallback {
             axis,
             reason: FallbackReason::ClientCannotPrepare,
         };
-    }
-    if !admitted {
-        return PreparationDecision::Fallback {
-            axis,
-            reason: FallbackReason::AxisNotProven,
-        };
-    }
-    if let Some(reason) = conditions.headroom_refusal() {
-        return PreparationDecision::Fallback { axis, reason };
     }
     PreparationDecision::Prepare { axis }
 }
@@ -2181,25 +1897,30 @@ pub(crate) const STARVED_RUNWAY_MS: i64 = 10_000;
 /// fetch. The Apple detector's `pendingMediaThresholdMs`.
 pub(crate) const FETCHABLE_GAP_MS: i64 = 10_000;
 
-/// The one fact that outranks every advisory hold: this client is stalled,
-/// starved, out of runway, and the server has already published media it has
-/// not fetched. Production state cannot veto fetching served bytes.
+/// The two facts that outrank every advisory hold while active playback is
+/// stalled: the client either has complete contiguous media it is not
+/// presenting, or the server has published media it has not fetched.
+/// Production state owns neither serving nor native presentation.
 ///
-/// Conjunctive on purpose. `client_runway_ms` reads 0 for an unknown runway,
-/// so the client's own `stalled` and `starved` reports are the positive
-/// evidence; the gap is the proof there is something to fetch; an unknown
-/// produced frontier proves nothing and fails the predicate.
+/// `client_runway_ms` reads 0 for an unknown runway, so a loaded-media recovery
+/// needs more than the shared starvation ceiling. The fetch-wedge arm retains
+/// its independent published frontier requirement. Both arms require the
+/// client's explicit stalled decoder evidence; a quiet or paused player must
+/// still receive the producer hold it asked for.
 pub(crate) fn recovery_outranks_hold(delivery: &DeliveryView, request: &ControlRequestV1) -> bool {
-    request.render_state == RenderState::Stalled
-        && request
-            .observation
-            .as_ref()
-            .and_then(|observation| observation.decoder_state)
-            == Some(DecoderState::Starved)
-        && delivery.client_runway_ms <= STARVED_RUNWAY_MS
-        && delivery.produced_through_ms.is_some_and(|produced| {
-            produced.saturating_sub(delivery.fetched_through_ms) >= FETCHABLE_GAP_MS
-        })
+    let decoder_waiting = request
+        .observation
+        .as_ref()
+        .and_then(|observation| observation.decoder_state)
+        .is_some_and(|state| matches!(state, DecoderState::Starved | DecoderState::Failed));
+    let loaded_but_waiting = delivery.client_runway_ms > STARVED_RUNWAY_MS;
+    let published_but_unfetched = delivery.produced_through_ms.is_some_and(|produced| {
+        produced.saturating_sub(delivery.fetched_through_ms) >= FETCHABLE_GAP_MS
+    });
+    request.demand == PlaybackDemand::Active
+        && request.render_state == RenderState::Stalled
+        && decoder_waiting
+        && (loaded_but_waiting || published_but_unfetched)
 }
 
 pub(crate) fn resolve_action(
@@ -13452,10 +13173,10 @@ static CONTROL_HOLD_REASONS: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
 /// could separate them again.
 ///
 /// Indexed `[platform][axis][outcome]`. Platform order is `ClientPlatform`'s
-/// own; axis is `PreparationAxis`'s; outcome is prepare, then the five
-/// `FallbackReason`s in declaration order.
-static PREPARATION_DECISIONS: [[[AtomicU64; 6]; 5]; 3] =
-    [const { [const { [const { AtomicU64::new(0) }; 6] }; 5] }; 3];
+/// own; axis is `PreparationAxis`'s; outcome is prepare, then
+/// `client_cannot_prepare`.
+static PREPARATION_DECISIONS: [[[AtomicU64; 2]; 5]; 3] =
+    [const { [const { [const { AtomicU64::new(0) }; 2] }; 5] }; 3];
 /// The same measurement with the client capability assumed satisfied.
 ///
 /// Same shape and same indices as `PREPARATION_DECISIONS` so the two are
@@ -13468,8 +13189,8 @@ static PREPARATION_DECISIONS: [[[AtomicU64; 6]; 5]; 3] =
 /// **today**, `preparation_counterfactual` is what M6 would do **after a
 /// client release flipped the literal**, and the difference between them is
 /// the value of shipping that release.
-static PREPARATION_COUNTERFACTUAL: [[[AtomicU64; 6]; 5]; 3] =
-    [const { [const { [const { AtomicU64::new(0) }; 6] }; 5] }; 3];
+static PREPARATION_COUNTERFACTUAL: [[[AtomicU64; 2]; 5]; 3] =
+    [const { [const { [const { AtomicU64::new(0) }; 2] }; 5] }; 3];
 /// Exchanges where an action transaction was available but the client had
 /// not declared its vocabulary, so it was told nothing. Watch this fall as
 /// clients roll out.
@@ -13685,16 +13406,10 @@ fn preparation_indices(decision: PreparationDecision) -> Option<(usize, usize)> 
     let (axis, outcome) = match decision {
         PreparationDecision::Unchanged => return None,
         PreparationDecision::Prepare { axis } => (axis, 0),
-        PreparationDecision::Fallback { axis, reason } => (
+        PreparationDecision::Fallback {
             axis,
-            1 + match reason {
-                FallbackReason::ClientCannotPrepare => 0,
-                FallbackReason::AxisNotProven => 1,
-                FallbackReason::MultipleAxes => 2,
-                FallbackReason::ThroughputUnreported => 3,
-                FallbackReason::ThroughputInsufficient => 4,
-            },
-        ),
+            reason: FallbackReason::ClientCannotPrepare,
+        } => (axis, 1),
     };
     let axis = match axis {
         PreparationAxis::ResolutionOrBitrate => 0,
@@ -14007,14 +13722,8 @@ pub(crate) fn prometheus() -> String {
             .iter()
             .enumerate()
             {
-                for (outcome_index, outcome) in [
-                    "prepare",
-                    FallbackReason::ClientCannotPrepare.as_str(),
-                    FallbackReason::AxisNotProven.as_str(),
-                    FallbackReason::MultipleAxes.as_str(),
-                    FallbackReason::ThroughputUnreported.as_str(),
-                    FallbackReason::ThroughputInsufficient.as_str(),
-                ]
+                for (outcome_index, outcome) in
+                    ["prepare", FallbackReason::ClientCannotPrepare.as_str()]
                 .iter()
                 .enumerate()
                 {
@@ -15015,72 +14724,6 @@ mod tests {
         );
     }
 
-    /// The refusal this removes. `headroom_refusal` needs a delivered rate;
-    /// with `None` it answers `ThroughputUnreported` for every VOD exchange,
-    /// which is every public session. A measured rate lets the real comparison
-    /// run — and still refuses when the link genuinely lacks headroom, so this
-    /// opens the decision rather than weakening it.
-    #[test]
-    fn a_measured_vod_rate_lets_the_headroom_decision_actually_run() {
-        let (_, mut request) = stalled_starved();
-        request.buffered_through_ms = request.position_ms;
-        let observed = 100_000_000_u64;
-
-        let unmeasured = DeliveryView::from_status(
-            &vod_status(Some(120_000), Some(120_000), 60_000),
-            &request,
-            "node",
-            1,
-            0,
-            None,
-        );
-        assert_eq!(
-            PreparationConditions {
-                observed_download_bps: Some(observed),
-                delivered_bps: unmeasured.delivered_bps,
-            }
-            .headroom_refusal(),
-            Some(FallbackReason::ThroughputUnreported),
-            "this is the state every VOD session was in"
-        );
-
-        let measured = DeliveryView::from_status(
-            &vod_status_delivering(Some(120_000), Some(120_000), 60_000, Some(12_000_000)),
-            &request,
-            "node",
-            1,
-            0,
-            None,
-        );
-        assert_eq!(
-            PreparationConditions {
-                observed_download_bps: Some(observed),
-                delivered_bps: measured.delivered_bps,
-            }
-            .headroom_refusal(),
-            None,
-            "a link with ten times the delivered rate has headroom"
-        );
-
-        let saturated = DeliveryView::from_status(
-            &vod_status_delivering(Some(120_000), Some(120_000), 60_000, Some(80_000_000)),
-            &request,
-            "node",
-            1,
-            0,
-            None,
-        );
-        assert_eq!(
-            PreparationConditions {
-                observed_download_bps: Some(observed),
-                delivered_bps: saturated.delivered_bps,
-            }
-            .headroom_refusal(),
-            Some(FallbackReason::ThroughputInsufficient),
-            "measuring the rate must not become a way to always pass"
-        );
-    }
-
     #[test]
     fn a_vod_seek_past_a_hole_is_judged_by_the_media_ahead_of_the_client() {
         // The trap this closes: after a far seek the title's published run
@@ -15185,13 +14828,16 @@ mod tests {
     }
 
     #[test]
-    fn the_serving_predicate_is_conjunctive() {
-        // Four facts, and no three of them are enough. `client_runway_ms`
-        // reads 0 for an unknown runway, so without the client's own stalled
-        // and starved reports a quiet client would look starved to us.
-        /// One conjunct, removed.
+    fn the_serving_predicate_requires_an_active_stall_and_a_recoverable_boundary() {
+        // Active stalled decoder evidence is shared by both recovery arms.
+        // The final fact may be either published-but-unfetched supply or a
+        // substantial contiguous loaded runway; neither depends on a producer
+        // hold to make progress.
         type BreakOne = fn(&mut DeliveryView, &mut ControlRequestV1);
-        let cases: [(&str, BreakOne); 6] = [
+        let cases: [(&str, BreakOne); 5] = [
+            ("not active", |_, request| {
+                request.demand = PlaybackDemand::Hold;
+            }),
             ("not stalled", |_, request| {
                 request.render_state = RenderState::Rendering;
             }),
@@ -15206,15 +14852,10 @@ mod tests {
             ("no observation", |_, request| {
                 request.observation = None;
             }),
-            ("runway above the ceiling", |delivery, _| {
-                delivery.client_runway_ms = STARVED_RUNWAY_MS + 1;
-            }),
-            ("gap below the threshold", |delivery, _| {
+            ("no recoverable boundary", |delivery, _| {
+                delivery.client_runway_ms = STARVED_RUNWAY_MS;
                 delivery.fetched_through_ms =
                     delivery.produced_through_ms.expect("produced") - (FETCHABLE_GAP_MS - 1);
-            }),
-            ("unknown produced frontier", |delivery, _| {
-                delivery.produced_through_ms = None;
             }),
         ];
         for (name, break_one) in cases {
@@ -15230,6 +14871,28 @@ mod tests {
             );
             assert!(!recovery_outranks_hold(&delivery, &request), "{name}");
         }
+    }
+
+    #[test]
+    fn lifecycle_refill_loaded_native_wait_outranks_a_producer_hold() {
+        let (mut delivery, request) = stalled_starved();
+        delivery.client_runway_ms = 22_000;
+        delivery.fetched_through_ms = delivery.produced_through_ms.expect("produced");
+        assert!(
+            recovery_outranks_hold(&delivery, &request),
+            "loaded native media is a presentation boundary even with no fetch gap"
+        );
+        assert_eq!(
+            resolve_action(&ControlAction::None, &delivery, &request),
+            ControlAction::None,
+            "a production hold cannot defer the client's bounded native recovery"
+        );
+
+        delivery.produced_through_ms = None;
+        assert!(
+            recovery_outranks_hold(&delivery, &request),
+            "known contiguous client media does not become unknown with publication"
+        );
     }
 
     #[test]
@@ -22604,11 +22267,8 @@ mod tests {
     /// The shadow metric's full cross product is published from boot, and its
     /// labels are the decision's own vocabulary.
     ///
-    /// Published at zero rather than on first observation, because the useful
-    /// reading is a *ratio* — how much of the fallback volume is
-    /// `client_cannot_prepare` against `throughput_unproven` — and a series
-    /// that appears only once it is nonzero cannot be divided by one that has
-    /// not appeared yet.
+    /// Published at zero rather than on first observation so fleet rollout can
+    /// compare capable and incapable clients without absent series.
     #[test]
     fn the_shadow_decision_metric_publishes_every_axis_and_outcome() {
         let metrics = prometheus();
@@ -22624,14 +22284,7 @@ mod tests {
                     PreparationAxis::DeliveryMethod,
                     PreparationAxis::DynamicRange,
                 ] {
-                    for outcome in [
-                        "prepare",
-                        FallbackReason::ClientCannotPrepare.as_str(),
-                        FallbackReason::AxisNotProven.as_str(),
-                        FallbackReason::MultipleAxes.as_str(),
-                        FallbackReason::ThroughputUnreported.as_str(),
-                        FallbackReason::ThroughputInsufficient.as_str(),
-                    ] {
+                    for outcome in ["prepare", FallbackReason::ClientCannotPrepare.as_str()] {
                         let series = format!(
                             "{name}{{platform=\"{platform}\",axis=\"{}\",outcome=\"{outcome}\"}}",
                             axis.as_str()
@@ -22654,7 +22307,7 @@ mod tests {
                 .filter(|(_, line)| line.starts_with(&format!("{name}{{")))
                 .map(|(index, _)| index)
                 .collect();
-            assert_eq!(samples.len(), 90, "{name}");
+            assert_eq!(samples.len(), 30, "{name}");
             assert_eq!(
                 samples.last().expect("samples") - samples[0],
                 samples.len() - 1,
@@ -22693,7 +22346,7 @@ mod tests {
                 "plurx_playback_preparation_decisions_total",
                 "android",
                 PreparationAxis::DynamicRange,
-                FallbackReason::ThroughputInsufficient.as_str(),
+                FallbackReason::ClientCannotPrepare.as_str(),
             )
         };
         let before = cell(&prometheus());
@@ -22704,7 +22357,7 @@ mod tests {
             ClientPlatform::Android,
             PreparationDecision::Fallback {
                 axis: PreparationAxis::DynamicRange,
-                reason: FallbackReason::ThroughputInsufficient,
+                reason: FallbackReason::ClientCannotPrepare,
             },
         );
         assert_eq!(cell(&prometheus()), before + 1, "and a real decision is");
@@ -22734,14 +22387,7 @@ mod tests {
             .expect("counter value")
     }
 
-    /// The counterfactual reaches the two rules the client gate hides, and
-    /// that is the whole reason it exists.
-    ///
-    /// Web and Android still report `dual_player_preparation=false`, so their
-    /// single-axis transitions book `client_cannot_prepare` — which is true,
-    /// and says nothing about whether
-    /// `PREPARED_AXIS_SETS` and the throughput floor would then refuse anyway. The
-    /// first production datapoint (m6, 2026-09-02) read exactly that.
+    /// The counterfactual removes only the explicit client-capability gate.
     #[test]
     fn the_counterfactual_reaches_the_rules_the_client_gate_hides() {
         // A link with no room for a second pipeline: the floor wants twice
@@ -22756,7 +22402,7 @@ mod tests {
                 axis: PreparationAxis::ResolutionOrBitrate,
                 reason: FallbackReason::ClientCannotPrepare,
             },
-            "today: the gate answers first and the floor is never consulted",
+            "the retained client capability is the only refusal",
         );
         assert_eq!(
             decide_preparation_after_client_release(
@@ -22764,11 +22410,10 @@ mod tests {
                 view(&playing(1080)),
                 strained,
             ),
-            PreparationDecision::Fallback {
+            PreparationDecision::Prepare {
                 axis: PreparationAxis::ResolutionOrBitrate,
-                reason: FallbackReason::ThroughputInsufficient,
             },
-            "after the release: the measured floor is what would refuse",
+            "link telemetry is advisory",
         );
 
         let mut audio = playing(2160);
@@ -22782,11 +22427,10 @@ mod tests {
         );
         assert_eq!(
             decide_preparation_after_client_release(view(&playing(2160)), view(&audio), roomy()),
-            PreparationDecision::Fallback {
+            PreparationDecision::Prepare {
                 axis: PreparationAxis::AudioTrackOrOffset,
-                reason: FallbackReason::AxisNotProven,
             },
-            "after the release: the axis rule is what would refuse",
+            "axis receipts are advisory",
         );
 
         assert_eq!(
@@ -22803,11 +22447,6 @@ mod tests {
     }
 
     /// The two decisions differ at the client gate and nowhere else.
-    ///
-    /// `MultipleAxes` is ranked above the gate deliberately so the metric
-    /// stays stable across a client release — this is the test that fails if
-    /// that ranking is undone, because the two counters would then disagree
-    /// about a transition neither client literal has any bearing on.
     #[test]
     fn the_counterfactual_differs_only_at_the_client_gate() {
         let mut two_axes = playing(1080);
@@ -22819,15 +22458,21 @@ mod tests {
                 delivered_bps: Some(12_000_000),
             },
         ] {
-            assert_eq!(
+            assert!(matches!(
                 decide_preparation(view(&playing(2160)), view(&two_axes), None, conditions),
+                PreparationDecision::Fallback {
+                    reason: FallbackReason::ClientCannotPrepare,
+                    ..
+                }
+            ));
+            assert!(matches!(
                 decide_preparation_after_client_release(
                     view(&playing(2160)),
                     view(&two_axes),
-                    conditions,
+                    conditions
                 ),
-                "a multi-axis transition is not the client literal's fault",
-            );
+                PreparationDecision::Prepare { .. }
+            ));
             assert_eq!(
                 decide_preparation_after_client_release(
                     view(&playing(2160)),
@@ -22846,7 +22491,7 @@ mod tests {
         // `series_value` on why a family sum would race.
         let decision = PreparationDecision::Fallback {
             axis: PreparationAxis::SubtitleBurn,
-            reason: FallbackReason::AxisNotProven,
+            reason: FallbackReason::ClientCannotPrepare,
         };
         let cell = |metrics: &str, name: &str| {
             series_value(
@@ -22854,7 +22499,7 @@ mod tests {
                 name,
                 "web",
                 PreparationAxis::SubtitleBurn,
-                FallbackReason::AxisNotProven.as_str(),
+                FallbackReason::ClientCannotPrepare.as_str(),
             )
         };
         const DECISIONS: &str = "plurx_playback_preparation_decisions_total";
@@ -22892,7 +22537,7 @@ mod tests {
             COUNTERFACTUAL,
             "apple",
             PreparationAxis::SubtitleBurn,
-            FallbackReason::AxisNotProven.as_str(),
+            FallbackReason::ClientCannotPrepare.as_str(),
         );
         record_preparation_counterfactual(ClientPlatform::Apple, decision);
         assert_eq!(
@@ -22901,7 +22546,7 @@ mod tests {
                 COUNTERFACTUAL,
                 "apple",
                 PreparationAxis::SubtitleBurn,
-                FallbackReason::AxisNotProven.as_str(),
+                FallbackReason::ClientCannotPrepare.as_str(),
             ),
             apple_before + 1,
         );
@@ -23180,8 +22825,7 @@ mod tests {
         }
     }
 
-    /// A link with room for a second pipeline: twice what this session is
-    /// delivering, with margin.
+    /// Representative advisory telemetry. Admission deliberately ignores it.
     fn roomy() -> PreparationConditions {
         PreparationConditions {
             observed_download_bps: Some(80_000_000),
@@ -23189,10 +22833,9 @@ mod tests {
         }
     }
 
-    /// The axis M6 prepares across, on a client that says it can, on a link
-    /// that has shown headroom — in **both** directions, because upshift is
-    /// the direction that raises demand and a rule that only ever tested
-    /// downshifts would not notice being restricted to them.
+    /// The axis M6 prepares across on a client that says it can, in **both**
+    /// directions. Upshift is the direction that raises demand, so exercising
+    /// both makes an accidental direction veto visible.
     #[test]
     fn a_resolution_change_on_a_capable_client_is_prepared() {
         for (from, to) in [(2160, 1080), (1080, 2160)] {
@@ -23253,7 +22896,7 @@ mod tests {
             "a session that has never been told has not been told",
         );
         // And the capability outranks the axis: an incapable client crossing
-        // an unproven axis is reported as incapable, because that is the fact
+        // any axis is reported as incapable, because that is the only fact
         // that would change if the literal flipped.
         let playing = playing(2160);
         assert_eq!(
@@ -23277,13 +22920,9 @@ mod tests {
     /// method moves with the height every time, and shadow mode measured that
     /// a pure resolution change does not occur on a real library at all.
     ///
-    /// Admitted because it was **run**, not because that observation made it
-    /// look necessary: Apple TV 4K (3rd generation), 2026-09-03, 20/20 clean
-    /// commits with zero failed admissions and zero predecessor or
-    /// post-commit stalls, on a 40 Mbit/s link against an 18.183 Mbit/s
-    /// predecessor — 2.20×, above the floor `headroom_refusal` enforces. An
-    /// earlier attempt at 30 Mbit/s (1.65×) failed eight of twenty and was
-    /// discarded as measuring a transition the server would itself refuse.
+    /// Earlier Apple TV observations remain advisory evidence about resource
+    /// cost, not permission to admit this viewer request. The client capability
+    /// and the real reserve/prime outcomes are the enforceable boundaries.
     #[test]
     fn resolution_together_with_delivery_method_is_prepared() {
         let caps = can_prepare(true);
@@ -23299,9 +22938,7 @@ mod tests {
             },
             "the axis label stays the hardest member, so the metric is comparable",
         );
-        // Not back, though — `raising_quality_back_to_a_direct_playing_source`
-        // owns that case, and it is refused.
-        // The throughput floor still governs it: admitted is not exempt.
+        // Link telemetry is advisory and cannot veto the viewer's request.
         assert_eq!(
             decide_preparation(
                 view(&direct),
@@ -23312,11 +22949,10 @@ mod tests {
                     delivered_bps: Some(12_000_000),
                 },
             ),
-            PreparationDecision::Fallback {
+            PreparationDecision::Prepare {
                 axis: PreparationAxis::DeliveryMethod,
-                reason: FallbackReason::ThroughputInsufficient,
             },
-            "the 30 Mbit run failed here, and that is the rule working",
+            "low observed throughput is advisory",
         );
         // So does the capability — and this is the one transition where the
         // two counters now disagree, which is the whole reason the
@@ -23345,18 +22981,9 @@ mod tests {
         );
     }
 
-    /// A set has no direction; the run did, and the floor is blind to the
-    /// successor's rate.
-    ///
-    /// `headroom_refusal` doubles the **predecessor's** delivered rate,
-    /// because an `EffectiveSelection` carries no bitrate. Toward a
-    /// server-selected successor that is conservative — the server picked the
-    /// rung. Away from one it is not: a direct-playing successor carries the
-    /// source file's own bitrate, which nothing bounds, so a 4 Mbit/s
-    /// transcode can clear the floor and then ask the link for a 40 Mbit/s
-    /// remux beside it. Only the measured direction is admitted.
+    /// Replanning back to Original is admitted like every explicit change.
     #[test]
-    fn raising_quality_back_to_a_direct_playing_source_is_not_admitted() {
+    fn raising_quality_back_to_a_direct_playing_source_is_prepared() {
         let caps = can_prepare(true);
         let mut direct = playing(2160);
         direct.codec = "source".to_owned();
@@ -23365,11 +22992,10 @@ mod tests {
 
         assert_eq!(
             decide_preparation(view(&transcoded), view(&direct), Some(&caps), roomy()),
-            PreparationDecision::Fallback {
+            PreparationDecision::Prepare {
                 axis: PreparationAxis::DeliveryMethod,
-                reason: FallbackReason::MultipleAxes,
             },
-            "the successor's rate is unbounded in this direction and nobody ran it",
+            "the ordinary planner owns the new recipe",
         );
         // The rule is about the successor's method, not about going up: a
         // higher rung that is still server-selected stays admitted.
@@ -23396,58 +23022,6 @@ mod tests {
         );
     }
 
-    /// The bitmask is exact-match, and order-independent.
-    ///
-    /// `decide_preparation` builds the set in the order its comparisons happen
-    /// to be written — `DeliveryMethod` first, `ResolutionOrBitrate` last —
-    /// while the table is written the other way round. If `of` and `with` were
-    /// not order-independent the admitted pair would never match, and the
-    /// widening would be a no-op that every test above still passed.
-    #[test]
-    fn the_axis_set_is_an_exact_order_independent_match() {
-        use PreparationAxis::{
-            AudioTrackOrOffset, DeliveryMethod, DynamicRange, ResolutionOrBitrate, SubtitleBurn,
-        };
-
-        assert_eq!(
-            PreparationAxisSet::of(&[ResolutionOrBitrate, DeliveryMethod]),
-            PreparationAxisSet::EMPTY
-                .with(DeliveryMethod)
-                .with(ResolutionOrBitrate),
-        );
-        assert_eq!(
-            PreparationAxisSet::EMPTY
-                .with(ResolutionOrBitrate)
-                .with(ResolutionOrBitrate),
-            PreparationAxisSet::of(&[ResolutionOrBitrate]),
-            "crossing one axis twice is still one axis",
-        );
-        // A superset of an admitted row is not admitted: `contains` compares
-        // whole masks, which is what keeps the HDR triple out.
-        assert!(!PREPARED_AXIS_SETS.contains(&PreparationAxisSet::of(&[
-            ResolutionOrBitrate,
-            DeliveryMethod,
-            DynamicRange
-        ])));
-        assert!(!PREPARED_AXIS_SETS.contains(&PreparationAxisSet::EMPTY));
-        for axis in [
-            AudioTrackOrOffset,
-            SubtitleBurn,
-            DeliveryMethod,
-            DynamicRange,
-        ] {
-            assert!(
-                !PREPARED_AXIS_SETS.contains(&PreparationAxisSet::of(&[axis])),
-                "{} alone has no receipt",
-                axis.as_str(),
-            );
-        }
-        assert!(
-            PreparationAxisSet::of(&[ResolutionOrBitrate, DeliveryMethod]).holds(DeliveryMethod)
-        );
-        assert!(!PreparationAxisSet::of(&[ResolutionOrBitrate]).holds(DeliveryMethod));
-    }
-
     /// The grade was not in the measured product, and adding it is not implied.
     ///
     /// The 2026-09-03 run was SDR H.264 throughout. An HDR or Dolby Vision
@@ -23470,11 +23044,10 @@ mod tests {
                 Some(&caps),
                 roomy(),
             ),
-            PreparationDecision::Fallback {
+            PreparationDecision::Prepare {
                 axis: PreparationAxis::DynamicRange,
-                reason: FallbackReason::MultipleAxes,
             },
-            "resolution + delivery + grade is the HDR case, and it is unmeasured",
+            "compound grade changes are one successor recipe",
         );
         // Nor does the pair admit some *other* pair that happens to be two.
         let mut audio = playing(1080);
@@ -23482,17 +23055,16 @@ mod tests {
         audio.audio_track = Some(1);
         assert_eq!(
             decide_preparation(view(&direct), view(&audio), Some(&caps), roomy()),
-            PreparationDecision::Fallback {
+            PreparationDecision::Prepare {
                 axis: PreparationAxis::DeliveryMethod,
-                reason: FallbackReason::MultipleAxes,
             },
-            "delivery + audio + resolution was never run either",
+            "compound audio changes are one successor recipe",
         );
     }
 
-    /// Every other axis falls back even on a capable client, and names itself.
+    /// Every axis is prepared on a capable client, and names its hardest move.
     #[test]
-    fn the_unproven_axes_fall_back_and_name_themselves() {
+    fn every_axis_is_prepared_and_names_itself() {
         let caps = can_prepare(true);
         let mut method = playing(2160);
         method.codec = "source".to_owned();
@@ -23531,10 +23103,7 @@ mod tests {
                     Some(&caps),
                     roomy(),
                 ),
-                PreparationDecision::Fallback {
-                    axis,
-                    reason: FallbackReason::AxisNotProven,
-                },
+                PreparationDecision::Prepare { axis },
                 "{}",
                 axis.as_str(),
             );
@@ -23794,9 +23363,8 @@ mod tests {
                 Some(&can_prepare(true)),
                 roomy(),
             ),
-            PreparationDecision::Fallback {
+            PreparationDecision::Prepare {
                 axis: PreparationAxis::DynamicRange,
-                reason: FallbackReason::MultipleAxes,
             },
             "method, height and grade all move; the hardest names it",
         );
@@ -24027,27 +23595,11 @@ mod tests {
             FallbackReason::ClientCannotPrepare.as_str(),
             "client_cannot_prepare"
         );
-        assert_eq!(FallbackReason::AxisNotProven.as_str(), "axis_not_proven");
-        assert_eq!(FallbackReason::MultipleAxes.as_str(), "multiple_axes");
-        assert_eq!(
-            FallbackReason::ThroughputUnreported.as_str(),
-            "throughput_unreported"
-        );
-        assert_eq!(
-            FallbackReason::ThroughputInsufficient.as_str(),
-            "throughput_insufficient"
-        );
     }
 
-    /// The hardest axis names the transition, by the enum's ordering rather
-    /// than by which comparison happens to be written first — so regrouping
-    /// those statements cannot silently change what an operator reads.
-    ///
-    /// Resolution together with delivery method is deliberately absent here:
-    /// that pair is an admitted set (`PREPARED_AXIS_SETS`), and
-    /// `resolution_together_with_delivery_method_is_prepared` owns it.
+    /// Compound changes prepare once and name the hardest crossed axis.
     #[test]
-    fn an_unadmitted_pair_is_never_prepared_and_the_hardest_names_it() {
+    fn compound_changes_prepare_once_and_the_hardest_names_it() {
         let caps = can_prepare(true);
         let mut audio_and_height = playing(1080);
         audio_and_height.audio_track = Some(1);
@@ -24078,24 +23630,16 @@ mod tests {
                     Some(&caps),
                     roomy(),
                 ),
-                PreparationDecision::Fallback {
-                    axis,
-                    reason: FallbackReason::MultipleAxes,
-                },
+                PreparationDecision::Prepare { axis },
                 "{}",
                 axis.as_str(),
             );
         }
     }
 
-    /// A link that has not shown room for a second pipeline does not get one.
-    ///
-    /// Handoff §8 asks for this by name: the spike ran on a steady shaped
-    /// link, so the constrained case is measured by nothing, and a prepared
-    /// handoff that causes the stall it exists to prevent is the worst
-    /// outcome available.
+    /// Link observations are advisory and never gate a capable client.
     #[test]
-    fn a_link_that_has_not_shown_headroom_does_not_get_a_second_pipeline() {
+    fn every_link_observation_preserves_the_prepare_decision() {
         let caps = can_prepare(true);
         // Both are refusals; they are separate outcomes because "the link was
         // too tight" and "nobody measured the link" are opposite findings, and
@@ -24107,14 +23651,13 @@ mod tests {
         // Android off the wire), and VOD sessions now carry a measured
         // `delivered_bps`. What remains unreported is a session too young for
         // a window to have closed.
-        let refusals = [
+        let observations = [
             (
                 "no margin at all",
                 PreparationConditions {
                     observed_download_bps: Some(12_000_000),
                     delivered_bps: Some(12_000_000),
                 },
-                FallbackReason::ThroughputInsufficient,
             ),
             (
                 "a hair under twice",
@@ -24122,7 +23665,6 @@ mod tests {
                     observed_download_bps: Some(23_999_999),
                     delivered_bps: Some(12_000_000),
                 },
-                FallbackReason::ThroughputInsufficient,
             ),
             (
                 "the client never reported one",
@@ -24130,7 +23672,6 @@ mod tests {
                     observed_download_bps: None,
                     delivered_bps: Some(12_000_000),
                 },
-                FallbackReason::ThroughputUnreported,
             ),
             (
                 "the server has not measured delivery yet",
@@ -24138,7 +23679,6 @@ mod tests {
                     observed_download_bps: Some(80_000_000),
                     delivered_bps: None,
                 },
-                FallbackReason::ThroughputUnreported,
             ),
             (
                 "nothing delivered yet, so there is no rate to double",
@@ -24146,7 +23686,6 @@ mod tests {
                     observed_download_bps: Some(80_000_000),
                     delivered_bps: Some(0),
                 },
-                FallbackReason::ThroughputUnreported,
             ),
             (
                 "a delivered rate that is not a measurement",
@@ -24154,10 +23693,9 @@ mod tests {
                     observed_download_bps: Some(80_000_000),
                     delivered_bps: Some(-1),
                 },
-                FallbackReason::ThroughputUnreported,
             ),
         ];
-        for (case, conditions, reason) in refusals {
+        for (case, conditions) in observations {
             assert_eq!(
                 decide_preparation(
                     view(&playing(2160)),
@@ -24165,9 +23703,8 @@ mod tests {
                     Some(&caps),
                     conditions,
                 ),
-                PreparationDecision::Fallback {
+                PreparationDecision::Prepare {
                     axis: PreparationAxis::ResolutionOrBitrate,
-                    reason,
                 },
                 "{case}",
             );
@@ -24226,9 +23763,8 @@ mod tests {
                 Some(&caps),
                 roomy(),
             ),
-            PreparationDecision::Fallback {
+            PreparationDecision::Prepare {
                 axis: PreparationAxis::DynamicRange,
-                reason: FallbackReason::AxisNotProven,
             },
             "the encoder agreeing does not make two different asks the same ask",
         );

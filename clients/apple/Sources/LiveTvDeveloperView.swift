@@ -33,11 +33,11 @@ struct LiveTvDeveloperView: View {
                 Label("Measured Apple cohort: Met", systemImage: "checkmark.circle")
                 Text("iPhone 17 Pro Max and Apple TV 4K (3rd generation) each completed 20 of 20 same-codec and codec/HDR handoffs.")
                     .font(.caption)
-                Label("Server successor media priming: Not met", systemImage: "exclamationmark.triangle")
-                Text("This server release reserves the staged successor but does not start its media worker before commit, so the client may fall back to the ordinary reopen.")
+                Label("Server successor media priming: Met", systemImage: "checkmark.circle")
+                Text("The server reserves the successor before warming local or remote media and cleans up a refused, cancelled, or expired attempt.")
                     .font(.caption)
-                Label("Current playback throughput: Checked during playback", systemImage: "questionmark.circle")
-                Text("A live session must report delivered throughput and this device must measure enough download headroom. Settings has no active session to measure.")
+                Label("Fleet and link evidence: Not met · Checked during playback", systemImage: "exclamationmark.triangle")
+                Text("Throughput, decoder capacity, and physical-device observations improve rollout confidence. Missing or low evidence never disables this switch.")
                     .font(.caption)
             }
             if let saved {
