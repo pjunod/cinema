@@ -180,11 +180,21 @@ enum TvLiveLayout: String, Codable, CaseIterable, Identifiable, Sendable {
     var id: String { rawValue }
     var label: String {
         switch self {
-        case .guidePreview: "Guide + preview"
-        case .guideOverlay: "Guide over picture"
-        case .channelBrowser: "Channel browser"
+        case .guidePreview: "Preview"
+        case .guideOverlay: "Over picture"
+        case .channelBrowser: "Preview"
         }
     }
+
+    /// What the raw value renders as. `channel_browser` and `guide_preview`
+    /// only ever differed in which browse view they opened with; now that On
+    /// now is a list beside the picture in both, a third entry would be a
+    /// choice with no consequence. The case is kept so an existing
+    /// `@AppStorage` value still decodes and round-trips unchanged.
+    var presented: TvLiveLayout { self == .channelBrowser ? .guidePreview : self }
+
+    /// The entries the layout sheet offers.
+    static var offered: [TvLiveLayout] { [.guidePreview, .guideOverlay] }
 }
 
 struct LiveTvLineup: Decodable, Sendable {
