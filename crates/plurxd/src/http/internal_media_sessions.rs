@@ -11,8 +11,9 @@ use axum::Json;
 use super::peer_transport::exact_auth_from_headers;
 use crate::media_sessions::{
     unix_ms, DurableRouteResolution, RelayRequest, RelayResource, RemoteAbortRequest,
-    RemoteActivateRequest, RemoteStartRequest, RemoteStartResponse, ABORT_PATH, ACTIVATE_PATH,
-    CONTROL_PATH, RELAY_PATH, REMOTE_ACTIVATION_CONFIRMATION_WINDOW, REMOTE_START_OWNERSHIP_HEADER,
+    RemoteActivateRequest, RemotePrepareRequest, RemoteStartRequest, RemoteStartResponse,
+    ABORT_PATH, ACTIVATE_PATH, CONTROL_PATH, PREPARE_PATH, RELAY_PATH,
+    REMOTE_ACTIVATION_CONFIRMATION_WINDOW, REMOTE_START_OWNERSHIP_HEADER,
     REMOTE_START_OWNERSHIP_V1, START_DEADLINE, START_PATH,
 };
 use crate::state::AppState;
@@ -461,6 +462,111 @@ pub(crate) async fn activate(
             });
             StatusCode::ACCEPTED.into_response()
         }
+    }
+}
+
+/// Prime an unpublished successor on the owner named by its durable row.
+///
+/// This is deliberately separate from remote START. START allocates first and
+/// waits for an activation; preparation must do the inverse: the predecessor
+/// owner reserves admission and the exact successor identity before a peer is
+/// allowed to allocate media resources.
+pub(crate) async fn prepare(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(status) = authorize(&state, &headers, PREPARE_PATH, &body).await {
+        return status.into_response();
+    }
+    let Some(request) = serde_json::from_slice::<RemotePrepareRequest>(&body)
+        .ok()
+        .filter(RemotePrepareRequest::is_valid)
+    else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let route = match state
+        .store
+        .media_session_route_by_incarnation(&request.incarnation_id)
+        .await
+    {
+        Ok(Some(route))
+            if route.incarnation_id == request.incarnation_id
+                && route.session_id == request.session_id
+                && route.user_id == request.user_id
+                && route.owner_node_id == state.node_id
+                && route.owner_epoch == request.expected_owner_epoch
+                && route.state == "active"
+                && route.publication_ready_at_ms
+                    == plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED
+                && route.lease_expires_at_ms > unix_ms() =>
+        {
+            route
+        }
+        Ok(_) => return StatusCode::CONFLICT.into_response(),
+        Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+    let Some(recipe) = serde_json::from_str::<RemoteStartRequest>(&route.recipe_json)
+        .ok()
+        .filter(RemoteStartRequest::is_valid)
+        .filter(|recipe| {
+            recipe.incarnation_id == request.incarnation_id
+                && recipe.user_id == request.user_id
+                && recipe.request.request_id.as_deref() == Some(request.incarnation_id.as_str())
+        })
+    else {
+        return StatusCode::CONFLICT.into_response();
+    };
+    let deadline_ms = route.lease_expires_at_ms.saturating_sub(unix_ms()).max(0) as u64;
+    let deadline = tokio::time::Instant::now()
+        + Duration::from_millis(deadline_ms).min(Duration::from_secs(45));
+    if recipe.request.presentation == crate::transcode::Presentation::Live {
+        return if super::hls::prime_live_prepared_session(
+            &state,
+            &recipe,
+            &request.session_id,
+            &route.recovery_epoch,
+            request.expected_owner_epoch,
+            deadline,
+        )
+        .await
+        {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE.into_response()
+        };
+    }
+    let Some(_restart_admission) = state.serving.try_restart_admission().await else {
+        return RemoteStartError::RestartDrain.into_response();
+    };
+    let authority = state.serving.authority();
+    let Some(admitted_generation) = authority.admit() else {
+        return RemoteStartError::ServingFence.into_response();
+    };
+    let adoption = loop {
+        if !authority.is_current(admitted_generation) || tokio::time::Instant::now() >= deadline {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+        if let Some(adoption) = state.transcode.session_adoption_token(&request.session_id) {
+            break adoption;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    if state
+        .transcode
+        .vod_resurrect_before(
+            &route.recipe_json,
+            &request.session_id,
+            request.user_id,
+            adoption,
+            deadline.into(),
+        )
+        .await
+        && authority.is_current(admitted_generation)
+    {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE.into_response()
     }
 }
 

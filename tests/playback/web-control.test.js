@@ -3488,8 +3488,9 @@ async function main() {
     h.instances[0].events.error(null, { fatal: true, details: "manifestLoadError" });
     assert.equal(latest(h).state, "failed");
     assert.equal(p.prepared, null, "a failed preparation frees its slot too");
-    assert.equal(p.preparedRefused, true,
-      "…and one that was never playable withdraws the offer for this playback");
+    h.handle(prepareAction({ action_id: "77777777-7777-4777-8777-777777777777" }));
+    assert.equal(h.instances.length, 2,
+      "a later explicit action may retry after the failed action settled");
     h.instances[0].events.error(null, { fatal: false, details: "bufferStalledError" });
     assert.equal(latest(h).state, "failed", "a non-fatal error settles nothing");
   }
@@ -3604,22 +3605,18 @@ async function main() {
     assert.equal(capabilities.capabilities().dual_player_preparation, true,
       "an enabled video player with real presentation evidence offers preparation");
     delete capabilityVideo.requestVideoFrameCallback;
-    assert.equal(capabilities.capabilities().dual_player_preparation, false,
-      "a video player without a presented-frame signal reports the runtime limitation");
+    assert.equal(capabilities.capabilities().dual_player_preparation, true,
+      "the frame callback API is not an enablement prerequisite");
     capabilityVideo.videoWidth = 0;
     capabilities.player({ source: {} });
     assert.equal(capabilities.capabilities().dual_player_preparation, true,
       "audio-only playback has honest advancing-clock evidence instead");
-    // …and the player can withdraw the offer without the operator touching the
-    // switch. A successor that died before it was ever playable is a statement
-    // about this playback, and while staging starts no worker that is every
-    // attempt — so the alternative is a doomed second pipeline on every quality
-    // change, which is a regression, not a feature.
+    // A stale field from an older client cannot become a hidden gate.
     capabilityVideo.videoWidth = 1_920;
     capabilityVideo.requestVideoFrameCallback = () => {};
     capabilities.player({ source: { video_codec: "h264" }, preparedRefused: true });
-    assert.equal(capabilities.capabilities().dual_player_preparation, false,
-      "a playback that could not be handed a usable successor stops offering");
+    assert.equal(capabilities.capabilities().dual_player_preparation, true,
+      "a previous runtime failure never overrides the saved choice");
     capabilities.player(null);
     assert.equal(capabilities.capabilities().dual_player_preparation, false,
       "there is no runtime handoff offer without an attached player");
@@ -3628,9 +3625,8 @@ async function main() {
   }
 
   // §C12.8 — `observed_download_bps` is populated wherever the platform can
-  // measure it. A client that reports no throughput can never be offered a
-  // preparation, whatever its capability says, so this is load-bearing rather
-  // than telemetry.
+  // measure it. This is advisory telemetry; missing or low throughput no
+  // longer vetoes an explicit preparation request.
   {
     const measured = adapter.playbackControlSnapshot(video,
       Object.assign({}, player, { hls: { bandwidthEstimate: 12_345_678 } }));

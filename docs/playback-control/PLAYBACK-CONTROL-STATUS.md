@@ -9,8 +9,11 @@ failures in the [lifecycle map](PLAYBACK-LIFECYCLE-COVERAGE.md).
 
 The current [implementation contract](PLAYBACK-LIFECYCLE-IMPLEMENTATION.md)
 defines the bounded build sequence and supersedes historical qualification
-prerequisites below. Developer requirements are advisory; evidence receipts
-do not decide runtime enablement. Follow the revised main-bound fast lane.
+prerequisites below. P1–P4 are built on `effort/playback-lifecycle`: prepared
+successors use ordinary capability planning, and axis-set, direction,
+throughput, and software-proof vetoes are removed. Developer requirements are
+advisory; evidence receipts do not decide runtime enablement. Follow the
+revised main-bound fast lane.
 
 **Updated:** 2026-09-09 · **Current follow-up:** `codex/m6-server-prime` on Forgejo `main` `75744fea` ·
 **Fleet:** level again — all four on `v0.3.0-260-g5b127370`, read off

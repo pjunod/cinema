@@ -1,5 +1,9 @@
 # M6 Apple hardware acceptance — the two numbers source cannot supply
 
+> **Superseded 2026-09-12:** use the finite device run card in the current
+> [lifecycle status](PLAYBACK-LIFECYCLE-STATUS.md). Missing evidence does not
+> gate the Developer enable switch.
+
 **Status:** open · **Owner:** an operator with the devices, or an agent with
 physical access · **Written:** 2026-09-08
 

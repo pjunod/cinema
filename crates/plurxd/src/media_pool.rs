@@ -1015,6 +1015,12 @@ pub(crate) async fn local_offer(state: &AppState, request: &MediaOfferRequest) -
             ..base()
         };
     }
+    if !state.serving.accepting_new_media().await {
+        return MediaOffer {
+            refusal_code: Some("serving_fenced".to_owned()),
+            ..base()
+        };
+    }
     let file = match state.store.get_file(request.file_id).await {
         Ok(Some(file)) => file,
         _ => {

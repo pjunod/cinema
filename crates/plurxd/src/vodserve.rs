@@ -447,9 +447,8 @@ pub struct VodSessionInfo {
     /// stays `None` rather than being filled from the encoder's configured
     /// target: what an encoder was *asked* to produce is not what a link
     /// carried, and on VOD the presentation is a stream copy, so the target
-    /// describes nothing that happened. Unknown must stay unknown — a
-    /// substituted number would let `headroom_refusal` pass a client whose
-    /// link was never measured.
+    /// describes nothing that happened. Unknown must stay unknown so advisory
+    /// fleet evidence never reports a fabricated link measurement.
     pub delivered_bytes: i64,
     /// Bits per second, to match the rolling view's units.
     pub delivered_bps: Option<i64>,
@@ -636,9 +635,8 @@ pub struct SegmentReady {
     ///
     /// Carried on the answer rather than looked up by the response, and not
     /// optional, so a segment cannot be served without something to count it
-    /// with. The delivery rate this feeds is what
-    /// `PreparationConditions::headroom_refusal` reads; a body served against
-    /// no meter would silently reintroduce `throughput_unreported`.
+    /// with. The delivery rate remains advisory preparation and fleet
+    /// telemetry; a body served against no meter would silently lose it.
     pub delivery: Arc<crate::meter::Meter>,
 }
 
@@ -1743,10 +1741,9 @@ struct Session {
     /// Per session rather than per rendition: two viewers of the same
     /// immutable rendition have two different links, and a rate that averaged
     /// them would describe neither. This is the VOD half of what
-    /// `transcode::Session::delivery` already is for rolling delivery, and it
-    /// exists for the same reason — `PreparationConditions::headroom_refusal`
-    /// cannot judge headroom against a rate nobody measured, so on VOD, which
-    /// is every public session, it refused `throughput_unreported` forever.
+    /// `transcode::Session::delivery` already is for rolling delivery. The
+    /// measurement remains useful for fleet advice and incident diagnosis,
+    /// while missing or low values no longer veto prepared handoff.
     ///
     /// `Arc` because the response body outlives the registry lock: bytes are
     /// counted on the pump task, long after `segment` has returned and the
@@ -11295,9 +11292,9 @@ mod tests {
     /// Every other proof of this change supplies its own meter, which exercises
     /// the pump and the control view in isolation and would keep passing if
     /// `session_rendition` handed out a fresh meter per request — every VOD
-    /// session would silently return to `delivered_bps: None`, preparation
-    /// would go back to refusing `throughput_unreported`, and the whole suite
-    /// would stay green. This drives the production entry point, so nothing
+    /// session would silently return to `delivered_bps: None`, erasing the
+    /// advisory evidence while the whole suite stayed green. This drives the
+    /// production entry point, so nothing
     /// here chooses the meter, and reads the count back off the session's own
     /// status rather than off the answer.
     #[tokio::test]
