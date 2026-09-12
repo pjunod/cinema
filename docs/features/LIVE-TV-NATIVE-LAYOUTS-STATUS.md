@@ -22,7 +22,7 @@ rule fixes them: **lists are tall and narrow; grids are wide.**
 | Cause | Correction |
 |---|---|
 | tvOS resolves the semantic text styles 2–2.5× larger than iOS — `.subheadline` 38 pt, `.title2` 57 pt | one explicit scale per client: `LiveTvType` (30 / 22 / 20 / 18, badges 16) and `LiveTvTypography` (15 / 11 / 10 / 9 sp, badges 8) |
-| Three bands of chrome before any content — a status banner, 7–10 66 pt buttons, the tab bar on Apple; ≈180 dp of Back, headline, title, status and a 7-item row on Android | one toolbar — 48 pt / 24 dp. The banner became one status line; Earlier / Now / Later became chips in the grid's own header; the search field became a dialog; Return to live went away because the picture is a focus target whose Select is fullscreen |
+| Three bands of chrome before any content — a status banner, 7–10 66 pt buttons, the tab bar on Apple; ≈180 dp of Back, headline, title, status and a 7-item row on Android | one toolbar — 48 pt on Apple, 28 dp minimum on Android (a fixed 24 dp clipped its own labels at any font scale above 1.0). The banner became one status line; Earlier / Now / Later became chips in the grid's own header; the search field became a dialog; Return to live went away because the picture is a focus target whose Select is fullscreen |
 | The preview was sized by a height fraction and then aspect-fit inside a width fraction — 437 × 246 pt, 23% of the width | On now is a 620 pt / 310 dp list column beside a picture that takes the width the list leaves |
 | The guide's slot width was a constant — 300 pt × 3 + 210 filled 58% of a 1920 pt screen, and Android drew the phone's 160 dp slots and 56 dp rows on a television | slot width is derived from the width the grid is actually given: `(contentWidth − inset − channelColumn) ÷ 4`. Two hours fit any panel, and the fixed `rows × rowHeight + 54` frame that pushed the last rows off the bottom is gone |
 | Phones stacked a six-line now bar, a status line, a filter row and an always-visible search field above the list | full-bleed 16:9 picture with its chips and its PiP/fullscreen actions on it, one 56 pt caption, one 48 pt toolbar, then the web `.lt-row` |
@@ -111,7 +111,13 @@ here before the fix is promoted.
 
 ## Contract — presentation moves, playback does not
 
-The effort ships `Guide + preview`, `Guide over picture`, and `Channel
+> **Superseded in part by the proportions correction above.** The three-entry
+> layout menu described here shipped and then collapsed to **Preview** and
+> **Over picture** in PRs #268 and #269; `channel_browser` is still a valid
+> stored value and still decodes, but it renders as Preview. Everything else
+> in this section still holds.
+
+The effort shipped `Guide + preview`, `Guide over picture`, and `Channel
 browser` together on both television clients. The default is `Guide +
 preview`; the choice saves locally per device and never starts, stops, or
 retunes the current session. A temporary guide over fullscreen also leaves

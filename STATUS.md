@@ -7,7 +7,7 @@ first.
 ## Live TV gets the web page's proportions on Apple TV and iPhone
 
 **Built for issue #267; iOS and tvOS compile green and the full simulator
-suite is green at 968 cases on the lab Mac.** tvOS resolves the semantic text
+suite is green at 970 cases on the lab Mac.** tvOS resolves the semantic text
 styles two to two and a half times larger than iOS does — `.subheadline` is
 38 pt there and `.title2` 57 — so a channel row ran the width of the screen
 and three bands of chrome left the live preview a fifth of it. Live TV now
@@ -21,7 +21,10 @@ width is derived from the width the grid actually got — a hard-coded 300 pt
 filled 58% of a 1920 pt screen and could never fit two hours — and the fixed
 `rows * rowHeight + 54` frame that pushed the last rows off the bottom is
 gone. Earlier / Now / Later became chips in the grid header; the status banner
-became a channel count plus a four-second toast.
+became a channel count in the toolbar plus one muted line along the bottom of
+the content. The adversarial review rejected the four seconds the spec asked
+for: a toast cannot repeat itself when the same failure happens twice, and it
+hid every cleanup message on a phone.
 
 The Layout menu offers Preview and Over picture. A stored `channel_browser`
 still decodes and keeps its raw value; it renders as Preview, because the two
@@ -46,7 +49,8 @@ rows, which are 320 and 112 px on a television. Six channels filled the
 screen and the grid showed barely an hour.
 
 Live TV now sizes itself through one explicit `LiveTvTypography` scale on
-television and spends one 24 dp toolbar row. `LiveTvGridMetrics.forTelevision`
+television and spends one toolbar row of 28 dp minimum — a fixed 24 dp clipped
+its own labels as soon as the television's font scale moved. `LiveTvGridMetrics.forTelevision`
 derives the slot width from the width the grid actually got, so two hours fit
 any panel; Earlier / Now / Later are chips in the grid header, and the search
 field is a dialog the viewer asks for. On now is a 310 dp column beside a
