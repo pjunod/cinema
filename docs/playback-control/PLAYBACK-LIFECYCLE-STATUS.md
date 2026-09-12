@@ -1,8 +1,8 @@
 # Playback lifecycle — implementation status
 
-**Status:** P1–P5 built and exact integrated tree compiled; draft promotion next ·
+**Status:** P1–P5 built and exact integrated tree compiled; PR #259 is draft ·
 **Updated:** 2026-09-12 · **Base:** `30cd51afc` · **Effort:**
-`effort/playback-lifecycle` at `180ddcdd` · **Latest task:**
+`effort/playback-lifecycle` at `856761df` before this receipt · **Latest task:**
 `codex/playback-lifecycle-p3-p4` at `139ad01f`
 
 Companion to the
@@ -23,7 +23,7 @@ sweep actually executes them.
 | P3 / S06–S07 prepared handoff | built and compiled; runtime deferred | successor planning reuses create-time capabilities; Original, grade, audio, offset, subtitle, and compound changes produce one recipe; VOD and rolling prime through their distinct engines; proof/headroom/direction vetoes and session-wide failure suppression are removed | include in current-main integration |
 | P4 / S08 owner transition | built and compiled; runtime deferred | restart/maintenance fences cause the next accepted local control exchange to reserve and prime one remote successor; durable identity precedes resource allocation; cancellation is checked before reserve, after reserve, after prime, and before commit | compile and inspect current-main integration |
 | P5 / S09 closeout | complete | obsolete proof/headroom authority is removed from code comments, superseded M6 briefs are marked as such, and Developer settings expose explicit advisory enablement | preserve receipts through promotion |
-| Main promotion | ready to open as draft | Apple build 143 and Android versionCode 86 are claimed once; final Astra handoff commit is integrated; exact effort tree compiled; no implementation review or fast lane has run | open one draft PR, obtain one adversarial review, address it, then run one fast lane |
+| Main promotion | draft PR #259 | Apple build 143 and Android versionCode 86 are claimed once; final Astra handoff commit is integrated; exact effort tree compiled; no implementation review or fast lane has run | freeze this receipt as the review boundary, obtain one adversarial review, address it, then run one fast lane |
 
 The original plan allowed two main promotions. No implementation slice reached
 `main` before P3–P4 completed, so one integrated promotion is smaller in CI and
@@ -135,12 +135,12 @@ decisions; neither keeps this implementation open.
 
 ## Review and delivery — evidence must name the exact head
 
-No adversarial implementation review has been requested and no implementation
-main-bound PR exists. The main PR will stay draft while its source,
-documentation, counters, and compilation settle. Exactly one adversarial agent
-will then review the final diff. The author will address every finding without
-requesting re-review; only afterward will the PR become ready and receive
-`fast-lane`. Merge requires a green `Main promotion gate` for the current head.
+No adversarial implementation review has been requested. Main-bound PR #259 is
+draft against unchanged base `30cd51afc`; this receipt freezes its review
+boundary. Exactly one adversarial agent will review that diff. The author will
+address every finding without requesting re-review; only afterward will the PR
+become ready and receive `fast-lane`. Merge requires a green
+`Main promotion gate` for the current head.
 
 ## Cleanup — keep only reusable build state
 
