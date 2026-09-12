@@ -1,8 +1,8 @@
 # Native Live TV layouts — implementation status and evidence
 
-**Status:** Apple TV review addressed and focused verification green; promotion pending · **Fix:**
-`fix/apple-tv-live-focus` · **Base:** Forgejo `main` at `29d97094` ·
-**Updated:** 2026-09-10
+**Status:** proportions shipped on both native clients; the physical
+walkthrough is the only unproved step · **Base:** Forgejo `main` at
+`ebe2b100` · **Updated:** 2026-09-12
 
 Companion to
 [LIVE-TV-GUIDE-AND-UI-PLAN.md](LIVE-TV-GUIDE-AND-UI-PLAN.md) (the existing
@@ -10,6 +10,74 @@ guide and playback contract) and
 [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md) (the one-review fast
 lane) — this is the short answer to *what has shipped in this effort, what is
 being built, and what remains unproved*.
+
+## Proportions — the second correction, issue #267
+
+Paul reported the shipped layouts as wrong in proportion rather than wrong in
+behaviour: Apple TV channel rows "three feet long", the live preview "tiny
+like an afterthought", mobile "still not very good", against a web page that
+is "nearly perfect". The review found five causes, all in the views, and one
+rule fixes them: **lists are tall and narrow; grids are wide.**
+
+| Cause | Correction |
+|---|---|
+| tvOS resolves the semantic text styles 2–2.5× larger than iOS — `.subheadline` 38 pt, `.title2` 57 pt | one explicit scale per client: `LiveTvType` (30 / 22 / 20 / 18, badges 16) and `LiveTvTypography` (15 / 11 / 10 / 9 sp, badges 8) |
+| Three bands of chrome before any content — a status banner, 7–10 66 pt buttons, the tab bar on Apple; ≈180 dp of Back, headline, title, status and a 7-item row on Android | one toolbar — 48 pt / 24 dp. The banner became one status line; Earlier / Now / Later became chips in the grid's own header; the search field became a dialog; Return to live went away because the picture is a focus target whose Select is fullscreen |
+| The preview was sized by a height fraction and then aspect-fit inside a width fraction — 437 × 246 pt, 23% of the width | On now is a 620 pt / 310 dp list column beside a picture that takes the width the list leaves |
+| The guide's slot width was a constant — 300 pt × 3 + 210 filled 58% of a 1920 pt screen, and Android drew the phone's 160 dp slots and 56 dp rows on a television | slot width is derived from the width the grid is actually given: `(contentWidth − inset − channelColumn) ÷ 4`. Two hours fit any panel, and the fixed `rows × rowHeight + 54` frame that pushed the last rows off the bottom is gone |
+| Phones stacked a six-line now bar, a status line, a filter row and an always-visible search field above the list | full-bleed 16:9 picture with its chips and its PiP/fullscreen actions on it, one 56 pt caption, one 48 pt toolbar, then the web `.lt-row` |
+
+The Layout menu collapses to **Preview** and **Over picture**. The stored
+`channel_browser` value still decodes and is never rewritten; it renders as
+Preview, because the two only ever differed in which browse view they opened
+with. No new persisted state, no reducer, lease or input-contract change, no
+server change, and no gate: the Developer-tab enable and its advisory
+readiness reasons remain the only runtime control.
+
+| PR | Scope | Evidence | State |
+|---|---|---|---|
+| [#268](http://192.168.4.7:3000/noirr/plurx/pulls/268) | Apple — `LiveTvView.swift`, `LiveTv.swift`, `Theme.swift`, `LiveTvTests.swift`, build 146 | `make apple-test` on the lab Mac: **970 cases, exit 0**, across the iOS and tvOS destinations | merged to `main` at `ebe2b100` |
+| [#269](http://192.168.4.7:3000/noirr/plurx/pulls/269) | Android — `LiveTvScreen.kt`, `LiveTvGuideUi.kt`, `LiveTvApi.kt`, `TvFocus.kt`, `SettingsScreen.kt`, versionCode 89 | pinned build image: `testDebugUnitTest` + `lintDebug`, **553 tests, 0 failures** | open on the fast lane |
+
+Each PR took exactly one adversarial review before it was marked ready. Both
+reviews found a focus blocker that no test could have caught, and both are
+answered in full on the PR:
+
+- **Apple.** The guide's new paging chips were focusable inside the remote
+  adapter with no focus key of their own. `onMoveCommand` consumes every
+  direction it is handed and the adapter discards the `apply` result, so a
+  chip could not be left in any direction — and the inline page has no root
+  adapter to answer Back with. Every focusable inside the adapter now owns a
+  key; `movePagingFocus` walks the chips, hands `up` to the toolbar and
+  enters the grid on `down`.
+- **Android.** `Over picture` drew the picture `fillMaxSize` as a focus
+  target, so its focus rect was the whole screen: nothing in the 260 dp guide
+  panel was below, left or right of it, and it also always won Down from the
+  toolbar. The picture now takes a focus modifier that stops above the panel.
+
+Both are anchored in `tests/client-fixes.toml` against the arrangement
+contracts that would catch them again — contracts that assert the wiring, not
+the constants: the grid draws only from the dimensions it is handed, the
+television call sites measure before they size, the fixed grid frame and the
+deleted chrome bands are gone, and the picture is a bounded focus target.
+
+**Still unproved:** every claim above is simulator, JVM and lint evidence. The
+Apple TV + Siri Remote and Google TV Streamer + D-pad walkthrough is the
+review document's §7 prompt and has not run; the first thing to check on the
+physical Apple TV is whether the guide's bottom rows are reachable, which was
+the unverified half of the fifth cause.
+
+**Three judgement calls made without Paul**, recorded so they can be reversed:
+the status banner became a persistent one-line status rather than the
+specified four-second toast (a toast cannot repeat itself when the same
+failure happens twice, and it hid every cleanup message on a phone); the
+`Over picture` layout keeps the 48 pt toolbar above it (hiding it would leave
+Search, Layout and More reachable from nowhere); and the Live TV Developer
+enable was left exactly as it is — it already carries prose requirements plus
+a readiness check that renders met/unmet rows and does not gate Enable, and
+giving it structured rows like *Library channels* has would need a new
+`live_tv` item in the server's `developer.rs`, which is a server change and a
+different CI lane.
 
 ## Progress — three packages, then one promotion
 
