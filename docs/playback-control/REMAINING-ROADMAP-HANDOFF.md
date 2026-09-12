@@ -1,5 +1,15 @@
 # The rest of the playback-control rewrite — M5.5 through M9
 
+> **Superseded 2026-09-12:** use the
+> [current rewrite remainder](PLAYBACK-REWRITE-REMAINDER.md) for executable
+> work. This file is design history. Its M9 instruction to delete all
+> `/status` polling and reach a fixed timer count is not the current ownership
+> rule: observation-only polling, lease renewal, bounded network/lifecycle
+> deadlines, and compatibility adapters with a named owner remain valid.
+> Remove only a proven duplicate action owner or unreachable caller; buffer
+> observability may continue to consume status without gaining recovery
+> authority.
+
 **Status:** ready to plan, not all ready to build · **Executes:** items 7, 9
 and 10 of
 [PLAYBACK-CONTROL-IMPLEMENTATION-HANDOFF.md](PLAYBACK-CONTROL-IMPLEMENTATION-HANDOFF.md)

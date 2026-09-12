@@ -30,10 +30,10 @@ sweep actually executes them.
 | Package | State | Current evidence | Next action |
 |---|---|---|---|
 | B01 · buffer observability/UI | reserved to task `01a095b1-0e77-72f1-8b48-b04da47f8f10` | server telemetry is published in PR #262; its separate ledger is `PLAYBACK-BUFFER-OBSERVABILITY-STATUS.md` | integrate its final receipt without duplicating its wire, stats, or UI work |
-| B02 · refill and operation races | inventorying | lifecycle implementation is on main through PR #259; focused runtime results for this effort are `not run` | map each required case to an existing fixture, add only missing assertions, then repair demonstrated failures |
-| B03 · prepared transition | inventorying | prepared server/client transactions and planning are present; focused runtime results for this effort are `not run` | audit terminal cleanup, lost/duplicate settlement, recipe coverage, and both engines |
-| B04 · relocation and alternate ingress | inventorying | planned relocation source is present; focused runtime results for this effort are `not run` | audit real-route authorization, phase cancellation, replicated ownership, and cleanup |
-| B05 · subtitle and compatibility | inventorying | subtitle, VOD/rolling, and mixed-client paths are present; focused runtime results for this effort are `not run` | map action-making callers and close only demonstrated coverage or ownership gaps |
+| B02 · refill and operation races | mapped; not run | refill, loaded-wait, pause/resume, seek supersession, pending-create stop, and recipe-race anchors are named below | execute the focused matrix after review; repair only demonstrated failures |
+| B03 · prepared transition | mapped; not run | recipe planning, both engines, exact settlement, timeout, supersession, readiness, and terminal cleanup anchors are named below | execute the focused matrix after review; repair only demonstrated failures |
+| B04 · relocation and alternate ingress | mapped; not run | planned-fence cancellation, takeover, relay ingress, ownership settlement, and cleanup anchors are named below | execute the focused matrix after review; keep destructive physical fault injection as an explicit evidence gap |
+| B05 · subtitle and compatibility | mapped; not run | subtitle windows/retry, seek coalescing, VOD/rolling identity, and compatibility owners are named below | execute the focused matrix after review and retain every justified adapter |
 | Final promotion | not started | no remainder review, fast lane, or merge receipt exists | freeze the candidate, obtain one adversarial review, address findings, run the single broad fast lane, and merge only its green current head |
 
 ### Current decisions and boundaries
@@ -51,6 +51,40 @@ sweep actually executes them.
 4. **Do not overlap B01.** Any needed edit to shared player-input fixtures,
    `PlaybackSessionStatus` wire models, or stats rendering is coordinated with
    the B01 owner before commit.
+
+### Remainder regression matrix
+
+Every row is `not run` until the post-review execution phase. The representative
+anchors name the real fixture that covers the package; no row treats source
+presence as a pass.
+
+| Package | Representative retained anchors | Result |
+|---|---|---|
+| B02 · server refill | `lifecycle_refill_empty_and_loaded_waits_are_not_answered_with_their_hold` · `lifecycle_refill_loaded_native_wait_outranks_a_producer_hold` | not run |
+| B02 · client ownership | Apple `testAViewerCommandRacingAStallDropsTheStallBinding` and `testStartStopStartRestoresOnlyTheNewTitlesPlaybackIntent` · Android `lifecycleRefillLoadedWaitClaimsOneReevaluationAndKeepsTheAbsoluteDeadline` and `transportLocalSelectionAndVisibilityRearmAnAskSuspendedAcrossTheWholeChange` · `tests/playback/web-control.test.js` | not run |
+| B03 · server transaction | `prepared_candidate_reuses_the_ordinary_plan_for_original_and_compound_changes` · `concurrent_exact_acknowledgements_join_one_canonical_settlement` · `a_timed_out_settlement_finishes_detached_and_replays_durably` · `a_failed_preparation_acknowledgement_aborts_and_frees_the_slot` | not run |
+| B03 · clients and stores | Apple `PreparedReplacementTests` · Android `PreparedReplacementTest` · web prepared-replacement cases · `media_session_prepare_stages_a_successor_that_changes_nothing` and the preparation expiry/commit contracts on both stores | not run |
+| B04 · ownership and ingress | `a_fresh_takeover_engine_discards_the_departed_owners_preparation` · `preparation_capacity_and_serving_loss_refuse_before_acknowledgement_acceptance` · `a_switch_releases_the_drain_through_the_relay_and_only_when_accepted` · `the_ingress_control_gate_answers_a_lost_owner_gone` · `release_reconciliation_elects_once_and_retries_with_one_fence` | not run |
+| B05 · subtitle, seek, engines | `a_twenty_seek_storm_starts_work_only_for_the_settled_target` · `one_session_traverses_anchors_joins_refuses_and_releases` · `real_subtitle_playlist_rebinds_after_video_attempt_handoff` · `a_prepared_successor_publishes_the_vod_engine_identity` · `a_rolling_preparation_commit_reaches_the_store` · native client readiness-retry cases | not run |
+
+### B05 action-making caller reconciliation
+
+| Symbol / path | Owner and requirement | Disposition |
+|---|---|---|
+| Server `resolve_action` | one control exchange chooses typed hold, retry, or terminal advice from fenced client/server facts | retain; this is the server decision owner, not a media attachment executor |
+| Server `process_preparation_candidate` plus `PreparationExecutor` | one durable successor transaction; client capability and saved server enablement are explicit asks, while throughput/fleet evidence is advisory | retain; exact slot, deadline, commit, abort, and cleanup ownership is already bounded |
+| Server `attempt_takeover` and release reconciliation | abrupt owner-loss authority under durable epoch/lease fencing | retain; this is cluster ownership recovery, not a duplicate client stall owner |
+| Apple `startPlaybackRecoveryMonitor` / `retrySameDeliveryAfterStall` | serialized native nudge and bounded reopen; status polling contributes facts to the same executor | retain; detector count is not executor count, and B01 needs the status observations |
+| Android `OpenPlaybackStallTracker` / `onStall` / `restartAt` | one absolute no-progress episode and one attachment mutation path | retain; pause, visibility, selection, and generation guards fence stale work |
+| Web `beginWait` / `persistentWait` | one timer per player wait episode; control is consulted before the existing bounded replacement | retain; `stallDiagnose` and `retryPlayback` are viewer actions, not automatic competitors |
+| Apple/Android `retryMediaOnNextNode` | same session and authorization retried through a different advertised ingress | retain; alternate ingress changes transport, not playback identity or durable owner |
+| Client prepared-replacement coordinators | one successor per exact action; switch requires contiguous runway and an observed successor frame | retain; failure settles once and never creates a hidden session-wide veto |
+| Native/web subtitle retry and seek coalescers | same video session for native text; latest destination/selection owns work | retain; subtitle observation does not restart video, and abandoned destinations release their work |
+| Rolling HLS and immutable VOD adapters | selected engine keeps its own pacing/materialization and terminal lifetime | retain both; rolling retirement is a separate product decision, not cleanup for this effort |
+
+The old M9 fixed-timer and blanket `/status` deletion instruction is now marked
+superseded in `REMAINING-ROADMAP-HANDOFF.md`. No caller above is deleted merely
+to satisfy that historical count.
 
 ## Progress — one integrated promotion, one review, one fast lane
 
@@ -73,6 +107,7 @@ remain separate history inside the effort branch.
 
 | Source | Command | Result |
 |---|---|---|
+| `99cf1c6e` tree | `rustup run 1.97.1 cargo check -p plurxd --locked --all-targets` | passed in 1 minute 15 seconds; established the pinned compile loop without executing tests |
 | `30cd51afc` | `rustup run 1.97.1 rustc --version` | `rustc 1.97.1 (8bab26f4f 2026-07-14)` |
 | `30cd51afc` | `rustup run 1.97.1 cargo check -p plurxd --all-targets` | passed in 69 seconds; compiled test targets without executing tests |
 | `7c21d238` tree | pinned Rust fmt and Clippy | passed; Clippy completed in 16 seconds |
