@@ -907,7 +907,7 @@ test_anchor = "testTheLiveSurfaceAllowsPictureInPictureAndReleasesOnlyWhenItIsNo
 
 [[fixes]]
 id = "apple.prepared-successor-failure-is-retryable"
-commits = ["a9b4933f"]
+commits = ["a9b4933f", "5b28ae7e"]
 source = "clients/apple/Sources/PreparedReplacement.swift"
 source_anchor = "var shouldAskForPreparation: Bool"
 test = "clients/apple/Tests/PreparedReplacementTests.swift"

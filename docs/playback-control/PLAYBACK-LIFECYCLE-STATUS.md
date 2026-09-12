@@ -2,7 +2,7 @@
 
 **Status:** one adversarial review addressed; PR #259 fast lane correcting preflight ·
 **Updated:** 2026-09-12 · **Base:** `30cd51afc` · **Effort:**
-`effort/playback-lifecycle` at `88066364` before this receipt · **Latest task:**
+`effort/playback-lifecycle` at `5b28ae7e` before this receipt · **Latest task:**
 `codex/playback-lifecycle-p3-p4` at `139ad01f`
 
 Companion to the
@@ -154,9 +154,11 @@ The stale Android and Rust phase comments called out by the reviewer were also
 removed. PR #259 moved ready and received `fast-lane` at `af02d539`. Its first
 preflight accepted validation scope and mobile-version bookkeeping, then found
 two superseded client-fix anchors plus missing anchor rows for `7c21d238` and
-`88066364`. This correction updates that ledger and removes the stale Apple
-test expectation that a failed attempt disables later preparation. Merge still
-requires a green `Main promotion gate` for the corrected exact head.
+`88066364`. Commit `5b28ae7e` updated that ledger and removed the stale Apple
+test expectation that a failed attempt disables later preparation; the second
+preflight then correctly required `5b28ae7e` itself to join that Apple anchor
+row. Merge still requires a green `Main promotion gate` for the corrected
+exact head.
 
 ## Cleanup — keep only reusable build state
 
