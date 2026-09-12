@@ -12,6 +12,10 @@ answers what must happen at each lifecycle transition, how buffering changes
 that answer, which messages coordinate it, and what evidence is still missing.
 It does not authorize another independent watchdog or change production policy.
 
+The companion [rewrite remainder](PLAYBACK-REWRITE-REMAINDER.md) separates
+unimplemented work, restricted coverage, physical evidence debt, and stale
+status claims, and maps their intersection with these lifecycle cases.
+
 ## 1. The current implementation is a hybrid, with incomplete acceptance
 
 All three client implementations contain playback-control reporters and action
