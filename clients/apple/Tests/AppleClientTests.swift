@@ -3433,6 +3433,42 @@ final class AppleClientTests: XCTestCase {
         XCTAssertEqual(detector.sample(positionMs: 12_000, shouldMonitor: true, established: true, waitingRegime: false), .none)
     }
 
+    func testPresentationProgressAgeKeepsUnavailableDistinctFromZero() {
+        var detector = PlaybackStallDetector()
+        XCTAssertNil(detector.progressAgeMs(at: 100))
+        XCTAssertEqual(
+            detector.sample(
+                positionMs: 10_000,
+                shouldMonitor: true,
+                established: true,
+                waitingRegime: false,
+                observedAt: 100
+            ),
+            .none
+        )
+        XCTAssertEqual(detector.progressAgeMs(at: 100), 0)
+        XCTAssertEqual(detector.progressAgeMs(at: 102), 2_000)
+        XCTAssertEqual(
+            detector.sample(
+                positionMs: 12_000,
+                shouldMonitor: true,
+                established: true,
+                waitingRegime: false,
+                observedAt: 103
+            ),
+            .none
+        )
+        XCTAssertEqual(detector.progressAgeMs(at: 103), 0)
+        _ = detector.sample(
+            positionMs: 12_000,
+            shouldMonitor: false,
+            established: true,
+            waitingRegime: false,
+            observedAt: 104
+        )
+        XCTAssertNil(detector.progressAgeMs(at: 104))
+    }
+
     @MainActor
     func testBufferingWaitHasABoundedRecoveryTimer() {
         var monitor = PlaybackRecoveryMonitor()
@@ -4032,6 +4068,27 @@ final class AppleClientTests: XCTestCase {
             ),
             0,
             accuracy: 0.001
+        )
+    }
+
+    func testPlaybackWaitPresentationSeparatesClientLoadedFromServerWaits() {
+        XCTAssertEqual(
+            PlaybackWaitPresentation.make(runwaySeconds: 0, httpWaitCount: 0),
+            PlaybackWaitPresentation(
+                title: "Presentation waiting…",
+                detail: "0.0 s client loaded · no server HTTP waits"
+            )
+        )
+        XCTAssertEqual(
+            PlaybackWaitPresentation.make(runwaySeconds: 3.25, httpWaitCount: 1),
+            PlaybackWaitPresentation(
+                title: "Presentation waiting…",
+                detail: "3.2 s client loaded · 1 server HTTP wait"
+            )
+        )
+        XCTAssertEqual(
+            PlaybackWaitPresentation.make(runwaySeconds: 0, httpWaitCount: nil).detail,
+            "0.0 s client loaded · server wait state unavailable"
         )
     }
 
