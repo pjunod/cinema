@@ -1,5 +1,12 @@
 # Playback implementation — finish the control loop without another rewrite
 
+> **Next-work reconciliation, 2026-09-12:** The lifecycle implementation landed
+> through PR #259 at `5548c3d3`. For remaining work and current execution rules,
+> read the [rewrite remainder](PLAYBACK-REWRITE-REMAINDER.md). The test-deferral
+> and fast-lane-only instructions below describe the earlier campaign; Paul’s
+> replacement AGENTS.md requires focused local tests and current qualification
+> for the new effort. Historical receipts below remain unchanged.
+
 **Status:** implementation complete on `effort/playback-lifecycle`; main
 promotion pending, updated 2026-09-12.
 **Handoff integration baseline:** `30cd51afc` (merged documentation PR #255).
