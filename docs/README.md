@@ -93,6 +93,7 @@ page; the milestone files are contracts an executing agent works from.
 
 | File | Answers | |
 |---|---|---|
+| [PLAYBACK-LIFECYCLE-COVERAGE.md](playback-control/PLAYBACK-LIFECYCLE-COVERAGE.md) | Playback states and transitions, buffer handoffs, communication contracts, existing test anchors, and open acceptance gaps. | open |
 | [PLAYBACK-CONTROL-PROTOCOL-PLAN.md](playback-control/PLAYBACK-CONTROL-PROTOCOL-PLAN.md) | The whole design: explicit demand, one owner, prepared handoffs. | open |
 | [PLAYBACK-CONTROL-STATUS.md](playback-control/PLAYBACK-CONTROL-STATUS.md) | What is actually built and merged, milestone by milestone. | open |
 | [PLAYBACK-CONTROL-IMPLEMENTATION-HANDOFF.md](playback-control/PLAYBACK-CONTROL-IMPLEMENTATION-HANDOFF.md) | The numbered work items the milestones execute. | open |
