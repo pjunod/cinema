@@ -2,7 +2,7 @@
 
 **Status:** one adversarial review addressed; PR #259 fast lane correcting operations truth ·
 **Updated:** 2026-09-12 · **Base:** `30cd51afc` · **Effort:**
-`effort/playback-lifecycle` at `63d5a6a3` before this receipt · **Latest task:**
+`effort/playback-lifecycle` at `491aac64` before this receipt · **Latest task:**
 `codex/playback-lifecycle-p3-p4` at `139ad01f`
 
 Companion to the
@@ -166,8 +166,9 @@ operations checks reported two documentation assertions for the new internal
 prepare route and one Apple advisory-label assertion. The route and total are
 now documented, and Apple explicitly reports the still-uncollected fleet/link
 evidence as `Not met · Checked during playback`; neither status gates its
-toggle. Merge still requires a green `Main promotion gate` for the corrected
-exact head.
+toggle. The Apple source correction is pinned by a current production-to-test
+anchor in the client-fix ledger. Merge still requires a green
+`Main promotion gate` for the corrected exact head.
 
 ## Cleanup — keep only reusable build state
 

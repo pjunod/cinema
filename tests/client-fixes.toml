@@ -1240,3 +1240,13 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackTelemetr
 source_anchor = "nativeReevaluationSpent = false"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackTelemetryTest.kt"
 test_anchor = "lifecycleRefillLoadedWaitClaimsOneReevaluationAndKeepsTheAbsoluteDeadline"
+
+[[fixes]]
+# Readiness truth is advisory: an unmet fleet/link observation must be visible
+# beside the switch and must never disable it.
+id = "apple.prepared-handoff-readiness-truth-is-advisory"
+commits = ["491aac64"]
+source = "clients/apple/Sources/LiveTvDeveloperView.swift"
+source_anchor = "Fleet and link evidence: Not met · Checked during playback"
+test = "tests/operations/test_evidence_workflows.py"
+test_anchor = "test_apple_prepared_enablement_is_visible_and_advisory"
