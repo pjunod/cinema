@@ -11,7 +11,10 @@ module_root = "crates/plurxd/src"
 id = "advancing-progress-stall"
 pattern = "PROGRESS_STALL"
 # +1 for the first-media publication deadline used by the HEVC init validator.
-expected_occurrences = 10
+# 10 -> 12 for the actor-managed HLS status fixture's copy and transcode
+# policies. Both pass the existing actor-owned budget as a policy value; they
+# create no timer and no producer outside the fixture's retained registration.
+expected_occurrences = 12
 kind = "recovery_timer"
 replacement = "the sole actor-owned rolling producer progress budget before and after first media"
 
@@ -289,7 +292,9 @@ expected_occurrences = 0
 [[module_symbols]]
 id = "legacy-progress-stall"
 pattern = "PROGRESS_STALL"
-expected_occurrences = 10
+# 10 -> 12 for the same two test-only actor-policy inputs inventoried under
+# `advancing-progress-stall`; neither is a shipped compatibility watchdog.
+expected_occurrences = 12
 
 [[module_symbols]]
 id = "legacy-watchdog-poll"
@@ -525,7 +530,10 @@ expected_occurrences = 0
 id = "m4-prepublication-ownership-projection"
 pattern = "actor_prepublication_producer"
 # The deadline regression marks its synthetic session as prepublication; it adds no runtime owner.
-expected_occurrences = 22
+# 22 -> 23: the actor-managed HLS status fixture marks its synthetic session
+# after admitting the exact attempt. The retained executor registration owns
+# the actor for the fixture lifetime; no shipped ownership projection changed.
+expected_occurrences = 23
 
 [[module_symbols]]
 id = "m4-decision-wake"
@@ -545,7 +553,10 @@ expected_occurrences = 16
 [[module_symbols]]
 id = "m4-immutable-prepublication-process-scope"
 pattern = "actor_managed_prepublication_process"
-expected_occurrences = 12
+# 12 -> 13 for that same synthetic actor-managed fixture. It is the test's
+# declaration that status authorization must cross the production actor path,
+# not a new process scope or a bypass around that owner.
+expected_occurrences = 13
 
 [[module_symbols]]
 id = "m4-first-media-owner-claim-latch"
@@ -683,7 +694,10 @@ pattern = "hls_session_status_publication"
 # actor so its detached Store result reports against the same owner/session.
 # 4 -> 5: the no-status Abort fixture also captures this publication before
 # explicitly discarding it; it verifies status is unnecessary for cleanup.
-expected_occurrences = 5
+# 5 -> 6: the HLS delivery fixture reads the existing owner-bound publication
+# solely to assert its lease remains healthy after a status response. It mints
+# no publication handle and cannot authorize one.
+expected_occurrences = 6
 
 [[module_symbols]]
 id = "m4-exact-media-session-end"
@@ -838,7 +852,10 @@ pattern = "publication_ready_at_ms"
 # 85 -> 86 with remote prepared activation: the target reads the durable
 # successor's publication fence before asking its existing actor slot to
 # activate it. This is a validation read; it writes no fence.
-expected_occurrences = 86
+# 86 -> 87: the status HTTP regression's live route fixture starts at the
+# ordinary zero publication fence. It is test-only and neither advances nor
+# relaxes any shipped activation handoff.
+expected_occurrences = 87
 
 [[module_symbols]]
 id = "m4-durable-projection-safety-window"
@@ -1421,7 +1438,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # owns cleanup to completion, and reservation plus actor activation each
 # transfer their exact guard through an owned task. The registry/cancellation
 # token bounds every task; none owns an untracked producer or process.
-expected_occurrences = 486
+# 486 -> 487: the actor-managed HLS delivery fixture owns one ordinary control
+# actor through its returned handle and retained executor registration. The
+# fixture drops both together; no task escapes the test and no shipped spawn
+# was added.
+expected_occurrences = 487
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -1761,7 +1782,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # observation, guard-transfer bounds, and exact cleanup backoff replace the
 # older candidate/deadline shapes. They bound ownership transfer and cleanup;
 # they do not create another playback-progress or producer-recovery clock.
-expected_occurrences = 733
+# 733 -> 734: `hold_actor_managed_producer` awaits one bounded one-second
+# observation of the actor's physical hold acknowledgement. The timeout is
+# test-only, is awaited to completion, and owns neither producer nor process.
+expected_occurrences = 734
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -2031,7 +2055,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # +1 in the playback-rewrite remainder: `VodServe::status()` reads the
 # in-process live-VOD session snapshot in a unit test after advancing beyond
 # materialized media. It does not construct, launch, or retain a child process.
-expected_occurrences = 318
+# 318 -> 322: four `Response::status()` assertions cover live transcode, live
+# remux, and unchanged VOD HTTP answers. They inspect in-process responses;
+# none is a child-process launch or a producer owner.
+expected_occurrences = 322
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
