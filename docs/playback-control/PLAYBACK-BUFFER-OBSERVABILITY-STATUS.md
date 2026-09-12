@@ -1,7 +1,7 @@
 # Playback buffer observability — implementation status
 
-**Status:** implementation and main promotion complete · **Updated:**
-2026-09-12 · **Promotion:**
+**Status:** live rolling-status repair in progress · **Updated:** 2026-09-12 ·
+**Promotion:**
 [PR #263](http://192.168.4.7:3000/noirr/plurx/pulls/263), merge `eaecb199`
 
 This is the live execution ledger for the additive playback buffer and delivery
@@ -18,8 +18,9 @@ evidence exists. Unknown and stale observations are never recorded as zero.
 | O02 server publication | complete on `main` | rolling applies the achieved origin once and stops at pruned/gapped media; VOD begins at the accepted playhead/seek entry and requires init plus contiguous materialized entries; the bounded wait pool publishes per-session count, oldest age and segment | none |
 | O03 Apple presentation | complete on `main` | Apple info/debug rows consume the shared fields; AVPlayer loaded ranges and film-clock age stay separate; visible waits name presentation, client-loaded media and server HTTP-wait state without inferring a cause | none |
 | O04 Android presentation | complete on `main` | Media3 reports attached-player loaded runway and presentation age; server samples are identity-fenced and age-stamped; rows and visible waiting copy use the shared vocabulary | none |
-| O05 web presentation | complete on `main` | browser buffered ranges, frame/clock advancement, server sample age and server HTTP waits are distinct; visible waits refresh when a newer status sample arrives | none |
+| O05 web presentation | degraded on current `main` | the client rows are present, but live rolling status requests deterministically return `503 response_state_changed`; client-loaded and presentation facts remain visible while server readiness, HTTP wait and delivery facts remain unavailable | repair O07, qualify once, then verify a live remux sample |
 | O06 promotion | complete | task PR [#264](http://192.168.4.7:3000/noirr/plurx/pulls/264) merged at `35d40a2d`; combined PR #263 passed review and run 1903, then merged to `main` at `eaecb199` | none |
+| O07 live rolling-status repair | in progress | a September 12 live remux session returned `503 response_state_changed` on every status poll while its rolling actor remained active; `attempt_status("status")` fell through to `ProtocolResponse`, a combination the actor deliberately rejects | add the typed status object and exact regression, obtain one adversarial review, run the fast lane, merge, then verify the deployed endpoint returns `200` |
 
 ## Measurement contract
 

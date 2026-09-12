@@ -7705,6 +7705,7 @@ impl MediaResponsePublication {
             "segment-not-modified" => Object::NotModified,
             "segment-range-not-satisfiable" => Object::RangeNotSatisfiable,
             "segment-range" => Object::ByteRange,
+            "status" => Object::SessionStatus,
             _ => Object::ProtocolResponse,
         }
     }
@@ -25179,7 +25180,11 @@ impl HlsDeliveryFixture {
     /// Publish a producer-less session under `session_id`, serving whatever
     /// files the caller writes into `dir`.
     pub(crate) async fn publish(dir: &std::path::Path, session_id: &str) -> Self {
-        Self::publish_with_takeover(dir, session_id, None).await
+        Self::publish_with_takeover(dir, session_id, None, false).await
+    }
+
+    pub(crate) async fn publish_copy(dir: &std::path::Path, session_id: &str) -> Self {
+        Self::publish_with_takeover(dir, session_id, None, true).await
     }
 
     pub(crate) async fn publish_takeover(
@@ -25201,6 +25206,7 @@ impl HlsDeliveryFixture {
                 discontinuity_sequence: owner_epoch.saturating_sub(1),
                 owner_epoch,
             }),
+            false,
         )
         .await
     }
@@ -25210,15 +25216,17 @@ impl HlsDeliveryFixture {
         state_root: &std::path::Path,
         session_id: &str,
     ) -> Self {
-        Self::publish_with_takeover_and_state_root(session_dir, state_root, session_id, None).await
+        Self::publish_with_takeover_and_state_root(session_dir, state_root, session_id, None, false)
+            .await
     }
 
     async fn publish_with_takeover(
         dir: &std::path::Path,
         session_id: &str,
         takeover: Option<SessionTakeoverStart>,
+        copy: bool,
     ) -> Self {
-        Self::publish_with_takeover_and_state_root(dir, dir, session_id, takeover).await
+        Self::publish_with_takeover_and_state_root(dir, dir, session_id, takeover, copy).await
     }
 
     async fn publish_with_takeover_and_state_root(
@@ -25226,6 +25234,7 @@ impl HlsDeliveryFixture {
         state_root: &std::path::Path,
         session_id: &str,
         takeover: Option<SessionTakeoverStart>,
+        copy: bool,
     ) -> Self {
         use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
         use plurx_core::store::SqliteStore;
@@ -25269,6 +25278,15 @@ impl HlsDeliveryFixture {
         let mut raw_session = test_session(session_dir.to_path_buf());
         raw_session.takeover = takeover;
         raw_session.file_id = file_id;
+        if copy {
+            raw_session.kind = SessionKind::Copy {
+                aac: true,
+                preserve_dolby_vision: false,
+                convert_dolby_vision: false,
+            };
+            raw_session.method = crate::delivery::Method::HlsCopy;
+            raw_session.encoder_label = Mutex::new("copy");
+        }
         let frozen_file = store
             .get_file(file_id)
             .await
@@ -30626,6 +30644,31 @@ pub(crate) mod tests {
             "fetching from a session is what keeps it alive"
         );
         assert!(mgr.stop_session(session_id, "test").await);
+    }
+
+    #[tokio::test]
+    async fn rolling_status_authz_maps_to_attempt_status() {
+        let root = crate::test_tempdir().expect("status fixture");
+        let session_id = "status-publication";
+        let fixture = HlsDeliveryFixture::publish(root.path(), session_id).await;
+        let publication = fixture
+            .state
+            .transcode
+            .hls_session_status_publication(session_id)
+            .await
+            .expect("rolling status publication");
+
+        fixture
+            .state
+            .transcode
+            .authorize_response_publication(
+                session_id,
+                &publication.owner,
+                MediaResponsePublication::attempt_status("status", None),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .expect("session status must use a typed attempt-status object");
     }
 
     /// The playlist is the only place a copied segment's true duration is

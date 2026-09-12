@@ -5981,6 +5981,7 @@ pub(crate) enum RollingResponseObject {
     ByteRange,
     NotModified,
     RangeNotSatisfiable,
+    SessionStatus,
     ProtocolResponse,
 }
 
@@ -10463,7 +10464,10 @@ impl RollingControlActor {
                 producer_attempt,
                 media_segment_index,
             } => {
-                if publication.object == RollingResponseObject::ProtocolResponse {
+                if matches!(
+                    publication.object,
+                    RollingResponseObject::ProtocolResponse | RollingResponseObject::SessionStatus
+                ) {
                     return Err(ResponsePublicationRejection::InvalidBinding);
                 }
                 let valid_segment_binding = match publication.object {
@@ -24355,6 +24359,80 @@ mod tests {
         let mut actor = prepublication_actor(now);
         assert_eq!(actor.register_producer_executor_at(), Ok(()));
         actor
+    }
+
+    #[test]
+    fn rolling_status_authz_keeps_its_exact_attempt_and_binding() {
+        let started = Instant::now();
+        let mut actor = registered_prepublication_actor(started);
+        assert_eq!(
+            actor.begin_initial_producer_attempt_at(
+                started,
+                InitialProducerPolicy::software(
+                    "session-status".to_owned(),
+                    PRODUCER_PROGRESS_BUDGET,
+                ),
+            ),
+            Ok(1)
+        );
+
+        let status =
+            || RollingResponsePublication::attempt_status(RollingResponseObject::SessionStatus, 1);
+        assert!(actor
+            .authorize_response_publication_at(started, status())
+            .is_ok());
+        assert_eq!(
+            actor.authorize_response_publication_at(
+                started,
+                RollingResponsePublication::attempt_status(
+                    RollingResponseObject::SessionStatus,
+                    2,
+                ),
+            ),
+            Err(ResponsePublicationRejection::StaleAttempt)
+        );
+        assert_eq!(
+            actor.authorize_response_publication_at(
+                started,
+                RollingResponsePublication::attempt_media(
+                    RollingResponseObject::SessionStatus,
+                    1,
+                    None,
+                ),
+            ),
+            Err(ResponsePublicationRejection::InvalidBinding)
+        );
+        assert_eq!(
+            actor.authorize_response_publication_at(
+                started,
+                RollingResponsePublication::protocol_only(RollingResponseObject::SessionStatus, 1,),
+            ),
+            Err(ResponsePublicationRejection::InvalidBinding)
+        );
+        assert_eq!(
+            actor.authorize_response_publication_at(
+                started,
+                RollingResponsePublication::generation_metadata(
+                    RollingResponseObject::SessionStatus,
+                    "session-status".to_owned(),
+                ),
+            ),
+            Err(ResponsePublicationRejection::InvalidBinding)
+        );
+
+        assert!(actor
+            .authorize_response_publication_at(
+                started,
+                RollingResponsePublication::attempt_media(
+                    RollingResponseObject::VideoMediaPlaylist,
+                    1,
+                    None,
+                ),
+            )
+            .is_ok());
+        assert!(actor
+            .authorize_response_publication_at(started, status())
+            .is_ok());
     }
 
     #[tokio::test(start_paused = true)]
