@@ -358,6 +358,7 @@ enum LiveTvGridMetrics {
     static let rowHeight: Double = 56
     static let channelColumnWidth: Double = 128
     static let visibleSlots = 8
+    static let horizontalInset: Double = 16
     /// The phone grid scrolls horizontally, so its column is a fixed size
     /// rather than a share of a width it does not have.
     static func pxPerSlot(contentWidth: Double) -> Double { 160 }
@@ -365,10 +366,13 @@ enum LiveTvGridMetrics {
     static let rowHeight: Double = 74
     static let channelColumnWidth: Double = 200
     static let visibleSlots = 4
+    /// The grid draws 8 pt of padding on each side of its own content, so the
+    /// slots have `contentWidth - 16` to share with the channel column.
+    static let horizontalInset: Double = 16
     /// Slot width follows the screen: a hard-coded 300 left 35% of a 1920 pt
     /// screen empty and could never fit two hours.
     static func pxPerSlot(contentWidth: Double) -> Double {
-        max(120, (contentWidth - channelColumnWidth) / Double(visibleSlots))
+        max(120, (contentWidth - horizontalInset - channelColumnWidth) / Double(visibleSlots))
     }
     #endif
 
@@ -593,6 +597,9 @@ struct LiveTvChannelRow: View {
                 if channel.favorite {
                     Image(systemName: "star.fill").foregroundStyle(Palette.accent)
                 }
+                if !channel.watchable {
+                    Image(systemName: "lock").foregroundStyle(Palette.muted)
+                }
                 #if os(tvOS)
                 if let endsAt {
                     Text(endsAt).font(LiveTvType.tertiary).foregroundStyle(Palette.muted)
@@ -744,6 +751,11 @@ struct LiveTvGuideGrid: View {
         let channelId: String
         let programmeStart: Int?
         let channelHeader: Bool
+        /// The header's paging chips. They live inside the grid, so they live
+        /// inside the remote adapter, and `onMoveCommand` swallows every
+        /// direction it receives — a focusable in here with no key of its own
+        /// is a focus trap with no way out.
+        var paging: Int? = nil
     }
 
     let layout: LiveTvGridLayout
@@ -934,9 +946,9 @@ struct LiveTvGuideGrid: View {
                 .clipped()
                 if let paging {
                     HStack(spacing: 6) {
-                        pagingChip("‹", enabled: paging.canEarlier, action: paging.earlier)
-                        pagingChip("Now", enabled: true, action: paging.now)
-                        pagingChip("›", enabled: paging.canLater, action: paging.later)
+                        pagingChip("‹", index: 0, enabled: paging.canEarlier, action: paging.earlier)
+                        pagingChip("Now", index: 1, enabled: true, action: paging.now)
+                        pagingChip("›", index: 2, enabled: paging.canLater, action: paging.later)
                     }
                     .padding(.leading, 8)
                     .frame(width: dimensions.channelColumnWidth + 8, height: headerHeight,
@@ -946,7 +958,10 @@ struct LiveTvGuideGrid: View {
         }
         #if os(tvOS)
         .onChange(of: focusedCell) { _, target in
-            guard let target else {
+            // A focused paging chip is inside the grid but is not the grid
+            // owning a cell: claiming ownership here would arm the restore
+            // pass, which would then take the focus straight back off the chip.
+            guard let target, target.paging == nil else {
                 focusCoordinator.focusChanged(active: false)
                 onFocusOwnershipChanged(false)
                 return
@@ -971,12 +986,8 @@ struct LiveTvGuideGrid: View {
             .guide,
             state: { .temporaryGuide },
             apply: { outcome, input in
-                // Declining when no cell is focused is what lets the header's
-                // paging chips be left again: the adapter sits above them, so
-                // swallowing the press would trap focus on a chip.
-                guard outcome == .focusCell, focusedCell != nil else { return false }
-                moveFocus(input)
-                return true
+                guard outcome == .focusCell else { return false }
+                return moveFocus(input)
             }
         )
         .onChange(of: restoreAllowed) { _, allowed in
@@ -1000,7 +1011,7 @@ struct LiveTvGuideGrid: View {
     }
 
     @ViewBuilder private func pagingChip(
-        _ label: String, enabled: Bool, action: @escaping () -> Void
+        _ label: String, index: Int, enabled: Bool, action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
             Text(label)
@@ -1012,6 +1023,9 @@ struct LiveTvGuideGrid: View {
         #if os(tvOS)
         .buttonStyle(LiveTvGuideButtonStyle())
         .focusEffectDisabled()
+        .focused($focusedCell, equals: FocusKey(
+            channelId: "", programmeStart: nil, channelHeader: false, paging: index
+        ))
         #else
         .buttonStyle(.plain)
         #endif
@@ -1020,8 +1034,13 @@ struct LiveTvGuideGrid: View {
     }
 
     #if os(tvOS)
-    private func moveFocus(_ direction: LiveTvContractInput) {
-        guard let current = focusedCell else { return }
+    /// Returns whether the press was used. `onMoveCommand` consumes every
+    /// direction it is given, so anything this declines is a dead press —
+    /// which is why the chips are handled here rather than left to the engine.
+    @discardableResult
+    private func moveFocus(_ direction: LiveTvContractInput) -> Bool {
+        guard let current = focusedCell else { return false }
+        if let chip = current.paging { return movePagingFocus(chip, direction) }
         let position = LiveTvGuideFocusPosition(
             channelId: current.channelId,
             programmeStart: current.programmeStart,
@@ -1050,6 +1069,31 @@ struct LiveTvGuideGrid: View {
                 onToolbarBoundary()
             }
         }
+        return true
+    }
+
+    /// Left and right walk the three chips; up hands the press to the toolbar
+    /// and down enters the grid, exactly as a cell in the first row would.
+    private func movePagingFocus(_ index: Int, _ direction: LiveTvContractInput) -> Bool {
+        switch direction {
+        case .left where index > 0:
+            focusedCell = FocusKey(channelId: "", programmeStart: nil,
+                                   channelHeader: false, paging: index - 1)
+        case .right where index < 2:
+            focusedCell = FocusKey(channelId: "", programmeStart: nil,
+                                   channelHeader: false, paging: index + 1)
+        case .up:
+            onToolbarBoundary()
+        case .down, .right:
+            focusGridCandidate()
+        case .left:
+            // Already on the first chip: the channel column's left edge is the
+            // page edge, so there is nowhere to go and nothing to hand back.
+            break
+        default:
+            return false
+        }
+        return true
     }
 
     private var gridContentIdentity: String {
@@ -1065,6 +1109,10 @@ struct LiveTvGuideGrid: View {
 
     private func restoreFocus() {
         guard restoreAllowed else { return }
+        focusGridCandidate()
+    }
+
+    private func focusGridCandidate() {
         guard let row = restoreChannelId.flatMap({ id in
             layout.rows.first(where: { $0.channel.id == id })
         }) ?? layout.rows.first else { return }
@@ -1125,8 +1173,6 @@ struct LiveTvView: View {
     @State private var tvFocusedChannelId: String?
     @State private var overlayGeneration = 0
     @State private var onScreen = false
-    @State private var toast: String?
-    @State private var toastGeneration = 0
     #if os(iOS)
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -1200,10 +1246,11 @@ struct LiveTvView: View {
         }
         .padding(.horizontal, liveContentInset)
         .padding(.bottom, liveContentInset)
-        // The status banner used to own a whole band above the content. What
-        // is durable about it — the channel count — is in the toolbar now, and
-        // the rest is a four-second toast over the content it describes.
-        .overlay(alignment: .bottom) { statusToast }
+        // The status banner used to own a whole band above the content: a
+        // three-line centred card, roughly 90 pt of the page. What is durable
+        // about it — the channel count — is in the toolbar now, and the rest
+        // is one muted line along the bottom of the content it describes.
+        .overlay(alignment: .bottom) { statusLine }
         }
         .navigationTitle("Live TV")
         #if os(iOS)
@@ -1211,17 +1258,7 @@ struct LiveTvView: View {
         .toolbar { phoneNavigationActions }
         #endif
         .background(Palette.bg)
-        .onChange(of: live.message) { _, message in
-            guard !LiveTvView.isPlaybackMessage(message) else { toast = nil; return }
-            toast = message
-            toastGeneration &+= 1
-        }
-        .task(id: toastGeneration) {
-            guard toast != nil else { return }
-            try? await Task.sleep(nanoseconds: 4_000_000_000)
-            guard !Task.isCancelled else { return }
-            toast = nil
-        }
+
         .task { await live.load(origin: model.origin, token: Session.shared.token) }
         .onReceive(tick) { _ in
             now = Int(Date().timeIntervalSince1970)
@@ -1296,15 +1333,19 @@ struct LiveTvView: View {
         return overlayVisible ? .fullscreenControls : .fullscreenHidden
     }
 
-    /// Playback and cleanup messages are a standing fact about what is on, not
-    /// news: they belong in the details panel's footer line, where they stay
-    /// readable. Everything else is news, and gets four seconds.
-    static func isPlaybackMessage(_ message: String) -> Bool {
-        ["Playing live", "Paused", "Cleanup", "Starting "].contains { message.contains($0) }
+    /// The one message that is a standing fact rather than something to read:
+    /// while a channel is playing normally there is nothing to say. Everything
+    /// else — including every cleanup and every failure — stays on screen for
+    /// as long as it is true, because a four-second toast cannot repeat itself
+    /// when the same failure happens twice.
+    static func isSteadyStateMessage(_ message: String) -> Bool {
+        message == "Playing live · no recording or rewind"
     }
 
-    private var playbackFooter: String? {
-        LiveTvView.isPlaybackMessage(live.message) ? live.message : nil
+    private var statusText: String? {
+        let message = live.message
+        guard !message.isEmpty, !LiveTvView.isSteadyStateMessage(message) else { return nil }
+        return message
     }
 
     /// The phone's picture is full-bleed, so the page cannot own a horizontal
@@ -1318,25 +1359,23 @@ struct LiveTvView: View {
         #endif
     }
 
-    @ViewBuilder private var statusToast: some View {
-        if let toast {
-            Text(toast)
-                .font(LiveTvType.secondary)
-                .foregroundStyle(Palette.onBg)
-                .multilineTextAlignment(.center)
-                .lineLimit(3)
-                .padding(.horizontal, 20).padding(.vertical, 10)
-                .frame(maxWidth: 1050)
-                .background(Palette.surface.opacity(0.94),
-                            in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .padding(.bottom, 16)
-                .transition(.opacity)
+    @ViewBuilder private var statusLine: some View {
+        if let statusText {
+            Text(statusText)
+                .font(LiveTvType.tertiary)
+                .foregroundStyle(Palette.muted)
+                .lineLimit(2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 12).padding(.vertical, 6)
+                .background(Palette.surface.opacity(0.94))
                 .accessibilityIdentifier("live-tv-status")
         }
     }
 
     private var toolbarSummary: String {
-        var parts = ["\(live.channels.count) channels"]
+        let shown = visibleChannels.count
+        let total = live.channels.count
+        var parts = [shown == total ? "\(total) channels" : "\(shown) of \(total) channels"]
         if live.playing { parts.append("1 tuner in use") }
         if let guide = live.guide, guide.freshness != "fresh" {
             parts.append(guide.freshness == "stale" ? "guide is stale" : "no guide data")
@@ -1622,7 +1661,21 @@ struct LiveTvView: View {
     }
     #endif
 
+    #if os(iOS)
+    /// The touch browse region. Television routes to `tvBrowseRegion`, so this
+    /// is compiled for iOS alone rather than kept alive with tvOS branches
+    /// nothing reaches.
     @ViewBuilder private var browseRegion: some View {
+        browseContent
+            // On the whole region, not on the On now list: the nav-bar icon
+            // sets `showingSearch` from either tab, and a `.searchable` that
+            // exists in only one of them leaves the flag stuck true and the
+            // field silently absent.
+            .searchable(text: $query, isPresented: $showingSearch,
+                        prompt: "Number, name, or what is on")
+    }
+
+    @ViewBuilder private var browseContent: some View {
         switch browse {
         case .list:
             List(visibleChannels) { channel in
@@ -1633,26 +1686,12 @@ struct LiveTvView: View {
                                      selected: live.watching?.id == channel.id)
                 }
                 .disabled(!channel.watchable || live.busy)
-                #if os(iOS)
                 .buttonStyle(.plain)
                 .listRowInsets(EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 8))
                 .listRowBackground(Color.clear)
-                #else
-                .buttonStyle(LiveTvChannelButtonStyle())
-                .focusEffectDisabled()
-                .listRowBackground(Color.clear)
-                #endif
             }
-            #if os(iOS)
             .listStyle(.plain)
-            // The search field is revealed by the nav-bar icon rather than
-            // standing above the list all the time, which cost the phone a
-            // whole row it did not have.
-            .searchable(text: $query, isPresented: $showingSearch,
-                        prompt: "Number, name, or what is on")
-            #endif
         case .guide:
-            #if os(iOS)
             if verticalSizeClass == .regular && horizontalSizeClass == .compact && !mobileGuideGrid {
                 mobileSchedule
             } else {
@@ -1662,24 +1701,23 @@ struct LiveTvView: View {
                             mobileGuideGrid = false
                             SettingsStore().liveTvMobileGuideUsesGrid = false
                         }
+                        .font(.system(size: 13, weight: .semibold))
                     }
                     guideGrid
                 }
             }
-            #else
-            guideGrid
-            #endif
         }
     }
 
     private var guideGrid: some View {
+        GeometryReader { geometry in
             LiveTvGuideGrid(
                 layout: LiveTvGuideReducer.gridLayout(
                     guide: live.guide, channels: visibleChannels,
                     window: LiveTvGridMetrics.window(start: guideWindowStart), now: now,
                     slotSeconds: LiveTvGridMetrics.slotSeconds,
-                    pxPerSlot: LiveTvGridMetrics.pxPerSlot(contentWidth: 0)),
-                dimensions: LiveTvGridMetrics.dimensions(contentWidth: 0),
+                    pxPerSlot: LiveTvGridMetrics.pxPerSlot(contentWidth: Double(geometry.size.width))),
+                dimensions: LiveTvGridMetrics.dimensions(contentWidth: Double(geometry.size.width)),
                 slots: LiveTvGuideReducer.gridSlots(
                     window: LiveTvGridMetrics.window(start: guideWindowStart),
                     slotSeconds: LiveTvGridMetrics.slotSeconds),
@@ -1695,9 +1733,9 @@ struct LiveTvView: View {
                 restoreRequest: 0,
                 restoreAllowed: false,
                 onFocusOwnershipChanged: { _ in })
+        }
     }
 
-    #if os(iOS)
     private var mobileSchedule: some View {
         let channel = scheduleChannelId.flatMap { id in visibleChannels.first { $0.id == id } }
             ?? live.watching
@@ -1797,10 +1835,6 @@ struct LiveTvView: View {
             livePicture(width: pictureWidth, height: pictureHeight)
             focusedProgrammeDetails(synopsisLines: 2, eyebrow: false)
             if let channel = focusedTvChannel { channelSchedule(channel) }
-            if let playbackFooter {
-                Text(playbackFooter).font(LiveTvType.tertiary).foregroundStyle(Palette.muted)
-                    .lineLimit(2)
-            }
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -1837,7 +1871,7 @@ struct LiveTvView: View {
                         .buttonStyle(TVReadableButtonStyle(prominent: false, compact: true))
                         .focusEffectDisabled()
                 }
-                tvBrowseContent(contentWidth: contentWidth, rows: rows)
+                tvBrowseContent(contentWidth: max(640, contentWidth - 40), rows: rows)
             }
             .padding(20)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1955,7 +1989,7 @@ struct LiveTvView: View {
     }
 
     private var guideStageFooter: String? {
-        guard let watching = live.watching else { return playbackFooter }
+        guard let watching = live.watching else { return nil }
         let airing = live.airing(watching, now: now)
         return [
             "Now playing: \(airing.now?.title ?? watching.title)",
@@ -2020,6 +2054,7 @@ struct LiveTvView: View {
         // `ScrollView` + `LazyVStack` rather than `List`: a tvOS List row
         // stretches to the container and fights a fixed-width column, and the
         // 620 pt width is the whole point of the arrangement.
+        ScrollViewReader { scroll in
         ScrollView {
             LazyVStack(spacing: 4) {
                 ForEach(visibleChannels) { channel in
@@ -2034,6 +2069,7 @@ struct LiveTvView: View {
                     .focusEffectDisabled()
                     .focused($focusedChannelId, equals: channel.id)
                     .disabled(!channel.watchable || live.busy)
+                    .id(channel.id)
                 }
             }
         }
@@ -2048,6 +2084,10 @@ struct LiveTvView: View {
                 ownerRequested: channelFocusRequested && browse == .list
             ), let target = nearestVisibleChannel(to: tvFocusedChannelId) else { return }
             tvFocusedChannelId = target.id
+            // A `LazyVStack` only registers `.focused` for rows it has built,
+            // so setting the binding to a row outside the built window leaves
+            // the page with nothing focused at all. `List` did this for us.
+            scroll.scrollTo(target.id, anchor: .center)
             await Task.yield()
             guard !Task.isCancelled,
                   browse == .list,
@@ -2057,6 +2097,7 @@ struct LiveTvView: View {
                   )
             else { return }
             focusedChannelId = target.id
+        }
         }
     }
 

@@ -975,21 +975,27 @@ final class LiveTvTests: XCTestCase {
     /// actually got; the phone's fixed columns do not move.
     func testGuideSlotWidthFollowsTheScreenOnTelevisionAndNotOnThePhone() throws {
         #if os(tvOS)
-        XCTAssertEqual(LiveTvGridMetrics.pxPerSlot(contentWidth: 1760), 390, accuracy: 0.001)
+        XCTAssertEqual(LiveTvGridMetrics.pxPerSlot(contentWidth: 1776), 390, accuracy: 0.001)
         XCTAssertEqual(LiveTvGridMetrics.channelColumnWidth, 200)
         XCTAssertEqual(LiveTvGridMetrics.rowHeight, 74)
         XCTAssertEqual(LiveTvGridMetrics.visibleSlots, 4)
-        let dimensions = LiveTvGridMetrics.dimensions(contentWidth: 1760)
+        let dimensions = LiveTvGridMetrics.dimensions(contentWidth: 1776)
         XCTAssertEqual(dimensions.slotWidth, 390, accuracy: 0.001)
+        // The grid pads its own content by 8 pt on each side, so what the
+        // slots and the channel column share is the content width less that
+        // inset. Getting this wrong is how the fourth half-hour ends up 16 pt
+        // off the right edge with a horizontal scroll nobody asked for.
         XCTAssertEqual(
-            dimensions.channelColumnWidth + dimensions.slotWidth * Double(LiveTvGridMetrics.visibleSlots),
-            1760, accuracy: 0.001,
-            "the channel column plus the visible slots must be exactly the content width")
+            LiveTvGridMetrics.horizontalInset
+                + dimensions.channelColumnWidth
+                + dimensions.slotWidth * Double(LiveTvGridMetrics.visibleSlots),
+            1776, accuracy: 0.001,
+            "the inset, the channel column and the visible slots must be exactly the content width")
         // Four half-hour slots is the two-hour page the paging chips move by.
         let window = LiveTvGridMetrics.window(start: 1_700_000_000)
         XCTAssertEqual(window.end - window.start, 4 * LiveTvGridMetrics.slotSeconds)
         #else
-        XCTAssertEqual(LiveTvGridMetrics.pxPerSlot(contentWidth: 1760), 160, accuracy: 0.001)
+        XCTAssertEqual(LiveTvGridMetrics.pxPerSlot(contentWidth: 1776), 160, accuracy: 0.001)
         XCTAssertEqual(LiveTvGridMetrics.pxPerSlot(contentWidth: 390), 160, accuracy: 0.001)
         XCTAssertEqual(LiveTvGridMetrics.rowHeight, 56)
         XCTAssertEqual(LiveTvGridMetrics.channelColumnWidth, 128)
@@ -1005,12 +1011,21 @@ final class LiveTvTests: XCTestCase {
     func testTheChannelBrowserLayoutIsPresentedAsPreviewWithoutRewritingIt() throws {
         let stored = try XCTUnwrap(TvLiveLayout(rawValue: "channel_browser"))
         XCTAssertEqual(stored.presented, .guidePreview)
-        XCTAssertEqual(stored.rawValue, "channel_browser", "the stored value is never rewritten")
         XCTAssertEqual(TvLiveLayout.guidePreview.presented, .guidePreview)
         XCTAssertEqual(TvLiveLayout.guideOverlay.presented, .guideOverlay)
         XCTAssertEqual(TvLiveLayout.offered, [.guidePreview, .guideOverlay])
         XCTAssertEqual(TvLiveLayout.offered.map(\.label), ["Preview", "Over picture"])
         XCTAssertEqual(TvLiveLayout.allCases.count, 3, "the third case still decodes")
+        // Nothing writes the aliased value back. The sheet only ever assigns a
+        // member of `offered`, so a stored `channel_browser` survives until the
+        // viewer deliberately picks a layout.
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "live-tv-layout-alias"))
+        defaults.removePersistentDomain(forName: "live-tv-layout-alias")
+        defaults.set("channel_browser", forKey: "plurx.liveTvLayout")
+        let read = TvLiveLayout(rawValue: defaults.string(forKey: "plurx.liveTvLayout") ?? "")
+        XCTAssertEqual(read?.presented, .guidePreview)
+        XCTAssertEqual(defaults.string(forKey: "plurx.liveTvLayout"), "channel_browser")
+        defaults.removePersistentDomain(forName: "live-tv-layout-alias")
     }
 
     /// tvOS resolves the semantic text styles two to two and a half times
@@ -1031,6 +1046,42 @@ final class LiveTvTests: XCTestCase {
         XCTAssertTrue(source.contains(".font(LiveTvType."))
         // The toolbar is one row of compact buttons; sheets keep the tall pair.
         XCTAssertTrue(source.contains("TVReadableButtonStyle(prominent: false, compact: true)"))
+    }
+
+    /// The arrangement itself, not just the constants behind it: each of these
+    /// would still be true if the numbers changed, and each is false if the
+    /// rewrite is reverted.
+    func testTheLiveTvArrangementIsWiredToTheDerivedGeometry() throws {
+        let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let source = try String(
+            contentsOf: testsDirectory.appendingPathComponent("../Sources/LiveTvView.swift").standardizedFileURL,
+            encoding: .utf8)
+        // The grid draws from the dimensions it is handed, never from the
+        // statics — that is what makes the slot width follow the screen.
+        let gridStart = try XCTUnwrap(source.range(of: "struct LiveTvGuideGrid: View")?.lowerBound)
+        let gridEnd = try XCTUnwrap(source.range(of: "struct LiveTvView: View")?.lowerBound)
+        let grid = String(source[gridStart..<gridEnd])
+        XCTAssertTrue(grid.contains("dimensions.slotWidth"))
+        XCTAssertTrue(grid.contains("dimensions.rowHeight"))
+        XCTAssertTrue(grid.contains("dimensions.channelColumnWidth"))
+        XCTAssertFalse(grid.contains("LiveTvGridMetrics.pxPerSlot"),
+                       "the grid must not reach past its own dimensions")
+        XCTAssertFalse(grid.contains("LiveTvGridMetrics.rowHeight"))
+        // The list owns its width, the picture is a focus target, and the
+        // fixed grid frame that pushed rows off the bottom is gone.
+        XCTAssertTrue(source.contains("static let tvListColumnWidth: CGFloat = 620"))
+        XCTAssertTrue(source.contains("Button { fullscreen = true } label: {"))
+        XCTAssertFalse(source.contains("LiveTvGridMetrics.rowHeight + 54"))
+        // One toolbar, one status line, and none of the bands they replaced.
+        XCTAssertTrue(source.contains("private var liveToolbar: some View"))
+        XCTAssertTrue(source.contains("accessibilityIdentifier(\"live-tv-status\")"))
+        XCTAssertFalse(source.contains("private var nowBar"))
+        XCTAssertFalse(source.contains("private var actionBar"))
+        XCTAssertFalse(source.contains("private var filterBar"))
+        // Every focusable inside the guide's remote adapter owns a focus key,
+        // or a direction press on it is swallowed with nowhere to go.
+        XCTAssertTrue(source.contains("private func movePagingFocus"))
+        XCTAssertTrue(source.contains("channelHeader: false, paging: index"))
     }
 }
 
