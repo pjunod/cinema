@@ -806,6 +806,70 @@ impl SegmentIndex {
         self.segs.iter().find(|s| !s.pruned).map(|s| s.index)
     }
 
+    /// Complete retained media contiguous with an absolute film-time anchor.
+    ///
+    /// `published_end_ms` and every segment bound in this index are relative
+    /// to the generation's achieved origin. Applying the origin here, once,
+    /// prevents status clients from guessing which timeline a frontier uses.
+    fn server_ready(&self, media_origin_ms: i64, anchor_ms: i64) -> ReadyCoverage {
+        let relative_anchor = anchor_ms.saturating_sub(media_origin_ms);
+        let containing = self.segs.iter().position(|segment| {
+            segment.start_ms <= relative_anchor && relative_anchor < segment.end_ms
+        });
+        let next_retained = self
+            .segs
+            .iter()
+            .position(|segment| !segment.pruned && segment.end_ms > relative_anchor);
+        let next_interval = next_retained.map(|start| {
+            let first = &self.segs[start];
+            let mut end_ms = first.end_ms;
+            for segment in self.segs.iter().skip(start + 1) {
+                if segment.pruned || segment.start_ms > end_ms {
+                    break;
+                }
+                end_ms = end_ms.max(segment.end_ms);
+            }
+            (
+                media_origin_ms.saturating_add(first.start_ms),
+                media_origin_ms.saturating_add(end_ms),
+            )
+        });
+        let Some(start) = containing else {
+            let known_missing = relative_anchor >= 0
+                && self
+                    .produced_playable_end_ms()
+                    .is_none_or(|end| relative_anchor >= end);
+            return ReadyCoverage::without_anchor(
+                anchor_ms,
+                if known_missing {
+                    "missing"
+                } else {
+                    "unavailable"
+                },
+                next_interval,
+            );
+        };
+        if self.segs[start].pruned {
+            return ReadyCoverage::without_anchor(anchor_ms, "unavailable", next_interval);
+        }
+        let mut end_ms = self.segs[start].end_ms;
+        for segment in self.segs.iter().skip(start + 1) {
+            if segment.pruned || segment.start_ms > end_ms {
+                break;
+            }
+            end_ms = end_ms.max(segment.end_ms);
+        }
+        let absolute_end_ms = media_origin_ms.saturating_add(end_ms);
+        ReadyCoverage {
+            state: "ready",
+            anchor_ms: Some(anchor_ms),
+            end_ms: Some(absolute_end_ms),
+            seconds: Some(absolute_end_ms.saturating_sub(anchor_ms) as f64 / 1_000.0),
+            next_start_ms: next_interval.map(|(start, _)| start),
+            next_end_ms: next_interval.map(|(_, end)| end),
+        }
+    }
+
     /// Bytes of published segments lying entirely after `ms`.
     fn bytes_after_ms(&self, ms: i64) -> i64 {
         self.segs
@@ -947,6 +1011,44 @@ impl SegmentIndex {
         }
         self.revision = self.revision.wrapping_add(1);
         Some(false)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ReadyCoverage {
+    state: &'static str,
+    anchor_ms: Option<i64>,
+    end_ms: Option<i64>,
+    seconds: Option<f64>,
+    next_start_ms: Option<i64>,
+    next_end_ms: Option<i64>,
+}
+
+impl ReadyCoverage {
+    fn unavailable() -> Self {
+        Self {
+            state: "unavailable",
+            anchor_ms: None,
+            end_ms: None,
+            seconds: None,
+            next_start_ms: None,
+            next_end_ms: None,
+        }
+    }
+
+    fn without_anchor(
+        anchor_ms: i64,
+        state: &'static str,
+        next_interval: Option<(i64, i64)>,
+    ) -> Self {
+        Self {
+            state,
+            anchor_ms: Some(anchor_ms),
+            end_ms: (state == "missing").then_some(anchor_ms),
+            seconds: (state == "missing").then_some(0.0),
+            next_start_ms: next_interval.map(|(start, _)| start),
+            next_end_ms: next_interval.map(|(_, end)| end),
+        }
     }
 }
 
@@ -7113,6 +7215,10 @@ async fn session_info(
     global_ahead_bytes: i64,
 ) -> SessionInfo {
     let lease = s.control.snapshot().await;
+    let demand = lease.as_ref().and_then(|lease| lease.demand.as_ref());
+    let media_origin_ms = (s.media_origin_seconds * 1_000.0).round() as i64;
+    let ready_anchor_ms =
+        demand.map(crate::playback_control::PlaybackDemandSnapshot::buffer_anchor_ms);
     #[cfg(test)]
     {
         let pause = s
@@ -7126,11 +7232,14 @@ async fn session_info(
         }
     }
     let (fetched_end_ms, published_end_ms) = delivery_frontier(s, lease.as_ref()).await;
-    let (ahead, first_retained_segment) = {
+    let (ahead, first_retained_segment, server_ready) = {
         let index = s.segments.lock().await;
         (
             ahead_of(&index, fetched_end_ms.max(0)),
             index.first_retained_index(),
+            ready_anchor_ms.map_or_else(ReadyCoverage::unavailable, |anchor| {
+                index.server_ready(media_origin_ms, anchor)
+            }),
         )
     };
     let idle_seconds = lease
@@ -7148,7 +7257,6 @@ async fn session_info(
         Some(lease) => lease.terminal.map_or("active", |cause| cause.status()),
         None => "unavailable",
     };
-    let demand = lease.as_ref().and_then(|lease| lease.demand.as_ref());
     let delivery = lease.as_ref().map(|lease| &lease.delivery);
     let control_demand = demand.map(|demand| match demand.demand {
         crate::playback_control::PlaybackDemand::Active => "active",
@@ -7171,7 +7279,7 @@ async fn session_info(
             published_end_ms,
             // Status reports the flow; it never spends the grant.
             startup_grant_spent: s.startup_grant_spent.load(Relaxed),
-            media_origin_ms: (s.media_origin_seconds * 1_000.0).round() as i64,
+            media_origin_ms,
             lease_mode: lease.mode,
             demand: lease.demand.as_ref(),
             global_live_bytes,
@@ -7249,6 +7357,12 @@ async fn session_info(
         reported_position_ms: demand.map(|demand| demand.position_ms),
         client_runway_ms: demand.map(|demand| demand.runway_ms()),
         render_state,
+        server_ready_state: server_ready.state,
+        server_ready_anchor_ms: server_ready.anchor_ms,
+        server_ready_end_ms: server_ready.end_ms,
+        server_ready_seconds: server_ready.seconds,
+        server_next_ready_start_ms: server_ready.next_start_ms,
+        server_next_ready_end_ms: server_ready.next_end_ms,
         production_policy: flow.map_or("unavailable", |flow| flow.policy),
         production_ahead_seconds: flow.and_then(|flow| flow.production_ahead_seconds),
         production_target_seconds: flow.and_then(|flow| flow.production_target_seconds),
@@ -7302,6 +7416,10 @@ async fn session_info(
         delivered_bytes: s.delivery.total_bytes(),
         delivered_bps: s.delivery.recent_bps().map(|b| b * 8),
         delivered_idle_ms: s.delivery.idle_for_ms(),
+        http_wait_count: 0,
+        http_wait_oldest_ms: None,
+        http_wait_segment: None,
+        status_generated_unix_ms: crate::media_sessions::unix_ms(),
         readrate: s.readrate,
         suspended,
         suspend_count: s.suspend_count.load(Relaxed),
@@ -7328,6 +7446,12 @@ fn vod_delivery_session_info(info: crate::vodserve::VodDeliveryInfo) -> SessionI
         reported_position_ms: None,
         client_runway_ms: None,
         render_state: None,
+        server_ready_state: "unavailable",
+        server_ready_anchor_ms: None,
+        server_ready_end_ms: None,
+        server_ready_seconds: None,
+        server_next_ready_start_ms: None,
+        server_next_ready_end_ms: None,
         production_policy: "immutable_vod",
         production_ahead_seconds: None,
         production_target_seconds: None,
@@ -7362,6 +7486,10 @@ fn vod_delivery_session_info(info: crate::vodserve::VodDeliveryInfo) -> SessionI
         delivered_bytes: info.delivered_bytes,
         delivered_bps: info.delivered_bps,
         delivered_idle_ms: info.delivered_idle_ms,
+        http_wait_count: 0,
+        http_wait_oldest_ms: None,
+        http_wait_segment: None,
+        status_generated_unix_ms: crate::media_sessions::unix_ms(),
         readrate: 0.0,
         suspended: false,
         suspend_count: 0,
@@ -8629,6 +8757,17 @@ pub struct SessionInfo {
     pub reported_position_ms: Option<i64>,
     pub client_runway_ms: Option<i64>,
     pub render_state: Option<&'static str>,
+    /// Contiguous, complete, retained media at the latest accepted absolute
+    /// film-time anchor. `missing` carries a measured zero; `unavailable`
+    /// deliberately carries no seconds.
+    pub server_ready_state: &'static str,
+    pub server_ready_anchor_ms: Option<i64>,
+    pub server_ready_end_ms: Option<i64>,
+    pub server_ready_seconds: Option<f64>,
+    /// A retained interval after an unavailable anchor. Debug consumers may
+    /// show it, but it is never runway at the playhead.
+    pub server_next_ready_start_ms: Option<i64>,
+    pub server_next_ready_end_ms: Option<i64>,
     /// The pacing authority and its measured high-water coordinates. The
     /// legacy policy is download-frontier inference; explicit policy is
     /// actor-owned demand plus reported playhead/runway.
@@ -8713,6 +8852,14 @@ pub struct SessionInfo {
     /// its last real value and this says how old it is, so a reader can tell a
     /// measurement from a memory.
     pub delivered_idle_ms: i64,
+    /// Rolling delivery never parks a response waiting for publication; VOD
+    /// fills these fields from its bounded wait pool.
+    pub http_wait_count: usize,
+    pub http_wait_oldest_ms: Option<i64>,
+    pub http_wait_segment: Option<i64>,
+    /// Server generation time. Clients also retain receipt time so wire age
+    /// and local display age remain different observations.
+    pub status_generated_unix_ms: i64,
     /// Effective ffmpeg input pace, matching `StreamInfo.readrate`.
     pub readrate: f64,
     pub suspended: bool,
@@ -30311,6 +30458,42 @@ pub(crate) mod tests {
         assert_eq!(recent_rate_step(2_000, RECENT_SAMPLE_MIN_MS - 1, 400), None);
         // Output going backwards is nonsense, not a negative rate.
         assert_eq!(recent_rate_step(2_000, 1_000, -50), None);
+    }
+
+    #[test]
+    fn server_ready_uses_absolute_origin_and_does_not_cross_pruned_media() {
+        let segment = |index, start_ms, end_ms, pruned| SegmentMeta {
+            index,
+            name: format!("seg{index:05}.ts"),
+            start_ms,
+            end_ms,
+            bytes: if pruned { 0 } else { 1_024 },
+            pruned,
+        };
+        let index = SegmentIndex {
+            segs: vec![
+                segment(0, 0, 4_000, true),
+                segment(1, 4_000, 8_000, false),
+                segment(2, 8_000, 12_000, false),
+            ],
+            revision: 1,
+        };
+
+        let ready = index.server_ready(720_000, 725_500);
+        assert_eq!(ready.state, "ready");
+        assert_eq!(ready.anchor_ms, Some(725_500));
+        assert_eq!(ready.end_ms, Some(732_000));
+        assert_eq!(ready.seconds, Some(6.5));
+
+        let evicted = index.server_ready(720_000, 721_000);
+        assert_eq!(evicted.state, "unavailable");
+        assert_eq!(evicted.seconds, None, "evicted is not a measured zero");
+        assert_eq!(evicted.next_start_ms, Some(724_000));
+        assert_eq!(evicted.next_end_ms, Some(732_000));
+
+        let beyond = index.server_ready(720_000, 733_000);
+        assert_eq!(beyond.state, "missing");
+        assert_eq!(beyond.seconds, Some(0.0));
     }
 
     /// End to end through the atomics: the rate appears, and a gapped sample
