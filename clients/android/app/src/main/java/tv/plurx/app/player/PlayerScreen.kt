@@ -1242,9 +1242,21 @@ private fun PlayerContent(
         }
 
         if (!isInPip && (buffering || findingNext)) {
+            val waiting = playbackWaitPresentation(
+                runwaySeconds = (player.bufferedPosition - player.currentPosition)
+                    .coerceAtLeast(0) / 1_000.0,
+                httpWaitCount = controller.sessionStatus?.http_wait_count,
+            )
             Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
                 CircularProgressIndicator(color = Accent)
-                if (findingNext) Text("Up next…", color = Color.White, modifier = Modifier.padding(top = 12.dp))
+                Text(
+                    if (findingNext) "Up next…" else waiting.title,
+                    color = Color.White,
+                    modifier = Modifier.padding(top = 12.dp),
+                )
+                if (buffering && !findingNext) {
+                    Text(waiting.detail, color = Color.White.copy(alpha = 0.72f))
+                }
             }
         }
 
@@ -1858,7 +1870,7 @@ private fun PlayerInfo(
     }
     val videoFormat = player.videoFormat
     val source = plan.source
-    val bufferSeconds = (player.bufferedPosition - player.currentPosition).coerceAtLeast(0) / 1_000.0
+    val clientLoadedSeconds = (player.bufferedPosition - player.currentPosition).coerceAtLeast(0) / 1_000.0
     val method = buildList {
         add(deliveryLabel(controller.deliveryMode))
         if (controller.deliveryMode == "transcode") {
@@ -1872,7 +1884,9 @@ private fun PlayerInfo(
             fileId = plan.fileId,
             delivery = method,
             position = "${formatTime(positionMs)} / ${formatTime(plan.durationMs)}",
-            buffer = String.format(Locale.US, "%.1f s", bufferSeconds),
+            clientLoadedSeconds = clientLoadedSeconds,
+            presentationAgeMs = controller.presentationProgressAgeMs,
+            statusAgeMs = controller.sessionStatusAgeMs,
             videoHealth = videoHealthSummary(player),
             frames = videoFramesSummary(player),
             sourceFile = source?.filename,
@@ -1947,7 +1961,9 @@ internal data class PlaybackInfoDetails(
     val fileId: Long,
     val delivery: String,
     val position: String,
-    val buffer: String,
+    val clientLoadedSeconds: Double,
+    val presentationAgeMs: Long? = null,
+    val statusAgeMs: Long? = null,
     val videoHealth: String? = null,
     val frames: String? = null,
     val sourceFile: String? = null,
@@ -1975,6 +1991,29 @@ internal data class PlaybackInfoDetails(
     val playerState: String = "Unknown",
     val control: String? = null,
 )
+
+internal data class PlaybackWaitPresentation(
+    val title: String,
+    val detail: String,
+)
+
+/** Visible waiting copy that keeps client runway distinct from server response waits. */
+internal fun playbackWaitPresentation(
+    runwaySeconds: Double,
+    httpWaitCount: Long?,
+): PlaybackWaitPresentation {
+    val waits = httpWaitCount?.coerceAtLeast(0)
+    val waitText = when (waits) {
+        null -> "server wait state unavailable"
+        0L -> "no server HTTP waits"
+        1L -> "1 server HTTP wait"
+        else -> "$waits server HTTP waits"
+    }
+    return PlaybackWaitPresentation(
+        title = "Presentation waiting",
+        detail = String.format(Locale.US, "%.1f s client loaded · %s", runwaySeconds, waitText),
+    )
+}
 
 /** Floating playback details with the same Mini/Standard/Debug contract as Apple and web. */
 @Composable
@@ -2110,8 +2149,8 @@ private fun PlaybackInfoMini(
             PlaybackMiniDivider()
         }
         PlaybackMiniValue(
-            details.buffer,
-            bufferTone(details.sessionStatus?.ahead_seconds),
+            formatSeconds(details.clientLoadedSeconds),
+            bufferTone(details.clientLoadedSeconds),
             Modifier.weight(1f, fill = false),
         )
         PlaybackMiniDivider()
@@ -2564,7 +2603,7 @@ internal fun playbackInfoRows(
     val status = details.sessionStatus
     val speed = status?.recent_speed ?: status?.speed
     val subtitleParts = splitLedgerValue(details.subtitles, facts = 1)
-    val aheadNote = buildList {
+    val fetchReserveNote = buildList {
         if (status?.suspended == true) add("Holding buffer")
         status?.resume_below_seconds?.let { add("releases below $it s") }
         status?.suspend_count?.let { add("$it suspends") }
@@ -2595,7 +2634,6 @@ internal fun playbackInfoRows(
         InfoRow("decode_resolution", "Resolution", "NOW DECODING", AllInfoModes, details.decodeResolution),
         InfoRow("dynamic_range", "Dynamic range", "NOW DECODING", AllInfoModes, details.dynamicRange, placement = "notes"),
         InfoRow("decode_audio", "Audio", "NOW DECODING", setOf(PlaybackStatsMode.Debug), details.playingAudio, placement = "notes"),
-        InfoRow("buffer", "Buffer", "NOW DECODING", AllInfoModes, details.buffer, tone = bufferTone(status?.ahead_seconds)),
         InfoRow("frames", "Frames", "NOW DECODING", StandardAndDebug, details.frames, tone = videoHealthTone(details.videoHealth)),
         InfoRow(
             "player_state",
@@ -2609,25 +2647,110 @@ internal fun playbackInfoRows(
         InfoRow("stalls", "Stalls", "NOW DECODING", StandardAndDebug, details.stalls),
         InfoRow("subtitles", "Subtitles", "NOW DECODING", StandardAndDebug, subtitleParts.first, subtitleParts.second),
         InfoRow(
+            "source_read",
+            "Source read",
+            "BUFFERING / DELIVERY",
+            setOf(PlaybackStatsMode.Debug),
+            "Unavailable",
+            tone = PlaybackStatTone.Muted,
+        ),
+        InfoRow(
+            "server_ready",
+            "Server ready",
+            "BUFFERING / DELIVERY",
+            StandardAndDebug,
+            serverReadyValue(status),
+            tone = serverReadyTone(status),
+        ),
+        InfoRow(
+            "ready_state",
+            "Ready state",
+            "BUFFERING / DELIVERY",
+            setOf(PlaybackStatsMode.Debug),
+            status?.server_ready_state?.replaceFirstChar { it.uppercase() } ?: "Unavailable",
+            tone = serverReadyTone(status),
+        ),
+        InfoRow(
+            "ready_anchor",
+            "Ready anchor",
+            "BUFFERING / DELIVERY",
+            setOf(PlaybackStatsMode.Debug),
+            status?.server_ready_anchor_ms?.let { "$it ms" },
+        ),
+        InfoRow(
+            "ready_end",
+            "Ready end",
+            "BUFFERING / DELIVERY",
+            setOf(PlaybackStatsMode.Debug),
+            status?.server_ready_end_ms?.let { "$it ms" },
+        ),
+        InfoRow(
+            "later_ready",
+            "Later ready",
+            "BUFFERING / DELIVERY",
+            setOf(PlaybackStatsMode.Debug),
+            laterReadyValue(status),
+            placement = "notes",
+        ),
+        InfoRow(
+            "http_wait",
+            "HTTP wait",
+            "BUFFERING / DELIVERY",
+            StandardAndDebug,
+            status?.http_wait_count?.let(::httpWaitValue),
+            note = httpWaitNote(status),
+            tone = httpWaitTone(status?.http_wait_count),
+        ),
+        InfoRow(
+            "client_loaded",
+            "Client loaded",
+            "BUFFERING / DELIVERY",
+            AllInfoModes,
+            formatSeconds(details.clientLoadedSeconds),
+            tone = bufferTone(details.clientLoadedSeconds),
+        ),
+        InfoRow(
+            "presentation",
+            "Presentation",
+            "BUFFERING / DELIVERY",
+            StandardAndDebug,
+            presentationValue(details.playerState),
+            tone = playerStateTone(details.playerState),
+        ),
+        InfoRow(
+            "presentation_age",
+            "Last advance",
+            "BUFFERING / DELIVERY",
+            StandardAndDebug,
+            details.presentationAgeMs?.let { "$it ms" },
+        ),
+        InfoRow(
             "delivery_rate",
             "Delivery rate",
-            "NETWORK",
+            "BUFFERING / DELIVERY",
             AllInfoModes,
             status?.delivered_bps?.let(::formatBitrate),
             note = status?.delivered_idle_ms?.takeIf { it > 0 }?.let { "idle for $it ms" },
             tone = networkTone(details),
         ),
-        InfoRow("observed_rate", "Observed rate", "NETWORK", setOf(PlaybackStatsMode.Debug), details.observedRate),
-        InfoRow("stream_rate", "Stream rate", "NETWORK", setOf(PlaybackStatsMode.Debug), details.streamRate),
-        InfoRow("delivered", "Delivered", "NETWORK", StandardAndDebug, status?.delivered_bytes?.let(::formatBytes)),
+        InfoRow("delivered", "Delivered", "BUFFERING / DELIVERY", StandardAndDebug, status?.delivered_bytes?.let(::formatBytes)),
         InfoRow(
             "delivery_idle",
             "Delivery idle",
-            "NETWORK",
+            "BUFFERING / DELIVERY",
             setOf(PlaybackStatsMode.Debug),
             status?.delivered_idle_ms?.let { "$it ms" },
             tone = idleTone(status?.delivered_idle_ms, status?.suspended == true),
         ),
+        InfoRow(
+            "status_age",
+            "Status sample age",
+            "BUFFERING / DELIVERY",
+            setOf(PlaybackStatsMode.Debug),
+            details.statusAgeMs?.let { "$it ms" },
+        ),
+        InfoRow("observed_rate", "Observed rate", "NETWORK", setOf(PlaybackStatsMode.Debug), details.observedRate),
+        InfoRow("stream_rate", "Stream rate", "NETWORK", setOf(PlaybackStatsMode.Debug), details.streamRate),
         InfoRow("started_in", "Started in", "NETWORK", setOf(PlaybackStatsMode.Debug), details.startedIn),
         InfoRow(
             "status",
@@ -2652,15 +2775,32 @@ internal fun playbackInfoRows(
             tone = speed?.let { encodeTone(it, status) } ?: PlaybackStatTone.Muted,
         ),
         InfoRow(
-            "server_ahead",
-            "Server ahead",
+            "production_actual",
+            "Production actual",
             "SERVER",
             StandardAndDebug,
-            status?.ahead_seconds?.let { String.format(Locale.US, "%.1f s", it.coerceAtLeast(0).toDouble()) },
-            note = aheadNote,
-            tone = bufferTone(status?.ahead_seconds, status?.suspended == true),
+            status?.production_ahead_seconds?.let { formatSeconds(it.toDouble()) },
+            tone = bufferTone(status?.production_ahead_seconds?.toDouble(), status?.suspended == true),
         ),
-        InfoRow("ahead_bytes", "Ahead bytes", "SERVER", setOf(PlaybackStatsMode.Debug), status?.ahead_bytes?.let(::formatBytes)),
+        InfoRow(
+            "production_target",
+            "Production target",
+            "SERVER",
+            StandardAndDebug,
+            status?.production_target_seconds?.let { formatSeconds(it.toDouble()) },
+            note = status?.production_policy,
+        ),
+        InfoRow("producer_state", "Producer", "SERVER", StandardAndDebug, status?.producer_state),
+        InfoRow(
+            "fetch_reserve",
+            "Fetch reserve",
+            "SERVER",
+            setOf(PlaybackStatsMode.Debug),
+            status?.ahead_seconds?.let { formatSeconds(it.coerceAtLeast(0).toDouble()) },
+            note = fetchReserveNote,
+            tone = bufferTone(status?.ahead_seconds?.toDouble(), status?.suspended == true),
+        ),
+        InfoRow("ahead_bytes", "Fetch reserve bytes", "SERVER", setOf(PlaybackStatsMode.Debug), status?.ahead_bytes?.let(::formatBytes)),
         InfoRow("produced", "Produced", "SERVER", setOf(PlaybackStatsMode.Debug), status?.out_time_ms?.let(::formatTime)),
         InfoRow("pacing", "Pacing", "SERVER", setOf(PlaybackStatsMode.Debug), status?.readrate?.let { String.format(Locale.US, "%.2f×", it) }),
         InfoRow("held", "Held", "SERVER", setOf(PlaybackStatsMode.Debug), status?.let { if (it.suspended == true) "Yes" else "No" }),
@@ -2681,7 +2821,7 @@ internal fun playbackInfoSections(
     mode: PlaybackStatsMode,
 ): List<PlaybackStatSection> {
     val rows = playbackInfoRows(details, reasons).filter { mode in it.modes && it.value != null }
-    return listOf("PLAYBACK", "SOURCE", "NOW DECODING", "NETWORK", "SERVER").map { section ->
+    return listOf("PLAYBACK", "SOURCE", "NOW DECODING", "BUFFERING / DELIVERY", "NETWORK", "SERVER").map { section ->
         PlaybackStatSection(
             section,
             rows.filter { it.section == section }.flatMap { row ->
@@ -2722,7 +2862,7 @@ private fun videoHealthTone(summary: String?): PlaybackStatTone = when {
 }
 
 private fun bufferTone(
-    seconds: Long?,
+    seconds: Double?,
     suspended: Boolean = false,
 ): PlaybackStatTone = when {
     suspended -> PlaybackStatTone.Good
@@ -2730,6 +2870,54 @@ private fun bufferTone(
     seconds < 2 -> PlaybackStatTone.Critical
     seconds < 5 -> PlaybackStatTone.Warning
     else -> PlaybackStatTone.Good
+}
+
+private fun formatSeconds(seconds: Double): String =
+    String.format(Locale.US, "%.1f s", seconds.coerceAtLeast(0.0))
+
+private fun serverReadyValue(status: PlaybackSessionStatus?): String = when (
+    status?.server_ready_state?.lowercase(Locale.US)
+) {
+    "ready" -> status.server_ready_seconds?.let(::formatSeconds) ?: "Unavailable"
+    "missing" -> "0.0 s"
+    else -> "Unavailable"
+}
+
+private fun serverReadyTone(status: PlaybackSessionStatus?): PlaybackStatTone = when (
+    status?.server_ready_state?.lowercase(Locale.US)
+) {
+    "ready" -> bufferTone(status.server_ready_seconds)
+    "missing" -> PlaybackStatTone.Critical
+    else -> PlaybackStatTone.Muted
+}
+
+private fun laterReadyValue(status: PlaybackSessionStatus?): String? {
+    val start = status?.server_next_ready_start_ms ?: return null
+    val end = status.server_next_ready_end_ms ?: return null
+    return "$start–$end ms (not current runway)"
+}
+
+private fun httpWaitValue(count: Long): String = when (val waits = count.coerceAtLeast(0)) {
+    0L -> "0 active"
+    1L -> "1 active"
+    else -> "$waits active"
+}
+
+private fun httpWaitNote(status: PlaybackSessionStatus?): String? = buildList {
+    status?.http_wait_oldest_ms?.let { add("oldest $it ms") }
+    status?.http_wait_segment?.let { add("segment $it") }
+}.takeIf { it.isNotEmpty() }?.joinToString(" · ")
+
+private fun httpWaitTone(count: Long?): PlaybackStatTone = when {
+    count == null -> PlaybackStatTone.Muted
+    count > 0 -> PlaybackStatTone.Warning
+    else -> PlaybackStatTone.Good
+}
+
+private fun presentationValue(playerState: String): String = when (playerState) {
+    "Playing" -> "Advancing"
+    "Buffering" -> "Waiting"
+    else -> playerState
 }
 
 private fun networkTone(details: PlaybackInfoDetails): PlaybackStatTone {

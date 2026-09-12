@@ -202,6 +202,16 @@ class PlaybackTelemetryTest {
     }
 
     @Test
+    fun presentationProgressAgeIsUnknownUntilTheFirstBaseline() {
+        val tracker = OpenPlaybackStallTracker()
+        assertNull(tracker.progressAgeMs(5_000))
+        assertNull(tracker.sample(true, false, true, 5_000, 5_000))
+        assertEquals(250L, tracker.progressAgeMs(5_250))
+        assertNull(tracker.sample(true, false, true, 5_300, 5_300))
+        assertEquals(200L, tracker.progressAgeMs(5_500))
+    }
+
+    @Test
     fun startupReadyFreezeAndStateFlapsHaveFiniteDeadlines() {
         val tracker = OpenPlaybackStallTracker()
 
