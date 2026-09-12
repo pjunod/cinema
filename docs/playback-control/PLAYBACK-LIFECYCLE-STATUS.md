@@ -7,10 +7,9 @@
 > replacement AGENTS.md requires focused local tests and current qualification
 > for the new effort. Historical receipts below remain unchanged.
 
-**Status:** combined B01–B05 candidate reviewed and focused-regression green;
-fast lane pending ·
-**Updated:** 2026-09-12 · **Current base:**
-`10f2afe6` · **Current effort:** `effort/playback-rewrite-remainder`
+**Status:** combined B01–B05 implementation, review, qualification and main
+promotion complete · **Updated:** 2026-09-12 · **Promotion:**
+[PR #263](http://192.168.4.7:3000/noirr/plurx/pulls/263), merge `eaecb199`
 
 Companion to the
 [implementation contract](PLAYBACK-LIFECYCLE-IMPLEMENTATION.md) (what to build),
@@ -23,19 +22,19 @@ sweep actually executes them.
 ## Remainder execution — B01–B05 integrated
 
 **Status:** source complete; one adversarial review addressed; focused matrix
-green; fast lane pending · **Started:**
+and main-promotion lane green; merged · **Started:**
 2026-09-12 · **Base:** `10f2afe60b3d177866fdcc5741acd9f494525d73` ·
 **Effort:** `effort/playback-rewrite-remainder` · **Clone:**
 `/private/tmp/plurx-sol-remainder-20260912`
 
 | Package | State | Current evidence | Next action |
 |---|---|---|---|
-| B01 · buffer observability/UI | integrated; green | server PR #262 and client PR #264 are merged through `effort/buffer-observability`; its complete focused receipts remain in `PLAYBACK-BUFFER-OBSERVABILITY-STATUS.md` | preserve through current-main promotion |
-| B02 · refill and operation races | source-complete; focused green | Apple rechecks session/open generation and viewer-action epoch after its ask; Android binds media-request and transport generations; web binds player, wait timestamp, playback generation, and control-intent generation | preserve through fast lane |
-| B03 · prepared transition | source-complete; focused green | recipe planning, both engines, exact settlement, timeout, supersession, readiness, and terminal cleanup anchors are named below | preserve through fast lane |
-| B04 · relocation and alternate ingress | source-complete; focused green | planned-fence cancellation, takeover, relay ingress, ownership settlement, and cleanup anchors are named below; destructive physical fault injection remains an explicit evidence gap | preserve through fast lane |
-| B05 · subtitle and compatibility | source-complete; focused green | subtitle windows/retry, seek coalescing, VOD/rolling identity, and compatibility owners are named below; `eb8fb452` puts authoritative prepared-handoff enablement and advisory readiness together in web Developer settings | preserve through fast lane |
-| Final promotion | review addressed; focused green | B01 merged at `247ba3d7`; the one combined adversarial review of `83693106` reported four findings, addressed by `09cd99c4` and the test-phase repair `4e0991f0` | run one broad fast lane on the current head and merge only that green head |
+| B01 · buffer observability/UI | complete | server PR #262 and client PR #264 merged through `effort/buffer-observability`; its complete focused receipts remain in `PLAYBACK-BUFFER-OBSERVABILITY-STATUS.md` | none |
+| B02 · refill and operation races | complete; focused green | Apple rechecks session/open generation and viewer-action epoch after its ask; Android binds media-request and transport generations; web binds player, wait timestamp, playback generation, and control-intent generation | none |
+| B03 · prepared transition | complete; focused green | recipe planning, both engines, exact settlement, timeout, supersession, readiness, and terminal cleanup anchors are named below | none |
+| B04 · relocation and alternate ingress | complete; focused green | planned-fence cancellation, takeover, relay ingress, ownership settlement, and cleanup anchors are named below; destructive physical fault injection remains an explicit evidence gap | run the separately scoped physical sweep when the device/fleet is available |
+| B05 · subtitle and compatibility | complete; focused green | subtitle windows/retry, seek coalescing, VOD/rolling identity, and compatibility owners are named below; `eb8fb452` puts authoritative prepared-handoff enablement and advisory readiness together in web Developer settings | none |
+| Final promotion | complete | the one review of `83693106` was addressed by `09cd99c4` and `4e0991f0`; exact head `91eb2546` passed run 1903 and merged through PR #263 at `eaecb199` | none |
 
 ### Current decisions and boundaries
 
@@ -110,6 +109,22 @@ selected test then passed.
 | Web | playback policy, input contract, player DOM, full playback-control reporter, and settings sections | green; settings sections reported 26/26 |
 | Android | `PlaybackTelemetryTest`, `PlaybackRequestOwnershipTest`, all `Prepared*`, and both `PlaybackControlPrepared*` groups | green: 72 passed, 0 failed |
 | Apple iOS simulator | exact-head `build-for-testing`, two telemetry/ownership cases, one operation-ownership case, and four prepared-replacement groups | green: 37 passed, 0 failed |
+
+### Main promotion receipt
+
+Exact candidate `91eb25464ca2ca9511c91c58c8aa294b16cf9c62` passed
+[main fast-lane run 1903](http://192.168.4.7:3000/noirr/plurx/actions/runs/1885):
+scope · mobile release version · policy/contracts · web · Rust · Apple ·
+Android · `Main promotion gate` all succeeded. Because every rostered
+`android-kvm` runner was offline, Android used one capability-matched ephemeral
+runner on trusted `nynuc`; the host is x86_64 and exposes `/dev/kvm` and Docker.
+No changed SSH host key was trusted or bypassed. The runner self-deleted after
+its one job, its temporary directory and diagnostic log were removed, and the
+four merged task/effort branches were pruned after ancestry checks.
+
+`main` was still the reviewed base `10f2afe6` immediately before merge. PR #263
+then merged the unchanged qualified head as
+`eaecb19988851c1efb1c8beb541b6a5b497643de`.
 
 ### B05 action-making caller reconciliation
 

@@ -1,18 +1,22 @@
 # Playback rewrite remainder — the next Sol implementation handoff
 
-**Status:** ready to execute; observability implementation is already assigned.
-**Reconciled:** 2026-09-12. **Source baseline:**
+**Status:** executed through [PR #263](http://192.168.4.7:3000/noirr/plurx/pulls/263),
+merge `eaecb19988851c1efb1c8beb541b6a5b497643de` · **Reconciled:**
+2026-09-12 · **Source baseline:**
 `10f2afe60b3d177866fdcc5741acd9f494525d73` on `main`.
 **Lifecycle landing:** [PR #259](http://192.168.4.7:3000/noirr/plurx/pulls/259),
 merge `5548c3d3c0b631af6df8d15c3c27e0d6a9880068`.
 
-Read this first, then the [lifecycle coverage map](PLAYBACK-LIFECYCLE-COVERAGE.md)
+This was the finite execution handoff. Read the
+[lifecycle status](PLAYBACK-LIFECYCLE-STATUS.md) for the completed review,
+qualification and promotion receipts, then the
+[lifecycle coverage map](PLAYBACK-LIFECYCLE-COVERAGE.md)
 for the relevant L01–L33 transitions and C01–C21 test anchors. The
 [implementation contract](PLAYBACK-LIFECYCLE-IMPLEMENTATION.md) explains the
 behavior already built; the [execution ledger](PLAYBACK-LIFECYCLE-STATUS.md)
 retains its compilation and historical test-deferral receipts. This document
-assigns the remaining work. Old M5–M9 milestone headings do not establish that
-code is still missing.
+records the assigned work. Old M5–M9 milestone headings do not establish that
+code is still missing; B01–B05 are now on `main`.
 
 The next Sol session owns packages B02–B05 below: execute the focused cases,
 fill missing regression coverage, repair defects they expose, and reconcile
