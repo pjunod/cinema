@@ -72,7 +72,7 @@ test("every section is a route, grouped in the rail's order", () => {
   ]);
   const dispatch = {
     metadata: "metadataPanel(d.settings)",
-    playback: "playbackPanel(d.settings,d.developerReadiness)",
+    playback: "playbackPanel(d.settings)",
     livetv: "liveTvPanel(d.settings)",
     analysis: "analysisSettingsPanel(d.settings,d.analysis)",
     maintenance: "maintenancePanel(d.settings,d.dvConversions)",
@@ -455,6 +455,7 @@ test("changing the guide source dirties the replacement card after its repaint",
   const state = { textContent: "Saved" };
   const classes = new Set();
   const card = {
+    dataset: { revision: "0" },
     classList: {
       contains: (name) => classes.has(name),
       add: (name) => classes.add(name),

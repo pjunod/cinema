@@ -1115,7 +1115,6 @@ struct PlayerAttachmentRecoveryState: Equatable {
 /// and the first non-zero presentation size retires the watchdog for good.
 struct BlackFrameWatchdog: Equatable {
     private(set) var lastPositionMs: Int?
-    private(set) var lastAdvanceAt: TimeInterval?
     private(set) var blackMs = 0
     private(set) var presentedVideo = false
     private(set) var fired = false
@@ -1266,6 +1265,7 @@ struct PlaybackStallDetector: Equatable {
     static let unestablishedReopenChecks = 15
 
     private(set) var lastPositionMs: Int?
+    private(set) var lastAdvanceAt: TimeInterval?
     private(set) var stagnantChecks = 0
     private(set) var stagnantSince: TimeInterval?
     private(set) var recoveredDurationMs: Int?

@@ -4051,6 +4051,7 @@ async function main() {
     h.instances[0].events.manifest();
     h.spare.ranges = [[0, 30]];
     h.instances[0].events.append();
+    h.fireAll();
     assert.equal(latest(h).state, "failed",
       "video preparation fails closed when presented-frame evidence is unavailable");
     h.spare.emit("timeupdate");
