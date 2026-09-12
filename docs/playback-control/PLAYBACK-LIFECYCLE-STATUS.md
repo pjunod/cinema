@@ -7,10 +7,9 @@
 > replacement AGENTS.md requires focused local tests and current qualification
 > for the new effort. Historical receipts below remain unchanged.
 
-**Status:** one adversarial review addressed; PR #259 fast lane correcting operations truth ·
-**Updated:** 2026-09-12 · **Base:** `30cd51afc` · **Effort:**
-`effort/playback-lifecycle` at `491aac64` before this receipt · **Latest task:**
-`codex/playback-lifecycle-p3-p4` at `139ad01f`
+**Status:** rewrite remainder active; B02–B05 source-complete, B01 client
+presentation in progress · **Updated:** 2026-09-12 · **Current base:**
+`10f2afe6` · **Current effort:** `effort/playback-rewrite-remainder`
 
 Companion to the
 [implementation contract](PLAYBACK-LIFECYCLE-IMPLEMENTATION.md) (what to build),
@@ -22,7 +21,7 @@ sweep actually executes them.
 
 ## Remainder execution — B02–B05 are active
 
-**Status:** source and regression inventory in progress · **Started:**
+**Status:** B02–B05 source reconciliation complete; B01 client presentation in progress · **Started:**
 2026-09-12 · **Base:** `10f2afe60b3d177866fdcc5741acd9f494525d73` ·
 **Effort:** `effort/playback-rewrite-remainder` · **Clone:**
 `/private/tmp/plurx-sol-remainder-20260912`
@@ -30,10 +29,10 @@ sweep actually executes them.
 | Package | State | Current evidence | Next action |
 |---|---|---|---|
 | B01 · buffer observability/UI | reserved to task `01a095b1-0e77-72f1-8b48-b04da47f8f10` | server telemetry is published in PR #262; its separate ledger is `PLAYBACK-BUFFER-OBSERVABILITY-STATUS.md` | integrate its final receipt without duplicating its wire, stats, or UI work |
-| B02 · refill and operation races | mapped; not run | refill, loaded-wait, pause/resume, seek supersession, pending-create stop, and recipe-race anchors are named below | execute the focused matrix after review; repair only demonstrated failures |
+| B02 · refill and operation races | source-complete; not run | Apple rechecks session/open generation and viewer-action epoch after its ask; Android binds media-request and transport generations; web binds player, wait timestamp, playback generation, and control-intent generation | execute the focused matrix after review; repair only demonstrated failures |
 | B03 · prepared transition | mapped; not run | recipe planning, both engines, exact settlement, timeout, supersession, readiness, and terminal cleanup anchors are named below | execute the focused matrix after review; repair only demonstrated failures |
 | B04 · relocation and alternate ingress | mapped; not run | planned-fence cancellation, takeover, relay ingress, ownership settlement, and cleanup anchors are named below | execute the focused matrix after review; keep destructive physical fault injection as an explicit evidence gap |
-| B05 · subtitle and compatibility | mapped; not run | subtitle windows/retry, seek coalescing, VOD/rolling identity, and compatibility owners are named below | execute the focused matrix after review and retain every justified adapter |
+| B05 · subtitle and compatibility | source-complete; not run | subtitle windows/retry, seek coalescing, VOD/rolling identity, and compatibility owners are named below; `eb8fb452` puts authoritative prepared-handoff enablement and advisory readiness together in web Developer settings | execute the focused matrix after review and retain every justified adapter |
 | Final promotion | not started | no remainder review, fast lane, or merge receipt exists | freeze the candidate, obtain one adversarial review, address findings, run the single broad fast lane, and merge only its green current head |
 
 ### Current decisions and boundaries
@@ -51,6 +50,22 @@ sweep actually executes them.
 4. **Do not overlap B01.** Any needed edit to shared player-input fixtures,
    `PlaybackSessionStatus` wire models, or stats rendering is coordinated with
    the B01 owner before commit.
+5. **Keep experimental enablement in Developer settings.** Apple and Android
+   already did. Web now places the server-wide prepared-handoff switch beside
+   its browser capability control and safety evidence; the saved switch stays
+   authoritative even when readiness is missing or unmet.
+
+### Static ownership receipt
+
+The B02 wait/control association is not inferred from a shared session ID.
+Apple accepts the status sample only for the polled session and current open,
+then rechecks both the open generation and viewer-action epoch after the
+control await. Android captures a `ControllerStallGuard.Observation` containing
+both request and transport generations and rejects it after any pause, seek,
+selection, visibility, transport, or playback-attempt change. Web's
+`persistentWait` checks the exact player, wait timestamp, playback generation,
+and control-intent generation both before and after its ask. No second recovery
+executor or new timer is required.
 
 ### Remainder regression matrix
 
@@ -86,7 +101,11 @@ The old M9 fixed-timer and blanket `/status` deletion instruction is now marked
 superseded in `REMAINING-ROADMAP-HANDOFF.md`. No caller above is deleted merely
 to satisfy that historical count.
 
-## Progress — one integrated promotion, one review, one fast lane
+## Historical lifecycle campaign — PR #259 receipt
+
+The tables below preserve the already-merged lifecycle campaign's original
+branches, test deferral, review, and promotion evidence. They do not describe
+the active remainder candidate above.
 
 | Package | State | Current evidence | Next action |
 |---|---|---|---|
