@@ -1260,3 +1260,16 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"
 source_anchor = "controller.player.bufferedPosition - controller.player.currentPosition"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackInfoContractTest.kt"
 test_anchor = "waitingCopyDoesNotCallServerWaitsClientBuffering"
+
+[[fixes]]
+# The final combined review found that a buffering Media3 state outlived the
+# viewer's play intent. The shared predicate and focused test keep paused
+# buffering from being presented as an active playback wait; the same commit
+# carries the reviewed server, web and Apple observability corrections and
+# their direct regressions.
+id = "android.paused-buffering-is-not-an-active-wait"
+commits = ["09cd99c4"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackTelemetry.kt"
+source_anchor = "internal fun playbackIsWaiting"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackTelemetryTest.kt"
+test_anchor = "pausedBufferingIsNotPresentedAsAnActiveWait"
