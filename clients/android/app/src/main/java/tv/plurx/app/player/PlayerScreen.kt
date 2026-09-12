@@ -1243,7 +1243,7 @@ private fun PlayerContent(
 
         if (!isInPip && (buffering || findingNext)) {
             val waiting = playbackWaitPresentation(
-                runwaySeconds = (player.bufferedPosition - player.currentPosition)
+                runwaySeconds = (controller.player.bufferedPosition - controller.player.currentPosition)
                     .coerceAtLeast(0) / 1_000.0,
                 httpWaitCount = controller.sessionStatus?.http_wait_count,
             )
