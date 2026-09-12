@@ -291,6 +291,7 @@ internal class OpenPlaybackStallTracker(
     private var stagnantSinceMs: Long? = null
     private var fired = false
     private var deferred = false
+    private var nativeReevaluationSpent = false
 
     fun sample(
         playbackRequested: Boolean,
@@ -341,6 +342,13 @@ internal class OpenPlaybackStallTracker(
         return true
     }
 
+    /** Claim the one harmless native playback reevaluation in this wait episode. */
+    fun claimNativeReevaluation(): Boolean {
+        if (nativeReevaluationSpent) return false
+        nativeReevaluationSpent = true
+        return true
+    }
+
     /** Wake on the exact active deadline, but never spin or poll slower than 1 s. */
     fun nextSampleDelayMs(observedAtMs: Long, establishedPlayback: Boolean): Long {
         val since = stagnantSinceMs ?: return MAX_SAMPLE_DELAY_MS
@@ -359,6 +367,7 @@ internal class OpenPlaybackStallTracker(
         stagnantSinceMs = null
         fired = false
         deferred = false
+        nativeReevaluationSpent = false
     }
 
 

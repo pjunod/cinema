@@ -2290,15 +2290,16 @@ async function main() {
     // real behaviour, and has its own test below.
     const h = stallHarness({ answer: () => ({ type: "none" }) });
     const player = Object.assign(stalledPlayer(), options.player || {});
+    const video = options.video || stalledVideo;
     const began=options.began==null?100:options.began;
     player.waitAt=began;
-    h.stub.attach(player, stalledVideo, bootstrap());
+    h.stub.attach(player, video, bootstrap());
     h.attached.push(player);
     await flush();
     h.answerWith(() => action);
     // start() already spent sequence 1; the ask must be answered by its own.
     const before = h.sent.length;
-    const running = h.stub.stall(player, stalledVideo, began, 3);
+    const running = h.stub.stall(player, video, began, 3);
     await settleExchange();
     // Settled by its own exchange, not by its bound: the line in onExchange
     // that connects the reporter to the waiters is what makes that true, and
@@ -2428,7 +2429,8 @@ async function main() {
     assert.match(fell.message, /no_room/, "and names the reason the producer gave");
   }
 
-  // A decode stall still defers to a hold: it holds media it cannot render
+  // A decode stall first gives already-loaded media one native reevaluation,
+  // then defers the replacement to a hold: it holds media it cannot render
   // rather than media it cannot get, so a reopen would churn against a server
   // that already knows better. The deferral is of the reopen and NOT of the
   // viewer's information — a client that only waited would leave a viewer eight
@@ -2436,8 +2438,12 @@ async function main() {
   {
     // This wait began with more buffered than the shipped supply threshold:
     // plenty left, and still not playing.
+    let nudges=0;
+    const video=Object.assign({},stalledVideo,{play(){nudges++;return Promise.resolve();}});
     const { h, player } = await askWith({ type: "hold", reason: "no_room" },
-      { player: { waitRunway: 8 } });
+      { player: { waitRunway: 22 }, video });
+    assert.equal(nudges,1,"loaded media receives one native reevaluation before deferral");
+    assert.notEqual(h.log.find((entry)=>entry.detail==="native_reevaluation:wait"),undefined);
     assert.equal(h.reopened.length, 0, "a hold reopens nothing");
     assert.equal(player.stallRecoveries, 0, "a hold spends no legacy attempt");
     assert.equal(h.loading.length, 1, "a hold tells the viewer what is happening");
@@ -2450,6 +2456,20 @@ async function main() {
     assert.equal(player.waitReported, true,
       "the wait stays reported, so resuming does not emit a second record for it");
     assert.equal(h.timers.get(player.waitTimer).ms, 8_000, "and the deadline comes round again");
+  }
+
+  // The server suppresses a producer hold once it classifies a loaded wait as
+  // client-owned. A passive `none` still leaves time to observe the native
+  // reevaluation; it is not an instruction to replace the player immediately.
+  {
+    let nudges=0;
+    const video=Object.assign({},stalledVideo,{play(){nudges++;return Promise.resolve();}});
+    const { h, player } = await askWith({ type: "none" },
+      { player: { waitRunway: 22 }, video });
+    assert.equal(nudges,1,"hold suppression preserves one native reevaluation");
+    assert.equal(h.reopened.length,0,"passive control does not force immediate replacement");
+    assert.equal(player.stallRecoveries,0,"the existing absolute deadline still owns recovery");
+    assert.equal(h.timers.get(player.waitTimer).ms,8_000,"the same episode cadence observes progress");
   }
 
   {

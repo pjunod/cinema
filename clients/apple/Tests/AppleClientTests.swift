@@ -2255,11 +2255,13 @@ final class AppleClientTests: XCTestCase {
             "an unknown runway is not evidence of health"
         )
 
-        // A player still holding media ahead of the clock is topping up…
-        XCTAssertTrue(PlayerController.holdMayDecideStall(
-            kind: .buffering, publishedEndMs: 200_000, fetchedEndMs: 190_000, runwaySeconds: 11
+        // A player holding substantial contiguous media has crossed the
+        // supply boundary already. The monitor's play nudge and bounded native
+        // recovery are not decisions a producer hold may postpone.
+        XCTAssertFalse(PlayerController.holdMayDecideStall(
+            kind: .buffering, publishedEndMs: 200_000, fetchedEndMs: 200_000, runwaySeconds: 22
         ))
-        // …and a backlog under the pending threshold is the tail of a stream.
+        // A backlog under the pending threshold is the tail of a stream.
         XCTAssertTrue(PlayerController.holdMayDecideStall(
             kind: .buffering, publishedEndMs: 200_000, fetchedEndMs: 190_001, runwaySeconds: 0
         ))
@@ -2270,9 +2272,10 @@ final class AppleClientTests: XCTestCase {
             "numbers the poll never carried cannot evidence a wedge"
         )
 
-        // A silent freeze has bytes in hand and is starved of nothing, so the
-        // server keeps that one and the HDR ladder keeps its case.
-        XCTAssertTrue(PlayerController.holdMayDecideStall(
+        // A silent freeze has bytes in hand and is starved of nothing, so
+        // production cannot explain it. The HDR/native recovery owner keeps
+        // the case without waiting for the producer.
+        XCTAssertFalse(PlayerController.holdMayDecideStall(
             kind: .silent, publishedEndMs: 200_000, fetchedEndMs: 150_000, runwaySeconds: 0
         ))
         XCTAssertFalse(PlayerController.holdMayDecideStall(
@@ -2369,17 +2372,17 @@ final class AppleClientTests: XCTestCase {
             XCTAssertFalse(controller.failed)
         }
 
-        // A silent freeze is still the server's to hold, and the notice is the
-        // visible half of that outcome.
+        // A silent freeze already received the monitor's one native play
+        // reevaluation. Production cannot defer the decoder/attachment owner.
         let freeze = PlaybackStallEvent(
             kind: .silent, action: .reopen, positionMs: 40_000, durationMs: 19_000
         )
         let held = controller.applyStallVerdict(
             ControlAction(type: "hold", reason: "demand"), event: freeze
         )
-        XCTAssertTrue(held)
-        XCTAssertEqual(controller.playbackNotice, PlayerController.holdNotice("demand"))
-        XCTAssertFalse(controller.failed, "a hold is not a failure")
+        XCTAssertFalse(held)
+        XCTAssertNil(controller.playbackNotice)
+        XCTAssertFalse(controller.failed)
 
         let expired = PlaybackStallEvent(
             kind: .silent,
