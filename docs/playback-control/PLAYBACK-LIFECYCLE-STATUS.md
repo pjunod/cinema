@@ -2,7 +2,8 @@
 
 **Status:** P1–P5 built and task-head compiled; current-main integration pending ·
 **Updated:** 2026-09-12 · **Base:** `30cd51afc` · **Effort:**
-`effort/playback-lifecycle` · **Task:** `codex/playback-lifecycle-p3-p4`
+`effort/playback-lifecycle` · **Task:** `codex/playback-lifecycle-p3-p4` at
+`139ad01f`
 
 Companion to the
 [implementation contract](PLAYBACK-LIFECYCLE-IMPLEMENTATION.md) (what to build),
@@ -39,16 +40,15 @@ remain separate history inside the effort branch.
 | `7c21d238` tree | `scripts/js-check` | passed; shipped inline scripts parsed without running browser tests |
 | `7c21d238` tree | `make apple-build` plus iOS/tvOS `build-for-testing` | passed at Apple build 143; test bundles compiled but did not execute |
 | `7c21d238` tree | host Gradle `:app:assembleDebug :app:compileDebugUnitTestKotlin` | passed at Android versionCode 86; test source compiled but did not execute |
-| P3–P5 task tree | `rustup run 1.97.1 cargo fmt --all -- --check` | passed |
-| P3–P5 task tree | `rustup run 1.97.1 cargo check -p plurxd --locked --all-targets` | passed in 27 seconds; compiled test targets without executing tests |
-| P3–P5 task tree | `rustup run 1.97.1 cargo clippy -p plurxd --locked --all-targets -- -D warnings` | passed in 34 seconds |
-| P3–P5 task tree | `scripts/js-check` | passed; shipped inline scripts parsed without running browser tests |
-| P3–P5 task tree | `make apple-build` plus iOS and tvOS `build-for-testing` | passed at Apple build 143; test bundles compiled but did not execute |
-| P3–P5 task tree | `ANDROID_HOME=/Users/pjunod/Library/Android/sdk ./gradlew :app:assembleDebug :app:compileDebugUnitTestKotlin --no-daemon` | passed at Android versionCode 86; test source compiled but did not execute |
+| `139ad01f` tree | `rustup run 1.97.1 cargo fmt --all -- --check` | passed |
+| `139ad01f` tree | `rustup run 1.97.1 cargo check -p plurxd --locked --all-targets` | passed in 27 seconds; compiled test targets without executing tests |
+| `139ad01f` tree | `rustup run 1.97.1 cargo clippy -p plurxd --locked --all-targets -- -D warnings` | passed in 34 seconds |
+| `139ad01f` tree | `scripts/js-check` | passed; shipped inline scripts parsed without running browser tests |
+| `139ad01f` tree | `make apple-build` plus iOS and tvOS `build-for-testing` | passed at Apple build 143; test bundles compiled but did not execute |
+| `139ad01f` tree | `ANDROID_HOME=/Users/pjunod/Library/Android/sdk ./gradlew :app:assembleDebug :app:compileDebugUnitTestKotlin --no-daemon` | passed at Android versionCode 86; test source compiled but did not execute |
 
-These receipts will name the exact committed task head after the source commit,
-then the compiler loop will be repeated on the exact current-main integration
-head. No unit,
+The compiler loop will be repeated on the exact current-main integration head.
+No unit,
 integration, browser, simulator, emulator, playback, or physical suite has run
 in this campaign. Regressions remain `written; not run` until the separate
 sweep supplies results.
