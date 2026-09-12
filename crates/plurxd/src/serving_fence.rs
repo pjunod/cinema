@@ -39,6 +39,16 @@ pub(crate) struct PlannedOutageFenceToken {
     generation: u64,
 }
 
+impl PlannedOutageFenceToken {
+    pub(crate) fn identity(self) -> String {
+        let owner = match self.owner {
+            PlannedOutageFenceOwner::Restart => "restart",
+            PlannedOutageFenceOwner::Maintenance => "maintenance",
+        };
+        format!("{owner}:{}", self.generation)
+    }
+}
+
 #[derive(Default)]
 struct RestartDrainState {
     expires_at: Option<tokio::time::Instant>,
@@ -300,6 +310,34 @@ impl ServingFence {
         Some(RestartAdmission {
             drain: Arc::clone(&self.restart_drain),
         })
+    }
+
+    /// The exact planned outage currently fencing new media, if its bounded
+    /// owner is still live. Existing playback control uses this as relocation
+    /// intent; it never treats a quorum-authority loss as a planned handoff.
+    pub(crate) async fn current_planned_outage(&self) -> Option<PlannedOutageFenceToken> {
+        let mut state = self.restart_drain.state.lock().await;
+        expire_restart_drain(&mut state);
+        state.token.or_else(|| {
+            self.restart_drain
+                .unresolved_releases
+                .lock()
+                .expect("planned-outage release set")
+                .iter()
+                .copied()
+                .max_by_key(|token| token.generation)
+        })
+    }
+
+    pub(crate) async fn planned_outage_is_current(&self, token: PlannedOutageFenceToken) -> bool {
+        self.current_planned_outage().await == Some(token)
+    }
+
+    /// Read-only placement predicate. Unlike `try_restart_admission`, it does
+    /// not hold an admission open; the eventual start/prime endpoint acquires
+    /// that real guard again before allocating anything.
+    pub(crate) async fn accepting_new_media(&self) -> bool {
+        self.is_ready() && self.current_planned_outage().await.is_none()
     }
 
     /// Admit one direct prepare/cancel handler without queuing request futures.
@@ -1006,6 +1044,36 @@ mod tests {
         let drained = fence.restart_drain_status(0).await;
         assert!(drained.drained);
         assert_eq!(drained.admissions_in_flight, 0);
+    }
+
+    /// Planned relocation observes the exact timed owner and generation. A
+    /// cancellation clears that identity immediately, so a successor prepared
+    /// for an older drain cannot commit under a later one.
+    #[tokio::test]
+    async fn planned_outage_identity_is_exact_and_controls_new_placement() {
+        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        assert!(fence.accepting_new_media().await);
+
+        let first = fence
+            .begin_restart_preparation_until(unix_ms().saturating_add(60_000))
+            .await
+            .expect("restart fence token");
+        assert_eq!(first.identity(), "restart:1");
+        assert_eq!(fence.current_planned_outage().await, Some(first));
+        assert!(fence.planned_outage_is_current(first).await);
+        assert!(!fence.accepting_new_media().await);
+
+        fence.cancel_planned_outage_preparation(first, 0).await;
+        assert!(fence.current_planned_outage().await.is_none());
+        assert!(!fence.planned_outage_is_current(first).await);
+        assert!(fence.accepting_new_media().await);
+
+        let second = fence
+            .begin_maintenance_preparation_until(unix_ms().saturating_add(60_000))
+            .await
+            .expect("maintenance fence token");
+        assert_eq!(second.identity(), "maintenance:2");
+        assert_ne!(first, second);
     }
 
     #[tokio::test(start_paused = true)]

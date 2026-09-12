@@ -540,6 +540,12 @@ pub fn router(state: AppState) -> Router {
             )),
         )
         .route(
+            crate::media_sessions::PREPARE_PATH,
+            post(internal_media_sessions::prepare).layer(DefaultBodyLimit::max(
+                crate::media_sessions::MAX_CONTROL_REQUEST_BYTES,
+            )),
+        )
+        .route(
             crate::media_sessions::ABORT_PATH,
             post(internal_media_sessions::abort).layer(DefaultBodyLimit::max(
                 crate::media_sessions::MAX_CONTROL_REQUEST_BYTES,

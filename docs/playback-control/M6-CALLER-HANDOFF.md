@@ -1,5 +1,9 @@
 # M6's caller — where the preparation decision is made, and by whom
 
+> **Superseded 2026-09-12:** retain this as design history. The current
+> [lifecycle contract](PLAYBACK-LIFECYCLE-IMPLEMENTATION.md) removes its
+> axis-set, direction, software-proof, and throughput admission rules.
+
 **Status:** ready to build · **Executes:** the remainder of
 [REMAINING-ROADMAP-HANDOFF.md](REMAINING-ROADMAP-HANDOFF.md) §3, after the
 slot, the executor and the decision ·

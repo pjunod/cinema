@@ -37,10 +37,11 @@ use super::peer_transport::PeerTransportError;
 use crate::media_pool::MediaOfferRequest;
 use crate::media_sessions::{
     unix_ms, worker_session_request_is_valid, DurableRouteResolution, RelayHeaders, RelayRequest,
-    RelayResource, ReleaseAdmission, ReleaseSettlement, RemoteAbortRequest, RemoteStartRequest,
-    RemoteStartResponse, ACTIVATION_STORE_DEADLINE, LEASE_TTL_MS, MAX_ADMITTED_MEDIA_BODY_LIFETIME,
-    MEDIA_BODY_NO_PROGRESS_TIMEOUT, OWNER_ASSIGNMENT_DEADLINE, PREPARED_SUCCESSOR_PLAN_NOTE,
-    REMOTE_ACTIVATION_CONFIRMATION_WINDOW, START_DEADLINE, TERMINAL_PROJECTION_SAFETY_WINDOW,
+    RelayResource, ReleaseAdmission, ReleaseSettlement, RemoteAbortRequest, RemotePrepareRequest,
+    RemoteStartRequest, RemoteStartResponse, ACTIVATION_STORE_DEADLINE, LEASE_TTL_MS,
+    MAX_ADMITTED_MEDIA_BODY_LIFETIME, MEDIA_BODY_NO_PROGRESS_TIMEOUT, OWNER_ASSIGNMENT_DEADLINE,
+    PREPARED_SUCCESSOR_PLAN_NOTE, REMOTE_ACTIVATION_CONFIRMATION_WINDOW, START_DEADLINE,
+    TERMINAL_PROJECTION_SAFETY_WINDOW,
 };
 use crate::state::AppState;
 use crate::transcode::{ClusterReplacementGuard, PlaylistError};
@@ -183,6 +184,32 @@ pub struct StartResponse {
     /// playing as HDR10 can read *why* without an admin reading the log.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plan_notes: Vec<String>,
+}
+
+const PLANNING_CAPS_RESPONSE_FIELD: &str = "planning_caps";
+const PLANNING_OVERRIDES_RESPONSE_FIELD: &str = "planning_overrides";
+const PREPARATION_REASON_RESPONSE_FIELD: &str = "preparation_reason";
+
+/// Read the create-time planning snapshot from the additive durable response.
+///
+/// The worker envelope intentionally denies unknown fields because it crosses
+/// mixed-version nodes. `StartResponse` is already additive, so keeping this
+/// server-owned sidecar beside its durable copy preserves legacy worker
+/// activation while allowing a new owner to re-plan after takeover.
+fn retained_planning_caps(response_json: &str) -> Option<plurx_core::playback::DeviceCaps> {
+    serde_json::from_str::<serde_json::Value>(response_json)
+        .ok()?
+        .get(PLANNING_CAPS_RESPONSE_FIELD)
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+}
+
+fn retained_planning_overrides(response_json: &str) -> Option<CreateOverrides> {
+    serde_json::from_str::<serde_json::Value>(response_json)
+        .ok()?
+        .get(PLANNING_OVERRIDES_RESPONSE_FIELD)
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
 }
 
 /// Owns a published worker until the replicated activation has a definitive
@@ -440,6 +467,14 @@ impl StartedSessionGuard {
             .as_mut()
             .expect("armed guard cleanup")
             .test_settlement = Some((settled, release, released));
+    }
+}
+
+impl crate::transcode::SessionAdoptionOwner for StartedSessionGuard {
+    fn adopted_session_id(&mut self, durable_session_id: &str) {
+        if let Some(cleanup) = self.cleanup.as_mut() {
+            cleanup.session_id = durable_session_id.to_owned();
+        }
     }
 }
 
@@ -784,7 +819,7 @@ pub mod plan_derivation {
 /// milestone exists to close. Each override that fires appends its own reason
 /// to the session's notes, so the badge shows why the delivery is not the one
 /// the caps alone would have produced.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct CreateOverrides {
     /// Apple's `forceCompatibleHDRBase` retry (`PlayerController.swift:2373`):
     /// the client decoded the Dolby Vision stream, failed, and is asking for
@@ -989,9 +1024,34 @@ pub(crate) fn review_client_plan(
     asked_hdr10: bool,
     now_ms: i64,
 ) -> PlanReview {
+    review_client_plan_inner(
+        caps,
+        overrides,
+        file,
+        node,
+        asked_preserve_dolby_vision,
+        asked_hdr10,
+        now_ms,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn review_client_plan_inner(
+    caps: &plurx_core::playback::DeviceCaps,
+    overrides: Option<&CreateOverrides>,
+    file: &MediaFile,
+    node: &plurx_core::playback::RenderCaps,
+    asked_preserve_dolby_vision: bool,
+    asked_hdr10: bool,
+    now_ms: i64,
+    count_create_metrics: bool,
+) -> PlanReview {
     use plurx_core::playback::{decide_forced, DeviceProfile, Force};
 
-    plan_derivation::count_rederived();
+    if count_create_metrics {
+        plan_derivation::count_rederived();
+    }
     let mut profile = DeviceProfile::from_caps_v2(caps);
     // The same clock the decision was taken under. Without this a create
     // would apply a learned limit that `/decision` had already let expire,
@@ -1040,7 +1100,7 @@ pub(crate) fn review_client_plan(
             );
         }
     }
-    if overridden {
+    if overridden && count_create_metrics {
         plan_derivation::count_overridden();
     }
 
@@ -1070,7 +1130,7 @@ pub(crate) fn review_client_plan(
     // Vision, or a client that never asked for it, must not be handed a
     // converted stream by a flag nobody looked at.
     review.convert_dolby_vision &= review.preserve_dolby_vision;
-    if review.mismatched {
+    if review.mismatched && count_create_metrics {
         plan_derivation::count_mismatched();
     }
     review
@@ -1623,6 +1683,12 @@ async fn create_with_purpose(
     req: CreateSession,
     library_channel: Option<crate::http::library_channels::LibraryChannelPlaybackPurpose>,
 ) -> Result<Json<StartResponse>, ApiError> {
+    let planning_caps = req
+        .caps
+        .as_ref()
+        .filter(|caps| caps.v == plurx_core::playback::DeviceCaps::VERSION && !caps.is_empty())
+        .cloned();
+    let planning_overrides = planning_caps.as_ref().and(req.overrides.as_ref()).cloned();
     if !valid_playback_id(&req.playback_id) {
         return Err(ApiError::BadRequest(
             "playback_id must contain 1 to 128 safe characters".into(),
@@ -2468,16 +2534,31 @@ async fn create_with_purpose(
     // channel purpose in that row so restart and owner takeover cannot turn a
     // following session into ordinary VOD. `StartResponse` deliberately
     // ignores additive fields, preserving every existing recovery reader.
-    let response_json = if let Some(purpose) = library_channel.as_ref() {
-        let mut value = serde_json::to_value(&response)?;
-        value
-            .as_object_mut()
-            .expect("StartResponse serializes as an object")
-            .insert("library_channel".to_owned(), serde_json::to_value(purpose)?);
-        serde_json::to_string(&value)?
-    } else {
-        serde_json::to_string(&response)?
-    };
+    let response_json =
+        if library_channel.is_some() || planning_caps.is_some() || planning_overrides.is_some() {
+            let mut value = serde_json::to_value(&response)?;
+            let object = value
+                .as_object_mut()
+                .expect("StartResponse serializes as an object");
+            if let Some(purpose) = library_channel.as_ref() {
+                object.insert("library_channel".to_owned(), serde_json::to_value(purpose)?);
+            }
+            if let Some(caps) = planning_caps.as_ref() {
+                object.insert(
+                    PLANNING_CAPS_RESPONSE_FIELD.to_owned(),
+                    serde_json::to_value(caps)?,
+                );
+            }
+            if let Some(overrides) = planning_overrides.as_ref() {
+                object.insert(
+                    PLANNING_OVERRIDES_RESPONSE_FIELD.to_owned(),
+                    serde_json::to_value(overrides)?,
+                );
+            }
+            serde_json::to_string(&value)?
+        } else {
+            serde_json::to_string(&response)?
+        };
     let activation_now_ms = unix_ms();
     let activation = MediaSessionActivation {
         // The one mint for this start, from the local bound above placement.
@@ -3213,6 +3294,131 @@ async fn abort_started_session(
     {
         tracing::warn!(error = ?error, "remote cluster-start abort did not settle");
     }
+}
+
+/// Prime one rolling prepared successor under its already-reserved durable
+/// capability.
+///
+/// Ordinary cluster creation deliberately mints a process-local session id.
+/// Preparation has already minted the public id in the Store, so the worker
+/// is adopted under that id before its cancellation guard is disarmed. The
+/// guard moves through the same registry transaction: cancellation before the
+/// move cleans the provisional id, and cancellation after it cleans the
+/// durable id. Only a successfully adopted worker backed by the reserved row
+/// is left for the preparation deadline/abort owner to settle.
+pub(super) async fn prime_live_prepared_session(
+    state: &AppState,
+    recipe: &RemoteStartRequest,
+    durable_session_id: &str,
+    recovery_epoch: &str,
+    expected_owner_epoch: i64,
+    deadline: tokio::time::Instant,
+) -> bool {
+    if recipe.request.presentation != crate::transcode::Presentation::Live
+        || tokio::time::Instant::now() >= deadline
+    {
+        return false;
+    }
+    let Some(_restart_admission) = state.serving.try_restart_admission().await else {
+        return false;
+    };
+    let authority = state.serving.authority();
+    let Some(admitted_generation) = authority.admit() else {
+        return false;
+    };
+    let user = match state.store.get_user(recipe.user_id).await {
+        Ok(Some(user)) => user,
+        _ => return false,
+    };
+    let recovery = crate::transcode::SessionRecoveryIdentity {
+        user_id: recipe.user_id,
+        incarnation_id: recipe.incarnation_id.clone(),
+        recovery_epoch: recovery_epoch.to_owned(),
+    };
+    let started = match state
+        .transcode
+        .create_cluster_session(
+            &recipe.request,
+            &recovery,
+            &user.username,
+            deadline,
+            admitted_generation,
+        )
+        .await
+    {
+        Ok(started) => started,
+        Err(error) => {
+            tracing::warn!(%error, "rolling prepared successor could not start");
+            return false;
+        }
+    };
+    let crate::transcode::ClusterSessionStart {
+        info,
+        replacement,
+        created,
+    } = started;
+    let mut guard = if created {
+        StartedSessionGuard::worker_only(
+            state.clone(),
+            state.node_id.clone(),
+            recipe.incarnation_id.clone(),
+            info.session_id.clone(),
+            recipe.user_id,
+            recipe.incarnation_id.clone(),
+            Some(replacement),
+        )
+    } else {
+        StartedSessionGuard::replayed(
+            state.clone(),
+            state.node_id.clone(),
+            recipe.incarnation_id.clone(),
+            info.session_id.clone(),
+            recipe.user_id,
+            recipe.incarnation_id.clone(),
+            Some(replacement),
+        )
+    };
+    if !authority.is_current(admitted_generation) {
+        return false;
+    }
+    let expires_at_ms = unix_ms().saturating_add(
+        i64::try_from(
+            deadline
+                .saturating_duration_since(tokio::time::Instant::now())
+                .as_millis(),
+        )
+        .unwrap_or(i64::MAX),
+    );
+    let pinned = super::internal_media_sessions::pin_shared_session_before_deadline(
+        deadline,
+        state.transcode.pin_shared_session(
+            &info.session_id,
+            &recipe.incarnation_id,
+            expected_owner_epoch,
+            expires_at_ms,
+        ),
+    )
+    .await
+    .unwrap_or(false);
+    if !pinned || !authority.is_current(admitted_generation) {
+        return false;
+    }
+    let Some(adoption) = state.transcode.session_adoption_token(durable_session_id) else {
+        return false;
+    };
+    guard = match state
+        .transcode
+        .adopt_session_id_with_owner(&info.session_id, durable_session_id, adoption, guard)
+        .await
+    {
+        Ok(guard) => guard,
+        Err(_) => return false,
+    };
+    if !authority.is_current(admitted_generation) {
+        return false;
+    }
+    guard.disarm();
+    true
 }
 
 async fn settle_activation_predecessor(
@@ -4845,6 +5051,25 @@ async fn settle_preparation_control(
             .preparation_directive
         {
             crate::playback_control::PreparationDirective::Commit { .. } => {
+                if !planned_preparation_still_current(state, staged_incarnation_id).await {
+                    match executor
+                        .reject_commit(staged_incarnation_id, unix_ms())
+                        .await
+                    {
+                        Ok(rejected) => {
+                            if rejected {
+                                retire_prepared_incarnation(
+                                    state,
+                                    staged_incarnation_id,
+                                    "planned relocation expired before commit",
+                                )
+                                .await;
+                            }
+                            return PreparationSettlement::Rejected;
+                        }
+                        Err(_) => return PreparationSettlement::Unavailable,
+                    }
+                }
                 #[cfg(test)]
                 if consume_preparation_settlement_fault(&route.incarnation_id) {
                     let wake = (tokio::time::Instant::now() + delay).min(deadline);
@@ -4975,12 +5200,36 @@ async fn settle_preparation_control(
     PreparationSettlement::Unavailable
 }
 
+async fn planned_preparation_still_current(state: &AppState, incarnation_id: &str) -> bool {
+    let Ok(Some(route)) = state
+        .store
+        .media_session_route_by_incarnation(incarnation_id)
+        .await
+    else {
+        return false;
+    };
+    let Ok(response) = serde_json::from_str::<serde_json::Value>(&route.response_json) else {
+        return false;
+    };
+    let reason = response
+        .get(PREPARATION_REASON_RESPONSE_FIELD)
+        .and_then(serde_json::Value::as_str);
+    let Some(reason) = reason else {
+        return true;
+    };
+    state
+        .serving
+        .current_planned_outage()
+        .await
+        .is_some_and(|fence| reason == format!("planned_relocation:{}", fence.identity()))
+}
+
 async fn retire_prepared_incarnation(
     state: &AppState,
     staged_incarnation_id: &str,
     reason: &'static str,
 ) {
-    let session_id = tokio::time::timeout(
+    let route = tokio::time::timeout(
         PREPARATION_STORE_BUDGET,
         state
             .store
@@ -4990,14 +5239,16 @@ async fn retire_prepared_incarnation(
     .ok()
     .and_then(Result::ok)
     .flatten()
-    .filter(|route| {
-        route.owner_node_id == state.node_id
-            && route.state == "ended"
-            && route.terminal_reason.as_deref() == Some("replaced")
-    })
-    .map(|route| route.session_id);
-    if let Some(session_id) = session_id {
-        retire_prepared_worker(state, &session_id, reason).await;
+    .filter(|route| route.state == "ended" && route.terminal_reason.as_deref() == Some("replaced"));
+    if let Some(route) = route {
+        retire_prepared_worker(
+            state,
+            &route.owner_node_id,
+            &route.incarnation_id,
+            &route.session_id,
+            reason,
+        )
+        .await;
     }
 }
 
@@ -6778,7 +7029,20 @@ async fn control_local_with_settlement_capacity(
     // was busy is "changed" for exactly one exchange and then never again, so
     // the successor the viewer actually asked for was built once, refused, and
     // forgotten. This stays true until the ask has been dispatched.
-    if result.selection.dispatch_preparation {
+    let planned_relocation = if route.owner_node_id == state.node_id {
+        state.serving.current_planned_outage().await
+    } else {
+        None
+    };
+    let preparation_purpose = planned_relocation
+        .map(PreparationPurpose::PlannedRelocation)
+        .or_else(|| {
+            result
+                .selection
+                .dispatch_preparation
+                .then_some(PreparationPurpose::SelectionChange)
+        });
+    if let Some(purpose) = preparation_purpose {
         crate::playback_control::record_preparation_observation(
             crate::playback_control::PreparationSeam::InSession,
         );
@@ -6811,6 +7075,8 @@ async fn control_local_with_settlement_capacity(
                 session_id: route.session_id.clone(),
                 route: route.clone(),
                 recipe: recipe.clone(),
+                planning_caps: retained_planning_caps(&route.response_json),
+                planning_overrides: retained_planning_overrides(&route.response_json),
                 selection: request.selection.clone(),
                 observed_download_bps: request.observed_download_bps,
                 delivered: response.effective_selection.clone(),
@@ -6823,6 +7089,7 @@ async fn control_local_with_settlement_capacity(
                 // unattributable.
                 platform: result.platform,
                 accepted_film_time_ms,
+                purpose,
             },
         ));
     }
@@ -7012,6 +7279,12 @@ fn remember_delivered_selection(
 /// A struct rather than eight parameters: these are all *one exchange's*
 /// answer, they are always passed together, and the spawned task has no reason
 /// to be able to take them from different exchanges.
+#[derive(Clone, Copy, Debug)]
+enum PreparationPurpose {
+    SelectionChange,
+    PlannedRelocation(crate::serving_fence::PlannedOutageFenceToken),
+}
+
 struct PreparationCandidateInputs {
     /// The live session this exchange belongs to. Staging needs it twice: to
     /// reach the actor that owns the one successor slot, and to name the
@@ -7019,12 +7292,15 @@ struct PreparationCandidateInputs {
     session_id: String,
     route: MediaSessionRoute,
     recipe: RemoteStartRequest,
+    planning_caps: Option<plurx_core::playback::DeviceCaps>,
+    planning_overrides: Option<CreateOverrides>,
     selection: crate::playback_control::ClientSelection,
     observed_download_bps: Option<u64>,
     delivered: crate::playback_control::EffectiveSelection,
     delivered_bps: Option<i64>,
     capabilities: Option<crate::playback_control::DynamicCapabilities>,
     platform: crate::playback_control::ClientPlatform,
+    purpose: PreparationPurpose,
     /// Where the viewer actually is, in absolute film time, according to the
     /// envelope this exchange **accepted**.
     ///
@@ -7051,6 +7327,219 @@ struct PreparationCandidateInputs {
     accepted_film_time_ms: i64,
 }
 
+/// Re-run the same capability-aware planning used by ordinary create.
+///
+/// A prepared successor is a new playable recipe, not an edit to the current
+/// encoder. In particular, Original may move a transcode back to direct/remux,
+/// and a compound quality/track/subtitle request must be resolved once as a
+/// whole. Recipes written before the durable response sidecar was retained use
+/// the legacy edit path so an upgrade never guesses capabilities that the
+/// client did not provide.
+async fn plan_preparation_candidate(
+    state: &AppState,
+    predecessor: &RemoteStartRequest,
+    planning_caps: Option<&plurx_core::playback::DeviceCaps>,
+    planning_overrides: Option<&CreateOverrides>,
+    selection: &crate::playback_control::ClientSelection,
+    source: &MediaFile,
+    delivered_height: i64,
+) -> Result<crate::transcode::SessionRequest, ApiError> {
+    let Some(caps) = planning_caps
+        .filter(|caps| caps.v == plurx_core::playback::DeviceCaps::VERSION && !caps.is_empty())
+    else {
+        let height = match selection.quality {
+            crate::playback_control::QualitySelection::Auto => delivered_height,
+            crate::playback_control::QualitySelection::Original => {
+                source.height.unwrap_or(delivered_height)
+            }
+            crate::playback_control::QualitySelection::Manual { height } => {
+                resolve_height(
+                    state,
+                    Some(source),
+                    None,
+                    predecessor.request.hdr10,
+                    Some(height),
+                )
+                .await
+            }
+        };
+        return Ok(crate::playback_control::candidate_request(
+            &predecessor.request,
+            selection,
+            height,
+            source.height,
+        ));
+    };
+
+    use plurx_core::playback::{DeviceProfile, Force, PlaybackMethod};
+    use plurx_core::transcode::OutputGrade;
+
+    let quality_force = match selection.quality {
+        crate::playback_control::QualitySelection::Auto => Force::Auto,
+        crate::playback_control::QualitySelection::Original => Force::Original,
+        crate::playback_control::QualitySelection::Manual { .. } => Force::Transcode,
+    };
+    let policy_force = match (selection.codec, selection.dynamic_range) {
+        (crate::playback_control::CodecPolicy::Av1, _) => {
+            return Err(ApiError::typed(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "prepared_output_unsupported",
+                "the ordinary planner has no AV1 successor output",
+            ));
+        }
+        (
+            crate::playback_control::CodecPolicy::Hevc,
+            crate::playback_control::DynamicRangePolicy::Hdr10,
+        )
+        | (
+            crate::playback_control::CodecPolicy::Auto,
+            crate::playback_control::DynamicRangePolicy::Hdr10,
+        )
+        | (crate::playback_control::CodecPolicy::H264, _)
+        | (
+            crate::playback_control::CodecPolicy::Auto,
+            crate::playback_control::DynamicRangePolicy::Sdr,
+        ) => Force::Transcode,
+        (crate::playback_control::CodecPolicy::Hevc, _) => {
+            return Err(ApiError::typed(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "prepared_output_unsupported",
+                "the ordinary planner supports HEVC successor output only for HDR10",
+            ));
+        }
+        _ => quality_force,
+    };
+    let force = if quality_force == Force::Original {
+        // Original is an explicit no-video-transcode request. Conflicting
+        // codec/grade policies need the existing full create ingress rather
+        // than a guessed v1 field.
+        Force::Original
+    } else {
+        policy_force
+    };
+    let force_name = match force {
+        Force::Auto => "auto",
+        Force::Original => "original",
+        Force::Transcode => "transcode",
+    };
+    let mut overrides = planning_overrides.cloned().unwrap_or_default();
+    overrides.force = Some(force_name.to_owned());
+    let mut profile = DeviceProfile::from_caps_v2(caps);
+    profile.retain_applicable_learned_limits(unix_ms());
+    let node = super::stream::render_caps(state).await;
+    let decision = plurx_core::playback::decide_forced(source, &profile, force, &node);
+    let copy = decision.method != PlaybackMethod::Transcode;
+    let requested_height = match selection.quality {
+        crate::playback_control::QualitySelection::Auto => None,
+        crate::playback_control::QualitySelection::Original => source.height,
+        crate::playback_control::QualitySelection::Manual { height } => Some(height),
+    };
+    let requested_hdr10 = decision.transcode_grade == OutputGrade::Hdr10
+        && !matches!(
+            selection.dynamic_range,
+            crate::playback_control::DynamicRangePolicy::Sdr
+        )
+        && !matches!(selection.codec, crate::playback_control::CodecPolicy::H264);
+    let native_subtitle = matches!(
+        selection.subtitle.mode,
+        crate::playback_control::SubtitleMode::Native
+    )
+    .then_some(selection.subtitle.track)
+    .flatten();
+    let body = CreateSession {
+        playback_id: predecessor.request.playback_id.clone(),
+        request_id: None,
+        control_sequence: None,
+        previous_session_id: None,
+        reopen_reason: None,
+        height: requested_height,
+        quality_auto: Some(matches!(
+            selection.quality,
+            crate::playback_control::QualitySelection::Auto
+        )),
+        subtitle_burn: matches!(
+            selection.subtitle.mode,
+            crate::playback_control::SubtitleMode::Burn
+        )
+        .then_some(selection.subtitle.track)
+        .flatten(),
+        subtitle_burn_sdr: Some(!requested_hdr10),
+        native_subtitles: Some(native_subtitle.is_some()),
+        subtitle: native_subtitle,
+        start: Some(predecessor.request.start_seconds),
+        audio: selection.audio_track,
+        copy: Some(copy),
+        aac: Some(decision.transcode_audio),
+        preserve_dolby_vision: Some(decision.preserve_dolby_vision),
+        hdr10: Some(requested_hdr10),
+        audio_offset_ms: Some(selection.audio_offset_ms),
+        caps: Some(caps.clone()),
+        overrides: Some(overrides.clone()),
+        presentation: Some("vod".to_owned()),
+        block_budget_secs: predecessor.request.block_budget_secs,
+        intent: None,
+    };
+    let review = review_client_plan_inner(
+        caps,
+        Some(&overrides),
+        source,
+        &node,
+        decision.preserve_dolby_vision,
+        requested_hdr10,
+        unix_ms(),
+        false,
+    );
+    let mut resolved = resolve_plan(
+        PlanInputs {
+            state,
+            user_id: predecessor.user_id,
+            file_id: predecessor.request.file_id,
+            source: Some(source),
+            network_prior: None,
+        },
+        Some(review),
+        body,
+    )
+    .await?
+    .request;
+    // Planning chooses the codec/container recipe. It must not silently turn
+    // a retained rolling fallback into VOD: the source prerequisite that made
+    // the incumbent use rolling has not changed merely because its quality or
+    // tracks did. VOD stays VOD and rolling stays rolling.
+    resolved.presentation = predecessor.request.presentation;
+    Ok(resolved)
+}
+
+async fn prepared_relocation_owner(
+    state: &AppState,
+    source: &MediaFile,
+    candidate: &crate::transcode::SessionRequest,
+    accepted_film_time_ms: i64,
+) -> Option<String> {
+    let target_height = match candidate.kind {
+        crate::transcode::SessionKind::Transcode { height } => height,
+        crate::transcode::SessionKind::Copy { .. } => source.height?,
+    }
+    .clamp(crate::transcode::MIN_HEIGHT, crate::transcode::MAX_HEIGHT);
+    let request = MediaOfferRequest::new(
+        source,
+        target_height,
+        accepted_film_time_ms,
+        candidate.audio_index,
+        candidate.subtitle_burn,
+        candidate.hdr10,
+    )
+    .ok()?;
+    state
+        .media_pool
+        .offers(state, request)
+        .await
+        .offers
+        .into_iter()
+        .find(|offer| offer.eligible && offer.node_id != state.node_id)
+        .map(|offer| offer.node_id)
+}
+
 /// Evaluate and, when admitted, durably stage this selection change.
 ///
 /// The response never waits for this work: the accepted exchange has already
@@ -7072,6 +7561,8 @@ async fn process_preparation_candidate(state: AppState, exchange: PreparationCan
         session_id,
         route,
         recipe,
+        planning_caps,
+        planning_overrides,
         selection,
         observed_download_bps,
         delivered,
@@ -7079,6 +7570,7 @@ async fn process_preparation_candidate(state: AppState, exchange: PreparationCan
         capabilities,
         platform,
         accepted_film_time_ms,
+        purpose,
     } = exchange;
     #[cfg(test)]
     struct Completion(String);
@@ -7126,40 +7618,27 @@ async fn process_preparation_candidate(state: AppState, exchange: PreparationCan
         // already-completed exchange remains valid.
         return;
     };
-    // Only a *manual* ask needs resolving, and this is the whole reason the
-    // network prior is not read here.
-    //
-    // `resolve_height`'s Auto arm is the only one that consults the prior, and
-    // Auto is not a client-driven height change: the ladder moving because the
-    // link moved is the server's own adaptation, which M6 is explicitly not
-    // for. So an Auto selection keeps the height it is already being served,
-    // and every case still decides the same way — Auto → Auto crosses nothing,
-    // and anything to or from Auto crosses `ResolutionOrBitrate` on
-    // `quality_auto` regardless of the number. Resolving it instead would
-    // invent a server-driven change and attribute it to the viewer.
-    let height = match selection.quality {
-        crate::playback_control::QualitySelection::Auto => delivered.height,
-        crate::playback_control::QualitySelection::Original => source
-            .as_ref()
-            .and_then(|file| file.height)
-            .unwrap_or(delivered.height),
-        crate::playback_control::QualitySelection::Manual { height } => {
-            resolve_height(
-                &state,
-                source.as_ref(),
-                None,
-                recipe.request.hdr10,
-                Some(height),
-            )
-            .await
+    let Some(source) = source.as_ref() else {
+        return;
+    };
+    let candidate = match plan_preparation_candidate(
+        &state,
+        &recipe,
+        planning_caps.as_ref(),
+        planning_overrides.as_ref(),
+        &selection,
+        source,
+        delivered.height,
+    )
+    .await
+    {
+        Ok(candidate) => candidate,
+        Err(error) => {
+            tracing::warn!(?error, "prepared successor could not be planned");
+            crate::playback_control::record_preparation_staged(false);
+            return;
         }
     };
-    let candidate = crate::playback_control::candidate_request(
-        &recipe.request,
-        &selection,
-        height,
-        source.as_ref().and_then(|file| file.height),
-    );
     let proposed = crate::playback_control::EffectiveSelection::from_request(
         &candidate,
         match candidate.kind {
@@ -7191,15 +7670,10 @@ async fn process_preparation_candidate(state: AppState, exchange: PreparationCan
         conditions,
     );
     crate::playback_control::record_preparation_decision(platform, decision);
-    // Apple now advertises the measured capability; web and Android remain
-    // false. Keep the counterfactual beside the production decision so the
-    // remaining rollout cost can still be read without pretending those
-    // clients can safely hold two pipelines.
-    //
-    // Expect `throughput_unreported` to dominate it at first, and read that as
-    // a statement about the *inputs*: the native clients send no
-    // `observed_download_bps` and VOD sessions carry no `delivered_bps`. That
-    // is a finding about instrumentation, not about links.
+    // Keep the counterfactual beside the production decision as advisory
+    // rollout telemetry. All three clients may advertise the explicit runtime
+    // capability; neither a missing receipt nor a link estimate changes the
+    // viewer's saved choice.
     crate::playback_control::record_preparation_counterfactual(
         platform,
         crate::playback_control::decide_preparation_after_client_release(
@@ -7208,7 +7682,25 @@ async fn process_preparation_candidate(state: AppState, exchange: PreparationCan
             conditions,
         ),
     );
-    if let crate::playback_control::PreparationDecision::Prepare { .. } = decision {
+    let successor_owner = match purpose {
+        PreparationPurpose::SelectionChange => matches!(
+            decision,
+            crate::playback_control::PreparationDecision::Prepare { .. }
+        )
+        .then(|| state.node_id.clone()),
+        PreparationPurpose::PlannedRelocation(fence)
+            if capabilities
+                .as_ref()
+                .is_some_and(|caps| caps.dual_player_preparation)
+                && state.serving.planned_outage_is_current(fence).await =>
+        {
+            prepared_relocation_owner(&state, source, &candidate, accepted_film_time_ms).await
+        }
+        PreparationPurpose::PlannedRelocation(_) => None,
+    };
+    if let Some(successor_owner) = successor_owner {
+        #[cfg(test)]
+        let _ = &successor_owner;
         #[cfg(not(test))]
         stage_and_prime_prepared_successor(
             &state,
@@ -7216,7 +7708,9 @@ async fn process_preparation_candidate(state: AppState, exchange: PreparationCan
             &route,
             &recipe,
             &candidate,
-            source.as_ref(),
+            Some(source),
+            &successor_owner,
+            purpose,
             AcceptedAsk {
                 film_time_ms: accepted_film_time_ms,
                 desired_digest: Some(selection.desired().digest()),
@@ -7233,7 +7727,7 @@ async fn process_preparation_candidate(state: AppState, exchange: PreparationCan
             &route,
             &recipe,
             &candidate,
-            source.as_ref(),
+            Some(source),
             AcceptedAsk {
                 film_time_ms: accepted_film_time_ms,
                 desired_digest: Some(selection.desired().digest()),
@@ -7245,11 +7739,12 @@ async fn process_preparation_candidate(state: AppState, exchange: PreparationCan
 
 /// How long a staged successor may sit unclaimed.
 ///
-/// Keyed off `VOD_LEASE_TIMEOUT_MS`, because every session this fires on is
-/// VOD: a client is allowed that long between exchanges before it is even
-/// nominally late, so a shorter window would expire successors for clients
-/// behaving exactly as the protocol permits. One lease plus a margin covers a
-/// slow client without covering a gone one.
+/// Keyed off `VOD_LEASE_TIMEOUT_MS`, the longest control lease this can inherit.
+/// A client is allowed that long between exchanges before it is even nominally
+/// late, so a shorter window would expire VOD successors for clients behaving
+/// exactly as the protocol permits. One longest lease plus a margin covers a
+/// slow client without covering a gone one; rolling successors still advertise
+/// and renew on their shorter rolling lease after commit.
 ///
 /// **Correction, 2026-09-08: the store does enforce this bound, and this
 /// paragraph used to say it did not.** It read *"This bound is enforced here,
@@ -7287,12 +7782,11 @@ const PREPARATION_PRIME_BUDGET: Duration = Duration::from_secs(45);
 /// runs the supersession reap nor advances `media_playback_pointers`, which is
 /// why a preparation cannot be built on `activate_media_session`.
 ///
-/// Best-effort, like the measurement it runs beside. A staged successor that
+/// Best-effort from the viewer's perspective. A staged successor that
 /// fails to appear costs the viewer nothing: the fallback replacement they
 /// would have taken before M6 is still exactly what happens. A staged
 /// successor that appears when it should not costs a saturated user real
-/// admission headroom, which is why every refusal below returns rather than
-/// retries.
+/// resources, which is why every refusal below returns rather than retries.
 /// What the accepted control exchange said the viewer wants.
 ///
 /// The two travel together because they are facts about the same exchange and
@@ -7327,6 +7821,8 @@ async fn stage_prepared_successor(
         predecessor,
         candidate,
         source,
+        &state.node_id,
+        PreparationPurpose::SelectionChange,
         accepted,
         false,
     )
@@ -7334,6 +7830,7 @@ async fn stage_prepared_successor(
 }
 
 #[cfg(not(test))]
+#[allow(clippy::too_many_arguments)]
 async fn stage_and_prime_prepared_successor(
     state: &AppState,
     session_id: &str,
@@ -7341,6 +7838,8 @@ async fn stage_and_prime_prepared_successor(
     predecessor: &RemoteStartRequest,
     candidate: &crate::transcode::SessionRequest,
     source: Option<&plurx_core::domain::MediaFile>,
+    successor_owner: &str,
+    purpose: PreparationPurpose,
     accepted: AcceptedAsk,
 ) {
     stage_prepared_successor_with_prime(
@@ -7350,6 +7849,8 @@ async fn stage_and_prime_prepared_successor(
         predecessor,
         candidate,
         source,
+        successor_owner,
+        purpose,
         accepted,
         true,
     )
@@ -7364,6 +7865,8 @@ async fn stage_prepared_successor_with_prime(
     predecessor: &RemoteStartRequest,
     candidate: &crate::transcode::SessionRequest,
     source: Option<&plurx_core::domain::MediaFile>,
+    successor_owner: &str,
+    purpose: PreparationPurpose,
     accepted: AcceptedAsk,
     prime_worker: bool,
 ) {
@@ -7371,6 +7874,12 @@ async fn stage_prepared_successor_with_prime(
         film_time_ms: accepted_film_time_ms,
         desired_digest,
     } = accepted;
+    if let PreparationPurpose::PlannedRelocation(fence) = purpose {
+        if !state.serving.planned_outage_is_current(fence).await {
+            crate::playback_control::record_preparation_staged(false);
+            return;
+        }
+    }
     // The actor owns the slot. No live local worker means no slot to take, and
     // an expired, remote-owned or retired playback stages nothing.
     let Some(gate) = state.transcode.session_preparation_gate(session_id).await else {
@@ -7425,7 +7934,7 @@ async fn stage_prepared_successor_with_prime(
         control_sequence: None,
         ..candidate.clone()
     };
-    let Ok(recipe_json) = serde_json::to_string(&RemoteStartRequest {
+    let staged_recipe = RemoteStartRequest {
         protocol_version: crate::media_pool::PROTOCOL_VERSION,
         incarnation_id: staged_incarnation_id.clone(),
         user_id: route.user_id,
@@ -7436,27 +7945,46 @@ async fn stage_prepared_successor_with_prime(
         typeless_playlist: predecessor.typeless_playlist,
         library_channel: predecessor.library_channel.clone(),
         request: staged_request.clone(),
-    }) else {
+    };
+    let Ok(recipe_json) = serde_json::to_string(&staged_recipe) else {
         return;
     };
     // A real `StartResponse`, because every reader of a route's
     // `response_json` parses it as one — and `control_start_response` filters
     // on the bootstrap being present, so a row without it answers 404
     // `session_gone` on the successor's first exchange after commit.
-    let Ok(response_json) = serde_json::to_string(&StartResponse {
+    let response = StartResponse {
         session_id: staged_session_id.clone(),
         playlist_url: format!("/api/v1/hls/{staged_session_id}/index.m3u8"),
         duration_ms: source.duration_ms,
         start_seconds: resume_ms as f64 / 1_000.0,
-        // VOD playlists retain the film's absolute zero origin. The resume
-        // belongs in `start_seconds`; copying it into the origin would make
-        // owner-loss and client alignment add the same offset twice.
-        media_origin_ms: Some(0),
+        // VOD playlists retain the film's absolute zero origin. A rolling
+        // successor instead begins its local timeline at this film boundary.
+        // Copy may internally pull back to a keyframe, but the requested
+        // boundary remains the client-visible handoff target just as it does
+        // for an ordinary rolling create.
+        media_origin_ms: Some(
+            if staged_request.presentation == crate::transcode::Presentation::Vod {
+                0
+            } else {
+                resume_ms
+            },
+        ),
         height: match staged_request.kind {
             crate::transcode::SessionKind::Transcode { height } => height,
             crate::transcode::SessionKind::Copy { .. } => source.height.unwrap_or_default(),
         },
-        encoder: "vod".to_owned(),
+        encoder: if staged_request.presentation == crate::transcode::Presentation::Vod {
+            "vod"
+        } else if matches!(
+            staged_request.kind,
+            crate::transcode::SessionKind::Copy { .. }
+        ) {
+            "copy"
+        } else {
+            "transcode"
+        }
+        .to_owned(),
         vod: staged_request.presentation == crate::transcode::Presentation::Vod,
         ladder: Vec::new(),
         prior_kbps: None,
@@ -7466,10 +7994,52 @@ async fn stage_prepared_successor_with_prime(
             &staged_session_id,
             &staged_incarnation_id,
             1,
-            crate::playback_control::VOD_LEASE_TIMEOUT_MS,
+            if staged_request.presentation == crate::transcode::Presentation::Vod {
+                crate::playback_control::VOD_LEASE_TIMEOUT_MS
+            } else {
+                crate::playback_control::ROLLING_LEASE_TIMEOUT_MS
+            },
         ),
         plan_notes: vec![PREPARED_SUCCESSOR_PLAN_NOTE.to_owned()],
-    }) else {
+    };
+    let mut response_value = match serde_json::to_value(response) {
+        Ok(value) => value,
+        Err(_) => return,
+    };
+    if let Some(caps) = retained_planning_caps(&route.response_json) {
+        response_value
+            .as_object_mut()
+            .expect("StartResponse serializes as an object")
+            .insert(
+                PLANNING_CAPS_RESPONSE_FIELD.to_owned(),
+                match serde_json::to_value(caps) {
+                    Ok(value) => value,
+                    Err(_) => return,
+                },
+            );
+    }
+    if let Some(overrides) = retained_planning_overrides(&route.response_json) {
+        response_value
+            .as_object_mut()
+            .expect("StartResponse serializes as an object")
+            .insert(
+                PLANNING_OVERRIDES_RESPONSE_FIELD.to_owned(),
+                match serde_json::to_value(overrides) {
+                    Ok(value) => value,
+                    Err(_) => return,
+                },
+            );
+    }
+    if let PreparationPurpose::PlannedRelocation(fence) = purpose {
+        response_value
+            .as_object_mut()
+            .expect("StartResponse serializes as an object")
+            .insert(
+                PREPARATION_REASON_RESPONSE_FIELD.to_owned(),
+                serde_json::Value::String(format!("planned_relocation:{}", fence.identity())),
+            );
+    }
+    let Ok(response_json) = serde_json::to_string(&response_value) else {
         return;
     };
     let executor = crate::playback_control::PreparationExecutor::new(
@@ -7498,10 +8068,14 @@ async fn stage_prepared_successor_with_prime(
         // fingerprint encodes `kind` and `start_seconds`, both of which this
         // row deliberately changes.
         request_fingerprint: staged_request.durable_intent_fingerprint(route.user_id),
-        owner_node_id: state.node_id.clone(),
+        owner_node_id: successor_owner.to_owned(),
         recipe_json,
         response_json,
-        media_origin_ms: 0,
+        media_origin_ms: if staged_request.presentation == crate::transcode::Presentation::Vod {
+            0
+        } else {
+            resume_ms
+        },
         now_ms,
         // Read here rather than carried from the exchange that triggered this,
         // and re-compared inside the admission transaction. The awaits between
@@ -7519,30 +8093,77 @@ async fn stage_prepared_successor_with_prime(
         deadline_ms: now_ms.saturating_add(PREPARATION_DEADLINE_MS),
     };
     let staged = if prime_worker {
+        if let PreparationPurpose::PlannedRelocation(fence) = purpose {
+            if !state.serving.planned_outage_is_current(fence).await {
+                crate::playback_control::record_preparation_staged(false);
+                return;
+            }
+        }
         let reserved =
             tokio::time::timeout(PREPARATION_STORE_BUDGET, executor.reserve(&preparation)).await;
         if !matches!(reserved, Ok(Ok(true))) {
             crate::playback_control::record_preparation_staged(false);
             return;
         }
-        let prime_deadline = Instant::now() + PREPARATION_PRIME_BUDGET;
-        let primed = match state
-            .transcode
-            .session_adoption_token(&preparation.session_id)
-        {
-            Some(adoption) => {
-                state
-                    .transcode
-                    .vod_resurrect_before(
-                        &preparation.recipe_json,
-                        &preparation.session_id,
-                        preparation.user_id,
-                        adoption,
-                        prime_deadline,
-                    )
-                    .await
+        if let PreparationPurpose::PlannedRelocation(fence) = purpose {
+            if !state.serving.planned_outage_is_current(fence).await {
+                let _ = tokio::time::timeout(
+                    PREPARATION_STORE_BUDGET,
+                    executor.discard_reserved(&preparation.incarnation_id, unix_ms()),
+                )
+                .await;
+                crate::playback_control::record_preparation_staged(false);
+                return;
             }
-            None => false,
+        }
+        let prime_deadline = Instant::now() + PREPARATION_PRIME_BUDGET;
+        let primed = if successor_owner == state.node_id {
+            if staged_request.presentation == crate::transcode::Presentation::Live {
+                prime_live_prepared_session(
+                    state,
+                    &staged_recipe,
+                    &preparation.session_id,
+                    &route.recovery_epoch,
+                    1,
+                    prime_deadline.into(),
+                )
+                .await
+            } else {
+                match state
+                    .transcode
+                    .session_adoption_token(&preparation.session_id)
+                {
+                    Some(adoption) => {
+                        state
+                            .transcode
+                            .vod_resurrect_before(
+                                &preparation.recipe_json,
+                                &preparation.session_id,
+                                preparation.user_id,
+                                adoption,
+                                prime_deadline,
+                            )
+                            .await
+                    }
+                    None => false,
+                }
+            }
+        } else {
+            state
+                .media_sessions
+                .prepare_remote(
+                    successor_owner,
+                    &RemotePrepareRequest {
+                        protocol_version: crate::media_pool::PROTOCOL_VERSION,
+                        incarnation_id: preparation.incarnation_id.clone(),
+                        session_id: preparation.session_id.clone(),
+                        user_id: preparation.user_id,
+                        expected_owner_epoch: 1,
+                    },
+                    prime_deadline.into(),
+                )
+                .await
+                .is_ok()
         };
         if !primed {
             let _ = tokio::time::timeout(
@@ -7552,12 +8173,33 @@ async fn stage_prepared_successor_with_prime(
             .await;
             retire_prepared_worker(
                 state,
+                &preparation.owner_node_id,
+                &preparation.incarnation_id,
                 &preparation.session_id,
                 "prepared successor prime failed",
             )
             .await;
             crate::playback_control::record_preparation_staged(false);
             return;
+        }
+        if let PreparationPurpose::PlannedRelocation(fence) = purpose {
+            if !state.serving.planned_outage_is_current(fence).await {
+                let _ = tokio::time::timeout(
+                    PREPARATION_STORE_BUDGET,
+                    executor.discard_reserved(&preparation.incarnation_id, unix_ms()),
+                )
+                .await;
+                retire_prepared_worker(
+                    state,
+                    &preparation.owner_node_id,
+                    &preparation.incarnation_id,
+                    &preparation.session_id,
+                    "planned relocation was cancelled",
+                )
+                .await;
+                crate::playback_control::record_preparation_staged(false);
+                return;
+            }
         }
         tokio::time::timeout(
             PREPARATION_STORE_BUDGET,
@@ -7575,6 +8217,7 @@ async fn stage_prepared_successor_with_prime(
                 executor,
                 preparation.incarnation_id,
                 preparation.session_id,
+                preparation.owner_node_id,
                 preparation.deadline_ms.saturating_sub(unix_ms()),
             );
         }
@@ -7582,6 +8225,8 @@ async fn stage_prepared_successor_with_prime(
             if prime_worker {
                 retire_prepared_worker(
                     state,
+                    &preparation.owner_node_id,
+                    &preparation.incarnation_id,
                     &preparation.session_id,
                     "prepared successor actor refused",
                 )
@@ -7592,12 +8237,34 @@ async fn stage_prepared_successor_with_prime(
     }
 }
 
-async fn retire_prepared_worker(state: &AppState, session_id: &str, reason: &'static str) {
-    state
-        .transcode
-        .begin_session_terminal(session_id, crate::vodserve::Terminal::Replaced, reason)
-        .await;
-    state.transcode.complete_session_release(session_id);
+async fn retire_prepared_worker(
+    state: &AppState,
+    owner_node_id: &str,
+    incarnation_id: &str,
+    session_id: &str,
+    reason: &'static str,
+) {
+    if owner_node_id == state.node_id {
+        state
+            .transcode
+            .begin_session_terminal(session_id, crate::vodserve::Terminal::Replaced, reason)
+            .await;
+        state.transcode.complete_session_release(session_id);
+    } else if let Err(error) = state
+        .media_sessions
+        .abort_remote(
+            owner_node_id,
+            &RemoteAbortRequest {
+                incarnation_id: incarnation_id.to_owned(),
+                session_id: session_id.to_owned(),
+                expected_owner_epoch: 1,
+                reason: None,
+            },
+        )
+        .await
+    {
+        tracing::warn!(?error, owner = %owner_node_id, %reason, "remote prepared worker cleanup did not settle");
+    }
 }
 
 /// Free the slot and the row when nobody claims the successor.
@@ -7633,6 +8300,7 @@ fn arm_preparation_deadline(
     executor: crate::playback_control::PreparationExecutor,
     staged_incarnation_id: String,
     staged_session_id: String,
+    staged_owner_node_id: String,
     deadline_ms: i64,
 ) {
     tokio::spawn(async move {
@@ -7642,7 +8310,14 @@ fn arm_preparation_deadline(
             .await
             .is_ok_and(|aborted| aborted)
         {
-            retire_prepared_worker(&state, &staged_session_id, "prepared successor expired").await;
+            retire_prepared_worker(
+                &state,
+                &staged_owner_node_id,
+                &staged_incarnation_id,
+                &staged_session_id,
+                "prepared successor expired",
+            )
+            .await;
         }
     });
 }
@@ -11334,9 +12009,9 @@ async fn vod_segment_response_before(
             // handed to the response whole, so crediting it would date bytes
             // at handoff rather than at delivery and inflate the first window
             // of a session that has delivered nothing yet. One small object
-            // missing from the total is the honest trade; the rate is what
-            // `headroom_refusal` reads, and an unmeasured session correctly
-            // reports no rate at all rather than a fast one.
+            // missing from the total is the honest trade; an unmeasured
+            // session correctly reports no rate at all rather than a fast
+            // one, even though that advisory value no longer gates handoff.
             delivery.note(bytes_len);
             delivered = delivered.saturating_add(bytes_len);
             if delivered == len {
@@ -16803,6 +17478,8 @@ mod tests {
                     library_channel: None,
                     request: recipe,
                 },
+                planning_caps: None,
+                planning_overrides: None,
                 selection: crate::playback_control::ClientSelection {
                     quality: crate::playback_control::QualitySelection::Manual {
                         height: asked_height,
@@ -16830,6 +17507,7 @@ mod tests {
                     dual_player_preparation: true,
                 }),
                 platform: crate::playback_control::ClientPlatform::Apple,
+                purpose: PreparationPurpose::SelectionChange,
                 accepted_film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
             },
         )
@@ -19027,6 +19705,92 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn prepared_candidate_reuses_the_ordinary_plan_for_original_and_compound_changes() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "planning-unrelated").await;
+        let route = MediaSessionRoute {
+            response_json: "{}".to_owned(),
+            ..crate::media_sessions::takeover_eligible_route(
+                "planning-session",
+                "00000000-0000-4000-8000-0000000000a1",
+            )
+        };
+        let predecessor = staged_predecessor_recipe(&route);
+        let source = staged_source_file();
+        let caps = caps_v2(
+            r#"{"v":2,"video":[{"codec":"h264","present":["sdr"],"max_height":2160}],"audio":["aac"],"containers":["mkv","mp4"]}"#,
+        );
+        let mut selection = crate::playback_control::ClientSelection {
+            quality: crate::playback_control::QualitySelection::Original,
+            audio_track: None,
+            subtitle: crate::playback_control::SubtitleSelection {
+                mode: crate::playback_control::SubtitleMode::Off,
+                track: None,
+            },
+            audio_offset_ms: 0,
+            codec: crate::playback_control::CodecPolicy::Auto,
+            dynamic_range: crate::playback_control::DynamicRangePolicy::Auto,
+        };
+        let original = plan_preparation_candidate(
+            &fixture.state,
+            &predecessor,
+            Some(&caps),
+            None,
+            &selection,
+            &source,
+            1080,
+        )
+        .await
+        .expect("Original plan");
+        assert!(matches!(
+            original.kind,
+            crate::transcode::SessionKind::Copy { .. }
+        ));
+        assert!(!original.automatic);
+
+        selection.quality = crate::playback_control::QualitySelection::Manual { height: 720 };
+        selection.audio_track = Some(1);
+        selection.audio_offset_ms = 125;
+        selection.subtitle = crate::playback_control::SubtitleSelection {
+            mode: crate::playback_control::SubtitleMode::Burn,
+            track: Some(2),
+        };
+        let compound = plan_preparation_candidate(
+            &fixture.state,
+            &predecessor,
+            Some(&caps),
+            None,
+            &selection,
+            &source,
+            1080,
+        )
+        .await
+        .expect("compound plan");
+        assert_eq!(
+            compound.kind,
+            crate::transcode::SessionKind::Transcode { height: 720 }
+        );
+        assert_eq!(compound.audio_index, Some(1));
+        assert_eq!(compound.audio_offset_ms, 125);
+        assert_eq!(compound.subtitle_burn, Some(2));
+
+        let mut rolling_predecessor = predecessor;
+        rolling_predecessor.request.presentation = crate::transcode::Presentation::Live;
+        let rolling = plan_preparation_candidate(
+            &fixture.state,
+            &rolling_predecessor,
+            Some(&caps),
+            None,
+            &selection,
+            &source,
+            1080,
+        )
+        .await
+        .expect("rolling plan");
+        assert_eq!(rolling.presentation, crate::transcode::Presentation::Live);
+    }
+
     /// Drive the **ingress** control gate, not the helper behind it.
     ///
     /// That gate returns before `verify_authority` ever runs, so a version of
@@ -19985,8 +20749,8 @@ mod tests {
     /// not move when the response is merely built: it moves as the body is
     /// drained, because that is the only moment a byte has actually reached
     /// this viewer. Without it `DeliveryView` reported `delivered_bps: None`
-    /// on every VOD session, and `headroom_refusal` refused every preparation
-    /// with `throughput_unreported`.
+    /// on every VOD session; the value remains useful telemetry even though it
+    /// no longer controls preparation admission.
     #[tokio::test]
     async fn a_vod_body_counts_its_delivered_bytes_where_they_leave() {
         let dir = crate::test_tempdir().expect("VOD HTTP directory");

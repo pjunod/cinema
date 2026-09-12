@@ -1,6 +1,6 @@
 # Playback rewrite remainder — what is unfinished and how it relates to freezes
 
-**Status:** open — reconciled implementation and acceptance backlog,
+**Status:** source implementation closed; finite acceptance evidence remains,
 2026-09-12 UTC. **Baseline:** `efd54247adddeb3978812e55ebbb6a7f08adc9d9`, the
 server revision observed during the September 11 Apple TV investigation.
 **Scope:** playback-control M1–M9 and directly related delivery work; this is a
@@ -70,11 +70,11 @@ Intersection describes a mechanism to test, not a causal verdict.
 
 | ID | Remainder / kind | Intersection with this issue | Lifecycle cases |
 |---|---|---|---|
-| R01 | Closed-loop refill/pacing liveness — demonstrated behavior defect and evidence gap | **Direct.** A waiting player and held producer need a reachable route back to presentation, even while film position is fixed | L03–L11, L13 |
-| R02 | Final recovery ownership and `/status` migration — M9 implementation/reconciliation | **Direct architectural overlap.** Client polling, observation, verdict deferral and local reopen must agree on one episode and current intent; their presence alone is not proof of conflicting actions | L09–L17, L23–L30 |
+| R01 | Closed-loop refill/pacing liveness — source correction built; physical evidence gap | **Direct.** A waiting player now retains its native recovery route even while a normal producer hold coexists | L03–L11, L13 |
+| R02 | Final recovery ownership — source audit closed; runtime evidence gap | **Direct architectural overlap.** Client polling, observation, verdict deferral and local reopen converge on one episode and current intent | L09–L17, L23–L30 |
 | R03 | Prepared replacement physical acceptance — M6 evidence gap | **Conditional.** Poor successor readiness or first-frame continuity adds delay to recovery/quality changes; not required to explain a self-recovering same-session wait | L18–L24 |
-| R04 | Prepared recipe/device/headroom coverage — M6 implementation and evidence gap | **Conditional.** Unsupported combinations fall back to more disruptive changes; duplicate pipelines can contend for bandwidth/decoder capacity | L18–L24, L32 |
-| R05 | Prepared planned node drain and complete failover — playback-control M8 implementation/evidence gap | **Conditional on owner transition.** Determines whether node loss/drain consumes remaining buffer smoothly or forces reopen | L29–L32 |
+| R04 | Prepared recipe/device coverage — source implementation closed; fleet evidence gap | **Conditional.** Compound recipes use ordinary capability planning; duplicate pipelines can still contend for bandwidth/decoder capacity | L18–L24, L32 |
+| R05 | Prepared planned node drain and abrupt failover — source implementation closed; cluster evidence gap | **Conditional on owner transition.** Planned drain now primes remotely; abrupt loss retains its distinct takeover path | L29–L32 |
 | R06 | Physical subtitle readiness/retry and seek evidence — M7 evidence gap | **Conditional on subtitle/seek activity.** Extra production and track readiness can interact with video refill, but missing captions alone do not prove video starvation | L07, L15–L17, L24 |
 | R07 | Mixed-fleet and two-engine acceptance; live fallback retirement — M9 evidence/product decision | **Direct coverage overlap.** Tests must force and assert VOD versus rolling; healthy VOD does not qualify the fallback path | All applicable L01–L33 |
 | R08 | Joined transition observability and native alternate-ingress proof — M2/M9 evidence and targeted instrumentation gap | **Direct diagnostic overlap.** Needed to identify which buffer boundary stalled; control success is not media success | L05–L11, L29–L31 |
@@ -96,13 +96,12 @@ wait for each other's progress indefinitely. VOD has a different upstream
 mechanism—materialization and working-set/read-window demand—but converges on
 the same loader, decoder and render behavior.
 
-**Required closure:** a coupled regression drives the real flow/materialization
-policy and controller/loader transitions with the playhead held still, for both
-empty and substantial loaded buffers. Show where new usable media comes from,
-why any hold releases, and what proves first resumed presentation. Then run
-that case on Apple TV on both forced paths. Fix the owning condition, not a new
-independent restart timer. A timed reopen may bound failure, but cannot pass
-healthy steady-play acceptance.
+**Source closure:** the coupled source regression drives empty and substantial
+loaded waits. The existing rolling target already releases the producer below
+its fixed demand frontier; the correction preserves the player's one native
+recovery route while that ordinary producer hold coexists. No second refill
+credit or recovery timer was added. Apple TV observation on both forced paths
+remains in the separate sweep.
 
 ### 3.2 R02 — finish ownership deliberately, preserving necessary bounds
 
@@ -118,64 +117,52 @@ struck deletion of budgets that still bound server deferral and client-local
 failure. Removing those because an old plan says “three timers” could restore
 unbounded waiting.
 
-**Required closure:** inventory every live recovery entry point on all three
-clients, identify the component allowed to mutate the player/session, and join
-its evidence to one current episode/intent. Move remaining status-only facts
-into the supported observation path before removing their poll. Prove no
-competing reopen, no stale callback after stop, and no reset of the stall clock
-by an unrelated heartbeat. Reconcile the original M9 wording with the accepted
-M5 scope instead of silently weakening either contract.
+**Source closure:** the implementation ledger inventories every live recovery
+entry point on all three clients. Status readers remain observers; Apple,
+Android, and web each retain one bounded attachment mutation owner, current
+intent fence, and absolute episode deadline. No poll or timer was deleted only
+to satisfy a count: the original M9 wording is superseded where it confused
+observation with action ownership. Runtime ordering remains a sweep result.
 
 ### 3.3 R03–R04 — complete the prepared-handoff promise, not just its transaction
 
-Server prime is implemented. What remains is the complete continuity claim:
+Server prime and capability-aware compound planning are implemented. What
+remains is the complete physical continuity claim:
 real successor buffer, measured first frame, correct film origin, preservation
 of pause/tracks/grade, and safe cleanup on refusal, expiry and failed commit.
 The old [Apple hardware handoff](M6-APPLE-HARDWARE-ACCEPTANCE.md) still describes
 a pre-priming server; its procedure needs that premise corrected before reuse.
 The receipt must distinguish an actual prepared switch from a fallback reopen.
 
-Current `PREPARED_AXIS_SETS` in
-[playback_control.rs](../../crates/plurxd/src/playback_control.rs) admits only:
+The old `PREPARED_AXIS_SETS`, direction rule, and throughput/headroom refusals
+are gone. The server retains the create-time capability document and reuses the
+ordinary planner for Original, quality, delivery, dynamic range, audio, offset,
+subtitle, and compound changes. Unsupported AV1 and HEVC-SDR output remain
+typed planner limits. Missing or low measurements are advisory. The client
+must still explicitly advertise the real dual-player capability, and the
+reserve/prime operation may still fail on actual resource pressure.
 
-- resolution/bitrate changes; and
-- resolution/bitrate plus delivery-method change, subject to the bounded
-  successor-rate direction check (`server_selected`).
-
-Audio/offset, subtitle-burn, dynamic-range changes, and other combinations are
-not generally admitted as prepared transitions by this decision function.
-The reverse transition toward an unbounded source bitrate has a separate
-restriction. The headroom check requires reported observed throughput at
-least twice the predecessor's measured delivered rate; missing measurements
-refuse preparation. This is a conservative floor, not a measurement of the
-successor's actual buffering cost or every device's decoder capacity.
-
-**Required closure:** document each allowed recipe/device/direction and its
-measured limits; exercise both simultaneous streams on a constrained link and
-under occupied hardware capacity. Keep unsupported changes explicit. The
-roadmap's one-slot software-bridge/buffered-break-before-make strategy is not
-established by finding reserve/commit functions; account for it separately
-before claiming the general one-slot contract. Refusal must preserve useful
-predecessor playback and the fallback must preserve viewer intent.
+**Evidence still owed:** exercise both simultaneous streams on constrained
+links and occupied decoder capacity, and distinguish actual prepared commits
+from fallback reopen. Refusal must preserve useful predecessor playback and
+viewer intent. This is R03/R04 evidence debt, not permission code.
 
 ### 3.4 R05 — distinguish stopping a node from transferring its playback
 
-Playback-control M8 calls for prepared planned drain, owner-loss recovery and
-fencing across the entire transaction. Existing drain/fence/status and
-compatibility takeover mechanisms are useful foundations; they do not by
-themselves prove “reserve and prime elsewhere while the old stream plays.”
-The historical ledger explicitly identifies prepared planned drain as unbuilt;
-this audit found no corresponding node-replacement orchestration in the
-inspected control/HLS/session path.
+Playback-control M8 now distinguishes planned drain from abrupt loss. An exact
+restart or maintenance fence blocks new local placement while existing control
+continues. The next accepted exchange selects an eligible peer, durably
+reserves the successor there, and sends only its exact identity to the target;
+the target reads the durable recipe before allocating. Fence cancellation is
+checked before reserve, after reserve, after prime, and immediately before
+commit. Refusal or expiry discards the row and retires the exact local or remote
+worker. Abrupt loss retains the existing epoch-incrementing takeover path.
 
-**Required closure:** establish the target-node placement → reservation →
-readable successor → client switch → old-owner retirement path. Kill or isolate
-the owner during each phase and verify one durable result, no old-owner
-resurrection, and buffer continuity or a measured bounded reopen. Preserve the
-existing rule against splicing unrelated production into a VOD/EVENT URL.
-Test no-snapshot recovery separately from recovery with a current control
-snapshot. Do not attribute tonight's freeze to M8 without an owner/epoch change
-in the same episode; the retained trace does not establish one.
+**Evidence still owed:** cancel or isolate during each phase and verify one
+durable result, no old-owner resurrection, and either buffer continuity or a
+measured bounded reopen. Test no-snapshot recovery separately from recovery
+with a current control snapshot. The retained freeze trace contains no
+owner/epoch change and therefore establishes no M8 cause.
 
 ### 3.5 R06–R10 — close evidence and scope without reopening finished projects
 

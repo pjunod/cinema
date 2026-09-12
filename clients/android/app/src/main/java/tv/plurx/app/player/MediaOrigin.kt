@@ -112,14 +112,11 @@ internal fun mediaOriginMsFromHeaders(headers: Map<String, List<String>>): Long?
  * — the number that reached the server oscillated between roughly the link
  * speed and near zero, and the low readings are the ones a floor sees.
  *
- * The server's floor wants `observed >= 2 * delivered`
- * (`headroom_refusal`, `playback_control.rs:1168`), which is a question about
- * *headroom*: could this link carry a second pipeline as well as this one. An
- * average that includes the idle between segments answers a different question
- * — roughly "what is this stream's bitrate" — and answers it with a number that
- * can never be twice itself. So idle time is not counted at all: the window
- * closes after a second of transfer, however long that second takes to
- * accumulate.
+ * An average that includes the idle between segments answers roughly "what is
+ * this stream's bitrate", not what the link can pull while active. Idle time is
+ * therefore not counted: the window closes after a second of transfer, however
+ * long that second takes to accumulate. The server retains this as advisory
+ * telemetry; missing or low estimates do not gate prepared handoff.
  *
  * Not thread-safe on its own; [ProgressiveMediaOrigin] holds its monitor,
  * because Media3 calls a transfer listener from its loader threads.

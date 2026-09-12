@@ -1,5 +1,9 @@
 # M6 — prepared recipe handoff, with the numbers it was waiting for
 
+> **Superseded 2026-09-12:** retain this as design history. The current
+> [lifecycle contract](PLAYBACK-LIFECYCLE-IMPLEMENTATION.md) replaces measured
+> qualification gates with explicit client capability and real resource outcomes.
+
 **Status:** ready to build · **Executes:** §3 of
 [REMAINING-ROADMAP-HANDOFF.md](REMAINING-ROADMAP-HANDOFF.md), which is §5.1–5.4
 of [PLAYBACK-CONTROL-PROTOCOL-PLAN.md](PLAYBACK-CONTROL-PROTOCOL-PLAN.md) ·

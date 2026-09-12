@@ -653,24 +653,18 @@ final class PreparedReplacementCoordinatorTests: XCTestCase {
         XCTAssertTrue(ledger.noteSwitching(action))
     }
 
-    /// A playback that has stopped asking still settles what it is offered:
-    /// a staging left to the 330-second deadline costs that session every
-    /// later preparation.
-    func testADeclinedStagingIsSettledAtOnceAndBuildsNothing() {
+    /// A failed attempt settles that action, but a later explicit change may
+    /// try again. Runtime failure is not a session-wide feature gate.
+    func testAFailedStagingDoesNotSuppressTheNextExplicitChange() {
         let host = RecordingHost()
         host.startSucceeds = false
         let coordinator = PreparedReplacementCoordinator(host: host)
         coordinator.offer(preparedAction(), filmPositionMs: 1_000)
-        XCTAssertFalse(coordinator.canOfferPreparation)
+        XCTAssertTrue(coordinator.shouldAskForPreparation)
         host.startSucceeds = true
         let pushed = preparedAction(actionId: "7c2e3b55-3c8f-4b2d-8a4f-3d6b8c9e0f12")
-        XCTAssertEqual(coordinator.offer(pushed, filmPositionMs: 1_000), .declined)
-        XCTAssertFalse(PreparedReplacementOffer.declined.ownsTheChange)
-        XCTAssertEqual(host.started.count, 0, "the server-pushed path obeys the same rule")
-        XCTAssertEqual(
-            coordinator.ledger.acknowledgements.entries.last?.actionId, pushed.actionId
-        )
-        XCTAssertEqual(coordinator.ledger.acknowledgements.entries.last?.state, .aborted)
+        XCTAssertEqual(coordinator.offer(pushed, filmPositionMs: 1_000), .build(pushed))
+        XCTAssertEqual(host.started.count, 1)
     }
 
     /// A staging this client already settled changes nothing, so the caller
