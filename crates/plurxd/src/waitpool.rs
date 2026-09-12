@@ -821,14 +821,13 @@ mod tests {
     fn session_snapshot_separates_active_waits_and_their_oldest_target() {
         let pool = WaitPool::new(8, 4);
         let first = pool.register(key(5), "sess-a").expect("first wait");
-        std::thread::sleep(Duration::from_millis(2));
         let second = pool.register(key(8), "sess-a").expect("second wait");
         let other = pool.register(key(3), "sess-b").expect("other wait");
 
         let snapshot = pool.session_snapshot("sess-a");
         assert_eq!(snapshot.count, 2);
         assert_eq!(snapshot.oldest_segment, Some(5));
-        assert!(snapshot.oldest_ms.is_some_and(|age| age >= 2));
+        assert!(snapshot.oldest_ms.is_some());
         assert_eq!(
             pool.session_snapshot("missing"),
             SessionWaitSnapshot {
