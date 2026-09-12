@@ -2028,7 +2028,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # +6 in Live TV: one real ffprobe spawn plus delivery/session `output()` and
 # HTTP `status()` lookalikes. Only the ffprobe launches a process, and its
 # foreground owner retains it until ordinary or timeout reap.
-expected_occurrences = 317
+# +1 in the playback-rewrite remainder: `VodServe::status()` reads the
+# in-process live-VOD session snapshot in a unit test after advancing beyond
+# materialized media. It does not construct, launch, or retain a child process.
+expected_occurrences = 318
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
