@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["813481a0"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "The Rust gate runs the wait-pool snapshot regression, which proves that active wait count and oldest-target attribution remain correct without an unmanaged wall-clock delay in the fixture."

@@ -234,12 +234,24 @@ struct ApplePlaybackTTFFState: Equatable {
 struct ApplePlaybackServerSnapshot: Encodable, Equatable {
     var observedAgeMs: Int?
     var recentSpeed: Double?
+    var serverReadyState: String?
+    var serverReadyAnchorMs: Int?
+    var serverReadyEndMs: Int?
+    var serverReadySeconds: Double?
+    var serverNextReadyStartMs: Int?
+    var serverNextReadyEndMs: Int?
+    var productionAheadSeconds: Int?
+    var productionTargetSeconds: Int?
+    var producerState: String?
     var aheadSeconds: Int?
     var aheadBytes: Int?
     var suspended: Bool?
     var holdReason: String?
     var deliveredBps: Int?
     var deliveredIdleMs: Int?
+    var httpWaitCount: Int?
+    var httpWaitOldestMs: Int?
+    var httpWaitSegment: Int?
     var readrate: Double?
     var suspendCount: Int?
     var progressIdleMs: Int?
@@ -254,12 +266,24 @@ struct ApplePlaybackServerSnapshot: Encodable, Equatable {
     init(_ status: PlaybackSessionStatus, observedAgeMs: Int? = nil) {
         self.observedAgeMs = observedAgeMs
         recentSpeed = status.recentSpeed
+        serverReadyState = status.serverReadyState
+        serverReadyAnchorMs = status.serverReadyAnchorMs
+        serverReadyEndMs = status.serverReadyEndMs
+        serverReadySeconds = status.serverReadySeconds
+        serverNextReadyStartMs = status.serverNextReadyStartMs
+        serverNextReadyEndMs = status.serverNextReadyEndMs
+        productionAheadSeconds = status.productionAheadSeconds
+        productionTargetSeconds = status.productionTargetSeconds
+        producerState = status.producerState
         aheadSeconds = status.aheadSeconds
         aheadBytes = status.aheadBytes
         suspended = status.suspended
         holdReason = status.holdReason
         deliveredBps = status.deliveredBps
         deliveredIdleMs = status.deliveredIdleMs
+        httpWaitCount = status.httpWaitCount
+        httpWaitOldestMs = status.httpWaitOldestMs
+        httpWaitSegment = status.httpWaitSegment
         readrate = status.readrate
         suspendCount = status.suspendCount
         progressIdleMs = status.progressIdleMs
@@ -278,12 +302,24 @@ struct ApplePlaybackServerSnapshot: Encodable, Equatable {
     enum CodingKeys: String, CodingKey {
         case observedAgeMs = "observed_age_ms"
         case recentSpeed = "recent_speed"
+        case serverReadyState = "server_ready_state"
+        case serverReadyAnchorMs = "server_ready_anchor_ms"
+        case serverReadyEndMs = "server_ready_end_ms"
+        case serverReadySeconds = "server_ready_seconds"
+        case serverNextReadyStartMs = "server_next_ready_start_ms"
+        case serverNextReadyEndMs = "server_next_ready_end_ms"
+        case productionAheadSeconds = "production_ahead_seconds"
+        case productionTargetSeconds = "production_target_seconds"
+        case producerState = "producer_state"
         case aheadSeconds = "ahead_seconds"
         case aheadBytes = "ahead_bytes"
         case suspended
         case holdReason = "hold_reason"
         case deliveredBps = "delivered_bps"
         case deliveredIdleMs = "delivered_idle_ms"
+        case httpWaitCount = "http_wait_count"
+        case httpWaitOldestMs = "http_wait_oldest_ms"
+        case httpWaitSegment = "http_wait_segment"
         case readrate
         case suspendCount = "suspend_count"
         case progressIdleMs = "progress_idle_ms"
@@ -1310,6 +1346,13 @@ struct PlaybackStallDetector: Equatable {
         return max(0, Int(((observedAt - stagnantSince) * 1_000).rounded()))
     }
 
+    /// Age of the last sampled film-clock advance. Unlike the recovery
+    /// duration, no baseline means unavailable rather than a measured zero.
+    func progressAgeMs(at observedAt: TimeInterval) -> Int? {
+        guard lastPositionMs != nil, let stagnantSince else { return nil }
+        return max(0, Int(((observedAt - stagnantSince) * 1_000).rounded()))
+    }
+
     mutating func takeRecoveredDurationMs() -> Int? {
         defer { recoveredDurationMs = nil }
         return recoveredDurationMs
@@ -1386,6 +1429,10 @@ struct PlaybackRecoveryMonitor: Equatable {
     mutating func takeRecoveredStagnantDurationMs() -> Int? {
         defer { recoveredStagnantDurationMs = nil }
         return recoveredStagnantDurationMs
+    }
+
+    func progressAgeMs(at observedAt: TimeInterval) -> Int? {
+        progressDetector.progressAgeMs(at: observedAt)
     }
 
     mutating func reset() {
@@ -1639,6 +1686,25 @@ final class PlayerController: ObservableObject {
     /// how old it was.
     private var diagnosticSessionStatus: PlaybackSessionStatus?
     private var diagnosticSessionStatusObservedAt: Date?
+    var sessionStatusAgeMs: Int? {
+        guard sessionStatus != nil, let observedAt = diagnosticSessionStatusObservedAt else {
+            return nil
+        }
+        return max(0, Int(Date().timeIntervalSince(observedAt) * 1_000))
+    }
+    var presentationProgressAgeMs: Int? {
+        playbackRecoveryMonitor.progressAgeMs(
+            at: ProcessInfo.processInfo.systemUptime
+        )
+    }
+    var isPlaybackWaiting: Bool {
+        started
+            && wantsPlayback
+            && !finished
+            && !failed
+            && !isChangingStream
+            && player.timeControlStatus == .waitingToPlayAtSpecifiedRate
+    }
     @Published private(set) var currentMs = 0
     @Published private(set) var knownDurationMs = 0
     @Published private(set) var isPlaying = false

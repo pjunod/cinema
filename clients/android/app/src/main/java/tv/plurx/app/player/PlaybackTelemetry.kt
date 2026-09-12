@@ -363,6 +363,13 @@ internal class OpenPlaybackStallTracker(
         return remaining.coerceIn(MIN_SAMPLE_DELAY_MS, MAX_SAMPLE_DELAY_MS)
     }
 
+    /** Age of the last sampled film-clock advance; no baseline is unknown. */
+    fun progressAgeMs(observedAtMs: Long): Long? {
+        if (baselinePositionMs == null) return null
+        val since = stagnantSinceMs ?: return null
+        return (observedAtMs - since).coerceAtLeast(0)
+    }
+
     fun reset() {
         baselinePositionMs = null
         stagnantSinceMs = null

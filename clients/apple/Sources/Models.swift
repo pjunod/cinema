@@ -867,6 +867,20 @@ struct PlaybackSessionStatus: Codable {
     var fetchedSegment: Int?
     var firstRetainedSegment: Int?
     var playlistShape: String?
+    var controlDemand: String?
+    var reportedPositionMs: Int?
+    var clientRunwayMs: Int?
+    var renderState: String?
+    var serverReadyState: String?
+    var serverReadyAnchorMs: Int?
+    var serverReadyEndMs: Int?
+    var serverReadySeconds: Double?
+    var serverNextReadyStartMs: Int?
+    var serverNextReadyEndMs: Int?
+    var productionPolicy: String?
+    var productionAheadSeconds: Int?
+    var productionTargetSeconds: Int?
+    var producerState: String?
     var aheadSeconds: Int?
     var aheadBytes: Int?
     var holdReason: String?
@@ -875,6 +889,10 @@ struct PlaybackSessionStatus: Codable {
     var deliveredBytes: Int?
     var deliveredBps: Int?
     var deliveredIdleMs: Int?
+    var httpWaitCount: Int?
+    var httpWaitOldestMs: Int?
+    var httpWaitSegment: Int?
+    var statusGeneratedUnixMs: Int?
     var readrate: Double?
     var suspended: Bool?
     var suspendCount: Int?

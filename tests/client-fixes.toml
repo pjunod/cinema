@@ -1250,3 +1250,13 @@ source = "clients/apple/Sources/LiveTvDeveloperView.swift"
 source_anchor = "Fleet and link evidence: Not met · Checked during playback"
 test = "tests/operations/test_evidence_workflows.py"
 test_anchor = "test_apple_prepared_enablement_is_visible_and_advisory"
+
+[[fixes]]
+# The visible-wait correction must sample the controller's attached player;
+# there is deliberately no shadow player binding in that overlay scope.
+id = "android.presentation-wait-samples-attached-player"
+commits = ["6f800466"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"
+source_anchor = "controller.player.bufferedPosition - controller.player.currentPosition"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackInfoContractTest.kt"
+test_anchor = "waitingCopyDoesNotCallServerWaitsClientBuffering"

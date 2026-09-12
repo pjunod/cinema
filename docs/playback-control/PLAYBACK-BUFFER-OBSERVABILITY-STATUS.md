@@ -1,0 +1,84 @@
+# Playback buffer observability — implementation status
+
+**Status:** implementation complete · handed to final integrator · **Updated:**
+2026-09-12 · **Base:** `10f2afe6` · **Effort:**
+`effort/buffer-observability`
+
+This is the live execution ledger for the additive playback buffer and delivery
+instrumentation that follows the
+[playback lifecycle implementation](PLAYBACK-LIFECYCLE-IMPLEMENTATION.md). It
+records what is built, what each measurement means, and which qualification
+evidence exists. Unknown and stale observations are never recorded as zero.
+
+## Progress
+
+| Package | State | Current evidence | Next action |
+|---|---|---|---|
+| O01 measurement contract | complete | the generated cross-client field contract names source read, anchored server ready, server HTTP wait/delivery, client loaded media and presentation separately; missing readiness is `0.0 s` while unknown is `Unavailable` | none |
+| O02 server publication | merged to effort | rolling applies the achieved origin once and stops at pruned/gapped media; VOD begins at the accepted playhead/seek entry and requires init plus contiguous materialized entries; the bounded wait pool publishes per-session count, oldest age and segment | none |
+| O03 Apple presentation | merged to effort | Apple info/debug rows consume the shared fields; AVPlayer loaded ranges and film-clock age stay separate; visible waits name presentation, client-loaded media and server HTTP-wait state without inferring a cause | none |
+| O04 Android presentation | merged to effort | Media3 reports attached-player loaded runway and presentation age; server samples are identity-fenced and age-stamped; rows and visible waiting copy use the shared vocabulary | none |
+| O05 web presentation | merged to effort | browser buffered ranges, frame/clock advancement, server sample age and server HTTP waits are distinct; visible waits refresh when a newer status sample arrives | none |
+| O06 promotion | handed off | client task PR [#264](http://192.168.4.7:3000/noirr/plurx/pulls/264) merged at `35d40a2d`; the playback-rewrite integration session owns the one combined adversarial review, final fast lane and main promotion | integrate `effort/buffer-observability` into the combined candidate |
+
+## Measurement contract
+
+The normal stats/info surface uses these separate facts:
+
+1. **Source read:** measured source availability or read activity only. A
+   configured input pace is policy, not source activity; unsupported readings
+   stay unavailable.
+2. **Server ready:** contiguous complete media that the active recipe and
+   generation can read, beginning at the latest accepted absolute film-time
+   playhead or pending seek target. Coverage must contain that anchor. A known
+   missing anchored segment is zero; evicted or unobservable coverage is
+   unavailable. A later ready island is debug context, not runway at the
+   playhead.
+3. **HTTP delivery:** server-observed completed response bytes/rate and active
+   server wait. Response completion is not proof that the client received,
+   demuxed, decoded, or retained the media.
+4. **Client loaded:** the contiguous native/browser loaded range ahead of the
+   current attached playhead. Prepared-successor ranges never enter the current
+   player's number.
+5. **Presentation:** player clock/frame progress and the age of its last
+   advance. Loaded media alone never attributes why presentation stopped.
+
+Production actual, production target, paced/running state and resource wait
+remain separate producer facts. The target is not displayed or interpreted as
+a buffer. Rolling readiness comes from complete published segments plus the
+retained window, with `media_origin_ms` applied once. VOD readiness comes from
+bounded manifest metadata beginning at the entry containing the accepted
+anchor; global completion, planned entries and non-contiguous cache islands do
+not count.
+
+## Qualification ledger
+
+| Candidate | Command or gate | Result |
+|---|---|---|
+| `10f2afe6` | `rustc --version` | `rustc 1.97.1 (8bab26f4f 2026-07-14)` |
+| `10f2afe6` | `cargo --version` | `cargo 1.97.1 (c980f4866 2026-06-30)` |
+| server task | `cargo fmt --all -- --check`; `cargo check -p plurxd --locked --all-targets`; `cargo clippy -p plurxd --locked --all-targets -- -D warnings` | passed |
+| server task | three exact Rust regressions: origin/retention readiness, wait-pool observation, VOD disjoint far-seek readiness | 3 passed; 0 failed |
+| client task `6f800466` | `node tests/playback/web-policy.test.js`; `node tests/playback/player-input-contract.test.js`; `node tests/web/player-dom.test.js` | passed |
+| client task `6f800466` | pinned Android JDK 25 / SDK 37: `:app:compileDebugKotlin`, `:app:assembleDebugAndroidTest`, and `:app:testDebugUnitTest --tests tv.plurx.app.player.PlaybackInfoContractTest --tests tv.plurx.app.player.PlaybackTelemetryTest` | passed; instrumentation sources compiled; focused JVM classes passed |
+| client task `6f800466` | iOS simulator build plus the two new `AppleClientTests`; tvOS simulator build | passed; 2 tests, 0 failures; both Apple platforms compiled |
+| client task `465a3aac` | Effort development gate [run 1895](http://192.168.4.7:3000/noirr/plurx/actions/runs/1877) | passed; policy preflight, Rust compile and aggregate gate green |
+| effort merge `35d40a2d` | PR [#264](http://192.168.4.7:3000/noirr/plurx/pulls/264) | merged into `effort/buffer-observability` |
+| combined current-main candidate | one adversarial review | delegated to playback-rewrite integration session; not requested here |
+| reviewed combined candidate | fast lane / Main promotion gate | delegated to playback-rewrite integration session; not run here |
+
+## Decisions made without waiting
+
+- This is ordinary observability and is visible through the existing stats
+  preference. It needs no Developer capability switch or qualification gate.
+- The existing two-second server status cadence and player progress sampling
+  are the telemetry budget. The implementation will not add a recovery owner,
+  watchdog, media-file scan, or independent polling loop.
+- Apple TV presentation is the first UI priority, while labels and measurement
+  meanings remain shared with Android and web.
+- Focused regressions required by the repository workflow run before task
+  pushes. The full suites stay deferred; the fast lane runs once, after the
+  single adversarial review is addressed on the final candidate.
+- The concurrent playback-rewrite session is the final integrator. It will
+  combine this additive effort with its rewrite work before review and
+  promotion, avoiding two competing main candidates and two fast-lane runs.
