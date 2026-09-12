@@ -664,6 +664,7 @@ struct LibraryChannelsView: View {
     @State private var personalPlayback: PlayContext?
     @State private var returnChannel: LibraryChannel?
     @State private var focusedProgrammeId: String?
+    @State private var fullscreen = false
     @AppStorage("libraryChannelTVLayout") private var tvLayout = "guide_preview"
 
     var body: some View {
@@ -761,6 +762,9 @@ struct LibraryChannelsView: View {
                     .padding()
             }
         }
+        .fullScreenCover(isPresented: $fullscreen) {
+            channelFullscreenSurface
+        }
         .task {
             await controller.load(model: model)
             while !Task.isCancelled {
@@ -768,7 +772,9 @@ struct LibraryChannelsView: View {
                 await controller.refresh()
             }
         }
-        .onDisappear { Task { await controller.stop() } }
+        .onDisappear {
+            if !fullscreen { Task { await controller.stop() } }
+        }
     }
 
     private var layoutLabel: String {
@@ -783,8 +789,10 @@ struct LibraryChannelsView: View {
         VStack(alignment: .leading, spacing: 12) {
             ZStack {
                 RoundedRectangle(cornerRadius: 18).fill(Color.black)
-                if controller.watching != nil {
+                if controller.watching != nil && !fullscreen {
                     VideoPlayer(player: controller.player).clipShape(RoundedRectangle(cornerRadius: 18))
+                } else if controller.watching != nil {
+                    Color.black
                 } else {
                     ContentUnavailableView("Choose a channel", systemImage: "play.tv", description: Text("Join the programme already in progress."))
                         .foregroundStyle(.white)
@@ -795,6 +803,9 @@ struct LibraryChannelsView: View {
                 Text(channel.name).font(.title2.bold())
                 Text(controller.title ?? "On now").font(.headline)
                 HStack {
+                    #if os(tvOS)
+                    Button("Fullscreen") { fullscreen = true }
+                    #endif
                     Button(controller.paused ? "Resume live" : "Pause") { Task { await controller.togglePause() } }
                     Button("Watch from start") {
                         returnChannel = channel
@@ -819,6 +830,31 @@ struct LibraryChannelsView: View {
                     .accessibilityIdentifier("library-channel-playback-error")
             }
             Text(controller.message).font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private var channelFullscreenSurface: some View {
+        ZStack(alignment: .topTrailing) {
+            Color.black.ignoresSafeArea()
+            VideoPlayer(player: controller.player).ignoresSafeArea()
+            VStack(alignment: .trailing, spacing: 12) {
+                Button("Return to channels") { fullscreen = false }
+                if controller.watching != nil {
+                    Button(controller.paused ? "Resume live" : "Pause") {
+                        Task { await controller.togglePause() }
+                    }
+                    Button("Stop") {
+                        fullscreen = false
+                        Task { await controller.stop() }
+                    }
+                }
+            }
+            #if os(tvOS)
+            .buttonStyle(TVReadableButtonStyle(prominent: true))
+            #else
+            .buttonStyle(.borderedProminent)
+            #endif
+            .padding()
         }
     }
 
