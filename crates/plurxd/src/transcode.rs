@@ -816,24 +816,32 @@ impl SegmentIndex {
         let containing = self.segs.iter().position(|segment| {
             segment.start_ms <= relative_anchor && relative_anchor < segment.end_ms
         });
-        let next_retained = self
-            .segs
-            .iter()
-            .position(|segment| !segment.pruned && segment.end_ms > relative_anchor);
-        let next_interval = next_retained.map(|start| {
-            let first = &self.segs[start];
-            let mut end_ms = first.end_ms;
-            for segment in self.segs.iter().skip(start + 1) {
-                if segment.pruned || segment.start_ms > end_ms {
-                    break;
-                }
-                end_ms = end_ms.max(segment.end_ms);
-            }
-            (
-                media_origin_ms.saturating_add(first.start_ms),
-                media_origin_ms.saturating_add(end_ms),
-            )
-        });
+        let retained_interval_after = |floor_ms: i64, inclusive: bool| {
+            self.segs
+                .iter()
+                .position(|segment| {
+                    !segment.pruned
+                        && if inclusive {
+                            segment.start_ms >= floor_ms
+                        } else {
+                            segment.start_ms > floor_ms
+                        }
+                })
+                .map(|start| {
+                    let first = &self.segs[start];
+                    let mut end_ms = first.end_ms;
+                    for segment in self.segs.iter().skip(start + 1) {
+                        if segment.pruned || segment.start_ms > end_ms {
+                            break;
+                        }
+                        end_ms = end_ms.max(segment.end_ms);
+                    }
+                    (
+                        media_origin_ms.saturating_add(first.start_ms),
+                        media_origin_ms.saturating_add(end_ms),
+                    )
+                })
+        };
         let Some(start) = containing else {
             let known_missing = relative_anchor >= 0
                 && self
@@ -846,11 +854,15 @@ impl SegmentIndex {
                 } else {
                     "unavailable"
                 },
-                next_interval,
+                retained_interval_after(relative_anchor, false),
             );
         };
         if self.segs[start].pruned {
-            return ReadyCoverage::without_anchor(anchor_ms, "unavailable", next_interval);
+            return ReadyCoverage::without_anchor(
+                anchor_ms,
+                "unavailable",
+                retained_interval_after(relative_anchor, false),
+            );
         }
         let mut end_ms = self.segs[start].end_ms;
         for segment in self.segs.iter().skip(start + 1) {
@@ -860,6 +872,7 @@ impl SegmentIndex {
             end_ms = end_ms.max(segment.end_ms);
         }
         let absolute_end_ms = media_origin_ms.saturating_add(end_ms);
+        let next_interval = retained_interval_after(end_ms, true);
         ReadyCoverage {
             state: "ready",
             anchor_ms: Some(anchor_ms),
@@ -30484,6 +30497,11 @@ pub(crate) mod tests {
         assert_eq!(ready.anchor_ms, Some(725_500));
         assert_eq!(ready.end_ms, Some(732_000));
         assert_eq!(ready.seconds, Some(6.5));
+        assert_eq!(
+            ready.next_start_ms, None,
+            "the anchored run is not a later island"
+        );
+        assert_eq!(ready.next_end_ms, None);
 
         let evicted = index.server_ready(720_000, 721_000);
         assert_eq!(evicted.state, "unavailable");
@@ -30494,6 +30512,11 @@ pub(crate) mod tests {
         let beyond = index.server_ready(720_000, 733_000);
         assert_eq!(beyond.state, "missing");
         assert_eq!(beyond.seconds, Some(0.0));
+        assert_eq!(
+            beyond.next_start_ms, None,
+            "media behind the anchor is not later"
+        );
+        assert_eq!(beyond.next_end_ms, None);
     }
 
     /// End to end through the atomics: the rate appears, and a gapped sample

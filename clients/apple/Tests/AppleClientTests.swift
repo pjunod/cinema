@@ -3446,8 +3446,8 @@ final class AppleClientTests: XCTestCase {
             ),
             .none
         )
-        XCTAssertEqual(detector.progressAgeMs(at: 100), 0)
-        XCTAssertEqual(detector.progressAgeMs(at: 102), 2_000)
+        XCTAssertNil(detector.progressAgeMs(at: 100))
+        XCTAssertNil(detector.progressAgeMs(at: 102))
         XCTAssertEqual(
             detector.sample(
                 positionMs: 12_000,

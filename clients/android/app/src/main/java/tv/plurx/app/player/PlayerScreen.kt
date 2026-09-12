@@ -1241,7 +1241,8 @@ private fun PlayerContent(
             )
         }
 
-        if (!isInPip && (buffering || findingNext)) {
+        val playbackWaiting = controller.isPlaybackWaiting
+        if (!isInPip && (playbackWaiting || findingNext)) {
             val waiting = playbackWaitPresentation(
                 runwaySeconds = (controller.player.bufferedPosition - controller.player.currentPosition)
                     .coerceAtLeast(0) / 1_000.0,
@@ -1254,7 +1255,7 @@ private fun PlayerContent(
                     color = Color.White,
                     modifier = Modifier.padding(top = 12.dp),
                 )
-                if (buffering && !findingNext) {
+                if (playbackWaiting && !findingNext) {
                     Text(waiting.detail, color = Color.White.copy(alpha = 0.72f))
                 }
             }

@@ -1115,6 +1115,7 @@ struct PlayerAttachmentRecoveryState: Equatable {
 /// and the first non-zero presentation size retires the watchdog for good.
 struct BlackFrameWatchdog: Equatable {
     private(set) var lastPositionMs: Int?
+    private(set) var lastAdvanceAt: TimeInterval?
     private(set) var blackMs = 0
     private(set) var presentedVideo = false
     private(set) var fired = false
@@ -1312,6 +1313,7 @@ struct PlaybackStallDetector: Equatable {
         if positionMs >= lastPositionMs + 250 || positionMs < lastPositionMs - 250 {
             recordRecovery(at: observedAt)
             self.lastPositionMs = positionMs
+            lastAdvanceAt = observedAt
             stagnantChecks = 0
             stagnantSince = observedAt
             waitingSamples = 0
@@ -1349,8 +1351,8 @@ struct PlaybackStallDetector: Equatable {
     /// Age of the last sampled film-clock advance. Unlike the recovery
     /// duration, no baseline means unavailable rather than a measured zero.
     func progressAgeMs(at observedAt: TimeInterval) -> Int? {
-        guard lastPositionMs != nil, let stagnantSince else { return nil }
-        return max(0, Int(((observedAt - stagnantSince) * 1_000).rounded()))
+        guard let lastAdvanceAt else { return nil }
+        return max(0, Int(((observedAt - lastAdvanceAt) * 1_000).rounded()))
     }
 
     mutating func takeRecoveredDurationMs() -> Int? {
@@ -1370,6 +1372,7 @@ struct PlaybackStallDetector: Equatable {
         lastPositionMs = nil
         stagnantChecks = 0
         stagnantSince = nil
+        lastAdvanceAt = nil
         waitingSamples = 0
     }
 

@@ -3939,17 +3939,18 @@ impl VodServe {
             } else {
                 "missing"
             };
-            let search_from = anchor_index.unwrap_or_else(|| {
-                ready_anchor
-                    .map(|anchor| entry_containing(&rendition.plan, anchor as f64 / 1_000.0))
-                    .unwrap_or(0)
-            });
+            let later_floor = anchored_end.or(ready_anchor);
             let next_index = init_present
                 .then(|| {
-                    (search_from..manifest.len() as u32).find(|index| {
+                    (0..manifest.len() as u32).find(|index| {
+                        let Some(entry) = rendition.plan.entry(*index) else {
+                            return false;
+                        };
+                        let start_ms = ticks_to_ms(entry.start_ticks, rendition.timescale);
                         manifest
                             .state(*index)
                             .is_some_and(SegState::is_materialized)
+                            && later_floor.is_some_and(|floor| start_ms > floor)
                     })
                 })
                 .flatten();
@@ -12377,6 +12378,8 @@ mod tests {
         assert_eq!(status.server_ready_state, "ready");
         assert_eq!(status.server_ready_anchor_ms, Some(anchor_ms));
         assert_eq!(status.server_ready_end_ms, Some(end_of(22)));
+        assert_eq!(status.server_next_ready_start_ms, None);
+        assert_eq!(status.server_next_ready_end_ms, None);
         assert_eq!(
             status.server_ready_seconds,
             Some((end_of(22) - anchor_ms) as f64 / 1_000.0)
@@ -12396,6 +12399,23 @@ mod tests {
         }
         let filled = serve.status("sess-a").await.expect("live VOD status");
         assert_eq!(filled.published_end_ms, filled.ready_ahead_end_ms);
+
+        let beyond_end = end_of((rendition.plan.entries.len() - 1) as u32) + 1_000;
+        {
+            let mut sessions = serve.shared.sessions.lock().await;
+            let snapshot = sessions
+                .get_mut("sess-a")
+                .and_then(|session| session.last_control_snapshot.as_mut())
+                .expect("control snapshot");
+            snapshot.position_ms = beyond_end;
+            snapshot.buffered_from_ms = Some(beyond_end);
+            snapshot.buffered_through_ms = beyond_end;
+        }
+        let beyond = serve.status("sess-a").await.expect("live VOD status");
+        assert_eq!(beyond.server_ready_state, "missing");
+        assert_eq!(beyond.server_ready_seconds, Some(0.0));
+        assert_eq!(beyond.server_next_ready_start_ms, None);
+        assert_eq!(beyond.server_next_ready_end_ms, None);
     }
 
     #[tokio::test]

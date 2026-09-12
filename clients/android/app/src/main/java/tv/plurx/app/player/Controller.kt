@@ -400,7 +400,7 @@ class Controller(
     val presentationProgressAgeMs: Long?
         get() = openStallTracker.progressAgeMs(monotonicNowMs())
     val isPlaybackWaiting: Boolean
-        get() = player.playWhenReady && player.playbackState == Player.STATE_BUFFERING
+        get() = playbackIsWaiting(player.playWhenReady, player.playbackState)
 
     val currentSessionId: String? get() = sessionId
     val currentSessionIsVod: Boolean get() = sessionIsVod

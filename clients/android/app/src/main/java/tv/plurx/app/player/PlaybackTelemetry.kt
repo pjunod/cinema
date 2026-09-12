@@ -13,6 +13,9 @@ import tv.plurx.app.data.Net
 import tv.plurx.app.data.Session
 import kotlin.math.abs
 
+internal fun playbackIsWaiting(playbackRequested: Boolean, playbackState: Int): Boolean =
+    playbackRequested && playbackState == androidx.media3.common.Player.STATE_BUFFERING
+
 /** The typed subset of `POST /api/v1/client-log` Android can measure. */
 @Serializable
 internal data class PlaybackClientLog(
@@ -289,6 +292,7 @@ internal class OpenPlaybackStallTracker(
 
     private var baselinePositionMs: Long? = null
     private var stagnantSinceMs: Long? = null
+    private var lastAdvanceAtMs: Long? = null
     private var fired = false
     private var deferred = false
     private var nativeReevaluationSpent = false
@@ -306,6 +310,7 @@ internal class OpenPlaybackStallTracker(
         }
         val baseline = baselinePositionMs
         if (baseline == null || kotlin.math.abs(positionMs - baseline) >= progressThresholdMs) {
+            if (baseline != null) lastAdvanceAtMs = observedAtMs
             baselinePositionMs = positionMs
             stagnantSinceMs = observedAtMs
             fired = false
@@ -365,14 +370,14 @@ internal class OpenPlaybackStallTracker(
 
     /** Age of the last sampled film-clock advance; no baseline is unknown. */
     fun progressAgeMs(observedAtMs: Long): Long? {
-        if (baselinePositionMs == null) return null
-        val since = stagnantSinceMs ?: return null
+        val since = lastAdvanceAtMs ?: return null
         return (observedAtMs - since).coerceAtLeast(0)
     }
 
     fun reset() {
         baselinePositionMs = null
         stagnantSinceMs = null
+        lastAdvanceAtMs = null
         fired = false
         deferred = false
         nativeReevaluationSpent = false

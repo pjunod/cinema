@@ -7625,6 +7625,8 @@ function commitPreparedReplacement(p,state){
   };
   state.predecessor={hls:predecessor,element:retired,sessionId:p.sessionId,
     probeUrl:p.probeUrl,offset:p.offset,wantsPlayback:p.wantsPlayback,
+    health:p.health,healthObservedAt:p.healthObservedAt,
+    presentationAdvancedAt:p.presentationAdvancedAt,
     muted:retired.muted,volume:retired.volume,playbackRate:retired.playbackRate,
     defaultPlaybackRate:retired.defaultPlaybackRate};
   // Authoritative before visible, so anything that reads PLAYER.hls during the
@@ -7633,6 +7635,9 @@ function commitPreparedReplacement(p,state){
   p.sessionId=state.sessionId;
   p.probeUrl=state.playlistUrl;
   p.offset=state.mediaOriginMs/1000;
+  p.health=null;
+  p.healthObservedAt=null;
+  p.presentationAdvancedAt=null;
   p.prepared=null;
   // Still this player's business until its first frame settles: the watchdog
   // below has to be cancellable by a teardown, or it fires eight seconds after
@@ -7729,6 +7734,9 @@ function rollbackPreparedReplacement(p,state,successor){
   p.probeUrl=predecessor.probeUrl;
   p.offset=predecessor.offset;
   p.wantsPlayback=predecessor.wantsPlayback;
+  p.health=predecessor.health;
+  p.healthObservedAt=predecessor.healthObservedAt;
+  p.presentationAdvancedAt=predecessor.presentationAdvancedAt;
   successor.id="";
   retired.id="video";
   successor.id="video-prepared";

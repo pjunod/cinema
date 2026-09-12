@@ -3309,7 +3309,9 @@ async function main() {
   {
     const h = preparedHarness();
     const incumbent = { bandwidthEstimate: 5_000_000, destroyed: false, destroy() { this.destroyed = true; } };
-    const p = h.set(preparedPlayer({ hls: incumbent, vod: false, offset: 600 }));
+    const predecessorHealth = { id: "incumbent", server_ready_seconds: 12 };
+    const p = h.set(preparedPlayer({ hls: incumbent, vod: false, offset: 600,
+      health: predecessorHealth, healthObservedAt: 75, presentationAdvancedAt: 80 }));
     h.live.currentTime = 300;                       // film 900 s
     const state = h.handle(prepareAction({ media_origin_ms: PREPARE_ORIGIN_MS }));
     assert.ok(state, "a valid preparation builds");
@@ -3369,6 +3371,9 @@ async function main() {
       "the predecessor remains recoverable until the successor proves a frame");
     assert.equal(p.sessionId, PREPARE_FIXTURE.session_id);
     assert.equal(p.offset, PREPARE_ORIGIN_MS / 1000, "the player's origin follows the session");
+    assert.equal(p.health, null, "the successor never inherits predecessor server telemetry");
+    assert.equal(p.healthObservedAt, null, "the successor starts without a server-sample age");
+    assert.equal(p.presentationAdvancedAt, null, "the successor must observe its own presentation advance");
     assert.equal(h.spare.id, "video", "the successor is the element the page addresses");
     assert.equal(h.live.id, "video-prepared", "and the predecessor is the spare");
     assert.equal(h.spare.muted, true, "a muted incumbent cannot leak an audible successor frame");
@@ -3413,8 +3418,10 @@ async function main() {
     const h = preparedHarness();
     const incumbent = { bandwidthEstimate: 1, destroyed: false,
       destroy() { this.destroyed = true; } };
+    const predecessorHealth = { id: "incumbent", server_ready_seconds: 9 };
     const p = h.set(preparedPlayer({ hls: incumbent, sessionId: "incumbent",
-      probeUrl: "/incumbent/probe", offset: 12, wantsPlayback: false }));
+      probeUrl: "/incumbent/probe", offset: 12, wantsPlayback: false,
+      health: predecessorHealth, healthObservedAt: 25, presentationAdvancedAt: 30 }));
     h.live.muted = true;
     h.live.volume = 0.4;
     h.live.defaultPlaybackRate = 1.25;
@@ -3436,6 +3443,9 @@ async function main() {
     assert.equal(p.sessionId, "incumbent");
     assert.equal(p.probeUrl, "/incumbent/probe");
     assert.equal(p.offset, 12);
+    assert.equal(p.health, predecessorHealth, "rollback restores predecessor server telemetry");
+    assert.equal(p.healthObservedAt, 25, "rollback restores predecessor sample ownership");
+    assert.equal(p.presentationAdvancedAt, 30, "rollback restores predecessor presentation age");
     assert.equal(incumbent.destroyed, false, "rollback keeps the proven pipeline alive");
     assert.equal(successor.destroyed, true, "rollback destroys the frame-less successor");
     assert.equal(h.live.id, "video");
