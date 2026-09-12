@@ -1,6 +1,6 @@
 # Playback buffer observability — implementation status
 
-**Status:** implementation complete · effort qualification pending · **Updated:**
+**Status:** implementation complete · handed to final integrator · **Updated:**
 2026-09-12 · **Base:** `10f2afe6` · **Effort:**
 `effort/buffer-observability`
 
@@ -16,10 +16,10 @@ evidence exists. Unknown and stale observations are never recorded as zero.
 |---|---|---|---|
 | O01 measurement contract | complete | the generated cross-client field contract names source read, anchored server ready, server HTTP wait/delivery, client loaded media and presentation separately; missing readiness is `0.0 s` while unknown is `Unavailable` | none |
 | O02 server publication | merged to effort | rolling applies the achieved origin once and stops at pruned/gapped media; VOD begins at the accepted playhead/seek entry and requires init plus contiguous materialized entries; the bounded wait pool publishes per-session count, oldest age and segment | none |
-| O03 Apple presentation | complete on task branch | Apple info/debug rows consume the shared fields; AVPlayer loaded ranges and film-clock age stay separate; visible waits name presentation, client-loaded media and server HTTP-wait state without inferring a cause | merge the client task after its effort gate |
-| O04 Android presentation | complete on task branch | Media3 reports attached-player loaded runway and presentation age; server samples are identity-fenced and age-stamped; rows and visible waiting copy use the shared vocabulary | merge the client task after its effort gate |
-| O05 web presentation | complete on task branch | browser buffered ranges, frame/clock advancement, server sample age and server HTTP waits are distinct; visible waits refresh when a newer status sample arrives | merge the client task after its effort gate |
-| O06 promotion | coordinated | the playback-rewrite integration session owns the one combined adversarial review, final fast lane and main promotion; this effort stops after its green task/effort merge | hand the exact effort head to the integration session |
+| O03 Apple presentation | merged to effort | Apple info/debug rows consume the shared fields; AVPlayer loaded ranges and film-clock age stay separate; visible waits name presentation, client-loaded media and server HTTP-wait state without inferring a cause | none |
+| O04 Android presentation | merged to effort | Media3 reports attached-player loaded runway and presentation age; server samples are identity-fenced and age-stamped; rows and visible waiting copy use the shared vocabulary | none |
+| O05 web presentation | merged to effort | browser buffered ranges, frame/clock advancement, server sample age and server HTTP waits are distinct; visible waits refresh when a newer status sample arrives | none |
+| O06 promotion | handed off | client task PR [#264](http://192.168.4.7:3000/noirr/plurx/pulls/264) merged at `35d40a2d`; the playback-rewrite integration session owns the one combined adversarial review, final fast lane and main promotion | integrate `effort/buffer-observability` into the combined candidate |
 
 ## Measurement contract
 
@@ -62,7 +62,8 @@ not count.
 | client task `6f800466` | `node tests/playback/web-policy.test.js`; `node tests/playback/player-input-contract.test.js`; `node tests/web/player-dom.test.js` | passed |
 | client task `6f800466` | pinned Android JDK 25 / SDK 37: `:app:compileDebugKotlin`, `:app:assembleDebugAndroidTest`, and `:app:testDebugUnitTest --tests tv.plurx.app.player.PlaybackInfoContractTest --tests tv.plurx.app.player.PlaybackTelemetryTest` | passed; instrumentation sources compiled; focused JVM classes passed |
 | client task `6f800466` | iOS simulator build plus the two new `AppleClientTests`; tvOS simulator build | passed; 2 tests, 0 failures; both Apple platforms compiled |
-| effort candidate | Effort development gate | not run |
+| client task `465a3aac` | Effort development gate [run 1895](http://192.168.4.7:3000/noirr/plurx/actions/runs/1877) | passed; policy preflight, Rust compile and aggregate gate green |
+| effort merge `35d40a2d` | PR [#264](http://192.168.4.7:3000/noirr/plurx/pulls/264) | merged into `effort/buffer-observability` |
 | combined current-main candidate | one adversarial review | delegated to playback-rewrite integration session; not requested here |
 | reviewed combined candidate | fast lane / Main promotion gate | delegated to playback-rewrite integration session; not run here |
 
