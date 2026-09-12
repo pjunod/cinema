@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["8673ee82"]
+reason = "Documentation-only reconciliation of playback rewrite implementation, evidence gaps, and freeze intersections. This commit changes Markdown and the docs index, with no runtime or validation behavior. Source links and the existing docs-index contract were checked; it claims no new physical playback acceptance."
+ignore = true

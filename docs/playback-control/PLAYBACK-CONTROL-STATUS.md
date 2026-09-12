@@ -1,5 +1,17 @@
 # Playback control rewrite — project status
 
+**Reconciliation, 2026-09-12:** this historical ledger contains conflicting
+status snapshots. Read [PLAYBACK-REWRITE-REMAINDER.md](PLAYBACK-REWRITE-REMAINDER.md)
+for the source-verified remainder at `efd54247`: M6 priming and VOD marker
+prewarming are built; M9 activation started, but final deletion and acceptance
+are incomplete. The new document distinguishes these from the buffering
+failures in the [lifecycle map](PLAYBACK-LIFECYCLE-COVERAGE.md).
+
+The current [implementation contract](PLAYBACK-LIFECYCLE-IMPLEMENTATION.md)
+defines the bounded build sequence and supersedes historical qualification
+prerequisites below. Developer requirements are advisory; evidence receipts
+do not decide runtime enablement. Follow the revised main-bound fast lane.
+
 **Updated:** 2026-09-09 · **Current follow-up:** `codex/m6-server-prime` on Forgejo `main` `75744fea` ·
 **Fleet:** level again — all four on `v0.3.0-260-g5b127370`, read off
 `/metrics` 2026-09-02. **nuc3 is a non-voting learner** answering `readyz` 503

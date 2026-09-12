@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["01366149"]
+reason = "Documentation-only implementation contract for playback lifecycle work, advisory Developer settings, and the current CI/CD process. The commit changes Markdown and its index/cross-links, with no runtime or validation behavior. Proposed algorithms and proposed tests are explicitly distinguished from deployed fixes and passing evidence."
+ignore = true

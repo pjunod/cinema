@@ -156,6 +156,11 @@ across the target hardware.
 
 ## Film-addressed VOD — enable it and prove the client contract
 
+**2026-09-12 correction:** the deployed system is VOD-first with typed
+rolling-HLS recovery. The no-fallback statements below describe the earlier
+cutover. Use the [lifecycle coverage map](playback-control/PLAYBACK-LIFECYCLE-COVERAGE.md)
+for the current path/state matrix and assert the actual presentation in each run.
+
 Every HLS client asks for the VOD presentation, and the server treats an absent
 setting as enabled. There is no live-HLS fallback.
 
