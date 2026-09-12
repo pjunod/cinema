@@ -1,8 +1,8 @@
 # Playback lifecycle — implementation status
 
-**Status:** one adversarial review addressed; PR #259 fast lane correcting ownership inventory ·
+**Status:** one adversarial review addressed; PR #259 fast lane correcting operations truth ·
 **Updated:** 2026-09-12 · **Base:** `30cd51afc` · **Effort:**
-`effort/playback-lifecycle` at `5b28ae7e` before this receipt · **Latest task:**
+`effort/playback-lifecycle` at `63d5a6a3` before this receipt · **Latest task:**
 `codex/playback-lifecycle-p3-p4` at `139ad01f`
 
 Companion to the
@@ -23,7 +23,7 @@ sweep actually executes them.
 | P3 / S06–S07 prepared handoff | built and compiled; runtime deferred | successor planning reuses create-time capabilities; Original, grade, audio, offset, subtitle, and compound changes produce one recipe; VOD and rolling prime through their distinct engines; proof/headroom/direction vetoes and session-wide failure suppression are removed | include in current-main integration |
 | P4 / S08 owner transition | built and compiled; runtime deferred | restart/maintenance fences cause the next accepted local control exchange to reserve and prime one remote successor; durable identity precedes resource allocation; cancellation is checked before reserve, after reserve, after prime, and before commit | compile and inspect current-main integration |
 | P5 / S09 closeout | complete | obsolete proof/headroom authority is removed from code comments, superseded M6 briefs are marked as such, and Developer settings expose explicit advisory enablement | preserve receipts through promotion |
-| Main promotion | fast lane correcting ownership inventory on PR #259 | Apple build 143 and Android versionCode 86 are claimed once; final Astra handoff commit is integrated; the one adversarial review's six blockers are addressed; history and catalogue bookkeeping now pass; the next preflight identified five reviewed-count deltas from the new exact-owner lifecycle | publish the reviewed-count correction, retrigger `fast-lane`, and merge only its current green head |
+| Main promotion | fast lane correcting operations truth on PR #259 | Apple build 143 and Android versionCode 86 are claimed once; the one adversarial review's six blockers are addressed; history, catalogue, and ownership inventory now pass; operations checks identified the undocumented internal prepare route and an advisory Apple status that was not explicit | publish the API/readiness correction and its anchor, retrigger `fast-lane`, and merge only its current green head |
 
 The original plan allowed two main promotions. No implementation slice reached
 `main` before P3–P4 completed, so one integrated promotion is smaller in CI and
@@ -161,8 +161,13 @@ row. At `3fd3ea5c`, history and the functionality catalogue passed; the
 ownership inventory then reported the exact admission-token, publication-fence,
 blocked-sentinel, task-owner, and timer-constructor deltas introduced by the
 prepared lifecycle. Those counts are reconciled to their concrete owners in
-the inventory. Merge still requires a green `Main promotion gate` for the
-corrected exact head.
+the inventory. At `63d5a6a3`, all 198 validation-contract cases passed before
+operations checks reported two documentation assertions for the new internal
+prepare route and one Apple advisory-label assertion. The route and total are
+now documented, and Apple explicitly reports the still-uncollected fleet/link
+evidence as `Not met · Checked during playback`; neither status gates its
+toggle. Merge still requires a green `Main promotion gate` for the corrected
+exact head.
 
 ## Cleanup — keep only reusable build state
 

@@ -36,7 +36,7 @@ struct LiveTvDeveloperView: View {
                 Label("Server successor media priming: Met", systemImage: "checkmark.circle")
                 Text("The server reserves the successor before warming local or remote media and cleans up a refused, cancelled, or expired attempt.")
                     .font(.caption)
-                Label("Fleet and link evidence: Checked during playback", systemImage: "questionmark.circle")
+                Label("Fleet and link evidence: Not met · Checked during playback", systemImage: "exclamationmark.triangle")
                 Text("Throughput, decoder capacity, and physical-device observations improve rollout confidence. Missing or low evidence never disables this switch.")
                     .font(.caption)
             }
