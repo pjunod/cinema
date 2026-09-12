@@ -7705,6 +7705,7 @@ impl MediaResponsePublication {
             "segment-not-modified" => Object::NotModified,
             "segment-range-not-satisfiable" => Object::RangeNotSatisfiable,
             "segment-range" => Object::ByteRange,
+            "status" => Object::SessionStatus,
             _ => Object::ProtocolResponse,
         }
     }
@@ -25143,6 +25144,7 @@ pub(crate) struct HlsDeliveryFixture {
     pub(crate) store: Arc<dyn Store>,
     pub(crate) state: crate::state::AppState,
     session: Arc<Session>,
+    _executor_registration: Option<crate::playback_control::RollingProducerExecutorRegistration>,
 }
 
 #[cfg(test)]
@@ -25179,7 +25181,18 @@ impl HlsDeliveryFixture {
     /// Publish a producer-less session under `session_id`, serving whatever
     /// files the caller writes into `dir`.
     pub(crate) async fn publish(dir: &std::path::Path, session_id: &str) -> Self {
-        Self::publish_with_takeover(dir, session_id, None).await
+        Self::publish_with_takeover(dir, session_id, None, false, false).await
+    }
+
+    pub(crate) async fn publish_actor_managed(dir: &std::path::Path, session_id: &str) -> Self {
+        Self::publish_with_takeover(dir, session_id, None, false, true).await
+    }
+
+    pub(crate) async fn publish_copy_actor_managed(
+        dir: &std::path::Path,
+        session_id: &str,
+    ) -> Self {
+        Self::publish_with_takeover(dir, session_id, None, true, true).await
     }
 
     pub(crate) async fn publish_takeover(
@@ -25201,6 +25214,8 @@ impl HlsDeliveryFixture {
                 discontinuity_sequence: owner_epoch.saturating_sub(1),
                 owner_epoch,
             }),
+            false,
+            false,
         )
         .await
     }
@@ -25210,15 +25225,33 @@ impl HlsDeliveryFixture {
         state_root: &std::path::Path,
         session_id: &str,
     ) -> Self {
-        Self::publish_with_takeover_and_state_root(session_dir, state_root, session_id, None).await
+        Self::publish_with_takeover_and_state_root(
+            session_dir,
+            state_root,
+            session_id,
+            None,
+            false,
+            false,
+        )
+        .await
     }
 
     async fn publish_with_takeover(
         dir: &std::path::Path,
         session_id: &str,
         takeover: Option<SessionTakeoverStart>,
+        copy: bool,
+        actor_managed: bool,
     ) -> Self {
-        Self::publish_with_takeover_and_state_root(dir, dir, session_id, takeover).await
+        Self::publish_with_takeover_and_state_root(
+            dir,
+            dir,
+            session_id,
+            takeover,
+            copy,
+            actor_managed,
+        )
+        .await
     }
 
     async fn publish_with_takeover_and_state_root(
@@ -25226,6 +25259,8 @@ impl HlsDeliveryFixture {
         state_root: &std::path::Path,
         session_id: &str,
         takeover: Option<SessionTakeoverStart>,
+        copy: bool,
+        actor_managed: bool,
     ) -> Self {
         use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
         use plurx_core::store::SqliteStore;
@@ -25266,9 +25301,35 @@ impl HlsDeliveryFixture {
             .await
             .expect("file");
 
-        let mut raw_session = test_session(session_dir.to_path_buf());
+        let (control, mut executor_registration) = if actor_managed {
+            let (control, registration) = if copy {
+                crate::playback_control::RollingControlHandle::spawn_prepublication_producer(
+                    "test-copy-start",
+                )
+            } else {
+                crate::playback_control::RollingControlHandle::spawn_prepublication_transcode(
+                    "test-transcode-start",
+                )
+            };
+            (control, Some(registration))
+        } else {
+            (
+                crate::playback_control::RollingControlHandle::spawn("test-start"),
+                None,
+            )
+        };
+        let mut raw_session = test_session_with_control(session_dir.to_path_buf(), control);
         raw_session.takeover = takeover;
         raw_session.file_id = file_id;
+        if copy {
+            raw_session.kind = SessionKind::Copy {
+                aac: true,
+                preserve_dolby_vision: false,
+                convert_dolby_vision: false,
+            };
+            raw_session.method = crate::delivery::Method::HlsCopy;
+            raw_session.encoder_label = Mutex::new("copy");
+        }
         let frozen_file = store
             .get_file(file_id)
             .await
@@ -25286,6 +25347,48 @@ impl HlsDeliveryFixture {
             },
             &raw_session.kind,
         ));
+        if let Some(registration) = executor_registration.as_mut() {
+            registration
+                .register()
+                .await
+                .expect("register actor-managed fixture executor");
+            let presentation_contract = raw_session
+                .frozen_presentation
+                .as_ref()
+                .expect("fixture presentation")
+                .contract_fingerprint
+                .clone();
+            raw_session
+                .control
+                .bind_response_publication_contract(
+                    presentation_contract.clone(),
+                    Arc::clone(&raw_session.failed),
+                )
+                .await
+                .expect("bind actor-managed fixture response contract");
+            let policy = if copy {
+                crate::playback_control::InitialProducerPolicy::copy_immediate(
+                    presentation_contract,
+                    PROGRESS_STALL,
+                )
+            } else {
+                crate::playback_control::InitialProducerPolicy::software(
+                    presentation_contract,
+                    PROGRESS_STALL,
+                )
+            };
+            let attempt = raw_session
+                .control
+                .begin_initial_producer_attempt(policy)
+                .await
+                .expect("admit actor-managed fixture producer");
+            raw_session.bind_retry_compatibility_attempt(attempt).await;
+            raw_session.actor_managed_response_publication = true;
+            raw_session.actor_managed_prepublication_process = true;
+            raw_session
+                .actor_prepublication_producer
+                .store(true, Release);
+        }
         let session = Arc::new(raw_session);
         let state = crate::state::AppState::new(
             "test".into(),
@@ -25311,7 +25414,46 @@ impl HlsDeliveryFixture {
             store,
             state,
             session,
+            _executor_registration: executor_registration,
         }
+    }
+
+    pub(crate) async fn hold_actor_managed_producer(&self) {
+        let attempt = self.session.control.current_producer_attempt();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        assert!(matches!(
+            self.session
+                .control
+                .request_producer_flow_before(attempt, true, deadline)
+                .await,
+            crate::playback_control::ProducerFlowIntentionOutcome::Issue { hold: true, .. }
+        ));
+        {
+            let transition = self.session.control.lock_producer_transition();
+            assert!(self
+                .session
+                .control
+                .reserve_producer_flow_applied(&transition, attempt));
+            self.session
+                .control
+                .finish_producer_flow_applied(&transition, attempt, true, true);
+        }
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if self
+                    .session
+                    .control
+                    .snapshot()
+                    .await
+                    .is_some_and(|snapshot| snapshot.producer_control.physical_flow == "held")
+                {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("actor applies fixture hold");
     }
 
     /// What this session's delivery meter has recorded — the figure behind
@@ -25340,6 +25482,14 @@ impl HlsDeliveryFixture {
             .await
             .expect("fixture control actor")
             .last_renewal_kind
+    }
+
+    pub(crate) async fn actor_snapshot(&self) -> crate::playback_control::RollingLeaseSnapshot {
+        self.session
+            .control
+            .snapshot()
+            .await
+            .expect("fixture control actor")
     }
 
     pub(crate) fn fetched_segment(&self) -> i64 {
@@ -25532,6 +25682,17 @@ impl HlsDeliveryFixture {
 /// real (idle) process because `Session` owns one; nothing here signals it.
 #[cfg(test)]
 fn test_session(dir: PathBuf) -> Session {
+    test_session_with_control(
+        dir,
+        crate::playback_control::RollingControlHandle::spawn("test-start"),
+    )
+}
+
+#[cfg(test)]
+fn test_session_with_control(
+    dir: PathBuf,
+    control: crate::playback_control::RollingControlHandle,
+) -> Session {
     let child = tokio::process::Command::new("sleep")
         .arg("30")
         .stdin(std::process::Stdio::null())
@@ -25540,7 +25701,6 @@ fn test_session(dir: PathBuf) -> Session {
         .kill_on_drop(true)
         .spawn()
         .expect("spawn placeholder child");
-    let control = crate::playback_control::RollingControlHandle::spawn("test-start");
     Session {
         dir,
         recovery: None,
@@ -30626,6 +30786,31 @@ pub(crate) mod tests {
             "fetching from a session is what keeps it alive"
         );
         assert!(mgr.stop_session(session_id, "test").await);
+    }
+
+    #[tokio::test]
+    async fn rolling_status_authz_maps_to_attempt_status() {
+        let root = crate::test_tempdir().expect("status fixture");
+        let session_id = "status-publication";
+        let fixture = HlsDeliveryFixture::publish_actor_managed(root.path(), session_id).await;
+        let publication = fixture
+            .state
+            .transcode
+            .hls_session_status_publication(session_id)
+            .await
+            .expect("rolling status publication");
+
+        fixture
+            .state
+            .transcode
+            .authorize_response_publication(
+                session_id,
+                &publication.owner,
+                MediaResponsePublication::attempt_status("status", None),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .expect("session status must use a typed attempt-status object");
     }
 
     /// The playlist is the only place a copied segment's true duration is

@@ -13584,6 +13584,42 @@ mod tests {
             .expect("media route confirmation accepted")
     }
 
+    async fn activate_fixture_route(
+        fixture: &HlsDeliveryFixture,
+        session_id: &str,
+        playback_id: &str,
+    ) {
+        let user = fixture
+            .store
+            .create_user(playback_id, "hash", false)
+            .await
+            .expect("status fixture user");
+        let now_ms = unix_ms();
+        activate_ready(
+            &fixture.store,
+            MediaSessionActivation {
+                recovery_epoch: String::new(),
+                expected_desired_revision: None,
+                incarnation_id: uuid::Uuid::new_v4().to_string(),
+                session_id: session_id.to_owned(),
+                user_id: user.id,
+                playback_id: playback_id.to_owned(),
+                expected_predecessor_incarnation_id: None,
+                fence_predecessor: false,
+                request_id: None,
+                request_fingerprint: "a".repeat(64),
+                owner_node_id: fixture.state.node_id.clone(),
+                lease_expires_at_ms: now_ms.saturating_add(60_000),
+                recipe_json: "{}".to_owned(),
+                response_json: "{}".to_owned(),
+                publication_ready_at_ms: 0,
+                media_origin_ms: 0,
+                now_ms,
+            },
+        )
+        .await;
+    }
+
     #[tokio::test]
     async fn driven_local_body_rejects_queued_data_after_terminal_failure() {
         let (sender, receiver) = tokio::sync::mpsc::channel(1);
@@ -14248,6 +14284,197 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&session_id);
+    }
+
+    async fn assert_rolling_status_before_and_after_media(
+        fixture: &HlsDeliveryFixture,
+        dir: &std::path::Path,
+        session_id: &str,
+    ) {
+        activate_fixture_route(fixture, session_id, &format!("{session_id}-playback")).await;
+
+        let before = status(
+            State(fixture.state.clone()),
+            AxPath(session_id.to_owned()),
+            HeaderMap::new(),
+        )
+        .await
+        .expect("status before media publication");
+        assert_eq!(before.status(), StatusCode::OK);
+        let before_body = axum::body::to_bytes(before.into_body(), 1024 * 1024)
+            .await
+            .expect("status body before media");
+        let before_json: serde_json::Value =
+            serde_json::from_slice(&before_body).expect("status JSON before media");
+        assert!(before_json.get("producer_state").is_some());
+        assert!(matches!(
+            fixture.last_renewal_kind().await,
+            "test-transcode-start" | "test-copy-start"
+        ));
+
+        fixture.hold_actor_managed_producer().await;
+        let held_before = fixture.actor_snapshot().await;
+        assert_eq!(held_before.producer_control.physical_flow, "held");
+        let held = status(
+            State(fixture.state.clone()),
+            AxPath(session_id.to_owned()),
+            HeaderMap::new(),
+        )
+        .await
+        .expect("status while producer held");
+        assert_eq!(held.status(), StatusCode::OK);
+        let held_after = fixture.actor_snapshot().await;
+        assert_status_snapshot_is_observational(held_before, held_after);
+
+        let segment_name = "seg00000.m4s";
+        let segment_bytes = b"published-media";
+        tokio::fs::write(dir.join(segment_name), segment_bytes)
+            .await
+            .expect("status fixture media");
+        let media = segment(
+            State(fixture.state.clone()),
+            AxPath((session_id.to_owned(), segment_name.to_owned())),
+            HeaderMap::new(),
+        )
+        .await
+        .expect("published media response");
+        let delivered = axum::body::to_bytes(media.into_body(), segment_bytes.len() + 1)
+            .await
+            .expect("published media body");
+        assert_eq!(delivered.as_ref(), segment_bytes);
+        fixture
+            .wait_for_delivery_projection("media-segment", Some(0))
+            .await;
+
+        let published_before = fixture.actor_snapshot().await;
+        let after = status(
+            State(fixture.state.clone()),
+            AxPath(session_id.to_owned()),
+            HeaderMap::new(),
+        )
+        .await
+        .expect("status after media publication");
+        assert_eq!(after.status(), StatusCode::OK);
+        let after_body = axum::body::to_bytes(after.into_body(), 1024 * 1024)
+            .await
+            .expect("status body after media");
+        let after_json: serde_json::Value =
+            serde_json::from_slice(&after_body).expect("status JSON after media");
+        assert_eq!(
+            after_json["delivered_bytes"],
+            serde_json::Value::from(segment_bytes.len() as i64)
+        );
+        assert_eq!(
+            fixture.last_renewal_kind().await,
+            "media-segment",
+            "status remains observational after publication"
+        );
+        let published_after = fixture.actor_snapshot().await;
+        assert_status_snapshot_is_observational(published_before, published_after);
+    }
+
+    fn assert_status_snapshot_is_observational(
+        mut before: crate::playback_control::RollingLeaseSnapshot,
+        mut after: crate::playback_control::RollingLeaseSnapshot,
+    ) {
+        before.delivery.producer_progress_idle_ms = 0;
+        after.delivery.producer_progress_idle_ms = 0;
+        if let Some(exit) = before.delivery.producer_exit.as_mut() {
+            exit.observed_idle_ms = 0;
+        }
+        if let Some(exit) = after.delivery.producer_exit.as_mut() {
+            exit.observed_idle_ms = 0;
+        }
+        before.producer_control.deadline_remaining_ms =
+            before.producer_control.deadline_remaining_ms.map(|_| 0);
+        after.producer_control.deadline_remaining_ms =
+            after.producer_control.deadline_remaining_ms.map(|_| 0);
+        before.producer_control.due_overdue_ms = before.producer_control.due_overdue_ms.map(|_| 0);
+        after.producer_control.due_overdue_ms = after.producer_control.due_overdue_ms.map(|_| 0);
+        before.producer_control.executor_pending_decision_age_ms = before
+            .producer_control
+            .executor_pending_decision_age_ms
+            .map(|_| 0);
+        after.producer_control.executor_pending_decision_age_ms = after
+            .producer_control
+            .executor_pending_decision_age_ms
+            .map(|_| 0);
+        before.producer_control.pending_probe_deadline_remaining_ms = before
+            .producer_control
+            .pending_probe_deadline_remaining_ms
+            .map(|_| 0);
+        after.producer_control.pending_probe_deadline_remaining_ms = after
+            .producer_control
+            .pending_probe_deadline_remaining_ms
+            .map(|_| 0);
+        // The read is itself an actor command, so its ingress coordinate must
+        // advance. It is ordering evidence, not playback-state mutation.
+        before.producer_control.last_applied_sequence = 0;
+        after.producer_control.last_applied_sequence = 0;
+
+        assert_eq!(after.mode, before.mode);
+        assert_eq!(after.last_renewal_kind, before.last_renewal_kind);
+        assert_eq!(after.demand, before.demand);
+        assert_eq!(after.settled_target, before.settled_target);
+        assert_eq!(after.delivery, before.delivery);
+        assert_eq!(after.retired, before.retired);
+        assert_eq!(after.terminal, before.terminal);
+        assert_eq!(after.expiration_claimed, before.expiration_claimed);
+        assert_eq!(after.producer_control, before.producer_control);
+    }
+
+    #[tokio::test]
+    async fn rolling_status_authz_covers_live_transcode_and_remux() {
+        let transcode_dir = crate::test_tempdir().expect("transcode status directory");
+        let transcode_id = uuid::Uuid::new_v4().to_string();
+        let transcode =
+            HlsDeliveryFixture::publish_actor_managed(transcode_dir.path(), &transcode_id).await;
+        assert_rolling_status_before_and_after_media(
+            &transcode,
+            transcode_dir.path(),
+            &transcode_id,
+        )
+        .await;
+
+        let remux_dir = crate::test_tempdir().expect("remux status directory");
+        let remux_id = uuid::Uuid::new_v4().to_string();
+        let feed = plurx_core::testfixtures::pipe_with_distinct_hevc_sample_entries("closed-gop");
+        let mut reader = plurx_core::fmp4::FragmentReader::new();
+        reader.push(&feed);
+        let Some(plurx_core::fmp4::Unit::Init(init)) =
+            reader.next_unit().expect("parse remux init fixture")
+        else {
+            panic!("remux fixture must begin with init");
+        };
+        tokio::fs::write(remux_dir.path().join("init.mp4"), init.bytes)
+            .await
+            .expect("write complete remux init");
+        let remux =
+            HlsDeliveryFixture::publish_copy_actor_managed(remux_dir.path(), &remux_id).await;
+        assert_rolling_status_before_and_after_media(&remux, remux_dir.path(), &remux_id).await;
+    }
+
+    #[tokio::test]
+    async fn rolling_status_authz_does_not_change_vod_status_publication() {
+        let dir = crate::test_tempdir().expect("VOD status directory");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "rolling-unused").await;
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let _owner = install_vod_http_session(&fixture, dir.path(), &session_id).await;
+        activate_fixture_route(&fixture, &session_id, "vod-status-playback").await;
+
+        let response = status(
+            State(fixture.state.clone()),
+            AxPath(session_id),
+            HeaderMap::new(),
+        )
+        .await
+        .expect("VOD status remains independently authorized");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("VOD status body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("VOD status JSON");
+        assert!(json.get("producer_state").is_some());
     }
 
     #[tokio::test]
