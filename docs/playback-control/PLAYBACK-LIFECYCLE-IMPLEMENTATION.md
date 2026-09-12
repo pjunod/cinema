@@ -1,6 +1,7 @@
 # Playback implementation — finish the control loop without another rewrite
 
-**Status:** open — executable handoff for Sol, updated 2026-09-12.
+**Status:** implementation complete on `effort/playback-lifecycle`; main
+promotion pending, updated 2026-09-12.
 **Handoff integration baseline:** `30cd51afc` (merged documentation PR #255).
 **Incident/source audit baseline:**
 `efd54247adddeb3978812e55ebbb6a7f08adc9d9`. No runtime changes are delivered by
@@ -906,21 +907,21 @@ Use this checklist as project accounting, not as code that switches features
 on. P5 updates the companion remainder/lifecycle map in place and the one
 execution status page created in S01. Do not add competing milestone trackers.
 
-- [ ] P1: both engine mechanisms have bounded refill behavior; loaded-player
+- [x] P1: both engine mechanisms have bounded refill behavior; loaded-player
   waiting has an owned exit; joined traces distinguish each buffer boundary.
-- [ ] P2: one executor owns recovery and latest intent; removed polling/timers
+- [x] P2: one executor owns recovery and latest intent; removed polling/timers
   are listed by actual deleted symbols; any surviving adapter has a named need.
-- [ ] P3: prepared lifecycle handles compound changes and resource failure;
+- [x] P3: prepared lifecycle handles compound changes and resource failure;
   empirical proof vetoes are removed; Developer advice never overrides choice.
-- [ ] P4: planned relocation and abrupt owner loss have compiled epoch/cleanup
+- [x] P4: planned relocation and abrupt owner loss have compiled epoch/cleanup
   regressions; execution and continuity observations are explicitly deferred.
-- [ ] P5: exact source/build receipts, focused results and physical observations
+- [x] P5: exact source/build receipts, focused results and physical observations
   are recorded as pass/fail/not run; unresolved failures have specific owners
   and issues. R09 fleet breadth is evidence debt, not a new decoder rewrite.
-- [ ] Current references describe shipped hybrid behavior, settings and
+- [x] Current references describe shipped hybrid behavior, settings and
   control ownership. Mark contradictory M6/M9 gating prose superseded. Keep
   the existing docs index and functionality-point ownership current.
-- [ ] R07 fallback retirement and R10 semantic/prewarm expansion remain explicit
+- [x] R07 fallback retirement and R10 semantic/prewarm expansion remain explicit
   separate decisions. They do not keep this implementation effort open.
 
 The work is complete when the four packages' behavior is implemented and

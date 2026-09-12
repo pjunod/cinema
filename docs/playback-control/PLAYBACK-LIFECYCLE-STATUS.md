@@ -1,9 +1,9 @@
 # Playback lifecycle — implementation status
 
-**Status:** P1–P5 built and task-head compiled; current-main integration pending ·
+**Status:** P1–P5 built and exact integrated tree compiled; draft promotion next ·
 **Updated:** 2026-09-12 · **Base:** `30cd51afc` · **Effort:**
-`effort/playback-lifecycle` · **Task:** `codex/playback-lifecycle-p3-p4` at
-`139ad01f`
+`effort/playback-lifecycle` at `180ddcdd` · **Latest task:**
+`codex/playback-lifecycle-p3-p4` at `139ad01f`
 
 Companion to the
 [implementation contract](PLAYBACK-LIFECYCLE-IMPLEMENTATION.md) (what to build),
@@ -23,7 +23,7 @@ sweep actually executes them.
 | P3 / S06–S07 prepared handoff | built and compiled; runtime deferred | successor planning reuses create-time capabilities; Original, grade, audio, offset, subtitle, and compound changes produce one recipe; VOD and rolling prime through their distinct engines; proof/headroom/direction vetoes and session-wide failure suppression are removed | include in current-main integration |
 | P4 / S08 owner transition | built and compiled; runtime deferred | restart/maintenance fences cause the next accepted local control exchange to reserve and prime one remote successor; durable identity precedes resource allocation; cancellation is checked before reserve, after reserve, after prime, and before commit | compile and inspect current-main integration |
 | P5 / S09 closeout | complete | obsolete proof/headroom authority is removed from code comments, superseded M6 briefs are marked as such, and Developer settings expose explicit advisory enablement | preserve receipts through promotion |
-| Main promotion | not opened | Apple build 143 and Android versionCode 86 are claimed once for the integrated branch; no implementation review or fast lane has run | merge current `main`, compile that exact tree, open one draft PR, obtain one adversarial review, address it, then run one fast lane |
+| Main promotion | ready to open as draft | Apple build 143 and Android versionCode 86 are claimed once; final Astra handoff commit is integrated; exact effort tree compiled; no implementation review or fast lane has run | open one draft PR, obtain one adversarial review, address it, then run one fast lane |
 
 The original plan allowed two main promotions. No implementation slice reached
 `main` before P3–P4 completed, so one integrated promotion is smaller in CI and
@@ -46,9 +46,14 @@ remain separate history inside the effort branch.
 | `139ad01f` tree | `scripts/js-check` | passed; shipped inline scripts parsed without running browser tests |
 | `139ad01f` tree | `make apple-build` plus iOS and tvOS `build-for-testing` | passed at Apple build 143; test bundles compiled but did not execute |
 | `139ad01f` tree | `ANDROID_HOME=/Users/pjunod/Library/Android/sdk ./gradlew :app:assembleDebug :app:compileDebugUnitTestKotlin --no-daemon` | passed at Android versionCode 86; test source compiled but did not execute |
+| `180ddcdd` tree | pinned Rust fmt, `cargo check -p plurxd --locked --all-targets`, and Clippy with `-D warnings` | passed in 2, 7, and 13 seconds respectively |
+| `180ddcdd` tree | `scripts/js-check` | passed; two shipped inline script blocks parsed |
+| `180ddcdd` tree | `make apple-build` | passed for iOS and tvOS at Apple build 143 |
+| `180ddcdd` tree | iOS and tvOS `xcodebuild ... build-for-testing` | passed; changed XCTest sources compiled without execution |
+| `180ddcdd` tree | `ANDROID_HOME=/Users/pjunod/Library/Android/sdk ./gradlew :app:assembleDebug :app:compileDebugUnitTestKotlin --no-daemon` | passed in 6 seconds at Android versionCode 86; no tests executed |
 
-The compiler loop will be repeated on the exact current-main integration head.
-No unit,
+The compiler loop will be repeated only if `main` moves before review or review
+corrections change compiled source. No unit,
 integration, browser, simulator, emulator, playback, or physical suite has run
 in this campaign. Regressions remain `written; not run` until the separate
 sweep supplies results.
