@@ -3,9 +3,12 @@ package tv.plurx.app.ui.components
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalMinimumInteractiveComponentSize
 import androidx.compose.material3.MaterialTheme
@@ -32,6 +35,7 @@ import androidx.compose.ui.semantics.SemanticsPropertyReceiver
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import kotlinx.coroutines.delay
 import tv.plurx.app.ui.FormFactor
@@ -113,20 +117,35 @@ fun Modifier.tvFocusRing(
         .semantics { tvFocusVisible = focused }
 }
 
+/**
+ * A ten-foot page can afford one row of chrome, not three. `compact` is the
+ * toolbar size: Material's 40 dp surface inside a 48 dp target is most of the
+ * reason the Live TV toolbar took 180 dp before any content.
+ */
+internal val TvCompactContentPadding = PaddingValues(horizontal = 10.dp, vertical = 5.dp)
+internal val TvCompactMinHeight = 24.dp
+internal val TvCompactFontSize = 11.sp
+
 @Composable
 fun TvButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
+    compact: Boolean = false,
     content: @Composable RowScope.() -> Unit,
 ) {
     val shape = MaterialTheme.shapes.extraLarge
     TightTvButtonFocusBounds {
         Button(
             onClick = onClick,
-            modifier = modifier.tvFocusRing(shape),
+            modifier = if (compact) {
+                modifier.tvFocusRing(shape).defaultMinSize(minHeight = TvCompactMinHeight)
+            } else {
+                modifier.tvFocusRing(shape)
+            },
             enabled = enabled,
             shape = shape,
+            contentPadding = if (compact) TvCompactContentPadding else ButtonDefaults.ContentPadding,
             content = content,
         )
     }
@@ -156,15 +175,21 @@ fun TvTextButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
+    compact: Boolean = false,
     content: @Composable RowScope.() -> Unit,
 ) {
     val shape = MaterialTheme.shapes.extraLarge
     TightTvButtonFocusBounds {
         TextButton(
             onClick = onClick,
-            modifier = modifier.tvFocusRing(shape),
+            modifier = if (compact) {
+                modifier.tvFocusRing(shape).defaultMinSize(minHeight = TvCompactMinHeight)
+            } else {
+                modifier.tvFocusRing(shape)
+            },
             enabled = enabled,
             shape = shape,
+            contentPadding = if (compact) TvCompactContentPadding else ButtonDefaults.TextButtonContentPadding,
             content = content,
         )
     }

@@ -1,8 +1,37 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-09-09 · Kept current by the working agent in the same
+**Updated:** 2026-09-12 · Kept current by the working agent in the same
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
+
+## Live TV gets the web page's proportions on Google TV and Android phones
+
+**Built for issue #267; `:app:compileDebugKotlin` green and the whole JVM
+unit suite green at 552 cases, including three new proportion contracts.**
+The Google TV screen spent about 180 dp on chrome — a Back button, a
+`headlineMedium` title, a title line, a status line and a seven-item
+`FlowRow` carrying a 260 dp search field — before any content, and then drew
+the guide with the phone's single `LiveTvGridMetrics`: 160 dp slots and 56 dp
+rows, which are 320 and 112 px on a television. Six channels filled the
+screen and the grid showed barely an hour.
+
+Live TV now sizes itself through one explicit `LiveTvTypography` scale on
+television and spends one 24 dp toolbar row. `LiveTvGridMetrics.forTelevision`
+derives the slot width from the width the grid actually got, so two hours fit
+any panel; Earlier / Now / Later are chips in the grid header, and the search
+field is a dialog the viewer asks for. On now is a 310 dp column beside a
+picture that is a focus target — Select on it is Fullscreen, so "Return to
+live" left the toolbar. The Layout menu offers Preview and Over picture, and a
+stored `channel_browser` renders as Preview.
+
+On the phone the picture is full-bleed with its chips and its
+picture-in-picture and fullscreen actions on it, followed by one 56 dp caption
+and one 48 dp toolbar. `LiveTvNowBar`, the filter row and the always-visible
+text field are gone, so four to five channel rows are visible while a channel
+plays instead of two.
+
+Nothing about playback, the lease, the input policy or enablement changed.
+Android versionCode 89.
 
 ## Fresh Dolby Vision recovery converts, and tvOS can arm Live TV starts
 

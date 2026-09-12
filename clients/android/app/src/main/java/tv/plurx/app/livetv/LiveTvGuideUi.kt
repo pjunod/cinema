@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -39,10 +40,15 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import tv.plurx.app.ui.FormFactor
 import tv.plurx.app.ui.components.TvTextButton
 import tv.plurx.app.ui.components.tvFocusRing
+import tv.plurx.app.ui.currentFormFactor
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -62,6 +68,17 @@ enum class LiveTvBrowseView(val storage: String, val label: String) {
     }
 }
 
+/**
+ * One grid's drawn geometry. Passed in rather than read from the object, so
+ * the slot width can follow the screen on a television without the phone's
+ * fixed columns moving.
+ */
+data class LiveTvGridDimensions(
+    val slotWidth: Dp,
+    val rowHeight: Dp,
+    val channelColumnWidth: Dp,
+)
+
 /** Half-hour geometry, shared by the grid composable and its tests. */
 object LiveTvGridMetrics {
     const val SLOT_SECONDS: Long = LiveTvGuideReducer.SLOT_SECONDS
@@ -70,6 +87,70 @@ object LiveTvGridMetrics {
     val channelColumnWidth: Dp = 132.dp
     /** The grid's now rule. Red because every guide's is. */
     val nowLine: Color = Color(0xFFE23A2E)
+
+    /** Two hours on screen. The paging chips move by exactly this much. */
+    const val TELEVISION_VISIBLE_SLOTS: Int = 4
+    val televisionChannelColumnWidth: Dp = 100.dp
+    val televisionRowHeight: Dp = 37.dp
+
+    /** The phone scrolls horizontally, so its columns are a fixed size. */
+    val phone: LiveTvGridDimensions =
+        LiveTvGridDimensions(slotWidth, rowHeight, channelColumnWidth)
+
+    /**
+     * Slot width follows the screen. One shared 160 dp column meant 320 px on
+     * a television — the grid showed barely an hour and the 56 dp rows drew
+     * 112 px tall, so six channels filled the screen.
+     */
+    fun forTelevision(contentWidth: Dp): LiveTvGridDimensions = LiveTvGridDimensions(
+        slotWidth = ((contentWidth - televisionChannelColumnWidth) / TELEVISION_VISIBLE_SLOTS)
+            .coerceAtLeast(60.dp),
+        rowHeight = televisionRowHeight,
+        channelColumnWidth = televisionChannelColumnWidth,
+    )
+}
+
+/**
+ * One explicit scale for the ten-foot surface. Material's semantic styles are
+ * sized for a phone held at arm's length; on a television `titleLarge` is a
+ * banner and `bodyMedium` a headline, which is why the rows were three feet
+ * long. The phone keeps exactly the styles it drew before.
+ */
+data class LiveTvTypeScale(
+    val title: TextStyle,
+    val primary: TextStyle,
+    val cell: TextStyle,
+    val secondary: TextStyle,
+    val tertiary: TextStyle,
+    val badge: TextStyle,
+    val eyebrow: TextStyle,
+)
+
+object LiveTvTypography {
+    val television = LiveTvTypeScale(
+        title = TextStyle(fontSize = 15.sp, fontWeight = FontWeight.SemiBold),
+        primary = TextStyle(fontSize = 11.sp, fontWeight = FontWeight.SemiBold),
+        cell = TextStyle(fontSize = 11.sp),
+        secondary = TextStyle(fontSize = 10.sp),
+        tertiary = TextStyle(fontSize = 9.sp),
+        badge = TextStyle(fontSize = 8.sp, fontWeight = FontWeight.Bold),
+        eyebrow = TextStyle(fontSize = 7.sp, fontWeight = FontWeight.Bold),
+    )
+
+    @Composable
+    fun current(): LiveTvTypeScale =
+        if (currentFormFactor() == FormFactor.Television) television else phone()
+
+    @Composable
+    private fun phone(): LiveTvTypeScale = LiveTvTypeScale(
+        title = MaterialTheme.typography.titleMedium,
+        primary = MaterialTheme.typography.titleSmall,
+        cell = MaterialTheme.typography.labelSmall,
+        secondary = MaterialTheme.typography.bodyMedium,
+        tertiary = MaterialTheme.typography.labelSmall,
+        badge = MaterialTheme.typography.labelSmall,
+        eyebrow = MaterialTheme.typography.labelSmall,
+    )
 }
 
 private val liveTvClock = SimpleDateFormat("h:mm a", Locale.getDefault())
@@ -89,7 +170,7 @@ fun LiveTvFormatBadges(channel: LiveTvChannel) {
         channel.formatBadges.forEach { badge ->
             Text(
                 badge,
-                style = MaterialTheme.typography.labelSmall,
+                style = LiveTvTypography.current().badge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier
                     .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(12.dp))
@@ -101,7 +182,11 @@ fun LiveTvFormatBadges(channel: LiveTvChannel) {
 
 /**
  * One channel row: chip, number and callsign, what is on with a bar to its
- * end, and what is next. A protected channel is dimmed, never hidden.
+ * end, and when it ends. A protected channel is dimmed, never hidden.
+ *
+ * A fixed three-column grid — chip · text · star — at a fixed 78 dp, so five
+ * of them fit a phone under a playing picture. The old row was a
+ * `fillMaxWidth` TextButton wrapping a five-line Column: two fit.
  */
 @Composable
 fun LiveTvChannelRow(
@@ -110,12 +195,14 @@ fun LiveTvChannelRow(
     selected: Boolean,
     onWatch: () -> Unit,
 ) {
-    Column(
+    val type = LiveTvTypography.current()
+    Row(
         Modifier
             .fillMaxWidth()
+            .height(78.dp)
             .clickable(enabled = channel.watchable, onClick = onWatch)
             .tvFocusRing()
-            .padding(vertical = 8.dp)
+            .padding(horizontal = 10.dp)
             .semantics {
                 contentDescription = buildString {
                     append(channel.title)
@@ -123,46 +210,84 @@ fun LiveTvChannelRow(
                     if (!channel.watchable) append(", protected channel")
                 }
             },
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
     ) {
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text(channel.title, style = MaterialTheme.typography.titleSmall)
-            LiveTvFormatBadges(channel)
-        }
-        when {
-            !channel.watchable -> Text(
-                "Protected channel · not playable",
-                style = MaterialTheme.typography.labelSmall,
-            )
-            airing.now != null -> {
-                Text(
-                    airing.now.title,
-                    style = MaterialTheme.typography.bodyMedium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                LinearProgressIndicator(
-                    progress = { airing.progress ?: 0f },
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                )
-                Text(
-                    liveTvTime(airing.now.end) +
-                        (airing.next?.let { " · Next: ${it.title}" } ?: ""),
-                    style = MaterialTheme.typography.labelSmall,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-            else -> Text("No programme information", style = MaterialTheme.typography.labelSmall)
-        }
-        if (channel.favorite) Text("Favorite", style = MaterialTheme.typography.labelSmall)
         Text(
-            when {
-                !channel.watchable -> "DRM unsupported"
-                selected -> "Watching"
-                else -> "Watch live"
-            },
-            style = MaterialTheme.typography.labelSmall,
+            channel.guide_name.take(5),
+            style = type.badge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier
+                .size(width = 52.dp, height = 32.dp)
+                .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(6.dp))
+                .padding(horizontal = 4.dp, vertical = 8.dp),
         )
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    channel.title,
+                    style = type.primary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (selected) {
+                    Text("● LIVE", style = type.eyebrow, color = MaterialTheme.colorScheme.primary)
+                }
+                LiveTvFormatBadges(channel)
+            }
+            when {
+                !channel.watchable -> Text("Protected · not playable", style = type.secondary)
+                airing.now != null -> {
+                    Text(
+                        airing.now.title,
+                        style = type.secondary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    LinearProgressIndicator(
+                        progress = { airing.progress ?: 0f },
+                        modifier = Modifier.fillMaxWidth().height(3.dp),
+                    )
+                    Text(
+                        listOfNotNull(
+                            "until ${liveTvTime(airing.now.end)}",
+                            airing.next?.let { "Next: ${it.title}" },
+                        ).joinToString(" · "),
+                        style = type.tertiary,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                else -> Text("No programme information", style = type.secondary)
+            }
+        }
+        if (channel.favorite) {
+            Text("★", style = type.primary, color = MaterialTheme.colorScheme.primary)
+        }
+    }
+}
+
+/** Earlier / Now / Later, drawn as chips inside the grid's own header. */
+data class LiveTvGuidePaging(
+    val canEarlier: Boolean,
+    val canLater: Boolean,
+    val onEarlier: () -> Unit,
+    val onNow: () -> Unit,
+    val onLater: () -> Unit,
+)
+
+@Composable
+private fun LiveTvPagingChip(
+    label: String,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    type: LiveTvTypeScale,
+) {
+    TvTextButton(onClick = onClick, enabled = enabled, compact = true) {
+        Text(label, style = type.badge)
     }
 }
 
@@ -175,6 +300,8 @@ fun LiveTvGuideGrid(
     layout: LiveTvGridLayout,
     slots: List<Long>,
     playingChannelId: String?,
+    dimensions: LiveTvGridDimensions = LiveTvGridMetrics.phone,
+    paging: LiveTvGuidePaging? = null,
     onAiring: (LiveTvChannel) -> Unit,
     onFuture: (LiveTvChannel, LiveTvProgramme) -> Unit,
     dpadNavigation: Boolean = false,
@@ -271,15 +398,28 @@ fun LiveTvGuideGrid(
         if (target != current) pending = target
     }
 
+    val type = LiveTvTypography.current()
     Column(modifier) {
-        Row {
-            Box(Modifier.width(LiveTvGridMetrics.channelColumnWidth))
+        Row(Modifier.height(17.dp)) {
+            // Earlier / Now / Later live in the header's channel column
+            // rather than as three more full-height buttons in the toolbar.
+            Row(
+                Modifier.width(dimensions.channelColumnWidth),
+                horizontalArrangement = Arrangement.spacedBy(3.dp),
+            ) {
+                paging?.let {
+                    LiveTvPagingChip("\u2039", it.canEarlier, it.onEarlier, type)
+                    LiveTvPagingChip("Now", true, it.onNow, type)
+                    LiveTvPagingChip("\u203a", it.canLater, it.onLater, type)
+                }
+            }
             Row(Modifier.horizontalScroll(scroll)) {
                 slots.forEach { at ->
                     Text(
                         liveTvTime(at),
-                        style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier.width(LiveTvGridMetrics.slotWidth),
+                        style = type.tertiary,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.width(dimensions.slotWidth).padding(start = 3.dp),
                     )
                 }
             }
@@ -290,20 +430,26 @@ fun LiveTvGuideGrid(
         Box(Modifier.weight(1f)) {
         LazyColumn(state = rows) {
             items(layout.rows, key = { it.channel.id }) { row ->
-                Row(Modifier.height(LiveTvGridMetrics.rowHeight)) {
+                Row(Modifier.height(dimensions.rowHeight)) {
                     val channelTarget = LiveTvGuideFocusTarget(row.channel.id, channelHeader = true)
                     TvTextButton(
                         onClick = { if (row.channel.watchable) onAiring(row.channel) },
                         modifier = Modifier
-                            .width(LiveTvGridMetrics.channelColumnWidth)
+                            .width(dimensions.channelColumnWidth)
                             .liveTvGuideFocusTarget(channelTarget, requesters) {
                                 receiveFocus(channelTarget, row.channel)
                             }
                             .liveTvGuideNavigation(dpadNavigation, ::move),
                     ) {
                         Column {
-                            Text(row.channel.guide_number, style = MaterialTheme.typography.labelMedium)
-                            Text(row.channel.guide_name, style = MaterialTheme.typography.labelSmall)
+                            Text(row.channel.guide_number, style = type.secondary)
+                            Text(
+                                row.channel.guide_name,
+                                style = type.badge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
                             LiveTvFormatBadges(row.channel)
                         }
                     }
@@ -312,8 +458,8 @@ fun LiveTvGuideGrid(
                         // not a channel that went away.
                         Box(
                             Modifier
-                                .width(LiveTvGridMetrics.slotWidth * slots.size)
-                                .height(LiveTvGridMetrics.rowHeight),
+                                .width(dimensions.slotWidth * slots.size)
+                                .height(dimensions.rowHeight),
                         )
                         // `left` and `width` arrive already in Dp units: the
                         // caller hands the reducer `slotWidth.value` as its
@@ -325,6 +471,7 @@ fun LiveTvGuideGrid(
                             LiveTvGridCellButton(
                                 cell = cell,
                                 channel = row.channel,
+                                dimensions = dimensions,
                                 playing = playingChannelId == row.channel.id && cell.airing,
                                 onAiring = onAiring,
                                 onFuture = onFuture,
@@ -340,8 +487,8 @@ fun LiveTvGuideGrid(
                             TvTextButton(
                                 onClick = { if (row.channel.watchable) onAiring(row.channel) },
                                 modifier = Modifier
-                                    .width(LiveTvGridMetrics.slotWidth * slots.size)
-                                    .height(LiveTvGridMetrics.rowHeight)
+                                    .width(dimensions.slotWidth * slots.size)
+                                    .height(dimensions.rowHeight)
                                     .liveTvGuideFocusTarget(emptyTarget, requesters) {
                                         receiveFocus(emptyTarget, row.channel)
                                     }
@@ -350,7 +497,7 @@ fun LiveTvGuideGrid(
                                 Text(
                                     if (row.channel.watchable) "No programme information · Watch live"
                                     else "Protected channel · unavailable",
-                                    style = MaterialTheme.typography.labelSmall,
+                                    style = type.cell,
                                 )
                             }
                         }
@@ -359,8 +506,8 @@ fun LiveTvGuideGrid(
             }
         }
         layout.nowX?.let { x ->
-            val offset = LiveTvGridMetrics.channelColumnWidth + x.dp - scroll.value.dp
-            if (offset >= LiveTvGridMetrics.channelColumnWidth) {
+            val offset = dimensions.channelColumnWidth + x.dp - scroll.value.dp
+            if (offset >= dimensions.channelColumnWidth) {
                 Box(
                     Modifier
                         .offset(x = offset)
@@ -378,21 +525,25 @@ fun LiveTvGuideGrid(
 private fun LiveTvGridCellButton(
     cell: LiveTvGridCell,
     channel: LiveTvChannel,
+    dimensions: LiveTvGridDimensions,
     playing: Boolean,
     onAiring: (LiveTvChannel) -> Unit,
     onFuture: (LiveTvChannel, LiveTvProgramme) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val type = LiveTvTypography.current()
     TvTextButton(
         onClick = { if (cell.airing) onAiring(channel) else onFuture(channel, cell.programme) },
+        compact = true,
         modifier = modifier
-            .offset(x = cell.left.dp)
-            .width((cell.width - 4f).coerceAtLeast(28f).dp)
+            .offset(x = (cell.left + 3f).dp, y = 3.dp)
+            .width((cell.width - 6f).coerceAtLeast(28f).dp)
+            .height((dimensions.rowHeight.value - 6f).coerceAtLeast(18f).dp)
             .background(if (playing) Color(0x33FFFFFF) else Color.Transparent),
     ) {
         Text(
             cell.programme.title,
-            style = MaterialTheme.typography.labelSmall,
+            style = type.cell,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
