@@ -36,14 +36,26 @@ import tv.plurx.app.data.DeviceCaps
 import java.util.concurrent.TimeUnit
 
 internal enum class TvLiveLayout(val storageValue: String, val label: String) {
-    GuidePreview("guide_preview", "Guide + preview"),
-    GuideOverlay("guide_overlay", "Guide over picture"),
-    ChannelBrowser("channel_browser", "Channel browser");
+    GuidePreview("guide_preview", "Preview"),
+    GuideOverlay("guide_overlay", "Over picture"),
+    ChannelBrowser("channel_browser", "Preview");
+
+    /**
+     * What the stored value renders as. `channel_browser` and `guide_preview`
+     * only ever differed in which browse view they opened with; now that On
+     * now is a list beside the picture in both, a third entry would be a
+     * choice with no consequence. The case stays so an existing stored value
+     * still decodes — and keeps its own raw string.
+     */
+    val presented: TvLiveLayout get() = if (this == ChannelBrowser) GuidePreview else this
 
     companion object {
         fun fromStorage(value: String?): TvLiveLayout = entries.firstOrNull {
             it.storageValue == value
-        } ?: GuidePreview
+        }?.presented ?: GuidePreview
+
+        /** The entries the Layout menu offers. */
+        val offered: List<TvLiveLayout> = listOf(GuidePreview, GuideOverlay)
     }
 }
 

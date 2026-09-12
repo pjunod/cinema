@@ -1297,3 +1297,16 @@ source = "clients/apple/Sources/LiveTvView.swift"
 source_anchor = "private func movePagingFocus"
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "testTheLiveTvArrangementIsWiredToTheDerivedGeometry"
+
+[[fixes]]
+# The adversarial review found the Over picture layout a D-pad dead end: the
+# picture became a focus target drawn `fillMaxSize`, so its focus rect was the
+# whole screen and nothing in the guide panel was below, left or right of it.
+# The picture now takes a focus modifier that stops above the panel, and the
+# arrangement contract asserts that it has one.
+id = "android.live-tv-picture-focus-rect-stops-at-the-panel"
+commits = ["44bce59a"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvScreen.kt"
+source_anchor = "focusModifier: Modifier? = null,"
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvProportionsTest.kt"
+test_anchor = "theTelevisionScreenIsWiredToTheDerivedGeometryAndOneToolbar"
