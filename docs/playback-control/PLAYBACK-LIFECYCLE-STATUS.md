@@ -1,5 +1,12 @@
 # Playback lifecycle — implementation status
 
+> **Next-work reconciliation, 2026-09-12:** The lifecycle implementation landed
+> through PR #259 at `5548c3d3`. For remaining work and current execution rules,
+> read the [rewrite remainder](PLAYBACK-REWRITE-REMAINDER.md). The test-deferral
+> and fast-lane-only instructions below describe the earlier campaign; Paul’s
+> replacement AGENTS.md requires focused local tests and current qualification
+> for the new effort. Historical receipts below remain unchanged.
+
 **Status:** one adversarial review addressed; PR #259 fast lane correcting operations truth ·
 **Updated:** 2026-09-12 · **Base:** `30cd51afc` · **Effort:**
 `effort/playback-lifecycle` at `491aac64` before this receipt · **Latest task:**
