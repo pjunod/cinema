@@ -310,6 +310,7 @@ internal class OpenPlaybackStallTracker(
             stagnantSinceMs = observedAtMs
             fired = false
             deferred = false
+            nativeReevaluationSpent = false
             return null
         }
         if (fired) return null

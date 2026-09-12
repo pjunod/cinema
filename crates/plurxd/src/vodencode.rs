@@ -28,6 +28,10 @@ pub(crate) struct Encoding {
     pub engine: crate::ffmpeg::EncodedEngine,
     pub admissions: Admissions,
     pub store: Arc<dyn plurx_core::store::Store>,
+    /// True only while this rendition belongs to an uncommitted prepared
+    /// successor. Admission reads it at each producer start so a committed VOD
+    /// session becomes ordinary foreground work without rebuilding its recipe.
+    pub speculative: std::sync::atomic::AtomicBool,
     pub queued: Mutex<Option<LiveWait>>,
     pub policy_retry: std::sync::atomic::AtomicBool,
     #[cfg(test)]
@@ -56,6 +60,24 @@ pub(crate) struct EncodePermit {
 }
 
 impl Encoding {
+    pub(crate) fn mark_speculative(&self) {
+        self.speculative
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    pub(crate) fn promote(&self) {
+        self.speculative
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+
+    fn priority(&self) -> Priority {
+        if self.speculative.load(std::sync::atomic::Ordering::Acquire) {
+            Priority::Speculative
+        } else {
+            Priority::Live
+        }
+    }
+
     pub async fn try_permit(&self) -> Option<EncodePermit> {
         #[cfg(test)]
         let pause = self
@@ -103,7 +125,10 @@ impl Encoding {
             .and_then(|value| value.trim().parse().ok())
             .unwrap_or_else(crate::admission::software_budget);
         let mut queued = self.queued.lock().expect("VOD encoder admission");
-        queued.get_or_insert_with(|| self.admissions.wait_for_slot());
+        let priority = self.priority();
+        if priority == Priority::Live {
+            queued.get_or_insert_with(|| self.admissions.wait_for_slot());
+        }
         // The shared pool deliberately admits one oversize job when otherwise
         // idle. A frozen VOD recipe cannot shrink its thread demand on retry,
         // so an operator lowering the budget below that exact plan is an
@@ -115,7 +140,7 @@ impl Encoding {
             hardware_limit,
             software_budget,
             &self.resources,
-            Priority::Live,
+            priority,
         )?;
         let (hardware, software) = bundle.into_parts();
         let permit = EncodePermit {

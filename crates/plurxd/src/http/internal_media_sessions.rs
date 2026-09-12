@@ -560,6 +560,7 @@ pub(crate) async fn prepare(
             request.user_id,
             adoption,
             deadline.into(),
+            true,
         )
         .await
         && authority.is_current(admitted_generation)

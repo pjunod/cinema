@@ -804,19 +804,9 @@ class SettlingSnapshotTest {
     }
 }
 
-/**
- * The rule that keeps a server which stages without priming from becoming a
- * regression on every quality change.
- *
- * `stage_prepared_successor` is stage-only — "a durable row and the actor's one
- * successor slot, nothing produced yet" — and the roadmap's third phase,
- * *reserve and prime*, is not implemented. The staged row carries
- * `publication_ready_at_ms = MEDIA_SESSION_PUBLICATION_BLOCKED`, so the
- * successor's playlist answers `503 media_owner_transition` until the pointer
- * moves. A client that keeps taking the offer builds a second pipeline that can
- * never become playable, for the life of the film, and pays for it every time
- * the viewer changes anything.
- */
+/** A failed prepared transaction settles only that action; a later explicit
+ * change may reserve and prime a fresh successor instead of inheriting
+ * session-wide suppression from the earlier failure. */
 class PreparedFailureRetryTest {
     @Test
     fun `a successor that was never playable does not suppress a later explicit change`() {

@@ -2135,6 +2135,26 @@ fn repair_job_for_artifact(
 }
 
 impl VodServe {
+    /// Convert an attached prepared VOD rendition to ordinary foreground
+    /// admission after its durable pointer commit. A copy rendition has no
+    /// encoder and therefore needs no transition.
+    pub(crate) async fn promote_prepared_session(&self, session_id: &str) -> bool {
+        let rendition = self
+            .shared
+            .sessions
+            .lock()
+            .await
+            .get(session_id)
+            .and_then(|session| session.rendition.clone());
+        let Some(rendition) = rendition else {
+            return false;
+        };
+        if let Some(encoding) = rendition.recipe.encoding.as_ref() {
+            encoding.promote();
+        }
+        true
+    }
+
     /// A preparation gate for one live session, or `None` when this engine
     /// has no live attachment under that id.
     ///

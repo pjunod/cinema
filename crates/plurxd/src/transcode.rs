@@ -16260,6 +16260,7 @@ impl TranscodeManager {
             None,
             None,
             None,
+            Priority::Live,
         )
         .await
         .map(|creation| creation.info)
@@ -16274,6 +16275,49 @@ impl TranscodeManager {
         user_name: &str,
         deadline: tokio::time::Instant,
         admitted_serving_generation: u64,
+    ) -> Result<ClusterSessionStart, String> {
+        self.create_cluster_session_with_priority(
+            req,
+            recovery,
+            user_name,
+            deadline,
+            admitted_serving_generation,
+            Priority::Live,
+        )
+        .await
+    }
+
+    /// Start a provisional make-before-break worker only from spare capacity.
+    /// It never registers as a foreground waiter, so the incumbent and any
+    /// other viewer keep admission priority while the durable preparation
+    /// owner retains exact cancellation authority.
+    pub(crate) async fn create_cluster_prepared_session(
+        &self,
+        req: &SessionRequest,
+        recovery: &SessionRecoveryIdentity,
+        user_name: &str,
+        deadline: tokio::time::Instant,
+        admitted_serving_generation: u64,
+    ) -> Result<ClusterSessionStart, String> {
+        self.create_cluster_session_with_priority(
+            req,
+            recovery,
+            user_name,
+            deadline,
+            admitted_serving_generation,
+            Priority::Speculative,
+        )
+        .await
+    }
+
+    async fn create_cluster_session_with_priority(
+        &self,
+        req: &SessionRequest,
+        recovery: &SessionRecoveryIdentity,
+        user_name: &str,
+        deadline: tokio::time::Instant,
+        admitted_serving_generation: u64,
+        priority: Priority,
     ) -> Result<ClusterSessionStart, String> {
         let user_id = recovery.user_id;
         let serving_admission = ClusterServingAdmission {
@@ -16306,6 +16350,7 @@ impl TranscodeManager {
                 Some(deadline),
                 None,
                 Some(serving_admission),
+                priority,
             )
             .await?;
         Ok(ClusterSessionStart {
@@ -16381,6 +16426,7 @@ impl TranscodeManager {
             Some(deadline),
             Some(takeover),
             None,
+            Priority::Live,
         )
         .await
         .map(|creation| creation.info)
@@ -16444,6 +16490,7 @@ impl TranscodeManager {
         replacement_deadline: Option<tokio::time::Instant>,
         takeover: Option<SessionTakeoverStart>,
         serving_admission: Option<ClusterServingAdmission>,
+        priority: Priority,
     ) -> Result<SessionCreation, String> {
         if let Some(admission) = serving_admission {
             self.require_cluster_serving_authority(admission)?;
@@ -16500,6 +16547,7 @@ impl TranscodeManager {
                     recovery,
                     replacement_deadline,
                     takeover,
+                    priority,
                 )
                 .await?;
             // Not a fallback decision: the request named the live presentation
@@ -16542,6 +16590,7 @@ impl TranscodeManager {
                                     recovery,
                                     replacement_deadline,
                                     takeover,
+                                    priority,
                                 )
                                 .await?;
                             // Counted after the start succeeded. `?` above is
@@ -16608,6 +16657,7 @@ impl TranscodeManager {
         ))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn start_live_recovery_session(
         &self,
         req: &SessionRequest,
@@ -16616,6 +16666,7 @@ impl TranscodeManager {
         recovery: &SessionRecoveryIdentity,
         replacement_deadline: Option<tokio::time::Instant>,
         takeover: Option<SessionTakeoverStart>,
+        priority: Priority,
     ) -> Result<StartInfo, String> {
         match req.kind {
             SessionKind::Transcode { height } => {
@@ -16634,6 +16685,7 @@ impl TranscodeManager {
                     &req.playback_id,
                     req.automatic,
                     req.hdr10,
+                    priority,
                 )
                 .await
             }
@@ -16877,6 +16929,7 @@ impl TranscodeManager {
             engine,
             admissions: self.admissions.clone(),
             store: Arc::clone(&self.store),
+            speculative: std::sync::atomic::AtomicBool::new(false),
             queued: std::sync::Mutex::new(None),
             policy_retry: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
@@ -17219,6 +17272,7 @@ impl TranscodeManager {
         user_id: i64,
         adoption: SessionAdoptionToken,
         deadline: Instant,
+        speculative: bool,
     ) -> bool {
         if Instant::now() >= deadline {
             return false;
@@ -17255,6 +17309,11 @@ impl TranscodeManager {
             let Ok(encoding) = self.prepare_vod_encoding(&req, &file).await else {
                 return false;
             };
+            if speculative {
+                if let Some(encoding) = encoding.as_ref() {
+                    encoding.mark_speculative();
+                }
+            }
             let user_name = self
                 .store
                 .get_user(user_id)
@@ -18558,6 +18617,7 @@ impl TranscodeManager {
             playback_id,
             false,
             false,
+            Priority::Live,
         )
         .await
     }
@@ -18576,8 +18636,9 @@ impl TranscodeManager {
         plan: Option<&ResolvedTranscode>,
         work: Workload<'_>,
         max_wait: Duration,
+        priority: Priority,
     ) -> Result<LiveAdmission, String> {
-        let _queued = self.admissions.wait_for_slot();
+        let _queued = (priority == Priority::Live).then(|| self.admissions.wait_for_slot());
         let deadline = Instant::now() + max_wait;
         let sw_budget = self.software_budget().await;
 
@@ -18592,7 +18653,7 @@ impl TranscodeManager {
             let mixed =
                 estimate.is_some_and(|estimate| estimate.hardware_slot && estimate.cpu_threads > 0);
             loop {
-                let decision = self.admissions.admit(max, work);
+                let decision = self.admissions.admit_with_priority(max, work, priority);
                 if let Admission::Hardware(slot) = decision {
                     if !mixed {
                         return Ok(LiveAdmission {
@@ -18608,9 +18669,9 @@ impl TranscodeManager {
                     // in the other order.
                     drop(slot);
                     let estimate = estimate.expect("a mixed pipeline has an estimate");
-                    if let Some(bundle) =
-                        self.admissions
-                            .try_admit_bundle(max, sw_budget, &estimate, Priority::Live)
+                    if let Some(bundle) = self
+                        .admissions
+                        .try_admit_bundle(max, sw_budget, &estimate, priority)
                     {
                         let (hw_slot, sw_permit) = bundle.into_parts();
                         tracing::info!(
@@ -18653,7 +18714,7 @@ impl TranscodeManager {
                     Admission::Software => match self.admissions.try_admit_software(
                         sw_budget,
                         work.software_threads(),
-                        Priority::Live,
+                        priority,
                     ) {
                         Some(permit) => {
                             tracing::info!(
@@ -18686,11 +18747,10 @@ impl TranscodeManager {
         }
 
         loop {
-            if let Some(permit) = self.admissions.try_admit_software(
-                sw_budget,
-                work.software_threads(),
-                Priority::Live,
-            ) {
+            if let Some(permit) =
+                self.admissions
+                    .try_admit_software(sw_budget, work.software_threads(), priority)
+            {
                 return Ok(LiveAdmission {
                     encoder: Encoder::Software,
                     hw_slot: None,
@@ -18739,7 +18799,8 @@ impl TranscodeManager {
         };
         // Live TV plans its own command and is never served from the movie
         // cache, so there is no resolved movie plan to read an estimate from.
-        self.admit_live(preferred, None, work, max_wait).await
+        self.admit_live(preferred, None, work, max_wait, Priority::Live)
+            .await
     }
 
     #[allow(clippy::too_many_arguments)] // one stream's worth of knobs
@@ -18759,6 +18820,7 @@ impl TranscodeManager {
         playback_id: &str,
         automatic: bool,
         hdr10: bool,
+        priority: Priority,
     ) -> Result<StartInfo, String> {
         let rate_control = self.rate_control_snapshot();
         // Cluster replacements are provisional until their durable pointer CAS
@@ -18877,7 +18939,17 @@ impl TranscodeManager {
         // play will forgive five seconds far sooner than a hang.
         let work = Workload::of(&file, target_height);
         let admission = self
-            .admit_live(encoder, Some(&plan), work, QUEUE_WAIT)
+            .admit_live(
+                encoder,
+                Some(&plan),
+                work,
+                if priority == Priority::Speculative {
+                    Duration::ZERO
+                } else {
+                    QUEUE_WAIT
+                },
+                priority,
+            )
             .await?;
         encoder = admission.encoder;
         if grade == OutputGrade::Hdr10
@@ -21076,6 +21148,14 @@ impl TranscodeManager {
         }
         let control = self.sessions.lock().await.get(session_id)?.control.clone();
         Some(Arc::new(control) as Arc<dyn crate::playback_control::PreparationGate>)
+    }
+
+    pub(crate) async fn promote_prepared_session(&self, session_id: &str) {
+        let _ = self.vod.promote_prepared_session(session_id).await;
+    }
+
+    pub(crate) fn foreground_media_waiting(&self) -> bool {
+        self.admissions.live_is_waiting()
     }
 
     /// Record that the durable row now names this ask.
@@ -34866,6 +34946,7 @@ pub(crate) mod tests {
                     target_height: 720,
                 },
                 wait,
+                Priority::Live,
             )
             .await
         {
@@ -34926,6 +35007,7 @@ pub(crate) mod tests {
                         target_height: 720,
                     },
                     Duration::from_secs(10),
+                    Priority::Live,
                 )
                 .await
             })
@@ -35032,8 +35114,14 @@ pub(crate) mod tests {
         for _ in 0..5 {
             let mgr = Arc::clone(&mgr);
             starts.push(tokio::spawn(async move {
-                mgr.admit_live(Encoder::Nvenc, None, workload, Duration::ZERO)
-                    .await
+                mgr.admit_live(
+                    Encoder::Nvenc,
+                    None,
+                    workload,
+                    Duration::ZERO,
+                    Priority::Live,
+                )
+                .await
             }));
         }
         let mut admitted = Vec::new();
@@ -36049,6 +36137,7 @@ pub(crate) mod tests {
                 None,
                 Workload::of(&file, 1080),
                 Duration::ZERO,
+                Priority::Live,
             )
             .await
             .expect("first fits an empty pool");
@@ -36059,6 +36148,7 @@ pub(crate) mod tests {
                 None,
                 Workload::of(&file, 1080),
                 Duration::ZERO,
+                Priority::Live,
             )
             .await
         {
@@ -36075,6 +36165,7 @@ pub(crate) mod tests {
                 None,
                 Workload::of(&file, 1080),
                 Duration::ZERO,
+                Priority::Live,
             )
             .await
             .expect("freed weight is grantable again");
@@ -40597,6 +40688,7 @@ pub(crate) mod tests {
                 None,
                 None,
                 None,
+                Priority::Live,
             )
             .await
             .expect("create");
@@ -40610,6 +40702,7 @@ pub(crate) mod tests {
                 None,
                 None,
                 None,
+                Priority::Live,
             )
             .await
             .expect("replay");
