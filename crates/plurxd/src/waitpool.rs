@@ -43,7 +43,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::oneshot;
 
@@ -249,7 +249,20 @@ fn render_blocked_gets(snapshot: BlockedGets) -> String {
 struct Waiter {
     id: u64,
     session: String,
+    started: Instant,
     tx: oneshot::Sender<WaitOutcome>,
+}
+
+/// Bounded, per-session view of HTTP requests currently parked for media.
+///
+/// This is delivery state, not a producer or client-buffer inference. Reading
+/// it walks only the already-capped wait set and does not add a sampler,
+/// watchdog, or request-path write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionWaitSnapshot {
+    pub count: usize,
+    pub oldest_ms: Option<i64>,
+    pub oldest_segment: Option<u32>,
 }
 
 #[derive(Default)]
@@ -403,6 +416,29 @@ impl WaitPool {
         Arc::clone(&self.metrics)
     }
 
+    /// Requests for one session that are actively waiting for materialized
+    /// media. The per-session and global admission caps bound this scan.
+    pub fn session_snapshot(&self, session: &str) -> SessionWaitSnapshot {
+        let state = self.lock();
+        let now = Instant::now();
+        let mut count = 0usize;
+        let mut oldest: Option<(Duration, u32)> = None;
+        for (key, waiters) in &state.waiters {
+            for waiter in waiters.iter().filter(|waiter| waiter.session == session) {
+                count += 1;
+                let age = now.saturating_duration_since(waiter.started);
+                if oldest.is_none_or(|(current, _)| age > current) {
+                    oldest = Some((age, key.index));
+                }
+            }
+        }
+        SessionWaitSnapshot {
+            count,
+            oldest_ms: oldest.map(|(age, _)| i64::try_from(age.as_millis()).unwrap_or(i64::MAX)),
+            oldest_segment: oldest.map(|(_, index)| index),
+        }
+    }
+
     /// Apply the configured node-wide cap.
     ///
     /// Lowering it below what is already parked refuses the *next* admission
@@ -496,6 +532,7 @@ impl WaitPool {
         state.waiters.entry(key.clone()).or_default().push(Waiter {
             id,
             session: session.to_string(),
+            started: Instant::now(),
             tx,
         });
         state.retained.insert(id, key.clone());
@@ -778,6 +815,29 @@ mod tests {
         assert_eq!(pool.len(), 1);
         drop(again);
         assert!(pool.is_empty());
+    }
+
+    #[test]
+    fn session_snapshot_separates_active_waits_and_their_oldest_target() {
+        let pool = WaitPool::new(8, 4);
+        let first = pool.register(key(5), "sess-a").expect("first wait");
+        std::thread::sleep(Duration::from_millis(2));
+        let second = pool.register(key(8), "sess-a").expect("second wait");
+        let other = pool.register(key(3), "sess-b").expect("other wait");
+
+        let snapshot = pool.session_snapshot("sess-a");
+        assert_eq!(snapshot.count, 2);
+        assert_eq!(snapshot.oldest_segment, Some(5));
+        assert!(snapshot.oldest_ms.is_some_and(|age| age >= 2));
+        assert_eq!(
+            pool.session_snapshot("missing"),
+            SessionWaitSnapshot {
+                count: 0,
+                oldest_ms: None,
+                oldest_segment: None,
+            }
+        );
+        drop((first, second, other));
     }
 
     #[tokio::test]
