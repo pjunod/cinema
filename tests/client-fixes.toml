@@ -1273,3 +1273,14 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackTelemetr
 source_anchor = "internal fun playbackIsWaiting"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackTelemetryTest.kt"
 test_anchor = "pausedBufferingIsNotPresentedAsAnActiveWait"
+
+[[fixes]]
+# The final validation repair places the Apple progress clock on the stall
+# detector that owns it and keeps the web preparation fixtures aligned with
+# the asynchronous frame-callback and settings-card contracts.
+id = "clients.final-playback-regression-fixtures"
+commits = ["4e0991f0"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "private(set) var lastAdvanceAt: TimeInterval?"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testPresentationProgressAgeKeepsUnavailableDistinctFromZero"
