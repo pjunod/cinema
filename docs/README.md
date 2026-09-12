@@ -96,10 +96,10 @@ list.
 | File | Answers | |
 |---|---|---|
 | [PLAYBACK-LIFECYCLE-COVERAGE.md](playback-control/PLAYBACK-LIFECYCLE-COVERAGE.md) | Playback states and transitions, buffer handoffs, communication contracts, existing test anchors, and open acceptance gaps. | open |
-| [PLAYBACK-REWRITE-REMAINDER.md](playback-control/PLAYBACK-REWRITE-REMAINDER.md) | Current Sol handoff: merged lifecycle foundations, assigned buffer observability, remaining regression/repair packages, compatibility cleanup and current workflow requirements. | open |
+| [PLAYBACK-REWRITE-REMAINDER.md](playback-control/PLAYBACK-REWRITE-REMAINDER.md) | Executed Sol handoff: the finite B01–B05 remainder, its boundaries, and the work promoted through PR #263. | done |
 | [PLAYBACK-LIFECYCLE-IMPLEMENTATION.md](playback-control/PLAYBACK-LIFECYCLE-IMPLEMENTATION.md) | Completed S01–S09 implementation contract: code entry points, lifecycle/buffer contracts, compiler commands, deferred regression coverage, advisory Developer settings and batched fast-lane delivery. | built |
-| [PLAYBACK-LIFECYCLE-STATUS.md](playback-control/PLAYBACK-LIFECYCLE-STATUS.md) | Live execution ledger for the lifecycle implementation: package state, compilation, deferred tests, review, fast lane, decisions and cleanup. | open |
-| [PLAYBACK-BUFFER-OBSERVABILITY-STATUS.md](playback-control/PLAYBACK-BUFFER-OBSERVABILITY-STATUS.md) | Live execution ledger and measurement contract for playhead-anchored server readiness, HTTP delivery, client loaded ranges, and presentation progress. | open |
+| [PLAYBACK-LIFECYCLE-STATUS.md](playback-control/PLAYBACK-LIFECYCLE-STATUS.md) | Completed execution ledger for the lifecycle implementation: package state, compilation, deferred tests, review, qualification, promotion and cleanup. | done |
+| [PLAYBACK-BUFFER-OBSERVABILITY-STATUS.md](playback-control/PLAYBACK-BUFFER-OBSERVABILITY-STATUS.md) | Completed execution ledger and live measurement contract for playhead-anchored server readiness, HTTP delivery, client loaded ranges, and presentation progress. | built |
 | [Retained playback observations](evidence/playback-lifecycle-observation-2026-09-11.json) | Sanitized September 11 Apple TV observations used by the lifecycle audit; diagnostic evidence, not a runnable test fixture or acceptance result. | done |
 | [PLAYBACK-CONTROL-PROTOCOL-PLAN.md](playback-control/PLAYBACK-CONTROL-PROTOCOL-PLAN.md) | The whole design: explicit demand, one owner, prepared handoffs. | open |
 | [PLAYBACK-CONTROL-STATUS.md](playback-control/PLAYBACK-CONTROL-STATUS.md) | What is actually built and merged, milestone by milestone. | open |

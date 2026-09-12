@@ -1,8 +1,8 @@
 # Playback buffer observability — implementation status
 
-**Status:** implementation complete · handed to final integrator · **Updated:**
-2026-09-12 · **Base:** `10f2afe6` · **Effort:**
-`effort/buffer-observability`
+**Status:** implementation and main promotion complete · **Updated:**
+2026-09-12 · **Promotion:**
+[PR #263](http://192.168.4.7:3000/noirr/plurx/pulls/263), merge `eaecb199`
 
 This is the live execution ledger for the additive playback buffer and delivery
 instrumentation that follows the
@@ -15,11 +15,11 @@ evidence exists. Unknown and stale observations are never recorded as zero.
 | Package | State | Current evidence | Next action |
 |---|---|---|---|
 | O01 measurement contract | complete | the generated cross-client field contract names source read, anchored server ready, server HTTP wait/delivery, client loaded media and presentation separately; missing readiness is `0.0 s` while unknown is `Unavailable` | none |
-| O02 server publication | merged to effort | rolling applies the achieved origin once and stops at pruned/gapped media; VOD begins at the accepted playhead/seek entry and requires init plus contiguous materialized entries; the bounded wait pool publishes per-session count, oldest age and segment | none |
-| O03 Apple presentation | merged to effort | Apple info/debug rows consume the shared fields; AVPlayer loaded ranges and film-clock age stay separate; visible waits name presentation, client-loaded media and server HTTP-wait state without inferring a cause | none |
-| O04 Android presentation | merged to effort | Media3 reports attached-player loaded runway and presentation age; server samples are identity-fenced and age-stamped; rows and visible waiting copy use the shared vocabulary | none |
-| O05 web presentation | merged to effort | browser buffered ranges, frame/clock advancement, server sample age and server HTTP waits are distinct; visible waits refresh when a newer status sample arrives | none |
-| O06 promotion | handed off | client task PR [#264](http://192.168.4.7:3000/noirr/plurx/pulls/264) merged at `35d40a2d`; the playback-rewrite integration session owns the one combined adversarial review, final fast lane and main promotion | integrate `effort/buffer-observability` into the combined candidate |
+| O02 server publication | complete on `main` | rolling applies the achieved origin once and stops at pruned/gapped media; VOD begins at the accepted playhead/seek entry and requires init plus contiguous materialized entries; the bounded wait pool publishes per-session count, oldest age and segment | none |
+| O03 Apple presentation | complete on `main` | Apple info/debug rows consume the shared fields; AVPlayer loaded ranges and film-clock age stay separate; visible waits name presentation, client-loaded media and server HTTP-wait state without inferring a cause | none |
+| O04 Android presentation | complete on `main` | Media3 reports attached-player loaded runway and presentation age; server samples are identity-fenced and age-stamped; rows and visible waiting copy use the shared vocabulary | none |
+| O05 web presentation | complete on `main` | browser buffered ranges, frame/clock advancement, server sample age and server HTTP waits are distinct; visible waits refresh when a newer status sample arrives | none |
+| O06 promotion | complete | task PR [#264](http://192.168.4.7:3000/noirr/plurx/pulls/264) merged at `35d40a2d`; combined PR #263 passed review and run 1903, then merged to `main` at `eaecb199` | none |
 
 ## Measurement contract
 
@@ -64,8 +64,9 @@ not count.
 | client task `6f800466` | iOS simulator build plus the two new `AppleClientTests`; tvOS simulator build | passed; 2 tests, 0 failures; both Apple platforms compiled |
 | client task `465a3aac` | Effort development gate [run 1895](http://192.168.4.7:3000/noirr/plurx/actions/runs/1877) | passed; policy preflight, Rust compile and aggregate gate green |
 | effort merge `35d40a2d` | PR [#264](http://192.168.4.7:3000/noirr/plurx/pulls/264) | merged into `effort/buffer-observability` |
-| combined current-main candidate | one adversarial review | delegated to playback-rewrite integration session; not requested here |
-| reviewed combined candidate | fast lane / Main promotion gate | delegated to playback-rewrite integration session; not run here |
+| combined candidate `83693106` | one adversarial review | four findings; all addressed before the final validation phase |
+| exact head `91eb2546` | [main fast-lane run 1903](http://192.168.4.7:3000/noirr/plurx/actions/runs/1885) | passed; all eight jobs, including Android and `Main promotion gate`, succeeded |
+| merge `eaecb199` | PR [#263](http://192.168.4.7:3000/noirr/plurx/pulls/263) | merged the unchanged qualified head to `main` |
 
 ## Decisions made without waiting
 
@@ -76,9 +77,9 @@ not count.
   watchdog, media-file scan, or independent polling loop.
 - Apple TV presentation is the first UI priority, while labels and measurement
   meanings remain shared with Android and web.
-- Focused regressions required by the repository workflow run before task
-  pushes. The full suites stay deferred; the fast lane runs once, after the
-  single adversarial review is addressed on the final candidate.
-- The concurrent playback-rewrite session is the final integrator. It will
-  combine this additive effort with its rewrite work before review and
-  promotion, avoiding two competing main candidates and two fast-lane runs.
+- Focused regressions required by the repository workflow ran before task
+  pushes. The full suites stayed deferred; broad validation was confined to
+  the final post-review phase, with retries limited to demonstrated failures.
+- The playback-rewrite session was the final integrator. It combined this
+  additive effort before the one review and promoted one main candidate,
+  avoiding competing instrumentation and rewrite PRs.
