@@ -282,7 +282,16 @@ test("every playback-info row has a unique id, a known section, a known format, 
     assert.ok(!labels.includes(banned), `label ${banned} is back — the audit retired it`);
   }
   // Rows the audit found missing on some client are present in the contract.
-  for (const required of ["container", "buffer", "status", "subtitles", "stalls"]) {
+  for (const required of [
+    "container",
+    "server_ready",
+    "http_wait",
+    "client_loaded",
+    "presentation",
+    "status",
+    "subtitles",
+    "stalls",
+  ]) {
     assert.ok(ids.has(required), `field ${required} missing`);
   }
 });

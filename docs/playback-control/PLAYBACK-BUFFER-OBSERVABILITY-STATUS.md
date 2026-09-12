@@ -1,7 +1,8 @@
 # Playback buffer observability — implementation status
 
-**Status:** implementation in progress · **Updated:** 2026-09-12 · **Base:**
-`10f2afe6` · **Effort:** `effort/buffer-observability`
+**Status:** implementation complete · effort qualification pending · **Updated:**
+2026-09-12 · **Base:** `10f2afe6` · **Effort:**
+`effort/buffer-observability`
 
 This is the live execution ledger for the additive playback buffer and delivery
 instrumentation that follows the
@@ -13,12 +14,12 @@ evidence exists. Unknown and stale observations are never recorded as zero.
 
 | Package | State | Current evidence | Next action |
 |---|---|---|---|
-| O01 measurement contract | decided | Astra confirmed the five-stage model and the authoritative server-ready definition; no separate implementation document is pending | encode the shared field contract and status types |
-| O02 server publication | complete on task branch | rolling applies the achieved origin once and stops at pruned/gapped media; VOD begins at the accepted playhead/seek entry and requires init plus contiguous materialized entries; the bounded wait pool publishes per-session count, oldest age and segment | merge `codex/buffer-server-telemetry` into the effort after its development gate |
-| O03 Apple presentation | pending | AVPlayer contiguous loaded-range and existing two-second status cadence identified | add Apple TV-first Buffering / Delivery rows and waiting copy |
-| O04 Android presentation | pending | Media3 buffered position, status cadence and playback-info renderer identified | add the shared rows, stale identity fence and waiting copy |
-| O05 web presentation | pending | browser buffered ranges, playback-quality clock and fenced status poll identified | add the shared rows, sample ages and waiting copy |
-| O06 promotion | pending | independent Forgejo clone and effort branch published | merge reviewable tasks into the effort, freeze, integrate current main, review once, run fast lane, merge |
+| O01 measurement contract | complete | the generated cross-client field contract names source read, anchored server ready, server HTTP wait/delivery, client loaded media and presentation separately; missing readiness is `0.0 s` while unknown is `Unavailable` | none |
+| O02 server publication | merged to effort | rolling applies the achieved origin once and stops at pruned/gapped media; VOD begins at the accepted playhead/seek entry and requires init plus contiguous materialized entries; the bounded wait pool publishes per-session count, oldest age and segment | none |
+| O03 Apple presentation | complete on task branch | Apple info/debug rows consume the shared fields; AVPlayer loaded ranges and film-clock age stay separate; visible waits name presentation, client-loaded media and server HTTP-wait state without inferring a cause | merge the client task after its effort gate |
+| O04 Android presentation | complete on task branch | Media3 reports attached-player loaded runway and presentation age; server samples are identity-fenced and age-stamped; rows and visible waiting copy use the shared vocabulary | merge the client task after its effort gate |
+| O05 web presentation | complete on task branch | browser buffered ranges, frame/clock advancement, server sample age and server HTTP waits are distinct; visible waits refresh when a newer status sample arrives | merge the client task after its effort gate |
+| O06 promotion | coordinated | the playback-rewrite integration session owns the one combined adversarial review, final fast lane and main promotion; this effort stops after its green task/effort merge | hand the exact effort head to the integration session |
 
 ## Measurement contract
 
@@ -58,10 +59,12 @@ not count.
 | `10f2afe6` | `cargo --version` | `cargo 1.97.1 (c980f4866 2026-06-30)` |
 | server task | `cargo fmt --all -- --check`; `cargo check -p plurxd --locked --all-targets`; `cargo clippy -p plurxd --locked --all-targets -- -D warnings` | passed |
 | server task | three exact Rust regressions: origin/retention readiness, wait-pool observation, VOD disjoint far-seek readiness | 3 passed; 0 failed |
-| remaining task branches | focused regressions and affected compilation | not run |
+| client task `6f800466` | `node tests/playback/web-policy.test.js`; `node tests/playback/player-input-contract.test.js`; `node tests/web/player-dom.test.js` | passed |
+| client task `6f800466` | pinned Android JDK 25 / SDK 37: `:app:compileDebugKotlin`, `:app:assembleDebugAndroidTest`, and `:app:testDebugUnitTest --tests tv.plurx.app.player.PlaybackInfoContractTest --tests tv.plurx.app.player.PlaybackTelemetryTest` | passed; instrumentation sources compiled; focused JVM classes passed |
+| client task `6f800466` | iOS simulator build plus the two new `AppleClientTests`; tvOS simulator build | passed; 2 tests, 0 failures; both Apple platforms compiled |
 | effort candidate | Effort development gate | not run |
-| current-main candidate | one adversarial review | not requested |
-| reviewed candidate | fast lane / Main promotion gate | not run |
+| combined current-main candidate | one adversarial review | delegated to playback-rewrite integration session; not requested here |
+| reviewed combined candidate | fast lane / Main promotion gate | delegated to playback-rewrite integration session; not run here |
 
 ## Decisions made without waiting
 
@@ -75,3 +78,6 @@ not count.
 - Focused regressions required by the repository workflow run before task
   pushes. The full suites stay deferred; the fast lane runs once, after the
   single adversarial review is addressed on the final candidate.
+- The concurrent playback-rewrite session is the final integrator. It will
+  combine this additive effort with its rewrite work before review and
+  promotion, avoiding two competing main candidates and two fast-lane runs.

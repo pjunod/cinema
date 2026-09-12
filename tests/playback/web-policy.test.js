@@ -159,6 +159,48 @@ test("playback info explicitly separates playback mode from delivery method", ()
   assert.match(stats, /method,playback_mode/);
 });
 
+test("playback info keeps readiness unknown distinct from measured zero", () => {
+  const telemetry = new Function(
+    `${shippedSource("statsServerReady")}\n${shippedSource("statsHttpWait")}\n${shippedSource("playbackWaitCopy")}\nreturn {statsServerReady,statsHttpWait,playbackWaitCopy};`,
+  )();
+  assert.deepEqual(telemetry.statsServerReady(null), {
+    value: "Unavailable",
+    state: "Unavailable",
+  });
+  assert.deepEqual(telemetry.statsServerReady({ server_ready_state: "missing" }), {
+    value: "0.0 s",
+    state: "Missing",
+  });
+  assert.deepEqual(
+    telemetry.statsServerReady({ server_ready_state: "ready", server_ready_seconds: 12.34 }),
+    { value: "12.3 s", state: "Ready" },
+  );
+  assert.deepEqual(telemetry.statsHttpWait({ http_wait_count: 0 }), {
+    value: "0 active",
+    note: null,
+  });
+  assert.deepEqual(
+    telemetry.statsHttpWait({
+      http_wait_count: 2,
+      http_wait_oldest_ms: 1450,
+      http_wait_segment: 37,
+    }),
+    { value: "2 active", note: "oldest 1450 ms · segment 37" },
+  );
+  assert.deepEqual(telemetry.playbackWaitCopy(0, 0), {
+    title: "Presentation waiting…",
+    detail: "0.0 s client loaded · no server HTTP waits",
+  });
+  assert.deepEqual(telemetry.playbackWaitCopy(3.25, 1), {
+    title: "Presentation waiting…",
+    detail: "3.3 s client loaded · 1 server HTTP wait",
+  });
+  assert.equal(
+    telemetry.playbackWaitCopy(0, null).detail,
+    "0.0 s client loaded · server wait state unavailable",
+  );
+});
+
 // `openSession` reaches two more shipped helpers than it used to, and every
 // caller of it here has to hand them the same fakes — otherwise the difference
 // between two cases is the harness rather than the behaviour.

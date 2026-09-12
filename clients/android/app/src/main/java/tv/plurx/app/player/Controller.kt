@@ -394,6 +394,13 @@ class Controller(
 
     var sessionStatus: PlaybackSessionStatus? by mutableStateOf(null)
         private set
+    private var sessionStatusObservedAtMs: Long? by mutableStateOf(null)
+    val sessionStatusAgeMs: Long?
+        get() = sessionStatusObservedAtMs?.let { (monotonicNowMs() - it).coerceAtLeast(0) }
+    val presentationProgressAgeMs: Long?
+        get() = openStallTracker.progressAgeMs(monotonicNowMs())
+    val isPlaybackWaiting: Boolean
+        get() = player.playWhenReady && player.playbackState == Player.STATE_BUFFERING
 
     val currentSessionId: String? get() = sessionId
     val currentSessionIsVod: Boolean get() = sessionIsVod
@@ -1761,10 +1768,14 @@ class Controller(
     private fun startStatusPolling(polledSessionId: String) {
         statusPollingJob?.cancel()
         sessionStatus = null
+        sessionStatusObservedAtMs = null
         statusPollingJob = scope.launch {
             while (isActive && sessionId == polledSessionId) {
                 try {
-                    sessionStatus = vm.hlsSessionStatus(polledSessionId)
+                    val observed = vm.hlsSessionStatus(polledSessionId)
+                    if (!isActive || sessionId != polledSessionId) return@launch
+                    sessionStatus = observed
+                    sessionStatusObservedAtMs = monotonicNowMs()
                 } catch (_: Exception) {
                     // Keep the last real sample. A completed session may
                     // disappear before the player finishes its buffered tail.
@@ -1778,6 +1789,7 @@ class Controller(
         statusPollingJob?.cancel()
         statusPollingJob = null
         sessionStatus = null
+        sessionStatusObservedAtMs = null
     }
 
     private fun remuxUri(ms: Long): String = progressiveRemuxUri(
@@ -2231,6 +2243,7 @@ class Controller(
         val deliveredDolbyVisionProfile: Int?,
         val encoder: String?,
         val sessionStatus: PlaybackSessionStatus?,
+        val sessionStatusObservedAtMs: Long?,
         val establishedPlayback: Boolean,
         val playWhenReady: Boolean,
         val playbackParameters: PlaybackParameters,
@@ -2505,6 +2518,7 @@ class Controller(
             deliveredDolbyVisionProfile = deliveredDolbyVisionProfile,
             encoder = encoder,
             sessionStatus = sessionStatus,
+            sessionStatusObservedAtMs = sessionStatusObservedAtMs,
             establishedPlayback = establishedPlayback,
             playWhenReady = previousPlayWhenReady,
             playbackParameters = previousPlaybackParameters,
@@ -2559,6 +2573,7 @@ class Controller(
         // until it does, no answer is better than the predecessor's.
         encoder = null
         sessionStatus = null
+        sessionStatusObservedAtMs = null
         establishedPlayback = false
         armTrackSelections()
         applyTextSelection()
@@ -2636,6 +2651,7 @@ class Controller(
         establishedPlayback = predecessor.establishedPlayback
         predecessor.sessionId?.let(::startStatusPolling) ?: clearStatusPolling()
         sessionStatus = predecessor.sessionStatus
+        sessionStatusObservedAtMs = predecessor.sessionStatusObservedAtMs
         predecessor.player.volume = predecessor.volume
         predecessor.player.playbackParameters = predecessor.playbackParameters
         predecessor.player.playWhenReady = predecessor.playWhenReady
