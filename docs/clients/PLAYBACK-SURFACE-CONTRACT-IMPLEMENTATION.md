@@ -813,14 +813,19 @@ left open, recorded here rather than resolved silently:
 **Two more rulings joined these after M5 merged, and both are now ruled**
 (2026-09-13, closed in `web/playback-surface-reach`):
 
-* **Ruling 1 — Keep waiting is offered.** All three web `owner_exhausted`
-  raises carry it. The two stall sites share `playbackExhaustedActions`, which
-  is `playbackStallActions` with `keep_waiting` in front; the create-exhaustion
-  owner names its own list. It is deliberately NOT folded into
+* **Ruling 1 — Keep waiting is offered on the two STALL prompts.** They share
+  `playbackExhaustedActions`, which is `playbackStallActions` with
+  `keep_waiting` in front. It is deliberately NOT folded into
   `playbackStallActions`, because that list is also what the D1 terminal verdict
   and the diagnosed-stall `decoder_failed` carry and those are `stopped` — a
   recipe the server has ended leaves nothing to wait for. The handler is
   unchanged: `recoveringStall` cleared, `armStall` re-armed, nothing else.
+  **The create-exhaustion prompt does not offer it, and that is the ruling
+  too:** nothing is attached on that path, so `armStall` arms a watchdog whose
+  `stallDiagnose` returns on its first line, and the button would clear the
+  prompt and do nothing — a stopped black player with only Close. Try again
+  re-runs the whole open, which is the honest bounded attempt there. The site
+  carries a comment saying so, and a test reads it back.
 * **Ruling 4 — `segment_503_not_yet` carries its codes.** The row now lists the
   503 codes a playlist or segment request can actually come back with, read off
   the server: `startup_timeout` and `playlist_state_changed` (playlist),

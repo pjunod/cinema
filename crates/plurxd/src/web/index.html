@@ -8692,20 +8692,30 @@ async function openSessionRetryingNotYet(fileId, opts, signal, options){
   const sequence={raised:false,refusal:null};
   const superseded=()=>Object.assign(new Error("Playback preparation superseded."),
     {name:"AbortError"});
+  // Two things about the raise below, both of them decisions rather than
+  // accidents. The DETAIL is the server's own sentence, the last thing it said
+  // about this stream: both ways the sequence ends have one — the ladder is
+  // spent only after a refusal, and the preparation deadline ends the SEQUENCE
+  // only when one has already arrived — so the viewer reads why the stream is
+  // not here rather than "Playback could not prepare." And the class's
+  // `keep_waiting` is deliberately ABSENT from the ACTIONS; putting it back
+  // would be a regression rather than a fix. §3.1's web Keep waiting is
+  // `armStall` re-armed, and on this path nothing is attached: the watchdog it
+  // arms calls `stallDiagnose`, which returns on its first line
+  // (`!playbackOwnsAttachedMedia(p)`). The button would clear the prompt and do
+  // nothing, leaving a stopped black player whose only way out is the chrome's
+  // Close. Try again re-runs the whole open, which IS the honest "one more
+  // bounded attempt" here. Ruled 2026-09-13, alongside the ruling that put the
+  // action on the two STALL sites, where there is a detector to re-arm.
   const exhaust=reason=>{
     if(!sequence.raised){
       sequence.raised=true;
       stopPlayerForExhaustion();
-      // The server's own sentence, which is the last thing it said about this
-      // stream. Both ways the sequence ends have one — the ladder is spent only
-      // after a refusal, and the preparation deadline ends the SEQUENCE only
-      // when one has already arrived — so the viewer reads why the stream is
-      // not here rather than "Playback could not prepare."
       raisePlaybackSurface("owner_exhausted",{context:where,player_stopped:true,
         title:"Playback is stalled.",
         detail:(sequence.refusal&&sequence.refusal.message)
           ||"the server did not finish starting this stream",
-        actions:["keep_waiting","retry","close"]});
+        actions:["retry","close"]});
     }
     return Object.assign(new Error("The server did not finish starting this stream."),
       {name:"PlaybackCreateExhausted",surfaceRaised:true,createRetryReason:reason});
@@ -11232,7 +11242,6 @@ async function rescueAutoSupply(){
   p.abr.supplyRescued=true;
   raisePlaybackSurface("owner_recovery_step",{title:"Adjusting quality…",
     detail:"repeated supply stalls — starting transcode Auto"});
-  raisePlaybackSurface("degraded_notice",{title:"Quality → Auto transcode — supply stalls"});
   try{
     await startTranscodeFallback("auto-supply",
       "switched to transcode Auto after 3 supply stalls in 60 seconds");
@@ -11246,6 +11255,11 @@ async function rescueAutoSupply(){
     p.abr.supplyRescued=false;
     return;
   }
+  // Said once the switch has LANDED, the same gate `switchAutoRung` uses. The
+  // `recovering` step above outranks a notice for as long as it is up, so a
+  // raise beside it is a sentence whose 5 s timer expires behind a spinner —
+  // which is worse than the toast it replaced, not better.
+  raisePlaybackSurface("degraded_notice",{title:"Quality → Auto transcode — supply stalls"});
   const now=performance.now();
   p.abr.lastSwitchAtMs=now;
   p.abr.stableSinceMs=now;

@@ -2092,22 +2092,35 @@ asyncTest("the decode rescue raises its notice as a degraded fault", async () =>
   await h.finishOpen();
 });
 
-asyncTest("the supply rescue raises its notice as a degraded fault", async () => {
+asyncTest("the supply rescue raises its notice once the switch has landed", async () => {
   const player = pressuredRemuxPlayer();
   const h = autoRescueHarness(player);
   const rescue = h.rescueAutoSupply();
   await h.settle();
+  // While the switch is in flight the only fault is the recovery step. A
+  // `degraded` notice beside it would be outranked by that rank-2 progress
+  // fault and would spend its whole 5 s timer behind a spinner.
+  assert.deepEqual(h.raises.map((entry) => entry.source), ["owner_recovery_step"]);
+  await h.finishOpen();
+  await rescue;
   assert.deepEqual(
     h.raises.map((entry) => entry.source),
     ["owner_recovery_step", "degraded_notice"],
-    "the recovery step and the notice about it are two faults, in that order",
+    "the notice arrives when the transcode has actually attached",
   );
-  assert.equal(
-    h.raises[1].fault.title,
-    "Quality → Auto transcode — supply stalls",
-  );
+  assert.equal(h.raises[1].fault.title, "Quality → Auto transcode — supply stalls");
+});
+
+asyncTest("a supply rescue that did not land says nothing", async () => {
+  const player = pressuredRemuxPlayer();
+  const h = autoRescueHarness(player);
+  h.failNextOpen();
+  const rescue = h.rescueAutoSupply();
+  await h.settle();
   await h.finishOpen();
   await rescue;
+  assert.deepEqual(h.raises.map((entry) => entry.source), ["owner_recovery_step"],
+    "a rescue whose open failed never claims the quality moved");
 });
 
 test("mild pressure needs two samples plus cooldown, dwell, and switch gain", () => {
@@ -2880,9 +2893,12 @@ test("every other action is still its own effect", () => {
   }
 });
 
-test("the exhausted prompt offers Keep waiting on every path that raises it", () => {
-  // The two stall sites share one list; the create-exhaustion site names its
-  // own. All three are `exhausted`, and the class leads with `keep_waiting`.
+test("the two stall prompts offer Keep waiting, and the create one does not", () => {
+  // The two stall sites share one list and lead with the class's own first
+  // action. The create-exhaustion site names its own, and Keep waiting is
+  // deliberately not on it: nothing is attached there, so `armStall` would arm
+  // a watchdog `stallDiagnose` returns from on its first line, and the button
+  // would clear the prompt and do nothing. Ruled 2026-09-13.
   const shared = new Function(
     "PLAYER",
     [
@@ -2903,8 +2919,13 @@ test("the exhausted prompt offers Keep waiting on every path that raises it", ()
   assert.deepEqual(stall({})({ method: "remux" }), ["retry", "force_transcode", "close"]);
   // The create-exhaustion owner names the actions inline, so read them back.
   const exhaust = shippedSource("openSessionRetryingNotYet");
-  assert.match(exhaust, /actions:\["keep_waiting","retry","close"\]/,
-    "the create-exhaustion prompt offers Keep waiting too");
+  assert.match(exhaust, /actions:\["retry","close"\]/,
+    "the create-exhaustion prompt names its own list");
+  assert.ok(!exhaust.includes("keep_waiting\","),
+    "…and Keep waiting is not on it — there is no detector to re-arm");
+  assert.ok(exhaust.includes("stallDiagnose"),
+    "the comment that says why must name the function that proves it, so a "
+      + "reader who moves `stallDiagnose` finds this");
   assert.equal(
     policy.SURFACE_CLASSES.exhausted.default_actions[0],
     "keep_waiting",

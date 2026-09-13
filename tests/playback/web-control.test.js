@@ -4436,8 +4436,9 @@ async function main() {
     const exhausted = h.raised.filter((entry) => entry.source === "owner_exhausted");
     assert.equal(exhausted.length, 1);
     assert.equal(exhausted[0].player_stopped, true, "`exhausted` carries the owner's stop");
-    // Ruled 2026-09-13: every `exhausted` prompt leads with Keep waiting.
-    assert.deepEqual(exhausted[0].actions, ["keep_waiting", "retry", "close"]);
+    // Ruled 2026-09-13: the two STALL prompts lead with Keep waiting; this one
+    // does not, because nothing is attached and there is no detector to re-arm.
+    assert.deepEqual(exhausted[0].actions, ["retry", "close"]);
     assert.equal(h.posts.length, 4, "the ladder is three retries and stops");
     assert.ok(settled && settled.error, "the caller is told the sequence is over");
     assert.equal(settled.error.surfaceRaised, true,

@@ -360,17 +360,19 @@ closed on the web and open on the two native clients.** Where each landed is
 below; the reasoning is in §4.6 of
 [PLAYBACK-SURFACE-CONTRACT-IMPLEMENTATION.md](docs/clients/PLAYBACK-SURFACE-CONTRACT-IMPLEMENTATION.md).
 
-**1. Keep waiting is offered, and the two rows nothing raised now have raise
-sites — web done, Apple and Android open.** *(Decided; the web half landed in
-`web/playback-surface-reach`.)* All three web `owner_exhausted` raises carry
-`keep_waiting`: the two stall sites through a new `playbackExhaustedActions`
-(`playbackStallActions` with the action in front), the create-exhaustion owner
-through its own list. It is deliberately not folded into `playbackStallActions`
-itself, because that list is also what the D1 terminal verdict and the
-diagnosed-stall `decoder_failed` carry, and those are `stopped` — a recipe the
-server has ended leaves nothing to wait for. The handler is unchanged and a
-test now fails if the button disappears or if pressing it does more than clear
-`recoveringStall` and re-arm `armStall`.
+**1. Keep waiting is offered on the two stall prompts, and the two rows nothing
+raised now have raise sites — web done, Apple and Android open.** *(Decided;
+the web half landed in `web/playback-surface-reach`.)* The two stall sites share
+a new `playbackExhaustedActions` (`playbackStallActions` with the action in
+front). It is deliberately not folded into `playbackStallActions` itself,
+because that list is also what the D1 terminal verdict and the diagnosed-stall
+`decoder_failed` carry, and those are `stopped` — a recipe the server has ended
+leaves nothing to wait for. The **create-exhaustion** prompt does not offer it:
+nothing is attached there, so `armStall` arms a watchdog `stallDiagnose` returns
+from immediately, and the button would clear the prompt and do nothing. The
+handler is unchanged and a test now fails if the button disappears from the
+stall prompts, if it appears on the create one, or if pressing it does more than
+clear `recoveringStall` and re-arm `armStall`.
 
 The same branch gave `degraded_notice` its first web raise site — six of them:
 the pre-play HDR/burn refusal, the same refusal from the subtitle menu, the
