@@ -8,7 +8,7 @@ first.
 
 **PR #299, from `codex/live-tv-start-stall-android` into
 `effort/live-tv-start-stall`; implementation complete, review and
-qualification pending.** The Android
+focused qualification green.** The Android
 player no longer imposes an absolute four-second target offset on every live
 playlist. Media3 now derives the target from the playlist while the existing
 eight-second ceiling remains in force, so a newly published two-segment live
@@ -17,6 +17,11 @@ the built configuration and the production call site. The Android-device
 first-minute check remains the physical hand-off and ships with the server
 candidate qualification; no buffer duration, input route, wire shape, phone
 surface, timeout, or feature gate moved.
+The adversarial review's two findings are closed: the test now reads the
+configuration from a built `MediaItem`, and the corrective commit has its
+durable `tests/client-fixes.toml` source-to-test anchor. The exact named JVM
+test passed on the installed Android toolchain; the device evidence is still
+pending.
 
 ## Live TV starts are being rebuilt around a stable one-second cadence
 
