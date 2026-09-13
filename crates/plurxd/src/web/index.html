@@ -16781,6 +16781,42 @@ function preparedQualityCard(settings,readiness){
       <div class="err" id="pqherr" role="alert"></div>
       ${setCardFoot("savePreparedQuality")}`);
 }
+// The playback surface contract, as a readiness card.
+//
+// Advisory in the strongest sense: there is no switch here, no save, and
+// nothing anywhere in the product reads these answers. The contract itself
+// says so (PLAYBACK-SURFACE-CONTRACT.md §5: "Nothing here is gated"), and the
+// point of the card is the opposite of a gate — the migration is merged and
+// shipping, and this is the honest list of what has NOT been checked about
+// it, in the one place an operator already looks for that kind of fact.
+//
+// Every row is a static sentence. The browser cannot read a client build
+// number, a repository file or a device log, so a computed-looking pill here
+// would be a computed pill that lies. Each row names the file to check
+// instead.
+function playbackSurfaceReadinessCard(){
+  return setCard(`${cardHead("Playback surface contract",
+      "What the error overlay is allowed to be, on every client. Merged and shipping; this is what has not been verified about it.",
+      `<span class="pill">advisory</span>`)}
+      <div class="hint">Nothing on this card is a switch. No result here disables a control, hides one, or changes what any client does.</div>
+      <details class="setdetails"><summary>Verification still owed</summary><div class="setdetails-body">
+      <p class="hint">These readings are about the source tree and the devices, neither of which this server can see. Each row names the file that carries the answer.</p>
+      <h3 class="devcheck-group">Client builds</h3>
+      ${devStaticReq("Apple client build and unit suite","not verified",
+        "Nothing Swift in M2 or M5 has been compiled. Met when <code>clients/apple/README.md</code> claims a build at or above the one that carried them (147 for M2, 149 for M5) and <code>docs/clients/PLAYBACK-SURFACE-APPLE-BUILD-PROMPT.md</code> has been run to green on both the iOS and the tvOS destination.","warn")}
+      ${devStaticReq("Android client build and unit suite","not verified",
+        "Nothing Kotlin in M3 or M5 has been compiled. Met when <code>clients/android/README.md</code> claims a build at or above the one that carried them (90 for M3, 92 for M5) and <code>docs/clients/PLAYBACK-SURFACE-ANDROID-BUILD-PROMPT.md</code> has been run to green.","warn")}
+      <h3 class="devcheck-group">Devices</h3>
+      ${devStaticReq("Physical verification of the four recipes","not run",
+        "The network drop, the failed change on a cold NAS, the Android remux seek and the iPhone lock screen — implementation plan §7, on an Apple TV, an iPhone and an Android TV. Met when a <code>docs/clients/PLAYBACK-SURFACE-PHYSICAL-VERIFICATION-&lt;date&gt;.md</code> record exists; the script is <code>docs/clients/PLAYBACK-SURFACE-PHYSICAL-VERIFICATION-PROMPT.md</code>.","warn")}
+      ${devStaticReq("surface_disagreement","none observed",
+        "A disagreement row is a place where something started the player after its owner stopped it. None has been observed because no device run has happened yet — this is an absence of looking, not an absence of rows. One exception is documented: the iOS lock-screen play command. Read them in Playback debug on the client, section SURFACE, or from the client log.","")}
+      <h3 class="devcheck-group">Gated on a measurement</h3>
+      ${devStaticReq("Remux-origin measurement (M6)","not taken",
+        "The Android progressive-remux landing is built only if a measurement says so: the achieved origin must differ from the requested start by more than 250 ms and the first frame must land at the origin. Nobody has measured it. The procedure is <code>docs/clients/PLAYBACK-SURFACE-REMUX-ORIGIN-MEASUREMENT-PROMPT.md</code>.","")}
+      <p class="devcheck-note">Advisory only. The contract is merged and every client already renders through it; these rows say what has not been checked, and no answer here enables, disables or overrides anything.</p>
+      </div></details>`);
+}
 function developerPanel(settings,readiness){
   const destinations=`<nav class="setdestinations" aria-label="Everyday settings">
     <a href="#/settings/livetv"><strong>Live TV <span aria-hidden="true">↗</span></strong><span>Tuner and guide</span></a>
@@ -16811,6 +16847,7 @@ function developerPanel(settings,readiness){
       ${destinations}
       <div class="setsection"><h2>Library channels</h2><p>Explicit playback enablement with advisory deployment facts.</p></div>${libraryChannels}
       <div class="setsection"><h2>Prepared quality handoff</h2><p>Explicit server and browser enablement with advisory safety evidence.</p></div>${preparedQualityCard(settings,readiness)}${browser}
+      <div class="setsection"><h2>Playback surface contract</h2><p>Advisory verification status for the one fault contract every client renders. Nothing here is a switch.</p></div>${playbackSurfaceReadinessCard()}
       <div class="setsection"><h2>Compatibility</h2><p>Protocol controls for compatible playback clients.</p></div>${protocol}
       <div class="setsection"><h2>Decoder experiments</h2><p>Recovery and cache-policy experiments. Evidence is advisory; saved choices remain authoritative.</p></div>${verifiedDecodeCard(settings)}${decodeRecoveryCard(settings)}
       <div class="setsection"><h2>Delivery experiments</h2><p>Use these overrides for controlled comparisons.</p></div>${experimental}`;
