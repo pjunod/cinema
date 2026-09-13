@@ -163,10 +163,41 @@ final class LiveTvTests: XCTestCase {
             XCTAssertEqual(error.localizedDescription,
                            "The source probe needs refreshing. (vod_source_rescan_required, HTTP 409)")
         }
-        for status in [400, 401, 403, 404, 503] {
+        // Authentication stays status-shaped, and deliberately: the body is not
+        // read at all for a 401 or a 403, so `AppModel.isSessionExpired` keeps
+        // matching however talkative the server becomes about its refusals.
+        for status in [401, 403] {
             let response = try XCTUnwrap(HTTPURLResponse(url: url, statusCode: status, httpVersion: nil, headerFields: nil))
             XCTAssertThrowsError(try PlurxAPI.check(response, data: data)) { error in
-                guard case APIError.http(let code) = error else { return XCTFail("HTTP classification changed") }
+                guard case APIError.http(let code) = error else { return XCTFail("auth classification changed") }
+                XCTAssertEqual(code, status)
+                XCTAssertTrue(AppModel.isSessionExpired(error))
+            }
+        }
+        // Every other refusal the server explained is kept whole, because the
+        // playback surface contract classifies on the code
+        // (PLAYBACK-SURFACE-CONTRACT.md §3.3). A Live TV session create refused
+        // with `vod_source_rescan_required` is the same answer whatever status
+        // carries it.
+        for status in [400, 404, 503] {
+            let response = try XCTUnwrap(HTTPURLResponse(url: url, statusCode: status, httpVersion: nil, headerFields: nil))
+            XCTAssertThrowsError(try PlurxAPI.check(response, data: data)) { error in
+                guard case APIError.refused(let refusedStatus, let code, let message, let positionMs) = error else {
+                    return XCTFail("a typed refusal must survive the throw")
+                }
+                XCTAssertEqual(refusedStatus, status)
+                XCTAssertEqual(code, "vod_source_rescan_required")
+                XCTAssertEqual(message, "The source probe needs refreshing.")
+                XCTAssertNil(positionMs)
+                XCTAssertFalse(AppModel.isSessionExpired(error))
+            }
+        }
+        // …and a body with no code is still just a status.
+        for status in [400, 404, 503] {
+            let response = try XCTUnwrap(HTTPURLResponse(url: url, statusCode: status, httpVersion: nil, headerFields: nil))
+            let legacy = Data(#"{"error":"no code here"}"#.utf8)
+            XCTAssertThrowsError(try PlurxAPI.check(response, data: legacy)) { error in
+                guard case APIError.http(let code) = error else { return XCTFail("a bodiless answer changed shape") }
                 XCTAssertEqual(code, status)
             }
         }

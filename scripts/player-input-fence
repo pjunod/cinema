@@ -131,6 +131,36 @@ def client_files() -> list[Path]:
     )
 
 
+# A fence that fails on prose is a fence people route around. `onMoveCommand`
+# named in a doc comment ABOUT the adapter is documentation, not a key handler,
+# and a comment cannot handle a key.
+#
+# The exemption is deliberately narrow: a line is skipped only when it opens a
+# comment AND has nothing executable left on it. `/* named = */ value` is an
+# idiom already used in this tree (Caps.kt, Controller.kt), so a line that
+# closes its comment and then runs code is NOT a comment line — nor is a `*/`
+# that ends a block and then calls something, nor a JS generator method
+# (`*keys(ev)`), a private class field (`#onkeydown = …`), a Swift `#if`, or an
+# Objective-C `#define`. None of those open a comment in any language scanned
+# here, and each of them can carry a real key handler.
+def is_comment_line(line: str) -> bool:
+    text = line.strip()
+    if text.startswith("*/"):
+        return not text[2:].strip()
+    if text.startswith("//"):
+        return True
+    if text.startswith("/*"):
+        _head, closer, tail = text.partition("*/")
+        return not closer or not tail.strip()
+    if text.startswith("<!--"):
+        _head, closer, tail = text.partition("-->")
+        return not closer or not tail.strip()
+    if text.startswith("*"):
+        # A KDoc/Javadoc body line, not `*spread` or `*keys(ev)`.
+        return len(text) == 1 or text[1] in " \t*"
+    return False
+
+
 def index_allowed_lines(lines: list[str]) -> set[int]:
     allowed: set[int] = set()
     for start_text, end_text, _reason in INDEX_REGIONS:
@@ -140,6 +170,21 @@ def index_allowed_lines(lines: list[str]) -> set[int]:
             raise ValueError(f"index.html lost keyboard allowlist anchors: {start_text!r} … {end_text!r}")
         allowed.update(range(starts[0] + 1, ends[0] + 2))
     return allowed
+
+
+def scan_lines(relative: Path, lines: list[str], allowed: set[int]) -> list[str]:
+    """Every key-handling failure in one file's lines. `scan()` and its test both
+    call this, so the test can never drift into checking a second copy of it."""
+    failures: list[str] = []
+    for number, line in enumerate(lines, start=1):
+        if number in allowed or is_comment_line(line):
+            continue
+        for token, pattern in TOKENS:
+            if (token, relative) in TOKEN_FILE_ALLOWLIST:
+                continue
+            if pattern.search(line):
+                failures.append(f"{relative}:{number}: {token} is outside an allowed adapter")
+    return failures
 
 
 def scan() -> list[str]:
@@ -166,14 +211,7 @@ def scan() -> list[str]:
             except ValueError as error:
                 failures.append(f"{relative}:1: {error}")
                 continue
-        for number, line in enumerate(lines, start=1):
-            if number in allowed:
-                continue
-            for token, pattern in TOKENS:
-                if (token, relative) in TOKEN_FILE_ALLOWLIST:
-                    continue
-                if pattern.search(line):
-                    failures.append(f"{relative}:{number}: {token} is outside an allowed adapter")
+        failures.extend(scan_lines(relative, lines, allowed))
 
     resource_files = {
         Path("clients/android/app/build.gradle.kts"):
@@ -182,12 +220,17 @@ def scan() -> list[str]:
             ("player-input-contract.json", "playback-info-fields.json"),
     }
     for relative, names in resource_files.items():
+        if not (ROOT / relative).is_file():
+            failures.append(f"{relative}:1: the build file that wires the fixture resources is missing")
+            continue
         source = (ROOT / relative).read_text(encoding="utf-8")
         for name in names:
             if name not in source:
                 failures.append(f"{relative}:1: test resources no longer reference {name}")
 
     android_build = ROOT / "clients/android/app/build.gradle.kts"
+    if not android_build.is_file():
+        return failures
     android_source = android_build.read_text(encoding="utf-8")
     resource_directories = re.findall(
         r'getByName\("test"\)\.resources\.directories\.add\("([^"]+)"\)',

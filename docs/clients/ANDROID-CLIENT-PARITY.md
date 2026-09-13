@@ -4,6 +4,19 @@ The Android client is the native plurx **viewer** for phones, foldables,
 tablets, Android TV, and Google TV. This page records what “web parity” means
 for that viewer and keeps server administration out of the comparison.
 
+> Status (2026-09-13): source is v0.3.0, Android build 90. The playback failure
+> surface is a projection of the player rather than a message channel
+> ([PLAYBACK-SURFACE-CONTRACT.md](PLAYBACK-SURFACE-CONTRACT.md), M3): a pure
+> `PlaybackSurfaceReducer` runs all 54 ordered-event cases of
+> `tests/playback/playback-surface-contract.json`, `Controller` publishes one
+> `StateFlow<PlaybackSurface>` in place of the `onError` string callback and
+> `playbackNotice`, the recovery owner sets `playWhenReady = false` before it
+> raises an `exhausted` or `stopped` fault, `PlaybackFailed` is opaque and reads
+> the fault's title, sentence and actions, server refusal bodies are decoded on
+> session create and on Media3 playlist/segment failures, and Playback debug
+> gains a SURFACE section with the last sixteen faults. `scripts/playback-surface-fence`
+> budgets the Android player at zero.
+
 > Status (2026-09-10): source is v0.3.0, Android build 84. Live TV starts include the required protocol version even when the JSON serializer omits defaults. Library-channel
 > browsing, mobile authoring, server-clock following, and all three television
 > presentation preferences are compiled alongside the existing viewer.

@@ -15,7 +15,7 @@ settings:
   base:
     SWIFT_VERSION: "5.9"
     MARKETING_VERSION: "0.3.0"
-    CURRENT_PROJECT_VERSION: "147"
+    CURRENT_PROJECT_VERSION: "148"
     CODE_SIGN_STYLE: Automatic
 
 targets:
@@ -118,6 +118,8 @@ targets:
         buildPhase: resources
       - path: ../../tests/playback/playback-info-fields.json
         buildPhase: resources
+      - path: ../../tests/playback/playback-surface-contract.json
+        buildPhase: resources
       - path: ../../tests/playback/live-tv-guide-cases.json
         buildPhase: resources
       - path: ../../tests/playback/live-tv-start-cases.json
@@ -141,6 +143,8 @@ targets:
       - path: ../../tests/playback/player-input-contract.json
         buildPhase: resources
       - path: ../../tests/playback/playback-info-fields.json
+        buildPhase: resources
+      - path: ../../tests/playback/playback-surface-contract.json
         buildPhase: resources
       - path: ../../tests/playback/live-tv-guide-cases.json
         buildPhase: resources

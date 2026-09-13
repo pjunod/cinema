@@ -8,6 +8,9 @@ enum PlayerControl: Hashable {
     case reveal
     case close
     case retry
+    /// A blocking surface whose fault offers `sign_in` — a 401 or 403, where
+    /// retrying the same bearer is the one thing that cannot work.
+    case signIn
     case progress
     case marker
     case skipBack
@@ -742,7 +745,7 @@ struct PlayerView: View {
                 // had auto-hidden it sat in front of the retry buttons
                 // consuming every direction — `failed × up/down` is `ignore`,
                 // and only Menu got out.
-                if !controlsVisible && !controller.failed {
+                if !controlsVisible && !controller.isPlaybackBlocked {
                     Color.clear
                         .contentShape(Rectangle())
                         .ignoresSafeArea()
@@ -776,7 +779,7 @@ struct PlayerView: View {
                     .accessibilityLabel("Show or hide playback controls")
                 #endif
 
-                if controller.failed {
+                if controller.isPlaybackBlocked {
                     failureView
                 } else {
                     if overlayVisibility.controls {
@@ -822,7 +825,7 @@ struct PlayerView: View {
                     }
                 }
 
-                if controller.isChangingStream {
+                if controller.isChangingStream || controller.showsBlockingProgress {
                     streamChangeProgress
                         .tint(.white)
                         .padding(18)
@@ -862,7 +865,7 @@ struct PlayerView: View {
                 }
 
                 if let error = playbackBannerMessage,
-                   !controller.failed {
+                   !controller.isPlaybackBlocked {
                     Text(error)
                         .font(.system(.caption, design: .monospaced))
                         .foregroundColor(.white)
@@ -950,7 +953,7 @@ struct PlayerView: View {
                 scrubbing: isScrubbing,
                 changingStream: controller.isChangingStream,
                 optionMenuOpen: optionMenuOpen,
-                failed: controller.failed,
+                failed: controller.isPlaybackBlocked,
                 infoOpen: Self.infoSuppressesAutoHide(showStats: showStats, statsMode: statsMode),
                 previewPending: pendingMs != nil,
                 tearingDown: lifecycle.isTearingDown
@@ -963,7 +966,7 @@ struct PlayerView: View {
                       scrubbing: isScrubbing,
                       changingStream: controller.isChangingStream,
                       optionMenuOpen: optionMenuOpen,
-                      failed: controller.failed,
+                      failed: controller.isPlaybackBlocked,
                       infoOpen: Self.infoSuppressesAutoHide(showStats: showStats, statsMode: statsMode),
                       previewPending: pendingMs != nil,
                       tearingDown: lifecycle.isTearingDown
@@ -972,6 +975,15 @@ struct PlayerView: View {
         }
         .onChange(of: controller.isPlaying) { _, _ in revealControls() }
         .onChange(of: controller.isChangingStream) { _, _ in revealControls() }
+        // PiP declares its own presentation and its own failures. Neither is
+        // this controller's to guess at, so the view hands both over and the
+        // banner reads only the presenter (contract §3.4, §4).
+        .onChange(of: pictureInPicture.isActive) { _, active in
+            controller.notePictureInPictureActive(active)
+        }
+        .onChange(of: pictureInPicture.errorMessage) { _, message in
+            controller.notePictureInPictureFailure(message)
+        }
         .onChange(of: showStats) { _, _ in restartAutoHideTimer() }
         .onChange(of: isScrubbing) { _, _ in restartAutoHideTimer() }
         .onChange(of: pendingMs) { _, _ in restartAutoHideTimer() }
@@ -1001,9 +1013,9 @@ struct PlayerView: View {
             }
         }
         #if os(tvOS)
-        .onChange(of: controller.failed) { _, failed in
-            guard failed else { return }
-            focusedControl = controller.canRetryPlaybackFailure ? .retry : .close
+        .onChange(of: controller.isPlaybackBlocked) { _, blocked in
+            guard blocked else { return }
+            focusedControl = Self.failureFocusTarget(for: controller.surface.surface)
         }
         .onChange(of: focusedControl) { oldControl, newControl in
             if let newControl, newControl.isChromeControl {
@@ -1054,10 +1066,20 @@ struct PlayerView: View {
         )
     }
 
+    /// The red strip beside the picture, read from the presenter and from
+    /// nothing else. A PiP failure is a `degraded` fault in the same model
+    /// (contract §4), so there is no second source to fall back to.
+    ///
+    /// It carries whatever the presenter is showing that is not a prompt or a
+    /// terminal — a notice, a hold, a recovery step, a refused change — which
+    /// is the same set of sentences `playbackNotice ?? playbackError` used to
+    /// carry whenever `failed` was false. The prompt and the terminal are
+    /// `failureView`, and the call site already excludes them.
     private var playbackBannerMessage: String? {
-        controller.playbackNotice
-            ?? controller.playbackError
-            ?? pictureInPicture.errorMessage
+        guard !controller.isPlaybackBlocked,
+              let fault = controller.surface.surface.fault
+        else { return nil }
+        return fault.detail ?? fault.title
     }
 
     #if os(iOS)
@@ -1071,7 +1093,7 @@ struct PlayerView: View {
             // system chrome stable while the viewer reads them, then retire it
             // only after the last visible player surface has gone away.
             persistentContentVisible: showStats
-                || controller.failed
+                || controller.isPlaybackBlocked
                 || controller.isChangingStream
                 || findingNext
                 || playbackBannerMessage != nil
@@ -1218,7 +1240,7 @@ struct PlayerView: View {
     }
 
     private func hideControls() {
-        guard controlsVisible, !controller.failed else { return }
+        guard controlsVisible, !controller.isPlaybackBlocked else { return }
         // Mini is a strip beside the transport, not a panel of its own: it no
         // longer suppresses the idle hide, so it has to leave with the chrome.
         // Left behind it would sit on screen with no transport and no producer
@@ -1270,7 +1292,11 @@ struct PlayerView: View {
     }
 
     private func inputState() -> PlayerInputState {
-        if controller.failed { return .failed }
+        // The input contract's `failed` state is a BLOCKING surface whose
+        // class is a prompt or a terminal — never a full-screen `preparing`,
+        // which covers the picture but asks the viewer nothing
+        // (PLAYBACK-SURFACE-CONTRACT.md §4).
+        if controller.isPlaybackBlocked { return .failed }
         // Contract §2.2 orders the precedence scrub → menu → info. A pending
         // position is the most local thing on screen: on the phone the slider
         // stays live under the panel, so asking `info` first meant a drag with
@@ -1464,35 +1490,108 @@ struct PlayerView: View {
     }
 
     private var failureView: some View {
-        VStack(spacing: 14) {
-            Text(controller.playbackFailureTitle)
+        let surface = controller.surface.surface
+        return VStack(spacing: 14) {
+            Text(surface.title ?? PlayerController.playbackStartFailureTitle)
                 .font(.system(.body, design: .monospaced))
                 .foregroundColor(.white)
-            if let error = controller.playbackError {
+            if let error = surface.detail {
                 Text(error)
                     .font(.system(.caption, design: .monospaced))
                     .foregroundColor(Palette.muted)
                     .multilineTextAlignment(.center)
             }
             HStack(spacing: 12) {
-                if controller.canRetryPlaybackFailure {
-                    Button("Try Again") { controller.retryAfterPlaybackFailure() }
-                        .buttonStyle(.borderedProminent)
-                        .tint(Palette.accent)
-                        #if os(tvOS)
-                        .focused($focusedControl, equals: .retry)
-                        #endif
+                ForEach(Self.failureActions(for: surface), id: \.self) { action in
+                    failureActionButton(action)
                 }
-                Button("Close") { closePlayer() }
-                    .buttonStyle(.bordered)
-                    #if os(tvOS)
-                    .focused($focusedControl, equals: .close)
-                    #endif
             }
         }
         .padding(30)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.black)
+    }
+
+    /// The buttons a blocking surface offers, in the fault's own order.
+    ///
+    /// Actions are a property of the FAULT (contract §3.1), so this is a
+    /// projection and not a hard-coded pair. Two rules on top of the fault's
+    /// list, each with a reason:
+    ///
+    /// * `keep_waiting` and `retry` are the same primitive on this client —
+    ///   §3.1 says Apple's Keep waiting IS `retryAfterPlaybackFailure`, which
+    ///   resets `recoveryReopenBudget` and only that — so offering both would
+    ///   be two buttons that do the same thing;
+    /// * Close is guaranteed. A full screen with no way out is worse than an
+    ///   extra button, and every blocking class's defaults include it anyway.
+    static func failureActions(for surface: PlaybackSurface) -> [PlaybackFault.Action] {
+        var actions = surface.actions.filter(rendersFailureAction)
+        if actions.contains(.retry) { actions.removeAll { $0 == .keepWaiting } }
+        if !actions.contains(.close) { actions.append(.close) }
+        return actions
+    }
+
+    /// Which button the remote lands on when a blocking surface appears: the
+    /// first one the fault actually offers, so a 401 opens on Sign In rather
+    /// than on a Try Again that is not drawn.
+    static func failureFocusTarget(for surface: PlaybackSurface) -> PlayerControl {
+        guard let first = failureActions(for: surface).first else { return .close }
+        switch first {
+        case .retry, .keepWaiting: return .retry
+        case .signIn: return .signIn
+        case .close, .forceTranscode: return .close
+        }
+    }
+
+    /// `force_transcode` is the web's, offered on its diagnosed-stall path.
+    /// This client has no such control, and a button that does nothing is
+    /// worse than no button.
+    static func rendersFailureAction(_ action: PlaybackFault.Action) -> Bool {
+        switch action {
+        case .retry, .keepWaiting, .close, .signIn: true
+        case .forceTranscode: false
+        }
+    }
+
+    @ViewBuilder
+    private func failureActionButton(_ action: PlaybackFault.Action) -> some View {
+        switch action {
+        case .retry, .keepWaiting:
+            Button(action == .keepWaiting ? "Keep Waiting" : "Try Again") {
+                controller.retryAfterPlaybackFailure()
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(Palette.accent)
+            #if os(tvOS)
+            .focused($focusedControl, equals: .retry)
+            #endif
+        case .signIn:
+            Button("Sign In") { signInAfterPlaybackFailure() }
+                .buttonStyle(.borderedProminent)
+                .tint(Palette.accent)
+                #if os(tvOS)
+                .focused($focusedControl, equals: .signIn)
+                #endif
+        case .close:
+            Button("Close") { closePlayer() }
+                .buttonStyle(.bordered)
+                #if os(tvOS)
+                .focused($focusedControl, equals: .close)
+                #endif
+        case .forceTranscode:
+            EmptyView()
+        }
+    }
+
+    /// Sign in belongs to the app, not to the player: the bearer is no longer
+    /// honoured, so the player tears down and `AppModel` puts the login screen
+    /// up through the same path every other screen uses. This adds no in-player
+    /// credential prompt.
+    private func signInAfterPlaybackFailure() {
+        finishPlayback {
+            model.noteAuthFailure(APIError.http(401))
+            dismiss()
+        }
     }
 
     #if os(iOS)
@@ -2749,6 +2848,11 @@ let applePlaybackInfoFields: [ApplePlaybackInfoField] = [
     .init("published_end", "Published end", "SERVER", [.debug]),
     .init("fetched_end", "Fetched end", "SERVER", [.debug]),
     .init("control", "Control", "SERVER", [.standard, .debug]),
+    .init("surface_kind", "Surface", "SURFACE", [.standard, .debug]),
+    .init("surface_class", "Fault", "SURFACE", [.standard, .debug]),
+    .init("surface_source", "Source", "SURFACE", [.debug]),
+    .init("surface_ids", "Attached/intent", "SURFACE", [.debug]),
+    .init("surface_history", "History", "SURFACE", [.debug], placement: .notes),
 ]
 
 /// The same three playback-info levels used by the web and Android players.
@@ -3545,7 +3649,7 @@ struct PlaybackStatsView: View {
         let definitions = applePlaybackInfoFields.filter { $0.modes.contains(requestedMode) }
         let sectionOrder = [
             "PLAYBACK", "SOURCE", "NOW DECODING",
-            "BUFFERING / DELIVERY", "NETWORK", "SERVER",
+            "BUFFERING / DELIVERY", "NETWORK", "SERVER", "SURFACE",
         ]
         return sectionOrder.compactMap { sectionName in
             let fields = definitions.filter { $0.section == sectionName }
@@ -3814,13 +3918,42 @@ struct PlaybackStatsView: View {
             return status?.fetchedEndMs.map { ContractFieldValue(value: "\($0) ms") }
         case "control":
             return controller.playbackControlSummary.map { ContractFieldValue(value: $0) }
+        // "What was that overlay" has an answer inside the product, which is
+        // the whole of the contract's §5.
+        case "surface_kind":
+            let surface = controller.surface.surface
+            return ContractFieldValue(
+                value: surface.kind.rawValue,
+                tone: surface.kind == .blocking ? .critical : .neutral
+            )
+        case "surface_class":
+            guard let fault = controller.surface.surface.fault else {
+                return ContractFieldValue(value: "none", tone: .muted)
+            }
+            let demoted = fault.demoted ? " · demoted" : ""
+            let stopped = fault.playerStopped ? " · owner stopped" : ""
+            return ContractFieldValue(
+                value: "\(fault.cls.rawValue)\(demoted)\(stopped)",
+                tone: fault.playerStopped ? .critical : .neutral,
+                note: fault.detail
+            )
+        case "surface_source":
+            return controller.surface.surface.source.map { ContractFieldValue(value: $0) }
+        case "surface_ids":
+            guard let fault = controller.surface.surface.fault else { return nil }
+            let intent = fault.intent.map { String($0) } ?? "—"
+            let position = fault.positionMs.map { " · \($0) ms" } ?? ""
+            return ContractFieldValue(value: "\(fault.attached) / \(intent)\(position)")
+        case "surface_history":
+            let summary = controller.surfaceHistory.ledgerSummary
+            return summary.isEmpty ? nil : ContractFieldValue(value: summary)
         default:
             return nil
         }
     }
 
     private var playbackServerStatus: ContractFieldValue {
-        if controller.failed { return ContractFieldValue(value: "Failed", tone: .critical) }
+        if controller.isPlaybackBlocked { return ContractFieldValue(value: "Failed", tone: .critical) }
         if controller.isVOD { return ContractFieldValue(value: "Served from cache", tone: .good) }
         guard let status = controller.sessionStatus else {
             return ContractFieldValue(value: "No server-side session", tone: .muted)
@@ -3832,7 +3965,7 @@ struct PlaybackStatsView: View {
     }
 
     private func normalizedPlayerState(_ raw: String?) -> String {
-        if controller.failed { return "Failed" }
+        if controller.isPlaybackBlocked { return "Failed" }
         if controller.finished { return "Ended" }
         guard let raw = raw?.lowercased() else { return controller.isPlaying ? "Playing" : "Paused" }
         if raw.contains("wait") { return "Buffering" }

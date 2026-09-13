@@ -20,13 +20,19 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `90` — native viewer parity across phone, foldable,
-> and TV. Build 90 makes Live TV starts recoverable rather than refusable: the
+> Status: **v0.3.0**, build `91` — native viewer parity across phone, foldable,
+> and TV. Build 91 makes Live TV starts recoverable rather than refusable: the
 > 90-second start barrier is gone, a press persists a `{request_id, touched_at}`
 > hint the owner can retire, a start that gets no answer replays once with the
 > same id and says so instead of locking the screen, reopening the app rejoins a
 > session the viewer never meant to leave, and the guide polls on the owner's
-> own `next_refresh_at`. Build 89 gives Live TV the web page's proportions on Google TV and on
+> own `next_refresh_at`. Build 90 makes the playback failure surface a projection of the
+> player: one `PlaybackSurface` StateFlow fed by a pure reducer that runs the
+> shared contract fixture, typed faults with a class and two identities instead
+> of an `onError` string, the recovery owner stopping ExoPlayer before it raises
+> a full-screen prompt, refusal bodies read from session creates and from
+> Media3's `InvalidResponseCodeException`, an opaque failure view, and a SURFACE
+> section in Playback debug. Build 89 gives Live TV the web page's proportions on Google TV and on
 > the phone: one explicit ten-foot type scale, one 24 dp toolbar, a guide whose
 > slot width is derived from the width it is given so two hours always fit, a
 > 310 dp On now column beside a focusable picture whose Select is fullscreen,
