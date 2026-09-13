@@ -5151,6 +5151,17 @@ final class PlayerController: ObservableObject {
     private func stopForBlockingSurface() {
         player.pause()
         isPlaying = false
+        // The stop is presentation evidence too, and it has to be recorded
+        // HERE rather than left to the next sampler tick. Every owner site
+        // raises its blocking fault synchronously after this call, so a model
+        // still holding a `presenting` sample sees a blocking raise over a
+        // moving picture and resolves §3.2's disagreement against it — and
+        // that demotion is one-way, so the terminal never comes back. A 401
+        // during a quality change drew "Playback recovered" with no Sign in
+        // and no Close, permanently, until this line existed.
+        if let attached = surface.attached {
+            present(.presenting(false, attached: attached))
+        }
     }
 
     // MARK: - M5: the create "not yet" retry
@@ -5616,7 +5627,8 @@ final class PlayerController: ObservableObject {
     /// `isChangingStream` never clears and the periodic observer returns
     /// early. Without this the `.change` and `.attached` halves of every
     /// context-sensitive rule are unreachable from a unit test. It sets one
-    /// piece of evidence and decides nothing.
+    /// piece of evidence and makes no decision of its own — `surfaceContext`
+    /// reads it, and the create-retry ladder turns on what that says.
     func noteFramePresentedForTesting() { surfaceHasPresented = true }
     #endif
 

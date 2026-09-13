@@ -3329,10 +3329,24 @@ final class AppleClientTests: XCTestCase {
     /// black-frame stop is pinned.
     func testOnlyTheEvidenceSamplerEverFeedsAPresentingEvent() throws {
         let source = try playerControllerSource()
+        // Two sites, and the second is not an exception to the rule but the
+        // rest of it: the recovery owner's stop IS evidence, and a fault
+        // raised before it is recorded is demoted by §3.2 and never recovers.
         XCTAssertEqual(
             source.components(separatedBy: "present(.presenting(").count - 1,
-            1,
-            "presentation evidence must have exactly one call site"
+            2,
+            "presentation evidence has two call sites: the evidence sampler, and the owner's stop"
+        )
+        let stopStart = try XCTUnwrap(
+            source.range(of: "private func stopForBlockingSurface() {")
+        )
+        let stopEnd = try XCTUnwrap(
+            source.range(of: "\n    }\n", range: stopStart.upperBound..<source.endIndex)
+        )
+        let stop = String(source[stopStart.upperBound..<stopEnd.lowerBound])
+        XCTAssertTrue(
+            stop.contains("present(.presenting(false"),
+            "the owner's stop must record that the picture stopped presenting"
         )
         let start = try XCTUnwrap(
             source.range(of: "private func sampleSurfacePresentation(at observedPosition: Int) {")
@@ -3343,7 +3357,7 @@ final class AppleClientTests: XCTestCase {
         let body = String(source[start.upperBound..<end.lowerBound])
         XCTAssertTrue(
             body.contains("present(.presenting("),
-            "the one call site must be the evidence sampler's"
+            "the sampler must be one of the two call sites"
         )
         // The contract's evidence is the position delta and the rate, plus the
         // first-frame proof — never a transport status (§3.4).
@@ -3544,12 +3558,31 @@ final class AppleClientTests: XCTestCase {
         XCTAssertEqual(refused.compactMap(\.error), [.blockingWithoutStop])
         XCTAssertEqual(model.kind, .none, "a refused blocking fault is not a surface — it is the absence of one")
 
-        // The owner stopped the player, so the picture stopped presenting:
-        // the fixture's own `auth_over_a_live_media_owner_lost_still_signs_in`
-        // spells that `presenting: false` out before its blocking raise. A
-        // blocking fault raised while the presenter still holds a presenting
-        // sample is a disagreement the moment it is raised (§3.2), and the
-        // picture wins — which is a different case from this one.
+        // This line is not test scaffolding: it is the event the shipped
+        // `PlayerController.stopForBlockingSurface()` emits, and the reason it
+        // has to. Raise the terminal while the model still believes the
+        // picture is presenting and §3.2 demotes it to a "Playback recovered"
+        // banner with no Sign in and no Close — irreversibly, because a
+        // demoted fault is never promoted again. That is what shipped until
+        // the owner's stop started recording its own evidence; the assertion
+        // that it still does is in
+        // `testOnlyTheEvidenceSamplerEverFeedsAPresentingEvent`, because the
+        // controller half needs a decoding player no unit test has. The pair
+        // below is the whole property: without the evidence, `degraded`.
+        var demoting = model
+        let demoted = demoting.apply(
+            PlaybackSurfaceModel.raise(
+                source: "auth_401_403", context: .change, attached: 1, playerStopped: true
+            ),
+            now: origin
+        )
+        XCTAssertEqual(demoted.compactMap(\.error), [])
+        XCTAssertEqual(
+            demoting.currentFault?.cls, .degraded,
+            "a terminal raised over a picture the model still thinks is presenting is lost"
+        )
+        XCTAssertTrue(demoting.currentFault?.demoted == true, "and it is lost for good")
+
         model.apply(.presenting(false, attached: 1), now: origin)
         let raised = model.apply(
             PlaybackSurfaceModel.raise(
