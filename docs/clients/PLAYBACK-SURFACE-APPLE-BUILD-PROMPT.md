@@ -144,13 +144,15 @@ hidden both.
 ## 4. Mutate and confirm — the tests have never killed anything
 
 A test that has never run has never killed a mutation. For each mutation
-below: apply it, run `make apple-test`, confirm **the named test fails**,
-then `git checkout` the file. A mutation that leaves the suite green is a
-finding — report it with the mutation and the file.
+below: apply it, run `make apple-test`, confirm **the named test fails**, then
+`git checkout` the file. If a *different* test fails instead, that is fine —
+report which one. What is not fine is the suite staying green: a mutation
+nothing catches is a finding, and it is reported with the mutation and the
+file rather than quietly fixed.
 
 | # | Mutation | Must fail |
 |---|---|---|
-| A1 | Delete `player.pause()` from the black-frame exhaustion in `handleBlackFrameDecodeFailure` | `testTheBlackFrameLadderStopsThePlayerBeforeItRaises` |
+| A1 | Delete the `stopForBlockingSurface()` call from `handleBlackFrameDecodeFailure`'s ladder-spent branch (`PlayerController.swift:6943`) — that helper is the `player.pause()` §4.3 names (`PlayerController.swift:5151`) | `testTheBlackFrameLadderStopsThePlayerBeforeItRaises` |
 | A2 | Make `PlaybackSurface.entersFailedRouting` (`PlaybackSurfaceModel.swift:132`) return `kind == .blocking` | `testPlaybackSurfaceModelRunsEveryContractCase` — the fixture carries `input_failed: false` on full-screen progress classes, which is exactly what this mutation gets wrong |
 | A3 | Change `sampleSurfacePresentation` (`PlayerController.swift:5589`) to decide on `player.timeControlStatus == .playing` instead of the position delta | `testAPresentingSampleAfterAStopDemotesToABannerAndLogsTheDisagreement` |
 | A4 | Delete the `await releaseHlsSession(model, id)` call on the late-create path (`PlayerController.swift:4053`) | `testACreateThatLandsAfterTheDeadlineIsReleasedAndNeverAttached` |

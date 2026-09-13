@@ -173,19 +173,21 @@ passes under the defect.
 ## 3. Mutate and confirm — the tests have never killed anything
 
 For each mutation: apply it, run `./gradlew :app:testDebugUnitTest`, confirm
-**the named test fails**, then `git checkout` the file. A mutation that leaves
-the suite green is a finding — report it with the mutation and the file.
+**the named test fails**, then `git checkout` the file. If a *different* test
+fails instead, that is fine — report which one. What is not fine is the suite
+staying green: a mutation nothing catches is a finding, and it is reported with
+the mutation and the file rather than quietly fixed.
 
 | # | Mutation | Must fail |
 |---|---|---|
-| K1 | Delete the `player.stop()` from any one blocking site in `PlaybackSurfaceOwner.kt` | **exactly one** `…StopsBeforeItRaises` case, and the failure must name that site. If more than one fails, the duplication that makes this diagnostic has been collapsed |
+| K1 | Delete the `player.playbackRequested = false` line from any one blocking site in `PlaybackSurfaceOwner.kt` — that assignment **is** the owner's stop (`ExoPlayer.playWhenReady`), e.g. from `exhaustedAfterReopenBudget` | **exactly one** `…StopsBeforeItRaises` case, and the failure must name that site. If more than one fails, the deliberate duplication that makes this diagnostic has been collapsed |
 | K2 | Make `SessionCreateCoordinator.createRetryingNotYet` arm the deadline watchdog regardless of `startContext` (blocker B1) | `aChangeContextCreateIsNotRetriedAndArmsNoWatchdogAtAll`, on `currentTime == 0` |
 | K3 | Attach the late session instead of releasing it | `aSuccessAfterTheAbsoluteDeadlineIsReleasedAndNeverAttached` |
 | K4 | Drop the third rung: `PlaybackPolicy.CreateRetry.backoffMs = listOf(1_000, 2_000)` (`PlaybackPolicy.kt:135`) | `ladderIsOneSecondTwoSecondsFourSecondsAndThenSpent`, and `node tests/playback/web-policy.test.js` on any machine |
 | K5 | Let `BehindLiveWindowRecovery` fire on a live timeline | `aLiveItemIsNeverSeekedAndNeverPrepared` |
 | K6 | Let it fire more than once per attach | `theSecondOneOnTheSameAttachDoesNothingAtAll` |
-| K7 | Delete the budget re-arm at `commitPreparedReplacement` (should-fix S1) | `aNewItemOnTheScreenGetsItsOwnSingleRecovery` |
-| K8 | Replace `seekTo(target)` with `seekToDefaultPosition()` | `theFirstFiniteBehindLiveWindowSeeksBackOnceAndPreparesOnce` — Media3's default position is a **live-edge** policy and on a finite timeline it skips content, which is why it is not used |
+| K7 | Delete the budget re-arm **call site** at `commitPreparedReplacement` in `Controller.kt` (should-fix S1) | `node tests/playback/web-policy.test.js` — *re-armed at BOTH attach sites*. **Not** `aNewItemOnTheScreenGetsItsOwnSingleRecovery`: that case exercises `BehindLiveWindowRecovery.attached()` directly and cannot see whether `Controller` calls it, because `Controller` cannot be constructed in a JVM test. The behavioural proof is §5.12 on a device |
+| K8 | Make the recovery seek to `0` instead of `seekTo(target)` — that is what Media3's `seekToDefaultPosition()` does on a finite timeline, and why it is deliberately not used | `theFirstFiniteBehindLiveWindowSeeksBackOnceAndPreparesOnce`, which asserts the exact seek list |
 
 ## 4. The fence bypasses — already verified, do not redo
 

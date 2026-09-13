@@ -72,13 +72,17 @@ minute 2, restore.
 - any surface that persists after 10 s of continuous presenting;
 - any `surface_disagreement`.
 
-> Note for the Apple TV and the iPhone: this client's `exhausted` prompt
-> offers Try again / Close. "Keep waiting works" is the Android affordance;
-> on Apple, read the third allowed outcome as *the prompt's own recovery
-> action works after the network returns*, and say which button you pressed.
-> On the **web** no site offers Keep waiting at all — see STATUS.md's open
-> ruling 1. The web is not one of M4's devices, but do not let a web
-> observation stand in for one of these three.
+> Note on "Keep waiting", because it is drawn differently on each client and
+> the recipe names it. **Android** offers a real Keep waiting button
+> (`PlayerScreen` maps it to `controller.keepWaiting()`). **Apple** does not
+> draw one: `PlayerView.failureActions` removes `keep_waiting` whenever
+> `retry` is present, because §3.1 says Apple's Keep waiting *is*
+> `retryAfterPlaybackFailure` and two buttons doing one thing is worse than
+> one — so the prompt reads **Try Again / Close**, and Try Again is the
+> affordance the recipe means. Say which button the prompt actually offered
+> and which you pressed. On the **web**, no site offers it at all (open ruling
+> 1 in `STATUS.md`); the web is not one of M4's three devices, and a web
+> observation may not stand in for one of them.
 
 ### (b) Failed change on a cold NAS — Apple TV, iPhone, Android TV
 
