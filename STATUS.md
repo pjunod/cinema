@@ -4,6 +4,21 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## The player input fence was red on `main`, on two doc comments
+
+**Fixed in `fix/player-input-fence-comments`.** `scripts/player-input-fence`
+matched `onMoveCommand` inside two `///` comments in `LiveTvView.swift` that
+explain why the guide grid handles its paging chips itself — prose about a key
+handler, with no handler in it. The fence now skips a line only when its
+first non-space characters open a comment *and* nothing executable is left on
+it — `/* named = */ onKeyEvent { … }`, a `*/` that ends a block and then calls
+something, a JS generator method (`*keys(ev)`), a private class field
+(`#onkeydown = …`) and an Objective-C `#define` all still trip, and so does a
+trailing comment after real code. `fence-fixtures/input/` and
+`tests/operations/test_player_input_fence.py` pin each of those shapes and
+drive them through the fence's own scanner rather than a second copy of its
+loop, so a widened exemption fails here.
+
 ## The error overlay and the picture disagree, on every client
 
 **Investigated 2026-09-13; contract v2 at
