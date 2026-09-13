@@ -6790,6 +6790,39 @@ function vodClientContract(){
     }}
   };
 }
+// M5 addition 2 — one bounded hls.js retry per attach.
+//
+// hls.js has already called `stopLoad()` and the element keeps playing whatever
+// it buffered. Two seconds later, ask it to load again FROM WHERE THE PICTURE
+// IS: `startLoad()` with no argument restarts from hls.js's own idea of the
+// position, which after a drained buffer is not the viewer's. The position is
+// read at the moment the retry fires, because the element kept playing through
+// the wait and the two seconds of film it played are exactly what must not be
+// re-fetched.
+//
+// One retry per attach, shared with the `segment_503_not_yet` row — whichever
+// fires first spends it — and then nothing further: `persistentWait`'s reopen,
+// whose budget this does not touch, is the existing recovery and stays the one
+// that follows. Returns whether the retry was scheduled, so the caller can say
+// so in the log without asking the budget a second time.
+function scheduleHlsNetworkRetry(video, player, detail){
+  if(!player||player.hls==null) return false;
+  if(!PlaybackPolicy.hlsRetryAllowed({used:player.hlsRetryUsed||0})) return false;
+  player.hlsRetryUsed=(player.hlsRetryUsed||0)+1;
+  const hls=player.hls, attempt=player.attemptId||null;
+  setTimeout(()=>{
+    // The attach this budget belonged to is gone: a seek, a quality change or
+    // a teardown replaced it, and reloading its instance would resurrect a
+    // stream nobody is watching.
+    if(!PLAYER||PLAYER!==player||PLAYER.hls!==hls||PLAYER.attemptId!==attempt) return;
+    const at=Math.max(0,Number(video&&video.currentTime)||0);
+    clientLog(Object.assign({level:"info",event:"hls_retry",detail:detail||"network",
+      message:`reloading the stream at ${at.toFixed(1)}s after a fatal ${detail||"network"} error`},
+      playbackContext()));
+    try{ hls.startLoad(at); }catch(e){}
+  },PlaybackPolicy.HLS_RETRY.delay_ms);
+  return true;
+}
 function attachHls(video, playlistUrl, startAt){
   const attachedPlayer=PLAYER;
   rememberPlaybackTransportIntent(video,attachedPlayer);
@@ -6806,6 +6839,11 @@ function attachHls(video, playlistUrl, startAt){
   // A new stream owns its own explanations. Whatever the last one was refused
   // for is now stale, and a stale reason is worse than no reason.
   clearStreamFailure();
+  // …and its own retry budget. ONE `startLoad` per attach, shared between the
+  // network-class fatal and the `segment_503_not_yet` row (M5 §4.6.2): the
+  // budget is per ATTACH, not per source, so two refusals of different kinds
+  // cannot produce two retries. Reset here because this is the attach.
+  attachedPlayer.hlsRetryUsed=0;
   if(!preferNativeHls(video) && window.Hls && Hls.isSupported()){
     // Buffer targets, in SECONDS, and deliberately not in bytes.
     //
@@ -7063,6 +7101,11 @@ function attachHls(video, playlistUrl, startAt){
         raisePlaybackSurface(refusal,{context:where,player_stopped:spent,
           title:explained.title,detail:explained.detail,
           position_ms:STREAM_FAILURE.position_ms==null?null:STREAM_FAILURE.position_ms});
+        // A "not yet" the server explained is the other half of M5's shared
+        // hls.js budget: the picture is still moving, so one reload at the
+        // current position is worth a try before the reopen path runs.
+        if(refusal==="segment_503_not_yet")
+          scheduleHlsNetworkRetry(video,PLAYER,STREAM_FAILURE.code||"segment-503");
         toast(explained.retryable?"Still starting…":"Playback failed");
         return;
       }
@@ -7077,6 +7120,10 @@ function attachHls(video, playlistUrl, startAt){
         raisePlaybackSurface("owner_recovery_step",{context:where,
           title:"Reconnecting…",
           detail:"the stream connection failed ("+d.details+") — recovering"});
+        // M5: one bounded reload at the current position before the reopen
+        // path. The classification above is untouched — this is a retry INSIDE
+        // `recovering`, not a new class.
+        scheduleHlsNetworkRetry(video,PLAYER,String(d.details||d.type||"network"));
         toast("Reconnecting…");
         return;
       }
@@ -8475,10 +8522,15 @@ function startPlaybackControl(v,p,bootstrap){
     return null;
   }
 }
-async function openSession(fileId, opts, signal=null){
+// `requestId` is the SAME identity across a retry sequence (M5 §4.6.1). The
+// server persists a create's answer under `request_id`, so replaying one
+// recovers the session it already made instead of spawning a second encoder —
+// which is what makes retrying a "still building" 503 safe at all. Absent, a
+// fresh identity is minted, exactly as every caller had before.
+async function openSession(fileId, opts, signal=null, requestId=null){
   const contract=vodClientContract();
   const body=Object.assign({},opts||{},
-    {playback_id:PLAYBACK_ID,request_id:newRequestId()},contract.session);
+    {playback_id:PLAYBACK_ID,request_id:requestId||newRequestId()},contract.session);
   // The capabilities the plan was derived from, on the request that acts on
   // it. Without this the server has only the body's echo of its own decision
   // to go on, and an echo cannot carry `convert_dolby_vision` — no client has
@@ -8542,6 +8594,140 @@ async function openSession(fileId, opts, signal=null){
     return result.playback;
   }
   return api(`/files/${fileId}/hls/sessions`,{method:"POST",body,signal});
+}
+// A cancellable wait. The newer intent's abort is the same signal the create
+// itself is carrying, so a retry sleeping between attempts is cancelled by the
+// thing that cancels the attempts (M5: "any newer intent cancels the whole
+// sequence").
+function playbackRetryDelay(ms, signal){
+  return new Promise((resolve,reject)=>{
+    const superseded=()=>Object.assign(new Error("Playback preparation superseded."),
+      {name:"AbortError"});
+    if(signal&&signal.aborted) return reject(superseded());
+    let timer=null;
+    const cancel=()=>{ if(timer!=null){clearTimeout(timer);timer=null;} reject(superseded()); };
+    timer=setTimeout(()=>{
+      timer=null;
+      if(signal) signal.removeEventListener("abort",cancel);
+      resolve();
+    },ms);
+    if(signal) signal.addEventListener("abort",cancel,{once:true});
+  });
+}
+// The context a failed create will be classified in, computed the way
+// `failPreparation` computes it — from the PREDECESSOR, because that is the
+// player still standing when the failure is surfaced. A create over an
+// attached predecessor is a refused CHANGE (§3.3 row 7) and keeps today's
+// banner; row 6's retry is the START context and nothing else.
+function playbackCreateRetryContext(){
+  const p=PLAYER, predecessor=(p&&p.mediaPredecessor)||p;
+  return predecessor&&predecessor.started?"change":"start";
+}
+// M5 addition 1 — the create "not yet" retry (contract §3.3 row 6).
+//
+// The same create, under the same request identity, on the review's ladder
+// (1 s · 2 s · 4 s), bounded by an ABSOLUTE 60 s deadline from the first
+// attempt. Three properties the review asked for, and each is a line here:
+//
+//   * the deadline is absolute, so a server that holds every create for a
+//     minute cannot stretch the sequence — the watchdog fires on the clock,
+//     not between attempts;
+//   * a success that lands AFTER the deadline is released, never attached: the
+//     viewer has already been told this attempt is over, and an encoder nobody
+//     is watching is a hardware slot held for nobody;
+//   * a newer intent aborts the signal, which cancels the attempt in flight
+//     and the sleep between attempts alike.
+//
+// When the ladder or the deadline is spent the OWNER stops the player and
+// raises `exhausted` (§3.0, §3.4) — this function is that owner, which is why
+// the stop is here and not in the presenter.
+//
+// `answeredLocally(failure)` lets a call site that has a better answer than
+// waiting keep it: `startCopyHls` turns `vod_index_pending` into a progressive
+// remux immediately, and making it wait seven seconds for a stream it can
+// already play would be a regression dressed as a recovery.
+async function openSessionRetryingNotYet(fileId, opts, signal, options){
+  const settings=options||{};
+  const where=settings.context||playbackCreateRetryContext();
+  const answeredLocally=settings.answeredLocally||null;
+  const requestId=newRequestId();
+  const began=Date.now();
+  const sequence={expired:false,raised:false};
+  let deadlineTimer=null;
+  const disarm=()=>{ if(deadlineTimer!=null){clearTimeout(deadlineTimer);deadlineTimer=null;} };
+  const superseded=()=>Object.assign(new Error("Playback preparation superseded."),
+    {name:"AbortError"});
+  const exhaust=reason=>{
+    if(!sequence.raised){
+      sequence.raised=true;
+      stopPlayerForExhaustion();
+      // Deliberately NOT the class's `keep_waiting`: on this path there is no
+      // stream to keep waiting on and no detector to re-arm, so offering it
+      // would be a button that does nothing. Try again re-runs the whole open,
+      // which IS the honest "one more bounded attempt" here.
+      raisePlaybackSurface("owner_exhausted",{context:where,player_stopped:true,
+        title:"Playback is stalled.",
+        detail:"the server is still building this stream and did not finish in a minute",
+        actions:["retry","close"]});
+    }
+    return Object.assign(new Error("The server did not finish starting this stream."),
+      {name:"PlaybackCreateExhausted",surfaceRaised:true,createRetryReason:reason});
+  };
+  const deadline=new Promise((_,reject)=>{
+    deadlineTimer=setTimeout(()=>{
+      deadlineTimer=null;
+      sequence.expired=true;
+      reject(exhaust("deadline"));
+    },PlaybackPolicy.CREATE_RETRY.deadline_ms);
+  });
+  const attempts=(async()=>{
+    for(let attempt=0;;attempt+=1){
+      if(signal&&signal.aborted) throw superseded();
+      // Belt and braces on the absolute deadline: `createRetryStep` never
+      // schedules a rung that would BEGIN past it, but a drifting timer or a
+      // clock that jumped must not be able to post one either.
+      if(sequence.expired) throw superseded();
+      let info;
+      try{
+        info=await openSession(fileId,opts,signal,requestId);
+      }catch(error){
+        if(signal&&signal.aborted) throw superseded();
+        if(sequence.expired) throw superseded();
+        const failure=error&&error.streamFailure;
+        if(answeredLocally&&failure&&answeredLocally(failure)) throw error;
+        const source=failure?PlaybackPolicy.classifyStreamFailure({
+          status:failure.status,code:failure.code,context:where}):null;
+        const step=PlaybackPolicy.createRetryStep({
+          attempt,elapsedMs:Date.now()-began,source});
+        if(step.action==="fail") throw error;
+        if(step.action==="exhausted") throw exhaust(step.reason);
+        // Still building. One fault for the sequence, not one per attempt: the
+        // ring is for distinct faults, and a viewer watching a spinner does not
+        // need four identical rows behind it.
+        const explained=PlaybackPolicy.streamFailureOverlay(failure);
+        raisePlaybackSurface("create_503_not_yet",{context:where,
+          title:explained?explained.title:"Still preparing this stream…",
+          detail:explained?explained.detail:failure.message},{once:true});
+        clientLog(Object.assign({level:"info",event:"create_retry",
+          detail:failure.code||String(failure.status),
+          message:`the server is still building this stream — retrying in ${step.delayMs}ms`},
+          playbackContext()));
+        await playbackRetryDelay(step.delayMs,signal);
+        continue;
+      }
+      // A session the sequence no longer owns belongs to nobody.
+      if(sequence.expired||(signal&&signal.aborted)){
+        releaseSession(info&&info.session_id);
+        throw sequence.expired?exhaust("deadline"):superseded();
+      }
+      return info;
+    }
+  })();
+  // The deadline may answer first; the attempt behind it is still running and
+  // will release whatever it produces. Its rejection is not an unhandled one.
+  attempts.catch(()=>{});
+  try{ return await Promise.race([attempts,deadline]); }
+  finally{ disarm(); }
 }
 // Take on a newly-opened session's identity, and attach it.
 //
@@ -9170,6 +9356,10 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
     // them, and covering it because the element happens to be paused is the
     // same mistake in a quieter spelling.
     const surfaceContext=(PLAYER&&PLAYER.started)?"change":"start";
+    // The create-retry owner (M5) stops the player and raises `exhausted`
+    // itself, on the clock, at the moment the deadline passes. Raising again
+    // here would put a second fault of a lower class over its prompt.
+    if(error&&error.surfaceRaised) return;
     if(!showSessionOpenFailure(error,surfaceContext)){
       if(surfaceContext==="change"){
         raisePlaybackSurface("change_failed",{context:"change",
@@ -9474,7 +9664,9 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
     raisePlaybackSurface("client_preparing",{context:"start",
       title:"Starting the transcoder…",detail:transcodeReason(PLAYER)});
     const options=transcodeOpts(startSec,initialAudio);
-    let info; try{info=await preparation.run(signal=>openSession(fileId,options,signal),
+    const retryContext=playbackCreateRetryContext();
+    let info; try{info=await preparation.run(
+      signal=>openSessionRetryingNotYet(fileId,options,signal,{context:retryContext}),
       late=>releaseSession(late&&late.session_id));}catch(e){
       if(openIsAttached())failPreparation(e);
       return;
@@ -9720,8 +9912,17 @@ async function startCopyHls(v, startSec, live, openAttempt, preparation, beforeA
     const fileId=PLAYER.fileId, options={copy:true,aac,
       preserve_dolby_vision:!!PLAYER.preserveDolbyVision,start:startSec||0,audio:aidx,
       audio_offset_ms:PLAYER.aoffset||0};
-    info=preparation?await preparation.run(signal=>openSession(fileId,options,signal),
-      late=>releaseSession(late&&late.session_id)):await openSession(fileId,options);
+    // `vod_index_pending` has a better answer than waiting on this path — the
+    // progressive remux below — so it is answered locally instead of retried.
+    const retry={context:playbackCreateRetryContext(),
+      answeredLocally:failure=>PlaybackPolicy.indexPendingFallback({
+        code:failure&&failure.code,method:PLAYER&&PLAYER.method,nativeHls:native
+      })==="progressive_remux"};
+    info=preparation
+      ?await preparation.run(
+        signal=>openSessionRetryingNotYet(fileId,options,signal,retry),
+        late=>releaseSession(late&&late.session_id))
+      :await openSessionRetryingNotYet(fileId,options,null,retry);
   }catch(error){
     if(live && !live()) return false;
     const fallback=PlaybackPolicy.indexPendingFallback({

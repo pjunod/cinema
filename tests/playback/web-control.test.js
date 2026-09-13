@@ -83,6 +83,12 @@ function fullOpenHarness() {
     "function openSession(file,opts,signal){return new Promise(resolve=>sessions.push({file,opts,signal,resolve(info={}){resolve({...info,session_id:info.session_id||'session-'+sessions.length,opts});}}));}",
     "function attachSession(v,p,info,pos){p.sessionId=info.session_id;p.offset=0;p.vod=true;media.push({attached:info.opts});markPlaybackControlSeekExecuted(p,pos);return pos;}",
     "function stopPlayerTimers(){} function releaseSession(id){released.push(id);} function teardownHls(){} function clearSubs(){}",
+    // M5's create-retry owner is shipped code, so the harness runs it rather
+    // than a copy: `requestIds` is what pins that a sequence replays ONE
+    // identity instead of minting a create per attempt.
+    "const requestIds=[];function newRequestId(){const id='rq-'+requestIds.length;requestIds.push(id);return id;}",
+    shippedSource("playbackRetryDelay"),shippedSource("playbackCreateRetryContext"),
+    shippedSource("openSessionRetryingNotYet"),
     "function prePlayApplication(d,s){return {subtitle:s?.subtitle??null,burnedSub:null,textSub:null};} function autoskipOn(){return false;}",
     "function newAttempt(){} function selectedAudioIndex(p){return p.audio[p.curAudio]?.index||0;} function setupAirplay(){} function setupTrackMenus(){}",
     "function renderPlayerInfo(){} function autoNextOn(){return false;} function useNativeHls(){return false;} function segmentedRemuxOk(){return false;}",
@@ -132,7 +138,7 @@ function fullOpenHarness() {
       shippedSource('wirePlayerMedia').match(/v\.addEventListener\("waiting",\(\)=>\{[\s\S]*?\n  \}\);/)[0]+"handler();}",
     "function incumbentError(){let handler;const v=Object.create(video);v.addEventListener=(_,fn)=>{handler=fn;};"+
       shippedSource('wirePlayerMedia').match(/v\.addEventListener\("error",\(\)=>\{[\s\S]*?\n  \}\);/)[0]+"handler();}",
-    "return {attach(p){PLAYER=p;},setOpen(value){modalOpen=value;},isOpen:()=>modalOpen,node,current:()=>PLAYER,decisions,sessions,released,media,loading,surface:surfacePainted,stops:()=>surfaceStops.length,posted,video,play,setQuality,seekTo,switchAudio,setSub,setSync,togglePlay,retryPlayback,closePlayer,incumbentError,incumbentWaiting,checkMarkers,skipCurrent,skipMarker,ttff,pbTick,reportProgress,attachHls:()=>attachHls(video,'/A/index.m3u8',10),hlsInstances,settle:()=>settlePlaybackControlSeek(video,PLAYER,video.currentTime,100),playing:()=>handlePlaybackPlaying(video,PLAYER),startTranscodeFallback,switchAutoRung,resetMediaSource,applyPlaybackTransportIntent,handlePlaybackTransportEvent,advance(ms){now+=ms;for(const [id,timer] of [...timers])if(timer.at<=now){timers.delete(id);timer.fn();}}};",
+    "return {attach(p){PLAYER=p;},setOpen(value){modalOpen=value;},isOpen:()=>modalOpen,node,current:()=>PLAYER,decisions,sessions,released,media,loading,requestIds,surface:surfacePainted,stops:()=>surfaceStops.length,posted,video,play,setQuality,seekTo,switchAudio,setSub,setSync,togglePlay,retryPlayback,closePlayer,incumbentError,incumbentWaiting,checkMarkers,skipCurrent,skipMarker,ttff,pbTick,reportProgress,attachHls:()=>attachHls(video,'/A/index.m3u8',10),hlsInstances,settle:()=>settlePlaybackControlSeek(video,PLAYER,video.currentTime,100),playing:()=>handlePlaybackPlaying(video,PLAYER),startTranscodeFallback,switchAutoRung,resetMediaSource,applyPlaybackTransportIntent,handlePlaybackTransportEvent,advance(ms){now+=ms;for(const [id,timer] of [...timers])if(timer.at<=now){timers.delete(id);timer.fn();}}};",
   ].join("\n"))(policy);
 }
 
@@ -199,9 +205,12 @@ function deferred() {
   return { promise, resolve };
 }
 
+// Enough microtask turns for the deepest shipped await chain in this file.
+// M5's create-retry owner sits between `startCopyHls` and `openSession` — a
+// race against its own deadline around an async sequence — so a two-turn flush
+// no longer reaches the attachment that follows a resolved create.
 async function flush() {
-  await Promise.resolve();
-  await Promise.resolve();
+  for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
 }
 
 async function main() {
@@ -843,7 +852,11 @@ async function main() {
       "const video={currentTime:10,querySelectorAll:()=>[],pause(){},play:()=>Promise.resolve()};",
       "const document={getElementById:id=>id==='video'?video:null};",
       "const localStorage={getItem:()=> 'auto',setItem:()=>{}};",
-      "const PlaybackPolicy={subtitleBurnAction:()=> 'burn',hlsTransport:()=> 'mse',copyAudioNeedsTranscode:()=>false,indexPendingFallback:()=> 'progressive_remux',stallReopenSessionOptions:({options})=>options}; const PLAY_CAPS={acodec:'aac'};",
+      "const PlaybackPolicy={subtitleBurnAction:()=> 'burn',hlsTransport:()=> 'mse',copyAudioNeedsTranscode:()=>false,indexPendingFallback:()=> 'progressive_remux',stallReopenSessionOptions:({options})=>options,"+
+        "CREATE_RETRY:{deadline_ms:60000,backoff_ms:[1000,2000,4000]},createRetryStep:()=>({action:'fail'}),classifyStreamFailure:()=>null,streamFailureOverlay:()=>null}; const PLAY_CAPS={acodec:'aac'};",
+      "function newRequestId(){return 'rq';}",
+      shippedSource("playbackRetryDelay"),shippedSource("playbackCreateRetryContext"),
+      shippedSource("openSessionRetryingNotYet"),
       "function closeMenu(){} function toast(){} function qualityLabel(){return '720p';}",
       "function clientLog(){} function playbackContext(){return {};} function renderPlayerInfo(){}",
       "function clearPlaybackControlWaiters(){} function notifyPlaybackControl(){} function endWait(){}",
@@ -4265,6 +4278,255 @@ async function main() {
     assert.equal(p.prepared, null);
   }
 
+
+  // ---- M5: the three bounded recovery additions -----------------------------
+  //
+  // All three run the SHIPPED owner sliced out of index.html — the retry, its
+  // ladder, its absolute deadline and the shared hls.js budget are the page's
+  // own code here, so a mutation that deletes one fails these rather than a
+  // copy of it.
+  function createRetryHarness() {
+    const policy = require("../../crates/plurxd/src/web/playback-policy.js");
+    return new Function("PlaybackPolicy", [
+      "let PLAYER={attemptId:'a1',started:false,method:'transcode'};",
+      "let now=0;const timers=new Map();let nextTimer=0;",
+      "function setTimeout(fn,ms){const id=++nextTimer;timers.set(id,{fn,at:now+ms});return id;}",
+      "function clearTimeout(id){timers.delete(id);}",
+      // Every create this sequence sends, with the identity it sent and when.
+      "const posts=[],released=[],raised=[],stops=[],logs=[];const answers=[];",
+      "function newRequestId(){return 'rq-'+(posts.length+1);}",
+      "function clientLog(entry){logs.push(entry);}function playbackContext(){return {};}",
+      "function releaseSession(id){released.push(id);}",
+      "function stopPlayerForExhaustion(){stops.push(now);}",
+      "function raisePlaybackSurface(source,fault,options){",
+      "  if(options&&options.once&&raised.some(entry=>entry.source===source)) return null;",
+      "  raised.push({source,at:now,player_stopped:!!(fault&&fault.player_stopped),",
+      "    actions:(fault&&fault.actions)||null,context:fault&&fault.context});return null;}",
+      // The server: one scripted answer per attempt. `hold` never settles until
+      // the harness settles it, which is how a slow server is expressed.
+      "function openSession(fileId,opts,signal,requestId){",
+      "  const index=posts.length;posts.push({requestId,at:now});",
+      "  const answer=answers[index]||answers[answers.length-1];",
+      "  if(answer&&answer.hold) return new Promise(resolve=>{answer.settle=resolve;});",
+      "  if(answer&&answer.error) return Promise.reject(answer.error);",
+      "  return Promise.resolve({session_id:'session-'+(index+1)});}",
+      shippedSource("playbackRetryDelay"),
+      shippedSource("playbackCreateRetryContext"),
+      shippedSource("openSessionRetryingNotYet"),
+      "return {posts,released,raised,stops,logs,answers,now:()=>now,player:()=>PLAYER,",
+      "  open(signal,options){return openSessionRetryingNotYet(7,{start:0},signal,options);},",
+      "  settle(index,info){const answer=answers[index];if(answer&&answer.settle)answer.settle(info);},",
+      "  advance(ms){now+=ms;for(const [id,timer] of [...timers])if(timer.at<=now){timers.delete(id);timer.fn();}}};",
+    ].join("\n"))(policy);
+  }
+
+  const refusal503 = (code) => Object.assign(new Error("still building"), {
+    status: 503, code,
+    streamFailure: { status: 503, code, message: "the transcoder is still starting", position_ms: null },
+  });
+
+  {
+    // m5_create_retry_deadline, on the client it applies to: the ladder is
+    // 1 s · 2 s · 4 s under ONE request identity, and the surface is
+    // `preparing` for the whole of it.
+    const h = createRetryHarness();
+    for (const code of ["startup_timeout", "media_owner_transition", "vod_index_pending", "vod_engine_unattested"]) {
+      h.answers.push({ error: refusal503(code) });
+    }
+    h.answers.push({ error: refusal503("startup_timeout") });
+    const opening = h.open(null, { context: "start" });
+    let settled = null;
+    opening.then((value) => { settled = { value }; }, (error) => { settled = { error }; });
+    await flush();
+    assert.equal(h.posts.length, 1, "the first attempt is immediate");
+    for (const [delay, attempts] of [[1000, 2], [2000, 3], [4000, 4]]) {
+      h.advance(delay - 1); await flush();
+      assert.equal(h.posts.length, attempts - 1, `nothing is re-posted before ${delay}ms`);
+      h.advance(1); await flush();
+      assert.equal(h.posts.length, attempts, `the ladder's next rung fires at ${delay}ms`);
+    }
+    assert.deepEqual(
+      h.posts.map((post) => post.requestId),
+      ["rq-1", "rq-1", "rq-1", "rq-1"],
+      "every attempt replays the SAME request identity",
+    );
+    assert.deepEqual(h.posts.map((post) => post.at), [0, 1000, 3000, 7000],
+      "1 s · 2 s · 4 s, and the backoff does not restart");
+    await flush();
+    assert.equal(h.raised.filter((entry) => entry.source === "create_503_not_yet").length, 1,
+      "one `preparing` fault for the sequence, not one per attempt");
+    assert.equal(h.stops.length, 1, "the owner stops the player before it raises the prompt");
+    const exhausted = h.raised.filter((entry) => entry.source === "owner_exhausted");
+    assert.equal(exhausted.length, 1);
+    assert.equal(exhausted[0].player_stopped, true, "`exhausted` carries the owner's stop");
+    assert.deepEqual(exhausted[0].actions, ["retry", "close"]);
+    assert.equal(h.posts.length, 4, "the ladder is three retries and stops");
+    assert.ok(settled && settled.error, "the caller is told the sequence is over");
+    assert.equal(settled.error.surfaceRaised, true,
+      "the owner already raised, so `failPreparation` must not raise again");
+  }
+  {
+    // The deadline is ABSOLUTE. A server that answers nothing at all cannot
+    // stretch the sequence past 60 s, and the prompt lands on the clock rather
+    // than when the slow create finally returns.
+    const h = createRetryHarness();
+    h.answers.push({ hold: true });
+    const opening = h.open(null, { context: "start" });
+    let settled = null;
+    opening.then((value) => { settled = { value }; }, (error) => { settled = { error }; });
+    await flush();
+    h.advance(59_999); await flush();
+    assert.equal(h.stops.length, 0, "nothing is raised one millisecond early");
+    h.advance(1); await flush();
+    assert.equal(h.stops.length, 1, "the deadline fires on the clock, not between attempts");
+    assert.equal(h.raised.filter((entry) => entry.source === "owner_exhausted").length, 1);
+    assert.ok(settled && settled.error);
+    assert.equal(settled.error.createRetryReason, "deadline");
+    // …and the create that finally lands is RELEASED, never attached.
+    h.settle(0, { session_id: "late-session" });
+    await flush();
+    assert.deepEqual(h.released, ["late-session"], "a late success is released, not attached");
+    assert.equal(h.raised.filter((entry) => entry.source === "owner_exhausted").length, 1,
+      "releasing the late session does not raise a second prompt");
+  }
+  {
+    // A newer intent cancels the whole sequence: the attempt in flight, the
+    // sleep between attempts, and the deadline watchdog with them. Nothing is
+    // raised — the newer intent owns the surface now.
+    const controller = new AbortController();
+    const h = createRetryHarness();
+    h.answers.push({ error: refusal503("startup_timeout") });
+    const opening = h.open(controller.signal, { context: "start" });
+    let settled = null;
+    opening.then((value) => { settled = { value }; }, (error) => { settled = { error }; });
+    await flush();
+    assert.equal(h.posts.length, 1);
+    controller.abort();
+    await flush();
+    assert.ok(settled && settled.error, "the sequence ends when its intent does");
+    assert.equal(settled.error.name, "AbortError");
+    h.advance(120_000); await flush();
+    assert.equal(h.posts.length, 1, "a cancelled sequence never posts again");
+    assert.equal(h.stops.length, 0, "a cancelled sequence is not an exhausted one");
+    assert.equal(h.raised.filter((entry) => entry.source === "owner_exhausted").length, 0);
+  }
+  {
+    // A refusal no "not yet" row claims is not retried at all: the caller's
+    // existing handling is what the contract leaves standing.
+    const h = createRetryHarness();
+    h.answers.push({ error: Object.assign(new Error("gone"), { status: 410, code: "media_owner_lost",
+      streamFailure: { status: 410, code: "media_owner_lost", message: "the node is gone", position_ms: 90_000 } }) });
+    let settled = null;
+    h.open(null, { context: "start" }).then((value) => { settled = { value }; }, (error) => { settled = { error }; });
+    await flush();
+    h.advance(120_000); await flush();
+    assert.equal(h.posts.length, 1, "only a `create_503_not_yet` answer is retried");
+    assert.equal(settled.error.status, 410);
+    assert.equal(settled.error.surfaceRaised, undefined, "the caller still owns this failure");
+  }
+  {
+    // A create refused during a pending CHANGE is a refused change, not a
+    // retry: row 7 beats row 6 and the predecessor keeps playing.
+    const h = createRetryHarness();
+    h.answers.push({ error: refusal503("startup_timeout") });
+    let settled = null;
+    h.open(null, { context: "change" }).then((value) => { settled = { value }; }, (error) => { settled = { error }; });
+    await flush();
+    h.advance(120_000); await flush();
+    assert.equal(h.posts.length, 1, "the change context is not retried");
+    assert.equal(h.stops.length, 0);
+    assert.ok(settled.error);
+  }
+  {
+    // A call site that answers a code better than waiting keeps its answer.
+    const h = createRetryHarness();
+    h.answers.push({ error: refusal503("vod_index_pending") });
+    let settled = null;
+    h.open(null, { context: "start",
+      answeredLocally: (failure) => failure.code === "vod_index_pending" })
+      .then((value) => { settled = { value }; }, (error) => { settled = { error }; });
+    await flush();
+    h.advance(120_000); await flush();
+    assert.equal(h.posts.length, 1, "a locally answered refusal is not retried");
+    assert.equal(settled.error.code, "vod_index_pending");
+  }
+  {
+    // A sequence that succeeds on a retry attaches that session and releases
+    // nothing.
+    const h = createRetryHarness();
+    h.answers.push({ error: refusal503("startup_timeout") }, { error: null });
+    let settled = null;
+    h.open(null, { context: "start" }).then((value) => { settled = { value }; }, (error) => { settled = { error }; });
+    await flush();
+    h.advance(1000); await flush();
+    assert.equal(h.posts.length, 2);
+    assert.equal(settled.value.session_id, "session-2");
+    assert.deepEqual(h.released, []);
+    assert.equal(h.stops.length, 0, "a sequence that worked never stopped the player");
+    h.advance(120_000); await flush();
+    assert.equal(h.raised.filter((entry) => entry.source === "owner_exhausted").length, 0,
+      "the deadline watchdog is disarmed when the sequence settles");
+  }
+
+  // ---- M5 addition 2: ONE hls.js retry per attach ----------------------------
+  function hlsRetryHarness() {
+    const policy = require("../../crates/plurxd/src/web/playback-policy.js");
+    return new Function("PlaybackPolicy", [
+      "let now=0;const timers=new Map();let nextTimer=0;const loads=[],logs=[];",
+      "function setTimeout(fn,ms){const id=++nextTimer;timers.set(id,{fn,at:now+ms});return id;}",
+      "function clientLog(entry){logs.push(entry);}function playbackContext(){return {};}",
+      "const hls={startLoad(at){loads.push({at,now});}};",
+      "const video={currentTime:0};",
+      "let PLAYER={attemptId:'a1',hls,hlsRetryUsed:0};",
+      shippedSource("scheduleHlsNetworkRetry"),
+      "return {loads,logs,player:()=>PLAYER,video,hls,",
+      "  retry(detail){return scheduleHlsNetworkRetry(video,PLAYER,detail);},",
+      "  seekTo(seconds){video.currentTime=seconds;},",
+      "  reattach(){PLAYER={attemptId:'a2',hls,hlsRetryUsed:0};},",
+      "  replaceInstance(){PLAYER.hls={startLoad(){loads.push({at:'wrong-instance'});}};},",
+      "  advance(ms){now+=ms;for(const [id,timer] of [...timers])if(timer.at<=now){timers.delete(id);timer.fn();}}};",
+    ].join("\n"))(policy);
+  }
+  {
+    // m5_hls_retry_once: one reload, two seconds later, at the position the
+    // picture actually reached — and at most ONE per attach however many
+    // fatals arrive.
+    const h = hlsRetryHarness();
+    assert.equal(h.retry("network"), true, "the first fatal spends the attach's budget");
+    h.advance(1999);
+    assert.deepEqual(h.loads, [], "the reload waits its two seconds");
+    h.seekTo(412.5);
+    h.advance(1);
+    assert.deepEqual(h.loads, [{ at: 412.5, now: 2000 }],
+      "the reload carries the position the element is at, not zero");
+    assert.equal(h.retry("segment-503"), false,
+      "the `segment_503_not_yet` row shares the SAME per-attach budget");
+    assert.equal(h.retry("network"), false, "and so does a second network fatal");
+    h.advance(60_000);
+    assert.equal(h.loads.length, 1, "at most one startLoad per attach");
+  }
+  {
+    // The budget is per ATTACH: a new attach gets its own single retry, and a
+    // retry scheduled by the attach before it never touches the new instance.
+    const h = hlsRetryHarness();
+    assert.equal(h.retry("network"), true);
+    h.reattach();
+    h.advance(2000);
+    assert.deepEqual(h.loads, [], "a retry whose attach is gone does not reload the new one");
+    assert.equal(h.retry("network"), true, "the new attach has its own budget");
+    h.advance(2000);
+    assert.equal(h.loads.length, 1);
+  }
+  {
+    // A teardown between the fatal and the reload leaves the element alone.
+    const h = hlsRetryHarness();
+    assert.equal(h.retry("network"), true);
+    h.replaceInstance();
+    h.advance(2000);
+    assert.deepEqual(h.loads, [], "the reload belongs to the instance that failed");
+  }
+
+  process.stdout.write("PASS the M5 recovery additions: create retry, hls retry, shared budget\n");
   process.stdout.write("PASS passive web playback-control reporter\n");
 }
 
