@@ -6,8 +6,9 @@ first.
 
 ## Android now lets each HLS playlist choose its live hold-back
 
-**`codex/live-tv-start-stall-android` into `effort/live-tv-start-stall`;
-implementation complete, review and qualification pending.** The Android
+**PR #299, from `codex/live-tv-start-stall-android` into
+`effort/live-tv-start-stall`; implementation complete, review and
+qualification pending.** The Android
 player no longer imposes an absolute four-second target offset on every live
 playlist. Media3 now derives the target from the playlist while the existing
 eight-second ceiling remains in force, so a newly published two-segment live
