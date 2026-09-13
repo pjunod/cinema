@@ -30,7 +30,9 @@ and a server-published `next_refresh_at` the clients poll on; and a public
 produced and starts afresh in one round trip to the owner — which already
 keys and tombstones starts by request id on the internal leg — with the
 owner evicting a viewer's own stray before ever answering `tuner_capacity`.
-The client-side barrier is deleted, not rewritten.
+The client-side barrier is deleted, not rewritten; opening Live TV asks the
+owner to resume the last stream if it is still live, and otherwise waits for
+the viewer to pick a channel.
 
 ## Live TV gets the web page's proportions on Apple TV and iPhone
 

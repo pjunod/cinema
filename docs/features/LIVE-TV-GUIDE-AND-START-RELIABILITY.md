@@ -469,6 +469,16 @@ card. It never returns the capability: a `request_id` is a handle that
 ([http/mod.rs 893–905](../../crates/plurxd/src/http/mod.rs) gains `starts`
 as a marker) and the GET adds nothing to what the holder already has.
 
+`POST /live-tv/starts/{request_id}/resume` is the reattach. For the
+requesting user's own request it answers exactly what the original start
+answered — the `LiveTvActivated` document, capability included — **if the
+session is still live** (activated, producing, not reaped), and touches
+`last_touch` so the heartbeat resumes from here; otherwise it answers the
+tombstone (`ended`) or `retired`, never a capability. Handing the same user
+back the capability they were already issued adds nothing a replayed POST
+would not also return, so it is inside the existing policy; it is still
+never persisted on the client, and the access log redacts the path.
+
 The new flow is advertised, not assumed: `start_protocols` gains `3`
 (live_tv.rs 1960, today `[1, 2]`), and a client uses `request_id` and the
 retire route only when the owner snapshot lists it. On a fleet mid-rollout
@@ -482,7 +492,30 @@ Paul's ruling (2026-09-13): a tuner that *might* still be held by a lost
 session is never a reason to refuse a viewer. There are four tuners; use
 another one and let the stray get reaped. The client side of the barrier
 is therefore deleted, not rewritten. What remains is a **retire hint** —
-the persisted `{request_id}` of the last start — and this `Lease.start`:
+the persisted `{request_id}` of the last start — used at two moments.
+
+**When Live TV is opened** (the controller is created: the tab on iOS and
+tvOS, the screen on Android, the route on the web), before the viewer
+touches anything, Paul's second ruling: *"if it was recent, reattach the
+stream; if it has been a while, tell the server to kill it and wait for the
+user to select something."* The server's own clock decides "recent" — a
+session the owner has not reaped is one the viewer had under a minute ago:
+
+```
+ open Live TV, a hint exists
+   POST /live-tv/starts/{id}/resume
+       200 + session document ──▶ reattach: same capability, playlist, heartbeat;
+                                  the picture is back without a press
+       200 ended / retired    ──▶ clear the hint; show the channel list and wait
+       no typed answer        ──▶ keep the hint; show the channel list and wait
+```
+
+This is not the "auto-tune on open" the guide plan's §5.8 forbids — no
+tuner is taken; a stream the viewer already owns is rejoined. On the web,
+a hint owned by another live document (BroadcastChannel answers) is left
+to that document.
+
+**When the viewer presses a channel:**
 
 ```
  press
@@ -533,7 +566,8 @@ What this changes in practice:
 
 | Situation | Today | After |
 |---|---|---|
-| Apple TV Home while watching, app later killed | 90 s at next open | press → retire (`200 ended`, idle-reaped) + start → plays |
+| Apple TV Home while watching, app killed, reopened within the idle window | 90 s at next open | open → resume → the same stream is back, no press |
+| Apple TV Home while watching, app killed, reopened later | 90 s at next open | open → `ended` → channel list; press → start → plays |
 | tab closed while watching | 90 s at next open | press → BroadcastChannel silent → retire + start → plays |
 | deploy while watching | 90 s at next open | press → retire (`200 retired`: the restarted owner has no such id; FFmpeg was a `kill_on_drop` child of PID 1 — `tokio::process::Child` at live_tv.rs 1101–1106, `kill_on_drop(true)` at 4280/4497; `ENTRYPOINT ["plurxd"]`, Dockerfile 165 — and the tuner's HTTP stream closed with it) + start → plays |
 | POST response lost mid-flight | 90 s | one replay POST with the same id → joins the same session |
@@ -580,11 +614,11 @@ still joins the same session.
 
 ---
 
-## 7. Three rulings from Paul (2026-09-13) — what they supersede
+## 7. Four rulings from Paul (2026-09-13) — what they supersede
 
 The first two come from [LIVE-TV-GUIDE-AND-UI-PLAN.md §5](LIVE-TV-GUIDE-AND-UI-PLAN.md#5-non-goals--guardrails-for-this-effort)
 and were right for that effort's scope; the third overrides a review
-finding on record. Recorded here so nobody re-litigates them:
+finding on record; the fourth adds the reattach. Recorded here so nobody re-litigates them:
 
 1. **§5.5 "No durable guide cache" — superseded.** The guide is cached
    (§5.1): node-local under the cache root, owner-only, never the
@@ -602,8 +636,15 @@ finding on record. Recorded here so nobody re-litigates them:
    critical: the accepted worst case is one tuner idle for ≤ 45 s, and the
    owner evicts the viewer's own stray first when capacity is actually full.
 
+4. **On relaunch, reattach or kill — never wait.** "Make it tell the
+   server to either reattach that stream if it is still recent, or if it
+   has been a while, kill the stream … and wait for the user to select
+   something." §6.3's open-time step; the owner's idle reap defines
+   "recent".
+
 Neither the `DeviceAuth` policy (§5.2) nor "no second tuner GET" (§5.4)
-changes. §5.3's bounded cold-lineup probe is a lineup read, not a stream.
+changes — the open-time resume rejoins a stream the viewer already owns.
+§5.3's bounded cold-lineup probe is a lineup read, not a stream.
 
 ---
 
@@ -647,8 +688,8 @@ touching Settings; `make web-check`, `make apple-test` on `mba`,
 §6.1, §6.2, §6.5, §6.6 and the same-viewer stray eviction from §6.3,
 plus the `docs/API.md` rows and route-count bump.
 **Accept:** registry unit cases for replay-joins, replay-conflict,
-retired-id 409, per-user retire cap, and retire on a
-live/tombstoned/unknown id; `test_api_doc_routes` green; `plurx_live_tv_starts_total{outcome="recovered"}`
+retired-id 409, per-user retire cap, retire on a
+live/tombstoned/unknown id, and resume on a live/ended/retired id; `test_api_doc_routes` green; `plurx_live_tv_starts_total{outcome="recovered"}`
 increments on a replayed public POST; ingress timeout stops the owner's
 provisional session.
 
@@ -659,7 +700,8 @@ classification sets; keep the retire hint. **Accept:** the
 `live-tv-start-cases.json` fixture passes on all three; a hint left by a
 killed process is retired in the background and the start is not delayed,
 in an instrumented test on each platform; kill the Apple TV app while
-watching, reopen, press a channel — it plays.
+watching and reopen within 45 s — the same stream is back with no press;
+reopen after two minutes — the channel list, and the first press plays.
 
 ### 8.6 M5 — Developer card rows, status doc, deploy
 
