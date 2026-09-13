@@ -4,12 +4,13 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
-## Live TV start, stall, and tvOS surface is being promoted to main
+## Live TV start, stall, and tvOS surface has landed on main
 
-**[#301](http://192.168.4.7:3000/noirr/plurx/pulls/301), from
-`effort/live-tv-start-stall` into `main`; final adversarial findings are folded
-and the candidate is being re-qualified after merging current `main`.** The server, Android, and Apple task
-PRs are merged into the effort and their focused automated evidence is green.
+**[#301](http://192.168.4.7:3000/noirr/plurx/pulls/301), merge
+`04cbb2e44` into `main`; final adversarial findings were folded and
+[Main promotion gate run 2005](http://192.168.4.7:3000/noirr/plurx/actions/runs/2005)
+passed on the exact merged-base candidate.** The server, Android, and Apple
+task PRs are merged and their focused automated evidence is green.
 Paul explicitly directed promotion without waiting for the HDHomeRun, Apple TV,
 Android-phone, and web physical results. Those results and the authenticated
 tvOS simulator screenshots remain unclaimed; the exact hand-off prompts stay
@@ -21,8 +22,9 @@ forbidden input-routing, remote-adapter, fixture, wire-shape, or timeout seams.
 **[#300](http://192.168.4.7:3000/noirr/plurx/pulls/300), from
 `codex/live-tv-start-stall-apple` into `effort/live-tv-start-stall`;
 implementation complete, adversarial review and focused qualification green,
-physical evidence pending.** Apple build 153 publishes a debounced
-stall-only waiting state, truthful behind-the-edge and buffered measurements,
+physical evidence pending.** The promotion ships Apple build 154, which
+publishes a debounced stall-only waiting state, truthful behind-the-edge and
+buffered measurements,
 and fullscreen-owned status copy. The tvOS fullscreen surface is now the
 reviewed telemetry strip, programme band, waiting tile, paused state, and
 five-action focus row; its reveal layer cannot take focus while controls or the
@@ -37,9 +39,8 @@ are closed: Info dismissal yields focus back to Pause, the corrective
 fullscreen commit has its durable source-to-test anchor, and the iOS fullscreen
 branch is restored unchanged. `make apple-build` compiled both schemes and
 the nine named tvOS tests executed on the Apple TV 4K simulator with nine
-passes, zero failures, and zero skips. `make history-check` names only the
-known corrective commits already red on this fixed `main`; this PR's
-corrective fullscreen commit is anchored and absent from that report.
+passes, zero failures, and zero skips. `make history-check` passes with this
+PR's corrective fullscreen commits anchored to their regressions.
 
 ## Android now lets each HLS playlist choose its live hold-back
 
@@ -60,7 +61,7 @@ durable `tests/client-fixes.toml` source-to-test anchor. The exact named JVM
 test passed on the installed Android toolchain; the device evidence is still
 pending.
 
-## Live TV starts are being rebuilt around a stable one-second cadence
+## Live TV starts now use a stable one-second cadence
 
 **[#298](http://192.168.4.7:3000/noirr/plurx/pulls/298), from
 `codex/live-tv-start-stall-server` into `effort/live-tv-start-stall`;
@@ -76,8 +77,7 @@ HEVC/AC-3 route and `--via` records the non-owner relay outcome under the
 runtime's existing 35 s public deadline. HDHomeRun and client evidence remains
 the physical hand-off. The ten named S1/S2 regressions, all four two-node
 cluster cases, the hardware-script syntax check, and pinned Rust 1.97.1
-check/Clippy/format are green. `make history-check` now reports only the
-pre-existing corrective commits already red on this exact `main`; this lane's
+check/Clippy/format are green. `make history-check` passes, and this lane's
 four corrections have their own `live-tv.integration` evidence mapping. No
 timeout, signed request, route, client input contract, or feature gate moved.
 
