@@ -1,8 +1,21 @@
 # Live TV native layouts — why the TV and phone screens look wrong, and the numbers that fix them
 
-**Status:** review + fix spec, ready to build · **Reviews:** the layouts
-shipped by [LIVE-TV-NATIVE-LAYOUTS-IMPLEMENTATION.md](LIVE-TV-NATIVE-LAYOUTS-IMPLEMENTATION.md)
+**Status:** review + fix spec — **built and merged 2026-09-12** · **Reviews:** the layouts
+shipped by [LIVE-TV-NATIVE-LAYOUTS-STATUS.md](LIVE-TV-NATIVE-LAYOUTS-STATUS.md)
 (Apple build 144 / Android versionCode 87, `main` at `10f2afe60`) · **Written:** 2026-09-12
+
+
+> **Built.** Apple PR #268, Android PR #269 and the status update PR #271
+> merged on 2026-09-12; `main` at `311683bc`, Apple build 146, Android
+> versionCode 89, issue #267 closed. Three things changed during the build and
+> the shipped code, not this document, is the record: the status banner became
+> a persistent one-line status rather than a four-second toast (a toast cannot
+> repeat itself when the same failure happens twice, and it hid every cleanup
+> message on a phone); the Android television toolbar is `heightIn(min = 28.dp)`
+> rather than a fixed 24 dp, which clipped its own labels; and the Apple slot
+> width also subtracts the grid's own 16 pt inset. What shipped, and what it
+> did not prove, is in
+> [LIVE-TV-NATIVE-LAYOUTS-STATUS.md](LIVE-TV-NATIVE-LAYOUTS-STATUS.md).
 
 Companion to the implementation plan above (what was asked for) and
 [LIVE-TV-GUIDE-AND-UI-PLAN.md](LIVE-TV-GUIDE-AND-UI-PLAN.md) (the web design
