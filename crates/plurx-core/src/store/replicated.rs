@@ -154,6 +154,55 @@ pub struct SqliteTransactionSite {
 /// boundaries here makes their port shape reviewable beside the CAS primitive.
 pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
     SqliteTransactionSite {
+        module: "dvr.rs",
+        method: "put_dvr_rule",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "dvr.rs",
+        method: "reorder_dvr_rules",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadExpandWrite,
+    },
+    SqliteTransactionSite {
+        module: "dvr.rs",
+        method: "insert_dvr_airing_if_absent",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "dvr.rs",
+        method: "request_dvr_stop",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BranchOnRowsAffected,
+    },
+    SqliteTransactionSite {
+        module: "dvr.rs",
+        method: "repoint_dvr_rule_rows",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::VerbatimBatch,
+    },
+    SqliteTransactionSite {
+        module: "dvr.rs",
+        method: "put_dvr_reminder",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "dvr.rs",
+        method: "transition_dvr_reminders",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadExpandWrite,
+    },
+    SqliteTransactionSite {
         module: "library_channels.rs",
         method: "create_library_channel",
         is_async: true,
@@ -865,6 +914,7 @@ mod tests {
             "fragment_index_cluster.rs",
             include_str!("sqlite/fragment_index_cluster.rs"),
         ),
+        ("dvr.rs", include_str!("sqlite/dvr.rs")),
         ("library.rs", include_str!("sqlite/library.rs")),
         (
             "library_channels.rs",

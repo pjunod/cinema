@@ -90,7 +90,8 @@ const RECOVERY_EPOCH_SCHEMA_VERSION: i64 = 33;
 const OFFLINE_RECOVERY_CLAIM_SCHEMA_VERSION: i64 = 34;
 const LIBRARY_CHANNELS_SCHEMA_VERSION: i64 = 35;
 const LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_VERSION: i64 = 36;
-pub const AUTH_SCHEMA_VERSION: i64 = LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_VERSION;
+const DVR_SCHEMA_VERSION: i64 = 37;
+pub const AUTH_SCHEMA_VERSION: i64 = DVR_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -128,6 +129,7 @@ const RECOVERY_EPOCH_SCHEMA_MIGRATION_SOURCE: i64 = PRODUCER_RECOVERY_SCHEMA_VER
 const OFFLINE_RECOVERY_CLAIM_SCHEMA_MIGRATION_SOURCE: i64 = RECOVERY_EPOCH_SCHEMA_VERSION;
 const LIBRARY_CHANNELS_SCHEMA_MIGRATION_SOURCE: i64 = OFFLINE_RECOVERY_CLAIM_SCHEMA_VERSION;
 const LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_MIGRATION_SOURCE: i64 = LIBRARY_CHANNELS_SCHEMA_VERSION;
+const DVR_SCHEMA_MIGRATION_SOURCE: i64 = LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_VERSION;
 // Session routing and shared-cache identity are additive durable state and use
 // the existing Hiqlite transport contract. Protocol 4 stays supported so a
 // healthy v9/v10 cluster can authorize the daemon that advances its schema.
@@ -1420,6 +1422,7 @@ impl HiqliteAuthStore {
         super::hiqlite_timeline_annotations::install_schema(&client).await?;
         super::hiqlite_fragment_index_cluster::install_schema(&client).await?;
         super::hiqlite_library_channels::install_schema(&client).await?;
+        super::hiqlite_dvr::install_schema(&client).await?;
 
         let store = Self::with_clock(client, clock, NodeLocalTelemetry::open(telemetry_path)?);
         let now = store.now()?;
@@ -2402,6 +2405,19 @@ impl HiqliteAuthStore {
                     )
                     .await?;
                 }
+                SchemaMigrationAction::MigrateFrom(DVR_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements = super::hiqlite_dvr::migration_statements()?;
+                    statements.push((
+                        "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                         WHERE singleton = 1 AND schema_version = $3"
+                            .to_owned(),
+                        params!(DVR_SCHEMA_VERSION, now, DVR_SCHEMA_MIGRATION_SOURCE),
+                    ));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(DVR_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
                         "cluster schema {version} has no migration implementation"
@@ -2645,6 +2661,9 @@ impl HiqliteAuthStore {
             ("DELETE FROM scan_reconcile_guards".to_owned(), params!()),
             ("DELETE FROM library_roots".to_owned(), params!()),
             ("DELETE FROM files".to_owned(), params!()),
+            // `dvr_recordings` keeps its row when its requester is deleted
+            // (ON DELETE SET NULL), so a users-delete does not reach it.
+            ("DELETE FROM dvr_recordings".to_owned(), params!()),
             ("DELETE FROM items".to_owned(), params!()),
             ("DELETE FROM libraries".to_owned(), params!()),
             (CREDENTIAL_MUTATION_INTENT_BEGIN_SQL.to_owned(), params!()),
