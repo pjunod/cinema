@@ -692,7 +692,9 @@ impl Cluster {
         let deadline = Instant::now() + Duration::from_secs(180);
         let mut first: Option<i64> = None;
         let mut latest = 0i64;
-        let mut read = 0usize;
+        let mut served = std::collections::HashSet::new();
+        let mut first_playlist = true;
+        let mut reached_full_window = false;
         loop {
             self.node_a.assert_running("reading live media");
             self.node_b.assert_running("reading live media");
@@ -722,7 +724,19 @@ impl Cluster {
                 "the window published {} segments; at most {LISTED_SEGMENTS} may be listed",
                 names.len()
             );
-            if let Some(name) = names.last() {
+            if first_playlist {
+                assert!(
+                    names.len() >= 2,
+                    "the first playlist exposed only {} segment(s); a player needs two",
+                    names.len()
+                );
+                first_playlist = false;
+            }
+            reached_full_window |= names.len() == LISTED_SEGMENTS;
+            for name in names {
+                if served.contains(&name) {
+                    continue;
+                }
                 let segment = self
                     .client
                     .get(format!(
@@ -731,14 +745,23 @@ impl Cluster {
                     .send()
                     .await
                     .expect("segment request");
-                if segment.status() == StatusCode::OK
-                    && !segment.bytes().await.expect("segment body").is_empty()
-                {
-                    read += 1;
-                }
+                assert_eq!(
+                    segment.status(),
+                    StatusCode::OK,
+                    "listed segment {name} was not served"
+                );
+                assert!(
+                    !segment.bytes().await.expect("segment body").is_empty(),
+                    "listed segment {name} was empty"
+                );
+                served.insert(name);
             }
             if latest - first.unwrap_or(0) >= LISTED_SEGMENTS as i64 {
-                return read;
+                assert!(
+                    reached_full_window,
+                    "the media sequence advanced before the list reached {LISTED_SEGMENTS} entries"
+                );
+                return served.len();
             }
             assert!(
                 Instant::now() < deadline,
@@ -776,7 +799,7 @@ impl Cluster {
     }
 }
 
-const LISTED_SEGMENTS: usize = 6; // MAX_LISTED_SEGMENTS in crates/plurxd/src/live_tv.rs
+const LISTED_SEGMENTS: usize = 24; // MAX_LISTED_SEGMENTS in crates/plurxd/src/live_tv.rs
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_ingress_relays_a_capability_it_does_not_own_and_never_takes_the_tuner_over() {

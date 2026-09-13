@@ -4,6 +4,27 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## Live TV starts are being rebuilt around a stable one-second cadence
+
+**[#298](http://192.168.4.7:3000/noirr/plurx/pulls/298), from
+`codex/live-tv-start-stall-server` into `effort/live-tv-start-stall`;
+implementation complete, physical evidence pending.** The server half now has
+the reviewed 24-entry uniform one-second HLS
+window, a two-listed-segment / two-target-duration publication barrier,
+progress at the newest listed segment, startup counts in its timeout message,
+and a graph probe built by the production command path. The two-node harness
+requires two entries in its first playlist, serves every listed name and rolls
+the full 24-entry window. `scripts/live-tv-hardware` measures first-list and
+answer times, durations, target duration and bitrate; `--copy` selects the real
+HEVC/AC-3 route and `--via` records the non-owner relay outcome under the
+runtime's existing 35 s public deadline. HDHomeRun and client evidence remains
+the physical hand-off. The ten named S1/S2 regressions, all four two-node
+cluster cases, the hardware-script syntax check, and pinned Rust 1.97.1
+check/Clippy/format are green. `make history-check` now reports only the
+pre-existing corrective commits already red on this exact `main`; this lane's
+four corrections have their own `live-tv.integration` evidence mapping. No
+timeout, signed request, route, client input contract, or feature gate moved.
+
 ## Apple's notice strip was a dead end, and two rows of the readiness card were false
 
 **[#297](http://192.168.4.7:3000/noirr/plurx/pulls/297), titled `WIP:`.**
