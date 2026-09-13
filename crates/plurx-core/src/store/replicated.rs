@@ -1037,10 +1037,24 @@ mod tests {
         methods.sort_unstable();
         methods.dedup();
         assert_eq!(methods.len(), original_len);
-        // 80 on the merge. Both parents moved this counter from a shared 66
-        // and neither parent's total describes the merged tree, so it is read
-        // off the merge rather than added up — but every boundary each of them
-        // classified is retained, and the arithmetic happens to agree:
+        // 87 on the DVR merge: 80 from the merge described below, plus the
+        // seven `dvr.rs` boundaries this effort adds. Each of those seven is a
+        // read-then-write that a second writer between the two halves would
+        // corrupt: `put_dvr_rule` and `put_dvr_reminder` (upsert),
+        // `reorder_dvr_rules` (every row's position moves together),
+        // `insert_dvr_airing_if_absent` (the whole point is that exactly one
+        // of two racing expansions wins), `request_dvr_stop` and
+        // `repoint_dvr_rule_rows` (a state change conditional on the state
+        // just read), and `transition_dvr_reminders` (arm-to-fired for a
+        // window, where a half-applied sweep fires some reminders twice). The
+        // list's other DVR methods open none: the plain reads, and the single
+        // conditional `UPDATE`s whose condition is in the statement.
+        //
+        // 80 came from the merge before this one. Both of those parents moved
+        // the counter from a shared 66 and neither parent's total described
+        // the merged tree, so it was read off the merge rather than added up —
+        // but every boundary each of them classified was retained, and the
+        // arithmetic happened to agree:
         //
         // * main reached 69 — 67 after `put_settings_if_generation`'s
         //   generation-fenced write, plus the two `users.rs` boundaries that
@@ -1060,7 +1074,7 @@ mod tests {
         // transaction boundary has to be a deliberate edit here. That is the
         // point of the assertion: two of the sites above reached main without
         // one.
-        assert_eq!(methods.len(), 80);
+        assert_eq!(methods.len(), 87);
     }
 
     #[test]

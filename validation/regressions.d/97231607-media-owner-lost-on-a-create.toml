@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["97231607"]
+points = ["playback.pipeline", "web.experience"]
+checks = ["web-static"]
+reason = "`media_owner_lost_410` was `context: attached`, which reads as something that only happens to a viewer already watching. A session handed to a node that is already gone answers 410 on a create with the same body, and this is the one row that carries `film_position_ms`, so refusing to match it at a start threw away the only thing a Try again there could aim at and left the refusal to whatever generic row was underneath. The retained fixture case `media_owner_lost_on_create_carries_its_position` raises the 410 in context `start` and requires the surface to be the `recovering` class carrying the position the body sent, which is red the moment the row goes back to `attached`, and `the shipped policy carries the fixture verbatim` requires the `SURFACE_SOURCES` embedded in playback-policy.js to be the fixture's rows in the fixture's order, so the context cannot be narrowed on one side only. The first-match order is unchanged and `change_failed` still sits above this row, which `every source row is exercised by at least one case` and the existing change-refusal cases keep true. All of it runs in the embedded-JavaScript gate."

@@ -48,6 +48,7 @@ fun LiveTvDeveloperScreen(origin: String, onBack: () -> Unit) {
     var saved by remember { mutableStateOf<LiveTvSettings?>(null) }
     var readiness by remember { mutableStateOf<LiveTvReadiness?>(null) }
     var developerReadiness by remember { mutableStateOf<DeveloperReadiness?>(null) }
+    var guideReadiness by remember { mutableStateOf<LiveTvGuideReadiness?>(null) }
     var ipv4 by remember { mutableStateOf("") }
     var owner by remember { mutableStateOf("") }
     var sessions by remember { mutableStateOf(2) }
@@ -76,6 +77,10 @@ fun LiveTvDeveloperScreen(origin: String, onBack: () -> Unit) {
             try {
                 apply(client.settings())
                 developerReadiness = client.developerReadiness()
+                // Advisory in the strongest sense: a guide panel that cannot be
+                // read must not cost the operator the settings form it sits
+                // under, so its failure is not this load's failure.
+                guideReadiness = runCatching { client.guideReadiness() }.getOrNull()
                 message = "Settings loaded. Save, check readiness, then enable."
             }
             catch (error: Exception) { saved = null; message = failure(error) }
@@ -181,7 +186,35 @@ fun LiveTvDeveloperScreen(origin: String, onBack: () -> Unit) {
                 }) { Text("Retry authenticated cleanup while disabled") }
             }
         }
-        readiness?.checks?.forEach { Text("${if (it.ready) "Ready" else "Needs attention"}: ${it.message}") }
+        // Every row the server sends, in the order it sent them — never a
+        // hand-written subset. `start_recovery` arrived this way without this
+        // screen being told about it, and the next row will too.
+        readiness?.checks?.forEach { Text("${if (it.ready) "Met" else "Needs attention"}: ${it.message}") }
+
+        Text("Programme guide · advisory enablement", style = MaterialTheme.typography.titleLarge)
+        Text("What the guide needs in order to populate, to come back after a deploy, and to say why it last failed — and whether each part is met right now. Every row below is advisory: none of them refuses a save or an enable, and a guide that will not load still leaves a working screen with number and callsign rows.")
+        guideReadiness?.let { guide ->
+            Text(
+                "Source ${guide.source} · ${guide.freshness} · ${guide.matched_channels} of " +
+                    "${guide.lineup_channels} channels matched · ${guide.programmes} programmes · " +
+                    "${guide.guide_hours}-hour horizon · refreshed every ${guide.refresh_interval_seconds}s",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            guide.checks.forEach { Text("${if (it.ready) "Met" else "Needs attention"}: ${it.message}") }
+            if (guide.checks.isEmpty()) Text("This server sent no guide rows.", style = MaterialTheme.typography.bodySmall)
+        } ?: Text(
+            "Guide readiness has not been read from this server. It is a read of the owner's cache and never triggers a fetch.",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Button(enabled = !busy, onClick = {
+            busy = true
+            scope.launch {
+                try { guideReadiness = (api ?: throw LiveTvFailure("invalid_settings")).guideReadiness() }
+                catch (error: Exception) { message = failure(error) }
+                finally { busy = false }
+            }
+        }) { Text("Refresh guide readiness") }
+
         Text(message)
         TextButton(enabled = !busy, onClick = ::load) { Text("Reload server settings") }
     }

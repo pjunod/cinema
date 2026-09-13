@@ -136,6 +136,226 @@ private struct PlaybackInfoFieldsFixture: Decodable {
     let fields: [Field]
 }
 
+/// `tests/playback/playback-surface-contract.json`, decoded literally.
+///
+/// Spelled out rather than decoded with `.convertFromSnakeCase`: that strategy
+/// rewrites dictionary KEYS too, and this fixture keys `classes` and
+/// `severity_rank` by name. Explicit keys also keep `class` — a Swift keyword —
+/// readable at the one place it appears.
+private struct PlaybackSurfaceContractFixture: Decodable {
+    /// `true` or `"while_not_presenting"`, or absent for a notice.
+    struct Blocking: Decodable, Equatable {
+        let isAlways: Bool
+        let isWhileNotPresenting: Bool
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.singleValueContainer()
+            if let flag = try? container.decode(Bool.self) {
+                isAlways = flag
+                isWhileNotPresenting = false
+                return
+            }
+            let text = try container.decode(String.self)
+            isAlways = false
+            isWhileNotPresenting = text == "while_not_presenting"
+        }
+    }
+
+    struct ClassRule: Decodable {
+        let severity: String
+        let blocking: Blocking?
+        let minMs: Int?
+        let timedMs: Int?
+        let timerPausedWhileActions: Bool?
+        let requiresPlayerStopped: Bool?
+        let retiredBy: [String]
+        let title: String?
+        let defaultActions: [String]?
+
+        enum CodingKeys: String, CodingKey {
+            case severity, blocking, title
+            case minMs = "min_ms"
+            case timedMs = "timed_ms"
+            case timerPausedWhileActions = "timer_paused_while_actions"
+            case requiresPlayerStopped = "requires_player_stopped"
+            case retiredBy = "retired_by"
+            case defaultActions = "default_actions"
+        }
+    }
+
+    struct SourceRow: Decodable {
+        struct Requires: Decodable {
+            let playerStopped: Bool?
+
+            enum CodingKeys: String, CodingKey {
+                case playerStopped = "player_stopped"
+            }
+        }
+
+        let id: String
+        let context: String
+        let cls: String?
+        let codes: [String]?
+        let actions: [String]?
+        let requires: Requires?
+        let thenWhenStopped: String?
+        let carries: [String]?
+        let retryable: Bool?
+
+        enum CodingKeys: String, CodingKey {
+            case id, context, codes, actions, requires, carries, retryable
+            case cls = "class"
+            case thenWhenStopped = "then_when_stopped"
+        }
+    }
+
+    struct Timings: Decodable {
+        let bufferingMinMs: Int
+        let holdNoticeMs: Int
+        let degradedNoticeMs: Int
+        let refusedProgressMs: Int
+        let disagreementNoticeMs: Int
+
+        enum CodingKeys: String, CodingKey {
+            case bufferingMinMs = "buffering_min_ms"
+            case holdNoticeMs = "hold_notice_ms"
+            case degradedNoticeMs = "degraded_notice_ms"
+            case refusedProgressMs = "refused_progress_ms"
+            case disagreementNoticeMs = "disagreement_notice_ms"
+        }
+    }
+
+    struct InputFailedState: Decodable {
+        let classes: [String]
+    }
+
+    struct Event: Decodable {
+        let t: Int
+        let attach: String?
+        let retire: String?
+        let presenting: Bool?
+        let attached: String?
+        let hidden: Bool?
+        let inert: String?
+        let raise: String?
+        let context: String?
+        let intent: String?
+        let playerStopped: Bool?
+        let actions: [String]?
+        let positionMs: Int?
+        let title: String?
+        let detail: String?
+        let intentSettled: String?
+        let intentSuperseded: String?
+        let ownerSuccess: String?
+        let userAction: String?
+        let tick: Bool?
+
+        enum CodingKeys: String, CodingKey {
+            case t, attach, retire, presenting, attached, hidden, raise, context, intent
+            case actions, title, detail, tick
+            case inert = "event"
+            case playerStopped = "player_stopped"
+            case positionMs = "position_ms"
+            case intentSettled = "intent_settled"
+            case intentSuperseded = "intent_superseded"
+            case ownerSuccess = "owner_success"
+            case userAction = "user_action"
+        }
+    }
+
+    struct Expect: Decodable {
+        let at: Int
+        let surface: String?
+        let cls: String?
+        let source: String?
+        let actions: [String]?
+        let title: String?
+        let detail: String?
+        /// Told apart from "absent" by hand: one case expects a `nil` position
+        /// rather than not caring about it.
+        let declaresPositionMs: Bool
+        let positionMs: Int?
+        let inputFailed: Bool?
+        let error: String?
+        let log: [String]?
+
+        enum CodingKeys: String, CodingKey {
+            case at, surface, source, actions, title, detail, error, log
+            case cls = "class"
+            case positionMs = "position_ms"
+            case inputFailed = "input_failed"
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            at = try container.decode(Int.self, forKey: .at)
+            surface = try container.decodeIfPresent(String.self, forKey: .surface)
+            cls = try container.decodeIfPresent(String.self, forKey: .cls)
+            source = try container.decodeIfPresent(String.self, forKey: .source)
+            actions = try container.decodeIfPresent([String].self, forKey: .actions)
+            title = try container.decodeIfPresent(String.self, forKey: .title)
+            detail = try container.decodeIfPresent(String.self, forKey: .detail)
+            declaresPositionMs = container.contains(.positionMs)
+            positionMs = try container.decodeIfPresent(Int.self, forKey: .positionMs)
+            inputFailed = try container.decodeIfPresent(Bool.self, forKey: .inputFailed)
+            error = try container.decodeIfPresent(String.self, forKey: .error)
+            log = try container.decodeIfPresent([String].self, forKey: .log)
+        }
+    }
+
+    struct Case: Decodable {
+        let name: String
+        let events: [Event]
+        let expect: [Expect]
+    }
+
+    let classes: [String: ClassRule]
+    let sources: [SourceRow]
+    let timings: Timings
+    let severityRank: [String: Int]
+    let actions: [String]
+    let contexts: [String]
+    let kinds: [String: String]
+    let inputFailedState: InputFailedState
+    let cases: [Case]
+
+    enum CodingKeys: String, CodingKey {
+        case classes, sources, timings, actions, contexts, kinds, cases
+        case severityRank = "severity_rank"
+        case inputFailedState = "input_failed_state"
+    }
+}
+
+/// The fixture names media generations and viewer intents `g1` / `i7`; Apple's
+/// are Ints (`openGeneration`, `viewerActionEpoch`). First-seen order gives
+/// each name a stable Int with the same monotonic shape the controller has —
+/// the event is MAPPED to Apple's equivalent, never skipped.
+private struct SurfaceIdentityMap {
+    /// A generation no event can ever name, for a fixture event that omits
+    /// `attached`. Minting a real one there would silently make the event
+    /// about `g1` the day a case leaves it out; this makes the event match
+    /// nothing, and the runner asserts the omission separately so it fails
+    /// loudly rather than passing for the wrong reason.
+    static let absent = Int.min
+
+    private var ids: [String: Int] = [:]
+    private var next = 0
+
+    mutating func id(_ name: String?) -> Int {
+        guard let name else { return Self.absent }
+        if let existing = ids[name] { return existing }
+        next += 1
+        ids[name] = next
+        return next
+    }
+}
+
+private struct PlaybackSurfaceSlot {
+    var log: [PlaybackSurfaceLog] = []
+    var surface = PlaybackSurface.empty
+}
+
 private actor ArtworkDownloadProbe {
     private var starts = 0
     private var cancellations = 0
@@ -2365,11 +2585,12 @@ final class AppleClientTests: XCTestCase {
                 decided,
                 "\(reason) vetoed the only thing that could clear the wedge"
             )
-            XCTAssertNil(
-                controller.playbackNotice,
-                "\(reason) spent a viewer-facing notice on a stall it did not decide"
+            XCTAssertEqual(
+                controller.surface.surface.kind,
+                .none,
+                "\(reason) spent a viewer-facing surface on a stall it did not decide"
             )
-            XCTAssertFalse(controller.failed)
+            XCTAssertFalse(controller.isPlaybackBlocked)
         }
 
         // A silent freeze already received the monitor's one native play
@@ -2381,8 +2602,8 @@ final class AppleClientTests: XCTestCase {
             ControlAction(type: "hold", reason: "demand"), event: freeze
         )
         XCTAssertFalse(held)
-        XCTAssertNil(controller.playbackNotice)
-        XCTAssertFalse(controller.failed)
+        XCTAssertEqual(controller.surface.surface.kind, .none)
+        XCTAssertFalse(controller.isPlaybackBlocked)
 
         let expired = PlaybackStallEvent(
             kind: .silent,
@@ -2405,8 +2626,14 @@ final class AppleClientTests: XCTestCase {
             ControlAction(type: "terminal", message: "The library moved."), event: wedge
         )
         XCTAssertTrue(stopped)
-        XCTAssertTrue(ended.failed)
-        XCTAssertEqual(ended.playbackError, "The library moved.")
+        XCTAssertTrue(ended.isPlaybackBlocked)
+        XCTAssertEqual(ended.surface.surface.cls, .stopped)
+        XCTAssertEqual(ended.surface.surface.source, "owner_stopped")
+        XCTAssertEqual(ended.surface.surface.detail, "The library moved.")
+        XCTAssertTrue(
+            ended.surface.surface.playerStopped,
+            "a blocking surface is only ever drawn over a player its owner stopped"
+        )
     }
 
     /// The server rewrites a ticketed automatic reopen one rung down, which is
@@ -2706,6 +2933,1004 @@ final class AppleClientTests: XCTestCase {
         }
     }
 
+    // MARK: - The playback surface contract
+
+    private func playbackSurfaceContractFixture() throws -> PlaybackSurfaceContractFixture {
+        let fixtureURL = try XCTUnwrap(
+            Bundle(for: AppleClientTests.self).url(
+                forResource: "playback-surface-contract",
+                withExtension: "json"
+            )
+        )
+        return try JSONDecoder().decode(
+            PlaybackSurfaceContractFixture.self,
+            from: Data(contentsOf: fixtureURL)
+        )
+    }
+
+    // MARK: - M5: the create "not yet" retry ladder
+    //
+    // The ladder is pure arithmetic, so it is tested here directly. What is
+    // NOT testable without a device is the async sequence around it
+    // (`createRetryingNotYet`): its watchdog, its late-session release and its
+    // cancellation are listed in the PR's "Needs a Mac" section, unrun.
+
+    func testCreateRetryLadderIsOneSecondTwoSecondsFourSecondsAndThenSpent() {
+        XCTAssertEqual(PlaybackCreateRetry.backoffMs, [1_000, 2_000, 4_000])
+        XCTAssertEqual(PlaybackCreateRetry.deadlineMs, 60_000)
+        XCTAssertEqual(
+            PlaybackCreateRetry.step(attempt: 0, elapsedMs: 0, isNotYet: true),
+            .retry(delayMs: 1_000)
+        )
+        XCTAssertEqual(
+            PlaybackCreateRetry.step(attempt: 1, elapsedMs: 1_000, isNotYet: true),
+            .retry(delayMs: 2_000)
+        )
+        XCTAssertEqual(
+            PlaybackCreateRetry.step(attempt: 2, elapsedMs: 3_000, isNotYet: true),
+            .retry(delayMs: 4_000)
+        )
+        // Three rungs, not "4 s for ever": the ladder is a closed list and the
+        // owner says so when it runs out.
+        XCTAssertEqual(
+            PlaybackCreateRetry.step(attempt: 3, elapsedMs: 7_000, isNotYet: true),
+            .exhausted(reason: "ladder_spent")
+        )
+        // The backoff is a function of the attempt index, so it cannot restart:
+        // asking for rung 1 again after twenty seconds still answers 2 s, and
+        // the deadline is what bounds the wall clock.
+        XCTAssertEqual(
+            PlaybackCreateRetry.step(attempt: 1, elapsedMs: 20_000, isNotYet: true),
+            .retry(delayMs: 2_000)
+        )
+    }
+
+    func testCreateRetryDeadlineIsAbsoluteAndNeverSchedulesPastItself() {
+        XCTAssertEqual(
+            PlaybackCreateRetry.step(attempt: 0, elapsedMs: 60_000, isNotYet: true),
+            .exhausted(reason: "deadline")
+        )
+        XCTAssertEqual(
+            PlaybackCreateRetry.step(attempt: 0, elapsedMs: 59_999, isNotYet: true),
+            .exhausted(reason: "deadline"),
+            "a rung that could only START after the deadline is not scheduled"
+        )
+        XCTAssertEqual(
+            PlaybackCreateRetry.step(attempt: 0, elapsedMs: 58_999, isNotYet: true),
+            .retry(delayMs: 1_000),
+            "a rung that still lands inside the deadline runs"
+        )
+        // A slow server spends the deadline on ONE attempt, and that is the
+        // point of measuring from the first attempt rather than the last.
+        XCTAssertEqual(
+            PlaybackCreateRetry.step(attempt: 1, elapsedMs: 90_000, isNotYet: true),
+            .exhausted(reason: "deadline")
+        )
+    }
+
+    func testOnlyTheContractsNotYetCodesAreRetried() throws {
+        let fixture = try playbackSurfaceContractFixture()
+        let row = try XCTUnwrap(fixture.sources.first { $0.id == "create_503_not_yet" })
+        XCTAssertEqual(
+            PlaybackCreateRetry.codes,
+            Set(try XCTUnwrap(row.codes)),
+            "the retried codes are the fixture's row, not a second list"
+        )
+        for code in PlaybackCreateRetry.codes {
+            let refusal = APIError.refused(
+                status: 503,
+                code: code,
+                message: "the transcoder is still starting",
+                positionMs: nil
+            )
+            XCTAssertTrue(PlaybackCreateRetry.isNotYet(refusal), code)
+        }
+        // Everything else keeps exactly the handling it had. A bodiless 503 is
+        // not a "not yet" answer — the code is what says so, and AVFoundation
+        // never had one (contract §2.2).
+        for error in [
+            APIError.http(503),
+            APIError.http(401),
+            APIError.refused(status: 503, code: "vod_disabled", message: "off", positionMs: nil),
+            APIError.refused(status: 410, code: "media_owner_lost", message: "gone", positionMs: 90_000),
+            APIError.transport("the network went away"),
+        ] as [Error] {
+            XCTAssertFalse(PlaybackCreateRetry.isNotYet(error))
+            XCTAssertEqual(
+                PlaybackCreateRetry.step(
+                    attempt: 0,
+                    elapsedMs: 0,
+                    isNotYet: PlaybackCreateRetry.isNotYet(error)
+                ),
+                .fail,
+                "a refusal no `create_503_not_yet` code claims is not retried at all"
+            )
+        }
+    }
+
+    /// One fixture event as Apple expresses it.
+    ///
+    /// Two of the fixture's shapes are not Apple's, and each is MAPPED rather
+    /// than skipped:
+    ///
+    /// * generations and intents are names in the fixture and Ints here (see
+    ///   `SurfaceIdentityMap`);
+    /// * the four inert platform events are the web's and Android's spellings.
+    ///   Apple's twins are `AVPlayerItem.status == .readyToPlay` (`canplay`),
+    ///   `AVPlayer.timeControlStatus == .playing` (`playing` and
+    ///   `timeControlStatus`) and the `isPlaying` flag changing
+    ///   (`isPlayingChanged`). All four stay inert here, which is the whole
+    ///   point of those cases: not one of them is presentation evidence.
+    private static func surfaceEvent(
+        _ raw: PlaybackSurfaceContractFixture.Event,
+        ids: inout SurfaceIdentityMap
+    ) -> PlaybackSurfaceModel.Event {
+        if let inert = raw.inert { return .inert(inert) }
+        if let attach = raw.attach { return .attach(ids.id(attach)) }
+        if let retire = raw.retire { return .retire(ids.id(retire)) }
+        if let hidden = raw.hidden { return .hidden(hidden) }
+        if let presenting = raw.presenting {
+            return .presenting(presenting, attached: ids.id(raw.attached))
+        }
+        if let source = raw.raise {
+            return PlaybackSurfaceModel.raise(
+                source: source,
+                context: PlaybackSurfaceModel.Context(rawValue: raw.context ?? "") ?? .attached,
+                attached: ids.id(raw.attached),
+                intent: raw.intent == nil ? nil : ids.id(raw.intent),
+                playerStopped: raw.playerStopped ?? false,
+                actions: (raw.actions ?? []).compactMap { PlaybackFault.Action(rawValue: $0) },
+                positionMs: raw.positionMs,
+                title: raw.title,
+                detail: raw.detail
+            )
+        }
+        if let settled = raw.intentSettled { return .intentSettled(ids.id(settled)) }
+        if let superseded = raw.intentSuperseded { return .intentSuperseded(ids.id(superseded)) }
+        if let success = raw.ownerSuccess { return .ownerSuccess(ids.id(success)) }
+        if let action = raw.userAction {
+            return .userAction(PlaybackFault.Action(rawValue: action) ?? .close)
+        }
+        return .tick
+    }
+
+    /// Replay one case and keep what the surface was, and what was logged, at
+    /// each timestamp — events at the same `t` apply in listed order and the
+    /// expectation is about the state after the last of them.
+    private func runPlaybackSurfaceCase(
+        _ item: PlaybackSurfaceContractFixture.Case
+    ) -> [Int: PlaybackSurfaceSlot] {
+        var model = PlaybackSurfaceModel()
+        var ids = SurfaceIdentityMap()
+        var slots: [Int: PlaybackSurfaceSlot] = [:]
+        let origin = ContinuousClock.now
+        for raw in item.events {
+            // Every raise and every evidence sample names the generation it is
+            // about. A case that stopped doing so would otherwise be mapped to
+            // a generation that matches nothing and pass quietly.
+            if raw.raise != nil || raw.presenting != nil {
+                XCTAssertNotNil(
+                    raw.attached,
+                    "\(item.name) @\(raw.t): the fixture event names no attached generation"
+                )
+            }
+            let entries = model.apply(
+                Self.surfaceEvent(raw, ids: &ids),
+                now: origin.advanced(by: .milliseconds(raw.t))
+            )
+            var slot = slots[raw.t] ?? PlaybackSurfaceSlot()
+            slot.log.append(contentsOf: entries)
+            slot.surface = model.surface
+            slots[raw.t] = slot
+        }
+        return slots
+    }
+
+    func testPlaybackSurfaceModelRunsEveryContractCase() throws {
+        let fixture = try playbackSurfaceContractFixture()
+        XCTAssertFalse(fixture.cases.isEmpty, "the fixture is the contract; an empty one proves nothing")
+        for item in fixture.cases {
+            let slots = runPlaybackSurfaceCase(item)
+            for expectation in item.expect {
+                let place = "\(item.name) @\(expectation.at)"
+                let slot = try XCTUnwrap(slots[expectation.at], "\(place): nothing happened")
+                if let kind = expectation.surface {
+                    XCTAssertEqual(slot.surface.kind.rawValue, kind, "\(place): surface kind")
+                }
+                if let cls = expectation.cls {
+                    XCTAssertEqual(slot.surface.cls?.rawValue, cls, "\(place): fault class")
+                }
+                if let source = expectation.source {
+                    XCTAssertEqual(slot.surface.source, source, "\(place): fault source")
+                }
+                if let actions = expectation.actions {
+                    XCTAssertEqual(
+                        slot.surface.actions.map(\.rawValue), actions, "\(place): actions"
+                    )
+                }
+                if let title = expectation.title {
+                    XCTAssertEqual(slot.surface.title, title, "\(place): title")
+                }
+                if let detail = expectation.detail {
+                    XCTAssertEqual(slot.surface.detail, detail, "\(place): detail")
+                }
+                if expectation.declaresPositionMs {
+                    XCTAssertEqual(
+                        slot.surface.positionMs, expectation.positionMs, "\(place): position_ms"
+                    )
+                }
+                if let inputFailed = expectation.inputFailed {
+                    XCTAssertEqual(
+                        slot.surface.entersFailedRouting,
+                        inputFailed,
+                        "\(place): the input contract's failed state"
+                    )
+                }
+                if let error = expectation.error {
+                    XCTAssertTrue(
+                        slot.log.contains { $0.error?.rawValue == error },
+                        "\(place): expected \(error), got \(slot.log.compactMap { $0.error?.rawValue })"
+                    )
+                }
+                if let log = expectation.log {
+                    XCTAssertEqual(slot.log.map(\.event.rawValue), log, "\(place): log")
+                }
+            }
+        }
+    }
+
+    func testABlockingSurfaceIsNeverDrawnOverAPlayerNobodyStopped() throws {
+        // The whole point, asserted independently of any one case: replay every
+        // sequence and fail if a fault whose class is blocking ever covers the
+        // picture without carrying the owner's stop.
+        let fixture = try playbackSurfaceContractFixture()
+        for item in fixture.cases {
+            var model = PlaybackSurfaceModel()
+            var ids = SurfaceIdentityMap()
+            let origin = ContinuousClock.now
+            for raw in item.events {
+                model.apply(
+                    Self.surfaceEvent(raw, ids: &ids),
+                    now: origin.advanced(by: .milliseconds(raw.t))
+                )
+                guard model.surface.kind == .blocking, let fault = model.surface.fault else { continue }
+                guard PlaybackSurfaceContract.rule(for: fault.cls).blocking == .always else { continue }
+                XCTAssertTrue(
+                    fault.playerStopped,
+                    "\(item.name) @\(raw.t): \(fault.cls) blocked the picture without the owner stopping the player"
+                )
+            }
+        }
+    }
+
+    func testReplayingAContractCaseGivesTheSameAnswer() throws {
+        let fixture = try playbackSurfaceContractFixture()
+        for item in fixture.cases {
+            let first = runPlaybackSurfaceCase(item)
+            let second = runPlaybackSurfaceCase(item)
+            XCTAssertEqual(
+                first.keys.sorted().map { "\($0):\(first[$0]!.surface.kind)/\(String(describing: first[$0]!.surface.cls))" },
+                second.keys.sorted().map { "\($0):\(second[$0]!.surface.kind)/\(String(describing: second[$0]!.surface.cls))" },
+                "\(item.name) is not deterministic"
+            )
+        }
+    }
+
+    func testTheSwiftSurfaceTablesAreTheFixtureVerbatim() throws {
+        let fixture = try playbackSurfaceContractFixture()
+        XCTAssertEqual(
+            Set(fixture.classes.keys),
+            Set(PlaybackFault.Class.allCases.map(\.rawValue)),
+            "the transcription and the fixture disagree about which classes exist"
+        )
+        for (name, rule) in fixture.classes {
+            let cls = try XCTUnwrap(PlaybackFault.Class(rawValue: name))
+            let mine = PlaybackSurfaceContract.rule(for: cls)
+            XCTAssertEqual(mine.severity.rawValue, rule.severity, name)
+            let blocking: PlaybackSurfaceContract.Blocking
+            if rule.blocking?.isAlways == true {
+                blocking = .always
+            } else if rule.blocking?.isWhileNotPresenting == true {
+                blocking = .whileNotPresenting
+            } else {
+                blocking = .never
+            }
+            XCTAssertEqual(mine.blocking, blocking, name)
+            XCTAssertEqual(mine.minMs, rule.minMs, name)
+            XCTAssertEqual(mine.timedMs, rule.timedMs, name)
+            XCTAssertEqual(mine.timerPausedWhileActions, rule.timerPausedWhileActions ?? false, name)
+            XCTAssertEqual(mine.requiresPlayerStopped, rule.requiresPlayerStopped ?? false, name)
+            XCTAssertEqual(mine.retiredBy.map(\.rawValue), rule.retiredBy, name)
+            XCTAssertEqual(mine.title, rule.title, name)
+            XCTAssertEqual(mine.defaultActions.map(\.rawValue), rule.defaultActions ?? [], name)
+        }
+        XCTAssertEqual(
+            PlaybackSurfaceContract.sources.count,
+            fixture.sources.count,
+            "rows are evaluated in order, so a missing or extra row changes what wins"
+        )
+        for (mine, row) in zip(PlaybackSurfaceContract.sources, fixture.sources) {
+            XCTAssertEqual(mine.id, row.id)
+            XCTAssertEqual(mine.context?.rawValue ?? "any", row.context, row.id)
+            XCTAssertEqual(mine.cls?.rawValue, row.cls, row.id)
+            XCTAssertEqual(mine.codes, row.codes ?? [], row.id)
+            XCTAssertEqual(mine.actions.map(\.rawValue), row.actions ?? [], row.id)
+            XCTAssertEqual(mine.requiresPlayerStopped, row.requires?.playerStopped ?? false, row.id)
+            XCTAssertEqual(mine.thenWhenStopped?.rawValue, row.thenWhenStopped, row.id)
+            XCTAssertEqual(mine.carries, row.carries ?? [], row.id)
+            XCTAssertEqual(mine.retryable, row.retryable ?? false, row.id)
+        }
+        XCTAssertEqual(PlaybackSurfaceContract.timings.bufferingMinMs, fixture.timings.bufferingMinMs)
+        XCTAssertEqual(PlaybackSurfaceContract.timings.holdNoticeMs, fixture.timings.holdNoticeMs)
+        XCTAssertEqual(PlaybackSurfaceContract.timings.degradedNoticeMs, fixture.timings.degradedNoticeMs)
+        XCTAssertEqual(PlaybackSurfaceContract.timings.refusedProgressMs, fixture.timings.refusedProgressMs)
+        XCTAssertEqual(
+            PlaybackSurfaceContract.timings.disagreementNoticeMs,
+            fixture.timings.disagreementNoticeMs
+        )
+        XCTAssertEqual(PlaybackSurfaceContract.actions.map(\.rawValue), fixture.actions)
+        for (severity, rank) in fixture.severityRank {
+            let mine = try XCTUnwrap(PlaybackSurfaceContract.Severity(rawValue: severity))
+            XCTAssertEqual(PlaybackSurfaceContract.severityRank[mine], rank, severity)
+        }
+        XCTAssertEqual(
+            Set(fixture.contexts),
+            Set(PlaybackSurfaceModel.Context.allCases.map(\.rawValue))
+        )
+        XCTAssertEqual(
+            Set(fixture.kinds.keys),
+            Set(PlaybackSurface.Kind.allCases.map(\.rawValue))
+        )
+    }
+
+    func testTheInputContractsFailedStateIsOnlyAPromptOrATerminal() throws {
+        // The cross product, pinned: a change to which surfaces enter `failed`
+        // routing is a visible diff here. Deriving `.failed` from any blocking
+        // surface — a full-screen `preparing`, say — fails this, which is the
+        // mutation it exists to kill.
+        let fixture = try playbackSurfaceContractFixture()
+        let failedClasses = Set(fixture.inputFailedState.classes)
+        XCTAssertEqual(failedClasses, ["exhausted", "stopped"])
+        for cls in PlaybackFault.Class.allCases {
+            for kind in PlaybackSurface.Kind.allCases {
+                let fault = PlaybackFault(
+                    cls: cls,
+                    source: "cross_product",
+                    attached: 1,
+                    raisedAt: ContinuousClock.now,
+                    actions: [.retry, .close],
+                    playerStopped: true
+                )
+                let surface = PlaybackSurface(kind: kind, fault: kind == .none ? nil : fault)
+                let expected = kind == .blocking && failedClasses.contains(cls.rawValue)
+                XCTAssertEqual(surface.entersFailedRouting, expected, "\(kind) × \(cls)")
+                for inputSurface in PlayerInputSurface.allCases {
+                    XCTAssertEqual(
+                        PlayerInputRouting.route(
+                            surface: inputSurface,
+                            state: surface.entersFailedRouting ? .failed : .transport,
+                            input: .playPause
+                        ),
+                        expected ? .ignore : .togglePlay,
+                        "\(inputSurface) × \(kind) × \(cls)"
+                    )
+                }
+            }
+        }
+    }
+
+    /// The adapter, pinned — because the reducer cannot pin this.
+    ///
+    /// `.inert` returns before the reducer's switch, so a model test fed inert
+    /// events can never fail however the adapter is mutated: it proves the
+    /// reducer ignores them, not that the client never feeds a transport
+    /// status in as evidence. That is a property of the ADAPTER, and the only
+    /// way to hold it here is to pin the one call site, the way the
+    /// black-frame stop is pinned.
+    func testOnlyTheEvidenceSamplerEverFeedsAPresentingEvent() throws {
+        let source = try playerControllerSource()
+        // Two sites, and the second is not an exception to the rule but the
+        // rest of it: the recovery owner's stop IS evidence, and a fault
+        // raised before it is recorded is demoted by §3.2 and never recovers.
+        XCTAssertEqual(
+            source.components(separatedBy: "present(.presenting(").count - 1,
+            2,
+            "presentation evidence has two call sites: the evidence sampler, and the owner's stop"
+        )
+        let stopStart = try XCTUnwrap(
+            source.range(of: "private func stopForBlockingSurface() {")
+        )
+        let stopEnd = try XCTUnwrap(
+            source.range(of: "\n    }\n", range: stopStart.upperBound..<source.endIndex)
+        )
+        let stop = String(source[stopStart.upperBound..<stopEnd.lowerBound])
+        XCTAssertTrue(
+            stop.contains("present(.presenting(false"),
+            "the owner's stop must record that the picture stopped presenting"
+        )
+        let start = try XCTUnwrap(
+            source.range(of: "private func sampleSurfacePresentation(at observedPosition: Int) {")
+        )
+        let end = try XCTUnwrap(
+            source.range(of: "\n    }\n", range: start.upperBound..<source.endIndex)
+        )
+        let body = String(source[start.upperBound..<end.lowerBound])
+        XCTAssertTrue(
+            body.contains("present(.presenting("),
+            "the sampler must be one of the two call sites"
+        )
+        // The contract's evidence is the position delta and the rate, plus the
+        // first-frame proof — never a transport status (§3.4).
+        XCTAssertTrue(body.contains("blackFrameWatchdog.presentedVideo"))
+        XCTAssertTrue(body.contains("rate: player.rate"))
+        // The decision the sampler defers to, pinned in the same breath: the
+        // evidence is collected here and weighed there, and neither half may
+        // name a transport status.
+        let verdictStart = try XCTUnwrap(
+            source.range(of: "nonisolated static func surfaceIsPresenting(")
+        )
+        let verdictEnd = try XCTUnwrap(
+            source.range(of: "\n    }\n", range: verdictStart.upperBound..<source.endIndex)
+        )
+        let verdict = String(source[verdictStart.upperBound..<verdictEnd.lowerBound])
+        XCTAssertTrue(verdict.contains("rate > 0"))
+        XCTAssertTrue(verdict.contains("!isChangingStream"))
+        for half in [body, verdict] {
+            XCTAssertFalse(
+                half.contains("timeControlStatus"),
+                "a transport status is an event, not presentation proof"
+            )
+            XCTAssertFalse(
+                half.contains("isPlaying"),
+                "the published transport flag is not presentation proof either"
+            )
+        }
+    }
+
+    /// A3, pinned. The source-shape test above forbids the WORD; this one
+    /// forbids the BEHAVIOUR, which is what actually matters. Swapping the
+    /// position delta for the transport's own opinion of itself compiles,
+    /// leaves every other test on both destinations green, and turns §4.3's
+    /// disagreement detector into a detector of nothing: a player that reports
+    /// itself playing over a frozen picture would keep publishing
+    /// `presenting`, and §3.2 would demote every blocking fault raised over it
+    /// to a banner the viewer cannot act on.
+    func testPresentationEvidenceIsAMovingPositionAndNeverATransportStatus() {
+        // Everything a presenting sample needs, except movement.
+        XCTAssertFalse(
+            PlayerController.surfaceIsPresenting(
+                observedPosition: 42_000, lastSampleMs: 42_000,
+                isChangingStream: false, rate: 1.0, picture: true
+            ),
+            "a rate over a position that has not moved is the disagreement, not presentation"
+        )
+        XCTAssertFalse(
+            PlayerController.surfaceIsPresenting(
+                observedPosition: 41_000, lastSampleMs: 42_000,
+                isChangingStream: false, rate: 1.0, picture: true
+            ),
+            "a position that went backwards is not progress either"
+        )
+        // The same evidence, one millisecond of film later.
+        XCTAssertTrue(
+            PlayerController.surfaceIsPresenting(
+                observedPosition: 42_001, lastSampleMs: 42_000,
+                isChangingStream: false, rate: 1.0, picture: true
+            )
+        )
+        // The first sample of an attachment has no predecessor to beat.
+        XCTAssertTrue(
+            PlayerController.surfaceIsPresenting(
+                observedPosition: 0, lastSampleMs: nil,
+                isChangingStream: false, rate: 1.0, picture: true
+            )
+        )
+        // And none of the other three stops being necessary.
+        XCTAssertFalse(PlayerController.surfaceIsPresenting(
+            observedPosition: 42_001, lastSampleMs: 42_000,
+            isChangingStream: true, rate: 1.0, picture: true
+        ), "a stream still changing is not presenting whatever the position does")
+        XCTAssertFalse(PlayerController.surfaceIsPresenting(
+            observedPosition: 42_001, lastSampleMs: 42_000,
+            isChangingStream: false, rate: 0, picture: true
+        ))
+        XCTAssertFalse(PlayerController.surfaceIsPresenting(
+            observedPosition: 42_001, lastSampleMs: 42_000,
+            isChangingStream: false, rate: 1.0, picture: false
+        ))
+    }
+
+    func testApplePlatformEventsAreNeverPresentationEvidence() {
+        // The Apple twin of `canplay_is_inert` / `isPlayingChanged_is_inert`:
+        // the reducer's half. It proves an inert event moves nothing, not that
+        // the adapter never feeds one in — the test above is what holds that.
+        var model = PlaybackSurfaceModel()
+        let origin = ContinuousClock.now
+        model.apply(.attach(1), now: origin)
+        model.apply(
+            PlaybackSurfaceModel.raise(
+                source: "decoder_failed",
+                context: .attached,
+                attached: 1,
+                playerStopped: true
+            ),
+            now: origin.advanced(by: .milliseconds(100))
+        )
+        XCTAssertEqual(model.kind, .blocking)
+        for name in ["canplay", "playing", "isPlayingChanged", "timeControlStatus"] {
+            model.apply(.inert(name), now: origin.advanced(by: .seconds(60)))
+            XCTAssertEqual(model.kind, .blocking, name)
+            XCTAssertEqual(model.currentFault?.cls, .stopped, name)
+        }
+    }
+
+    func testAPresentingSampleAfterAStopDemotesToABannerAndLogsTheDisagreement() {
+        // The lock-screen `playCommand` still calls `player.play()` directly:
+        // the contract's answer to it is not to fight it but to record it
+        // (§3.2). The picture wins, the fault keeps its actions and its data,
+        // and the ledger gets a row naming what started the player.
+        var model = PlaybackSurfaceModel()
+        let origin = ContinuousClock.now
+        model.apply(.attach(1), now: origin)
+        model.apply(
+            PlaybackSurfaceModel.raise(
+                source: "decoder_failed",
+                context: .attached,
+                attached: 1,
+                playerStopped: true,
+                actions: [.retry, .close]
+            ),
+            now: origin.advanced(by: .milliseconds(100))
+        )
+        XCTAssertEqual(model.kind, .blocking)
+        XCTAssertTrue(model.entersFailedRouting)
+
+        let log = model.apply(.presenting(true, attached: 1), now: origin.advanced(by: .seconds(5)))
+
+        XCTAssertEqual(model.kind, .banner)
+        XCTAssertEqual(model.currentFault?.cls, .degraded)
+        XCTAssertEqual(model.currentFault?.title, PlaybackSurfaceModel.recoveredTitle)
+        XCTAssertEqual(model.currentFault?.actions, [.retry, .close])
+        XCTAssertEqual(model.currentFault?.source, "decoder_failed", "the fault keeps its identity")
+        XCTAssertTrue(model.currentFault?.demoted == true)
+        XCTAssertFalse(model.entersFailedRouting, "a banner is not the input contract's failed state")
+        XCTAssertEqual(log.map(\.event), [.disagreement])
+
+        var history = PlaybackSurfaceHistory()
+        let snapshot = PlaybackSurfaceHistory.PlayerSnapshot(
+            rate: 0, positionMs: 90_000, presenting: false, sessionId: "s-1", attempt: "a-1"
+        )
+        history.record(
+            PlaybackSurfaceLog(
+                event: .raised, cls: .stopped, source: "decoder_failed", attached: 1, playerStopped: true
+            ),
+            atMs: 100,
+            player: snapshot
+        )
+        for entry in log { history.record(entry, atMs: 5_000, player: snapshot) }
+        XCTAssertEqual(history.entries.count, 1)
+        XCTAssertTrue(history.entries[0].disagreed)
+        XCTAssertTrue(history.ledgerSummary.contains("demoted"))
+    }
+
+    /// One mutation-killer per owner-stop site.
+    ///
+    /// The contract's whole thesis is that a blocking surface is drawn only
+    /// over a player its recovery owner has already stopped. Five of the six
+    /// Apple sites already paused before M2; `fail()` and the black-frame
+    /// ladder gained theirs here. None of them can be exercised without a
+    /// server and a device that cannot decode, so each is pinned in the source:
+    /// remove the `player.pause()` from any one of them and this fails.
+    func testEveryOwnerStopSiteStopsThePlayerBeforeItRaises() throws {
+        let source = try playerControllerSource()
+        // (the slice that must contain a stop, the raise that ends it)
+        let sites: [(String, String)] = [
+            ("case .stop(let terminal):", "source: \"owner_exhausted\""),
+            ("let terminal = event.kind.terminalState", "source: \"owner_stopped\""),
+            ("private func fail(_ error: Error) {", "source: \"auth_401_403\""),
+            ("guard surface.presenting else {", "ladderSpent ? \"owner_exhausted\" : \"owner_stopped\""),
+            ("func stopAfterRepeatedEarlyEnd(", "source: \"repeated_early_end\""),
+            ("guard !establishedHDRRetryAttempted, !unchangedRetryRuledOut else {", "source: \"owner_stopped\""),
+            ("private func handleBlackFrameDecodeFailure(at position: Int) async {", "source: \"black_frame_ladder_spent\""),
+        ]
+        for (open, raise) in sites {
+            let start = try XCTUnwrap(source.range(of: open), "site vanished: \(open)")
+            let end = try XCTUnwrap(
+                source.range(of: raise, range: start.upperBound..<source.endIndex),
+                "raise vanished: \(raise)"
+            )
+            let block = String(source[start.lowerBound..<end.upperBound])
+            XCTAssertTrue(
+                block.contains("player.pause()") || block.contains("stopForBlockingSurface()"),
+                "\(open) raises \(raise) without stopping the player first"
+            )
+        }
+        // `handleItemFailure`'s stop is further from its raise than a slice can
+        // usefully bound, so it is pinned on its own: the pause is the line the
+        // ladder's last rung falls through to.
+        let failureStart = try XCTUnwrap(
+            source.range(of: "private func handleItemFailure(_ item: AVPlayerItem) async {")
+        )
+        let failureRaise = try XCTUnwrap(
+            source.range(of: "Self.mediaFailureSurfaceSource(", range: failureStart.upperBound..<source.endIndex)
+        )
+        XCTAssertTrue(
+            String(source[failureStart.lowerBound..<failureRaise.upperBound]).contains("player.pause()"),
+            "handleItemFailure raises a terminal without stopping the player first"
+        )
+        // And the helper itself, so "stop" cannot quietly become "log".
+        let helper = try XCTUnwrap(
+            source.range(of: "private func stopForBlockingSurface() {")
+        )
+        let helperEnd = try XCTUnwrap(
+            source.range(of: "\n    }\n", range: helper.upperBound..<source.endIndex)
+        )
+        let body = String(source[helper.upperBound..<helperEnd.lowerBound])
+        XCTAssertTrue(body.contains("player.pause()"))
+        XCTAssertTrue(body.contains("isPlaying = false"))
+    }
+
+    /// R1, pinned: a credential refusal beats context everywhere.
+    ///
+    /// The source table puts `auth_401_403` (context `any`) above
+    /// `change_failed`, so a 401 during a pending change is a terminal with
+    /// Sign in — not a banner about the destination. Because it maps to a
+    /// blocking class, raising it without a stop draws NOTHING: the reducer
+    /// answers `blocking_without_stop` and the viewer gets a frozen picture
+    /// with no banner and no prompt. Both halves are asserted.
+    func testACredentialRefusalDuringAPendingChangeIsATerminalWithSignIn() throws {
+        for status in [401, 403] {
+            let outcome = try XCTUnwrap(PlayerController.refusalSurfaceOutcome(for: APIError.http(status)))
+            XCTAssertEqual(outcome.source, "auth_401_403")
+            XCTAssertEqual(outcome.actions, [.signIn, .close])
+            // Context does not demote it: the row is `any` and it is above
+            // `change_failed` in the table.
+            for context in PlaybackSurfaceModel.Context.allCases {
+                XCTAssertEqual(
+                    PlayerController.surfaceOutcome(
+                        for: APIError.http(status), context: context, fallback: "change_failed"
+                    ).source,
+                    "auth_401_403",
+                    context.rawValue
+                )
+                XCTAssertTrue(PlayerController.surfaceSourceIsBlocking("auth_401_403", context: context))
+            }
+        }
+
+        // A notice can never carry it, because a notice never stopped anything.
+        XCTAssertEqual(
+            PlayerController.surfaceOutcome(
+                for: APIError.http(401),
+                context: .change,
+                fallback: "change_failed",
+                allowsBlocking: false
+            ).source,
+            "change_failed",
+            "a caller that has not stopped the player may not be handed a blocking row"
+        )
+
+        // And the reducer's half, which is what makes it a blocker rather than
+        // a wording problem: raised without the stop, nothing is drawn at all.
+        var model = PlaybackSurfaceModel()
+        let origin = ContinuousClock.now
+        model.apply(.attach(1), now: origin)
+        model.apply(.presenting(true, attached: 1), now: origin)
+        let refused = model.apply(
+            PlaybackSurfaceModel.raise(
+                source: "auth_401_403", context: .change, attached: 1, playerStopped: false
+            ),
+            now: origin
+        )
+        XCTAssertEqual(refused.compactMap(\.error), [.blockingWithoutStop])
+        XCTAssertEqual(model.kind, .none, "a refused blocking fault is not a surface — it is the absence of one")
+
+        // This line is not test scaffolding: it is the event the shipped
+        // `PlayerController.stopForBlockingSurface()` emits, and the reason it
+        // has to. Raise the terminal while the model still believes the
+        // picture is presenting and §3.2 demotes it to a "Playback recovered"
+        // banner with no Sign in and no Close — irreversibly, because a
+        // demoted fault is never promoted again. That is what shipped until
+        // the owner's stop started recording its own evidence; the assertion
+        // that it still does is in
+        // `testOnlyTheEvidenceSamplerEverFeedsAPresentingEvent`, because the
+        // controller half needs a decoding player no unit test has. The pair
+        // below is the whole property: without the evidence, `degraded`.
+        var demoting = model
+        let demoted = demoting.apply(
+            PlaybackSurfaceModel.raise(
+                source: "auth_401_403", context: .change, attached: 1, playerStopped: true
+            ),
+            now: origin
+        )
+        XCTAssertEqual(demoted.compactMap(\.error), [])
+        XCTAssertEqual(
+            demoting.currentFault?.cls, .degraded,
+            "a terminal raised over a picture the model still thinks is presenting is lost"
+        )
+        XCTAssertTrue(demoting.currentFault?.demoted == true, "and it is lost for good")
+
+        model.apply(.presenting(false, attached: 1), now: origin)
+        let raised = model.apply(
+            PlaybackSurfaceModel.raise(
+                source: "auth_401_403", context: .change, attached: 1, playerStopped: true
+            ),
+            now: origin
+        )
+        XCTAssertEqual(raised.compactMap(\.error), [])
+        XCTAssertEqual(model.currentFault?.cls, .stopped)
+        XCTAssertEqual(model.currentFault?.actions, [.signIn, .close])
+        XCTAssertEqual(
+            PlayerView.failureActions(for: model.surface),
+            [.signIn, .close],
+            "the viewer is offered the only thing that can work"
+        )
+        XCTAssertEqual(PlayerView.failureFocusTarget(for: model.surface), .signIn)
+    }
+
+    /// B4, pinned: a readiness verdict decides on the picture, not on whether
+    /// an item happens to be attached.
+    ///
+    /// `seekWhenReady` throws `.timedOut` straight past
+    /// `retryAfterReadinessTimeout`, so a rung can still be left when `fail()`
+    /// runs. An item is attached and has never presented a frame: deciding on
+    /// attachment leaves a red strip over a black screen that nothing can ever
+    /// retire. Deciding on presentation stops the player and prompts.
+    func testAFailureOverAPictureThatIsNotPresentingIsBlockingWhateverIsAttached() throws {
+        let source = try playerControllerSource()
+        let start = try XCTUnwrap(source.range(of: "private func fail(_ error: Error) {"))
+        let end = try XCTUnwrap(source.range(of: "\n    }\n", range: start.upperBound..<source.endIndex))
+        let body = String(source[start.upperBound..<end.lowerBound])
+        XCTAssertTrue(
+            body.contains("guard surface.presenting else {"),
+            "fail() must decide on the presenter's evidence, not on `player.currentItem != nil`"
+        )
+        XCTAssertFalse(
+            body.contains("let hasItem = player.currentItem != nil"),
+            "\"is an item attached\" is the question §2.2 indicts"
+        )
+
+        // The surfaces either side of that decision.
+        var blocked = PlaybackSurfaceModel()
+        let origin = ContinuousClock.now
+        blocked.apply(.attach(1), now: origin)
+        blocked.apply(
+            PlaybackSurfaceModel.raise(
+                source: "owner_stopped", context: .start, attached: 1, playerStopped: true
+            ),
+            now: origin
+        )
+        XCTAssertEqual(blocked.kind, .blocking)
+        XCTAssertTrue(blocked.entersFailedRouting, "the recovery monitor is suppressed exactly as `failed` did")
+
+        var banner = PlaybackSurfaceModel()
+        banner.apply(.attach(1), now: origin)
+        banner.apply(.presenting(true, attached: 1), now: origin)
+        banner.apply(
+            PlaybackSurfaceModel.raise(
+                source: "change_failed", context: .change, attached: 1, intent: 7
+            ),
+            now: origin
+        )
+        XCTAssertEqual(banner.kind, .banner)
+        XCTAssertFalse(banner.entersFailedRouting)
+    }
+
+    func testTheBlackFrameLadderStopsThePlayerBeforeItRaises() throws {
+        // The ladder needs a device that cannot decode the picture, so the call
+        // site is pinned in the source: the pause and the raise are one site,
+        // and the raise is only legal after the stop.
+        let source = try playerControllerSource()
+        let start = try XCTUnwrap(
+            source.range(of: "private func handleBlackFrameDecodeFailure(at position: Int) async {")
+        )
+        let end = try XCTUnwrap(
+            source.range(of: "black_frame_ladder_spent", range: start.upperBound..<source.endIndex)
+        )
+        let block = String(source[start.lowerBound..<end.upperBound])
+        XCTAssertTrue(
+            // `stopForBlockingSurface()` IS the `player.pause()` §4.3 names: the
+            // recovery owner's one obligation lives in that helper, and every
+            // owner stop site calls it rather than pausing by hand.
+            block.contains("stopForBlockingSurface()"),
+            "the spent black-frame ladder must stop the player before it raises `exhausted`"
+        )
+
+        // And the presenter's half: without that stop the contract answers with
+        // a fixture error and draws nothing at all.
+        var model = PlaybackSurfaceModel()
+        let origin = ContinuousClock.now
+        model.apply(.attach(1), now: origin)
+        let log = model.apply(
+            PlaybackSurfaceModel.raise(
+                source: "black_frame_ladder_spent",
+                context: .start,
+                attached: 1,
+                playerStopped: false
+            ),
+            now: origin
+        )
+        XCTAssertEqual(log.compactMap(\.error), [.blockingWithoutStop])
+        XCTAssertEqual(model.kind, .none)
+
+        // With it, the viewer is told and offered a way out — which is what the
+        // silent black picture never did.
+        let raised = model.apply(
+            PlaybackSurfaceModel.raise(
+                source: "black_frame_ladder_spent",
+                context: .start,
+                attached: 1,
+                playerStopped: true
+            ),
+            now: origin
+        )
+        XCTAssertEqual(raised.compactMap(\.error), [])
+        XCTAssertEqual(model.kind, .blocking)
+        XCTAssertEqual(model.currentFault?.cls, .exhausted)
+        XCTAssertEqual(model.currentFault?.actions, [.close, .retry])
+    }
+
+    func testTheAdapterClassifiesEveryRefusalCodeTheServerSends() {
+        XCTAssertEqual(
+            PlayerController.refusalSurfaceOutcome(for: APIError.http(401))?.source,
+            "auth_401_403"
+        )
+        XCTAssertEqual(
+            PlayerController.refusalSurfaceOutcome(for: APIError.http(403))?.actions,
+            [.signIn, .close]
+        )
+        for (code, source) in [
+            ("vod_disabled", "vod_disabled"),
+            ("vod_source_unsupported", "vod_source_unsupported"),
+            ("vod_transcode_unavailable", "vod_transcode_unavailable"),
+            ("vod_subtitle_burn_unavailable", "vod_subtitle_burn_unavailable"),
+        ] {
+            let error = APIError.refused(status: 503, code: code, message: "no", positionMs: nil)
+            XCTAssertEqual(PlayerController.refusalSurfaceOutcome(for: error)?.source, source, code)
+        }
+        XCTAssertEqual(
+            PlayerController.refusalSurfaceOutcome(
+                for: APIError.conflict(code: "vod_source_rescan_required", message: "rescan")
+            )?.source,
+            "vod_source_rescan_required"
+        )
+        let lost = APIError.refused(
+            status: 410, code: "media_owner_lost", message: "gone", positionMs: 92_000
+        )
+        XCTAssertEqual(PlayerController.refusalSurfaceOutcome(for: lost)?.source, "media_owner_lost_410")
+        XCTAssertEqual(PlayerController.refusalSurfaceOutcome(for: lost)?.positionMs, 92_000)
+        // Until M5 gives the Apple owner a create retry, a "still building"
+        // 503 is the owner's own terminal outcome carrying the server's
+        // sentence — not a `preparing` spinner with nothing behind it
+        // (PLAYBACK-SURFACE-CONTRACT.md §3.3 row 6).
+        let building = APIError.refused(
+            status: 503, code: "startup_timeout", message: "Still building this stream.", positionMs: nil
+        )
+        XCTAssertNil(PlayerController.refusalSurfaceOutcome(for: building))
+        XCTAssertEqual(
+            PlayerController.surfaceOutcome(for: building, context: .start, fallback: "owner_stopped").source,
+            "owner_stopped"
+        )
+        XCTAssertEqual(building.errorDescription, "Still building this stream.")
+        // A row the context does not declare is never raised: the presenter
+        // would answer `source_context_mismatch` and draw nothing at all.
+        let disabled = APIError.refused(
+            status: 503, code: "vod_disabled", message: "off", positionMs: nil
+        )
+        XCTAssertEqual(
+            PlayerController.surfaceOutcome(for: disabled, context: .change, fallback: "change_failed").source,
+            "change_failed"
+        )
+        XCTAssertEqual(
+            PlayerController.surfaceOutcome(for: disabled, context: .start, fallback: "owner_stopped").source,
+            "vod_disabled"
+        )
+        XCTAssertEqual(
+            PlayerController.mediaFailureSurfaceSource(statusCode: 401, context: .attached),
+            "auth_401_403"
+        )
+        XCTAssertEqual(
+            PlayerController.mediaFailureSurfaceSource(statusCode: 404, context: .attached),
+            "owner_stopped"
+        )
+        XCTAssertEqual(
+            PlayerController.mediaFailureSurfaceSource(statusCode: nil, context: .start),
+            "owner_stopped"
+        )
+    }
+
+    func testA401WithARefusalBodyIsStillASessionExpiry() throws {
+        let url = try XCTUnwrap(URL(string: "http://server.local/api/v1/files/1/hls"))
+        let response = try XCTUnwrap(
+            HTTPURLResponse(url: url, statusCode: 401, httpVersion: "HTTP/1.1", headerFields: nil)
+        )
+        let body = Data(#"{"code":"token_expired","message":"Sign in again."}"#.utf8)
+        XCTAssertThrowsError(try PlurxAPI.check(response, data: body)) { error in
+            XCTAssertTrue(
+                AppModel.isSessionExpired(error),
+                "a server that starts explaining its 401 must not stop logging the viewer out"
+            )
+            guard let api = error as? APIError, case .http(401) = api else {
+                XCTFail("a 401 must stay status-shaped")
+                return
+            }
+        }
+        let forbidden = try XCTUnwrap(
+            HTTPURLResponse(url: url, statusCode: 403, httpVersion: "HTTP/1.1", headerFields: nil)
+        )
+        XCTAssertThrowsError(try PlurxAPI.check(forbidden, data: body)) { error in
+            XCTAssertTrue(AppModel.isSessionExpired(error))
+        }
+    }
+
+    func testRefusalBodiesAreKeptWithoutDisturbingTheMatchersThatPredateThem() throws {
+        let url = try XCTUnwrap(URL(string: "http://server.local/api/v1/files/1/hls"))
+
+        func answer(_ status: Int, _ body: String?) throws -> Error? {
+            let response = try XCTUnwrap(
+                HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: nil)
+            )
+            do {
+                try PlurxAPI.check(response, data: body.map { Data($0.utf8) })
+                return nil
+            } catch {
+                return error
+            }
+        }
+
+        // 409 keeps `.conflict` for every matcher written before the split.
+        guard let conflict = try answer(409, #"{"code":"vod_reopen_required","message":"reopen"}"#),
+              let api = conflict as? APIError,
+              case .conflict(let code, let message) = api
+        else { return XCTFail("a 409 with a body must still be a conflict") }
+        XCTAssertEqual(code, "vod_reopen_required")
+        XCTAssertEqual(message, "reopen")
+
+        // A refusal the server explained is kept whole.
+        guard let refused = try answer(
+            503, #"{"code":"startup_timeout","message":"Still building this stream."}"#
+        ), let api503 = refused as? APIError,
+           case .refused(let status, let refusedCode, let refusedMessage, let positionMs) = api503
+        else { return XCTFail("a typed 503 must become a refusal") }
+        XCTAssertEqual(status, 503)
+        XCTAssertEqual(refusedCode, "startup_timeout")
+        XCTAssertEqual(refusedMessage, "Still building this stream.")
+        XCTAssertNil(positionMs)
+
+        // …including the recovery data a 410 carries.
+        guard let lost = try answer(
+            410, #"{"code":"media_owner_lost","message":"gone","film_position_ms":92000}"#
+        ), let api410 = lost as? APIError,
+           case .refused(_, _, _, let lostPosition) = api410
+        else { return XCTFail("a 410 must carry its film position") }
+        XCTAssertEqual(lostPosition, 92_000)
+
+        // A bodiless or unparseable answer stays exactly what it was.
+        guard let bodiless = try answer(503, nil), let bare = bodiless as? APIError,
+              case .http(503) = bare
+        else { return XCTFail("a bodiless 503 must stay `.http`") }
+        guard let legacy = try answer(400, #"{"error":"bad request"}"#), let old = legacy as? APIError,
+              case .http(400) = old
+        else { return XCTFail("the legacy {error} body has no code and must stay `.http`") }
+        XCTAssertNil(try answer(204, nil), "a 2xx is not an error")
+
+        // And the two matchers that read a status keep reading one.
+        XCTAssertTrue(PlurxAPI.shouldFallBackToLegacyDecision(after: APIError.http(404)))
+        XCTAssertTrue(PlurxAPI.shouldFallBackToLegacyDecision(
+            after: APIError.refused(status: 405, code: "gone", message: "no", positionMs: nil)
+        ))
+        XCTAssertFalse(PlurxAPI.shouldFallBackToLegacyDecision(
+            after: APIError.refused(status: 503, code: "x", message: "y", positionMs: nil)
+        ))
+        var body = createBody()
+        body.previousSessionId = "session-a"
+        XCTAssertNotNil(PlayerController.unboundStallRetry(for: body, after: APIError.http(400)))
+        XCTAssertNotNil(PlayerController.unboundStallRetry(
+            for: body,
+            after: APIError.refused(status: 400, code: "vod_invalid_height", message: "no", positionMs: nil)
+        ))
+        XCTAssertNil(PlayerController.unboundStallRetry(for: body, after: APIError.http(404)))
+    }
+
     func testPlaybackInfoRowsMatchTheSharedFieldList() throws {
         let fixtureURL = try XCTUnwrap(
             Bundle(for: AppleClientTests.self).url(
@@ -2796,7 +4021,7 @@ final class AppleClientTests: XCTestCase {
         // remote adapter. Drawn beside the retry buttons it consumed every
         // direction, and `failed × up/down` is `ignore` — only Menu escaped.
         let source = try playerViewSource()
-        XCTAssertTrue(source.contains("if !controlsVisible && !controller.failed {"))
+        XCTAssertTrue(source.contains("if !controlsVisible && !controller.isPlaybackBlocked {"))
     }
 
     func testThePhonePanelSwallowsTheTapsThatMissIt() throws {
@@ -3803,7 +5028,16 @@ final class AppleClientTests: XCTestCase {
         let terminal = PlaybackStallKind.buffering.terminalState
         XCTAssertFalse(terminal.isPlaying)
         XCTAssertFalse(terminal.wantsPlayback)
-        XCTAssertTrue(terminal.failed)
+        // The struct no longer carries a `failed` flag. Whether the viewer sees
+        // a blocking surface is the fault class's answer now, and the stall
+        // funnel's `.stop` raises `owner_exhausted` — `exhausted`, which the
+        // contract will only draw over a player its owner has already stopped.
+        // `testEveryOwnerStopSiteStopsThePlayerBeforeItRaises` pins that stop.
+        XCTAssertEqual(
+            PlaybackSurfaceContract.rule(for: .exhausted).blocking,
+            .always
+        )
+        XCTAssertTrue(PlaybackSurfaceContract.rule(for: .exhausted).requiresPlayerStopped)
         XCTAssertEqual(
             terminal.message,
             "Playback could not resume after repeated buffering. Check the connection and try again."
@@ -4300,23 +5534,41 @@ final class AppleClientTests: XCTestCase {
     }
 
     @MainActor
-    func testNonfatalPlaybackNoticeExpiresWithoutBecomingAPlaybackError() async {
+    func testNonfatalPlaybackNoticeIsADegradedBannerThatNeverBlocks() {
         let controller = PlayerController()
 
-        controller.showPlaybackNotice(
-            PlayerController.hdrSubtitleNotice,
-            duration: .milliseconds(10)
+        controller.showPlaybackNotice(PlayerController.hdrSubtitleNotice)
+
+        XCTAssertEqual(controller.surface.surface.kind, .banner)
+        XCTAssertEqual(controller.surface.surface.cls, .degraded)
+        XCTAssertEqual(controller.surface.surface.source, "degraded_notice")
+        XCTAssertEqual(controller.surface.surface.detail, PlayerController.hdrSubtitleNotice)
+        XCTAssertFalse(controller.isPlaybackBlocked)
+        XCTAssertFalse(
+            controller.surface.surface.playerStopped,
+            "a notice never claims the owner stopped anything"
         )
 
-        XCTAssertEqual(controller.playbackNotice, PlayerController.hdrSubtitleNotice)
-        XCTAssertNil(controller.playbackError)
-        XCTAssertFalse(controller.failed)
-
-        try? await Task.sleep(for: .milliseconds(50))
-
-        XCTAssertNil(controller.playbackNotice)
-        XCTAssertNil(controller.playbackError)
-        XCTAssertFalse(controller.failed)
+        // The five-second clock is the contract's, not a Task this controller
+        // schedules for itself: the fault expires when a later event is
+        // applied at or past its boundary. Driven from explicit instants so
+        // the assertion does not depend on how long the lines above took.
+        var timed = PlaybackSurfaceModel()
+        let origin = ContinuousClock.now
+        timed.apply(.attach(1), now: origin)
+        timed.apply(
+            PlaybackSurfaceModel.raise(
+                source: "degraded_notice",
+                context: .attached,
+                attached: 1,
+                detail: PlayerController.hdrSubtitleNotice
+            ),
+            now: origin
+        )
+        timed.apply(.tick, now: origin.advanced(by: .milliseconds(4_999)))
+        XCTAssertEqual(timed.kind, .banner, "the notice is not due yet")
+        timed.apply(.tick, now: origin.advanced(by: .seconds(5)))
+        XCTAssertEqual(timed.kind, .none, "and it expires exactly on its boundary")
     }
 
     @MainActor
@@ -7015,10 +8267,13 @@ final class AppleClientTests: XCTestCase {
         XCTAssertNil(controller.lastUncorroboratedEndMs)
         XCTAssertEqual(controller.currentMs, 100_000)
         XCTAssertFalse(controller.wantsPlayback)
-        XCTAssertTrue(controller.failed)
+        XCTAssertTrue(controller.isPlaybackBlocked)
         XCTAssertFalse(controller.finished)
-        XCTAssertEqual(controller.playbackFailureTitle, PlayerController.earlyEndFailureTitle)
-        XCTAssertEqual(controller.playbackError, PlayerController.repeatedEarlyEndMessage)
+        XCTAssertEqual(controller.surface.surface.cls, .stopped)
+        XCTAssertEqual(controller.surface.surface.source, "repeated_early_end")
+        XCTAssertEqual(controller.surface.surface.title, PlayerController.earlyEndFailureTitle)
+        XCTAssertEqual(controller.surface.surface.detail, PlayerController.repeatedEarlyEndMessage)
+        XCTAssertTrue(controller.surface.surface.playerStopped)
 
         let nearEnd = PlayerController()
         XCTAssertEqual(nearEnd.prepareObservedEndAction(
@@ -7037,7 +8292,7 @@ final class AppleClientTests: XCTestCase {
         XCTAssertEqual(nearEnd.currentMs, 3_431_000)
         XCTAssertFalse(nearEnd.wantsPlayback)
         XCTAssertTrue(nearEnd.finished)
-        XCTAssertFalse(nearEnd.failed)
+        XCTAssertFalse(nearEnd.isPlaybackBlocked)
     }
 
     func testRepeatedEarlyEndTelemetryNamesTheTerminalBoundary() throws {
@@ -7132,7 +8387,7 @@ final class AppleClientTests: XCTestCase {
         controller.stop()
 
         XCTAssertNil(controller.player.currentItem)
-        XCTAssertNil(controller.playbackNotice)
+        XCTAssertEqual(controller.surface.surface.kind, .none)
         XCTAssertFalse(controller.isPlaying)
 
         controller.stop()

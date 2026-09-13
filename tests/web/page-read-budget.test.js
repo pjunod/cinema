@@ -1779,18 +1779,24 @@ test("local sign-out clears every protected page cache before rendering auth", (
        SETTINGS_DATA={secret:true},SETTINGS_LOADED=new Set(["settings"]),SETTINGS_LOADS=new Map([["settings",{}]]),
        LOGS_RUN={},CLUSTER_LOGS_RUN={},CLUSTER_LOADED=true,CLUSTER_LEAVING=true,
        CLUSTER_TOKEN={token:"secret"},CLUSTER_REFUSAL={message:"secret"},ACT_TIMER=2,rendered=0,
-       DVR_REMINDER_TIMER=3,DVR_DUE=[{id:"secret"}];
+       DVR_REMINDER_TIMER=3,DVR_DUE=[{id:"secret"}],
+       LIBRARY_CHANNEL_DRAFT={secret:true},LIBRARY_CHANNEL_TUNING=true;
      function forgetJoinToken(){CLUSTER_TOKEN=null;CLUSTER_REFUSAL=null;}
+     // The library-channel wizard keeps an unsaved draft in sessionStorage and
+     // a tune fence pointed at a channel. Both outlive a sign-out unless
+     // clearLocalSession drops them, so they are stubbed as observable state
+     // rather than as no-ops.
+     function clearLibraryChannelDraft(){LIBRARY_CHANNEL_DRAFT=null;}
+     const LIBRARY_CHANNEL_TUNE={stop(){LIBRARY_CHANNEL_TUNING=false;}};
      async function stopLiveTv(){}
-     function clearLibraryChannelDraft(){}
-     const LIBRARY_CHANNEL_TUNE={stop(){}};
      function paintDvrReminder(){}
      function render(){rendered++;}
      ${shippedSource("clearLocalSession")};
      return {logout:()=>clearLocalSession(AUTH_GENERATION,""),state:()=>({TOKEN,ME,PAGE_RENDER_GENERATION,PAGE_TIMER,ACTIVITY_SNAPSHOT,
        SETTINGS_DATA,loaded:SETTINGS_LOADED.size,loads:SETTINGS_LOADS.size,LOGS_RUN,CLUSTER_LOGS_RUN,
        CLUSTER_TOKEN,CLUSTER_REFUSAL,CLUSTER_LOADED,CLUSTER_LEAVING,rendered,DVR_REMINDER_TIMER,
-       due:DVR_DUE.length,main:document.getElementById("main").innerHTML})};`,
+       due:DVR_DUE.length,LIBRARY_CHANNEL_DRAFT,LIBRARY_CHANNEL_TUNING,
+       main:document.getElementById("main").innerHTML})};`,
   )(document,localStorage);
   harness.logout();
   // The due-reminder overlay is a protected page cache like any other: it
@@ -1798,7 +1804,7 @@ test("local sign-out clears every protected page cache before rendering auth", (
   assert.deepEqual(harness.state(),{TOKEN:null,ME:null,PAGE_RENDER_GENERATION:8,PAGE_TIMER:null,
     ACTIVITY_SNAPSHOT:null,SETTINGS_DATA:{},loaded:0,loads:0,LOGS_RUN:null,CLUSTER_LOGS_RUN:null,
     CLUSTER_TOKEN:null,CLUSTER_REFUSAL:null,CLUSTER_LOADED:false,CLUSTER_LEAVING:false,rendered:1,
-    DVR_REMINDER_TIMER:null,due:0,main:""});
+    DVR_REMINDER_TIMER:null,due:0,LIBRARY_CHANNEL_DRAFT:null,LIBRARY_CHANNEL_TUNING:false,main:""});
   assert.deepEqual(removed,["plurx_token"]);
 });
 

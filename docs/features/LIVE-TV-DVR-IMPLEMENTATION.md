@@ -19,7 +19,8 @@ guardrails an executing agent must not cross.
 **How to work it.** Read §1–§4 once. Build milestone by milestone (§6), each
 as one task PR into `effort/live-tv-dvr`: proper commits · the fast local
 lane only · open as a draft (`WIP:` title) · exactly one adversarial review ·
-implement the findings · mark ready and apply `fast-lane` · merge. Every
+implement the findings · mark ready, which is what runs the fast lane ·
+merge. Every
 `path:line` here was read at `311683bc`; **re-verify against the file at
 build time** — `live_tv.rs` moves every week. If a step seems to require
 changing something §5 forbids, stop and flag it in the PR instead of doing
@@ -982,7 +983,7 @@ What every client renders from the same rows:
 ## 6. Milestones
 
 Each milestone: one task PR into `effort/live-tv-dvr`, draft → one
-adversarial review → ready → `fast-lane` → merge. The lane promotes to
+adversarial review → ready, which runs the lane → merge. The lane promotes to
 `main` once after M4 (server complete) and once after M7 (clients), each
 time with the one full qualification run. Apple `CURRENT_PROJECT_VERSION`
 (`project.yml:18`, now 146) and Android `versionCode`

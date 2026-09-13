@@ -38,6 +38,7 @@ row and a doc's own `**Status:**` header disagree, the doc wins.
 | Why was the transport-recovery campaign red on main for so long? | [cluster/TRANSPORT-RECOVERY-RESOURCE-BASELINE.md](cluster/TRANSPORT-RECOVERY-RESOURCE-BASELINE.md) |
 | What does its resource check assert now, and why? | [cluster/TRANSPORT-RECOVERY-RESOURCE-CONTRACT-DECISION.md](cluster/TRANSPORT-RECOVERY-RESOURCE-CONTRACT-DECISION.md) |
 | Which button does what on which client? | [clients/PLAYER-INPUT-CONTRACT.md](clients/PLAYER-INPUT-CONTRACT.md) |
+| Why is there an error overlay while the picture is still playing? | [clients/PLAYBACK-SURFACE-CONTRACT.md](clients/PLAYBACK-SURFACE-CONTRACT.md) |
 | What is missing from the Apple / Android client? | [clients/APPLE-CLIENT-PARITY.md](clients/APPLE-CLIENT-PARITY.md) · [clients/ANDROID-CLIENT-PARITY.md](clients/ANDROID-CLIENT-PARITY.md) |
 | How do I cut a release? | [RELEASING.md](RELEASING.md), then [PUBLISHING.md](PUBLISHING.md) |
 | What does CI gate, and why did it fail? | [VALIDATION.md](VALIDATION.md) |
@@ -80,6 +81,7 @@ Apple build 137: [Library channel startup and contrast](apple-builds/245-library
 Apple build 138: [Library channel playback decision](apple-builds/245-library-channel-playback-decision.md).
 Apple build 141: [Library channel buffering demand](apple-builds/245-library-channel-buffering-demand.md).
 Apple build 143: [Playback lifecycle recovery and prepared handoff](apple-builds/257-playback-lifecycle.md).
+Apple build 147: [The playback surface contract](apple-builds/278-playback-surface-contract.md).
 
 Previous: [Live TV playback method](apple-builds/245-live-tv-playback-method.md).
 
@@ -237,6 +239,14 @@ player obeys, subtitles and overlays, layouts and themes.
 | [PLAYER-INPUT-CONTRACT.md](clients/PLAYER-INPUT-CONTRACT.md) | One routing table every client obeys — which key does what, in which state. | live |
 | [PLAYER-INPUT-CONTRACT-PLAN.md](clients/PLAYER-INPUT-CONTRACT-PLAN.md) | How that contract was implemented. | built |
 | [PLAYER-INPUT-PHYSICAL-VERIFICATION-2026-09-02.md](clients/PLAYER-INPUT-PHYSICAL-VERIFICATION-2026-09-02.md) | What the physical devices did on 2026-09-02. | done |
+| [PLAYBACK-SURFACE-CONTRACT.md](clients/PLAYBACK-SURFACE-CONTRACT.md) | Why an error overlay sits over a playing picture on every client, and the one fault contract that ends it (v2, ruled). | live |
+| [PLAYBACK-SURFACE-CONTRACT-REVIEW.md](clients/PLAYBACK-SURFACE-CONTRACT-REVIEW.md) | Adversarial review of PR #274: factual audit, recovery and ownership counterexamples, and acceptance gaps. | done |
+| [PLAYBACK-SURFACE-CONTRACT-REVIEW-RESPONSE.md](clients/PLAYBACK-SURFACE-CONTRACT-REVIEW-RESPONSE.md) | Finding-by-finding disposition of that review — what v2 of the contract changed and why. | done |
+| [PLAYBACK-SURFACE-CONTRACT-IMPLEMENTATION.md](clients/PLAYBACK-SURFACE-CONTRACT-IMPLEMENTATION.md) | The six-PR build plan for the surface contract: exact interfaces, owner sites, fence, acceptance commands. | open |
+| [PLAYBACK-SURFACE-APPLE-BUILD-PROMPT.md](clients/PLAYBACK-SURFACE-APPLE-BUILD-PROMPT.md) | Hand-off for a Mac: compile and test M2 and M5's Swift, which has never seen a compiler. | open |
+| [PLAYBACK-SURFACE-ANDROID-BUILD-PROMPT.md](clients/PLAYBACK-SURFACE-ANDROID-BUILD-PROMPT.md) | The same for M3 and M5's Kotlin: Gradle, the mutations, the device runs. | open |
+| [PLAYBACK-SURFACE-PHYSICAL-VERIFICATION-PROMPT.md](clients/PLAYBACK-SURFACE-PHYSICAL-VERIFICATION-PROMPT.md) | M4: the four §7 recipes on an Apple TV, an iPhone and an Android TV, and what counts as a pass. | open |
+| [PLAYBACK-SURFACE-REMUX-ORIGIN-MEASUREMENT-PROMPT.md](clients/PLAYBACK-SURFACE-REMUX-ORIGIN-MEASUREMENT-PROMPT.md) | M6's gate: the one measurement that decides whether the Android remux-seek landing gets built at all. | open |
 | [UI-NAVIGATION-AUDIT.md](clients/UI-NAVIGATION-AUDIT.md) | Why the player felt different on every client, anchored at `file:line`. | done |
 | [CLIENTS-CODE-REVIEW.md](clients/CLIENTS-CODE-REVIEW.md) · [assessment](clients/CLIENTS-CODE-REVIEW-ASSESSMENT.md) | Capable players that under-ask the server — findings, and what to trust. | done |
 | [CLIENTS-REMEDIATION-PLAN.md](clients/CLIENTS-REMEDIATION-PLAN.md) | Restoring trust, then raising the quality ceiling. | built |
@@ -312,6 +322,7 @@ Two rounds of performance work, each with its plan, review, and response.
 | [LIVE-TV-PROPORTIONS-IMPLEMENTATION.md](features/LIVE-TV-PROPORTIONS-IMPLEMENTATION.md) | The two-PR build plan for the approved TV and phone proportions — constants per platform, file ownership, acceptance screenshots. | open |
 | [LIVE-TV-GUIDE-AND-START-RELIABILITY.md](features/LIVE-TV-GUIDE-AND-START-RELIABILITY.md) | Why the guide is empty after every deploy and why Live TV says "wait 90 seconds" with the tuner idle — the diagnosis with fleet evidence, and the durable-guide + ask-the-server-instead-of-waiting fix. | open |
 | [LIVE-TV-RELIABILITY-IMPLEMENTATION.md](features/LIVE-TV-RELIABILITY-IMPLEMENTATION.md) | The plan Opus builds from Paul's four rulings — exact interfaces for the durable guide, the event-driven loop, `request_id`, retire/resume, stray eviction and the barrier removal on all three clients; milestones with acceptance checks and the reviewer's attack list. | open |
+| [LIVE-TV-RELIABILITY-STATUS.md](features/LIVE-TV-RELIABILITY-STATUS.md) | How far the reliability lane has got: milestone by milestone, the deviations from the plan and why, and the evidence recorded for each. | open |
 | [SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS.md](features/SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS.md) | What is built, reviewed, and proved for the settings navigation and Developer-page redesign. | open |
 | [HOMEVIDEO-PLAN.md](features/HOMEVIDEO-PLAN.md) | Home video and photos — the `home` libraries. | built |
 | [INTEGRATION-PLAN.md](features/INTEGRATION-PLAN.md) | plurx's side of the monarr pipeline. | built |

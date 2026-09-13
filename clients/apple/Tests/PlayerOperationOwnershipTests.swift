@@ -145,7 +145,7 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         }
         await loadA.value
         XCTAssertNil(controller.decision)
-        XCTAssertFalse(controller.failed)
+        XCTAssertFalse(controller.isPlaybackBlocked)
         XCTAssertFalse(controller.wantsPlayback)
         XCTAssertEqual(controller.pendingPlaybackIntentForTesting.targetMs, before.targetMs)
         XCTAssertEqual(controller.pendingPlaybackIntentForTesting.generation, before.generation)
@@ -233,6 +233,204 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         controller.stop()
         for decision in decisions { decision.resume(throwing: CancellationError()) }
         await load.value
+    }
+
+    // MARK: - M5: the create "not yet" retry sequence
+
+    /// The create endpoint, scripted. Each attempt takes the next answer; a
+    /// `nil` answer holds the create open until the test resolves it, which is
+    /// how a server that never finishes is expressed.
+    private final class Creates {
+        struct Attempt {
+            let file: Int
+            let body: CreateSessionRequest
+            var continuation: CheckedContinuation<HlsStart, Error>?
+        }
+        var attempts: [Attempt] = []
+        var answers: [Result<HlsStart, Error>?] = []
+
+        func request(file: Int, body: CreateSessionRequest) async throws -> HlsStart {
+            let index = attempts.count
+            let answer = index < answers.count ? answers[index] : answers.last ?? nil
+            if let answer {
+                attempts.append(Attempt(file: file, body: body, continuation: nil))
+                return try answer.get()
+            }
+            return try await withCheckedThrowingContinuation {
+                attempts.append(Attempt(file: file, body: body, continuation: $0))
+            }
+        }
+
+        func resolve(_ index: Int, with result: Result<HlsStart, Error>) {
+            let continuation = attempts[index].continuation
+            attempts[index].continuation = nil
+            continuation?.resume(with: result)
+        }
+
+        func cancelAll() {
+            for index in attempts.indices { resolve(index, with: .failure(CancellationError())) }
+        }
+    }
+
+    /// M5's one clock. Every wait the sequence takes arrives here with the
+    /// milliseconds it asked for, and the test decides when it returns — so a
+    /// sixty-second absolute deadline costs the suite nothing.
+    private final class RetryWaits {
+        struct Wait {
+            let ms: Int
+            var continuation: CheckedContinuation<Void, Error>?
+        }
+        var waits: [Wait] = []
+
+        func wait(_ ms: Int) async throws {
+            try await withCheckedThrowingContinuation { waits.append(Wait(ms: ms, continuation: $0)) }
+        }
+
+        func fire(_ index: Int) {
+            let continuation = waits[index].continuation
+            waits[index].continuation = nil
+            continuation?.resume()
+        }
+
+        func cancelAll() {
+            for index in waits.indices {
+                let continuation = waits[index].continuation
+                waits[index].continuation = nil
+                continuation?.resume(throwing: CancellationError())
+            }
+        }
+    }
+
+    private func stillBuilding(_ code: String = "startup_timeout") -> Error {
+        APIError.refused(status: 503, code: code, message: "the transcoder is still starting", positionMs: nil)
+    }
+
+    private func hlsStart(_ id: String) throws -> HlsStart {
+        try JSONDecoder().decode(HlsStart.self, from: Data("""
+        {"sessionId":"\(id)","playlistUrl":"/hls/\(id)/index.m3u8"}
+        """.utf8))
+    }
+
+    /// The property with a leaked transcode on the other side of it: a session
+    /// the server produces AFTER the absolute deadline belongs to nobody, and
+    /// an encoder nobody is watching is a hardware slot held for nobody.
+    func testACreateThatLandsAfterTheDeadlineIsReleasedAndNeverAttached() async throws {
+        let decisions = Decisions()
+        let creates = Creates()
+        let waits = RetryWaits()
+        var released: [String] = []
+        creates.answers = [nil]
+        let controller = PlayerController(
+            requestPlaybackDecision: { _, file, selection, quality in
+                try await decisions.request(file: file, selection: selection, quality: quality)
+            },
+            waitCreateRetry: { ms in try await waits.wait(ms) },
+            releaseHlsSession: { _, sessionId in released.append(sessionId) },
+            requestHlsSession: { _, file, body in try await creates.request(file: file, body: body) }
+        )
+        let model = AppModel()
+        defer { controller.stop(); decisions.cancelAll(); creates.cancelAll(); waits.cancelAll() }
+        start(controller, model: model)
+        try await waitUntil("initial decision") { decisions.requests.count == 1 }
+        decisions.resolve(0, with: .success((try coldDecision(), caps)))
+        try await waitUntil("the create is issued") { creates.attempts.count == 1 }
+        // Exactly one wait is armed, and it is the ABSOLUTE deadline: the
+        // backoff is only asked for after an attempt has failed.
+        try await waitUntil("the deadline watchdog is armed") { waits.waits.count == 1 }
+        XCTAssertEqual(waits.waits[0].ms, PlaybackCreateRetry.deadlineMs)
+        XCTAssertTrue(released.isEmpty, "nothing is released before the deadline")
+        waits.fire(0)
+        try await waitUntil("the owner raises its prompt on the clock") {
+            controller.surface.surface.cls == .exhausted
+        }
+        XCTAssertTrue(
+            controller.surface.surface.playerStopped,
+            "the owner stops the player before it raises a blocking fault"
+        )
+        XCTAssertEqual(controller.player.rate, 0)
+        XCTAssertTrue(released.isEmpty, "the create is still in flight")
+        // …and now the server finally answers.
+        creates.resolve(0, with: .success(try hlsStart("late")))
+        try await waitUntil("the late session is released") { released == ["late"] }
+        XCTAssertNil(controller.player.currentItem, "a released session is never attached")
+        XCTAssertEqual(
+            controller.surface.surface.cls,
+            .exhausted,
+            "releasing it does not raise a second fault"
+        )
+    }
+
+    /// The ladder, through the shipped `open()`: the same identity on every
+    /// rung, the review's three delays, and the prompt when it is spent.
+    func testTheCreateLadderReplaysOneIdentityAndThenRaisesExhausted() async throws {
+        let decisions = Decisions()
+        let creates = Creates()
+        let waits = RetryWaits()
+        creates.answers = [.failure(stillBuilding())]
+        let controller = PlayerController(
+            requestPlaybackDecision: { _, file, selection, quality in
+                try await decisions.request(file: file, selection: selection, quality: quality)
+            },
+            waitCreateRetry: { ms in try await waits.wait(ms) },
+            requestHlsSession: { _, file, body in try await creates.request(file: file, body: body) }
+        )
+        let model = AppModel()
+        defer { controller.stop(); decisions.cancelAll(); creates.cancelAll(); waits.cancelAll() }
+        start(controller, model: model)
+        try await waitUntil("initial decision") { decisions.requests.count == 1 }
+        decisions.resolve(0, with: .success((try coldDecision(), caps)))
+        try await waitUntil("the first attempt") { creates.attempts.count == 1 }
+        for (rung, delay) in [1_000, 2_000, 4_000].enumerated() {
+            try await waitUntil("the backoff for rung \(rung)") { waits.waits.count == rung + 2 }
+            XCTAssertEqual(waits.waits[rung + 1].ms, delay, "rung \(rung) of the ladder")
+            waits.fire(rung + 1)
+            try await waitUntil("attempt \(rung + 2)") { creates.attempts.count == rung + 2 }
+        }
+        try await waitUntil("the ladder is spent") { controller.surface.surface.cls == .exhausted }
+        XCTAssertEqual(creates.attempts.count, 4, "three retries, and then the owner gives up")
+        let identities = Set(creates.attempts.compactMap { $0.body.requestId })
+        XCTAssertEqual(identities.count, 1, "every rung replays ONE request identity")
+        XCTAssertTrue(controller.surface.surface.playerStopped)
+    }
+
+    /// Row 6 is the `start` context. A create refused over a picture the viewer
+    /// is watching is a refused CHANGE, and the sequence must not run there at
+    /// all — no ladder, and no sixty-second watchdog stopping that player.
+    func testAChangeContextCreateIsNotRetriedAndArmsNoDeadline() async throws {
+        let decisions = Decisions()
+        let creates = Creates()
+        let waits = RetryWaits()
+        creates.answers = [.success(try hlsStart("first")), .failure(stillBuilding())]
+        let controller = PlayerController(
+            requestPlaybackDecision: { _, file, selection, quality in
+                try await decisions.request(file: file, selection: selection, quality: quality)
+            },
+            waitCreateRetry: { ms in try await waits.wait(ms) },
+            requestHlsSession: { _, file, body in try await creates.request(file: file, body: body) }
+        )
+        let model = AppModel()
+        defer { controller.stop(); decisions.cancelAll(); creates.cancelAll(); waits.cancelAll() }
+        start(controller, model: model)
+        try await waitUntil("initial decision") { decisions.requests.count == 1 }
+        decisions.resolve(0, with: .success((try coldDecision(), caps)))
+        try await waitUntil("the first session") { creates.attempts.count == 1 }
+        XCTAssertEqual(waits.waits.count, 1, "the cold start armed its deadline")
+        // The picture the viewer is watching, which is what makes the next
+        // create a CHANGE rather than a start. `surfaceContext` is `.start`
+        // until a frame has presented, and a headless test cannot decode one:
+        // the item over a playlist URL nothing serves never readies, so
+        // `isChangingStream` never clears and the periodic observer — the one
+        // producer of presentation evidence — returns before it samples.
+        controller.noteFramePresentedForTesting()
+        // A warm quality change is a PREPARED replacement: it reuses the
+        // decision it already has and posts the successor create straight
+        // away, so there is no second decision request to wait for here.
+        controller.selectQuality(720)
+        try await waitUntil("the change's create") { creates.attempts.count == 2 }
+        // Nothing new is armed, and nothing is retried: the change keeps its
+        // banner and the picture behind it keeps playing.
+        XCTAssertEqual(waits.waits.count, 1, "a change context arms no deadline watchdog")
+        XCTAssertNotEqual(controller.surface.surface.cls, .exhausted)
     }
 
     private final class Decisions {
@@ -340,7 +538,7 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         decisions.resolve(1, with: .success((try coldDecision(), caps)))
         await originalLoad.value
         XCTAssertNil(controller.decision)
-        XCTAssertFalse(controller.failed)
+        XCTAssertFalse(controller.isPlaybackBlocked)
         XCTAssertTrue(creates.isEmpty)
         decisions.resolve(3, with: .success((try coldDecision(), caps)))
         await finalLoad.value
@@ -418,7 +616,7 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         controller.seek(toMs: 90_000)
         controller.togglePlayPause()
         deadlines.fire(0)
-        try await waitUntil("decision times out") { controller.failed }
+        try await waitUntil("decision times out") { controller.isPlaybackBlocked }
         XCTAssertTrue(controller.canRetryPlaybackFailure)
         XCTAssertNil(controller.decision)
         XCTAssertEqual(controller.currentMs, 90_000)
@@ -426,7 +624,7 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         controller.retryAfterPlaybackFailure()
         let retry = try XCTUnwrap(controller.loadingTask)
         try await waitUntil("retry request and deadline") { decisions.requests.count == 2 && deadlines.waits.count == 2 }
-        XCTAssertFalse(controller.failed)
+        XCTAssertFalse(controller.isPlaybackBlocked)
         XCTAssertEqual(decisions.requests[1].quality, .p720)
         decisions.resolve(0, with: .success((try coldDecision(), caps)))
         await timedOut.value
@@ -456,10 +654,10 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         try await waitUntil("replacement deadline") { decisions.requests.count == 2 && deadlines.waits.count == 2 }
         deadlines.fire(0)
         for _ in 0..<10 { await Task.yield() }
-        XCTAssertFalse(controller.failed)
+        XCTAssertFalse(controller.isPlaybackBlocked)
         XCTAssertEqual(controller.selectedAudio, 7)
         deadlines.fire(1)
-        try await waitUntil("current deadline fails") { controller.failed }
+        try await waitUntil("current deadline fails") { controller.isPlaybackBlocked }
         controller.stop()
         XCTAssertFalse(controller.canRetryPlaybackFailure)
     }
@@ -478,13 +676,13 @@ final class PlayerOperationOwnershipTests: XCTestCase {
                          durationMs: 600_000, title: "Cold create retry", initialHeight: 720)
         controller.togglePlayPause()
         await controller.loadingTask?.value
-        XCTAssertTrue(controller.failed)
+        XCTAssertTrue(controller.isPlaybackBlocked)
         XCTAssertNotNil(controller.decision)
         XCTAssertNil(controller.player.currentItem)
         XCTAssertEqual(controller.currentMs, 40_000)
         for count in 2...3 {
             controller.retryAfterPlaybackFailure()
-            try await waitUntil("retry create completes") { creates.count == count && controller.failed }
+            try await waitUntil("retry create completes") { creates.count == count && controller.isPlaybackBlocked }
             XCTAssertFalse(controller.wantsPlayback)
             XCTAssertEqual(controller.currentMs, 40_000)
             XCTAssertEqual(creates.last?.start, 40)
@@ -522,7 +720,7 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         await old.value
         XCTAssertTrue(files.isEmpty, "revoked recipe cannot issue a create, even against its original file")
         XCTAssertNil(controller.decision)
-        XCTAssertFalse(controller.failed)
+        XCTAssertFalse(controller.isPlaybackBlocked)
         decisions.resolve(1, with: .success((try coldDecision(file: 2), caps)))
         await latest.value
         XCTAssertEqual(files, [2])
@@ -550,7 +748,7 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         try await waitUntil("held quality decision") { decisions.requests.count == 2 && deadlines.waits.count == 2 }
         timer()
         deadlines.fire(1)
-        try await waitUntil("resume decision timeout") { controller.failed }
+        try await waitUntil("resume decision timeout") { controller.isPlaybackBlocked }
         XCTAssertEqual(controller.currentMs, 40_000)
         controller.retryAfterPlaybackFailure()
         try await waitUntil("resume Retry decision") { decisions.requests.count == 3 }

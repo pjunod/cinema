@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["5ae76988"]
+points = ["web.experience"]
+checks = ["web-static"]
+reason = "`tests/web/layout-containment.test.js` reads the shipped `crates/plurxd/src/web/index.html` itself and requires every fractional content track in every grid declaration it finds - `grid`, `grid-template`, `grid-template-columns` and `grid-auto-columns` alike, media queries included - to be the direct maximum of a `minmax()` whose minimum is explicit and non-intrinsic. A bare `1fr` is `minmax(auto, 1fr)`, so the track's floor is whatever a long programme title says it is, and the test names `1fr`, `minmax(auto, 1fr)`, `minmax(min-content, 1fr)`, `minmax(max-content, 1fr)` and `minmax(fit-content(20rem), 1fr)` as the same refusal. Four declarations named one: `.lc-programme`, and the under-760px overrides for `.lc-editor`, `.lc-programme` and `.lc-grid`. Put any of the four back and the test's failure list stops being empty and it reports that declaration verbatim, which is exactly how `make web-check` had been red on main since 78c48a95 and is what this commit cleared. What the retained test does NOT hold is the other half of the same bug: `.lc-programme>span{min-width:0;overflow-wrap:anywhere}` has no assertion of its own, unlike the `.specs dd`, `.specs .trk` and `.clmetric strong` rules the same file pins by name, so a single unbreakable word painting over the next column is held by the source alone. The whole file runs under `make web-check`, which is the `web-static` gate."

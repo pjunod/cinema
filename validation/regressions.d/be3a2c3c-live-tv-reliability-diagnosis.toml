@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["be3a2c3c"]
+reason = "Documentation only: the diagnosis of the empty guide and the 90-second start wait, with its fleet evidence, and its index row. No runtime behaviour and no client source. The document itself is held by tests/operations/test_docs_index.py, which fails if it is not indexed or if it names a docs/ path that does not exist; what it proposes is implemented and covered separately under e44b5426."
+ignore = true

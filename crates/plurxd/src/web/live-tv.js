@@ -5,39 +5,80 @@
   if (typeof module === "object" && module.exports) module.exports = api;
   else root.PlurxLiveTv = api;
 })(typeof self !== "undefined" ? self : globalThis, function buildLiveTv() {
-  const RETRYABLE_CODES = new Set([
-    "owner_unavailable",
-    "live_tv_protocol_unready",
-    "tuner_capacity",
-    "tuner_unavailable",
-    "startup_timeout",
-    "stream_failed",
-    "source_format_changed",
-    "capability_expired",
+  // Every copy key a start answer can render. A code with no row here is a code
+  // this client has never heard of, and the honest thing to say about it is
+  // that the owner could not serve the channel — which is also what the shared
+  // fixture rules for `node_maintenance`.
+  const ERROR_COPY = {
+    live_tv_disabled: ["Live TV is off", "An administrator can enable it in Settings → Developer."],
+    live_tv_protocol_unready: ["Live TV route is updating", "This tuner owner cannot serve the requested route yet. Another compatible owner may still work."],
+    owner_unavailable: ["Tuner owner unavailable", "The selected tuner owner cannot serve Live TV right now."],
+    no_answer: ["The server did not answer", "Press the channel again."],
+    invalid_request: ["Live TV could not read that request", "Reload the page and choose the channel again."],
+    admin_required: ["Live TV needs an administrator", "This account cannot change Live TV on this server."],
+    invalid_settings: ["Live TV settings are incomplete", "An administrator can finish the tuner setup in Settings → Developer."],
+    tuner_capacity: ["All Live TV slots are busy", "Close another Live TV session or try this channel again shortly."],
+    tuner_unavailable: ["The tuner could not start this channel", "A tuner, signal, or channel authorization may be unavailable."],
+    channel_not_found: ["Channel no longer available", "Reload the channel list and choose another channel."],
+    drm_unsupported: ["Protected channel", "plurx does not play DRM-protected television."],
+    codec_unsupported: ["Channel format unsupported", "The tuner owner cannot decode this channel into the compatible live format."],
+    startup_timeout: ["Channel took too long to start", "No first live segment arrived before the startup deadline."],
+    stream_failed: ["Live stream stopped", "The tuner or transcoder stopped producing live television."],
+    source_format_changed: ["Broadcast format changed", "The player will release this session and select a fresh compatible route once."],
+    capability_expired: ["Live session expired", "The player was idle or disconnected. Start the channel again."],
+    settings_conflict: ["Live TV settings changed", "Reload the channel list before starting another channel."],
+    guide_unavailable: ["No programme guide yet", "The tuner owner has not fetched a guide. Channels still play; rows show number and callsign only."],
+  };
+
+  // The four typed refusals the ingress decides before a request ever reaches a
+  // tuner owner. They cannot have left a start behind, so their hint goes; and
+  // no button can make any of them succeed, so no retry is offered.
+  const INGRESS_REFUSALS = new Set([
+    "invalid_request",
+    "admin_required",
+    "invalid_settings",
+    "live_tv_disabled",
   ]);
+
+  // The one reducer, ruled by tests/playback/live-tv-start-cases.json and
+  // shared in shape with the Apple and Android leases. It is a pure function of
+  // the answer — `{status, body}` for anything that arrived, anything else for
+  // a request that did not come back — and it never refuses to start.
+  //
+  // A hint is kept unless the body is typed with `owner_decided: true`, or is a
+  // typed refusal the ingress made on its own. Everything else leaves a start
+  // that may or may not exist on an owner, and the hint is the only handle for
+  // retiring it later.
+  function startOutcome(answer) {
+    const body = (answer && answer.body) || {};
+    const code = typeof body.code === "string" && body.code ? body.code : null;
+    // No typed body is no answer: the client says so and the next press
+    // repeats. It never invents a quarantine the server did not ask for.
+    if (!code) return { render: "no_answer", offerRetry: true, keepHint: true, replay: true };
+    // The status is half of what makes a refusal the ingress's own. A 4xx is
+    // the ingress rejecting the request itself, before any owner saw it, so
+    // there is no start to retire and the handle goes. The same code inside a
+    // 5xx is a failure on the way to — or at — an owner that may already have
+    // opened a tuner, and the handle is the only thing that could retire it.
+    const status = Number(answer && answer.status);
+    const ingress = INGRESS_REFUSALS.has(code) && status >= 400 && status < 500;
+    const retry = typeof body.retry === "string" ? body.retry : null;
+    return {
+      render: Object.prototype.hasOwnProperty.call(ERROR_COPY, code) ? code : "owner_unavailable",
+      offerRetry: retry !== "never" && !ingress,
+      keepHint: !(body.owner_decided === true || ingress),
+      replay: false,
+    };
+  }
 
   function errorView(error) {
     const code = String((error && error.code) || "owner_unavailable");
-    const views = {
-      live_tv_disabled: ["Live TV is off", "An administrator can enable it in Settings → Developer."],
-      live_tv_protocol_unready: ["Live TV route is updating", "This tuner owner cannot serve the requested route yet. Another compatible owner may still work."],
-      owner_unavailable: ["Tuner owner unavailable", "The selected tuner owner cannot serve Live TV right now."],
-      start_outcome_unknown: ["Start response was lost", "Wait 90 seconds for any unclaimed tuner session to expire, then select the channel again."],
-      live_tv_storage_unavailable: ["Live TV needs browser storage", "Allow this site's local storage so an interrupted start cannot acquire a second tuner after reload."],
-      tuner_capacity: ["All Live TV slots are busy", "Close another Live TV session or try this channel again shortly."],
-      tuner_unavailable: ["The tuner could not start this channel", "A tuner, signal, or channel authorization may be unavailable."],
-      channel_not_found: ["Channel no longer available", "Reload the channel list and choose another channel."],
-      drm_unsupported: ["Protected channel", "plurx does not play DRM-protected television."],
-      codec_unsupported: ["Channel format unsupported", "The tuner owner cannot decode this channel into the compatible live format."],
-      startup_timeout: ["Channel took too long to start", "No first live segment arrived before the startup deadline."],
-      stream_failed: ["Live stream stopped", "The tuner or transcoder stopped producing live television."],
-      source_format_changed: ["Broadcast format changed", "The player will release this session and select a fresh compatible route once."],
-      capability_expired: ["Live session expired", "The player was idle or disconnected. Start the channel again."],
-      settings_conflict: ["Live TV settings changed", "Reload the channel list before starting another channel."],
-      guide_unavailable: ["No programme guide yet", "The tuner owner has not fetched a guide. Channels still play; rows show number and callsign only."],
-    };
-    const selected = views[code] || views.owner_unavailable;
-    return { code, title: selected[0], detail: selected[1], retryable: RETRYABLE_CODES.has(code) };
+    const outcome = startOutcome({
+      status: error && error.status,
+      body: { code, retry: error && error.retry, owner_decided: error && error.owner_decided },
+    });
+    const selected = ERROR_COPY[outcome.render] || ERROR_COPY.owner_unavailable;
+    return { code, title: selected[0], detail: selected[1], retryable: outcome.offerRetry };
   }
 
   function channelView(channel) {
@@ -122,73 +163,58 @@
     return info && typeof info.session_id === "string" && info.session_id ? info.session_id : null;
   }
 
-  // Only random marker identities are persisted, never capabilities, account
-  // tokens, channel IDs or tuner URLs. Each tab owns its own storage key, so
-  // clearing a confirmed request cannot erase another tab's uncertain result.
-  class StartBarrier {
-    constructor(storage, now, randomId) {
+  // A hint is `{request_id, touched_at}` and nothing else. Only random request
+  // identities are persisted, never capabilities, account tokens, channel IDs
+  // or tuner URLs — the hint is a handle for retiring or resuming a start on
+  // the owner, and it is worthless to anyone who steals it.
+  //
+  // Nothing here ever throws and nothing here ever refuses: a browser that
+  // will not keep a hint loses the ability to tidy up after itself, which is
+  // never a reason to stop the viewer watching television.
+  const HINT_PREFIX = "plurx_live_tv_hint_v1:";
+  // Hints are forgotten on release, on a retire and on an owner's verdict, so
+  // the store is normally one row deep. The cap only bounds the pathological
+  // case — a browser that never manages a clean DELETE — by dropping the
+  // oldest handle, never by refusing to mint a new one.
+  const HINT_LIMIT = 32;
+
+  class StartHints {
+    constructor(storage, now) {
       this.storage = storage;
       this.now = now;
-      this.randomId = randomId;
-      this.prefix = "plurx_live_tv_pending_v1:";
-      this.observed = new Map();
+      this.prefix = HINT_PREFIX;
     }
 
-    sync() {
+    // Every persisted hint, oldest touch first.
+    list() {
+      const out = [];
       try {
-        const storage = this.storage(), found = new Set(), now = this.now();
+        const storage = this.storage();
         for (let i = 0; i < storage.length; i++) {
           const key = storage.key(i);
           if (!key || !key.startsWith(this.prefix)) continue;
-          found.add(key);
-          const value = storage.getItem(key), old = this.observed.get(key);
-          // A reload or another tab's rearm always earns a fresh monotonic
-          // deadline. Wall-clock movement never shortens the safety wait.
-          if (!old || old.value !== value) this.observed.set(key, { value, until: now + 90000 });
+          const touchedAt = Number(storage.getItem(key));
+          out.push({ id: key.slice(this.prefix.length), touchedAt: Number.isFinite(touchedAt) ? touchedAt : 0 });
         }
-        for (const [key, state] of this.observed) {
-          if (!found.has(key)) this.observed.delete(key);
-          else if (now >= state.until && storage.getItem(key) === state.value) {
-            storage.removeItem(key);
-            this.observed.delete(key);
-            found.delete(key);
-          }
-        }
-        // Sweep first, then refuse. Refusing before the expiry pass meant a
-        // store holding 32 markers could never clear them and Live TV stayed
-        // permanently unavailable in that browser.
-        if (found.size >= 32) throw new Error("too many unresolved starts");
-      } catch (_) { throw { code: "live_tv_storage_unavailable" }; }
+      } catch (_) { return []; }
+      return out.sort((a, b) => a.touchedAt - b.touchedAt);
     }
 
-    begin() {
-      this.sync();
-      if (this.observed.size) throw { code: "start_outcome_unknown" };
-      return this.hold();
+    remember(id) {
+      if (!id) return;
+      const existing = this.list();
+      for (let i = 0; i <= existing.length - HINT_LIMIT; i++) this.forget(existing[i].id);
+      this.touch(id);
     }
 
-    hold(key) {
-      try {
-        const storage = this.storage();
-        const replacement = this.prefix + this.randomId();
-        // Immutable identities: persist the replacement BEFORE retiring the
-        // old key. Another tab expiring the old key cannot delete our rearm.
-        if (storage.getItem(replacement) !== null) throw new Error("marker collision");
-        storage.setItem(replacement, "1");
-        if (storage.getItem(replacement) !== "1") throw new Error("storage did not retain marker");
-        this.observed.set(replacement, { value: "1", until: this.now() + 90000 });
-        this.confirm(key);
-        return replacement;
-      } catch (_) { throw { code: "live_tv_storage_unavailable" }; }
+    touch(id) {
+      if (!id) return;
+      try { this.storage().setItem(this.prefix + id, String(this.now())); } catch (_) { /* best effort */ }
     }
 
-    confirm(key) {
-      if (!key) return;
-      try {
-        const state = this.observed.get(key), storage = this.storage();
-        if (state && storage.getItem(key) === state.value) storage.removeItem(key);
-        this.observed.delete(key);
-      } catch (_) { /* Keeping a marker is conservative; begin still fails closed. */ }
+    forget(id) {
+      if (!id) return;
+      try { this.storage().removeItem(this.prefix + id); } catch (_) { /* best effort */ }
     }
   }
 
@@ -227,6 +253,23 @@
           await this.releaseCurrent();
           return null;
         }
+        return info;
+      });
+      this.tail = operation;
+      return operation;
+    }
+
+    // A session the owner handed back on resume enters through exactly the
+    // path a fresh start uses: same generation bump, same release of whatever
+    // was current, same ownership record. The only difference is that the
+    // capability came from `/starts/{id}/resume` instead of a POST.
+    adopt(info) {
+      const generation = ++this.generation;
+      const operation = this.tail.catch(() => {}).then(async () => {
+        await this.releaseCurrent();
+        if (generation !== this.generation || !capability(info)) return null;
+        this.current = info;
+        this.currentGeneration = generation;
         return info;
       });
       this.tail = operation;
@@ -283,6 +326,37 @@
   // the same way on the web, on Apple and on Android — the cases they must
   // reproduce are tests/playback/live-tv-guide-cases.json. Keeping them here
   // rather than in index.html is what lets a test call them directly.
+
+  // When to ask for the guide again, in milliseconds, from the answer the
+  // owner just gave. The owner's clock decides: `next_refresh_at` is when it
+  // expects to have something new, and the client asks a few seconds after
+  // that rather than a few seconds before. `guide_poll_min_s` is a floor on
+  // fan-out and applies whatever the owner said; an `unavailable` guide that
+  // names no next refresh is asked for again on the short unavailable cadence,
+  // because an owner with nothing to serve is usually about to have something.
+  // Every number comes from the shared contract table — none is written here.
+  function guidePollDelayMs(guide, nowSeconds, timings) {
+    const floor = timings.guide_poll_min_s;
+    const at = guide && Number.isFinite(guide.next_refresh_at) ? guide.next_refresh_at : null;
+    if (at !== null) {
+      const delay = Math.max(at + timings.guide_poll_after_next_refresh_s, nowSeconds + floor) * 1000
+        - nowSeconds * 1000;
+      // An owner that says it will refresh next week must not park the grid
+      // until then: a channel line-up changes, a guide host comes back, and a
+      // page left open has to notice. The ceiling bounds only this branch —
+      // the other two return the contract's own cadences. The floor still
+      // wins if the two were ever set to cross, because a fan-out floor is a
+      // promise to the owner and a ceiling is only a promise to the viewer.
+      const ceiling = Number.isFinite(timings.guide_poll_ceiling_s)
+        ? timings.guide_poll_ceiling_s * 1000 : Infinity;
+      return Math.max(floor * 1000, Math.min(delay, ceiling));
+    }
+    // A read that failed is paced like an `unavailable` answer: no document at
+    // all and a document with nothing in it carry the same information — the
+    // owner has no guide to serve yet — and the three clients pace them alike.
+    if (!guide || guide.freshness === "unavailable") return timings.guide_poll_unavailable_s * 1000;
+    return floor * 1000;
+  }
 
   function guideChannel(guide, channelId) {
     if (!guide || !Array.isArray(guide.channels)) return null;
@@ -583,7 +657,9 @@
 
   return Object.freeze({
     Lease,
-    StartBarrier,
+    StartHints,
+    startOutcome,
+    guidePollDelayMs,
     channelView,
     channelBadges,
     measuredSourceFormat,

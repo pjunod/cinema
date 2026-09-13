@@ -477,4 +477,65 @@ class ThroughputWindowTest {
         origin.begin("http://server/stream.mp4", 0)
         assertNull(origin.currentObservedBitsPerSecond())
     }
+
+    /**
+     * M5's `BEHIND_LIVE_WINDOW` recovery reads the last real position in FILM
+     * time and hands `ExoPlayer.seekTo` a number in the PLAYER's, so the two
+     * mappings have to be each other's inverse on every transport.
+     *
+     * UNRUN: no Android toolchain on the machine this was written on.
+     */
+    @Test
+    fun playerLocalPositionIsTheInverseOfTheFilmPosition() {
+        data class Transport(
+            val name: String,
+            val direct: Boolean,
+            val vod: Boolean,
+            val progressive: Boolean,
+            val originMs: Long,
+            val baseMs: Long,
+        )
+        for (transport in listOf(
+            Transport("direct", direct = true, vod = false, progressive = false, originMs = 0, baseMs = 0),
+            Transport("vod session", direct = false, vod = true, progressive = false, originMs = 0, baseMs = 0),
+            Transport("progressive remux", direct = false, vod = false, progressive = true, originMs = 86_000, baseMs = 0),
+            Transport("live-shaped session", direct = false, vod = false, progressive = false, originMs = 0, baseMs = 120_000),
+        )) {
+            for (local in listOf(0L, 1L, 4_321L, 600_000L)) {
+                val film = realMediaPositionMs(
+                    playerPositionMs = local,
+                    directTransport = transport.direct,
+                    sessionIsVod = transport.vod,
+                    progressiveTransport = transport.progressive,
+                    progressiveOriginMs = transport.originMs,
+                    sessionBaseMs = transport.baseMs,
+                )
+                assertEquals(
+                    "${transport.name} at ${local}ms round-trips",
+                    local,
+                    playerLocalPositionMs(
+                        filmPositionMs = film,
+                        directTransport = transport.direct,
+                        sessionIsVod = transport.vod,
+                        progressiveTransport = transport.progressive,
+                        progressiveOriginMs = transport.originMs,
+                        sessionBaseMs = transport.baseMs,
+                    ),
+                )
+            }
+        }
+        // A film position before this session's own origin cannot be seeked to
+        // inside it, and a negative seek is not an answer.
+        assertEquals(
+            0L,
+            playerLocalPositionMs(
+                filmPositionMs = 1_000,
+                directTransport = false,
+                sessionIsVod = false,
+                progressiveTransport = false,
+                progressiveOriginMs = 0,
+                sessionBaseMs = 120_000,
+            ),
+        )
+    }
 }

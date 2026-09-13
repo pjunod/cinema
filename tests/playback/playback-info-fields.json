@@ -10,7 +10,7 @@
     "debug": "The same ledger with every row below. Title reads \"Playback debug\"."
   },
 
-  "sections": ["PLAYBACK", "SOURCE", "NOW DECODING", "BUFFERING / DELIVERY", "NETWORK", "SERVER"],
+  "sections": ["PLAYBACK", "SOURCE", "NOW DECODING", "BUFFERING / DELIVERY", "NETWORK", "SERVER", "SURFACE"],
 
   "formats": {
     "bitrate": "\"12.3 Mb/s\" — one decimal below 10 Mb/s, none at or above; \"800 kb/s\" below 1 Mb/s. Unit is always Mb/s or kb/s, never Mbps.",
@@ -105,6 +105,11 @@
     { "id": "playlist",        "label": "Playlist",       "section": "SERVER",       "modes": ["debug"],                     "format": "text" },
     { "id": "published_end",   "label": "Published end",  "section": "SERVER",       "modes": ["debug"],                     "format": "millis" },
     { "id": "fetched_end",     "label": "Fetched end",    "section": "SERVER",       "modes": ["debug"],                     "format": "millis" },
-    { "id": "control",         "label": "Control",        "section": "SERVER",       "modes": ["standard", "debug"],         "format": "text",       "note": "Playback-control session owner and state; timing and failure are notes under the same label in Debug." }
+    { "id": "control",         "label": "Control",        "section": "SERVER",       "modes": ["standard", "debug"],         "format": "text",       "note": "Playback-control session owner and state; timing and failure are notes under the same label in Debug." },
+    { "id": "surface_kind",    "label": "Surface",        "section": "SURFACE",      "modes": ["standard", "debug"],         "format": "text",       "note": "What is drawn over the picture right now — none · indicator · banner · blocking." },
+    { "id": "surface_class",   "label": "Fault",          "section": "SURFACE",      "modes": ["standard", "debug"],         "format": "text",       "note": "The fault class the surface is projecting: preparing · buffering · recovering · hold · degraded · refused · exhausted · stopped." },
+    { "id": "surface_source",  "label": "Source",         "section": "SURFACE",      "modes": ["debug"],                     "format": "text",       "note": "The raw event the fault came from, as named in tests/playback/playback-surface-contract.json." },
+    { "id": "surface_ids",     "label": "Attached/intent","section": "SURFACE",      "modes": ["debug"],                     "format": "text",       "note": "The media generation the fault is about and the viewer request it belongs to, if any." },
+    { "id": "surface_history", "label": "History",        "section": "SURFACE",      "modes": ["debug"],                     "format": "text",       "placement": "notes", "note": "Last 16 faults: class \u00b7 source \u00b7 raised \u2192 cleared (by) \u00b7 player at raise (rate, position, presenting, stopped_by_owner)." }
   ]
 }

@@ -94,6 +94,32 @@ internal fun realMediaPositionMs(
     }
 }
 
+/**
+ * The inverse of [realMediaPositionMs]: where a FILM position sits on the
+ * player's own timeline.
+ *
+ * M5's `BEHIND_LIVE_WINDOW` recovery reads the last real position in film time
+ * — which is the number every other part of this client speaks — and then has
+ * to hand `ExoPlayer.seekTo` a number in the player's. Doing that subtraction
+ * at the call site is how the two timelines got confused in the first place
+ * (see the progressive-remux finding in the contract's §6).
+ */
+internal fun playerLocalPositionMs(
+    filmPositionMs: Long,
+    directTransport: Boolean,
+    sessionIsVod: Boolean,
+    progressiveTransport: Boolean,
+    progressiveOriginMs: Long,
+    sessionBaseMs: Long,
+): Long {
+    val film = filmPositionMs.coerceAtLeast(0L)
+    return when {
+        directTransport || sessionIsVod -> film
+        progressiveTransport -> (film - progressiveOriginMs.coerceAtLeast(0L)).coerceAtLeast(0L)
+        else -> (film - sessionBaseMs.coerceAtLeast(0L)).coerceAtLeast(0L)
+    }
+}
+
 internal fun mediaOriginMsFromHeaders(headers: Map<String, List<String>>): Long? =
     headers.entries
         .firstOrNull { (name, _) -> name.equals(MEDIA_ORIGIN_HEADER, ignoreCase = true) }

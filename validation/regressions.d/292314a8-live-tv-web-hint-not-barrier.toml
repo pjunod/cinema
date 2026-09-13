@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["292314a8"]
+points = ["web.experience", "live-tv.integration"]
+checks = ["web-static", "web-layout"]
+reason = "The web half of the same change, and the three defects an adversarial review found in it. tests/web/live-tv.test.js drives every answers, resume and protocols row of tests/playback/live-tv-start-cases.json through both the pure reducer and the shipped lease, so a start_outcome_unknown cannot come back under another name. A second tab never rejoins the session the first tab is watching runs two documents over one shared storage and one BroadcastChannel and requires the second to ask nothing - without the probe hoisted above the resume loop, the second tab adopts the first tab's capability and kills its picture on navigation. A lineup read that failed leaves the resume for the next visit requires a document not to mark itself resumed before it knows recovery is possible. The press does not wait for the liveness probe before reaching the owner pins the wire order: the POST first, the retire after. Both readiness views render every row the server sends and gate nothing requires the Developer panel to stay advisory. And the guide-poll cases pin the owner's clock, the floor, the ceiling and the failed read. The layout gate covers the .lt-signal span containment floor in the same commit."

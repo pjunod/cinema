@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["93beae93"]
+points = ["live-tv.integration"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "The owner refused a start whose request id was not a version-4 UUID, which is fifteen ids in sixteen once a client mints the id from sixteen random bytes. Two retained tests hold it. a_client_minted_request_id_is_not_a_uuid_and_the_owner_takes_it_anyway walks all sixteen possible version nibbles and requires both valid_request_id and validate_start_request to accept each one, so restoring the version-4 rule fails it on fifteen of the sixteen rather than on a lucky draw. the_owner_refuses_every_request_id_that_is_not_thirty_two_lower_case_hex requires the empty string, the two off-by-one lengths, upper-case hex, a trailing hyphen, a path traversal and a hyphenated UUID to be refused by both, and requires the ingress's own minted id to pass - so the rule cannot be widened into accepting anything that reaches a registry key or a path segment. The hyphenated UUID case is there because the session fixture used that spelling and nothing on the wire ever does, which is exactly how the wrong rule survived a review and a full fast lane. Both run in the local and hosted Rust gates."

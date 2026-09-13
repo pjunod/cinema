@@ -1,6 +1,6 @@
 # Record and remind from the guide, on iPhone, iPad and Apple TV
 
-Build: 147
+Build: 151
 Issue: #295
 
 Every guide cell now carries **Record · Record series · Remind me** beside

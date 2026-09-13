@@ -34,14 +34,473 @@ Four things carry the design, and each was a defect in the plan's first draft:
   session is evicted first, so they are never told a recording took a tuner
   they were holding themselves.
 
-Two prerequisites the plan pins on were not on `main` (the reliability effort
-is planned but unbuilt), so both were built here and only those two: the guide
-now survives a restart and reaches a fortnight ahead, and the owner evicts a
-viewer's own stray before answering a capacity refusal.
+The plan pins on two things — a guide that survives a restart, and the owner
+evicting a viewer's own stray before answering a capacity refusal — that were
+not on `main` when this branch started, so it built both, and only those two.
+The reliability effort (#281) has since merged its own versions, so the merge
+into `main` keeps **its** implementations and this branch keeps only what is
+genuinely DVR: the fortnight horizon the recording rules need, the programme
+identity they match on, and the tuner accounting that lets a recording hold a
+transport.
 
 Nothing is gated — `dvr.enabled` is a plain setting, and the Developer tab's
 six rows are advisory. Nothing has touched the tuner yet: the hardware pass is
 the only unproved step, and §8 of the plan carries its prompts.
+
+## The web half of the playback surface contract is reachable, and four rulings are closed
+
+**`web/playback-surface-reach`, WIP, not merged.** An audit found parts of the
+merged work unreachable — two contract rows that no web site ever raised, an
+action in the vocabulary that no site ever offered, and a deadline that could
+not fire. All of it is closed here, together with the four rulings that were
+waiting on somebody (§*Open rulings* below says where each landed).
+
+- **`degraded_notice` had no web raise site.** Six §3.3 row 17 notices left the
+  player through `toast()` — a 2.2-second strip with no class, no identity and
+  no ledger row — and picture-in-picture's failure left through a `catch` that
+  dropped the browser's own sentence. They raise now, with the copy they
+  shipped with.
+- **`log_only` was raised by nobody, on any client**, so `surface_log_only` was
+  a log event the fleet could never emit. Four web sites raise it: a prepared
+  successor abandoned, one that failed on its own, a refused control exchange,
+  a stats poll that could not answer. The incumbent is untouched at all four,
+  which is the row.
+- **`keep_waiting` never reached a button.** It does now, at all three
+  `owner_exhausted` raises, and a test fails if it disappears or if pressing it
+  does more than re-arm the ladder.
+- **The create-retry deadline could not fire.** M5's 60 s sequence ran inside a
+  pre-existing 20 s preparation bound, so the viewer got "Playback could not
+  prepare." where the server had been saying "still building". The bound stays;
+  the outcome is now the sequence's own exhaustion with the server's own
+  sentence, and the branches that could never run are deleted rather than left
+  reading like a bound.
+- **`segment_503_not_yet` got its codes**, in a separate cherry-pickable commit
+  the Apple and Android sessions rebase onto.
+- **A `buffering` fault that the viewer pauses under now retires.** Found
+  independently by the Apple and Android sessions and true of the web too: §3.1
+  retired `buffering` only on presentation evidence, and a paused picture never
+  produces another sample, so a buffer that filled while paused left a spinner
+  over a still frame until the generation changed — the overlay outliving the
+  thing it described, reintroduced by the migration itself. A `buffering` fault
+  is about a player that WANTS media, so a viewer who pauses makes it about
+  nothing. New `playback_requested` event, new `playback_not_requested`
+  retirement reason on `buffering` **and on no other class**, wired to the web's
+  own `wantsPlayback` transport edges. Its own cherry-pickable commit, second of
+  the two.
+
+Not done here, and named rather than implied: Apple and Android still raise
+neither row 17 nor row 18, and no part of this has been seen in a browser — the
+evidence is the lane (`make web-check`, both contract tests, both fences, the
+whole of `tests/operations`, `scripts/validate lint`) plus a five-mutation table
+in the pull request.
+
+## `make web-check` is green, and `rust-gate` has actually been run
+
+**[#286](http://192.168.4.7:3000/noirr/plurx/pulls/286), WIP, not merged.**
+Two gaps the playback surface effort left behind: its own acceptance command
+could not go green, and its Rust gate had never been executed at all.
+
+### `make web-check`
+
+Three tests were red on `main`, none of them for a defect in what the page
+does.
+
+- **`layout-containment`** — four bare `1fr` content columns, all four from
+  `78c48a95`: at the branch point they are lines 3204 and 3209 of
+  `index.html`, and `git blame 3062f3c9` gives that commit for both. (Line
+  3210 is `</style>`, from `a9cca3dc`; on this branch the `@media` line sits
+  at 3210 because of the rule added above it, which is an easy off-by-one to
+  blame against the wrong tree.) `1fr` is `minmax(auto, 1fr)`: content sets
+  the track's minimum,
+  so a long programme title in `.lc-programme` widens the middle column and
+  pushes the "Watch from start" button off the card, and the under-760px
+  overrides for `.lc-editor`, `.lc-grid` and `.lc-programme` put that failure
+  where the viewport is narrowest. Fixed in the CSS with `minmax(0,1fr)` — the
+  floor the other thirty-odd grid declarations in this stylesheet already use,
+  and the one that also drops the grid item's automatic minimum size, which a
+  track-only fix leaves behind. The title cell gets `min-width:0` and
+  `overflow-wrap:anywhere` for the same reason `.specs dd` has them.
+- **`page-read-budget`** and **`settings-sections`** — `ReferenceError` in
+  both, and the shipped page is correct in both. `shippedSource(name)` hands a
+  harness one function, sliced declaration-to-declaration, so the harness must
+  declare everything that function calls. `78c48a95` added
+  `clearLibraryChannelDraft()` and `LIBRARY_CHANNEL_TUNE.stop()` to
+  `clearLocalSession`, and `583bcd1d` added `playbackSurfaceReadinessCard()`
+  to `developerPanel`, neither with the stub its harness needed. The two
+  sign-out collaborators are stubbed as observable state rather than as
+  no-ops — so the test now asserts that signing out really does drop the
+  unsaved wizard draft and the tune fence, and deleting either call from
+  `index.html` fails it — and the readiness card is evaluated from the shipped
+  source rather than stubbed, with an assertion that Developer renders it.
+
+Every test in the target passes afterwards. The target is sixteen node tests
+plus `scripts/js-check` and `scripts/contrast-check` (`Makefile:1413`) — it
+does **not** contain either fence, so `scripts/playback-surface-fence` and
+`scripts/player-input-fence` were run separately; both PASS, with no new
+`MIGRATION_BUDGET` entries.
+
+### `rust-gate`, at last
+
+Archived out of the clone and compiled in a container on the pinned `1.97.1`,
+the `COMPILE-LOOP.md` route. Run twice, at two shas:
+
+- **`3062f3c9`** — the branch point, and the first sha at which all seven
+  playback-surface PRs are in.
+- **`ec1c324f`** — this branch's second commit, and the last one that touches
+  compiled or embedded source. The branch tip is `08aeedc7`, which adds only
+  this `STATUS.md` entry, so the gate result carries to it unchanged.
+
+`main` has since moved on to `a64e28ff`, but `git diff 3062f3c9..a64e28ff --
+'*.rs' 'Cargo.toml' 'Cargo.lock'` is empty: no Rust and no dependency has
+changed, so this result still describes current `main`.
+
+Identically at both shas: `cargo fmt --all --check` **clean**, `cargo clippy -p
+plurxd --all-targets -- -D warnings` **clean**, `cargo test -p plurxd --bin
+plurxd` **2192 passed, 18 failed, 6 ignored**.
+
+**Nothing in the playback surface work broke a Rust test.** `index.html` and
+`playback-policy.js` are `include_str!`'d into the binary and asserted on by
+`http::web::tests`; every one of those passes, before and after the CSS change
+here. The 18 are identical on both shas, so this branch introduces none of
+them:
+
+- 13 `decode_facts` tests fail at `Spawn("Function not implemented (os error
+  38)")` before any assertion — the bound-exec probe's `pre_exec` builds a
+  Landlock ruleset and `landlock_create_ruleset` is `ENOSYS` in that
+  container, confirmed directly. Environmental.
+- `live_tv::one_tuner_get_runs_the_full_hls_lifecycle_and_stop_waits_for_cleanup`
+  says "FFprobe is not configured on the tuner owner"; `playback_control::copy_retry_is_unsupported_only…`
+  and `vodserve::a_capacity_stall_still_says_no_room_after_its_producer_is_gone`
+  both need a real producer process to reach a particular exit. Environmental.
+- **Two `live_tv` tests are deterministically red on `main`** — pure in-memory
+  assertions, no I/O, so they fail on any machine.
+  `live_tv_software_hls_argument_baseline_is_stable` freezes an expected
+  FFmpeg argument list containing `bwdif=mode=send_frame:…` and an ordering
+  the code no longer emits: the fixture sets `deinterlace: false` so `bwdif`
+  cannot appear, and the shipped filter says `send_field`.
+  `live_hls_publishes_short_startup_segments_before_steady_cadence` looks for
+  `-force_key_frames` in `LIVE_HLS_OUTPUT_ARGS`, which is a 10-element array
+  ending at `-hls_delete_threshold`; the flag moved into the encoder block.
+  **Both are left alone on purpose** — fixing either means editing a frozen
+  Live TV FFmpeg baseline, and neither is playback-surface work. Reported, not
+  changed, and still red.
+
+### A trap for the next session: `TMPDIR`
+
+The device VM's `/sessions` — its default `TMPDIR`, and where the clone's own
+`$HOME` lives — is **100% full**. Nothing warns you. Two things follow:
+`tests/playback/network-shaping.test.js` reports "12 shaping contract
+failure(s)" there and "93 shaping contracts hold" with `TMPDIR` pointed
+anywhere else, and detached `nohup` jobs die without a message. Export
+`TMPDIR` off `/sessions` before believing any red result on that machine.
+
+## The playback surface contract — built, both clients compiled, unverified on hardware
+
+**Merged to `main`: M0 (#276), M1 (#277), M2 (#280), M3 (#279) and M5 (#282).
+Both clients now compile and both unit suites pass — the Kotlin on 2026-09-13
+on both of the hand-off's routes (see (2) below), the Swift the same day on
+both simulator destinations (see "What the Apple build and test run found"
+below). M4 and M6 are not done, and no physical device has run any of it.**
+The effort replaced three imperative error channels — the web's
+`setLoading()`, Apple's
+`failed`/`playbackError`/`playbackFailureTitle`/`playbackNotice`, Android's
+`onError`/`playFailure`/`playbackNotice` — with one fixture-driven presenter
+per client that renders a surface from typed faults and the player's own
+presentation evidence. It closes the defect in Paul's tablet photo: "Playback
+stopped (ERROR_CODE_IO_BAD_HTTP_STATUS)." over a picture that was visibly
+still playing, behind a transparent overlay, with the stall watchdog free to
+restart the stream underneath it.
+
+The contract is
+[PLAYBACK-SURFACE-CONTRACT.md](docs/clients/PLAYBACK-SURFACE-CONTRACT.md) (v2,
+ruled, reviewed and answered); the build plan, the amendments and the recipes
+are
+[PLAYBACK-SURFACE-CONTRACT-IMPLEMENTATION.md](docs/clients/PLAYBACK-SURFACE-CONTRACT-IMPLEMENTATION.md).
+
+### What each milestone did
+
+- **M0 (#276) — the fixture, the reference reducer, the fence.** One JSON
+  fixture of ordered-event cases that every client's presenter must run, the
+  generated class/source/timing blocks the three docs embed verbatim, the
+  SURFACE section of the Playback debug field list, and
+  `scripts/playback-surface-fence` with a per-file migration budget for the
+  110 pre-contract write sites so no new one could be added while the
+  migration was in flight.
+- **M1 (#277) — the web.** `renderPlaybackSurface` is the only code in
+  `index.html` that writes the overlay, its two new non-blocking surfaces, or
+  the `failed` class; every former call site raises a typed fault instead.
+  §3.4's stop-before-raise landed at eleven sites. Classes that were
+  full-screen are an indicator or a banner now — a failed change, an explained
+  "not yet", an automatic downshift, a control hold — which is the point of
+  the migration and a visible change.
+- **M2 (#280) — Apple.** `PlaybackSurfaceModel.swift` is a pure presenter: no
+  AVFoundation, no timer, no side effect but the log entries it returns. The
+  four published failure fields are deleted. `fail()` decides on whether a
+  picture is *presenting* rather than on whether an item is *attached*, so a
+  readiness verdict over a black screen stops the player and prompts while a
+  create failure over a playing predecessor is a banner. A 401 or 403 anywhere
+  stops the player and offers Sign in (ruling R1).
+- **M3 (#279) — Android.** `PlaybackSurface.kt` is the same reducer in Kotlin,
+  carrying the fixture's tables verbatim so a client that skipped a port fails
+  rather than drifts. Every blocking site is a **named** method on
+  `PlaybackSurfaceOwner` that does its **own** stop, deliberately duplicated so
+  deleting one stop fails exactly one test and the failure names the site. Two
+  rows of implementation §3.4 were wrong about the code and were amended in the
+  same commit as the fix.
+- **M5 (#282) — the three bounded recovery additions.** The only PR of the
+  effort that changes what the player *does*, which is why it was its own PR by
+  ruling. A create the server refuses with a "not yet" code is re-posted under
+  the **same** `request_id` after 1 s, 2 s and 4 s, bounded by an **absolute**
+  60 s watchdog, `start` context only, with a late success **released** rather
+  than attached. The web gets one bounded `hls.startLoad` per attach, sharing
+  its budget with the `segment_503_not_yet` row. Android recovers
+  `BEHIND_LIVE_WINDOW` on **finite** timelines by seeking back to the last real
+  position, once per attach — Media3's `seekToDefaultPosition()` is a live-edge
+  policy and is deliberately not used.
+
+### What the fence holds at zero
+
+`scripts/playback-surface-fence` has **no `MIGRATION_BUDGET` entry above
+zero left**. `index.html`, `PlayerController.swift`, `PlayerView.swift`,
+`PlayerSurface.swift`, `playback-policy.js`, `Controller.kt`,
+`PlayerScreen.kt` and `PlaybackSurfaceOwner.kt` are all at zero: every surface
+write in the shipped players is inside a presenter's render or a publish
+region with a required anchor. M5 added three rules the migration itself
+needed — the element **lookup** is guarded rather than the property spelling,
+because a computed member write names no property at all; the owner file is
+scanned with a rule that does not require a receiver, because inside that file
+there is none; and a presenter is scanned by an **inverted** rule (no player
+call, no timer of its own, no control-plane call), which is contract v2's
+actual thesis and was exempted wholesale before.
+
+The fixture is **60** ordered-event cases. The web presenter runs all 60 in
+`tests/playback/playback-surface-contract.test.js`; the Apple presenter runs
+all 60 in `testPlaybackSurfaceModelRunsEveryContractCase`, confirmed passing
+on the iOS **and** the tvOS destination; the Android presenter runs all 60 in
+`PlaybackSurfaceReducerTest.everyFixtureCaseRuns`. All three were executed for
+the first time on 2026-09-13.
+
+### What the Apple build and test run found
+
+On a Mac (macOS 26.6.2, Xcode 26.6, xcodegen 2.46.0), against this branch:
+`make apple-build` compiled **both** schemes clean, and `make apple-test` ran
+the whole suite on **iPhone 17 Pro (iOS 26.5)** — 532 tests — and on **Apple
+TV 4K (3rd generation) (tvOS 26.5)** — 518 tests — with **0 failures on
+each**. Every test the hand-off prompt names by name ran and passed under both
+destinations.
+
+Four defects in code written blind had to be fixed to get there: one compile
+error (a test still read `PlayerController.failed`, the flag M2 deleted) and
+three test failures (a source-shape assertion looking for the literal
+`player.pause()` that M2 had moved into `stopForBlockingSurface()`; M5's
+change-context test, which asserted a second `/decision` request that a warm —
+prepared — quality change never makes, and whose precondition no headless test
+could reach; and a blocking raise set up over a still-`presenting` picture).
+
+**That third one was not a test bug. It was the code reporting a shipped
+defect, and adjusting the test is what hid it.** `stopForBlockingSurface()`
+paused the player but never told the presenter the picture had stopped
+presenting, and every owner site raises its blocking fault synchronously right
+after. So a 401 or 403 during a quality change — the R1 case, over a picture
+that was playing — raised its `stopped` terminal into a model that still
+believed the picture was moving, §3.2 resolved the disagreement against it,
+and the viewer got a "Playback recovered" banner with **no Sign in and no
+Close**. Permanently: a demoted fault is never promoted again, by design. Not
+a race — the raise always precedes the next sampler tick. The owner's stop now
+records its own evidence, which is the one-line fix, and the assertion that it
+still does is pinned in `testOnlyTheEvidenceSamplerEverFeedsAPresentingEvent`.
+No threshold, budget, detector or ladder was retuned.
+
+The prompt's six pinned mutations were applied and reverted one at a time.
+**A1, A2, A4 and A5 were each killed by the test pinned to it**; A5 and A6 are
+also killed by `tests/playback/web-policy.test.js`, as predicted. A3 —
+deciding presentation on `timeControlStatus` instead of the position delta —
+**is killed by `testOnlyTheEvidenceSamplerEverFeedsAPresentingEvent`**, which
+forbids the token outright. But that is a source-shape pin, and the
+semantically identical mutation that avoids the banned word — dropping the
+position delta and keeping the rate — survived all 531 tests. So the detector
+was pinned by spelling and proved by nothing. `surfaceIsPresenting` is now a
+pure function of the evidence, and
+`testPresentationEvidenceIsAMovingPositionAndNeverATransportStatus` kills that
+survivor. **A6 is the one genuine survivor**: no Swift test, exactly as the
+prompt predicted, and the field route is §6.6.
+
+### Exactly what is not done
+
+1. **The Apple client compiles and its suite is green — but §6 of the
+   hand-off has not been run.** `AppleClientTests`' surface cases, the eight
+   owner-stop killers, the R1 and B4 pins and M5's three
+   `PlayerOperationOwnershipTests` cases have now all executed and passed, on
+   both destinations. What has *not* run is any of the eight simulator and
+   device recipes in §6 of
+   [PLAYBACK-SURFACE-APPLE-BUILD-PROMPT.md](docs/clients/PLAYBACK-SURFACE-APPLE-BUILD-PROMPT.md):
+   every one of them needs a live `plurxd` with real media — a cold NAS that
+   answers 503 `startup_timeout`, a forced 401 on a quality change, a create
+   that lands after the 60 s deadline — and no server was reachable from the
+   build machine. The unit suite cannot see any of those behaviours, and one
+   shipped defect this branch fixes — the 401 terminal demoting itself to a
+   banner — is exactly the kind of thing only §6.2 would have caught.
+2. **The Kotlin compiles and its JVM tests pass. Nothing has run on a
+   device.** M3 and M5's Android code was written on Linux with no SDK and no
+   disk for a Gradle build; it was compiled for the first time on 2026-09-13,
+   on both of the hand-off's routes. The **pinned image** on `m6`
+   (192.168.4.14, x86_64, Docker 29.1.3, so `linux/amd64` is native and
+   nothing is emulated): `make android-image`, `make android-test` and
+   `make android` all green — this is the run CI does. The **local SDK** on
+   `pauls.macbook.air.lan`: JDK 25, Homebrew command-line tools, platform
+   `android-37.0`, build-tools 36.0.0 and 37.0.0, Gradle 9.7.1, with
+   `:app:compileDebugKotlin`, `:app:testDebugUnitTest`, `:app:lintDebug` and
+   `:app:assembleDebug` all green. Both routes report the same
+   **612 tests, 0 failures, 0 skipped**, and the local-SDK one is stable over
+   five consecutive `--rerun-tasks` runs on the Mac. The APK `make android`
+   produced carries `versionCode 92`, read back out of the APK itself with
+   the image's own `build-tools/37.0.0/aapt2 dump badging` (`aapt2` is not on
+   `PATH` in the image) and independently out of `output-metadata.json`.
+   `PlaybackSurfaceReducerTest`
+   (7 cases, `everyFixtureCaseRuns` over all 60 fixture cases included),
+   `PlaybackSurfaceOwnerTest` (14), `CreateRetryTest` (10),
+   `BehindLiveWindowRecoveryTest` (6) and `PlaybackInfoContractTest` (4) all
+   ran and all passed. One compile error was fixed and it was in a test, not
+   in the app: `Cannot infer type for type parameter 'T'` on the two
+   `?: emptyList()` elvis arms of `PlaybackSurfaceReducerTest`. No main-source
+   Kotlin was changed, so `versionCode` stays at 92. All eight of the
+   hand-off's K1–K8 mutations were applied and every one killed its named
+   test; K7, as the hand-off predicts, is killed by
+   `tests/playback/web-policy.test.js` and by no JVM test. What is still
+   missing is every part that needs hardware: no instrumented test, no
+   emulator, and none of the twelve recipes in §5 of
+   [PLAYBACK-SURFACE-ANDROID-BUILD-PROMPT.md](docs/clients/PLAYBACK-SURFACE-ANDROID-BUILD-PROMPT.md).
+   What was done before any of this, and is evidence about the semantics and
+   not about the Kotlin: the shipped reducer was transliterated into Python,
+   run against every fixture case, and fuzzed 3,500 sequences differentially
+   against the shipped JS reducer with zero divergences.
+3. **M4 — physical verification — has not been run.** Not one of §7's four
+   recipes has been executed on an Apple TV, an iPhone or an Android TV. No
+   `surface_disagreement` has been observed, and that is an absence of looking
+   rather than an absence of rows. The script is
+   [PLAYBACK-SURFACE-PHYSICAL-VERIFICATION-PROMPT.md](docs/clients/PLAYBACK-SURFACE-PHYSICAL-VERIFICATION-PROMPT.md).
+4. **M6 is gated on a measurement nobody has taken.** The Android remux-seek
+   landing is built only if the achieved origin differs from the requested
+   start by more than 250 ms **and** the first frame landed at the origin. The
+   procedure is
+   [PLAYBACK-SURFACE-REMUX-ORIGIN-MEASUREMENT-PROMPT.md](docs/clients/PLAYBACK-SURFACE-REMUX-ORIGIN-MEASUREMENT-PROMPT.md).
+   One correction found while writing it: §4.7 says to capture the origin
+   "from the client log", and there is no such log line —
+   `ProgressiveMediaOrigin.acceptResponse` has no logging at all. The prompt
+   gives two ways that do exist.
+5. **One ruling is still open; four and the web half of a fifth are decided.**
+   See
+   [Open rulings — the playback surface contract](#open-rulings--the-playback-surface-contract)
+   below.
+
+What *has* run, on every one of those PRs and on this one: the node contract,
+policy, control and player-DOM tests, both fences, the whole of
+`tests/operations`, and `scripts/validate lint`. Developer → **Playback
+surface contract** carries the same list as an advisory readiness card — it
+gates nothing and never will; contract §5 says so outright.
+
+### The two things the fence cannot do
+
+It is a ratchet against the spellings it knows, not a proof: it knows more of
+them than it did, each with a must-trip fixture line, but it cannot see a
+write it was never taught. And it says nothing about a surface being *right* —
+only about where it is written.
+
+## Open rulings — the playback surface contract
+
+Five questions the effort could not answer for itself. **Paul ruled on all
+five 2026-09-13 and delegated the open ones; four are closed, and the fifth is
+closed on the web and open on the two native clients.** Where each landed is
+below; the reasoning is in §4.6 of
+[PLAYBACK-SURFACE-CONTRACT-IMPLEMENTATION.md](docs/clients/PLAYBACK-SURFACE-CONTRACT-IMPLEMENTATION.md).
+
+**1. Keep waiting is offered on the two stall prompts, and the two rows nothing
+raised now have raise sites — web done, Apple and Android open.** *(Decided;
+the web half landed in `web/playback-surface-reach`.)* The two stall sites share
+a new `playbackExhaustedActions` (`playbackStallActions` with the action in
+front). It is deliberately not folded into `playbackStallActions` itself,
+because that list is also what the D1 terminal verdict and the diagnosed-stall
+`decoder_failed` carry, and those are `stopped` — a recipe the server has ended
+leaves nothing to wait for. The **create-exhaustion** prompt does not offer it:
+nothing is attached there, so `armStall` arms a watchdog `stallDiagnose` returns
+from immediately, and the button would clear the prompt and do nothing. The
+handler is unchanged and a test now fails if the button disappears from the
+stall prompts, if it appears on the create one, or if pressing it does more than
+clear `recoveringStall` and re-arm `armStall`.
+
+The same branch gave `degraded_notice` its first web raise site — six of them:
+the pre-play HDR/burn refusal, the same refusal from the subtitle menu, the
+decode rescue, the Auto rung downshift, the supply rescue and a
+picture-in-picture that would not start, all of which used to leave the player
+through `toast()` or, for PiP, through a swallowed `catch` — and `log_only` its
+first raise site on **any** client, so `surface_log_only` is emitted at last:
+a prepared successor abandoned, one that failed on its own, a refused control
+exchange (`session_gone` on a committed successor's first one included), and a
+stats poll that could not answer.
+
+**Still open:** Apple and Android raise neither row either. Their `degraded`
+notices (`playbackNotice`, the PiP persistent error) and their row-18 events
+(prepared-successor abandonment, telemetry and reporter failures) are the same
+shape as the web's and want the same treatment; that is native work and is not
+in this branch.
+
+**2. The web's create-retry deadline: keep the 20 s, make the outcome honest.**
+*(Closed in `web/playback-surface-reach`.)* The bound does not move — §6 forbids
+it, and 20 s is the right bound for a client whose whole open is bounded at
+20 s. What changes is what it produces. `beginPlaybackPreparation` gained one
+hook, `expiry`, where a running operation may leave the error its own deadline
+should produce; M5's sequence answers with its own `exhausted`, carrying the
+server's own sentence, when and only when the server has already refused it
+with a "not yet" code. A create that was merely slow is still a preparation
+timeout and still says so. Both terminations are reachable on the web now, and
+"a late success is released, not attached" is a property of the browser rather
+than of the tests. M5's own 60 s watchdog, `sequence.expired` and both its
+guards, and the dead half of the late-success fork are deleted;
+`openSessionRetryingNotYet` refuses an ownerless sequence outright so nothing
+is left unbounded by the removal. `CREATE_RETRY.deadline_ms` stays in the
+shared policy: Apple and Android reach it on shipped paths.
+
+**3. "Backoff 1 s · 2 s · 4 s" is the closed list.** *(Ruled; recorded in
+implementation §4.6 so it stops reading as an open question.)* Three retries,
+four attempts. The text is a closed list, the deadline is still load-bearing
+under it — it cuts a slow server mid-attempt — and nothing in the review or the
+contract asked for the fourteen-retry reading. What shipped is what was meant.
+
+**4. `segment_503_not_yet` carries its codes.** *(Closed; its own
+cherry-pickable commit on `web/playback-surface-reach`, which the Apple and
+Android sessions rebase onto.)* The row lists the sixteen 503 codes a playlist
+or segment request can actually come back with, read off `http/hls.rs`,
+`vodserve.rs` and `http/mod.rs`. On those two resources a 503 is only ever a
+"not yet" — the terminal answers are 404/410/502 — so the `recovering` class is
+right for every code on the list. `classifyStreamFailure` requires the status
+**and** the code for that row, so `vod_disabled` is no longer read as "the
+segment is not ready yet", and a code that is also a create code cannot match
+off a status that never carried it.
+
+**5. The branch model: task branches into `main`, as an explicit exception.**
+*(Ruled; both documents now say the same thing.)* The rule that was followed is
+the one that worked, so [AGENTS.md](AGENTS.md)'s "large efforts" section keeps
+its `effort/<project>` default and gains one bounded exception: a multi-task
+project may branch each task from `main` when its implementation plan says so
+*and* names the file ownership per task — an effort branch buys serialised
+integration, and there is nothing to serialise when no two tasks can touch the
+same file. §9 of the implementation plan now says which rule it is exercising
+and what earns it.
+
+## The player input fence was red on `main`, on two doc comments
+
+**Fixed in `fix/player-input-fence-comments`.** `scripts/player-input-fence`
+matched `onMoveCommand` inside two `///` comments in `LiveTvView.swift` that
+explain why the guide grid handles its paging chips itself — prose about a key
+handler, with no handler in it. The fence now skips a line only when its
+first non-space characters open a comment *and* nothing executable is left on
+it — `/* named = */ onKeyEvent { … }`, a `*/` that ends a block and then calls
+something, a JS generator method (`*keys(ev)`), a private class field
+(`#onkeydown = …`) and an Objective-C `#define` all still trip, and so does a
+trailing comment after real code. `fence-fixtures/input/` and
+`tests/operations/test_player_input_fence.py` pin each of those shapes and
+drive them through the fence's own scanner rather than a second copy of its
+loop, so a widened exemption fails here.
 
 ## Live TV: the empty guide and the "wait 90 seconds" refusal, diagnosed
 

@@ -337,6 +337,7 @@ test("Developer owns experimental enablement and keeps readiness advisory", () =
       shippedSource("devReadinessEvidence"), shippedSource("devReq"),
       shippedSource("devStaticReq"), shippedSource("clusterTransportRecoveryCard"),
       shippedSource("preparedQualityCard"), shippedSource("dvrCard"),
+      shippedSource("playbackSurfaceReadinessCard"),
       shippedSource("developerPanel"),
       shippedSource("liveTvPanel"),
       "return {developerPanel,preparedQualityCard,clusterTransportRecoveryCard,liveTvPanel,dvrCard};",
@@ -387,6 +388,11 @@ test("Developer owns experimental enablement and keeps readiness advisory", () =
   assert.match(html, /FOOT:savePreparedQuality/);
   assert.match(html, /FOOT:saveExperimental/);
   assert.match(html, /Explicit server and browser enablement with advisory safety evidence/);
+  // The readiness card is rendered by Developer, not merely declared: a card
+  // that stops being reachable from the panel is the same regression as a card
+  // that stops existing.
+  assert.match(html, /CARDHEAD:Playback surface contract\|/);
+  assert.match(html, /Nothing on this card is a switch/);
   assert.match(html, /This saved switch is authoritative; readiness is advisory and never overrides your choice/);
   // The switch has to be wired to something. A control that renders and does
   // nothing is worse than no control: it reports a capability to the operator

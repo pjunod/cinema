@@ -85,11 +85,109 @@ class LiveTvInputPolicyTest {
     @Test
     fun theTimingsAreTheFixturesTimings() {
         val timings = live.getValue("timings").jsonObject
-        assertEquals(timings.getValue("hide_after_ms").jsonPrimitive.int.toLong(), LiveTvInputPolicy.HIDE_AFTER_MS)
+        fun pinned(key: String) = timings.getValue(key).jsonPrimitive.int
+        assertEquals(pinned("hide_after_ms").toLong(), LiveTvInputPolicy.HIDE_AFTER_MS)
+        assertEquals(pinned("channel_coalesce_ms").toLong(), LiveTvInputPolicy.CHANNEL_COALESCE_MS)
+        // §3.14: the six that pace Live TV's reliability flows, transcribed by
+        // the same rule as the two above. `retire_liveness_probe_ms` and
+        // `retire_orphan_after_keepalives` are the web's sibling-document
+        // mechanics — Android has one process and one hint — but a
+        // transcription that drifts from the fixture is worth nothing on any
+        // client, so all six are pinned here.
+        assertEquals(pinned("guide_poll_unavailable_s").toLong(), LiveTvInputPolicy.GUIDE_POLL_UNAVAILABLE_S)
+        assertEquals(pinned("guide_poll_min_s").toLong(), LiveTvInputPolicy.GUIDE_POLL_MIN_S)
         assertEquals(
-            timings.getValue("channel_coalesce_ms").jsonPrimitive.int.toLong(),
-            LiveTvInputPolicy.CHANNEL_COALESCE_MS,
+            pinned("guide_poll_after_next_refresh_s").toLong(),
+            LiveTvInputPolicy.GUIDE_POLL_AFTER_NEXT_REFRESH_S,
         )
+        assertEquals(pinned("guide_poll_ceiling_s").toLong(), LiveTvInputPolicy.GUIDE_POLL_CEILING_S)
+        assertEquals(pinned("retire_liveness_probe_ms").toLong(), LiveTvInputPolicy.RETIRE_LIVENESS_PROBE_MS)
+        assertEquals(
+            pinned("retire_orphan_after_keepalives"),
+            LiveTvInputPolicy.RETIRE_ORPHAN_AFTER_KEEPALIVES,
+        )
+        assertEquals(pinned("start_replay_attempts"), LiveTvInputPolicy.START_REPLAY_ATTEMPTS)
+    }
+
+    /**
+     * The guide polls on the owner's clock. These are the three rules §3.14
+     * names, against the contract's own numbers rather than repeated literals.
+     */
+    @Test
+    fun theGuidePollFollowsTheOwnersNextRefresh() {
+        val min = LiveTvInputPolicy.GUIDE_POLL_MIN_S
+        val after = LiveTvInputPolicy.GUIDE_POLL_AFTER_NEXT_REFRESH_S
+        val fresh = LiveTvGuide(freshness = "fresh")
+
+        // An announced refresh far enough out is honoured exactly.
+        assertEquals(
+            600 + after,
+            LiveTvGuideReducer.nextPollDelaySeconds(fresh.copy(next_refresh_at = 1_600), 1_000),
+        )
+        // One in the past, or so close that the answer would not exist yet,
+        // still cannot poll faster than the floor.
+        assertEquals(min, LiveTvGuideReducer.nextPollDelaySeconds(fresh.copy(next_refresh_at = 900), 1_000))
+        assertEquals(min, LiveTvGuideReducer.nextPollDelaySeconds(fresh.copy(next_refresh_at = 1_001), 1_000))
+        // An owner older than this contract says nothing about when it returns.
+        assertEquals(min, LiveTvGuideReducer.nextPollDelaySeconds(fresh, 1_000))
+        assertEquals(
+            LiveTvInputPolicy.GUIDE_POLL_UNAVAILABLE_S,
+            LiveTvGuideReducer.nextPollDelaySeconds(LiveTvGuide(freshness = "unavailable"), 1_000),
+        )
+        // An unavailable guide that DOES name its next refresh is scheduled on
+        // it: "unavailable" is a rendered state, not a reason to guess.
+        assertEquals(
+            600 + after,
+            LiveTvGuideReducer.nextPollDelaySeconds(
+                LiveTvGuide(freshness = "unavailable", next_refresh_at = 1_600), 1_000,
+            ),
+        )
+        // A read that did not answer carries exactly what an unavailable guide
+        // with no next refresh does, and is paced the same way.
+        assertEquals(
+            LiveTvInputPolicy.GUIDE_POLL_UNAVAILABLE_S,
+            LiveTvGuideReducer.nextPollDelaySeconds(null, 1_000),
+        )
+    }
+
+    /**
+     * The ceiling. An owner whose clock is skewed, whose refresh interval is
+     * misconfigured, or whose loop has stopped can answer with a
+     * `next_refresh_at` hours out; the grid must still come back on its own
+     * rather than sit on a stale document until the viewer leaves the screen.
+     */
+    @Test
+    fun aFarFutureNextRefreshCannotParkTheGrid() {
+        val ceiling = LiveTvInputPolicy.GUIDE_POLL_CEILING_S
+        val fresh = LiveTvGuide(freshness = "fresh")
+        val now = 1_000L
+
+        // Six hours out, an owner-day out, and the end of time all clamp.
+        listOf(now + 6 * 3_600, now + 86_400, Long.MAX_VALUE).forEach { announced ->
+            assertEquals(
+                "next_refresh_at $announced must clamp to the ceiling",
+                ceiling,
+                LiveTvGuideReducer.nextPollDelaySeconds(fresh.copy(next_refresh_at = announced), now),
+            )
+        }
+        // An unavailable guide with a far-future refresh clamps the same way:
+        // the ceiling is about the answer, not about the freshness.
+        assertEquals(
+            ceiling,
+            LiveTvGuideReducer.nextPollDelaySeconds(
+                LiveTvGuide(freshness = "unavailable", next_refresh_at = Long.MAX_VALUE), now,
+            ),
+        )
+        // Just inside the ceiling is still honoured exactly, so the clamp never
+        // becomes the cadence for an owner that is behaving.
+        val inside = now + ceiling - LiveTvInputPolicy.GUIDE_POLL_AFTER_NEXT_REFRESH_S - 1
+        assertEquals(
+            ceiling - 1,
+            LiveTvGuideReducer.nextPollDelaySeconds(fresh.copy(next_refresh_at = inside), now),
+        )
+        // And the ceiling can never undercut the floor.
+        assertTrue(ceiling > LiveTvInputPolicy.GUIDE_POLL_MIN_S)
+        assertTrue(ceiling > LiveTvInputPolicy.GUIDE_POLL_UNAVAILABLE_S)
     }
 }
 

@@ -1,0 +1,197 @@
+{
+  "schema_version": 1,
+  "title": "Live TV start outcomes — one truth for the web, Apple and Android lease reducers",
+  "documented_in": "docs/features/LIVE-TV-RELIABILITY-IMPLEMENTATION.md",
+  "ruled": "2026-09-13",
+  "notes": [
+    "Three clients, one reducer. Each answer below is what the server said (or failed to say) to POST /api/v1/live-tv/sessions, and what the client must do with it — the same shape tests/playback/live-tv-guide-cases.json already uses for the grid.",
+    "`render` is the copy key the client shows. `offer_retry` is whether the error view offers a retry control. `keep_hint` is whether the persisted {request_id, touched_at} hint survives the answer; `replay` is whether the lease re-sends the POST once with the same request id.",
+    "The rule the table encodes: a hint is kept unless the body is typed with owner_decided true, or is a typed 4xx the ingress decided before it ever reached an owner (invalid_request, admin_required, invalid_settings, live_tv_disabled). Anything the owner did not decide leaves a start that may or may not exist, and the hint is the only handle for retiring it.",
+    "There is no start_outcome_unknown. An answer that never arrived is `no_answer`: the client says the server did not answer and the next press repeats — it never refuses to start.",
+    "`protocols` is the intersection the ingress publishes on GET /api/v1/live-tv/channels. An ingress that omits the field is older than this contract: no request_id on the body, no /live-tv/starts/* routes, hints kept for later.",
+    "Timings that pace these flows live in tests/playback/player-input-contract.json under live.timings, and reach the clients through scripts/player-contract-table --embed.",
+    "The `resume` session object is a real LiveTvActivated, field for field: a client decodes it with exactly the decoder a successful start uses, which is the point — a resume is not a second shape."
+  ],
+  "answers": [
+    {
+      "case": "the owner refused because every tuner is busy",
+      "body": {
+        "code": "tuner_unavailable",
+        "retry": "now",
+        "owner_decided": true
+      },
+      "render": "tuner_unavailable",
+      "offer_retry": true,
+      "keep_hint": false
+    },
+    {
+      "case": "the ingress could not reach the owner at all",
+      "body": {
+        "code": "owner_unavailable",
+        "retry": "now",
+        "owner_decided": false
+      },
+      "render": "owner_unavailable",
+      "offer_retry": true,
+      "keep_hint": true
+    },
+    {
+      "case": "a typed refusal minted outside the Live TV module carries no verdict",
+      "body": {
+        "code": "node_maintenance"
+      },
+      "render": "owner_unavailable",
+      "offer_retry": true,
+      "keep_hint": true
+    },
+    {
+      "case": "the owner tried and the tuner never fed the graph",
+      "body": {
+        "code": "startup_timeout",
+        "retry": "later",
+        "owner_decided": true
+      },
+      "render": "startup_timeout",
+      "offer_retry": true,
+      "keep_hint": false
+    },
+    {
+      "case": "the request timed out with no answer",
+      "transport": "timeout",
+      "render": "no_answer",
+      "offer_retry": true,
+      "keep_hint": true,
+      "replay": true
+    },
+    {
+      "case": "an untyped HTTP failure is no answer either",
+      "transport": "http",
+      "status": 404,
+      "body": {
+        "error": "not found"
+      },
+      "render": "no_answer",
+      "offer_retry": true,
+      "keep_hint": true,
+      "replay": true
+    },
+    {
+      "case": "the ingress rejected the body before any owner saw it",
+      "transport": "http",
+      "status": 400,
+      "body": {
+        "code": "invalid_request"
+      },
+      "render": "invalid_request",
+      "offer_retry": false,
+      "keep_hint": false
+    },
+    {
+      "case": "Live TV is switched off",
+      "body": {
+        "code": "live_tv_disabled",
+        "retry": "never",
+        "owner_decided": true
+      },
+      "render": "live_tv_disabled",
+      "offer_retry": false,
+      "keep_hint": false
+    },
+    {
+      "case": "the channel is gone from the lineup",
+      "body": {
+        "code": "channel_not_found",
+        "retry": "never",
+        "owner_decided": true
+      },
+      "render": "channel_not_found",
+      "offer_retry": false,
+      "keep_hint": false
+    }
+  ],
+  "resume": [
+    {
+      "case": "the session the viewer left is still running",
+      "body": {
+        "outcome": "live",
+        "session": {
+          "session_id": "ltv1.7de1a4c0.9f2b",
+          "playlist_url": "/api/v1/live-tv/sessions/ltv1.7de1a4c0.9f2b/index.m3u8",
+          "channel": {
+            "id": "7.1",
+            "guide_number": "7.1",
+            "guide_name": "WABC",
+            "favorite": true,
+            "drm": false,
+            "support": "ready"
+          },
+          "output": {
+            "container": "hls",
+            "video": "h264",
+            "audio": "aac",
+            "height": 720
+          },
+          "live": true
+        }
+      },
+      "then": "reattach"
+    },
+    {
+      "case": "the owner reaped it while the app was gone",
+      "body": {
+        "outcome": "ended"
+      },
+      "then": "clear_hint_wait"
+    },
+    {
+      "case": "the request id was retired",
+      "body": {
+        "outcome": "retired"
+      },
+      "then": "clear_hint_wait"
+    },
+    {
+      "case": "an activation is still in flight from an ingress",
+      "body": {
+        "outcome": "pending"
+      },
+      "then": "keep_hint_wait"
+    },
+    {
+      "case": "the resume itself did not answer",
+      "transport": "timeout",
+      "then": "keep_hint_wait"
+    }
+  ],
+  "protocols": [
+    {
+      "case": "an ingress older than the protocol list",
+      "channels_response": {},
+      "request_id": false,
+      "recovery_routes": false
+    },
+    {
+      "case": "an ingress whose owner does not retire starts yet",
+      "channels_response": {
+        "protocols": [
+          1,
+          2
+        ]
+      },
+      "request_id": false,
+      "recovery_routes": false
+    },
+    {
+      "case": "both ends carry the whole path",
+      "channels_response": {
+        "protocols": [
+          1,
+          2,
+          3
+        ]
+      },
+      "request_id": true,
+      "recovery_routes": true
+    }
+  ]
+}
