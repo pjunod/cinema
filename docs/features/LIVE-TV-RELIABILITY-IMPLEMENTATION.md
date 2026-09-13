@@ -1,6 +1,6 @@
 # Live TV reliability — the implementation plan
 
-**Status:** ready for adversarial review, then build · **Executes:** Paul's
+**Status:** reviewed by Astra 2026-09-13 (R1–R8 accepted, §8), ready to build · **Executes:** Paul's
 four rulings in [LIVE-TV-GUIDE-AND-START-RELIABILITY.md §7](LIVE-TV-GUIDE-AND-START-RELIABILITY.md#7-four-rulings-from-paul-2026-09-13--what-they-supersede) ·
 **Written:** 2026-09-13 · **Against:** `main` at `a124876` · **Lane:**
 `effort/live-tv-reliability` (exists, at `a124876`)
@@ -47,10 +47,12 @@ any client-side refusal to start.
    45 s: the picture is back with no press. Reopen after two minutes: the
    channel list, and the first press plays.
 6. **A stray never refuses a viewer.** With `max_sessions` = 4 and four
-   sessions of which one is the viewer's own with no keepalive for ≥ 15 s,
-   a new start from that viewer is admitted and the stray is cancelled;
+   sessions of which one is the viewer's own, *activated*, with no
+   keepalive for ≥ 15 s (or whose request id the viewer has retired), a
+   new start from that viewer is admitted and the stray is cancelled; a
+   starting or provisional session is never evicted by idleness;
    `tuner_capacity` is answered only when every slot is live and none is
-   the viewer's.
+   the viewer's stray.
 7. **Every session end is on the box.** One INFO line per ended session
    with channel, reason, duration and tuner bytes;
    `plurx_live_tv_session_ends_total{reason=…}` broken out by reason.
@@ -132,9 +134,15 @@ unreadable or wrong `version` → `None` + one `tracing::warn!`;
 clock step at boot must not discard a good copy); `age > GUIDE_STALE_TTL`
 → `None` (left on disk; the next success overwrites it);
 `observed = Instant::now().checked_sub(age).unwrap_or_else(Instant::now)`
-(a machine up for less time than the guide's age has no such instant; the
-copy is then served as if fetched at boot — fresher than it is, never
-staler). Write rules: serialise → `guide.json.tmp` → `rename`, inside
+(a machine up for less time than the guide's age has no such instant).
+**The age is never lost to that fallback** (review R6): `CachedGuide`
+gains `age_offset: Duration` — the clamped wall-clock age at adoption,
+zero for a fresh fetch — and every age is `age_offset + now - observed`.
+When `checked_sub` fails, `observed = Instant::now()` and `age_offset =
+age`; the served `age_seconds`, the `fresh`/`stale`/dropped classification
+and the Prometheus gauge all use the effective age, so a copy adopted at
+3 600 s reports 3 600 s and expires `GUIDE_STALE_TTL − 3 600 s` later
+whichever branch it took. Write rules: serialise → `guide.json.tmp` → `rename`, inside
 `spawn_blocking`, **after** the state mutex is released; failure is a
 `warn!`, never an error to the refresh. `invalidate()` removes the file
 (`NotFound` is fine).
@@ -169,7 +177,10 @@ impl GuideCache {
 ```
 
 `read()` sets `guide.next_refresh_at = state.next_refresh_at` on **both**
-branches — an `unavailable` answer still says when to ask again.
+branches — an `unavailable` answer still says when to ask again — and
+computes `age = cached.age_offset + now.duration_since(cached.observed)`
+everywhere the old code used the bare difference (the stale filter at
+1566, `age_seconds` at 1576, the freshness split at 1578).
 `store()` on `Ok` clones the new `CachedGuide` out, drops the lock, then
 `persist_guide`. `Default` stays what it is (tests use it).
 
@@ -177,9 +188,11 @@ branches — an `unavailable` answer still says when to ask again.
 the `Arc` exists, calls `manager.adopt_persisted_guide()`:
 `state.try_lock()` (uncontended at construction), and if `cached` is
 `Some`, `metrics.observe_guide_at(cached.observed, total_programmes)` and
-`publish_guide_titles(&cached.guide)`. `observe_guide_at` is a new sibling
-of `observe_guide` (live_tv.rs 1268–1274) taking the instant explicitly —
-the age gauge must report the copy's real age, not a fresh fetch.
+`publish_guide_titles(&cached.guide)`. `observe_guide_at(observed, age_offset,
+programmes)` is a new sibling of `observe_guide` (live_tv.rs 1268–1274); the
+projection stores the offset with the instant and `guide_prometheus`
+(1300–1310) adds it — the age gauge reports the copy's real age, not a
+fresh fetch, on either branch of the adoption.
 
 `observe_config` (live_tv.rs 1782) gains one line after
 `cancel_if_config_changed`: `self.guide_cache.observe_generation(config.generation)`.
@@ -304,11 +317,35 @@ Validation at the ingress: `^[0-9a-f]{32}$`, else `400 invalid_request`.
 when present — **no internal wire change**: the field already exists on
 the signed v1/v2 bodies, its content was always an opaque string, and the
 owner key (`LiveTvRequestKey`, 1040–1055) already includes `user_id`. When
-absent, `uuid::Uuid::new_v4()` as today. Advertise it: `start_protocols:
-vec![1, 2]` at live_tv.rs 1960 becomes `vec![1, 2, 3]`, and the public
-snapshot exposes it exactly as `2` is exposed today (the `owner_protocols`
-read at http/live_tv.rs 360–366 is the model). Clients send `request_id`
-and use the routes in §3.10 only when the snapshot lists `3`.
+absent, `uuid::Uuid::new_v4()` as today.
+
+**Negotiation covers the whole path, not just the owner** (review R1). An
+owner advertising `3` says nothing about the ingress the client is
+talking to: an older ingress rejects the new field (`deny_unknown_fields`
+on its `PublicLiveTvStart`) and has none of §3.10's routes. So the signal
+the client reads is produced *by the ingress*, as an intersection:
+
+```rust
+/// What this binary's public surface accepts: body fields and recovery
+/// routes. Protocol 3 = client request ids + /live-tv/starts/*.
+const INGRESS_START_PROTOCOLS: &[u8] = &[1, 2, 3];
+
+fn negotiated_protocols(owner: &[u8]) -> Vec<u8> {
+    INGRESS_START_PROTOCOLS.iter().copied().filter(|p| owner.contains(p)).collect()
+}
+```
+
+`LiveTvChannelsResponse` (http/live_tv.rs 52–60) gains
+`#[serde(default, skip_serializing_if = "Vec::is_empty")] protocols: Vec<u8>`
+= `negotiated_protocols(&owner_snapshot.start_protocols)`; the owner's
+`start_protocols: vec![1, 2]` at live_tv.rs 1960 becomes `vec![1, 2, 3]`.
+Client rule, all three: send `request_id` and use `/live-tv/starts/*` **iff
+the last channels response listed `3`**; a response without the field (an
+older ingress) means legacy behaviour — no `request_id`, no retire, no
+resume, hints kept for later. The ingress additionally strips `request_id`
+when the owner does not list `3` (the same shape as `playback` for `2` at
+364–366), which covers a client that read the list before an owner
+downgrade.
 
 Replay semantics are the owner's existing ones and are **not** widened:
 the same ingress under the same serving generation joins the in-flight
@@ -348,12 +385,15 @@ Lookup helpers on `LiveTvRegistry` (all O(sessions), fine — the map holds
 ≤ 4 live sessions and ≤ 256 tombstones):
 
 ```rust
-fn session_for_public_request(&self, user_id: i64, request_id: &str) -> Option<Arc<LiveTvSession>>;
-   // scans `requests` keys for key.user_id == user_id && key.request_id == request_id
+fn sessions_for_public_request(&self, user_id: i64, request_id: &str) -> Vec<Arc<LiveTvSession>>;
+   // ALL matches: scans `requests` keys for key.user_id == user_id && key.request_id == request_id.
+   // A serving-generation bump between a POST and its replay legitimately makes two
+   // (review R5); every public operation is defined over the whole set.
 fn tombstone_for_public_request(&self, user_id: i64, request_id: &str) -> Option<&LiveTvTerminalTombstone>;
    // scans `terminals` values by entry.request.{user_id, request_id}
 fn retire(&mut self, user_id: i64, request_id: String, now: Instant);
    // insert with now + RETIRED_TTL; evict the user's oldest past MAX_RETIRED_PER_USER
+fn is_retired(&self, user_id: i64, request_id: &str) -> bool;
 ```
 
 The capacity branch at 2195–2206 becomes:
@@ -365,11 +405,19 @@ if live >= usize::from(config.max_sessions) {
     // Paul's ruling: a possibly-held tuner is never a reason to refuse a
     // viewer. This viewer's own stray — no keepalive for STRAY_EVICTION_IDLE,
     // or a request id they have since retired — is cancelled first.
+    // Idle is only meaningful for a session that has a heartbeat to miss
+    // (review R4): `last_touch` is set at admission and a starting or
+    // provisional session cannot yet be touched by a player, and both are
+    // already bounded by STARTUP_*_TIMEOUT / PROVISIONAL_TIMEOUT. They are
+    // never evicted for idleness — only a retired request id evicts them.
     let stray = registry.sessions.values()
         .filter(|s| s.request.user_id == request.user_id && !s.cancel.is_cancelled())
         .filter(|s| {
             let state = s.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            now.duration_since(state.last_touch) >= STRAY_EVICTION_IDLE
+            let idle_active = state.activated
+                && state.phase == LiveTvSessionPhase::Active
+                && now.duration_since(state.last_touch) >= STRAY_EVICTION_IDLE;
+            idle_active || registry.is_retired(request.user_id, &s.request.request_id)
         })
         .min_by_key(|s| s.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).last_touch)
         .cloned();
@@ -396,7 +444,7 @@ pub(crate) enum LiveTvRetireOutcome { Stopped, Ended, Retired }
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct LiveTvResumeAnswer {
-    pub(crate) outcome: LiveTvResumeOutcome,        // live | ended | retired
+    pub(crate) outcome: LiveTvResumeOutcome,        // live | pending | ended | retired
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) session: Option<LiveTvActivated>,    // present iff outcome == live
 }
@@ -405,20 +453,37 @@ impl LiveTvManager {
     /// Stop whatever this viewer's request produced, and make sure nothing
     /// can be produced from it later.
     pub(crate) async fn retire_local(&self, user_id: i64, request_id: &str) -> LiveTvRetireOutcome {
-        // 1. live session for (user, id)  → cancel_and_wait(vec![session]) (ignore Err) → Stopped
-        // 2. tombstone for (user, id)     → Ended
-        // 3. neither                      → registry.retire(user_id, request_id, now) → Retired
-        // In all three cases the id is also inserted into `retired`, so a POST that
-        // was in flight when the client gave up gets Conflict, never a tuner.
+        // Under ONE registry lock, in this order (review R5 — the fence goes in
+        // before anything is looked at, so a POST racing this call finds
+        // Conflict or a session that is about to be cancelled, never a fresh
+        // admission):
+        //   registry.retire(user_id, request_id, now);
+        //   let live = registry.sessions_for_public_request(user_id, request_id);   // all of them
+        //   let ended = registry.tombstone_for_public_request(user_id, request_id).is_some();
+        // then, lock released:
+        //   !live.is_empty() → cancel_and_wait(live) (ignore Err) → Stopped
+        //   ended            → Ended
+        //   otherwise        → Retired
     }
 
     /// The same document the original activation answered, for a session
     /// that is still live and still this viewer's.
     pub(crate) async fn resume_local(&self, user_id: i64, request_id: &str) -> LiveTvResumeAnswer {
-        // live session, state.activated, phase == Active, !cancel.is_cancelled()
-        //   → state.last_touch = now; Live + document built exactly as at 2312–2319
-        //     (channel_with_source_format, output, delivery, playlist_url, live: true)
-        // tombstoned → Ended;  otherwise → Retired (and registry.retire(...))
+        // Over ALL matches, collected under the registry lock (review R5):
+        //   resumable = activated && phase == Active && !cancel.is_cancelled()
+        //   Some resumable → pick the one with the greatest last_touch; touch it;
+        //                    answer Live + document built exactly as at 2312–2319
+        //                    (channel_with_source_format, output, delivery,
+        //                    playlist_url, live: true); every OTHER live match —
+        //                    resumable or not — is cancelled outside the lock:
+        //                    one public identity, one stream.
+        //   none resumable but a Starting/Provisional match → Pending
+        //                    (an activation is in flight from an ingress; the
+        //                    client keeps its hint, shows the list, and does not
+        //                    touch it — the provisional timeout or that ingress
+        //                    settles it)
+        //   no live match, tombstone present → Ended
+        //   nothing        → registry.retire(...) → Retired
     }
 }
 ```
@@ -469,7 +534,7 @@ client's rule in §3.16 needs it to be.
 | Method | Path | Auth | Answer |
 |---|---|---|---|
 | `DELETE` | `/api/v1/live-tv/starts/{request_id}` | bearer (`AuthUser`) | `200 {"outcome": "stopped" \| "ended" \| "retired"}` |
-| `POST` | `/api/v1/live-tv/starts/{request_id}/resume` | bearer | `200 {"outcome": "live", "session": <LiveTvActivated>}` or `200 {"outcome": "ended" \| "retired"}` |
+| `POST` | `/api/v1/live-tv/starts/{request_id}/resume` | bearer | `200 {"outcome": "live", "session": <LiveTvActivated>}` or `200 {"outcome": "pending" \| "ended" \| "retired"}` |
 | `GET` | `/api/v1/live-tv/starts/{request_id}` | bearer | `200 {"state": "starting" \| "active" \| "ended" \| "retired" \| "unknown", "code"?: <terminal code>}` — never a capability |
 
 All three validate `request_id` as `^[0-9a-f]{32}$` (400 otherwise) and
@@ -516,7 +581,21 @@ older client reading only those two is unaffected:
 
 Mechanically: `api_error(error)` becomes `api_error_from(error, Decided::Owner)`
 and the three ingress-minted sites call it with `Decided::Ingress`; the
-`retry` column is a `match` on the variant in one place. `node_maintenance`,
+`retry` column is a `match` on the variant in one place.
+
+**The remote-owner path carries the same two fields without any change to
+the internal wire** (review R2). Internal errors are serialised by
+`signed_wire_error` (internal_live_tv.rs 322–339) as `{code, message}` and
+parsed by `wire_api_error` (http/live_tv.rs 1020–1045) into a stable code.
+Both fields are *functions of where the body came from and what the code
+is*, so the ingress produces them at the parse site: a body that arrived
+as a **signed owner response** — whether from a new or an older owner —
+is `owner_decided: true`, and `retry` is the same `match` on the stable
+code (a code `wire_api_error` folds into `owner_unavailable` at its `_`
+arm is still owner-decided: the owner answered). `peer_error` (transport
+failure, timeout, invalid signature/body) stays `Decided::Ingress`.
+`signed_wire_error` is not touched. Closing evidence is a two-node run
+(§5.4), not a reducer fixture. `node_maintenance`,
 `node_removal_fenced` and `learner_route_ineligible` are minted outside
 this module by the request gate; they stay as they are — the client rule
 (§3.16) treats any typed body without `owner_decided` as **not** owner
@@ -547,16 +626,38 @@ clean release — `CapabilityExpired` from `stop_local` — counts under
 Prometheus block at 3583–3585 emits one `plurx_live_tv_session_ends_total{reason="…"}`
 line per key, plus `plurx_live_tv_stray_evictions_total` from §3.7.
 
-### 3.13 Ingress budgets
+### 3.13 One public start deadline, threaded through every stage
 
-http/live_tv.rs 24–26: `START_EXCHANGE_ATTEMPT` 17 s → **20 s**,
-`START_EXCHANGE_TOTAL` 24 s → **36 s** (`STARTUP_FEEDING_TIMEOUT` 30 s + 6 s
-of activation and relay slack; the 45 s client POST timeouts on all three
-clients stay above it). In `owner_start` (713–721), when the loop exhausts
-its attempts, call `owner_retire(state, config, request.user_id,
-&request.request_id)` before returning the error — the only handle the
-ingress has is the request id, and this closes the published-but-lost
-window the diagnosis §3.6 describes. Ignore its result.
+`start_session` today runs three stages whose sum nobody bounds:
+`owner_snapshot` (`SNAPSHOT_DEADLINE` 25 s), `owner_start`
+(`START_EXCHANGE_TOTAL` 24 s over two `START_EXCHANGE_ATTEMPT` 17 s tries)
+and `owner_activate` (two `CONTROL_EXCHANGE_DEADLINE` 5 s tries) — a worst
+case past the clients' 45 s POST timeout (review R7). Replace the per-stage
+sums with one budget:
+
+```rust
+const PUBLIC_START_DEADLINE: Duration = Duration::from_secs(40);   // clients time out at 45 s
+```
+
+`start_session` takes `let deadline = deadline_after(PUBLIC_START_DEADLINE)`
+at entry and passes `remaining(deadline)` into each stage, which uses
+`min(its own constant, remaining)`: the snapshot read, each start attempt
+(`START_EXCHANGE_ATTEMPT` becomes 20 s; `START_EXCHANGE_TOTAL` goes — the
+public deadline is the total), each activation attempt. The owner's
+lifecycle constants are untouched. When the budget is exhausted at any
+stage after a provisional was issued, or when `owner_start` gives up:
+
+```rust
+// Not awaited on the response path — it has its own 5 s deadline and is
+// logged either way, so exhausting the public budget never silently
+// abandons the retirement.
+tokio::spawn(owner_retire_detached(state.clone(), config.clone(), user_id, request_id));
+```
+
+and the public answer is `owner_unavailable` with `owner_decided: false`,
+`retry: "now"` — the client's next press retires and starts. The
+published-but-lost window the diagnosis §3.6 describes closes because the
+retire carries the request id, the only handle the ingress ever has.
 
 ### 3.14 The live contract table carries the client timings
 
@@ -603,7 +704,13 @@ Same shape as `live-tv-guide-cases.json` (`schema_version`, `title`,
   {"body": {"outcome": "live", "session": {"session_id": "ltv1.x.y", "live": true, "...": "..."}}, "then": "reattach"},
   {"body": {"outcome": "ended"},   "then": "clear_hint_wait"},
   {"body": {"outcome": "retired"}, "then": "clear_hint_wait"},
+  {"body": {"outcome": "pending"}, "then": "keep_hint_wait"},
   {"transport": "timeout",         "then": "keep_hint_wait"}
+],
+"protocols": [
+  {"channels_response": {},                       "request_id": false, "recovery_routes": false},
+  {"channels_response": {"protocols": [1, 2]},    "request_id": false, "recovery_routes": false},
+  {"channels_response": {"protocols": [1, 2, 3]}, "request_id": true,  "recovery_routes": true}
 ]
 ```
 
@@ -629,9 +736,11 @@ comment moves onto the hint store). `Lease.start`:
    hint present → POST /live-tv/starts/{id}/resume
        live    → attach the returned session exactly as a fresh start would (playlist, heartbeat, watching = channel)
        ended | retired | typed 4xx from the ingress → forget hint; channel list
-       anything else → keep hint; channel list
+       pending | anything else → keep hint; channel list
  press
-   hints present and orphaned (see web) → DELETE /live-tv/starts/{id}   (fire and forget; forget on any typed 2xx)
+   hints present and orphaned (web: not owned by a live document) → DELETE /live-tv/starts/{id}
+                                          (fire and forget; forget on any typed 2xx; a hint that is
+                                          NOT retired is simply left — the press still proceeds)
    new id → persist hint → POST …/sessions {playback, request_id}
        typed 2xx → acquired; hint stays until DELETE /sessions confirms (then forget)
        no typed answer → replay POST once, same id
@@ -653,14 +762,18 @@ are replaced by the fixture's `retry`/`keep_hint` reducer.
   `list()`, `remember(id)`, `touch(id)`, `forget(id)`. Boot `sync()` at
   index.html 14824 becomes the open-time resume in `openLiveTv` (the route
   handler around 14939), guarded so it runs once per document.
-- **Liveness before retiring** (the multi-tab rule): a `BroadcastChannel("plurx-live-tv")`
-  is opened at document boot; a document that owns a live session answers
-  `{alive: id}` to `{who: id}`. Before `DELETE /starts/{id}` the pressing
-  document posts `{who}` and waits `retire_liveness_probe_ms`; an answer,
-  or `touched_at` newer than `retire_orphan_after_keepalives × 5 s`,
-  leaves the hint alone and renders the existing "another tab is watching"
-  refusal. Web Locks would be cleaner and is unavailable on the LAN HTTP
-  origin this runs on (`randomUUID` is not either — 14819).
+- **Liveness decides what to retire, never whether to start** (review
+  R3): a `BroadcastChannel("plurx-live-tv")` is opened at document boot; a
+  document that owns a live session answers `{alive: id}` to `{who: id}`.
+  Before `DELETE /starts/{id}` the pressing document posts `{who}` and
+  waits `retire_liveness_probe_ms`; an answer, or `touched_at` newer than
+  `retire_orphan_after_keepalives × 5 s`, means that hint is **left
+  alone** — and the new start proceeds to the owner regardless. A sibling
+  tab keeps its stream (admission is the owner's, with four slots); a tab
+  that crashed 10 s ago keeps its hint until a later press or the 45 s
+  reap. The "another tab is watching" refusal is deleted with the barrier.
+  Web Locks would be cleaner and is unavailable on the LAN HTTP origin this
+  runs on (`randomUUID` is not either — 14819).
 - `LIVE_TV_LEASE.start/release/keepalive` (14847–14887): body gains
   `request_id`; the `hold` on keepalive (14884) becomes `touch`; the
   `hold` on release (14875) goes; `confirm` after the unload DELETE stays
@@ -731,8 +844,10 @@ Developer views. Met/unmet colouring, never a gate.
    (40 s), `STARTUP_TIMEOUT`, `STARTUP_FEEDING_TIMEOUT`.** They are what make
    "recent" mean something and a stray cheap.
 4. **No client-side refusal to start, ever again.** No monotonic wait, no
-   quarantine, no "try again in N seconds" that the client computed. A hint
-   that cannot be retired is kept and the start proceeds.
+   quarantine, no "try again in N seconds" that the client computed, no
+   "another tab is watching". A hint that cannot be retired — or that a
+   live sibling document owns — is kept, and the start proceeds to the
+   owner's admission.
 5. **No capability, token, channel id or tuner URL persisted on a client.**
    The hint is `{request_id, touched_at}` and nothing else. `resume` hands
    the capability back over the authenticated channel; the client holds it
@@ -773,7 +888,10 @@ incremental; the cloud container works too, see `docs/ci/AGENT-COMPILE-LOOP.md`)
 
 §3.1–§3.5, §3.17's server half. New unit tests in `live_tv.rs`'s test
 module, beside `the_guide_cache_serves_fresh_then_stale_then_nothing…`
-(7976): `a_persisted_guide_survives_a_restart_at_its_real_age`,
+(7976): `a_persisted_guide_survives_a_restart_at_its_real_age` (asserted under
+`tokio::time::pause()`, where `checked_sub` cannot represent an hour before
+the clock started — the real age must still be served and the expiry must
+land `GUIDE_STALE_TTL − age` later; never accept zero),
 `a_persisted_guide_past_the_stale_window_is_not_adopted` (and garbage on
 disk is ignored), `the_guide_document_says_when_the_owner_comes_back`,
 `a_skipped_tick_on_the_owner_comes_back_in_a_minute_not_twenty`,
@@ -797,21 +915,44 @@ lineup wake (`get_or_refresh` from cold notifies; from warm does not).
 
 ### 5.4 M3 — `request_id`, retire, resume, stray eviction, budgets, logging (server)
 
-§3.6–§3.13. Tests: registry-level cases for replay-join, replay-conflict,
-retired → `Conflict`, per-user retired cap (a 9th evicts the oldest; 256
-retires from one user never refuse another user's start), retire on a
-live/tombstoned/unknown id, resume on a live/provisional/ended/retired id
-(provisional → not `live`), stray eviction (full slots + own idle session
-→ admitted and cancelled; full slots + own *fresh* session → `Capacity`;
-full slots + another user's idle session → `Capacity`), ingress 404 →
-`owner_decided: false`, redaction of `starts/<id>`, maintenance eligibility
-of the two public routes, and the `DeviceAuth`-absence assertion over an end
-line.
-- **Accept:** focused suite green; `test_api_doc_routes` green with the
-  three rows and `190`; `plurx_live_tv_starts_total{outcome="recovered"}`
-  increments on a replayed public POST in a two-node cluster-check
-  scenario or the single-node integration test, whichever is cheaper to
-  add beside the existing Live TV cases.
+§3.6–§3.13. **Registry unit cases** (live_tv.rs test module): replay-join,
+replay-conflict, retired → `Conflict`, per-user retired cap (a 9th evicts
+the oldest; 256 retires from one user never refuse another user's start),
+`negotiated_protocols` over `[]`, `[1,2]`, `[1,2,3]`, retire over zero /
+one / two live matches for one identity (two: both cancelled, and a POST
+racing the retire — issued between the fence insert and the cancel —
+answers `Conflict`), resume selection (active + provisional → the active
+one, the provisional cancelled; provisional only → `pending`; two active →
+the greater `last_touch`, the other cancelled; tombstone → `ended`; none →
+`retired`), stray eviction at full capacity over five fixtures — own
+*active idle* session (evicted, admitted), own *active fresh* session
+(`Capacity`), own *healthy 16 s-old starting* session (`Capacity`, never
+evicted), own *provisional awaiting activation* session (`Capacity`), and
+another user's idle session (`Capacity`) — plus a retired-id eviction of a
+provisional session, redaction of `starts/<id>`, maintenance eligibility
+of the two public routes, and the `DeviceAuth`-absence assertion over an
+end line.
+
+**Two-node cases** in `crates/plurxd/tests/live_tv_two_node.rs` (the
+existing ingress/owner harness with a fixture HDHomeRun; runs under
+`--features cluster-integration-tests`), because a single node cannot show
+any of these (review R2, R7): (a) an owner refusal (`tuner_unavailable`
+from the fixture device) reaches the client through the ingress with
+`owner_decided: true` and the right `retry`; (b) an owner that is
+unreachable yields `owner_unavailable` with `owner_decided: false`;
+(c) a replayed public POST through the same ingress joins the same session
+(`starts_total{outcome="recovered"}` increments) and a retire through the
+ingress stops it; (d) a resume through the ingress hands back the same
+capability; (e) a fixture device that publishes late plus a delayed
+activation stays inside `PUBLIC_START_DEADLINE`, and a device that never
+publishes ends in a retired request with no session left on the owner
+(assert elapsed public-request time and the owner's registry afterwards).
+The old-ingress/new-owner direction is a *client* decision proven by the
+`protocols` fixture cases (§3.15) on all three clients; the
+new-ingress/old-owner direction is `negotiated_protocols` plus the
+existing `playback`-stripping shape at 364–366.
+- **Accept:** the focused suite and the two-node file green;
+  `test_api_doc_routes` green with the three rows and `190`.
 
 ### 5.5 M4 — the barrier removal, from one fixture (web · Apple · Android)
 
@@ -823,9 +964,10 @@ not an extracted helper.
   --include='*.{js,html,swift,kt,json,md}'` returns only the diagnosis
   document; all three fixture suites green; on each platform an
   instrumented test proves a hint left by a killed process is retired in
-  the background and the press is not delayed. Physical: kill the Apple TV
-  app while watching, reopen within 45 s — the same stream is back with no
-  press; reopen after two minutes — the channel list, first press plays.
+  the background and the press is not delayed. Physical: §7 — the abrupt
+  termination case (no clean release happened) must resume; the clean
+  background case must show the list; the long-delay case must not
+  resurrect an idle session.
 
 ### 5.6 M5 — Developer rows, status doc, release counters, deploy
 
@@ -838,21 +980,25 @@ Android `versionCode` + README claim (if not done in M4); lane promotion
 
 ## 6. What the reviewer should attack
 
-The diagnosis document's own review found twenty things; these are the
-ones that survive into this plan and the new surfaces it adds:
+The diagnosis document's own review found twenty things and Astra's
+review of this plan eight more (§8); these are the ones that survive into
+the contracts as written and the new surfaces they add:
 
 1. **The lineup-fill wake.** Is `was_cold` computed before the write, and
    is the `Notify` the same instance the loop awaits? A `notify_waiters`
    here loses a wake that lands mid-refresh; `notify_one` stores it.
 2. **`checked_sub` on `tokio::time::Instant`.** Under `tokio::time::pause()`
    in tests the clock starts near zero; a persisted age of an hour has no
-   instant before it. The fallback (served as fetched-at-boot) must be the
-   *conservative* direction and the test must not assert an age it cannot
-   produce under a paused clock.
+   instant before it. `age_offset` (§3.2) is what makes the real age
+   survive that; confirm every reader of `observed` adds it — `read()`,
+   the stale filter, the freshness split, the Prometheus gauge — and that
+   none of them can be reached with a bare difference.
 3. **Replay across a fence bump.** `LiveTvRequestKey` includes
    `source_serving_generation`; a blip between POST and replay makes a
-   second session. Paul accepted a stray; confirm §3.7's eviction catches
-   it under full capacity and the idle reap catches it otherwise.
+   second session for one public identity. §3.7/§3.8 now define every
+   public operation over the whole match set; confirm nothing still calls
+   a singular lookup, and that resume's "cancel the others" cannot cancel
+   the one it just selected.
 4. **Retire during an in-flight start on the owner.** `retire_local` must
    insert into `retired` *before* looking for the session, so a POST racing
    the retire either finds `Conflict` or a session that is about to be
@@ -882,24 +1028,85 @@ ones that survive into this plan and the new surfaces it adds:
     clock.** A clock step makes a live tab look orphaned and its session
     gets retired: the other tab sees `capability_expired` and its next
     press plays. Annoying, not unsafe — but say so in the code.
-12. **Budgets.** `START_EXCHANGE_TOTAL` 36 s with two 20 s attempts:
-    confirm the second attempt is still bounded by the total (the
-    `min` at 675) and that the retire-on-exhaustion uses a fresh 5 s
-    deadline, not the exhausted one.
+12. **Budgets.** One `PUBLIC_START_DEADLINE`: confirm every stage takes
+    `min(own, remaining)` — the snapshot read included — that the detached
+    retire uses a fresh 5 s deadline, not the exhausted one, and that a
+    provisional issued in the last second of the budget is retired rather
+    than left to the 40 s provisional timeout.
+13. **Negotiation.** `protocols` is the *intersection*; confirm an ingress
+    never reports `3` from its own constant alone, that the channels
+    response is what every client reads before its first start (not the
+    readiness document), and that a client caches it per lineup read, not
+    per process.
+14. **Eviction predicate.** `activated && phase == Active` — confirm
+    `Provisional` with `activated == false` (the window between publish and
+    activation) is excluded, and that a retired id evicts in every phase.
 
 ---
 
 ## 7. Physical verification — the prompt for the GPT session at Paul's Mac
 
+Pressing Home first is a *clean* release on Apple (the `scenePhase`
+handler at LiveTvView.swift 1304–1310 stops the session, and a confirmed
+release forgets the hint), so it must not be the setup for the crash case
+(review R8). The abrupt case has to kill the process while it is playing
+in the foreground, without giving the app a chance to release.
+
 > plurx Live TV reliability, lane `effort/live-tv-reliability`, Apple build
-> 147 / Android 90. Install both on the Apple TV, the iPhone and the Google
-> TV from the lane head with `scripts/ship-physical`. Then, on each device:
-> (1) with the fleet freshly deployed, open Live TV within a minute — the
-> guide must fill in without touching Settings; note how long it took;
-> (2) start a channel, press Home, force-quit the app, reopen within 45 s —
-> the same channel must be playing with no press; (3) start a channel,
-> force-quit, wait two minutes, reopen — the channel list, and the first
-> press must play; (4) confirm the words "Wait 90 seconds" cannot be
-> produced by any sequence you try. Report each as pass/fail with the
-> device, the build number from Settings → About, and a screenshot of any
+> 147 / Android 90. Install on the Apple TV, the iPhone and the Google TV
+> from the lane head with `scripts/ship-physical`. For every case record
+> the device, the build from Settings → About, what you did, whether the
+> server logged a `Live TV session ended` line before you reopened (nynuc:
+> `sudo docker logs --since 5m plurxd | grep 'Live TV session ended'`), the
+> seconds since the last keepalive, and the reopen result; screenshot any
 > failure.
+> (1) Guide after a deploy: with the fleet freshly deployed, open Live TV
+> within a minute — the grid must fill in without touching Settings; note
+> how long it took.
+> (2) Abrupt termination, recent: start a channel and, while it is playing
+> in the foreground, kill the process without backgrounding it — Apple:
+> `xcrun devicectl device process terminate` (or Xcode Debug → Stop while
+> attached); Android: `adb shell am force-stop tv.plurx.app` is NOT abrupt
+> enough (it runs `onStop`) — use `adb shell kill -9 $(adb shell pidof
+> tv.plurx.app)`. Reopen within 30 s. Expected: the same channel playing
+> with no press, and NO `session ended` line before the reopen.
+> (3) Abrupt termination, late: same kill, reopen after two minutes.
+> Expected: the channel list (the owner reaped it at 45 s idle — the
+> `session ended` line is there), and the first press plays.
+> (4) Clean background: start a channel, press Home, wait ten seconds,
+> reopen. Expected: the channel list (the release was confirmed — the
+> `session ended` line is there), and the first press plays. This is not
+> a failure.
+> (5) Deploy mid-stream: start a channel on the Apple TV, ask Paul to
+> restart nynuc's plurxd, reopen Live TV after it is back. Expected: the
+> channel list, and the first press plays.
+> (6) Confirm the words "Wait 90 seconds" cannot be produced by any
+> sequence you try.
+
+---
+
+## 8. Review log — Astra, 2026-09-13 (R1–R8), and where each landed
+
+All eight accepted; none disputed or superseded. Each line names the
+revised section that carries the correction and the evidence that closes
+it.
+
+| # | Finding | Status | Where | Closing evidence |
+|---|---|---|---|---|
+| R1 | Owner protocol support did not prove ingress support | accepted | §3.6 `negotiated_protocols`, `protocols` on the channels response; §3.15 `protocols` fixture | client fixture cases (old ingress → legacy), `negotiated_protocols` unit test (new ingress / old owner), two-node (new / new) |
+| R2 | Remote-owner errors bypassed the envelope | accepted | §3.11 — fields produced at `wire_api_error`, no internal wire change | two-node cases (a), (b) in §5.4 |
+| R3 | Web liveness rule reinstated a refusal | accepted | §3.16 web bullet; §4.4 | web tests: dead-fresh hint, live sibling, old orphan — which retires are sent, and the start reaches the server in all three |
+| R4 | Idle eviction could cancel a slow start | accepted | §3.7 predicate (`activated && Active`, or retired) | the five capacity fixtures in §5.4 |
+| R5 | Retire/resume assumed one session per identity | accepted | §3.7 `sessions_for_public_request`; §3.8 fence-first retire, resume precedence, `pending` | registry cases in §5.4 (two matches; racing POST; active + provisional) |
+| R6 | Age fallback made old data look new | accepted | §3.2/§3.3 `age_offset` | `…real_age` test under a paused clock, expiry at `TTL − age` |
+| R7 | 36 s did not bound the public start | accepted | §3.13 `PUBLIC_START_DEADLINE`, remaining-budget threading, detached retire | two-node case (e) in §5.4 |
+| R8 | Physical test performed a clean release first | accepted | §7 cases (2)–(4); §5.5 | the per-case record in §7 |
+
+Standing constraints re-checked after the revision: no `DeviceAuth` policy
+change; no field added to `LiveTvStartRequest`, `LiveTvStartRequestV2`,
+`LiveTvActivateRequest` or `LiveTvStopRequest` (the `protocols` field is on
+a public response, `request_id` rides an existing signed field, the new
+internal bodies are new paths); no lifecycle constant changed
+(`START_EXCHANGE_ATTEMPT`/`TOTAL` are ingress exchange budgets, not
+lifecycle constants); nothing persisted on a client but
+`{request_id, touched_at}`.
