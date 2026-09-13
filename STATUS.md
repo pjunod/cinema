@@ -4,6 +4,45 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## plurx records now, and tells you before a programme starts
+
+**Built on `effort/live-tv-dvr`, one PR to `main`.** Executes
+[LIVE-TV-DVR-IMPLEMENTATION.md](docs/features/LIVE-TV-DVR-IMPLEMENTATION.md)
+v2 — the plan Astra reviewed on 2026-09-13, eleven findings, all folded in.
+Status and evidence:
+[LIVE-TV-DVR-STATUS.md](docs/features/LIVE-TV-DVR-STATUS.md).
+
+Every guide cell on every client now offers **Record · Record series ·
+Remind me** beside Watch. The owner writes the tuner's bytes straight to a
+`.ts` under the DVR root with a sidecar of guide metadata; the file becomes an
+item in a `recordings` library that any node serves through the ordinary VOD
+path. A reminder reaches an overlay on every open client, a local notification
+on a phone, and one webhook POST.
+
+Four things carry the design, and each was a defect in the plan's first draft:
+
+- **An airing is `(channel, start)` for its whole life.** Expansion runs every
+  fifteen seconds, so insert-if-absent over an index covering *every* state is
+  what stops a rule resurrecting a recording the viewer skipped.
+- **One channel is one tuner.** Back-to-back airings share a single tuner GET
+  and produce two files, with the overlapping padding written to both.
+- **An attempt is its own file.** A capture that loses its worker resumes into
+  `.a2.part`, so a fenced predecessor still draining cannot corrupt it; the
+  gap is recorded and the recording finishes `partial`, never silently `done`.
+- **A viewer refused a tuner is told what holds it.** `tuner_capacity` carries
+  the recordings by channel and offers to stop one — and their own idle
+  session is evicted first, so they are never told a recording took a tuner
+  they were holding themselves.
+
+Two prerequisites the plan pins on were not on `main` (the reliability effort
+is planned but unbuilt), so both were built here and only those two: the guide
+now survives a restart and reaches a fortnight ahead, and the owner evicts a
+viewer's own stray before answering a capacity refusal.
+
+Nothing is gated — `dvr.enabled` is a plain setting, and the Developer tab's
+six rows are advisory. Nothing has touched the tuner yet: the hardware pass is
+the only unproved step, and §8 of the plan carries its prompts.
+
 ## Live TV: the empty guide and the "wait 90 seconds" refusal, diagnosed
 
 **Diagnosis in [#273](http://192.168.4.7:3000/noirr/plurx/pulls/273); Paul

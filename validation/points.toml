@@ -742,6 +742,7 @@ paths = [
   "crates/plurxd/src/http/dvr.rs",
   "docs/features/LIVE-TV-DVR-AND-REMINDERS-OPTIONS.md",
   "docs/features/LIVE-TV-DVR-IMPLEMENTATION.md",
+  "docs/features/LIVE-TV-DVR-STATUS.md",
 ]
 checks = ["rust-gate", "rust-gate-ci", "security-boundaries", "resource-bounds", "operations-contract", "web-static", "web-layout"]
 depends_on = ["live-tv.integration", "library.catalog", "identity.access", "playback.pipeline", "server.api"]
