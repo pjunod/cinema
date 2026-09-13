@@ -2941,6 +2941,219 @@ test("a refusal no source row claims still reaches the surface as the server's s
   assert.equal(lost.source, "media_owner_lost_410");
 });
 
+
+// ---- one owner-stop killer per blocking-raise site -------------------------
+//
+// §5.7 of the implementation plan asks for one per site, not one in total: a
+// suite that pins `showStallRecoveryFailure` and nothing else lets the other
+// five lose their stop in silence. The site list is DERIVED from the page, so
+// a new blocking raise added without a stop fails here too rather than being
+// something this test forgot to know about.
+function shippedSurfaceRaises() {
+  const needle = 'raisePlaybackSurface("';
+  const out = [];
+  let at = SHIPPED_UI.indexOf(needle);
+  while (at !== -1) {
+    const source = SHIPPED_UI.slice(at + needle.length, SHIPPED_UI.indexOf('"', at + needle.length));
+    const open = SHIPPED_UI.indexOf("{", at);
+    let depth = 0;
+    let end = open;
+    for (; end < SHIPPED_UI.length; end += 1) {
+      if (SHIPPED_UI[end] === "{") depth += 1;
+      else if (SHIPPED_UI[end] === "}") { depth -= 1; if (depth === 0) break; }
+    }
+    out.push({
+      source,
+      args: SHIPPED_UI.slice(open, end + 1),
+      line: SHIPPED_UI.slice(0, at).split("\n").length,
+      before: SHIPPED_UI.slice(Math.max(0, at - 460), at),
+    });
+    at = SHIPPED_UI.indexOf(needle, end);
+  }
+  return out;
+}
+
+test("every blocking raise in the page takes the owner's stop first", () => {
+  const raises = shippedSurfaceRaises();
+  assert.ok(raises.length >= 20, `only ${raises.length} raise sites found — the scanner has drifted`);
+  // `player_stopped` present and not the literal false: either the site claims
+  // the stop outright or it computes the claim from a table read.
+  const blocking = raises.filter((raise) => /player_stopped\s*:\s*(?!false)/.test(raise.args));
+  assert.ok(blocking.length >= 8, `only ${blocking.length} blocking raise sites — a site has lost its claim`);
+  for (const raise of blocking) {
+    assert.match(
+      raise.before,
+      /stopPlayerForExhaustion\(\);/,
+      `index.html:${raise.line}: ${raise.source} claims a stopped player with no stop before it`,
+    );
+  }
+  // And the other direction: a stop with no raise after it is a player paused
+  // for nothing, which is a side effect the contract does not allow either.
+  const stops = [...SHIPPED_UI.matchAll(/stopPlayerForExhaustion\(\);/g)];
+  assert.ok(stops.length >= 8);
+  for (const stop of stops) {
+    const after = SHIPPED_UI.slice(stop.index, stop.index + 460);
+    assert.match(after, /raisePlaybackSurface\(/,
+      `index.html:${SHIPPED_UI.slice(0, stop.index).split("\n").length}: a stop that raises nothing`);
+  }
+  // Named so the count cannot quietly shrink: these are the sites §3.4 and the
+  // review between them require.
+  const sources = new Set(blocking.map((raise) => raise.source));
+  for (const required of ["owner_exhausted", "owner_stopped", "decoder_failed", "repeated_early_end"]) {
+    assert.ok(sources.has(required), `no blocking site raises ${required} any more`);
+  }
+});
+
+// MUTATION M7: make the progress tick report `presenting: true` unconditionally
+// and this fails — evidence is the clock AND the frames, not the tick running.
+test("the shipped progress tick reports the advance it measured, not that it ran", () => {
+  const fed = [];
+  const build = new Function(
+    "PLAYER", "document", "performance", "playbackSurfaceStep", "playbackSurfaceGeneration",
+    "samplePlaybackPresentationClock", "streamHasVideo", "endWait", "clearStall",
+    "finishStallRecovery", "persistentWait", "bufferRunway", "PERSISTENT_STALL_MS",
+    "playbackOwnsAttachedMedia",
+    [shippedSource("playbackProgressTick"), "return playbackProgressTick;"].join("\n"),
+  );
+  const player = { started: true, wantsPlayback: true, attemptId: "g1" };
+  const video = { currentTime: 10, paused: false, ended: false };
+  let now = 1000;
+  const tick = build(
+    player, { hidden: false }, { now: () => now },
+    (event) => fed.push(event), (p) => (p && p.attemptId) || null,
+    () => 0, () => false, () => {}, () => {}, () => {}, () => {}, () => 10, 8000,
+    () => true,
+  );
+
+  tick(video, player);            // first sample: the watch is seeded, nothing moved
+  const first = fed.filter((event) => "presenting" in event);
+  assert.deepEqual(first, [{ presenting: false, attached: "g1" }],
+    "a seeded watch has measured no advance yet and must not claim one");
+
+  now = 1500; video.currentTime = 11;
+  tick(video, player);
+  assert.deepEqual(fed.filter((event) => "presenting" in event).at(-1),
+    { presenting: true, attached: "g1" }, "a film clock that advanced is presenting");
+
+  now = 2000;                      // same clock: the picture froze
+  tick(video, player);
+  assert.deepEqual(fed.filter((event) => "presenting" in event).at(-1),
+    { presenting: false, attached: "g1" }, "a clock that did not move is not presenting");
+
+  // And the tick is what ages the presenter's timed classes, before any guard.
+  assert.ok(fed.some((event) => event.tick === true), "the tick drives the presenter's timers");
+});
+
+// MUTATION M10: delete the re-arm from `armStall` and this fails. §3.4's stop
+// takes `stopPlayerTimers` with it, and those timers are the stall detector AND
+// the presenter's only evidence.
+test("a stream that starts again after the owner stopped it gets its sampler back", () => {
+  const armed = [];
+  const build = new Function(
+    "PLAYER", "document", "setTimeout", "clearStall", "stallDiagnose", "pbPosSec",
+    "armPlaybackSampling",
+    [shippedSource("armStall"), "return armStall;"].join("\n"),
+  );
+  const run = (player) => {
+    armed.length = 0;
+    build(player, { getElementById: () => ({ id: "video" }) }, () => 1, () => {}, () => {}, () => 0,
+      (v, p) => armed.push(p))(0);
+    return armed.length;
+  };
+  assert.equal(run({ samplingStopped: true }), 1,
+    "a player whose timers the owner stopped gets them back when a stream starts");
+  assert.equal(run({ samplingStopped: false }), 0,
+    "and a player that never lost them is not re-armed under its own running timers");
+});
+
+// MUTATION M11/M12: stop feeding `retire`/`attach` and these fail. Identity is
+// what bounds a fault's life; without it a refusal outlives the attempt.
+test("attachment and retirement are what the presenter is told about identity", () => {
+  const fed = [];
+  const attach = new Function(
+    "PLAYER", "playbackSurfaceStep", "playbackSurfaceGeneration",
+    [shippedSource("beginPlaybackMediaAttachment"), "return beginPlaybackMediaAttachment;"].join("\n"),
+  )(null, (event) => fed.push(event), (p) => (p && p.attemptId) || null);
+  attach({ attemptId: "a7" });
+  assert.deepEqual(fed, [{ attach: "a7" }],
+    "every attach on every route runs through here, so every one must say so");
+
+  fed.length = 0;
+  const retire = new Function(
+    "PLAYER", "playbackSurfaceStep", "playbackSurfaceGeneration", "stopPlayerTimers",
+    "teardownHls", "releaseSession",
+    [shippedSource("retirePlaybackPredecessor"), "return retirePlaybackPredecessor;"].join("\n"),
+  )(null, (event) => fed.push(event), (p) => (p && p.attemptId) || null, () => {}, () => {}, () => {});
+  retire({ attemptId: "a9", mediaPredecessor: { attemptId: "a8" } });
+  assert.deepEqual(fed, [{ retire: "a8" }],
+    "a retired generation stops being about anything, and the presenter has to hear it");
+});
+
+// MUTATION M16: drop `{once:true}` from the `waiting` listener and this fails.
+// Safari fires `waiting` at every fMP4 boundary; one wait is one fault.
+test("the waiting listener raises one fault per wait, not one per boundary", () => {
+  const wired = shippedSource("wirePlayerMedia");
+  const match = wired.match(/addEventListener\("waiting",\(\)=>\{([\s\S]*?)\n  \}\);/);
+  assert.ok(match, "index.html no longer wires waiting through the presenter");
+  const raised = [];
+  const live = [];
+  const handler = new Function(
+    "PLAYER", "PlaybackPolicy", "playbackOwnsAttachedMedia", "playbackSurfacePromptUp",
+    "beginWait", "bufferRunway", "playbackWaitCopy", "raisePlaybackSurface",
+    "notifyPlaybackControl", "v",
+    match[1],
+  );
+  const call = () => handler(
+    { started: true, health: null }, policy, () => true, () => false, () => {}, () => 3,
+    () => ({ title: "Buffering…", detail: "3.0 s client loaded" }),
+    (source, fault, options) => {
+      if (options && options.once && live.includes(source)) return null;
+      live.push(source);
+      raised.push({ source, options });
+      return null;
+    },
+    () => {}, {},
+  );
+  call();
+  call();
+  call();
+  assert.deepEqual(raised.map((entry) => entry.source), ["media_waiting"],
+    "three boundaries in one wait are one fault");
+  assert.equal(raised[0].options && raised[0].options.once, true,
+    "and the listener is what says so — the presenter is not asked to de-duplicate");
+});
+
+
+// The other blocking sites, behaviourally rather than structurally: each one
+// runs, and each one fails if its own stop is deleted. `persistentWait`'s
+// prompt branch and `stallDiagnose` have their own runs in web-control.test.js;
+// these are the two whose harness is cheapest here.
+asyncTest("the diagnosed-stall site stops before it raises", async () => {
+  const runs = [];
+  const order = [];
+  // stallDiagnose's terminal verdict.
+  const diagnose = new Function(
+    "PLAYER", "document", "TOKEN", "pbPosSec", "notifyPlaybackControl", "currentStreamFailureOverlay",
+    "probePlaybackSource", "finishStallRecovery", "clientLog", "toast",
+    "stopPlayerForExhaustion", "raisePlaybackSurface", "playbackOwnsAttachedMedia",
+    [shippedSource("playbackStallActions"), shippedSource("stallDiagnose"), "return stallDiagnose;"].join("\n"),
+  );
+  const player = { method: "remux", probeUrl: null, started: false };
+  await diagnose(
+    player, { getElementById: () => ({ networkState: 0, readyState: 0 }) }, null,
+    () => 0, () => null, () => null, async () => ({ status: 200, segState: 200 }),
+    () => {}, () => {}, () => {},
+    () => order.push("stop"),
+    (source, fault) => { order.push("raise"); runs.push({ source, fault }); },
+    () => true,
+  )();
+  assert.deepEqual(order, ["stop", "raise"],
+    "a diagnosed stall stops the player before its verdict goes over it");
+  assert.equal(runs[0].source, "decoder_failed");
+  assert.equal(runs[0].fault.player_stopped, true);
+  assert.deepEqual(runs[0].fault.actions, ["retry", "force_transcode", "close"]);
+});
+
 test("playback-info row builders follow the shared web field list in fixture order", () => {
   const rows = new Function(
     [
