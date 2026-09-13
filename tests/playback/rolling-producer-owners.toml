@@ -1794,7 +1794,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # tokio::time::sleep in its select, and five tokio::time::timeout /
 # Instant-arithmetic sites in the new registry tests. None bounds a producer;
 # the loop's cadence is the owner's, not a stream's.
-expected_occurrences = 747
+# +3 for the start-publication race regression: two awaited fixture deadlines
+# bound the start future and one short sleep advances the locked inventory
+# fixture. They are test-only, stay owned by the test task, and launch no child.
+expected_occurrences = 750
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -1881,7 +1884,11 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # Both are test-only synthetic inputs, owned by bounded_command_output with
 # capped output, timeout, kill-on-drop, and awaited reaping. Neither survives
 # the bounded await or enters a shipped binary.
-expected_occurrences = 107
+# 107 -> 106 for the Live TV graph-probe correction: the probe now builds the
+# production command with a finite synthetic input instead of constructing a
+# second command. The same bounded child remains, but one duplicate constructor
+# is gone.
+expected_occurrences = 106
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -2217,7 +2224,10 @@ pattern = "kill_on_drop\\s*\\("
 # cancellation backstop; normal and timed paths still explicitly reap it.
 # +1 for the finite-sample Live TV ffprobe; explicit kill/reap remains the
 # normal timeout path and kill-on-drop is only its cancellation backstop.
-expected_occurrences = 69
+# 69 -> 68 with the same Live TV graph-probe correction: the probe reuses the
+# production command's kill-on-drop child, so the duplicate probe-only call is
+# gone while cancellation protection remains on the one process that runs.
+expected_occurrences = 68
 
 [[module_structures]]
 id = "rolling-supervisor-construction"
