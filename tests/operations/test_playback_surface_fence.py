@@ -31,7 +31,13 @@ class PlaybackSurfaceFenceTest(unittest.TestCase):
         self.fence = load_fence()
 
     def test_must_trip_fixtures_trip_on_every_write(self):
-        expected = {"web": 16, "swift": 10, "kotlin": 8}
+        # The web count went 16 -> 36 when M1 closed the spellings the review
+        # found: the modern DOM replacements (`innerText`, `insertAdjacentHTML`,
+        # `append`, `prepend`, `replaceChildren`, `replaceWith`), optional-call
+        # and reflected `setLoading`, and every one of them again against the
+        # two surfaces M1 added. An exact count, because a pattern that stops
+        # matching is a hole, and so is a fixture line nobody notices is dead.
+        expected = {"web": 37, "swift": 10, "kotlin": 8}
         names = {"web": "must_trip.web.html", "swift": "must_trip.swift", "kotlin": "must_trip.kt"}
         for kind, name in names.items():
             with self.subTest(kind=kind):

@@ -27,4 +27,34 @@
     setLoading
       (true, "Preparing…", "", "");
   }
+  // The spellings a DOM API list written in 2015 would miss.
+  function modernDom(l) {
+    ploadText.innerText = "Reconnecting…";
+    ploadSub.insertAdjacentHTML("beforeend", "<em>held</em>");
+    ploadAct.append(document.createElement("button"));
+    ploadAct.prepend(document.createElement("button"));
+    ploadAct.replaceChildren();
+    ploading.replaceWith(document.createElement("div"));
+    setLoading?.(true, "Preparing…", "", "");
+    setLoading.call(null, true, "Preparing…", "", "");
+    setLoading.apply(null, [true]);
+    setLoading.bind(null)(true);
+  }
+  // The declaration exemption is for a line that is ONLY the declaration. A
+  // line that declares AND writes is a write, and the loose spelling excused it.
+  function shadow(l) { setLoading(true); return l; } function setLoading(on) { return on; }
+  // M1 added the two surfaces that are not the full screen. They are the
+  // presenter's output too, and every spelling above reaches them as well.
+  function notices() {
+    psurfText.textContent = "Waiting for the server.";
+    psurfSub.innerText = "held";
+    psurfAct.innerHTML = "<button>Try again</button>";
+    pindText.className = "pindicator on";
+    psurfAct.insertAdjacentHTML("beforeend", "<button>Close</button>");
+    psurfAct.replaceChildren();
+    psurface.setAttribute("class", "psurface on");
+    psurface.classList.add("on");
+    pindicator.classList.remove("on");
+    Object.assign(psurfText, { textContent: "held" });
+  }
 </script>
