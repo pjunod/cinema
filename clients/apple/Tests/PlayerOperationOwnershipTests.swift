@@ -393,6 +393,62 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         XCTAssertTrue(controller.surface.surface.playerStopped)
     }
 
+    /// The staged loading overlay, routed (§3.3 row 10). It is a
+    /// `client_preparing` fault for as long as the open is in flight, it
+    /// covers the picture without asking the viewer anything, and it is
+    /// retired when the open settles — including when it settles by failing,
+    /// which is the path a successful open's `intent_settled` never reaches.
+    func testTheStagedOpenIsAPreparingFaultThatSettlesHoweverTheOpenEnds() async throws {
+        let decisions = Decisions()
+        let creates = Creates()
+        let waits = RetryWaits()
+        creates.answers = [nil]
+        let controller = PlayerController(
+            requestPlaybackDecision: { _, file, selection, quality in
+                try await decisions.request(file: file, selection: selection, quality: quality)
+            },
+            waitCreateRetry: { ms in try await waits.wait(ms) },
+            requestHlsSession: { _, file, body in try await creates.request(file: file, body: body) }
+        )
+        let model = AppModel()
+        defer { controller.stop(); decisions.cancelAll(); creates.cancelAll(); waits.cancelAll() }
+        start(controller, model: model)
+        try await waitUntil("initial decision") { decisions.requests.count == 1 }
+        decisions.resolve(0, with: .success((try coldDecision(), caps)))
+        try await waitUntil("the create is issued") { creates.attempts.count == 1 }
+
+        XCTAssertEqual(controller.surface.surface.source, "client_preparing")
+        XCTAssertEqual(controller.surface.surface.cls, .preparing)
+        XCTAssertEqual(
+            controller.surface.kind, .blocking,
+            "nothing is presenting yet, so the staged overlay covers the picture"
+        )
+        XCTAssertTrue(controller.showsProgressSurface)
+        XCTAssertFalse(
+            controller.isPlaybackBlocked,
+            "a spinner covers pixels and asks nothing; it is not the input contract's `failed`"
+        )
+        XCTAssertNil(controller.surface.surface.title, "the overlay it replaces had no words")
+
+        // The server refuses outright: no ladder, no retry, and `open` never
+        // reaches the `intent_settled` a successful attach would emit.
+        creates.resolve(0, with: .failure(
+            APIError.refused(
+                status: 503, code: "vod_disabled",
+                message: "streaming is switched off on this server", positionMs: nil
+            )
+        ))
+        try await waitUntil("the owner's terminal") {
+            controller.surface.surface.cls == .stopped
+        }
+        XCTAssertTrue(
+            controller.surface.faults.allSatisfy { $0.source != "client_preparing" },
+            "the staged overlay is retired when the open settles, however it settled"
+        )
+        XCTAssertTrue(controller.surface.surface.playerStopped)
+        XCTAssertTrue(controller.isPlaybackBlocked)
+    }
+
     /// Row 6 is the `start` context. A create refused over a picture the viewer
     /// is watching is a refused CHANGE, and the sequence must not run there at
     /// all — no ladder, and no sixty-second watchdog stopping that player.

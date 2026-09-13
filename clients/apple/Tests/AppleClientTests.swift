@@ -3319,6 +3319,145 @@ final class AppleClientTests: XCTestCase {
         }
     }
 
+    // MARK: - Reach: the raise sites the audit found missing
+
+    /// Row 12, the important one. `waitingToPlayAtSpecifiedRate` used to drive
+    /// a spinner of its own (`isPlaybackWaiting`), so the `buffering` class
+    /// could never be drawn on this client and two things decided what covered
+    /// the picture. The decision is pure so it is provable: a headless
+    /// `AVPlayer` over a playlist URL nothing serves never reaches that
+    /// status, and the last round's lesson is that a detector pinned by
+    /// spelling is proved by nothing.
+    func testAWaitBecomesTheRowItsContextDeclares() {
+        func source(
+            _ status: AVPlayer.TimeControlStatus,
+            _ context: PlaybackSurfaceModel.Context,
+            started: Bool = true,
+            wantsPlayback: Bool = true,
+            finished: Bool = false,
+            blocked: Bool = false
+        ) -> String? {
+            PlayerController.mediaWaitSurfaceSource(
+                timeControlStatus: status,
+                context: context,
+                started: started,
+                wantsPlayback: wantsPlayback,
+                finished: finished,
+                blocked: blocked
+            )
+        }
+        // Row 12 is declared for the `attached` context and nowhere else.
+        XCTAssertEqual(source(.waitingToPlayAtSpecifiedRate, .attached), "media_waiting")
+        // A wait before the first frame is the staged start it actually is.
+        XCTAssertEqual(source(.waitingToPlayAtSpecifiedRate, .start), "client_preparing")
+        // A change already has a `preparing` fault of its own.
+        XCTAssertNil(source(.waitingToPlayAtSpecifiedRate, .change))
+        // Nothing else is a wait.
+        XCTAssertNil(source(.playing, .attached))
+        XCTAssertNil(source(.paused, .attached))
+        // And a wait nobody is waiting for is not one.
+        XCTAssertNil(source(.waitingToPlayAtSpecifiedRate, .attached, started: false))
+        XCTAssertNil(source(.waitingToPlayAtSpecifiedRate, .attached, wantsPlayback: false))
+        XCTAssertNil(source(.waitingToPlayAtSpecifiedRate, .attached, finished: true))
+        XCTAssertNil(
+            source(.waitingToPlayAtSpecifiedRate, .attached, blocked: true),
+            "a prompt the viewer has to answer is not covered by a spinner"
+        )
+        // Both rows exist in the shared table, in the context the adapter
+        // raises them in, and both are progress rather than a prompt.
+        for (id, context) in [("media_waiting", PlaybackSurfaceModel.Context.attached),
+                              ("client_preparing", .start)] {
+            guard case .success(let row) = PlaybackSurfaceContract.row(source: id, context: context),
+                  let cls = row.cls
+            else { return XCTFail("\(id) is not a row this client may raise in \(context)") }
+            XCTAssertEqual(PlaybackSurfaceContract.rule(for: cls).severity, .progress, id)
+            XCTAssertFalse(PlaybackSurfaceContract.rule(for: cls).requiresPlayerStopped, id)
+        }
+        XCTAssertEqual(
+            PlaybackSurfaceContract.rule(for: .buffering).minMs,
+            PlaybackSurfaceContract.timings.bufferingMinMs,
+            "the 350 ms debounce is the reducer's, and the adapter must not keep a second one"
+        )
+    }
+
+    /// A `media_waiting` fault IS the buffering surface, after the debounce and
+    /// not before — the whole of what the legacy spinner could never produce.
+    func testAMediaWaitIsDrawnAsBufferingOnceItHasLasted() {
+        let origin = ContinuousClock.now
+        var model = PlaybackSurfaceModel()
+        model.apply(.attach(4), now: origin)
+        model.apply(.presenting(false, attached: 4), now: origin)
+        model.apply(
+            PlaybackSurfaceModel.raise(
+                source: "media_waiting", context: .attached, attached: 4,
+                title: "Buffering…", detail: "0s buffered"
+            ),
+            now: origin
+        )
+        XCTAssertEqual(model.kind, .none, "a wait shorter than the debounce draws nothing")
+        model.apply(.tick, now: origin.advanced(by: .milliseconds(349)))
+        XCTAssertEqual(model.kind, .none)
+        model.apply(.tick, now: origin.advanced(by: .milliseconds(350)))
+        XCTAssertEqual(model.kind, .blocking)
+        XCTAssertEqual(model.currentFault?.cls, .buffering)
+        XCTAssertEqual(model.surface.title, "Buffering…")
+        XCTAssertFalse(
+            model.entersFailedRouting,
+            "a full-screen buffering covers pixels, not routing"
+        )
+        // And the picture coming back is what takes it down.
+        model.apply(.presenting(true, attached: 4), now: origin.advanced(by: .seconds(1)))
+        XCTAssertEqual(model.kind, .none)
+    }
+
+    /// One owner for the spinner pixel. The two legacy drawers are gone from
+    /// both files, and the view has exactly one progress overlay.
+    func testTheSpinnerPixelHasExactlyOneOwner() throws {
+        let controller = try playerControllerSource()
+        XCTAssertFalse(
+            controller.contains("var isPlaybackWaiting"),
+            "the legacy waiting flag is retired, not kept beside the presenter"
+        )
+        let view = try playerViewSource()
+        XCTAssertFalse(view.contains("controller.isPlaybackWaiting"))
+        XCTAssertFalse(
+            view.contains("if controller.isChangingStream ||"),
+            "the staged loading overlay is a `client_preparing` fault now"
+        )
+        XCTAssertEqual(
+            view.components(separatedBy: "playbackProgressSurface").count - 1,
+            2,
+            "one progress overlay: one definition and one use"
+        )
+        XCTAssertTrue(view.contains("if controller.showsProgressSurface && !findingNext {"))
+    }
+
+    /// The presenter's own clock. Without it nothing ever recomputes a surface
+    /// while the film clock is stopped — which is exactly when a wait is drawn
+    /// — because AVPlayer's periodic observer stops firing with it.
+    func testThePresenterHasAClockThatSurvivesAStoppedFilmClock() throws {
+        let source = try playerControllerSource()
+        XCTAssertEqual(
+            PlayerController.surfaceClockIntervalMs, 500,
+            "the same 500 ms the web's playbackProgressTick uses"
+        )
+        XCTAssertLessThan(
+            PlayerController.surfaceClockIntervalMs,
+            PlaybackSurfaceContract.timings.bufferingMinMs * 2,
+            "a clock coarser than the debounce could not draw a wait at all"
+        )
+        let start = try XCTUnwrap(source.range(of: "private func startSurfaceClock() {"))
+        let end = try XCTUnwrap(
+            source.range(of: "\n    }\n", range: start.upperBound..<source.endIndex)
+        )
+        let body = String(source[start.upperBound..<end.lowerBound])
+        XCTAssertTrue(body.contains("self.present(.tick)"), "it feeds the reducer's clock")
+        // Pure: the presenter's clock may not touch the player.
+        for forbidden in ["player.pause()", "player.play()", "reopen(", "seek(", "prepare("] {
+            XCTAssertFalse(body.contains(forbidden), "the presenter's clock does not \(forbidden)")
+        }
+    }
+
     /// The adapter, pinned — because the reducer cannot pin this.
     ///
     /// `.inert` returns before the reducer's switch, so a model test fed inert

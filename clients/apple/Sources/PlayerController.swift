@@ -1852,27 +1852,53 @@ final class PlayerController: ObservableObject {
     /// routing (PLAYBACK-SURFACE-CONTRACT.md §4).
     var isPlaybackBlocked: Bool { surface.entersFailedRouting }
 
-    /// A PROGRESS fault the presenter says is covering the picture, because
-    /// the attached media is not presenting: `preparing`, `buffering` or
-    /// `recovering` full-screen. It is blocking pixels and not routing, so it
-    /// draws the same spinner a stream change already draws and asks the
-    /// viewer nothing (PLAYBACK-SURFACE-CONTRACT.md §3.1, §4).
-    var showsBlockingProgress: Bool {
-        surface.kind == .blocking && !surface.entersFailedRouting
+    /// The presenter's PROGRESS surface — `preparing`, `buffering` or
+    /// `recovering` — full-screen while the attached picture is not
+    /// presenting, an in-chrome indicator while it is (§3.1). It is blocking
+    /// pixels and not routing, so it draws a spinner and asks the viewer
+    /// nothing (PLAYBACK-SURFACE-CONTRACT.md §3.1, §4).
+    ///
+    /// One flag, because there is now one owner of that pixel. Until this
+    /// branch the same pixel had two: `isChangingStream` drew a spinner and
+    /// the legacy `isPlaybackWaiting` drew a second one straight off
+    /// `timeControlStatus`, and which of them covered the picture was decided
+    /// by the order of two `if`s in a view. Both are now faults, and the
+    /// presenter decides.
+    var showsProgressSurface: Bool {
+        switch surface.kind {
+        case .blocking: return !surface.entersFailedRouting
+        case .indicator: return true
+        case .none, .banner: return false
+        }
     }
 
-    var isPlaybackWaiting: Bool {
-        started
-            && wantsPlayback
-            && !finished
-            && !isPlaybackBlocked
-            && !isChangingStream
-            && player.timeControlStatus == .waitingToPlayAtSpecifiedRate
-    }
     @Published private(set) var currentMs = 0
     @Published private(set) var knownDurationMs = 0
     @Published private(set) var isPlaying = false
-    @Published private(set) var isChangingStream = false
+    /// An open, a reopen, a failover or a prepared commit is in flight.
+    ///
+    /// Contract §3.3 row 10: that is a `client_preparing` fault — the staged
+    /// start every client paints, with no refusal behind it — and what it
+    /// draws is the presenter's to decide. The raise hangs off the flag's own
+    /// transition rather than off the four sites that set it, because a dozen
+    /// sites clear it; keying both halves to the one transition is what makes
+    /// the fault's life exactly the flag's life.
+    ///
+    /// The fault carries the viewer request it belongs to, so it is retired by
+    /// that request settling or being superseded and never by the
+    /// predecessor's own picture: a warm quality change happens over a moving
+    /// picture, and a fault evidence could retire would be swept away in the
+    /// same step that raised it.
+    @Published private(set) var isChangingStream = false {
+        didSet {
+            guard isChangingStream != oldValue else { return }
+            if isChangingStream {
+                raiseStreamChangePreparing()
+            } else {
+                settleStreamChangePreparing()
+            }
+        }
+    }
     @Published private(set) var selectedSubtitle: Int?
     @Published private(set) var selectedAudio: Int?
     @Published private(set) var selectedHeight: Int?
@@ -2011,6 +2037,12 @@ final class PlayerController: ObservableObject {
     private(set) var surfaceHistory = PlaybackSurfaceHistory()
     private var surfaceEpoch = ContinuousClock.now
     private var surfaceLifecycleObservation: [AnyCancellable] = []
+    /// The presenter's own clock (see `startSurfaceClock`).
+    private var surfaceClockTask: Task<Void, Never>?
+    /// The viewer request the in-flight open's `client_preparing` fault was
+    /// raised with, so the settle names the request the raise named even after
+    /// the viewer has moved the epoch on.
+    private var streamChangePreparingIntent: Int?
     /// The last position the surface's evidence sampler saw, so "the clock
     /// moved" is a delta rather than a guess.
     private var lastSurfaceSampleMs: Int?
@@ -2478,6 +2510,7 @@ final class PlayerController: ObservableObject {
         player.automaticallyWaitsToMinimizeStalling = true
         addPeriodicObserver()
         startPlaybackRecoveryMonitor()
+        startSurfaceClock()
 
         restartInitialDecision(lifecycle: lifecycle)
     }
@@ -2533,6 +2566,7 @@ final class PlayerController: ObservableObject {
         installSurfaceLifecycleObservation()
         addPeriodicObserver()
         startPlaybackRecoveryMonitor()
+        startSurfaceClock()
         let startMs = currentMs
         let url = OfflineCatalog.localURL(for: path)
         loadingTask = Task { await loadOffline(url: url, startMs: startMs, lifecycle: lifecycle) }
@@ -3343,6 +3377,8 @@ final class PlayerController: ObservableObject {
         statusTask = nil
         recoveryTask?.cancel()
         recoveryTask = nil
+        surfaceClockTask?.cancel()
+        surfaceClockTask = nil
         clearPGSOverlaySelection()
         pgsOverlayItemGeneration &+= 1
         // Before the reporter goes, not after: a staging still live is owed
@@ -5349,6 +5385,7 @@ final class PlayerController: ObservableObject {
         surfaceEpoch = ContinuousClock.now
         lastSurfaceSampleMs = nil
         surfaceHasPresented = false
+        streamChangePreparingIntent = nil
     }
 
     /// The ledger ring and the four client-log events of the contract's §3.6.
@@ -5580,6 +5617,131 @@ final class PlayerController: ObservableObject {
             }
         }
     }
+
+    /// The staged loading overlay, raised (§3.3 row 10). No title and no
+    /// detail: the overlay it replaces was a bare spinner, and §6 says move
+    /// the text as it is rather than write new text.
+    private func raiseStreamChangePreparing() {
+        guard started else { return }
+        let intent = viewerActionEpoch
+        streamChangePreparingIntent = intent
+        raiseSurfaceNotice(
+            source: "client_preparing",
+            context: surfaceContext,
+            detail: nil,
+            intent: intent
+        )
+    }
+
+    /// The open settled — attached, refused, superseded or abandoned; the flag
+    /// goes down on all four. `intent_settled` retires only the classes whose
+    /// row names it, which is `preparing` and nothing else, so a refusal this
+    /// same failure raised keeps its banner and its Try again.
+    private func settleStreamChangePreparing() {
+        guard let intent = streamChangePreparingIntent else { return }
+        streamChangePreparingIntent = nil
+        present(.intentSettled(intent))
+    }
+
+    /// Contract §3.3 row 12: `waitingToPlayAtSpecifiedRate` after start is a
+    /// `media_waiting` fault, which the presenter draws as `buffering` once
+    /// the wait has lasted `buffering_min_ms`. The debounce is the reducer's
+    /// and there is no second timer here — this says only that the player is
+    /// waiting, and says it at most once per wait.
+    ///
+    /// Before the first frame there is no "after start" to be after: row 12 is
+    /// declared for the `attached` context alone, and a wait during a cold
+    /// open is the staged start it actually is (`client_preparing`, row 10).
+    /// Both carry the sentence the legacy overlay composed, moved as-is.
+    private func noteMediaWaiting() {
+        let context = surfaceContext
+        guard let source = Self.mediaWaitSurfaceSource(
+            timeControlStatus: player.timeControlStatus,
+            context: context,
+            started: started,
+            wantsPlayback: wantsPlayback,
+            finished: finished,
+            blocked: isPlaybackBlocked
+        ) else { return }
+        // The web's `{once:true}`. AVPlayer flaps in and out of this status at
+        // every fMP4 boundary on healthy 4K, exactly as Safari fires `waiting`,
+        // and a wait already raised is a fact being restated rather than a new
+        // one: the ledger ring is for distinct faults.
+        guard !hasLiveSurfaceFault(source: source) else { return }
+        let waiting = PlaybackWaitPresentation.make(
+            runwaySeconds: bufferedRunwaySeconds(),
+            httpWaitCount: sessionStatus?.httpWaitCount
+        )
+        raiseSurfaceNotice(
+            source: source,
+            context: context,
+            title: waiting.title,
+            detail: waiting.detail
+        )
+    }
+
+    /// Which row a wait belongs to, or `nil` for no raise at all.
+    ///
+    /// Pure, like `surfaceIsPresenting` and for the same reason: a headless
+    /// `AVPlayer` over a playlist URL nothing serves never reaches
+    /// `.waitingToPlayAtSpecifiedRate`, so the decision is otherwise provable
+    /// only by reading the source — which is how the last round's detector
+    /// came to be pinned by spelling and proved by nothing.
+    ///
+    /// `change` is somebody else's pixel: the change's own `client_preparing`
+    /// is already up, and a second progress fault under it would say the same
+    /// thing twice. `wantsPlayback` rather than the transport's own rate,
+    /// because a buffering player reports rate zero while Play is still the
+    /// viewer's intent — the same reason `togglePlayPause` keys off it.
+    nonisolated static func mediaWaitSurfaceSource(
+        timeControlStatus: AVPlayer.TimeControlStatus,
+        context: PlaybackSurfaceModel.Context,
+        started: Bool,
+        wantsPlayback: Bool,
+        finished: Bool,
+        blocked: Bool
+    ) -> String? {
+        guard started, wantsPlayback, !finished, !blocked,
+              timeControlStatus == .waitingToPlayAtSpecifiedRate
+        else { return nil }
+        switch context {
+        case .attached: return "media_waiting"
+        case .start: return "client_preparing"
+        case .change: return nil
+        }
+    }
+
+    private func hasLiveSurfaceFault(source: String) -> Bool {
+        let generation = surfaceAttachedGeneration
+        return surface.faults.contains {
+            $0.source == source && $0.attached == generation
+        }
+    }
+
+    /// The presenter's clock, and nothing else.
+    ///
+    /// Every timing the contract states — the 350 ms buffering debounce, the
+    /// 30 s hold, the 5 s degraded notice — is measured by the reducer, and
+    /// the reducer only measures when its caller applies an event
+    /// (implementation §3.3: "timers are the caller's `tick` events").
+    /// AVPlayer's periodic observer cannot be that clock: it stops firing the
+    /// moment the film clock stops, which is exactly when a wait needs
+    /// drawing. This is the twin of the web's `playbackProgressTick`, on the
+    /// same 500 ms. It samples nothing, detects nothing, moves no threshold
+    /// and raises nothing the player is not already doing.
+    private func startSurfaceClock() {
+        surfaceClockTask?.cancel()
+        surfaceClockTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(Self.surfaceClockIntervalMs))
+                guard !Task.isCancelled, let self, self.started else { return }
+                self.noteMediaWaiting()
+                self.present(.tick)
+            }
+        }
+    }
+
+    static let surfaceClockIntervalMs = 500
 
     /// PiP and AirPlay report presentation through the platform's own flags,
     /// so the view hands them over rather than this controller guessing.
@@ -5901,6 +6063,13 @@ final class PlayerController: ObservableObject {
                 // observer already has: the position delta, the rate, and the
                 // first-frame proof for an item that has never presented one.
                 self.sampleSurfacePresentation(at: observedPosition)
+                // In the same turn as the evidence, never before it: AVPlayer
+                // invokes this observer when playback stops as well as while
+                // it runs, so a wait raised here is raised against a model
+                // that has already been told the picture stopped. Raised the
+                // other way round, §3.2 would resolve the disagreement against
+                // the fault and retire it in the step that made it.
+                self.noteMediaWaiting()
                 if isActuallyPlaying {
                     self.preferredRate = self.player.rate
                     self.attachmentRecovery.observe(

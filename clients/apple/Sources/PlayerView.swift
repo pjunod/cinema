@@ -825,31 +825,15 @@ struct PlayerView: View {
                     }
                 }
 
-                if controller.isChangingStream || controller.showsBlockingProgress {
-                    streamChangeProgress
-                        .tint(.white)
-                        .padding(18)
-                        .background(.ultraThinMaterial, in: Circle())
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
-
-                if controller.isPlaybackWaiting && !findingNext {
-                    let waiting = PlaybackWaitPresentation.make(
-                        runwaySeconds: controller.bufferedRunwaySeconds(),
-                        httpWaitCount: controller.sessionStatus?.httpWaitCount
-                    )
-                    VStack(spacing: 10) {
-                        ProgressView().tint(.white)
-                        Text(waiting.title)
-                            .font(.system(.callout, design: .monospaced).weight(.semibold))
-                        Text(waiting.detail)
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundColor(.white.opacity(0.72))
-                    }
-                    .foregroundColor(.white)
-                    .padding(18)
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // ONE progress surface, drawn by the presenter's verdict.
+                // `isChangingStream` used to draw a spinner here and
+                // `isPlaybackWaiting` a second box below it, so two things
+                // decided what covered the picture — the exact defect the
+                // contract exists to kill. Both are faults now
+                // (`client_preparing`, `media_waiting`), and this draws
+                // whichever one the presenter says owns the surface.
+                if controller.showsProgressSurface && !findingNext {
+                    playbackProgressSurface
                 }
 
                 if findingNext {
@@ -1487,6 +1471,38 @@ struct PlayerView: View {
         #else
         ProgressView()
         #endif
+    }
+
+    /// The presenter's progress fault, in the two shapes this player has
+    /// always drawn: a bare spinner for a fault with nothing to say (the
+    /// staged open), and the spinner with the fault's own sentence under it
+    /// for one that does (a wait, a recovery rung). No new copy — the words
+    /// are the ones the raising owner put on the fault.
+    @ViewBuilder
+    private var playbackProgressSurface: some View {
+        let surface = controller.surface.surface
+        if let title = surface.title, !title.isEmpty {
+            VStack(spacing: 10) {
+                ProgressView().tint(.white)
+                Text(title)
+                    .font(.system(.callout, design: .monospaced).weight(.semibold))
+                if let detail = surface.detail, !detail.isEmpty {
+                    Text(detail)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundColor(.white.opacity(0.72))
+                }
+            }
+            .foregroundColor(.white)
+            .padding(18)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            streamChangeProgress
+                .tint(.white)
+                .padding(18)
+                .background(.ultraThinMaterial, in: Circle())
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
     }
 
     private var failureView: some View {
