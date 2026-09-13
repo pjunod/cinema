@@ -328,6 +328,51 @@ internal val SURFACE_SOURCES: List<SurfaceSourceRow> = listOf(
 )
 
 /**
+ * Which source row a refusal CODE names, in [context], or null.
+ *
+ * The fixture's `codes` lists are what say "this status, with this code, is
+ * that row": §3.3 row 6 for a create, row 8 for a playlist or segment. A code
+ * in no row's list names no row — a 503 nobody explained is not a "still
+ * building" answer and may not borrow one's class, which is the rule
+ * `Controller.createIsStillBuilding` already applies to creates. A row is
+ * consulted only in a context it declares, so a create-only code cannot claim
+ * a segment refusal and the reverse.
+ *
+ * Read straight off [SURFACE_SOURCES], so a code the fixture adds or moves is
+ * honoured by the adapter the moment the transcribed table moves with it.
+ */
+internal fun surfaceSourceForCode(code: String?, context: SurfaceContext): String? {
+    val wanted = code?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+    return SURFACE_SOURCES.firstOrNull { row ->
+        row.codes.contains(wanted) && row.matches(context)
+    }?.id
+}
+
+/**
+ * Does [sourceId]'s row admit a refusal carrying [code], in [context]?
+ *
+ * A row that lists `codes` is claiming "this status WITH one of these codes",
+ * and a refusal carrying something else is not that row. A row that lists none
+ * is claiming the status outright, and a client that demanded a code from it
+ * would make the row unreachable — which is the defect this whole change
+ * exists to remove, not one to add.
+ *
+ * Which of the two a row is doing belongs to the fixture, so it is READ here
+ * rather than decided: the same adapter is correct before and after a `codes`
+ * list is added to a row, and adding one narrows the row on every client at
+ * once.
+ */
+internal fun surfaceRowAdmitsCode(
+    sourceId: String,
+    code: String?,
+    context: SurfaceContext,
+): Boolean {
+    val row = SURFACE_SOURCES.firstOrNull { it.id == sourceId && it.matches(context) } ?: return false
+    if (row.codes.isEmpty()) return true
+    return row.codes.contains(code?.trim()?.takeIf { it.isNotEmpty() })
+}
+
+/**
  * Only the owner's OWN stop promotes a fault that declared a successor class
  * (`media_owner_lost_410` → `stopped`). Any other blocking source is its own
  * fault with its own sentence and its own actions — a decoder failure reported
@@ -549,6 +594,15 @@ internal data class SurfaceLog(
     val action: SurfaceAction? = null,
     val error: String? = null,
     val context: String? = null,
+    /**
+     * What the owner said about this event.
+     *
+     * Every other field is an identity or a class. `log_only` (§3.3 row 18) has
+     * neither — it maps to no class at all — so without this the one event that
+     * IS the whole trace would reach the client log saying only that something
+     * happened.
+     */
+    val detail: String? = null,
 )
 
 internal data class SurfaceStep(
@@ -700,6 +754,7 @@ internal class PlaybackSurfaceReducer {
                 event = SurfaceLogEvents.LOG_ONLY,
                 source = row.id,
                 attached = event.attached,
+                detail = event.detail,
             )
             return state
         }

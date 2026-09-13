@@ -781,7 +781,6 @@ private fun PlayerContent(
     var pendingMs by remember(controller) { mutableStateOf<Long?>(null) }
     var timelineFocused by remember { mutableStateOf(false) }
     var isPlaying by remember(controller) { mutableStateOf(playbackIntent.playbackRequested) }
-    var buffering by remember { mutableStateOf(true) }
     var controlsVisible by remember { mutableStateOf(true) }
     // Height of the bottom control block as it was last laid out. The info
     // panel has to clear that block, but the block is a title, chips, a context
@@ -1102,7 +1101,8 @@ private fun PlayerContent(
             }
 
             override fun onPlaybackStateChanged(state: Int) {
-                buffering = state == Player.STATE_BUFFERING
+                // No screen-held copy of "the player is buffering": that is the
+                // presenter's `media_waiting` now, and one of it is the point.
                 if (state == Player.STATE_ENDED) {
                     vm.postProgress(itemId, plan.globalPosition(plan.durationMs), plan.progressDurationMs)
                     controlsVisible = true
@@ -1351,8 +1351,13 @@ private fun PlayerContent(
             )
         }
 
-        val playbackWaiting = controller.isPlaybackWaiting
-        if (!isInPip && (playbackWaiting || findingNext || progressFault != null)) {
+        // One owner for this pixel. `controller.isPlaybackWaiting` used to draw
+        // here as well, which meant two things decided what covered the picture
+        // and the `buffering` class could never be drawn on Android at all —
+        // §2.3's defect wearing the contract's clothes. The wait now reaches
+        // this block the same way every other reason does: as a fault the
+        // presenter raised, debounced by its class and retired by the picture.
+        if (!isInPip && (findingNext || progressFault != null)) {
             val waiting = playbackWaitPresentation(
                 runwaySeconds = (controller.player.bufferedPosition - controller.player.currentPosition)
                     .coerceAtLeast(0) / 1_000.0,
@@ -1364,6 +1369,9 @@ private fun PlayerContent(
             val title = when {
                 findingNext -> "Up next…"
                 progressFault?.detail != null -> progressFault.detail
+                // A `client_preparing` or a `media_waiting` carries no sentence
+                // of its own: the wait copy IS what this window said before the
+                // presenter owned it, and moving text is not this change's job.
                 else -> waiting.title
             }
             Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -1373,7 +1381,13 @@ private fun PlayerContent(
                     color = Color.White,
                     modifier = Modifier.padding(top = 12.dp),
                 )
-                if (playbackWaiting && !findingNext) {
+                // The runway and the server's wait count, as before. They were
+                // drawn whenever the player was buffering, and a progress fault
+                // is what that state is now: `preparing` while the stream is
+                // opening, `buffering` once it has, `recovering` while the owner
+                // is working on it. "Up next…" is the screen's own errand and
+                // has no player runway to report.
+                if (progressFault != null && !findingNext) {
                     Text(waiting.detail, color = Color.White.copy(alpha = 0.72f))
                 }
             }

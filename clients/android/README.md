@@ -20,8 +20,19 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `92` — native viewer parity across phone, foldable,
-> and TV. Build 92 adds the two bounded recovery steps this client owns under
+> Status: **v0.3.0**, build `93` — native viewer parity across phone, foldable,
+> and TV. Build 93 gives every playback-surface source this client owns a raise
+> site. `STATE_BUFFERING` after start is the contract's `media_waiting` and is
+> drawn as `buffering`, debounced by the class's own 350 ms; the separate
+> `isPlaybackWaiting` spinner that used to draw beside it is gone, so one thing
+> decides what covers the picture. Opening a stream is `client_preparing`. A
+> prepared successor abandoned after failing, a control reporter that has given
+> up, and session-status polling that stopped answering each record a
+> `surface_log_only` line and move nothing. A playlist or segment 503 is a "not
+> yet" only when its body carries a code the contract lists for that row. What a
+> stall, a reopen or a failure DOES is unchanged — no threshold, budget,
+> detector or ladder moved. Build 92 adds the two bounded recovery steps this
+> client owns under
 > the playback surface contract (M5). A session create the server answers with
 > "still building" is re-posted under the same request identity after 1 s, 2 s
 > and 4 s, bounded by an absolute sixty seconds from the first attempt; a

@@ -2,6 +2,7 @@ package tv.plurx.app.player
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -295,6 +296,197 @@ class PlaybackSurfaceOwnerTest {
             owner.degradedNotice(epoch, SurfaceContext.Attached, "notice $index")
         }
         assertEquals(PlaybackSurfaceOwner.HISTORY_LIMIT, owner.history.size)
+    }
+
+    // ------------------------------------------------- the three reach sites
+    //
+    // §3.3 rows 10, 12 and 18 had no Android raise site at all, which is what
+    // made `client_preparing`, `buffering` and `surface_log_only` unreachable
+    // on this client. `Controller` cannot be built on the JVM, so — as with the
+    // blocking sites above — each one is a named method here and that is where
+    // it is pinned.
+
+    @Test
+    fun aMediaWaitIsTheBufferingClassAndIsNotDrawnBeforeTheDebounce() {
+        attached()
+        owner.bufferingMediaWait(epoch, positionMs = 90_000)
+        assertTrue("the wait must not stop the player", player.playbackRequested)
+        // The fault exists from this instant; `buffering_min_ms` debounces the
+        // SURFACE, which is the whole reason a fragment-boundary wait no longer
+        // repaints the screen.
+        assertEquals(PlaybackSurface.None, owner.current)
+        assertTrue(logs.any { it.event == SurfaceLogEvents.RAISED })
+        now += SurfaceTimings.BUFFERING_MIN_MS - 1
+        owner.tick()
+        assertEquals("one millisecond short is still nothing", PlaybackSurface.None, owner.current)
+        now += 1
+        owner.tick()
+        val surface = owner.current
+        assertTrue("nothing is presenting, so the wait covers the picture", surface is PlaybackSurface.Blocking)
+        val fault = checkNotNull(surface.fault)
+        assertEquals(SurfaceClass.Buffering, fault.cls)
+        assertEquals(SurfaceSources.MEDIA_WAITING, fault.source)
+        assertEquals(90_000L, fault.positionMs)
+        assertFalse("a wait is not the input contract's failed state", surface.entersFailedRouting)
+    }
+
+    @Test
+    fun aWaitIsRaisedOnceHoweverOftenTheSamplerSeesIt() {
+        attached()
+        repeat(6) {
+            now += 100
+            owner.bufferingMediaWait(epoch, positionMs = 90_000)
+        }
+        assertEquals(
+            "a sampler on a loop must not push a fault per sample",
+            1,
+            logs.count { it.event == SurfaceLogEvents.RAISED },
+        )
+        // And the ONE fault's own raise time is what the debounce is measured
+        // against, so a restated wait cannot postpone the surface for ever.
+        owner.tick()
+        assertTrue(owner.current is PlaybackSurface.Blocking)
+        assertEquals(SurfaceClass.Buffering, checkNotNull(owner.current.fault).cls)
+    }
+
+    @Test
+    fun aWaitIsRetiredByThePictureItself() {
+        attached()
+        owner.bufferingMediaWait(epoch, positionMs = 90_000)
+        now += SurfaceTimings.BUFFERING_MIN_MS
+        owner.tick()
+        assertTrue(owner.current is PlaybackSurface.Blocking)
+        logs.clear()
+        owner.presenting(true, epoch)
+        assertEquals(PlaybackSurface.None, owner.current)
+        assertEquals(
+            listOf(SurfaceLogEvents.CLEARED),
+            logs.map { it.event },
+        )
+        assertEquals("presenting", logs.single().by)
+    }
+
+    @Test
+    fun aClientOpenIsThePreparingClassAndIsRaisedOncePerGeneration() {
+        attached()
+        owner.preparingClientOpen(epoch, SurfaceContext.Start)
+        owner.preparingClientOpen(epoch, SurfaceContext.Start)
+        assertTrue("opening a stream must not stop the player", player.playbackRequested)
+        assertEquals(1, logs.count { it.event == SurfaceLogEvents.RAISED })
+        val surface = owner.current
+        assertTrue(surface is PlaybackSurface.Blocking)
+        val fault = checkNotNull(surface.fault)
+        assertEquals(SurfaceClass.Preparing, fault.cls)
+        assertEquals(SurfaceSources.CLIENT_PREPARING, fault.source)
+        assertFalse("a cold start is not the input contract's failed state", surface.entersFailedRouting)
+        // No sentence of its own: the screen's existing wait copy is what this
+        // window said before the presenter owned it.
+        assertNull(fault.detail)
+        // It has no intent, so the picture is what retires it.
+        owner.presenting(true, epoch)
+        assertEquals(PlaybackSurface.None, owner.current)
+    }
+
+    @Test
+    fun aRecoveryStepRaisedAfterAnOpenKeepsItsReason() {
+        // The reopen paths raise their step after `restartAt`, and progress
+        // classes tie on severity — so recency has to be what decides, or every
+        // reopen would say "opening" instead of why.
+        attached()
+        owner.preparingClientOpen(epoch, SurfaceContext.Start)
+        now += 10
+        owner.recoveringOwnerStep(epoch, SurfaceContext.Start, "Reconnecting to the stream.")
+        val fault = checkNotNull(owner.current.fault)
+        assertEquals(SurfaceClass.Recovering, fault.cls)
+        assertEquals("Reconnecting to the stream.", fault.detail)
+    }
+
+    @Test
+    fun aLogOnlyEventMovesNothingAndIsStillRecorded() {
+        attached()
+        owner.degradedNotice(epoch, SurfaceContext.Attached, "Quality reduced to keep playing.")
+        val before = owner.current
+        val historyBefore = owner.history.size
+        logs.clear()
+        owner.logOnly(epoch, "prepared successor abandoned after it failed")
+        assertEquals("row 18 leaves the surface exactly as it was", before, owner.current)
+        assertEquals("and it is not a fault, so it takes no ledger row", historyBefore, owner.history.size)
+        val entry = logs.single()
+        assertEquals(SurfaceLogEvents.LOG_ONLY, entry.event)
+        assertEquals(SurfaceSources.LOG_ONLY, entry.source)
+        assertEquals(epoch, entry.attached)
+        assertNull(entry.cls)
+        // The event is the only trace there is, so it has to say what happened.
+        assertEquals("prepared successor abandoned after it failed", entry.detail)
+    }
+
+    @Test
+    fun aLogOnlyEventNeverEntersTheFailedRouting() {
+        attached()
+        owner.logOnly(epoch, "control reporting stopped (transport:404:session_gone)")
+        assertEquals(PlaybackSurface.None, owner.current)
+        assertFalse(owner.current.entersFailedRouting)
+        assertTrue("the incumbent is untouched", player.playbackRequested)
+    }
+
+    // ------------------------------------------ the fixture's `codes` lookup
+
+    @Test
+    fun aRefusalCodeNamesOnlyARowThatListsItInAContextThatDeclaresIt() {
+        // Row 6's create codes, in the context the row declares.
+        assertEquals(
+            SurfaceSources.CREATE_503_NOT_YET,
+            surfaceSourceForCode("vod_index_pending", SurfaceContext.Start),
+        )
+        // The same code on a SEGMENT is not that row: row 6 is `start` only.
+        assertNull(surfaceSourceForCode("vod_index_pending", SurfaceContext.Change))
+        // A code in no row's list names no row, and neither does no code at all
+        // — a 503 nobody explained may not borrow a class.
+        assertNull(surfaceSourceForCode("something_else_entirely", SurfaceContext.Attached))
+        assertNull(surfaceSourceForCode(null, SurfaceContext.Attached))
+        assertNull(surfaceSourceForCode("   ", SurfaceContext.Attached))
+        // Every code the fixture lists resolves to the row that lists it, in a
+        // context that row declares. This is what makes the lookup honour a
+        // list the fixture grows rather than one transcribed into the adapter.
+        for (row in SURFACE_SOURCES) {
+            for (code in row.codes) {
+                val context = SurfaceContext.entries.first { row.matches(it) }
+                assertEquals(code, row.id, surfaceSourceForCode(code, context))
+            }
+        }
+    }
+
+    @Test
+    fun aRowThatListsNoCodesClaimsItsStatusOutright() {
+        // The adapter has to be right BEFORE and AFTER a `codes` list is added
+        // to a row, because demanding a code from a row that lists none would
+        // make that row unreachable — the defect this whole change removes.
+        for (row in SURFACE_SOURCES) {
+            val context = SurfaceContext.entries.first { row.matches(it) }
+            if (row.codes.isEmpty()) {
+                assertTrue(
+                    "${'$'}{row.id} lists no codes, so any refusal is its refusal",
+                    surfaceRowAdmitsCode(row.id, null, context),
+                )
+                assertTrue(row.id, surfaceRowAdmitsCode(row.id, "anything_at_all", context))
+            } else {
+                assertFalse(
+                    "${'$'}{row.id} lists codes, so a bodiless refusal is not its refusal",
+                    surfaceRowAdmitsCode(row.id, null, context),
+                )
+                assertFalse(row.id, surfaceRowAdmitsCode(row.id, "not_in_the_list", context))
+                for (code in row.codes) {
+                    assertTrue("${'$'}{row.id}/${'$'}code", surfaceRowAdmitsCode(row.id, code, context))
+                }
+            }
+            // A row is never consulted in a context it does not declare.
+            for (other in SurfaceContext.entries.filterNot { row.matches(it) }) {
+                assertFalse(
+                    "${'$'}{row.id} in ${'$'}{other.wire}",
+                    surfaceRowAdmitsCode(row.id, row.codes.firstOrNull(), other),
+                )
+            }
+        }
     }
 
     @Test

@@ -305,6 +305,8 @@ class PlaybackControlSession(
         onSubtitleReady: () -> Unit = {},
         onPrepare: (ControlAction) -> Unit = {},
         onAcknowledged: (ActionAcknowledgement) -> Unit = {},
+        /** The reporter stopped for good. A fact to record, never a surface. */
+        onGaveUp: (String) -> Unit = {},
     ) {
         end()
         this.observe = observe
@@ -423,6 +425,12 @@ class PlaybackControlSession(
                         }
                     }
                 }
+            },
+            onGaveUp = { reason ->
+                // Behind the same generation fence as its neighbours: a
+                // reporter this `begin` replaced may still be unwinding, and
+                // its give-up is not news about the session running now.
+                if (generation == verdictGeneration) onGaveUp(reason)
             },
         ) ?: return
         reporter = subject

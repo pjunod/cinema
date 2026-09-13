@@ -313,7 +313,71 @@ internal class PlaybackSurfaceOwner(
             detail = detail,
         )
 
+    /**
+     * `STATE_BUFFERING` while playback is requested, after start (§3.3 row 12).
+     *
+     * Raised ONCE per wait. The caller is a sampler on a loop that already runs,
+     * so a fault per sample would push a ring row per second at a stall and make
+     * the ledger's history the sampler's cadence rather than the player's story.
+     * The web does the same thing for the same reason — `waiting` fires at every
+     * fMP4 boundary — and calls it `{once:true}`.
+     *
+     * The 350 ms debounce is the CLASS's and lives in the reducer: the fault
+     * exists from this instant and is simply not drawn until it has lasted that
+     * long. There is no timer here and no second detector: `playbackIsWaiting`
+     * is the same predicate the retired spinner read.
+     */
+    fun bufferingMediaWait(attached: Long, positionMs: Long?) {
+        if (hasLiveFault(SurfaceSources.MEDIA_WAITING, attached)) return
+        raiseNotice(
+            SurfaceSources.MEDIA_WAITING,
+            SurfaceContext.Attached,
+            attached,
+            positionMs = positionMs,
+        )
+    }
+
+    /**
+     * The client is opening a stream (§3.3 row 10).
+     *
+     * The overlay every client paints between "the viewer asked for this" and
+     * "a picture is presenting". It is a `preparing` fault with no refusal
+     * behind it, which is what lets the ledger name an ordinary cold start
+     * instead of borrowing `owner_recovery_step` and calling it a recovery.
+     *
+     * Once per open: the generation it is about has just been attached, so a
+     * second one could only be a duplicate of this one.
+     */
+    fun preparingClientOpen(attached: Long, context: SurfaceContext, detail: String? = null) {
+        if (hasLiveFault(SurfaceSources.CLIENT_PREPARING, attached)) return
+        raiseNotice(SurfaceSources.CLIENT_PREPARING, context, attached, detail = detail)
+    }
+
+    /**
+     * Something failed and the incumbent is untouched (§3.3 row 18).
+     *
+     * A prepared successor abandoned, a control exchange the protocol will not
+     * retry, a stats poll that stopped answering. Nothing about the PICTURE
+     * changed, so nothing is drawn — `log_only` maps to no class at all and the
+     * reducer leaves the surface exactly as it was. The event is the only trace
+     * there is, which is why [detail] is carried rather than dropped.
+     */
+    fun logOnly(attached: Long, detail: String) =
+        raiseNotice(SurfaceSources.LOG_ONLY, SurfaceContext.Attached, attached, detail = detail)
+
     // ------------------------------------------------------------- internals
+
+    /**
+     * Is a fault from [source] about [attached] still live?
+     *
+     * A READ of the reducer's state and nothing else. It exists so a site that
+     * is restating a fact rather than reporting a new one can say so: a fault
+     * inside its class's debounce is live and undrawn, so `current` cannot
+     * answer this and a site that asked it would raise a second fault every
+     * sample for the whole of the first one's 350 ms.
+     */
+    private fun hasLiveFault(source: String, attached: Long): Boolean =
+        state.faults.any { it.source == source && it.attached == attached }
 
     /**
      * A fault the owner has NOT stopped the player for. A blocking class raised
