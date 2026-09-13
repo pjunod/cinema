@@ -4,6 +4,75 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## Apple's notice strip was a dead end, and two rows of the readiness card were false
+
+**[#PRNUM](http://192.168.4.7:3000/noirr/plurx/pulls/PRNUM), titled `WIP:`.**
+A reachability audit of `main` found one real defect left on Apple after the
+three surface-reach branches merged, and it was the kind this contract exists
+to stop: a surface that tells the viewer something and gives them nothing to
+do about it.
+
+**The banner rendered no actions at all.** §3.1's `banner` is "a notice strip
+with **the fault's actions**; the picture is untouched", and `failureView` was
+the only view in the client that drew `surface.actions` — gated on a blocking
+surface. So `refused`, the one class whose whole point is that the predecessor
+keeps playing while the viewer's change did not, drew a sentence and no Try
+again. Physical recipe (b) forbids exactly that outcome. §3.2's demoted
+"Playback recovered" banner lost its actions the same way, which defeats the
+reason the demotion keeps them: so the viewer gets the specific reopen when the
+buffer drains.
+
+The strip has its own action row now, through the same button and the same
+labels as the full screen, so "Try Again" cannot come to mean two things. It
+does **not** add the guaranteed Close the full screen adds — behind a banner is
+the viewer's film, and a Close on a notice is a button that ends playback that
+is fine. A Close the fault itself carries is still drawn: actions are a
+property of the fault, and the presenter does not second-guess the owner about
+them. That distinction is what the two banner tests hold from either side.
+
+Two smaller faults in the same code went with it. A **demoted** banner read
+`detail ?? title` and so announced the thing that had failed at the exact
+moment the picture came back — §3.2 rewrites the title to "Playback recovered"
+and deliberately keeps the failure sentence in `detail` for the fault's own Try
+again. And the strip asked whether the viewer was *blocked* rather than what
+*kind* of surface this is, so every `indicator` drew the in-chrome capsule and
+the strip at once: one fault, two overlays.
+
+### The readiness card said two false things
+
+`playbackSurfaceReadinessCard` is deliberately static prose — the browser
+cannot read a build number or a repository file, so a computed-looking pill
+there would be a computed pill that lies. The cost is that nothing sweeps it:
+`validation/doc_versions.py` checks the two client READMEs,
+`APPLE-CLIENT-PARITY.md` and `docs/STATUS.html`, and has never read
+`index.html`. Both client rows went stale the moment a client shipped again —
+the Apple row claimed build 150 and a 532/518 run two builds after both had
+moved, and the Android row claimed build 92 and 612 tests against a README that
+says 93. Both now read what is in the tree, and the comment above the function
+says why they drifted and what the next reader has to do. They stay advisory:
+no control, no gate.
+
+### What was run
+
+`make apple-build` (both schemes) and `make apple-test` on iPhone 17 Pro
+(iOS 26.5) and Apple TV 4K 3rd generation (tvOS 26.5): **552 iOS tests and 538
+tvOS tests executed, zero failures**, with
+`testPlaybackSurfaceModelRunsEveryContractCase` confirmed to have run under
+each and all three new tests confirmed passed under each. Four mutations, each
+failing a named test against a run that executed 552.
+
+On the VM: both fences PASS with no new `MIGRATION_BUDGET` entries, all five
+node playback tests (62 surface cases), `make web-check` exit 0,
+`tests/operations` 356 OK, `scripts/validate lint` OK.
+
+### What this does not close
+
+The tvOS focus question. The banner's buttons are focusable while the picture
+plays, so a directional press with the chrome hidden can land on Try Again
+rather than revealing the controls. That is arguably the better answer — the
+action is right there — but it is a device behaviour and no simulator settles
+it. It joins §6's eight runs, none of which has happened.
+
 ## Every class in the playback surface contract can now be drawn on Apple
 
 **[#291](http://192.168.4.7:3000/noirr/plurx/pulls/291), titled `WIP:`.**
