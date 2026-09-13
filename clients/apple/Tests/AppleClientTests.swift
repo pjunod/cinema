@@ -3458,6 +3458,39 @@ final class AppleClientTests: XCTestCase {
         }
     }
 
+    /// Row 14. The readiness deadline that still has a rung names its own row
+    /// rather than borrowing the ladder's, and it is `recovering` — never a
+    /// prompt — because the guard above it has already returned if no rung is
+    /// left.
+    func testTheReadinessDeadlineRaisesRowFourteenWhileARungRemains() throws {
+        guard case .success(let row) = PlaybackSurfaceContract.row(
+            source: "readiness_deadline_rungs_left", context: .start
+        ) else { return XCTFail("row 14 is missing from the shared table") }
+        XCTAssertEqual(row.cls, .recovering)
+        XCTAssertFalse(row.requiresPlayerStopped)
+        XCTAssertEqual(
+            PlaybackSurfaceContract.rule(for: .recovering).severity, .progress,
+            "never a prompt while a rung remains"
+        )
+        let source = try playerControllerSource()
+        let start = try XCTUnwrap(
+            source.range(of: "private func retryAfterReadinessTimeout(at position: Int) async -> Bool {")
+        )
+        let end = try XCTUnwrap(
+            source.range(of: "\n    }\n", range: start.upperBound..<source.endIndex)
+        )
+        let body = String(source[start.upperBound..<end.lowerBound])
+        XCTAssertTrue(
+            body.contains("guard fallback != .none else { return false }"),
+            "the deadline only raises row 14 while a rung is actually left"
+        )
+        XCTAssertTrue(body.contains("source: \"readiness_deadline_rungs_left\""))
+        XCTAssertFalse(
+            body.contains("\"owner_recovery_step\""),
+            "row 14 is the readiness deadline's own row, not the ladder's"
+        )
+    }
+
     /// The adapter, pinned — because the reducer cannot pin this.
     ///
     /// `.inert` returns before the reducer's switch, so a model test fed inert

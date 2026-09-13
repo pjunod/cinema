@@ -7084,7 +7084,16 @@ final class PlayerController: ObservableObject {
     /// Advance through the least-destructive recovery ladder. A compatible
     /// DV source first becomes HDR10/HLG without a video encode; only a second
     /// failure falls back to the existing universal transcode.
-    private func retryWithNextCompatibilityFallback(at position: Int) async -> Bool {
+    ///
+    /// `source` is the contract row the rung belongs to. The ladder's own
+    /// steps are row 13 (`owner_recovery_step`); the readiness deadline that
+    /// spends one is row 14 (`readiness_deadline_rungs_left`), which the
+    /// contract names for Apple outright. Same class, same pixel, and the
+    /// ledger stops calling a readiness timeout an ordinary fallback.
+    private func retryWithNextCompatibilityFallback(
+        at position: Int,
+        source: String = "owner_recovery_step"
+    ) async -> Bool {
         switch Self.nextCompatibilityFallback(
             canRetryWithHDRBase: canRetryCurrentItemWithHDRBase,
             hdrBaseAlreadyAttempted: dolbyVisionFallbackAttempted,
@@ -7101,7 +7110,7 @@ final class PlayerController: ObservableObject {
             // A rung the owner is about to spend is a recovery step, not a
             // failure: contract §3.3 row 13 names this sentence outright.
             raiseSurfaceNotice(
-                source: "owner_recovery_step",
+                source: source,
                 context: surfaceContext,
                 detail: "Dolby Vision did not start. Retrying the HDR10-compatible picture…"
             )
@@ -7111,7 +7120,7 @@ final class PlayerController: ObservableObject {
             canRetryCurrentItemWithTranscode = false
             isChangingStream = false
             raiseSurfaceNotice(
-                source: "owner_recovery_step",
+                source: source,
                 context: surfaceContext,
                 detail: "The compatible stream did not start. Retrying a universal stream…"
             )
@@ -7147,7 +7156,14 @@ final class PlayerController: ObservableObject {
                 fallback: fallback
             )
         )
-        return await retryWithNextCompatibilityFallback(at: position)
+        // Row 14, and never a prompt: the guard above returned already if no
+        // rung was left, so reaching here IS "the deadline fired with rungs
+        // left". The class is `recovering` either way — what changes is that
+        // the ledger names the deadline instead of borrowing the ladder's row.
+        return await retryWithNextCompatibilityFallback(
+            at: position,
+            source: "readiness_deadline_rungs_left"
+        )
     }
 
     /// Six seconds of film clock with nothing decoded. Nothing was ever
