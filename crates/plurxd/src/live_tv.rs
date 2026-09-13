@@ -120,27 +120,33 @@ const SOURCE_PREFIX_BYTES: usize = 8 * 1024 * 1024;
 const SOURCE_PREFIX_TIME: Duration = Duration::from_secs(3);
 const SOURCE_PROBE_TIME: Duration = Duration::from_secs(2);
 const MAX_SOURCE_PROBE_JSON_BYTES: usize = 256 * 1024;
-// Publish one short segment so a channel can reach the player promptly, then
-// return to the four-second steady cadence that keeps the six-segment live
-// window resilient. Encoded routes add forced startup keyframes; copy routes
-// wait for real source random-access points.
-const LIVE_HLS_OUTPUT_ARGS: [&str; 10] = [
+/// Uniform one-second segments, for the whole session. The short first
+/// segment `-hls_init_time 1` used to cut is what keeps a start no slower
+/// than the tuner; what it also did was let the cadence grow to 4 s once the
+/// list filled, which left every client -- attached 1 s behind the edge --
+/// waiting a whole segment at each jump. Keeping the cadence at 1 s removes
+/// the jump. Encode routes already force a keyframe every second; copy routes
+/// cut at the broadcast's own keyframes. The window is 24 entries: 24 s on an
+/// encode route and 24 source GOPs on a copy route.
+const LIVE_HLS_OUTPUT_ARGS: [&str; 8] = [
     "-f",
     "hls",
-    "-hls_init_time",
-    "1",
     "-hls_time",
-    "4",
-    "-hls_list_size",
-    "6",
-    "-hls_delete_threshold",
     "1",
+    "-hls_list_size",
+    "24",
+    "-hls_delete_threshold",
+    "4",
 ];
+const HLS_DELETE_THRESHOLD: usize = 4;
 pub(crate) const MAX_PLAYLIST_BYTES: u64 = 64 * 1024;
 pub(crate) const MAX_SEGMENT_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_SESSION_BYTES: u64 = MAX_SEGMENT_BYTES;
-const MAX_LISTED_SEGMENTS: usize = 6;
-const MAX_DELETION_LAG_SEGMENTS: usize = 1;
+const MAX_LISTED_SEGMENTS: usize = 24;
+/// hlsenc renames a finished segment before it rewrites the playlist, so for
+/// an instant the scratch holds `threshold + 1` final files that the playlist
+/// does not list. Deletion precedes the rewrite, so it is never `+ 2`.
+const MAX_DELETION_LAG_SEGMENTS: usize = HLS_DELETE_THRESHOLD + 1;
 const PUMP_CHANNEL_CAPACITY: usize = 2;
 const LOCAL_RESOURCE_CHUNK_BYTES: usize = 64 * 1024;
 const LOCAL_RESOURCE_CONCURRENCY: usize = 4;
@@ -2640,14 +2646,7 @@ impl LiveTvManager {
             );
         }
         drop(scratch_creation);
-        let result = run_graph_probe(
-            &self.system.ffmpeg,
-            encoder,
-            &self.system,
-            height,
-            &probe_dir,
-        )
-        .await;
+        let result = run_graph_probe(encoder, &self.system, height, &probe_dir).await;
         let _ = tokio::fs::remove_dir_all(&probe_dir).await;
         match result {
             Ok(()) => (
@@ -5322,6 +5321,21 @@ fn live_ffmpeg_command(
     plan: &LiveTvTranscodePlan,
     directory: &Path,
 ) -> Result<tokio::process::Command, LiveTvError> {
+    live_ffmpeg_command_for_input(system, plan, directory, LiveTvFfmpegInput::Tuner)
+}
+
+#[derive(Clone, Copy)]
+enum LiveTvFfmpegInput {
+    Tuner,
+    GraphProbe,
+}
+
+fn live_ffmpeg_command_for_input(
+    system: &SystemInfo,
+    plan: &LiveTvTranscodePlan,
+    directory: &Path,
+    input: LiveTvFfmpegInput,
+) -> Result<tokio::process::Command, LiveTvError> {
     let playlist = directory.join("index.m3u8");
     let extension = match plan.delivery.packaging {
         LivePackaging::Mpegts => "ts",
@@ -5342,17 +5356,29 @@ fn live_ffmpeg_command(
     command
         .args(["-hwaccel", "none"])
         .args(["-fflags", "+genpts+discardcorrupt"])
-        .args(live_probe_args())
-        .args([
-            "-i",
-            "pipe:0",
-            "-map",
-            plan.video_map,
-            "-map",
-            "0:a:0",
-            "-sn",
-            "-dn",
-        ]);
+        .args(live_probe_args());
+    let audio_map = match input {
+        LiveTvFfmpegInput::Tuner => {
+            command.args(["-i", "pipe:0"]);
+            "0:a:0"
+        }
+        LiveTvFfmpegInput::GraphProbe => {
+            command.args([
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=1920x1080:rate=30",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=1000:sample_rate=48000",
+                "-t",
+                "4.25",
+            ]);
+            "1:a:0"
+        }
+    };
+    command.args(["-map", plan.video_map, "-map", audio_map, "-sn", "-dn"]);
     match plan.delivery.video_action {
         LiveTrackAction::Copy => {
             command.args(["-c:v", "copy"]);
@@ -6650,40 +6676,22 @@ pub(crate) async fn fetch_bounded(
 }
 
 async fn run_graph_probe(
-    ffmpeg: &str,
     encoder: Encoder,
     system: &SystemInfo,
     height: u16,
     directory: &Path,
 ) -> Result<(), String> {
     let playlist = directory.join("index.m3u8");
-    let segments = directory.join("segment-%06d.ts");
-    let mut command = tokio::process::Command::new(ffmpeg);
-    command.args(["-hide_banner", "-loglevel", "error", "-y"]);
-    command.args(encoder.init_args());
-    command.args([
-        "-f",
-        "lavfi",
-        "-i",
-        "testsrc2=size=1920x1080:rate=30",
-        "-f",
-        "lavfi",
-        "-i",
-        "sine=frequency=1000:sample_rate=48000",
-        "-t",
-        "4.25",
-    ]);
-    let filter = live_video_filter(encoder, 1080, height, false);
-    command.args(["-vf", &filter]);
-    command.args(encoder.encode_args(
-        if height == 1080 { 8_000 } else { 4_000 },
-        EffectiveRateControl::Vbr,
-        system.encoders.forced_idr.wanted_by(encoder),
+    let plan = LiveTvTranscodePlan::new(
+        system,
+        graph_probe_delivery(height),
+        Some(encoder),
         (encoder == Encoder::Software).then_some(2),
-    ));
-    command.args(LIVE_HLS_OUTPUT_ARGS);
-    command.arg(segments).arg(&playlist);
-    command.kill_on_drop(true);
+    )
+    .map_err(|error| format!("could not prepare live-TV graph probe: {error}"))?;
+    let mut command =
+        live_ffmpeg_command_for_input(system, &plan, directory, LiveTvFfmpegInput::GraphProbe)
+            .map_err(|error| format!("could not build live-TV graph probe: {error}"))?;
     let output = tokio::time::timeout(Duration::from_secs(20), command.output())
         .await
         .map_err(|_| "live-TV FFmpeg graph probe timed out".to_owned())?
@@ -6698,10 +6706,51 @@ async fn run_graph_probe(
     let manifest = tokio::fs::read_to_string(&playlist)
         .await
         .map_err(|error| format!("live-TV probe did not publish a playlist: {error}"))?;
-    if manifest.contains("#EXT-X-ENDLIST") || !manifest.contains(".ts") {
+    let one_second_segments = manifest
+        .lines()
+        .filter(|line| line.starts_with("#EXTINF:1."))
+        .count();
+    if manifest.contains("#EXT-X-ENDLIST")
+        || !manifest.contains("#EXT-X-TARGETDURATION:1")
+        || one_second_segments < 3
+        || !manifest.contains(".ts")
+    {
         return Err("live-TV probe published an invalid live playlist".to_owned());
     }
     Ok(())
+}
+
+fn graph_probe_delivery(height: u16) -> LiveDeliveryPlan {
+    LiveDeliveryPlan {
+        source: LiveSourceFacts {
+            video_codec: Some("mpeg2video".into()),
+            width: Some(1920),
+            height: Some(1080),
+            audio_codec: Some("ac3".into()),
+            audio_channels: Some(2),
+            ..LiveSourceFacts::default()
+        },
+        output: crate::live_tv_delivery::LiveDeliveryOutput {
+            container: "mpegts".into(),
+            video_codec: "h264".into(),
+            audio_codec: "aac".into(),
+            width: height.saturating_mul(16) / 9,
+            height,
+            bit_depth: Some(8),
+            frame_rate: None,
+            hdr: None,
+            audio_channels: 2,
+        },
+        video_action: LiveTrackAction::Encode,
+        audio_action: LiveTrackAction::Encode,
+        packaging: LivePackaging::Mpegts,
+        reasons: vec![crate::live_tv_delivery::LiveDeliveryReason {
+            code: "graph_probe".into(),
+            explanation: "exercise the encoded live path".into(),
+        }],
+        deinterlace: false,
+        max_bitrate_bps: None,
+    }
 }
 
 fn sanitize_error(message: &str) -> String {
@@ -8462,14 +8511,12 @@ Output #0, hls, to 'index.m3u8':
             "2",
             "-f",
             "hls",
-            "-hls_init_time",
-            "1",
             "-hls_time",
-            "4",
-            "-hls_list_size",
-            "6",
-            "-hls_delete_threshold",
             "1",
+            "-hls_list_size",
+            "24",
+            "-hls_delete_threshold",
+            "4",
             "-hls_flags",
             "delete_segments+temp_file+independent_segments+omit_endlist",
             "-hls_segment_filename",
@@ -8485,12 +8532,10 @@ Output #0, hls, to 'index.m3u8':
         );
     }
 
-    /// Startup should not make the viewer wait for the normal four-second
-    /// segment cadence. Keep the short initial cadence, steady cadence, and
-    /// live window explicit here so tuning cannot silently regress while the
-    /// runtime and graph-probe commands continue to share one argument list.
+    /// The cadence must stay uniform after startup so a player attached near
+    /// the edge never catches a segment-duration jump.
     #[test]
-    fn live_hls_publishes_short_startup_segments_before_steady_cadence() {
+    fn live_hls_cuts_uniform_one_second_segments_and_keeps_a_24_entry_window() {
         let value_after = |flag: &str| {
             LIVE_HLS_OUTPUT_ARGS
                 .windows(2)
@@ -8498,10 +8543,62 @@ Output #0, hls, to 'index.m3u8':
                 .unwrap_or_else(|| panic!("missing {flag} from live HLS arguments"))
         };
 
-        assert_eq!(value_after("-hls_init_time"), "1");
-        assert_eq!(value_after("-hls_time"), "4");
-        assert_eq!(value_after("-hls_list_size"), "6");
-        assert_eq!(value_after("-force_key_frames"), "expr:gte(t,n_forced*1)");
+        assert!(!LIVE_HLS_OUTPUT_ARGS.contains(&"-hls_init_time"));
+        assert_eq!(value_after("-hls_time"), "1");
+        assert_eq!(value_after("-hls_list_size"), "24");
+        assert_eq!(
+            value_after("-hls_delete_threshold")
+                .parse::<usize>()
+                .expect("numeric threshold"),
+            HLS_DELETE_THRESHOLD
+        );
+        assert_eq!(MAX_DELETION_LAG_SEGMENTS, HLS_DELETE_THRESHOLD + 1);
+
+        let system = SystemInfo {
+            ffmpeg: "/fixture/ffmpeg".to_owned(),
+            ..SystemInfo::default()
+        };
+        let plan = LiveTvTranscodePlan::new(
+            &system,
+            test_encode_delivery(720),
+            Some(Encoder::Software),
+            Some(2),
+        )
+        .expect("prepare live-TV plan");
+        let command = live_ffmpeg_command(&system, &plan, Path::new("/fixture/live"))
+            .expect("build live-TV command");
+        let arguments = command
+            .as_std()
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(arguments
+            .windows(2)
+            .any(|pair| pair == ["-force_key_frames", "expr:gte(t,n_forced*1)"]));
+    }
+
+    #[tokio::test]
+    async fn the_graph_probe_publishes_the_production_cadence() {
+        let temp = crate::test_tempdir().expect("graph probe scratch");
+        let system = SystemInfo {
+            ffmpeg: "ffmpeg".to_owned(),
+            ..SystemInfo::default()
+        };
+        run_graph_probe(Encoder::Software, &system, 720, temp.path())
+            .await
+            .expect("production graph probe");
+        let manifest = tokio::fs::read_to_string(temp.path().join("index.m3u8"))
+            .await
+            .expect("graph probe playlist");
+        assert!(manifest.contains("#EXT-X-TARGETDURATION:1"));
+        assert!(
+            manifest
+                .lines()
+                .filter(|line| line.starts_with("#EXTINF:1."))
+                .count()
+                >= 3
+        );
+        assert!(!manifest.contains("#EXT-X-ENDLIST"));
     }
 
     #[test]
@@ -8896,9 +8993,12 @@ Output #0, hls, to 'index.m3u8':
     }
 
     fn live_playlist(first: u64, count: usize) -> Vec<u8> {
-        let mut playlist = format!("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-MEDIA-SEQUENCE:{first}\n");
+        let mut playlist = format!(
+            "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n\
+             #EXT-X-MEDIA-SEQUENCE:{first}\n"
+        );
         for sequence in first..first + count as u64 {
-            playlist.push_str(&format!("#EXTINF:4.000,\nsegment-{sequence:06}.ts\n"));
+            playlist.push_str(&format!("#EXTINF:1.000000,\nsegment-{sequence:06}.ts\n"));
         }
         playlist.into_bytes()
     }
@@ -8927,9 +9027,10 @@ Output #0, hls, to 'index.m3u8':
 
     #[test]
     fn live_playlist_accepts_only_the_closed_numeric_inventory() {
-        let parsed = parse_playlist_bytes(&live_playlist(41, 6)).expect("bounded playlist");
+        let parsed = parse_playlist_bytes(&live_playlist(41, MAX_LISTED_SEGMENTS))
+            .expect("bounded playlist");
         assert_eq!(parsed.media_sequence, 41);
-        assert_eq!(parsed.segments, vec![41, 42, 43, 44, 45, 46]);
+        assert_eq!(parsed.segments.len(), MAX_LISTED_SEGMENTS);
 
         for refused in [
             b"#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:4,\n../secret.ts\n".as_slice(),
@@ -8942,7 +9043,7 @@ Output #0, hls, to 'index.m3u8':
         ] {
             assert!(parse_playlist_bytes(refused).is_err());
         }
-        assert!(parse_playlist_bytes(&live_playlist(1, 7)).is_err());
+        assert!(parse_playlist_bytes(&live_playlist(1, MAX_LISTED_SEGMENTS + 1)).is_err());
     }
 
     #[tokio::test]

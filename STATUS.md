@@ -4,6 +4,17 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## Live TV starts are being rebuilt around a stable one-second cadence
+
+**Branch `codex/live-tv-start-stall-server` into
+`effort/live-tv-start-stall`; work in progress.** The server half is being
+implemented from the reviewed start-stall plan: a 24-entry uniform one-second
+HLS window, a two-listed-segment publication barrier, progress measured at the
+newest listed segment, and a graph probe built by the production command path.
+The two-node and physical-hardware evidence follows after the owner loop is
+complete; no timeout, signed request, route, client input contract, or feature
+gate moves in this effort.
+
 ## Apple's notice strip was a dead end, and two rows of the readiness card were false
 
 **[#297](http://192.168.4.7:3000/noirr/plurx/pulls/297), titled `WIP:`.**
