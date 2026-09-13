@@ -30,6 +30,40 @@ function shippedConst(name) {
   return match[0];
 }
 
+
+// The playback surface presenter is the subject of `web-policy.test.js`, which
+// runs the shipped reducer and the shipped render against every fixture case.
+// In THIS file it is a seam: these harnesses slice owner code that raises typed
+// faults now, so the seam records what was raised and what the owner stopped,
+// and the overlay-copy assertions below read the fault instead of a
+// `setLoading` call that no longer exists. `playbackStallActions` is the
+// shipped one, because the buttons a stalled recipe offers are exactly what
+// several of those assertions are about.
+function surfaceSeam() {
+  return [
+    "const raised=[],surfaceEvents=[],surfaceStops=[];",
+    "const PLAYBACK_SURFACE={state:{faults:[],presenting:false},surface:null,history:[]};",
+    "function playbackSurfaceStep(event){surfaceEvents.push(event);return null;}",
+    "function raisePlaybackSurface(source,fault,options){raised.push({source,fault:fault||{},options:options||null});return null;}",
+    "function playbackSurfaceGeneration(p){return (p&&p.attemptId)||null;}",
+    "function playbackSurfaceIntent(p){return p&&p.controlSeek?p.controlSeek.sequence:null;}",
+    "function playbackSurfaceContext(p){return p&&p.pendingMediaChange?'change':(p&&p.started?'attached':'start');}",
+    "function playbackSurfacePromptUp(){return false;}",
+    "function playbackSurfaceClassOf(){return null;}",
+    "function playbackSurfaceClassBlocks(){return false;}",
+    "function playbackSurfaceSourceIsBlocking(){return false;}",
+    "function stopPlayerForExhaustion(){surfaceStops.push(true);}",
+    "function resetPlaybackSurface(){}",
+    "function armPlaybackSampling(){}",
+    shippedSource("playbackStallActions"),
+    // The old `{on, title, detail, buttons}` shape the copy assertions read,
+    // built from the fault the owner raised.
+    "function surfacePainted(){return raised.map(entry=>({on:true,source:entry.source,"+
+      "title:entry.fault.title,detail:entry.fault.detail,"+
+      "actions:entry.fault.actions||[],player_stopped:!!entry.fault.player_stopped}));}",
+  ].join("\n");
+}
+
 // Run the real full-open and menu code with a controllable decision boundary.
 // Media/server facilities are replaced; intent capture and replacement are not.
 function fullOpenHarness() {
@@ -42,6 +76,7 @@ function fullOpenHarness() {
     "const document={activeElement:node,getElementById:id=>id==='video'?video:node};",
     "let now=0;const performance={now:()=>now},timers=new Map();let timerId=0;const window={}; function setTimeout(fn,ms){if(ms===100){Promise.resolve().then(fn);return 0;}const id=++timerId;timers.set(id,{fn,at:now+ms});return id;}function clearTimeout(id){timers.delete(id);} function setInterval(){return 0;} function clearInterval(){}",
     "function qualityForce(){return PlaybackPolicy.qualityForce(quality);} function playQuality(){return quality;} function qualityLabel(){return '720p';} function prePlaySelection(){return null;}",
+    surfaceSeam(),
     "const loading=[],posted=[],ITEM_FOR_FILE={film:'film-item','new-title':'new-item'};function api(path,{body}={}){posted.push({path,body});return Promise.resolve({});}function wirePlayer(){} function setLoading(...args){loading.push(args);} function toast(){} function closeMenu(){} const location={hash:'#/'};function exitPresentationModes(){}function cancelPendingSeek(){}",
     "function clientLog(){} function playbackContext(){return {};} function decodeLimits(){return {};} function playerPixelHeight(){return 1080;}",
     "function askDecision(file,force,selection,signal){return new Promise(resolve=>decisions.push({file,selection:selection&&{...selection},signal,resolve}));}",
@@ -97,7 +132,7 @@ function fullOpenHarness() {
       shippedSource('wirePlayerMedia').match(/v\.addEventListener\("waiting",\(\)=>\{[\s\S]*?\n  \}\);/)[0]+"handler();}",
     "function incumbentError(){let handler;const v=Object.create(video);v.addEventListener=(_,fn)=>{handler=fn;};"+
       shippedSource('wirePlayerMedia').match(/v\.addEventListener\("error",\(\)=>\{[\s\S]*?\n  \}\);/)[0]+"handler();}",
-    "return {attach(p){PLAYER=p;},setOpen(value){modalOpen=value;},isOpen:()=>modalOpen,node,current:()=>PLAYER,decisions,sessions,released,media,loading,posted,video,play,setQuality,seekTo,switchAudio,setSub,setSync,togglePlay,retryPlayback,closePlayer,incumbentError,incumbentWaiting,checkMarkers,skipCurrent,skipMarker,ttff,pbTick,reportProgress,attachHls:()=>attachHls(video,'/A/index.m3u8',10),hlsInstances,settle:()=>settlePlaybackControlSeek(video,PLAYER,video.currentTime,100),playing:()=>handlePlaybackPlaying(video,PLAYER),startTranscodeFallback,switchAutoRung,resetMediaSource,applyPlaybackTransportIntent,handlePlaybackTransportEvent,advance(ms){now+=ms;for(const [id,timer] of [...timers])if(timer.at<=now){timers.delete(id);timer.fn();}}};",
+    "return {attach(p){PLAYER=p;},setOpen(value){modalOpen=value;},isOpen:()=>modalOpen,node,current:()=>PLAYER,decisions,sessions,released,media,loading,surface:surfacePainted,stops:()=>surfaceStops.length,posted,video,play,setQuality,seekTo,switchAudio,setSub,setSync,togglePlay,retryPlayback,closePlayer,incumbentError,incumbentWaiting,checkMarkers,skipCurrent,skipMarker,ttff,pbTick,reportProgress,attachHls:()=>attachHls(video,'/A/index.m3u8',10),hlsInstances,settle:()=>settlePlaybackControlSeek(video,PLAYER,video.currentTime,100),playing:()=>handlePlaybackPlaying(video,PLAYER),startTranscodeFallback,switchAutoRung,resetMediaSource,applyPlaybackTransportIntent,handlePlaybackTransportEvent,advance(ms){now+=ms;for(const [id,timer] of [...timers])if(timer.at<=now){timers.delete(id);timer.fn();}}};",
   ].join("\n"))(policy);
 }
 
@@ -700,6 +735,7 @@ async function main() {
   let presentationNow=0;
   const seekIntentAdapter=new Function("performance",[
     "let PLAYER=null; let notifications=0;",
+    surfaceSeam(),
     "function clearPlaybackControlWaiters(){}",
     "function notifyPlaybackControl(){notifications+=1;}",
     shippedSource("supersedePlaybackControlIntent"),
@@ -803,6 +839,7 @@ async function main() {
   function replacementHarness(){
     return new Function([
       "let PLAYER=null; const calls=[],released=[],pending=[]; let held=false,failure=null; let PENDING_ATTEMPT_REASON=null; let PENDING_DEFAULT_SUB_OFF=false;",
+      surfaceSeam(),
       "const video={currentTime:10,querySelectorAll:()=>[],pause(){},play:()=>Promise.resolve()};",
       "const document={getElementById:id=>id==='video'?video:null};",
       "const localStorage={getItem:()=> 'auto',setItem:()=>{}};",
@@ -978,12 +1015,14 @@ async function main() {
     await oldSeek;
     await h.startTranscodeFallback('stream-rejected');
     await h.switchAutoRung(720,{height:360,reason:'supply'});
-    const loading=h.loading.length;h.incumbentError();
+    const painted=h.surface().length,stopped=h.stops();h.incumbentError();
     assert.equal(h.sessions.length,0,'delayed old seek and newly fired fallback/ABR cannot steal the next title decision');
-    assert.equal(h.loading.length,loading,'the complete incumbent error handler is fenced before clearing loading/recovery');
+    assert.equal(h.surface().length,painted,'the complete incumbent error handler is fenced before it raises anything');
+    assert.equal(h.stops(),stopped,'and before it stops a player that is not its own');
   }
   for(const native of [false,true]){
     const h=new Function("native",[
+      surfaceSeam(),
       "let PLAYER={offset:0,wantsPlayback:true,controlSeekSequence:1}; const instances=[],metadata=[];",
       "const video={paused:false,currentTime:10,playCount:0,pause(){this.paused=true;},play(){this.paused=false;this.playCount++;return Promise.resolve();},addEventListener(e,f){metadata.push(f);},removeEventListener(){}};",
       "const document={getElementById:()=>video}; const window={Hls:true}; const TOKEN=null;",
@@ -1039,7 +1078,7 @@ async function main() {
   {
     const h=fullOpenHarness(),p=fullPlayer();p.method='transcode';h.attach(p);h.attachHls();
     const incumbent=h.hlsInstances[0],opening=h.switchAudio(1);
-    const loading=h.loading.length;
+    const painted=h.surface().length,stopped=h.stops();
     for(const event of ['flush','frag','level','loaded','append'])assert.doesNotThrow(
       ()=>incumbent.events[event](null,{details:{targetduration:2},frag:{duration:2,stats:{total:4096,loading:{start:0,end:1}}}}),
       `incumbent HLS ${event} cannot mutate or attribute the pending partial recipe`);
@@ -1048,7 +1087,10 @@ async function main() {
       assert.doesNotThrow(()=>incumbent.events.error(null,details));
     let load;incumbent.config.xhrSetup({status:503,responseText:'old error',addEventListener(_,callback){load=callback;}});
     assert.doesNotThrow(()=>load());
-    assert.equal(h.loading.length,loading);assert.equal(h.sessions.length,1);
+    assert.equal(h.surface().length,painted,
+      'an incumbent HLS instance cannot raise a fault about the pending recipe');
+    assert.equal(h.stops(),stopped,'nor stop the player under it');
+    assert.equal(h.sessions.length,1);
     assert.equal(p._hlsEvt,undefined);assert.equal(p.segBytes,undefined);assert.equal(p._levelAt,undefined);
     h.advance(20_000);await opening;
     assert.equal(h.sessions[0].signal.aborted,true,'HLS callbacks cannot replace the original preparation deadline');
@@ -1058,7 +1100,12 @@ async function main() {
     const opening=h.play('cold','Cold film',0,600_000,null);
     h.advance(20_000);await opening;
     assert.equal(h.decisions[0].signal.aborted,true);
-    assert.equal(h.loading.at(-1)[1],'Playback could not prepare.');
+    // Cold: no predecessor holds the picture, so the failed start is the owner
+    // out of rungs — a blocking fault over a player it stopped first.
+    assert.equal(h.surface().at(-1).title,'Playback could not prepare.');
+    assert.equal(h.surface().at(-1).source,'owner_stopped');
+    assert.equal(h.surface().at(-1).player_stopped,true);
+    assert.equal(h.stops(),1,'a blocking surface is only drawn over a stopped player');
     const retry=h.retryPlayback();
     assert.equal(h.decisions.length,2,'cold decision timeout has a working Retry without PLAYER');
     resolveDecision(h.decisions[1]);await retry;
@@ -1173,11 +1220,12 @@ async function main() {
   for(const delayedBoundary of [0,1,2,3]){
     for(const interruption of ['title','seek','open']){
       const h=new Function([
-        "let PLAYER={fileId:'f'},AUTOPLAY=null,closed=0;const pending=[],loading=[],location={hash:''},ITEM_FOR_FILE={f:'e1'};",
+        "let PLAYER={fileId:'f',attemptId:'a1'},AUTOPLAY=null,closed=0;const pending=[],loading=[],location={hash:''},ITEM_FOR_FILE={f:'e1'};",
+        surfaceSeam(),
         "function api(){return new Promise(resolve=>pending.push(resolve));}function exactWireId(x){return x.id;}function toast(){}function autoNextOn(){return true;}function setLoading(value){loading.push(value);}function closePlayer(){closed++;}",
         shippedSource("playbackContinuation"),shippedSource("playNextEpisode"),shippedSource("finishPlayback"),
         shippedSource("beginPlaybackPreparation"),
-        "return {pending,location,loading,start:()=>finishPlayback(true),result:()=>({AUTOPLAY,closed}),interrupt(kind){if(kind==='title')PLAYER={fileId:'other'};else if(kind==='seek')PLAYER.controlIntentGeneration=1;else PLAYER.pendingOpenAttempt={};}};",
+        "return {pending,location,loading,surface:surfacePainted,events:()=>surfaceEvents,start:()=>finishPlayback(true),result:()=>({AUTOPLAY,closed}),interrupt(kind){if(kind==='title')PLAYER={fileId:'other'};else if(kind==='seek')PLAYER.controlIntentGeneration=1;else PLAYER.pendingOpenAttempt={};}};",
       ].join("\n"))();
       const replies=[{item:{kind:'episode'},ancestors:[{id:'show'},{id:'s1'}]},
         {children:[{id:'e1',kind:'episode'}]},
@@ -1188,17 +1236,23 @@ async function main() {
       h.interrupt(interruption);h.pending[delayedBoundary](replies[delayedBoundary]);await opening;
       assert.deepEqual(h.result(),{AUTOPLAY:null,closed:0},`${interruption} at next-episode await ${delayedBoundary}`);
       assert.equal(h.location.hash,'');
-      assert.deepEqual(h.loading,[true],'obsolete autoplay cannot hide the newer player loading state');
+      // The "Up next…" fault is raised and left standing: an obsolete autoplay
+      // lookup must not settle an intent that belongs to the newer player.
+      assert.deepEqual(h.surface().map((entry) => entry.title), ['Up next…'],
+        'obsolete autoplay cannot hide the newer player loading state');
+      assert.deepEqual(h.events(), [],
+        'and cannot retire it either — the intent it belongs to never settled');
     }
   }
   for(const delayedBoundary of [0,1,2,3])for(const boundary of ['headers','body']){
     const h=new Function([
-      "let PLAYER={fileId:'f'},AUTOPLAY=null,closed=0,now=0,timerId=0;const pending=[],loading=[],notices=[],timers=new Map(),location={hash:''},ITEM_FOR_FILE={f:'e1'};",
+      "let PLAYER={fileId:'f',attemptId:'a1'},AUTOPLAY=null,closed=0,now=0,timerId=0;const pending=[],loading=[],notices=[],timers=new Map(),location={hash:''},ITEM_FOR_FILE={f:'e1'};",
+      surfaceSeam(),
       "const performance={now:()=>now};const API='/api',TOKEN=null,AUTH_GENERATION=0;function logout(){}function fetch(url,options){return new Promise(resolve=>pending.push({url,options,resolve}));}",
       "function setTimeout(fn,ms){const id=++timerId;timers.set(id,{fn,at:now+ms});return id;}function clearTimeout(id){timers.delete(id);}function exactWireId(x){return x.id;}function toast(text){notices.push(text);}function autoNextOn(){return true;}function setLoading(value){loading.push(value);}function closePlayer(){closed++;}",
       shippedSource('api'),shippedSource('beginPlaybackPreparation'),
       shippedSource('playbackContinuation'),shippedSource('playNextEpisode'),shippedSource('finishPlayback'),
-      "return {pending,loading,notices,location,start:()=>finishPlayback(true),result:()=>({AUTOPLAY,closed}),advance(ms){now+=ms;for(const[id,t]of [...timers])if(t.at<=now){timers.delete(id);t.fn();}}};",
+      "return {pending,loading,notices,surface:surfacePainted,events:()=>surfaceEvents,location,start:()=>finishPlayback(true),result:()=>({AUTOPLAY,closed}),advance(ms){now+=ms;for(const[id,t]of [...timers])if(t.at<=now){timers.delete(id);t.fn();}}};",
     ].join('\n'))();
     const replies=[{item:{kind:'episode'},ancestors:[{id:'show'},{id:'s1'}]},
       {children:[{id:'e1',kind:'episode'}]},
@@ -1217,7 +1271,11 @@ async function main() {
     }
     h.advance(delayedBoundary?1000:20_000);await opening;
     assert.equal(held.options.signal.aborted,true,`next episode lookup ${delayedBoundary} ${boundary} shares the original20s limit`);
-    assert.deepEqual(h.loading,[true,false],'a nonresponsive autoplay lookup cannot leave Up next visible forever');
+    // Raised, then retired by the intent it belongs to settling — "Up next…"
+    // is a pending destination, so nothing about the picture may clear it.
+    assert.deepEqual(h.surface().map((entry) => entry.title), ['Up next…'],
+      'a nonresponsive autoplay lookup cannot leave Up next visible forever');
+    assert.deepEqual(h.events().map((event) => Object.keys(event)[0]), ['intent_settled']);
     assert.deepEqual(h.result(),{AUTOPLAY:null,closed:1});
     assert.equal(h.notices.length,1);
     if(boundary==='body')releaseBody(replies[delayedBoundary]);
@@ -1229,12 +1287,13 @@ async function main() {
   for(const failureAt of ['headers','body','segment']){
     const h=new Function([
       "let PLAYER={method:'transcode',probeUrl:'/index.m3u8',started:false},timer;const requests=[],loading=[];const TOKEN=null;",
+      surfaceSeam(),
       "const document={getElementById:()=>({classList:{add(){}},currentTime:0})};const console={warn(){}};",
       "function setTimeout(fn){timer=fn;return 1;}function clearTimeout(){}function fetch(url){return new Promise(resolve=>requests.push({url,resolve}));}",
       "function pbPosSec(){return 0;}function currentStreamFailureOverlay(){return null;}function notifyPlaybackControl(){}function finishStallRecovery(){}function clientLog(){}function toast(){}function setLoading(...args){loading.push(args);}",
       shippedSource("probePlaybackSource"),shippedSource("stallDiagnose"),
       shippedSource("hasPendingPlaybackOpen"),shippedSource("playbackOwnsAttachedMedia"),
-      "return {requests,loading,start:stallDiagnose,timeout:()=>timer(),replace(){PLAYER={started:false,method:'remux'};}};",
+      "return {requests,loading,surface:surfacePainted,stops:()=>surfaceStops.length,start:stallDiagnose,timeout:()=>timer(),replace(){PLAYER={started:false,method:'remux'};}};",
     ].join("\n"))();
     const probe=h.start();
     if(failureAt!=='headers'){
@@ -1243,35 +1302,45 @@ async function main() {
     }
     if(failureAt==='segment')assert.equal(h.requests.length,2);
     h.timeout();await probe;
-    assert.equal(h.loading.length,1);
-    assert.equal(h.loading[0][1],'The stream probe timed out.',`${failureAt} is bounded by the same probe deadline`);
+    assert.equal(h.surface().length,1);
+    assert.equal(h.surface()[0].title,'The stream probe timed out.',`${failureAt} is bounded by the same probe deadline`);
+    // A diagnosed stall is the owner out of rungs: it stops the player before
+    // the verdict goes over it (contract §3.4).
+    assert.equal(h.stops(),1,`${failureAt} stops the player before it raises`);
+    assert.equal(h.surface()[0].player_stopped,true);
+    assert.deepEqual(h.surface()[0].actions,['retry','close'],
+      'Force transcode is not offered on a session that already is one');
   }
   {
     const h=new Function([
       "let PLAYER={method:'remux',probeUrl:'/stream.mp4',started:false};let requests=0;const loading=[];const TOKEN=null;",
+      surfaceSeam(),
       "let STREAM_FAILURE={code:'session_failed',status:502,at:Date.now()};const PlaybackPolicy={streamFailureOverlay:()=>({title:'The server could not start playback.',detail:'copy output validation failed: unusable decoder configuration',retryable:false})};",
       "const document={getElementById:()=>({classList:{add(){}},currentTime:0})};const console={warn(){}};function fetch(){requests++;throw Error('terminal refusal must suppress generic probe');}",
       "function pbPosSec(){return 0;}function notifyPlaybackControl(){}function finishStallRecovery(){}function clientLog(){}function toast(){}function setLoading(...args){loading.push(args);}",
       shippedSource("currentStreamFailureOverlay"),shippedSource("probePlaybackSource"),shippedSource("stallDiagnose"),
       shippedSource("hasPendingPlaybackOpen"),shippedSource("playbackOwnsAttachedMedia"),
-      "return {start:stallDiagnose,result:()=>({requests,loading})};",
+      "return {start:stallDiagnose,result:()=>({requests,loading,surface:surfacePainted(),stops:surfaceStops.length})};",
     ].join("\n"))();
     await h.start();
     assert.equal(h.result().requests,0,'a typed terminal refusal remains the authoritative diagnosis');
-    assert.equal(h.result().loading[0][1],'The server could not start playback.');
-    assert.match(h.result().loading[0][2],/unusable decoder configuration/);
+    assert.equal(h.result().surface[0].title,'The server could not start playback.');
+    assert.match(h.result().surface[0].detail,/unusable decoder configuration/);
+    assert.equal(h.result().stops,1);
+    assert.deepEqual(h.result().surface[0].actions,['retry','force_transcode','close']);
   }
   for(const replacement of ['title','close','seek']){
     const h=new Function([
       "let PLAYER={method:'remux',probeUrl:'/stream.mp4',started:false},resolve;const loading=[];const TOKEN=null;",
+      surfaceSeam(),
       "const document={getElementById:()=>({})};const console={warn(){}};function fetch(){return new Promise(done=>resolve=done);}",
       "function pbPosSec(){return 0;}function currentStreamFailureOverlay(){return null;}function notifyPlaybackControl(){}function finishStallRecovery(){throw Error('stale recovery');}function clientLog(){}function toast(){}function setLoading(...args){loading.push(args);}",
       shippedSource("probePlaybackSource"),shippedSource("stallDiagnose"),
       shippedSource("hasPendingPlaybackOpen"),shippedSource("playbackOwnsAttachedMedia"),
-      "return {loading,start:stallDiagnose,resolve:()=>resolve({status:500}),replace(kind){if(kind==='close')PLAYER=null;else if(kind==='seek')PLAYER.controlIntentGeneration=1;else PLAYER={started:false,method:'transcode'};}};",
+      "return {loading,surface:surfacePainted,start:stallDiagnose,resolve:()=>resolve({status:500}),replace(kind){if(kind==='close')PLAYER=null;else if(kind==='seek')PLAYER.controlIntentGeneration=1;else PLAYER={started:false,method:'transcode'};}};",
     ].join("\n"))();
     const probe=h.start();h.replace(replacement);h.resolve();await probe;
-    assert.equal(h.loading.length,0,`stale probe after ${replacement} cannot label another playback failed`);
+    assert.equal(h.surface().length,0,`stale probe after ${replacement} cannot label another playback failed`);
   }
   for(const outcome of ['success','failure']){
     const h=new Function([
@@ -1397,6 +1466,7 @@ async function main() {
   {
     const h=new Function([
       "let now=1000,attempts=0,recovered=0; const performance={now:()=>now},document={hidden:false};",
+      surfaceSeam(),
       "const PERSISTENT_STALL_MS=8000,STALL_MIN_MS=350,SUPPLY_RUNWAY_SECS=1.5; const p={started:true,waitAt:null,controlHasFrameCallbacks:true,controlPresentedFrames:10,source:{video_codec:'h264'},wantsPlayback:true}; let PLAYER=p;",
       "const v={currentTime:10,paused:false,ended:false,pause(){this.paused=true;}};",
       "function bufferRunway(){return 10;} function persistentWait(){attempts++;return new Promise(()=>{});}",
@@ -2061,11 +2131,12 @@ async function main() {
     const stub = new Function(
       "setTimeout", "clearTimeout", "PERSISTENT_STALL_MS",
       "PlaybackPolicy", "playQuality", "recordWaitStall", "pbPosSec", "clientLog",
-      "setLoading", "startTranscodeFallback", "seekTo", "endWait", "playbackContext",
+      "startTranscodeFallback", "seekTo", "endWait", "playbackContext",
       "clockFromSec", "CONTROL_CLIENT_ID", "playbackControlSnapshot",
       "sendPlaybackControl", "window", "PlurxPlaybackControl", "performance", "bufferRunway",
       [
         "let PLAYER=null; const document={hidden:false,getElementById:()=>null};",
+        surfaceSeam(),
         shippedSource("createPlaybackOpenGate"),"const PLAY_OPEN_GATE=createPlaybackOpenGate();",
         askConstants,
         shippedSource("supersedePlaybackControlIntent"),
@@ -2107,6 +2178,7 @@ async function main() {
         shippedSource("playbackProgressTick"),
         shippedSource("hasPendingPlaybackOpen"),shippedSource("playbackOwnsAttachedMedia"),
         "return {",
+        " surface:surfacePainted, stops:()=>surfaceStops.length, events:()=>surfaceEvents,",
         " preparation(player,kind){PLAYER=player;if(kind==='full')player.retiringOpenAttempt=PLAY_OPEN_GATE.begin('open');else player.pendingMediaChange={};},",
         " attachedAgain(player){PLAYER=player;player.pendingMediaChange=null;player.retiringOpenAttempt=null;return notifyPlaybackControl();},",
         " monitor(player,video){PLAYER=player; playbackProgressTick(video,player);},",
@@ -2137,7 +2209,6 @@ async function main() {
       (player, kind, ms, runway, detail) => stalls.push(detail),
       () => 12,
       (entry) => log.push(entry),
-      (on, title, detail, buttons) => loading.push({ on, title, detail, buttons }),
       (why) => reopened.push({ kind: "transcode", why }),
       (position) => reopened.push({ kind: "seek", position }),
       () => {},
@@ -2157,7 +2228,12 @@ async function main() {
       () => options.runway??1,
     );
     const made = {
-      stub, timers, log, loading, reopened, stalls, sent,
+      stub, timers, log, reopened, stalls, sent,
+      // The overlay copy, read off the faults the owner raised. `buttons` was
+      // a string of inline HTML; `actions` is the contract's vocabulary, which
+      // is the same question asked in the form the presenter answers.
+      get loading() { return stub.surface(); },
+      get stops() { return stub.stops(); },
       answerWith(next) { answer = next; },
       holdWith(next) { hold = next; },
       snapshotWith(next) { snapshotFn = next; },
@@ -2387,9 +2463,16 @@ async function main() {
     assert.equal(h.loading.length, 1);
     assert.equal(h.loading[0].title, "This file's audio is not playable here.",
       "the viewer reads the server's verdict, not the client's guess");
-    assert.match(h.loading[0].buttons, /retryPlayback/, "Try again survives a terminal verdict");
-    assert.match(h.loading[0].buttons, /startTranscodeFallback/,
+    assert.ok(h.loading[0].actions.includes("retry"), "Try again survives a terminal verdict");
+    assert.ok(h.loading[0].actions.includes("force_transcode"),
       "Force transcode survives it — it is a different recipe");
+    assert.equal(player.surfaceTranscodeReason, "stall-terminal",
+      "and reopens as the terminal recipe change it always was");
+    // D1 is unchanged, but the surface it produces is not drawn over a running
+    // player: this branch returns with nothing left to try (contract §3.4).
+    assert.equal(h.loading[0].source, "owner_stopped");
+    assert.equal(h.loading[0].player_stopped, true);
+    assert.equal(h.stops, 1, "a terminal verdict stops the player before it says so");
   }
 
   // Server text is bounded and stripped on the way in, the way the outbound
@@ -2449,8 +2532,11 @@ async function main() {
     assert.equal(h.loading.length, 1, "a hold tells the viewer what is happening");
     assert.equal(h.loading[0].detail, "The server is short of space.",
       "in the viewer's words, not the wire's");
-    assert.equal(h.loading[0].buttons.includes("startTranscodeFallback"), false,
+    assert.equal(h.loading[0].actions.includes("force_transcode"), false,
       "a hold offers no recipe change: the server said the recipe is not the problem");
+    assert.equal(h.loading[0].source, "control_hold",
+      "a hold is a notice beside the picture, not a screen over it");
+    assert.equal(h.stops, 0, "and stops nothing — the owner still has rungs");
     assert.equal(h.stalls.length, 1,
       "the stall is recorded once, not once per deferral");
     assert.equal(player.waitReported, true,
@@ -2761,11 +2847,12 @@ async function main() {
     const stub = new Function(
       "setTimeout", "clearTimeout", "PERSISTENT_STALL_MS", "ENDED_SLACK_SEC",
       "pbTotalSec", "pbPosSec", "reportProgress", "finishPlayback",
-      "playNextAudiobookPart", "clientLog", "setLoading", "seekTo", "clockFromSec",
+      "playNextAudiobookPart", "clientLog", "seekTo", "clockFromSec",
       "CONTROL_CLIENT_ID", "playbackControlSnapshot", "sendPlaybackControl",
       "window", "PlurxPlaybackControl", "performance", "document",
       [
         "let PLAYER=null;",
+        surfaceSeam(),
         askConstants,
         shippedSource("controlVerdictText"),
         shippedSource("armedPlaybackControlVerdict"),
@@ -2801,6 +2888,7 @@ async function main() {
         " attach(player,video,bootstrap){PLAYER=player;",
         "   return startPlaybackControl(video,player,bootstrap);},",
         " detach(player){PLAYER=player; stopPlaybackControl(player); PLAYER=null;},",
+        " surface:surfacePainted, stops:()=>surfaceStops.length,",
         " ended(player,fileId){PLAYER=player; return handleEnded(fileId);}};",
       ].join("\n"),
     )(
@@ -2814,7 +2902,6 @@ async function main() {
       () => {},
       async () => false,
       (entry) => log.push(entry),
-      (on, title, detail, buttons) => loading.push({ on, title, detail, buttons }),
       (sec) => seeks.push(sec),
       (sec) => `0:${Math.round(sec)}`,
       "44444444-4444-4444-8444-444444444444",
@@ -2830,7 +2917,9 @@ async function main() {
       { getElementById: () => video },
     );
     const made = {
-      stub, timers, log, loading, seeks, video, attached: [],
+      stub, timers, log, seeks, video, attached: [],
+      get loading() { return stub.surface(); },
+      get stops() { return stub.stops(); },
       answerWith(next) { answer = next; },
       holdWith(next) { hold = next; },
       fire() {
@@ -2878,6 +2967,12 @@ async function main() {
     const { h } = await endedWith({ type: "none" }, 3);
     assert.equal(h.seeks.length, 0, "past the local budget it gives up, as today");
     assert.equal(h.loading[0].title, "The stream stopped before the end.");
+    // Giving up is exhaustion, so the claim that the player is stopped is one
+    // the owner makes by stopping it (contract §3.4), not one inferred from
+    // `ended` across an ask that can take seconds.
+    assert.equal(h.loading[0].source, "repeated_early_end");
+    assert.equal(h.loading[0].player_stopped, true);
+    assert.equal(h.stops, 1);
   }
 
   // When the server answers, the guess stops bounding anything. This is the
@@ -2893,8 +2988,10 @@ async function main() {
     assert.deepEqual(paced, [], "and arms no retry");
     assert.equal(h.loading.length, 1, "the viewer is told what is happening");
     assert.equal(h.loading[0].detail, "The server is short of space.");
-    assert.match(h.loading[0].buttons, /retryPlayback/, "and can act on it");
-    assert.match(h.loading[0].buttons, /closePlayer/);
+    assert.deepEqual(h.loading[0].actions, ["retry", "close"], "and can act on it");
+    assert.equal(h.loading[0].source, "control_hold",
+      "a hold is a notice, not a screen: D1 arms wording, it does not tear down");
+    assert.equal(h.stops, 0, "and it stops nothing");
     assert.match(h.log[0].detail, /deferred:hold/);
     assert.equal(player.endedTries, 2, "the count is kept as evidence");
   }
@@ -3025,8 +3122,10 @@ async function main() {
     }, 0);
     assert.equal(h.seeks.length, 0, "a terminal verdict reconnects nothing");
     assert.equal(h.loading[0].title, "The source stops here.");
-    assert.match(h.loading[0].buttons, /retryPlayback/,
+    assert.ok(h.loading[0].actions.includes("retry"),
       "and the viewer keeps every option they had");
+    assert.equal(h.loading[0].source, "owner_stopped");
+    assert.equal(h.stops, 1, "the owner stops before the verdict goes over it");
   }
 
   reporter.stop();

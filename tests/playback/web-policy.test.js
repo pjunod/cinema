@@ -719,7 +719,7 @@ asyncTest("a temporary live recovery presentation remains playable", async () =>
 
 test("an initial VOD refusal stays visible instead of closing the player", () => {
   const play = shippedSource("play");
-  assert.match(play, /showSessionOpenFailure\(error\)/);
+  assert.match(play, /showSessionOpenFailure\(error,surfaceContext\)/);
   assert.doesNotMatch(
     play,
     /openSession[\s\S]{0,500}return closePlayer\(\)/,
@@ -1713,7 +1713,7 @@ function autoRescueHarness(player, autoAbr = true) {
     "clientLog",
     "toast",
     "playbackContext",
-    "setLoading",
+    "raisePlaybackSurface",
     "recordAutoSwitch",
     "startTranscodeFallback",
     "pollSessionHealth",
@@ -2243,15 +2243,15 @@ test("fallback swaps preserve healthy playback until the replacement exists", ()
 
 test("a persistent-stall prompt survives later waiting events", () => {
   assert.equal(
-    policy.waitingOverlayAction({ started: false, stallPrompt: false }),
+    policy.waitingOverlayAction({ started: false, promptUp: false }),
     "ignore",
   );
   assert.equal(
-    policy.waitingOverlayAction({ started: true, stallPrompt: false }),
+    policy.waitingOverlayAction({ started: true, promptUp: false }),
     "buffer",
   );
   assert.equal(
-    policy.waitingOverlayAction({ started: true, stallPrompt: true }),
+    policy.waitingOverlayAction({ started: true, promptUp: true }),
     "preserve_prompt",
   );
 });
@@ -2343,7 +2343,7 @@ test("the shipped player adapter applies state precedence and preview-then-commi
   const clearTimeoutStub = () => { pending = null; };
   let surface = "desktop";
   const build = new Function(
-    "document", "PLAYER", "PlaybackPolicy", "isFullscreenAnywhere", "toggleFullscreen",
+    "document", "PLAYER", "PlaybackPolicy", "PLAYBACK_SURFACE", "isFullscreenAnywhere", "toggleFullscreen",
     "toggleStats", "cycleSub", "playerActivity", "pbTotalSec", "pbPosSec",
     "pbTick", "seekTo", "togglePlay", "closeMenu", "closePlayer", "coarsePointer",
     "setTimeout", "clearTimeout",
@@ -2363,8 +2363,9 @@ test("the shipped player adapter applies state precedence and preview-then-commi
       "return {playerInputState,playerInputSurface,playerContractInput,applyPlayerOutcome,handlePlayerKeydown};",
     ].join("\n"),
   );
+  const model = { surface: null };
   const adapter = build(
-    document, player, policy, () => false, () => { calls.fullscreen += 1; },
+    document, player, policy, model, () => false, () => { calls.fullscreen += 1; },
     () => { calls.stats += 1; }, () => {}, () => {}, () => 100, () => 20,
     () => { calls.ticks += 1; }, (target) => calls.seek.push(target),
     () => { calls.play += 1; }, () => { calls.menu += 1; }, () => { calls.close += 1; },
@@ -2463,14 +2464,694 @@ test("the shipped player adapter applies state precedence and preview-then-commi
   assert.equal(player._seekPending, null);
   surface = "desktop";
 
-  elements.ploading.classList.add("failed");
+  // `failed` is the presenter's answer now, not a class four call sites set:
+  // a BLOCKING surface whose class is a prompt or a terminal. Read off the
+  // model, so a prompt raised before `play()` built a PLAYER still routes.
+  model.surface = { kind: "blocking", class: "stopped" };
   assert.equal(adapter.playerInputState(), "failed");
-  elements.ploading.classList.remove("failed");
+  model.surface = { kind: "blocking", class: "preparing" };
+  assert.equal(adapter.playerInputState(), "transport");
+  model.surface = null;
   elements.statsov.classList.add("on");
   assert.equal(adapter.playerInputState(), "info");
   elements.statsov.classList.remove("on");
   elements.player.classList.add("idle");
   assert.equal(adapter.playerInputState(), "hidden");
+});
+
+
+// ---- the playback surface contract, against the SHIPPED presenter ----------
+//
+// tests/playback/playback-surface-contract.test.js runs every fixture case
+// against the reducer. These run the same cases against the reducer AND the
+// shipped render, because a contract kept by a pure function nobody draws is a
+// contract about nothing — and the three mutation-killers the implementation
+// plan §4.2 names, each of which is a way the surface could quietly go back to
+// being a message channel.
+
+const surfaceContract = require("./playback-surface-contract.json");
+
+function surfaceClassList(...initial) {
+  const values = new Set(initial);
+  return {
+    values,
+    contains: (name) => values.has(name),
+    add: (...names) => names.forEach((name) => values.add(name)),
+    remove: (...names) => names.forEach((name) => values.delete(name)),
+    toggle: (name, on) => (on ? values.add(name) : values.delete(name)),
+  };
+}
+
+// The shipped render, wired to a DOM that is nothing but the elements it is
+// allowed to write.
+function buildShippedSurfaceRender() {
+  const node = (extra = {}) => Object.assign({ textContent: "", innerHTML: "", classList: surfaceClassList() }, extra);
+  const elements = {
+    ploading: node(), ploadText: node(), ploadSub: node(), ploadAct: node(),
+    psurface: node(), psurfText: node(), psurfSub: node(), psurfAct: node(),
+    pindicator: node(), pindText: node(),
+  };
+  const document = { getElementById: (id) => elements[id] || null };
+  const render = new Function(
+    "document",
+    [
+      shippedSource("esc"),
+      shippedBinding("const", "SURFACE_ACTION_LABELS"),
+      shippedSource("renderPlaybackSurface"),
+      shippedSource("playbackSurfaceActionHtml"),
+      shippedSource("renderPlaybackSurfaceNotice"),
+      shippedSource("renderPlaybackSurfaceIndicator"),
+      shippedSource("setLoading"),
+      "return renderPlaybackSurface;",
+    ].join("\n"),
+  )(document);
+  return { render, elements };
+}
+
+function shippedRenderedKind(elements) {
+  const on = [
+    elements.ploading.classList.contains("on") ? "blocking" : null,
+    elements.psurface.classList.contains("on") ? "banner" : null,
+    elements.pindicator.classList.contains("on") ? "indicator" : null,
+  ].filter(Boolean);
+  assert.ok(on.length <= 1, `two surfaces are drawn at once: ${on.join(" + ")}`);
+  return on[0] || "none";
+}
+
+function countButtons(html) {
+  return (String(html || "").match(/<button /g) || []).length;
+}
+
+test("every contract case reaches the shipped render as the kind it names", () => {
+  const { render, elements } = buildShippedSurfaceRender();
+  let checked = 0;
+  for (const item of surfaceContract.cases) {
+    let state = policy.initialSurfaceState();
+    let surface = policy.presentSurface(state, { t: 0 }).surface;
+    const expectations = new Map();
+    for (const expectation of item.expect) {
+      if (!expectations.has(expectation.at)) expectations.set(expectation.at, []);
+      expectations.get(expectation.at).push(expectation);
+    }
+    const times = [...new Set(item.events.map((event) => event.t))];
+    for (const at of times) {
+      for (const event of item.events.filter((event) => event.t === at)) {
+        const step = policy.presentSurface(state, Object.assign({}, event));
+        state = step.state;
+        surface = step.surface;
+      }
+      for (const expectation of expectations.get(at) || []) {
+        if (expectation.surface == null) continue;
+        render(surface);
+        checked += 1;
+        assert.equal(
+          shippedRenderedKind(elements),
+          expectation.surface,
+          `${item.name} @${at}: the shipped render drew the wrong surface`,
+        );
+        // `failed` is the input contract's state and nothing else: a blocking
+        // `preparing` covers the picture and asks the viewer nothing.
+        assert.equal(
+          elements.ploading.classList.contains("failed"),
+          !!surface.input_failed,
+          `${item.name} @${at}: the failed class must follow surfaceEntersFailedRouting`,
+        );
+        if (expectation.surface === "blocking") {
+          assert.equal(elements.ploadText.textContent, surface.title || "");
+          assert.equal(elements.ploadSub.textContent, surface.detail || "");
+          assert.equal(countButtons(elements.ploadAct.innerHTML), surface.actions.length);
+        }
+        if (expectation.surface === "banner") {
+          assert.equal(elements.psurfText.textContent, surface.title || "");
+          assert.equal(countButtons(elements.psurfAct.innerHTML), surface.actions.length);
+        }
+        if (expectation.surface === "indicator") {
+          assert.equal(elements.pindText.textContent, surface.title || "Working…");
+        }
+        if (expectation.surface === "none") {
+          assert.equal(elements.ploadAct.innerHTML, "");
+          assert.equal(elements.psurfAct.innerHTML, "");
+        }
+      }
+    }
+  }
+  assert.ok(checked >= surfaceContract.cases.length, "every case must assert at least one rendered surface");
+});
+
+test("the shipped presenter step is the only thing that renders, and it renders every step", () => {
+  const step = shippedSource("playbackSurfaceStep");
+  assert.match(step, /PlaybackPolicy\.presentSurface\(/);
+  assert.match(step, /renderPlaybackSurface\(step\.surface\)/);
+  assert.doesNotMatch(
+    step,
+    /\b(pause|play|seekTo|closePlayer|startTranscodeFallback|armStall|clearTimeout|clearInterval|notifyPlaybackControl)\s*\(/,
+    "the presenter step must have no side effect but the render and the log",
+  );
+  for (const name of ["renderPlaybackSurface", "renderPlaybackSurfaceNotice", "renderPlaybackSurfaceIndicator", "setLoading"]) {
+    assert.doesNotMatch(
+      shippedSource(name),
+      /\b(pausePlaybackInternally|seekTo|startLoad|reopen|notifyPlaybackControl|clearInterval|setInterval|setTimeout)\s*\(/,
+      `${name} is the render; it may not act on the player`,
+    );
+  }
+});
+
+// MUTATION (ii): make renderPlaybackSurface add `failed` for `preparing` and
+// this fails, because a full-screen `preparing` keeps today's routing.
+test("surface kind x class x input is a fixed cross-product", () => {
+  const { render, elements } = buildShippedSurfaceRender();
+  const inputState = new Function(
+    "document", "PLAYER", "PlaybackPolicy", "PLAYBACK_SURFACE",
+    [
+      shippedSource("playerSeekPending"),
+      shippedSource("playerInputState"),
+      "return playerInputState;",
+    ].join("\n"),
+  );
+  const chrome = {
+    player: { classList: surfaceClassList() },
+    pseek: { id: "pseek" },
+    pmenu: { classList: surfaceClassList() },
+    statsov: { classList: surfaceClassList(), dataset: { mode: "standard" } },
+  };
+  const document = { activeElement: { tagName: "DIV" }, getElementById: (id) => chrome[id] || null };
+  const expected = {
+    "blocking:exhausted": "failed",
+    "blocking:stopped": "failed",
+    "blocking:preparing": "transport",
+    "blocking:buffering": "transport",
+    "blocking:recovering": "transport",
+    "indicator:preparing": "transport",
+    "indicator:buffering": "transport",
+    "indicator:recovering": "transport",
+    "banner:hold": "transport",
+    "banner:degraded": "transport",
+    "banner:refused": "transport",
+    "none:null": "transport",
+  };
+  for (const [pair, state] of Object.entries(expected)) {
+    const [kind, name] = pair.split(":");
+    const cls = name === "null" ? null : name;
+    const surface = Object.freeze({
+      kind, class: cls, source: cls, title: "t", detail: "d", actions: Object.freeze([]),
+      attached: "g1", intent: null, position_ms: null, player_stopped: kind === "blocking",
+      input_failed: policy.surfaceEntersFailedRouting({ kind, class: cls }), fault: null,
+    });
+    render(surface);
+    // No PLAYER at all: a prompt the presenter raised before one existed has
+    // to route the same way, which is finding 7.
+    assert.equal(inputState(document, null, policy, { surface })(), state, `${pair} must route as ${state}`);
+    assert.equal(
+      elements.ploading.classList.contains("failed"),
+      state === "failed",
+      `${pair}: the failed class and the failed input state are one answer`,
+    );
+    // Every routing table input must have an answer in the state the surface
+    // produced — a state the table does not know is an unroutable player.
+    for (const input of Object.keys(surfaceContract.kinds)) void input;
+    assert.ok(policy.INPUT_ROUTING.desktop[state], `${state} is not a state the input contract declares`);
+  }
+});
+
+// MUTATION (iii): let `canplay` feed the reducer `presenting: true` and this
+// fails — a decoder can fire `canplay` and present nothing.
+test("the shipped canplay listener feeds an inert event and nothing else", () => {
+  const wired = shippedSource("wirePlayerMedia");
+  const match = wired.match(/addEventListener\("canplay",\(\)=>\{([^\n]*)\}\);/);
+  assert.ok(match, "index.html no longer wires canplay through the presenter");
+  const fed = [];
+  // Everything the listener could reach for, so a mutation that feeds evidence
+  // fails on what it fed rather than on an undefined name.
+  new Function(
+    "playbackSurfaceStep", "PLAYER", "playbackSurfaceGeneration", "playbackWaitNeedsProgress",
+    match[1],
+  )((event) => fed.push(event), { started: true, attemptId: "g1" }, () => "g1", () => false);
+  assert.deepEqual(fed, [{ event: "canplay" }],
+    "canplay may prompt a look and nothing else — it is not evidence");
+
+  // And prove it is inert where it matters: over a stopped player, the event
+  // this listener feeds must not move the surface.
+  let state = policy.initialSurfaceState();
+  for (const event of [
+    { t: 0, attach: "g1" },
+    { t: 100, raise: "decoder_failed", attached: "g1", player_stopped: true, context: "attached" },
+  ]) state = policy.presentSurface(state, event).state;
+  const before = policy.presentSurface(state, { t: 800 }).surface;
+  let after = before;
+  for (const event of fed) after = policy.presentSurface(state, Object.assign({ t: 800 }, event)).surface;
+  assert.equal(after.kind, "blocking");
+  assert.equal(after.class, before.class);
+});
+
+// MUTATION (i): delete the stop from showStallRecoveryFailure and this fails.
+// A blocking surface is only ever drawn over a player its owner has stopped.
+test("the stall-recovery prompt stops the player before it raises", () => {
+  const order = [];
+  let raised = null;
+  const build = new Function(
+    "PLAYER", "document", "pausePlaybackInternally", "stopPlayerTimers", "raisePlaybackSurface",
+    [
+      shippedSource("playbackStallActions"),
+      shippedSource("stopPlayerForExhaustion"),
+      shippedSource("showStallRecoveryFailure"),
+      "return showStallRecoveryFailure;",
+    ].join("\n"),
+  );
+  const player = { method: "remux" };
+  const video = {};
+  build(
+    player,
+    { getElementById: (id) => (id === "video" ? video : null) },
+    (element) => { assert.equal(element, video); order.push("pause"); },
+    () => order.push("timers"),
+    (source, fault) => { order.push("raise"); raised = { source, fault }; },
+  )("the reopen failed");
+
+  assert.deepEqual(order, ["pause", "timers", "raise"],
+    "the owner stops the player, and only then raises (contract §3.4)");
+  assert.equal(raised.source, "owner_exhausted");
+  assert.equal(raised.fault.player_stopped, true);
+  assert.deepEqual(raised.fault.actions, ["retry", "force_transcode", "close"]);
+
+  // The reducer's half of the same rule: without the stop this is a fixture
+  // error and no surface at all.
+  let state = policy.presentSurface(policy.initialSurfaceState(), { t: 0, attach: "g1" }).state;
+  const withStop = policy.presentSurface(state, {
+    t: 100, raise: raised.source, attached: "g1", context: "attached",
+    player_stopped: raised.fault.player_stopped, actions: raised.fault.actions,
+  });
+  assert.equal(withStop.surface.kind, "blocking");
+  assert.equal(withStop.surface.class, "exhausted");
+  const withoutStop = policy.presentSurface(state, {
+    t: 100, raise: raised.source, attached: "g1", context: "attached", player_stopped: false,
+  });
+  assert.equal(withoutStop.surface.kind, "none");
+  assert.equal(withoutStop.log[0].error, "blocking_without_stop");
+});
+
+test("every former setLoading site now raises a source the fixture declares", () => {
+  const declared = new Set(surfaceContract.sources.map((row) => row.id));
+  const raised = new Set(
+    [...SHIPPED_UI.matchAll(/raisePlaybackSurface\(\s*"([a-z_0-9]+)"/g)].map((match) => match[1]),
+  );
+  assert.ok(raised.size >= 8, "the web raises more than a handful of the table's rows");
+  for (const source of raised) {
+    assert.ok(declared.has(source), `index.html raises ${source}, which is in no fixture row`);
+  }
+  // The two the whole migration exists to make impossible.
+  assert.doesNotMatch(
+    shippedSource("executePlaybackMediaChange"),
+    /showStallRecoveryFailure/,
+    "a failed change must not raise the predecessor's exhaustion prompt",
+  );
+  assert.match(shippedSource("closePlayer"), /resetPlaybackSurface\(\)/);
+});
+
+
+// The shipped glue, not the reducer and not the render alone: the defaults
+// index.html fills in — which generation a fault is about, which context it was
+// raised in, which intent it belongs to — are where a correct reducer and a
+// correct render can still add up to an overlay over a moving picture.
+function buildShippedSurfaceGlue(player) {
+  const node = (extra = {}) => Object.assign({ textContent: "", innerHTML: "", classList: surfaceClassList() }, extra);
+  const elements = {
+    ploading: node(), ploadText: node(), ploadSub: node(), ploadAct: node(),
+    psurface: node(), psurfText: node(), psurfSub: node(), psurfAct: node(),
+    pindicator: node(), pindText: node(),
+  };
+  const document = { getElementById: (id) => elements[id] || null };
+  const clock = { now: 0 };
+  const logged = [];
+  const api = new Function(
+    "document", "PLAYER", "PlaybackPolicy", "performance", "recordPlaybackSurfaceLog",
+    [
+      shippedSource("esc"),
+      shippedBinding("const", "SURFACE_ACTION_LABELS"),
+      shippedBinding("const", "PLAYBACK_SURFACE"),
+      shippedSource("playbackSurfaceGeneration"),
+      shippedSource("playbackSurfaceIntent"),
+      shippedSource("playbackSurfaceContext"),
+      shippedSource("playbackSurfaceHasLiveFault"),
+      shippedSource("playbackSurfaceStep"),
+      shippedSource("raisePlaybackSurface"),
+      shippedSource("renderPlaybackSurface"),
+      shippedSource("playbackSurfaceActionHtml"),
+      shippedSource("renderPlaybackSurfaceNotice"),
+      shippedSource("renderPlaybackSurfaceIndicator"),
+      shippedSource("setLoading"),
+      "return {PLAYBACK_SURFACE, playbackSurfaceStep, raisePlaybackSurface, playbackSurfaceGeneration};",
+    ].join("\n"),
+  )(document, player, policy, { now: () => clock.now }, (entry) => logged.push(entry));
+  return { api, elements, clock, logged };
+}
+
+// §2.1's second defect, closed: "Playback could not reconnect." over a
+// predecessor that is still playing.
+test("a failed change reaches the shipped glue as a banner beside a playing picture", () => {
+  const player = { attemptId: "a1", started: true, method: "remux", controlSeek: { sequence: 7 } };
+  const { api, elements, clock } = buildShippedSurfaceGlue(player);
+  api.playbackSurfaceStep({ attach: "a1" });
+  api.playbackSurfaceStep({ presenting: true, attached: "a1" });
+  assert.equal(shippedRenderedKind(elements), "none");
+
+  // The change is pending, so the player's own context says `change`.
+  clock.now = 1000;
+  player.pendingMediaChange = { method: "transcode" };
+  api.raisePlaybackSurface("change_failed", {
+    intent: 7, title: "Playback could not reconnect.", detail: "the server refused it",
+    actions: ["retry"],
+  });
+  assert.equal(shippedRenderedKind(elements), "banner");
+  assert.equal(elements.psurfText.textContent, "Playback could not reconnect.");
+  assert.equal(countButtons(elements.psurfAct.innerHTML), 1);
+  assert.equal(elements.ploading.classList.contains("on"), false,
+    "a refused change must never cover the predecessor");
+
+  // The predecessor keeps playing and keeps its picture for the whole
+  // `refused_progress_ms` window; only then is the viewer taken to have been
+  // told (contract §3.1).
+  clock.now = 9000;
+  api.playbackSurfaceStep({ presenting: true, attached: "a1" });
+  assert.equal(shippedRenderedKind(elements), "banner");
+  clock.now = 11001;
+  api.playbackSurfaceStep({ tick: true });
+  assert.equal(shippedRenderedKind(elements), "none");
+});
+
+// §3.2, and the row to watch after this lands: a blocking surface over a
+// picture that moves resolves in favour of the picture, loudly.
+test("the shipped glue resolves a disagreement in favour of the picture", () => {
+  const player = { attemptId: "a4", started: true, method: "transcode" };
+  const { api, elements, clock, logged } = buildShippedSurfaceGlue(player);
+  api.playbackSurfaceStep({ attach: "a4" });
+  clock.now = 500;
+  api.playbackSurfaceStep({ presenting: false, attached: "a4" });
+  api.raisePlaybackSurface("owner_exhausted", {
+    context: "attached", player_stopped: true, title: "Playback is still stalled.",
+    detail: "one automatic recovery was already tried", actions: ["retry", "close"],
+  });
+  assert.equal(shippedRenderedKind(elements), "blocking");
+  assert.equal(elements.ploading.classList.contains("failed"), true);
+
+  clock.now = 3000;
+  api.playbackSurfaceStep({ presenting: true, attached: "a4" });
+  assert.equal(shippedRenderedKind(elements), "banner");
+  assert.equal(elements.psurfText.textContent, "Playback recovered");
+  assert.equal(countButtons(elements.psurfAct.innerHTML), 2, "the fault keeps its actions");
+  assert.ok(
+    logged.some((entry) => entry.event === "surface_disagreement"),
+    "a disagreement is the row §5 says to watch, so it has to be emitted",
+  );
+});
+
+
+// The table does not have a row for every sentence the server can send, and a
+// refusal it does not claim is still a refusal the viewer should read. This is
+// the seam where "Playback failed to start. / the server's encoder exited…"
+// could silently become the caller's generic "Playback could not prepare."
+test("a refusal no source row claims still reaches the surface as the server's sentence", () => {
+  const raised = [];
+  const toasts = [];
+  const stops = [];
+  const build = new Function(
+    "PLAYER", "PlaybackPolicy", "STREAM_FAILURE", "currentStreamFailureOverlay",
+    "playbackSurfaceContext", "playbackSurfaceIntent", "playbackSurfaceClassOf",
+    "playbackSurfaceClassBlocks", "stopPlayerForExhaustion", "raisePlaybackSurface",
+    "clientLog", "playbackContext", "toast",
+    [
+      // The table read is the SHIPPED one, so the stop this site takes is
+      // decided by the same rows the reducer renders from.
+      shippedSource("playbackSurfaceSourceIsBlocking"),
+      shippedSource("showSessionOpenFailure"),
+      "return showSessionOpenFailure;",
+    ].join("\n"),
+  );
+  const run = (status, code, message, context) => {
+    raised.length = 0;
+    stops.length = 0;
+    const failure = policy.parseStreamFailure({ status, body: JSON.stringify({ code, message }) });
+    const overlay = policy.streamFailureOverlay(failure);
+    const classOf = (source, where) => {
+      for (const row of policy.SURFACE_SOURCES) {
+        if (row.id === source && (row.context === "any" || row.context === where)) return row.class || null;
+      }
+      return null;
+    };
+    return [
+      build(
+        { fileId: 1 }, policy, null, () => overlay, () => context, () => 3,
+        classOf,
+        (cls) => !!(cls && policy.SURFACE_CLASSES[cls] && policy.SURFACE_CLASSES[cls].blocking === true),
+        () => stops.push(true),
+        (source, fault) => raised.push({ source, where: fault.context, fault }),
+        () => {}, () => ({}), (text) => toasts.push(text),
+      )({ streamFailure: failure }, context),
+      raised[0],
+      stops.length,
+    ];
+  };
+
+  // No row: a 502 the encoder died on, at start. The owner has nothing left,
+  // so it is `owner_stopped` — carrying the sentence, not losing it.
+  const [handled, terminal, terminalStops] = run(502, "producer_failed", "the encoder exited before it produced video", "start");
+  assert.equal(handled, true, "the caller must not fall back to its own generic sentence");
+  assert.equal(terminal.source, "owner_stopped");
+  assert.equal(terminal.fault.title, "Playback failed to start.");
+  assert.equal(terminal.fault.detail, "the encoder exited before it produced video");
+  assert.equal(terminal.fault.player_stopped, true);
+  assert.equal(terminalStops, 1, "a blocking class is only ever raised over a stopped player");
+
+  // The same body during a pending change is the predecessor's business, not
+  // its execution: a notice, the intent it belongs to, and no stop.
+  const [, refused, refusedStops] = run(502, "producer_failed", "the encoder exited before it produced video", "change");
+  assert.equal(refused.source, "change_failed");
+  assert.equal(refused.fault.intent, 3);
+  assert.equal(refused.fault.player_stopped, false);
+  assert.equal(refusedStops, 0, "a refused change never stops the predecessor");
+
+  // Ruled 2026-09-13: row 3 wins in every context. A 403 during a pending
+  // change is `stopped` with Sign in, and it takes the stop that goes with it.
+  const [, auth, authStops] = run(403, "forbidden", "this bearer is not allowed to open a session", "change");
+  assert.equal(auth.source, "auth_401_403");
+  assert.equal(auth.fault.player_stopped, true);
+  assert.equal(authStops, 1);
+
+  // A row that DOES claim it still wins, and carries its position.
+  const [, lost] = run(410, "media_owner_lost", "the node serving this media session is gone", "attached");
+  assert.equal(lost.source, "media_owner_lost_410");
+});
+
+
+// ---- one owner-stop killer per blocking-raise site -------------------------
+//
+// §5.7 of the implementation plan asks for one per site, not one in total: a
+// suite that pins `showStallRecoveryFailure` and nothing else lets the other
+// five lose their stop in silence. The site list is DERIVED from the page, so
+// a new blocking raise added without a stop fails here too rather than being
+// something this test forgot to know about.
+function shippedSurfaceRaises() {
+  const needle = 'raisePlaybackSurface("';
+  const out = [];
+  let at = SHIPPED_UI.indexOf(needle);
+  while (at !== -1) {
+    const source = SHIPPED_UI.slice(at + needle.length, SHIPPED_UI.indexOf('"', at + needle.length));
+    const open = SHIPPED_UI.indexOf("{", at);
+    let depth = 0;
+    let end = open;
+    for (; end < SHIPPED_UI.length; end += 1) {
+      if (SHIPPED_UI[end] === "{") depth += 1;
+      else if (SHIPPED_UI[end] === "}") { depth -= 1; if (depth === 0) break; }
+    }
+    out.push({
+      source,
+      args: SHIPPED_UI.slice(open, end + 1),
+      line: SHIPPED_UI.slice(0, at).split("\n").length,
+      before: SHIPPED_UI.slice(Math.max(0, at - 460), at),
+    });
+    at = SHIPPED_UI.indexOf(needle, end);
+  }
+  return out;
+}
+
+test("every blocking raise in the page takes the owner's stop first", () => {
+  const raises = shippedSurfaceRaises();
+  assert.ok(raises.length >= 20, `only ${raises.length} raise sites found — the scanner has drifted`);
+  // `player_stopped` present and not the literal false: either the site claims
+  // the stop outright or it computes the claim from a table read.
+  const blocking = raises.filter((raise) => /player_stopped\s*:\s*(?!false)/.test(raise.args));
+  assert.ok(blocking.length >= 8, `only ${blocking.length} blocking raise sites — a site has lost its claim`);
+  for (const raise of blocking) {
+    assert.match(
+      raise.before,
+      /stopPlayerForExhaustion\(\);/,
+      `index.html:${raise.line}: ${raise.source} claims a stopped player with no stop before it`,
+    );
+  }
+  // And the other direction: a stop with no raise after it is a player paused
+  // for nothing, which is a side effect the contract does not allow either.
+  const stops = [...SHIPPED_UI.matchAll(/stopPlayerForExhaustion\(\);/g)];
+  assert.ok(stops.length >= 8);
+  for (const stop of stops) {
+    const after = SHIPPED_UI.slice(stop.index, stop.index + 460);
+    assert.match(after, /raisePlaybackSurface\(/,
+      `index.html:${SHIPPED_UI.slice(0, stop.index).split("\n").length}: a stop that raises nothing`);
+  }
+  // Named so the count cannot quietly shrink: these are the sites §3.4 and the
+  // review between them require.
+  const sources = new Set(blocking.map((raise) => raise.source));
+  for (const required of ["owner_exhausted", "owner_stopped", "decoder_failed", "repeated_early_end"]) {
+    assert.ok(sources.has(required), `no blocking site raises ${required} any more`);
+  }
+});
+
+// MUTATION M7: make the progress tick report `presenting: true` unconditionally
+// and this fails — evidence is the clock AND the frames, not the tick running.
+test("the shipped progress tick reports the advance it measured, not that it ran", () => {
+  const fed = [];
+  const build = new Function(
+    "PLAYER", "document", "performance", "playbackSurfaceStep", "playbackSurfaceGeneration",
+    "samplePlaybackPresentationClock", "streamHasVideo", "endWait", "clearStall",
+    "finishStallRecovery", "persistentWait", "bufferRunway", "PERSISTENT_STALL_MS",
+    "playbackOwnsAttachedMedia",
+    [shippedSource("playbackProgressTick"), "return playbackProgressTick;"].join("\n"),
+  );
+  const player = { started: true, wantsPlayback: true, attemptId: "g1" };
+  const video = { currentTime: 10, paused: false, ended: false };
+  let now = 1000;
+  const tick = build(
+    player, { hidden: false }, { now: () => now },
+    (event) => fed.push(event), (p) => (p && p.attemptId) || null,
+    () => 0, () => false, () => {}, () => {}, () => {}, () => {}, () => 10, 8000,
+    () => true,
+  );
+
+  tick(video, player);            // first sample: the watch is seeded, nothing moved
+  const first = fed.filter((event) => "presenting" in event);
+  assert.deepEqual(first, [{ presenting: false, attached: "g1" }],
+    "a seeded watch has measured no advance yet and must not claim one");
+
+  now = 1500; video.currentTime = 11;
+  tick(video, player);
+  assert.deepEqual(fed.filter((event) => "presenting" in event).at(-1),
+    { presenting: true, attached: "g1" }, "a film clock that advanced is presenting");
+
+  now = 2000;                      // same clock: the picture froze
+  tick(video, player);
+  assert.deepEqual(fed.filter((event) => "presenting" in event).at(-1),
+    { presenting: false, attached: "g1" }, "a clock that did not move is not presenting");
+
+  // And the tick is what ages the presenter's timed classes, before any guard.
+  assert.ok(fed.some((event) => event.tick === true), "the tick drives the presenter's timers");
+});
+
+// MUTATION M10: delete the re-arm from `armStall` and this fails. §3.4's stop
+// takes `stopPlayerTimers` with it, and those timers are the stall detector AND
+// the presenter's only evidence.
+test("a stream that starts again after the owner stopped it gets its sampler back", () => {
+  const armed = [];
+  const build = new Function(
+    "PLAYER", "document", "setTimeout", "clearStall", "stallDiagnose", "pbPosSec",
+    "armPlaybackSampling",
+    [shippedSource("armStall"), "return armStall;"].join("\n"),
+  );
+  const run = (player) => {
+    armed.length = 0;
+    build(player, { getElementById: () => ({ id: "video" }) }, () => 1, () => {}, () => {}, () => 0,
+      (v, p) => armed.push(p))(0);
+    return armed.length;
+  };
+  assert.equal(run({ samplingStopped: true }), 1,
+    "a player whose timers the owner stopped gets them back when a stream starts");
+  assert.equal(run({ samplingStopped: false }), 0,
+    "and a player that never lost them is not re-armed under its own running timers");
+});
+
+// MUTATION M11/M12: stop feeding `retire`/`attach` and these fail. Identity is
+// what bounds a fault's life; without it a refusal outlives the attempt.
+test("attachment and retirement are what the presenter is told about identity", () => {
+  const fed = [];
+  const attach = new Function(
+    "PLAYER", "playbackSurfaceStep", "playbackSurfaceGeneration",
+    [shippedSource("beginPlaybackMediaAttachment"), "return beginPlaybackMediaAttachment;"].join("\n"),
+  )(null, (event) => fed.push(event), (p) => (p && p.attemptId) || null);
+  attach({ attemptId: "a7" });
+  assert.deepEqual(fed, [{ attach: "a7" }],
+    "every attach on every route runs through here, so every one must say so");
+
+  fed.length = 0;
+  const retire = new Function(
+    "PLAYER", "playbackSurfaceStep", "playbackSurfaceGeneration", "stopPlayerTimers",
+    "teardownHls", "releaseSession",
+    [shippedSource("retirePlaybackPredecessor"), "return retirePlaybackPredecessor;"].join("\n"),
+  )(null, (event) => fed.push(event), (p) => (p && p.attemptId) || null, () => {}, () => {}, () => {});
+  retire({ attemptId: "a9", mediaPredecessor: { attemptId: "a8" } });
+  assert.deepEqual(fed, [{ retire: "a8" }],
+    "a retired generation stops being about anything, and the presenter has to hear it");
+});
+
+// MUTATION M16: drop `{once:true}` from the `waiting` listener and this fails.
+// Safari fires `waiting` at every fMP4 boundary; one wait is one fault.
+test("the waiting listener raises one fault per wait, not one per boundary", () => {
+  const wired = shippedSource("wirePlayerMedia");
+  const match = wired.match(/addEventListener\("waiting",\(\)=>\{([\s\S]*?)\n  \}\);/);
+  assert.ok(match, "index.html no longer wires waiting through the presenter");
+  const raised = [];
+  const live = [];
+  const handler = new Function(
+    "PLAYER", "PlaybackPolicy", "playbackOwnsAttachedMedia", "playbackSurfacePromptUp",
+    "beginWait", "bufferRunway", "playbackWaitCopy", "raisePlaybackSurface",
+    "notifyPlaybackControl", "v",
+    match[1],
+  );
+  const call = () => handler(
+    { started: true, health: null }, policy, () => true, () => false, () => {}, () => 3,
+    () => ({ title: "Buffering…", detail: "3.0 s client loaded" }),
+    (source, fault, options) => {
+      if (options && options.once && live.includes(source)) return null;
+      live.push(source);
+      raised.push({ source, options });
+      return null;
+    },
+    () => {}, {},
+  );
+  call();
+  call();
+  call();
+  assert.deepEqual(raised.map((entry) => entry.source), ["media_waiting"],
+    "three boundaries in one wait are one fault");
+  assert.equal(raised[0].options && raised[0].options.once, true,
+    "and the listener is what says so — the presenter is not asked to de-duplicate");
+});
+
+
+// The other blocking sites, behaviourally rather than structurally: each one
+// runs, and each one fails if its own stop is deleted. `persistentWait`'s
+// prompt branch and `stallDiagnose` have their own runs in web-control.test.js;
+// these are the two whose harness is cheapest here.
+asyncTest("the diagnosed-stall site stops before it raises", async () => {
+  const runs = [];
+  const order = [];
+  // stallDiagnose's terminal verdict.
+  const diagnose = new Function(
+    "PLAYER", "document", "TOKEN", "pbPosSec", "notifyPlaybackControl", "currentStreamFailureOverlay",
+    "probePlaybackSource", "finishStallRecovery", "clientLog", "toast",
+    "stopPlayerForExhaustion", "raisePlaybackSurface", "playbackOwnsAttachedMedia",
+    [shippedSource("playbackStallActions"), shippedSource("stallDiagnose"), "return stallDiagnose;"].join("\n"),
+  );
+  const player = { method: "remux", probeUrl: null, started: false };
+  await diagnose(
+    player, { getElementById: () => ({ networkState: 0, readyState: 0 }) }, null,
+    () => 0, () => null, () => null, async () => ({ status: 200, segState: 200 }),
+    () => {}, () => {}, () => {},
+    () => order.push("stop"),
+    (source, fault) => { order.push("raise"); runs.push({ source, fault }); },
+    () => true,
+  )();
+  assert.deepEqual(order, ["stop", "raise"],
+    "a diagnosed stall stops the player before its verdict goes over it");
+  assert.equal(runs[0].source, "decoder_failed");
+  assert.equal(runs[0].fault.player_stopped, true);
+  assert.deepEqual(runs[0].fault.actions, ["retry", "force_transcode", "close"]);
 });
 
 test("playback-info row builders follow the shared web field list in fixture order", () => {
@@ -2493,6 +3174,23 @@ test("playback-info row builders follow the shared web field list in fixture ord
       .map((field) => field.label);
     assert.deepEqual(rows(mode, telemetry).map((row) => row.label), expected);
   }
+});
+
+// A section in the shared field list that no column renders is a row nobody
+// can read: the SURFACE section is the ledger half of the surface contract's
+// attributability (§5), and it had to be added to a hand-written column list
+// to appear at all.
+test("every playback-info section the fixture declares has a column to render in", () => {
+  const markup = shippedSource("playbackInfoMarkup");
+  const sections = new Set(require("./playback-info-fields.json").fields.map((field) => field.section));
+  const rendered = new Set(
+    [...markup.matchAll(/\[([^\]]*)\]\.map\(gridSection\)/g)]
+      .flatMap((match) => [...match[1].matchAll(/"([^"]+)"/g)].map((name) => name[1])),
+  );
+  for (const section of sections) {
+    assert.ok(rendered.has(section), `the ${section} section has no column and would never be drawn`);
+  }
+  assert.ok(sections.has("SURFACE"), "the ledger's SURFACE section is what §5 asks the web for");
 });
 
 test("decode rescue uses lost frames over a long window, not pipeline latency", () => {
@@ -2593,7 +3291,7 @@ test("each refusal the server names reaches the overlay as itself", () => {
     });
     assert.deepEqual(
       failure,
-      { status, code: body.code, message: body.message },
+      { status, code: body.code, message: body.message, position_ms: null },
       body.code,
     );
     const overlay = policy.streamFailureOverlay(failure);
@@ -2638,6 +3336,13 @@ test("a lost owner is reported as a stopped stream, not a startup failure", () =
     }),
   });
   assert.equal(failure.code, "media_owner_lost");
+  // The one field a Try again on this row actually needs: without it the
+  // reopen the fault offers has nowhere to reopen at.
+  assert.equal(failure.position_ms, 146_000);
+  assert.equal(
+    policy.classifyStreamFailure({ status: 410, code: failure.code, context: "attached" }),
+    "media_owner_lost_410",
+  );
 
   const overlay = policy.streamFailureOverlay(failure);
   assert.equal(overlay.retryable, false, "no successor is coming, so retrying is not the advice");
@@ -2698,7 +3403,7 @@ test("the legacy error body is still read", () => {
       status: 404,
       body: JSON.stringify({ error: "transcode session not found" }),
     }),
-    { status: 404, code: null, message: "transcode session not found" },
+    { status: 404, code: null, message: "transcode session not found", position_ms: null },
   );
 });
 
@@ -2790,9 +3495,12 @@ test("a successful playlist retry immediately clears its 503 explanation", () =>
 // `unsupported_build` is returned by the session-creation POST, before hls.js
 // exists. Exercise the shipped api -> openSession -> burnSub catch path rather
 // than composing policy helpers: the typed body must survive the rejected
-// promise and become the persistent player overlay, not a 2.2-second toast.
-asyncTest("a burn session-open refusal reaches the persistent overlay", async () => {
-  const loading = [];
+// promise and reach the presenter as a fault carrying the server's sentence,
+// not a 2.2-second toast — and, because the predecessor is still playing, as a
+// refusal about the CHANGE rather than anything drawn over that picture.
+asyncTest("a burn session-open refusal reaches the surface as a refused change", async () => {
+  const raised = [];
+  const stopped = [];
   const toasts = [];
   let request = null;
   const player = {
@@ -2816,7 +3524,12 @@ asyncTest("a burn session-open refusal reaches the persistent overlay", async ()
     "teardownHls",
     "clearSubs",
     "pbSyncSubIcon",
-    "setLoading",
+    "raisePlaybackSurface",
+    "playbackSurfaceClassOf",
+    "playbackSurfaceClassBlocks",
+    "stopPlayerForExhaustion",
+    "playbackSurfaceContext",
+    "playbackSurfaceIntent",
     "subLabelFor",
     "transcodeOpts",
     "toast",
@@ -2839,6 +3552,7 @@ asyncTest("a burn session-open refusal reaches the persistent overlay", async ()
       CAPS_DOCUMENT_PRELUDE,
       shippedSource("openSession"),
       shippedSource("currentStreamFailureOverlay"),
+      shippedSource("playbackSurfaceSourceIsBlocking"),
       shippedSource("showSessionOpenFailure"),
       shippedSource("positionForPlaybackIntent"),
       shippedSource("selectedAudioIndex"),
@@ -2870,7 +3584,17 @@ asyncTest("a burn session-open refusal reaches the persistent overlay", async ()
     () => {},
     () => {},
     () => {},
-    (...args) => loading.push(args),
+    (source, fault) => raised.push({ source, context: fault && fault.context, fault }),
+    (source, where) => {
+      for (const row of policy.SURFACE_SOURCES) {
+        if (row.id === source && (row.context === "any" || row.context === where)) return row.class || null;
+      }
+      return null;
+    },
+    (cls) => !!(cls && policy.SURFACE_CLASSES[cls] && policy.SURFACE_CLASSES[cls].blocking === true),
+    () => stopped.push(true),
+    () => "change",
+    () => null,
     () => "English bitmap",
     (start, audio) => ({
       start,
@@ -2893,16 +3617,27 @@ asyncTest("a burn session-open refusal reaches the persistent overlay", async ()
   assert.equal(request.url, "/api/v1/files/7/hls/sessions");
   assert.equal(request.init.method, "POST");
   assert.equal(JSON.parse(request.init.body).subtitle_burn, 2);
-  assert.deepEqual(loading.at(-1), [
-    true,
-    "Playback failed to start.",
-    "this server's ffmpeg build has no overlay filter",
-  ]);
+  // The shipped classifier decides the row, not the test: a 501 during a
+  // pending change is row 10, and its class is a notice beside a picture that
+  // is still playing.
+  assert.deepEqual(raised.at(-1), {
+    source: "change_failed",
+    context: "change",
+    fault: {
+      context: "change",
+      player_stopped: false,
+      title: "Playback failed to start.",
+      detail: "this server's ffmpeg build has no overlay filter",
+      intent: null,
+      position_ms: null,
+    },
+  });
   assert.equal(
-    loading.some(([on]) => on === false),
+    raised.some((entry) => entry.source === "owner_exhausted" || entry.source === "owner_stopped"),
     false,
-    "the persistent refusal must not be hidden after the rejected session open",
+    "a refused change must never raise a blocking fault over the predecessor",
   );
+  assert.deepEqual(stopped, [], "and must never stop the predecessor");
   assert.equal(toasts.at(-1), "Playback failed");
 });
 
@@ -3440,7 +4175,7 @@ function carryHarness(player) {
     "clearInterval",
     "STATS_TIMER",
     "teardownHls",
-    "setLoading",
+    "resetPlaybackSurface",
     "location",
     "setTimeout",
     "prePlayPreview",

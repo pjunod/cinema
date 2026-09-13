@@ -27,8 +27,13 @@ ROOT = Path(__file__).resolve().parents[1]
 # be in the tree: an assignment, a `+=`, and a class toggle are all writes.
 # A line that DEFINES the render entry point is not a call site. Checked before
 # the write patterns so the budget below counts the calls it says it counts.
+# A line that is ONLY the render's entry-point declaration is not a call site.
+# Anchored, because `if (x) function setLoading(){}` is not a thing but
+# `paint(); function setLoading(` on one folded logical line very much is: a
+# loose search here excused every write that happened to share a line with the
+# declaration, which is a hole the shape of the whole render.
 NOT_A_WRITE = (
-    re.compile(r"\bfunction\s+setLoading\s*\("),
+    re.compile(r"^\s*(?:async\s+)?function\s+setLoading\s*\([^)]*\)\s*\{?\s*$"),
 )
 
 # One pattern set per file kind. Spellings, not just the idiom that happened to
@@ -38,7 +43,8 @@ NOT_A_WRITE = (
 # `playFailure\n    = message` are not hiding places.
 PATTERNS = {
     "web": (
-        ("setLoading", re.compile(r"\bsetLoading\s*\(")),
+        ("setLoading", re.compile(r"\bsetLoading\s*(?:\?\.)?\s*\(")),
+        ("setLoading reflected", re.compile(r"\bsetLoading\s*\.\s*(?:call|apply|bind)\s*\(")),
         ("setLoading by name", re.compile(r"[\"']setLoading[\"']")),
         ("setLoading alias", re.compile(r"=\s*setLoading\s*(?:[;,)\]}]|$)")),
         ("failed class toggle", re.compile(r"classList\s*\.\s*(?:add|remove|toggle|replace)\s*\([^)]*(?i:failed)")),
@@ -48,9 +54,17 @@ PATTERNS = {
         ("overlay className write", re.compile(r"\.className\s*(?:=|\+=)(?!=)[^\n]*(?i:failed|ploading)")),
         ("stallPrompt write", re.compile(r"\b[A-Za-z_$][\w$]*\.stallPrompt\s*(?:=|\+=)(?!=)")),
         ("stallPrompt in a literal", re.compile(r"[{,]\s*stallPrompt\s*:")),
-        ("overlay element write", re.compile(r"\bpload(?:ing|Text|Sub|Act)\b[^\n]*?\.(?:textContent|innerHTML|className)\s*=(?!=)")),
+        ("overlay element write", re.compile(r"\bpload(?:ing|Text|Sub|Act)\b[^\n]*?\.(?:textContent|innerText|innerHTML|className)\s*=(?!=)")),
+        ("overlay element replace", re.compile(r"\bpload(?:ing|Text|Sub|Act)\b[^\n]*?\.(?:insertAdjacentHTML|append|prepend|replaceChildren|replaceWith)\s*\(")),
         ("overlay attribute write", re.compile(r"\bpload(?:ing|Text|Sub|Act)\b[^\n]*?setAttribute\(\s*[\"']class[\"']")),
         ("overlay bulk write", re.compile(r"Object\.assign\([^)]*\b(?:ploading|ploadText|ploadSub|ploadAct|stallPrompt)\b")),
+        # M1 added the two surfaces that are not the full screen. They are the
+        # presenter's output too, so they are fenced the same way.
+        ("notice element write", re.compile(r"\b(?:psurface|psurfText|psurfSub|psurfAct|pindicator|pindText)\b[^\n]*?\.(?:textContent|innerText|innerHTML|className)\s*=(?!=)")),
+        ("notice element replace", re.compile(r"\b(?:psurface|psurfText|psurfSub|psurfAct|pindicator|pindText)\b[^\n]*?\.(?:insertAdjacentHTML|append|prepend|replaceChildren|replaceWith)\s*\(")),
+        ("notice attribute write", re.compile(r"\b(?:psurface|psurfText|psurfSub|psurfAct|pindicator|pindText)\b[^\n]*?setAttribute\(\s*[\"']class[\"']")),
+        ("notice class toggle", re.compile(r"\b(?:psurface|pindicator)\b[^\n]*classList\s*\.\s*(?:add|remove|toggle|replace)\s*\(")),
+        ("notice bulk write", re.compile(r"Object\.assign\([^)]*\b(?:psurface|psurfText|psurfSub|psurfAct|pindicator|pindText)\b")),
     ),
     "swift": (
         ("failure field write", re.compile(r"(?<!var )(?<!let )(?<![=!<>])\b(?:failed|playbackError|playbackFailureTitle|playbackNotice)\s*(?:=|\+=)(?!=)")),
@@ -133,8 +147,10 @@ REGIONS = {
 # The migration budget: how many pre-contract write sites each file may still
 # have, and why. A milestone that lands drops its file's entry to zero and then
 # removes it. A NEW write site fails the fence today, which is the point.
+# `index.html` is not here any more: M1 landed, and a file with no entry is held
+# at zero by `MIGRATION_BUDGET.get(relative, (0, ""))` below — every web surface
+# write is inside the render anchors.
 MIGRATION_BUDGET = {
-    Path("crates/plurxd/src/web/index.html"): (55, "M1 removes these: the web surface still writes #ploading imperatively."),
     Path("crates/plurxd/src/web/playback-policy.js"): (0, "The policy module never touched the DOM; it stays at zero."),
     Path("clients/apple/Sources/PlayerController.swift"): (39, "M2 removes these: failed/playbackError/playbackFailureTitle/playbackNotice are still fields."),
     Path("clients/apple/Sources/PlayerView.swift"): (0, "The Apple view reads the model; it never wrote one."),

@@ -49,7 +49,7 @@
       "timed_ms": 30000,
       "retired_by": [
         "timer",
-        "presenting"
+        "presenting_after_raise"
       ]
     },
     "degraded": {
@@ -213,6 +213,11 @@
       "retryable": true
     },
     {
+      "id": "client_preparing",
+      "context": "any",
+      "class": "preparing"
+    },
+    {
       "id": "change_failed",
       "context": "change",
       "class": "refused",
@@ -227,7 +232,7 @@
     },
     {
       "id": "media_owner_lost_410",
-      "context": "attached",
+      "context": "any",
       "class": "recovering",
       "then_when_stopped": "stopped",
       "carries": [
@@ -312,6 +317,44 @@
     "surface_log_only"
   ],
   "cases": [
+    {
+      "name": "buffering_retired_by_unbroken_presentation",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 3000,
+          "raise": "media_waiting",
+          "attached": "g1",
+          "context": "attached"
+        },
+        {
+          "t": 3400,
+          "tick": true
+        }
+      ],
+      "expect": [
+        {
+          "at": 3000,
+          "surface": "none",
+          "log": [
+            "surface_raised",
+            "surface_cleared"
+          ]
+        },
+        {
+          "at": 3400,
+          "surface": "none"
+        }
+      ]
+    },
     {
       "name": "canplay_is_inert",
       "note": "A platform event never moves the surface. Only the client's own presentation proof does.",
@@ -1153,6 +1196,31 @@
       ]
     },
     {
+      "name": "media_owner_lost_on_create_carries_its_position",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 500,
+          "raise": "media_owner_lost_410",
+          "attached": "g1",
+          "position_ms": 146000,
+          "context": "start"
+        }
+      ],
+      "expect": [
+        {
+          "at": 500,
+          "surface": "blocking",
+          "class": "recovering",
+          "position_ms": 146000,
+          "input_failed": false
+        }
+      ]
+    },
+    {
       "name": "media_owner_lost_plays_out_then_stops",
       "events": [
         {
@@ -1424,6 +1492,41 @@
           "at": 1100,
           "surface": "none",
           "error": "unknown_source"
+        }
+      ]
+    },
+    {
+      "name": "client_preparing_is_the_staged_start",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 100,
+          "raise": "client_preparing",
+          "attached": "g1",
+          "context": "start"
+        },
+        {
+          "t": 2000,
+          "presenting": true,
+          "attached": "g1"
+        }
+      ],
+      "expect": [
+        {
+          "at": 100,
+          "surface": "blocking",
+          "class": "preparing",
+          "input_failed": false
+        },
+        {
+          "at": 2000,
+          "surface": "none",
+          "log": [
+            "surface_cleared"
+          ]
         }
       ]
     },
