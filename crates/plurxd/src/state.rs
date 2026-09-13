@@ -914,6 +914,7 @@ impl AppState {
             serving.authority(),
             node_id.clone(),
             live_tv_scratch,
+            runtime_cache.join("live-tv"),
         );
         AppState {
             store,

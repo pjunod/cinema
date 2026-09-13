@@ -9,8 +9,9 @@ use axum::Json;
 use super::peer_transport::exact_auth_from_headers;
 use crate::live_tv::{
     LiveTvActivateRequest, LiveTvDrainAck, LiveTvDrainRequest, LiveTvResourceRequest,
-    LiveTvStartRequest, LiveTvStartRequestV2, LiveTvStopRequest, SnapshotRequest, ACTIVATE_PATH,
-    DRAIN_PATH, GUIDE_PATH, RESOURCE_PATH, SNAPSHOT_PATH, START_PATH, START_V2_PATH, STOP_PATH,
+    LiveTvResumeRequest, LiveTvRetireRequest, LiveTvStartRequest, LiveTvStartRequestV2,
+    LiveTvStopRequest, SnapshotRequest, ACTIVATE_PATH, DRAIN_PATH, GUIDE_PATH, RESOURCE_PATH,
+    RESUME_PATH, RETIRE_PATH, SNAPSHOT_PATH, START_PATH, START_V2_PATH, STOP_PATH,
 };
 use crate::state::AppState;
 
@@ -245,6 +246,47 @@ pub(crate) async fn stop(
         "application/json",
         Vec::new(),
     )
+}
+
+/// Retire a viewer's public request id on the owner: stop whatever it
+/// produced, and fence it so nothing can be produced from it later. Modelled
+/// on `stop` — a new path with a new body rather than a field on a signed one,
+/// because an older owner must answer 404 here and not 400 to a start.
+pub(crate) async fn retire(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, StatusCode> {
+    authorize(&state, &headers, &body, RETIRE_PATH).await?;
+    let request = serde_json::from_slice::<LiveTvRetireRequest>(&body)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    if request.expected_owner_node_id != state.node_id {
+        return Err(StatusCode::CONFLICT);
+    }
+    let outcome = state
+        .live_tv
+        .retire_local(request.user_id, &request.request_id)
+        .await;
+    signed_json_response(&state, &headers, RETIRE_PATH, StatusCode::OK, &outcome)
+}
+
+/// Hand back the session a viewer's request id still owns, if there is one.
+pub(crate) async fn resume(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, StatusCode> {
+    authorize(&state, &headers, &body, RESUME_PATH).await?;
+    let request = serde_json::from_slice::<LiveTvResumeRequest>(&body)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    if request.expected_owner_node_id != state.node_id {
+        return Err(StatusCode::CONFLICT);
+    }
+    let answer = state
+        .live_tv
+        .resume_local(request.user_id, &request.request_id)
+        .await;
+    signed_json_response(&state, &headers, RESUME_PATH, StatusCode::OK, &answer)
 }
 
 pub(crate) async fn drain(

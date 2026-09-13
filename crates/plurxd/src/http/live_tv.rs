@@ -15,16 +15,21 @@ use crate::live_tv::{
     capability_owner, guide, GuideWindow, LiveTvActivateRequest, LiveTvActivated, LiveTvConfig,
     LiveTvDrainAck, LiveTvError, LiveTvGuide, LiveTvResourceRequest, LiveTvSnapshot,
     LiveTvStartRequest, LiveTvStartRequestV2, LiveTvStopRequest, SnapshotFreshness,
-    SnapshotRequest, ACTIVATE_PATH, GUIDE_PATH, MAX_SNAPSHOT_BYTES, RESOURCE_PATH, SNAPSHOT_PATH,
-    START_PATH, START_V2_PATH, STOP_PATH,
+    SnapshotRequest, ACTIVATE_PATH, GUIDE_PATH, MAX_SNAPSHOT_BYTES, RESOURCE_PATH, RESUME_PATH,
+    RETIRE_PATH, SNAPSHOT_PATH, START_PATH, START_V2_PATH, STOP_PATH,
 };
 use crate::live_tv_delivery::LivePlaybackRequest;
 use crate::state::AppState;
 
 const SNAPSHOT_DEADLINE: Duration = Duration::from_secs(25);
-const START_EXCHANGE_ATTEMPT: Duration = Duration::from_secs(17);
-const START_EXCHANGE_TOTAL: Duration = Duration::from_secs(24);
+const START_EXCHANGE_ATTEMPT: Duration = Duration::from_secs(20);
 const CONTROL_EXCHANGE_DEADLINE: Duration = Duration::from_secs(5);
+/// Everything a public start may spend, snapshot read through activation. The
+/// clients give up at 45 s; a start that outlives that leaves a session with
+/// nobody holding it, which is the whole failure this effort exists to end.
+/// The owner's own lifecycle constants are untouched — this bounds the
+/// ingress's exchanges, not how long a tuner is given to feed.
+const PUBLIC_START_DEADLINE: Duration = Duration::from_secs(40);
 const DRAIN_EXCHANGE_DEADLINE: Duration = Duration::from_secs(20);
 const RESOURCE_EXCHANGE_DEADLINE: Duration = Duration::from_secs(12);
 const MAX_START_RESPONSE_BYTES: usize = 32 * 1024;
@@ -56,6 +61,11 @@ pub(crate) struct LiveTvChannelsResponse {
     pub(crate) last_success_at: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) refresh_error: Option<String>,
+    /// What the whole path — this ingress *and* the owner it talks to —
+    /// accepts on a start. The clients read this and nothing else before
+    /// deciding whether to send a request id or use the recovery routes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) protocols: Vec<u8>,
     pub(crate) channels: Vec<crate::live_tv::LiveTvChannel>,
 }
 
@@ -283,6 +293,63 @@ pub(crate) async fn guide_readiness(
     )
     .await;
     let programmes = guide.total_programmes();
+    // Four rows about the copy itself: how old it is, when the owner comes
+    // back, whether a deploy would keep it, and what the last refresh said.
+    // Advisory like every other row — none of them refuse a save.
+    checks.push(LiveTvReadinessCheck {
+        id: "guide_age",
+        ready: guide.freshness == crate::live_tv::GuideFreshness::Fresh,
+        message: match guide.fetched_at {
+            Some(fetched_at) => format!(
+                "The cached guide is {} seconds old (fetched at unix {fetched_at}).",
+                guide.age_seconds
+            ),
+            None => "Nothing has been fetched yet on this node.".to_owned(),
+        },
+    });
+    checks.push(LiveTvReadinessCheck {
+        id: "guide_next_refresh",
+        ready: guide.next_refresh_at.is_some(),
+        message: match guide.next_refresh_at {
+            Some(next) => format!(
+                "The owner's refresh loop next runs in {} seconds (unix {next}); clients poll on that.",
+                next.saturating_sub(now).max(0)
+            ),
+            None => "The owner's refresh loop has not completed a tick yet.".to_owned(),
+        },
+    });
+    checks.push(match state.live_tv.guide_store_status() {
+        Some((path, bytes, generation)) => LiveTvReadinessCheck {
+            id: "guide_persisted",
+            ready: true,
+            message: format!(
+                "A copy is on disk at {} ({bytes} bytes, settings generation {}), so a restart serves the previous guide while the first refresh runs.",
+                path.display(),
+                generation
+                    .map(|generation| generation.to_string())
+                    .unwrap_or_else(|| "unknown".to_owned())
+            ),
+        },
+        None => LiveTvReadinessCheck {
+            id: "guide_persisted",
+            ready: false,
+            message: if owner_is_local {
+                "No copy is on disk yet. The first successful refresh writes one, and a restart before then starts the grid empty."
+                    .to_owned()
+            } else {
+                "Only the tuner owner keeps a copy on disk; this node relays the owner's answer."
+                    .to_owned()
+            },
+        },
+    });
+    checks.push(LiveTvReadinessCheck {
+        id: "guide_last_error",
+        ready: guide.refresh_error.is_none(),
+        message: match guide.refresh_error.as_deref() {
+            Some(error) => format!("The last refresh under this configuration failed: {error}"),
+            None => "No refresh under this configuration has reported an error.".to_owned(),
+        },
+    });
     Ok(Json(LiveTvGuideReadiness {
         // Advisory: this is what the operator is told, never what they are
         // held to. Nothing consults it before a save.
@@ -330,6 +397,47 @@ struct WireError {
 pub(crate) struct PublicLiveTvStart {
     #[serde(default)]
     playback: Option<LivePlaybackRequest>,
+    /// The client's durable identity for this start — 32 lower-case hex
+    /// characters, the same id it persists as its hint. Replaying it joins the
+    /// same owner session instead of taking a second tuner. Absent from an
+    /// older client; the ingress then mints one.
+    #[serde(default)]
+    request_id: Option<String>,
+}
+
+/// 128 bits of hex. Not a UUID spelling, because the clients generate this
+/// without `crypto.randomUUID` (unavailable on the LAN HTTP origin the web UI
+/// runs on) and a hyphenless hex string is what all three can produce.
+fn valid_public_request_id(value: &str) -> bool {
+    value.len() == 32
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn parse_public_request_id(value: &str) -> Result<&str, ApiError> {
+    valid_public_request_id(value)
+        .then_some(value)
+        .ok_or_else(|| {
+            ApiError::typed(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "a live-TV request id is 32 lower-case hex characters",
+            )
+        })
+}
+
+/// What *this binary's public surface* accepts: body fields and recovery
+/// routes. An owner advertising 3 says nothing about the ingress a client is
+/// talking to, so what the client reads is the intersection.
+const INGRESS_START_PROTOCOLS: &[u8] = &[1, 2, 3];
+
+fn negotiated_protocols(owner: &[u8]) -> Vec<u8> {
+    INGRESS_START_PROTOCOLS
+        .iter()
+        .copied()
+        .filter(|protocol| owner.contains(protocol))
+        .collect()
 }
 
 pub(crate) async fn start_session(
@@ -338,11 +446,17 @@ pub(crate) async fn start_session(
     State(state): State<AppState>,
     body: Option<Json<PublicLiveTvStart>>,
 ) -> Result<Json<LiveTvActivated>, ApiError> {
+    // One budget for the whole public start. The stages below each take
+    // `min(their own constant, what is left)`, so no combination of a slow
+    // snapshot, two start attempts and two activation attempts can outlive the
+    // clients' 45 s POST timeout and leave a session nobody is holding.
+    let deadline = deadline_after(PUBLIC_START_DEADLINE);
     let ingress_generation = state.serving.authority().admit().ok_or_else(|| {
-        ApiError::typed(
+        ApiError::typed_detail(
             StatusCode::SERVICE_UNAVAILABLE,
             "owner_unavailable",
             crate::serving_fence::SERVING_FENCED_MESSAGE,
+            serde_json::json!({"retry": "now", "owner_decided": false}),
         )
     })?;
     let config = state.live_tv.config().await.map_err(api_error)?;
@@ -351,31 +465,55 @@ pub(crate) async fn start_session(
             "Live TV is disabled; an administrator can enable it in Settings → Developer".into(),
         )));
     }
-    let mut playback = body.and_then(|Json(body)| body.playback);
+    let Json(body) = body.unwrap_or(Json(PublicLiveTvStart {
+        playback: None,
+        request_id: None,
+    }));
+    let mut playback = body.playback;
     if let Some(request) = &playback {
         request.validate().map_err(|message| {
             ApiError::typed(StatusCode::BAD_REQUEST, "invalid_request", message)
         })?;
     }
-    let owner_protocols = owner_snapshot(&state, &config, false, false)
+    let mut client_request_id = match body.request_id.as_deref() {
+        Some(value) => Some(parse_public_request_id(value)?.to_owned()),
+        None => None,
+    };
+    let owner_protocols = owner_snapshot_within(&state, &config, false, false, deadline)
         .await
         .map(|snapshot| snapshot.start_protocols)
         .unwrap_or_default();
     if !owner_protocols.contains(&2) {
         playback = None;
     }
+    // The same shape as `playback` above: a client that read the protocol list
+    // before an owner downgrade must not take the whole start down with a
+    // field the owner's registry would key differently than it expects.
+    if !owner_protocols.contains(&3) {
+        client_request_id = None;
+    }
+    let request_id = client_request_id.unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
     let request = LiveTvStartRequest {
         expected_owner_node_id: config.owner_node_id.clone(),
         source_node_id: state.node_id.clone(),
         user_id: user.id,
         user_name: user.username,
-        request_id: uuid::Uuid::new_v4().to_string(),
+        request_id: request_id.clone(),
         channel_id: channel,
         config_generation: config.generation,
         source_serving_generation: ingress_generation,
         playback,
     };
-    let provisional = owner_start(&state, &config, &request).await?;
+    let provisional = match owner_start_within(&state, &config, &request, deadline).await {
+        Ok(provisional) => provisional,
+        Err(error) => {
+            // The start may have been admitted on the owner even though the
+            // answer never got back here. The request id is the only handle
+            // this ingress has, so spend it rather than leaving a tuner held.
+            retire_detached(&state, &config, user.id, request_id);
+            return Err(error);
+        }
+    };
     let activation = LiveTvActivateRequest {
         expected_owner_node_id: config.owner_node_id.clone(),
         capability: provisional.capability.clone(),
@@ -383,21 +521,122 @@ pub(crate) async fn start_session(
         config_generation: config.generation,
         source_serving_generation: ingress_generation,
     };
-    let activated = match owner_activate(&state, &config, &activation).await {
+    let activated = match owner_activate_within(&state, &config, &activation, deadline).await {
         Ok(activated) => activated,
         Err(error) => {
             let _ = owner_stop(&state, &config.owner_node_id, &provisional.capability).await;
+            retire_detached(&state, &config, user.id, request_id);
             return Err(error);
         }
     };
     let current = state.live_tv.config().await.map_err(api_error)?;
     if current != config || !state.serving.authority().is_current(ingress_generation) {
         let _ = owner_stop(&state, &config.owner_node_id, &provisional.capability).await;
-        return Err(api_error(LiveTvError::OwnerUnavailable(
-            "Live TV changed while the session was starting; press Watch again".into(),
-        )));
+        retire_detached(&state, &config, user.id, request_id);
+        return Err(ApiError::typed_detail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "owner_unavailable",
+            "Live TV changed while the session was starting; press Watch again",
+            serde_json::json!({"retry": "now", "owner_decided": false}),
+        ));
     }
     Ok(Json(activated))
+}
+
+/// Retire the request id without making the caller wait for it. Not awaited on
+/// the response path: it has its own fresh 5 s deadline rather than whatever
+/// remains of an exhausted budget, and it logs either way, so a start that ran
+/// out of time never silently abandons the retirement.
+fn retire_detached(state: &AppState, config: &LiveTvConfig, user_id: i64, request_id: String) {
+    let state = state.clone();
+    let config = config.clone();
+    tokio::spawn(async move {
+        if owner_retire(&state, &config, user_id, &request_id)
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                user = user_id,
+                "could not retire an abandoned live-TV start on the tuner owner"
+            );
+        }
+    });
+}
+
+/// Stop whatever this request id produced and fence it. Idempotent: a client
+/// that presses again after a no-answer sends this first.
+pub(crate) async fn retire_start(
+    Path(request_id): Path<String>,
+    AuthUser(user): AuthUser,
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let request_id = parse_public_request_id(&request_id)?.to_owned();
+    let config = live_tv_enabled_config(&state).await?;
+    let outcome = owner_retire(&state, &config, user.id, &request_id).await?;
+    Ok(Json(serde_json::json!({ "outcome": outcome })))
+}
+
+/// Rejoin the session this viewer's request id still owns. This is what makes
+/// reopening the app after an unclean end show the picture instead of the list.
+pub(crate) async fn resume_start(
+    Path(request_id): Path<String>,
+    AuthUser(user): AuthUser,
+    State(state): State<AppState>,
+) -> Result<Json<crate::live_tv::LiveTvResumeAnswer>, ApiError> {
+    let request_id = parse_public_request_id(&request_id)?.to_owned();
+    let config = live_tv_enabled_config(&state).await?;
+    Ok(Json(
+        owner_resume(&state, &config, user.id, &request_id).await?,
+    ))
+}
+
+/// A status read, never a capability. `unknown` is the honest answer for an id
+/// this owner has never seen — which, after a restart, is every id.
+pub(crate) async fn start_state(
+    Path(request_id): Path<String>,
+    AuthUser(user): AuthUser,
+    State(state): State<AppState>,
+) -> Result<Json<crate::live_tv::LiveTvStartState>, ApiError> {
+    let request_id = parse_public_request_id(&request_id)?.to_owned();
+    let config = live_tv_enabled_config(&state).await?;
+    if config.owner_node_id != state.node_id {
+        // The owner's registry is the only place this is known, and a resume
+        // is the operation that answers it authoritatively across nodes.
+        return Ok(Json(
+            match owner_resume(&state, &config, user.id, &request_id)
+                .await?
+                .outcome
+            {
+                crate::live_tv::LiveTvResumeOutcome::Live => crate::live_tv::LiveTvStartState {
+                    state: "active",
+                    code: None,
+                },
+                crate::live_tv::LiveTvResumeOutcome::Pending => crate::live_tv::LiveTvStartState {
+                    state: "starting",
+                    code: None,
+                },
+                crate::live_tv::LiveTvResumeOutcome::Ended => crate::live_tv::LiveTvStartState {
+                    state: "ended",
+                    code: None,
+                },
+                crate::live_tv::LiveTvResumeOutcome::Retired => crate::live_tv::LiveTvStartState {
+                    state: "retired",
+                    code: None,
+                },
+            },
+        ));
+    }
+    Ok(Json(state.live_tv.start_state_local(user.id, &request_id)))
+}
+
+async fn live_tv_enabled_config(state: &AppState) -> Result<LiveTvConfig, ApiError> {
+    let config = state.live_tv.config().await.map_err(api_error)?;
+    if !config.enabled {
+        return Err(api_error(LiveTvError::Disabled(
+            "Live TV is disabled; an administrator can enable it in Settings → Developer".into(),
+        )));
+    }
+    Ok(config)
 }
 
 pub(crate) async fn playlist(
@@ -502,6 +741,7 @@ pub(crate) async fn channels(
         age_seconds: snapshot.age_seconds,
         last_success_at: snapshot.last_success_at,
         refresh_error: snapshot.refresh_error,
+        protocols: negotiated_protocols(&snapshot.start_protocols),
         channels: snapshot.channels,
     }))
 }
@@ -643,10 +883,21 @@ pub(crate) async fn readiness_for_config(
     }
 }
 
-async fn owner_start(
+/// A stage deadline: its own constant, or whatever is left of the public
+/// start's budget, whichever is sooner. Never past the budget.
+fn stage_deadline(own: Duration, budget: tokio::time::Instant) -> tokio::time::Instant {
+    budget.min(deadline_after(own))
+}
+
+fn budget_exhausted(budget: tokio::time::Instant) -> bool {
+    budget <= tokio::time::Instant::now()
+}
+
+async fn owner_start_within(
     state: &AppState,
     config: &LiveTvConfig,
     request: &LiveTvStartRequest,
+    budget: tokio::time::Instant,
 ) -> Result<crate::live_tv::LiveTvProvisional, ApiError> {
     if config.owner_node_id == state.node_id {
         return state
@@ -669,10 +920,12 @@ async fn owner_start(
         )
     };
     let transport = PeerTransport::new(state.membership.clone());
-    let mut last_transport = PeerTransportError::Unreachable;
-    let total_deadline = deadline_after(START_EXCHANGE_TOTAL);
+    let mut last_transport = PeerTransportError::TimedOut;
     for attempt in 0..2 {
-        let attempt_deadline = total_deadline.min(deadline_after(START_EXCHANGE_ATTEMPT));
+        if budget_exhausted(budget) {
+            break;
+        }
+        let attempt_deadline = stage_deadline(START_EXCHANGE_ATTEMPT, budget);
         match transport
             .request(
                 &node_id,
@@ -701,10 +954,11 @@ async fn owner_start(
                     || provisional.config_generation != config.generation
                     || provisional.channel.id != request.channel_id
                 {
-                    return Err(ApiError::typed(
+                    return Err(ApiError::typed_detail(
                         StatusCode::SERVICE_UNAVAILABLE,
                         "owner_unavailable",
                         "The tuner owner returned a mismatched start response",
+                        serde_json::json!({"retry": "now", "owner_decided": false}),
                     ));
                 }
                 return Ok(provisional);
@@ -718,13 +972,14 @@ async fn owner_start(
             }
         }
     }
-    Err(api_error(peer_error(last_transport)))
+    Err(api_error_from(peer_error(last_transport), Decided::Ingress))
 }
 
-async fn owner_activate(
+async fn owner_activate_within(
     state: &AppState,
     config: &LiveTvConfig,
     request: &LiveTvActivateRequest,
+    budget: tokio::time::Instant,
 ) -> Result<LiveTvActivated, ApiError> {
     if config.owner_node_id == state.node_id {
         return state
@@ -737,8 +992,11 @@ async fn owner_activate(
     let body =
         serde_json::to_vec(request).map_err(|error| ApiError::Internal(error.to_string()))?;
     let transport = PeerTransport::new(state.membership.clone());
-    let mut last_transport = PeerTransportError::Unreachable;
+    let mut last_transport = PeerTransportError::TimedOut;
     for attempt in 0..2 {
+        if budget_exhausted(budget) {
+            break;
+        }
         match transport
             .request(
                 &node_id,
@@ -746,7 +1004,7 @@ async fn owner_activate(
                 reqwest::Method::POST,
                 ACTIVATE_PATH,
                 body.clone(),
-                deadline_after(CONTROL_EXCHANGE_DEADLINE),
+                stage_deadline(CONTROL_EXCHANGE_DEADLINE, budget),
                 MAX_START_RESPONSE_BYTES,
                 PeerAuthMode::ExactRequestAndResponse,
             )
@@ -755,17 +1013,19 @@ async fn owner_activate(
             Ok(response) if response.status.is_success() => {
                 let mut activated = serde_json::from_slice::<LiveTvActivated>(&response.body)
                     .map_err(|_| {
-                        ApiError::typed(
+                        ApiError::typed_detail(
                             StatusCode::SERVICE_UNAVAILABLE,
                             "owner_unavailable",
                             "The tuner owner returned an invalid activation response",
+                            serde_json::json!({"retry": "now", "owner_decided": false}),
                         )
                     })?;
                 if activated.session_id != request.capability {
-                    return Err(ApiError::typed(
+                    return Err(ApiError::typed_detail(
                         StatusCode::SERVICE_UNAVAILABLE,
                         "owner_unavailable",
                         "The tuner owner returned a mismatched activation response",
+                        serde_json::json!({"retry": "now", "owner_decided": false}),
                     ));
                 }
                 activated.playlist_url =
@@ -781,7 +1041,7 @@ async fn owner_activate(
             }
         }
     }
-    Err(api_error(peer_error(last_transport)))
+    Err(api_error_from(peer_error(last_transport), Decided::Ingress))
 }
 
 async fn owner_resource(
@@ -832,7 +1092,7 @@ async fn owner_resource(
                 PeerAuthMode::ExactRequestAndResponse,
             )
             .await
-            .map_err(|error| api_error(peer_error(error)))?;
+            .map_err(|error| api_error_from(peer_error(error), Decided::Ingress))?;
         if !response.status.is_success() {
             return Err(wire_api_error(response.status, &response.body));
         }
@@ -859,7 +1119,7 @@ async fn owner_resource(
             PeerAuthMode::ExactRequest,
         )
         .await
-        .map_err(|error| api_error(peer_error(error)))?;
+        .map_err(|error| api_error_from(peer_error(error), Decided::Ingress))?;
     if !response.status().is_success() {
         return Err(ApiError::typed(
             StatusCode::from_u16(response.status().as_u16())
@@ -879,7 +1139,7 @@ async fn owner_resource(
         state.live_tv.relay_counter(),
         max_body_bytes,
     )
-    .map_err(|error| api_error(peer_error(error)))
+    .map_err(|error| api_error_from(peer_error(error), Decided::Ingress))
 }
 
 async fn owner_stop(state: &AppState, owner: &str, capability: &str) -> Result<(), ApiError> {
@@ -908,7 +1168,7 @@ async fn owner_stop(state: &AppState, owner: &str, capability: &str) -> Result<(
             PeerAuthMode::ExactRequestAndResponse,
         )
         .await
-        .map_err(|error| api_error(peer_error(error)))?;
+        .map_err(|error| api_error_from(peer_error(error), Decided::Ingress))?;
     if response.status.is_success() {
         Ok(())
     } else {
@@ -918,6 +1178,88 @@ async fn owner_stop(state: &AppState, owner: &str, capability: &str) -> Result<(
             "The tuner owner could not stop this live session",
         ))
     }
+}
+
+/// Local on the owner, a signed peer exchange otherwise. An owner too old to
+/// know these paths answers 404, which becomes a typed answer that proves
+/// nothing about the tuner — exactly what the client's keep-the-hint rule
+/// needs it to be.
+async fn owner_retire(
+    state: &AppState,
+    config: &LiveTvConfig,
+    user_id: i64,
+    request_id: &str,
+) -> Result<crate::live_tv::LiveTvRetireOutcome, ApiError> {
+    if config.owner_node_id == state.node_id {
+        return Ok(state.live_tv.retire_local(user_id, request_id).await);
+    }
+    let body = serde_json::to_vec(&crate::live_tv::LiveTvRetireRequest {
+        expected_owner_node_id: config.owner_node_id.clone(),
+        user_id,
+        request_id: request_id.to_owned(),
+    })
+    .map_err(|error| ApiError::Internal(error.to_string()))?;
+    owner_recovery_exchange(state, config, RETIRE_PATH, body, "retire starts yet").await
+}
+
+async fn owner_resume(
+    state: &AppState,
+    config: &LiveTvConfig,
+    user_id: i64,
+    request_id: &str,
+) -> Result<crate::live_tv::LiveTvResumeAnswer, ApiError> {
+    if config.owner_node_id == state.node_id {
+        return Ok(state.live_tv.resume_local(user_id, request_id).await);
+    }
+    let body = serde_json::to_vec(&crate::live_tv::LiveTvResumeRequest {
+        expected_owner_node_id: config.owner_node_id.clone(),
+        user_id,
+        request_id: request_id.to_owned(),
+    })
+    .map_err(|error| ApiError::Internal(error.to_string()))?;
+    owner_recovery_exchange(state, config, RESUME_PATH, body, "resume starts yet").await
+}
+
+async fn owner_recovery_exchange<T: serde::de::DeserializeOwned>(
+    state: &AppState,
+    config: &LiveTvConfig,
+    path: &'static str,
+    body: Vec<u8>,
+    missing: &str,
+) -> Result<T, ApiError> {
+    let (node_id, base) = owner_peer(state, &config.owner_node_id).await?;
+    let response = PeerTransport::new(state.membership.clone())
+        .request(
+            &node_id,
+            &base,
+            reqwest::Method::POST,
+            path,
+            body,
+            deadline_after(CONTROL_EXCHANGE_DEADLINE),
+            MAX_START_RESPONSE_BYTES,
+            PeerAuthMode::ExactRequestAndResponse,
+        )
+        .await
+        .map_err(|error| api_error_from(peer_error(error), Decided::Ingress))?;
+    if response.status == reqwest::StatusCode::NOT_FOUND {
+        return Err(ApiError::typed_detail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "owner_unavailable",
+            format!("the tuner owner does not {missing}"),
+            serde_json::json!({"retry": "now", "owner_decided": false}),
+        ));
+    }
+    if !response.status.is_success() {
+        return Err(wire_api_error(response.status, &response.body));
+    }
+    serde_json::from_slice::<T>(&response.body).map_err(|_| {
+        ApiError::typed_detail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "owner_unavailable",
+            "The tuner owner returned an invalid recovery response",
+            serde_json::json!({"retry": "now", "owner_decided": false}),
+        )
+    })
 }
 
 pub(crate) async fn drain_owner(
@@ -1017,6 +1359,12 @@ async fn owner_peer(state: &AppState, expected: &str) -> Result<(String, String)
         })
 }
 
+/// An error the owner signed, turned into the same envelope a locally minted
+/// one gets. The two extra fields are functions of *where the body came from*
+/// and *what the code is*, so they are produced here rather than added to the
+/// internal wire: a body that arrived as a signed owner response is
+/// owner-decided, whatever its code — including one this function folds into
+/// `owner_unavailable`, because the owner still answered.
 fn wire_api_error(status: reqwest::StatusCode, body: &[u8]) -> ApiError {
     let wire = serde_json::from_slice::<WireError>(body).ok();
     let code = wire
@@ -1025,9 +1373,11 @@ fn wire_api_error(status: reqwest::StatusCode, body: &[u8]) -> ApiError {
         .unwrap_or("owner_unavailable")
         .to_owned();
     let message = wire
+        .as_ref()
         .map(|error| sanitize_public_error(&error.message))
         .unwrap_or_else(|| "The tuner owner could not complete the request".into());
     let status = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::SERVICE_UNAVAILABLE);
+    let decided_by_owner = wire.is_some();
     let stable = match code.as_str() {
         "live_tv_disabled" => "live_tv_disabled",
         "tuner_capacity" => "tuner_capacity",
@@ -1042,7 +1392,15 @@ fn wire_api_error(status: reqwest::StatusCode, body: &[u8]) -> ApiError {
         "capability_expired" => "capability_expired",
         _ => "owner_unavailable",
     };
-    ApiError::typed(status, stable, message)
+    ApiError::typed_detail(
+        status,
+        stable,
+        message,
+        serde_json::json!({
+            "retry": retry_advice_for_code(stable),
+            "owner_decided": decided_by_owner,
+        }),
+    )
 }
 
 async fn owner_snapshot(
@@ -1050,6 +1408,23 @@ async fn owner_snapshot(
     config: &LiveTvConfig,
     force: bool,
     probe_graph: bool,
+) -> Result<LiveTvSnapshot, LiveTvError> {
+    owner_snapshot_within(
+        state,
+        config,
+        force,
+        probe_graph,
+        deadline_after(SNAPSHOT_DEADLINE),
+    )
+    .await
+}
+
+async fn owner_snapshot_within(
+    state: &AppState,
+    config: &LiveTvConfig,
+    force: bool,
+    probe_graph: bool,
+    budget: tokio::time::Instant,
 ) -> Result<LiveTvSnapshot, LiveTvError> {
     if !state.serving.is_ready() {
         return Err(LiveTvError::OwnerUnavailable(
@@ -1105,7 +1480,7 @@ async fn owner_snapshot(
             reqwest::Method::POST,
             SNAPSHOT_PATH,
             body,
-            deadline_after(SNAPSHOT_DEADLINE),
+            stage_deadline(SNAPSHOT_DEADLINE, budget),
             MAX_SNAPSHOT_BYTES,
             PeerAuthMode::ExactRequestAndResponse,
         )
@@ -1137,44 +1512,94 @@ fn peer_error(error: PeerTransportError) -> LiveTvError {
     LiveTvError::OwnerUnavailable(message.to_owned())
 }
 
-pub(crate) fn api_error(error: LiveTvError) -> ApiError {
-    let code = error.code();
+/// Who decided the answer a client is about to read.
+///
+/// `Owner` means the tuner owner looked at the request and refused it: the
+/// client learns something about the tuner, and its hint is spent. `Ingress`
+/// means this node refused before an owner ever saw it, or could not tell
+/// whether one had — in which case a session may exist and the hint is the
+/// only handle for retiring it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Decided {
+    Owner,
+    Ingress,
+}
+
+/// What a client should do next with this code, as a word rather than a
+/// number: `now` the next press may work, `later` this channel needs time,
+/// `never` pressing again changes nothing.
+fn retry_advice(error: &LiveTvError) -> &'static str {
     match error {
-        LiveTvError::InvalidConfig(message) | LiveTvError::InvalidResponse(message) => {
-            ApiError::BadRequest(message)
-        }
-        LiveTvError::DeviceUnavailable(message) | LiveTvError::OwnerUnavailable(message) => {
-            ApiError::typed(
-                StatusCode::SERVICE_UNAVAILABLE,
-                code,
-                sanitize_public_error(&message),
-            )
-        }
-        LiveTvError::Disabled(message) => {
-            ApiError::typed(StatusCode::SERVICE_UNAVAILABLE, code, message)
-        }
-        LiveTvError::Capacity(message) | LiveTvError::TunerUnavailable(message) => {
-            ApiError::typed(StatusCode::SERVICE_UNAVAILABLE, code, message)
-        }
-        LiveTvError::ChannelNotFound(message) => {
-            ApiError::typed(StatusCode::NOT_FOUND, code, message)
-        }
-        LiveTvError::DrmUnsupported(message) | LiveTvError::CodecUnsupported(message) => {
-            ApiError::typed(StatusCode::UNSUPPORTED_MEDIA_TYPE, code, message)
-        }
-        LiveTvError::StartupTimeout(message) => {
-            ApiError::typed(StatusCode::REQUEST_TIMEOUT, code, message)
-        }
-        LiveTvError::StreamFailed(message) => ApiError::typed(
-            StatusCode::BAD_GATEWAY,
-            code,
-            sanitize_public_error(&message),
-        ),
-        LiveTvError::Conflict(message) | LiveTvError::SourceFormatChanged(message) => {
-            ApiError::typed(StatusCode::CONFLICT, code, message)
-        }
-        LiveTvError::CapabilityExpired(message) => ApiError::typed(StatusCode::GONE, code, message),
+        LiveTvError::Disabled(_)
+        | LiveTvError::ChannelNotFound(_)
+        | LiveTvError::DrmUnsupported(_)
+        | LiveTvError::CodecUnsupported(_) => "never",
+        LiveTvError::InvalidConfig(_)
+        | LiveTvError::InvalidResponse(_)
+        | LiveTvError::DeviceUnavailable(_)
+        | LiveTvError::Capacity(_)
+        | LiveTvError::StartupTimeout(_) => "later",
+        LiveTvError::OwnerUnavailable(_)
+        | LiveTvError::TunerUnavailable(_)
+        | LiveTvError::StreamFailed(_)
+        | LiveTvError::Conflict(_)
+        | LiveTvError::SourceFormatChanged(_)
+        | LiveTvError::CapabilityExpired(_) => "now",
     }
+}
+
+/// The same advice keyed by a stable wire code, for an answer that arrived as
+/// a signed owner response rather than as a local `LiveTvError`.
+fn retry_advice_for_code(code: &str) -> &'static str {
+    match code {
+        "live_tv_disabled" | "channel_not_found" | "drm_unsupported" | "codec_unsupported" => {
+            "never"
+        }
+        "tuner_capacity" | "startup_timeout" | "device_unavailable" | "invalid_settings" => "later",
+        _ => "now",
+    }
+}
+
+pub(crate) fn api_error(error: LiveTvError) -> ApiError {
+    api_error_from(error, Decided::Owner)
+}
+
+/// Every Live TV error leaves here as a typed body with two extra flat fields.
+/// `typed_detail` writes `code` and `message` last, so a client reading only
+/// those two is unaffected by their presence.
+pub(crate) fn api_error_from(error: LiveTvError, decided: Decided) -> ApiError {
+    let code = error.code();
+    let detail = serde_json::json!({
+        "retry": retry_advice(&error),
+        "owner_decided": decided == Decided::Owner,
+    });
+    let (status, message) = match &error {
+        LiveTvError::InvalidConfig(message) | LiveTvError::InvalidResponse(message) => {
+            (StatusCode::BAD_REQUEST, message.clone())
+        }
+        LiveTvError::DeviceUnavailable(message) | LiveTvError::OwnerUnavailable(message) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            sanitize_public_error(message),
+        ),
+        LiveTvError::Disabled(message)
+        | LiveTvError::Capacity(message)
+        | LiveTvError::TunerUnavailable(message) => {
+            (StatusCode::SERVICE_UNAVAILABLE, message.clone())
+        }
+        LiveTvError::ChannelNotFound(message) => (StatusCode::NOT_FOUND, message.clone()),
+        LiveTvError::DrmUnsupported(message) | LiveTvError::CodecUnsupported(message) => {
+            (StatusCode::UNSUPPORTED_MEDIA_TYPE, message.clone())
+        }
+        LiveTvError::StartupTimeout(message) => (StatusCode::REQUEST_TIMEOUT, message.clone()),
+        LiveTvError::StreamFailed(message) => {
+            (StatusCode::BAD_GATEWAY, sanitize_public_error(message))
+        }
+        LiveTvError::Conflict(message) | LiveTvError::SourceFormatChanged(message) => {
+            (StatusCode::CONFLICT, message.clone())
+        }
+        LiveTvError::CapabilityExpired(message) => (StatusCode::GONE, message.clone()),
+    };
+    ApiError::typed_detail(status, code, message, detail)
 }
 
 fn sanitize_public_error(message: &str) -> String {
