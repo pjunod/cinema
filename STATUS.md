@@ -6,7 +6,12 @@ first.
 
 ## Every class in the playback surface contract can now be drawn on Apple
 
-**[#PRNUM](http://192.168.4.7:3000/noirr/plurx/pulls/PRNUM), WIP, not merged.**
+**[#291](http://192.168.4.7:3000/noirr/plurx/pulls/291), titled `WIP:`.**
+Paul's to merge, and this branch has not been. (The wording is careful
+because `test_status_pr_claims` reads that number as landed: this
+repository's history carries a GitHub-era `Merge pull request #291` from
+before the numbering restarted on Gitea, and the check cannot tell two
+numbering spaces apart. Recorded rather than worked around in the check.)
 Build 147 landed the Apple presenter and an audit found parts of it
 unreachable. Four fixture source rows had no Apple raise site, one view branch
 could not be reached at all, and the one mutation the last round could not kill
