@@ -308,7 +308,7 @@ _Generated from [`tests/playback/playback-surface-contract.json`](../../tests/pl
 | `preparing` | progress | while not presenting | none | no | `presenting` · `intent_settled` · `attached_retired` | – |
 | `buffering` | progress | while not presenting | none | no | `presenting` · `attached_retired` | – |
 | `recovering` | progress | while not presenting | none | no | `presenting_after_raise` · `owner_success` · `attached_retired` | – |
-| `hold` | notice | never | 30000 ms | no | `timer` · `presenting` | – |
+| `hold` | notice | never | 30000 ms | no | `timer` · `presenting_after_raise` | – |
 | `degraded` | notice | never | 5000 ms (paused while it has actions) | no | `timer` · `presenting_continuous_ms` | – |
 | `refused` | notice | never | none | no | `intent_superseded` · `presenting_continuous_ms` | `retry` |
 | `exhausted` | prompt | always | none | yes | `user` | `keep_waiting` · `retry` · `close` |

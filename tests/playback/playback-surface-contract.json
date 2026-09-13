@@ -49,7 +49,7 @@
       "timed_ms": 30000,
       "retired_by": [
         "timer",
-        "presenting"
+        "presenting_after_raise"
       ]
     },
     "degraded": {
@@ -317,6 +317,44 @@
     "surface_log_only"
   ],
   "cases": [
+    {
+      "name": "buffering_retired_by_unbroken_presentation",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 3000,
+          "raise": "media_waiting",
+          "attached": "g1",
+          "context": "attached"
+        },
+        {
+          "t": 3400,
+          "tick": true
+        }
+      ],
+      "expect": [
+        {
+          "at": 3000,
+          "surface": "none",
+          "log": [
+            "surface_raised",
+            "surface_cleared"
+          ]
+        },
+        {
+          "at": 3400,
+          "surface": "none"
+        }
+      ]
+    },
     {
       "name": "canplay_is_inert",
       "note": "A platform event never moves the surface. Only the client's own presentation proof does.",
