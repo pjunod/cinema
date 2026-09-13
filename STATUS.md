@@ -4,6 +4,55 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## M3 — the Android playback surface is a projection of the player
+
+**In `android/playback-surface` (build 90), open as a WIP PR against `main`.**
+The third milestone of the [playback surface
+contract](docs/clients/PLAYBACK-SURFACE-CONTRACT.md) ports the presenter to
+Kotlin. `PlaybackSurface.kt` is a pure reducer — no Android imports, no player,
+no timers of its own — carrying the fixture's classes, sources and timings
+verbatim, and `PlaybackSurfaceReducerTest` runs all 54 ordered-event cases of
+`tests/playback/playback-surface-contract.json` against it. The two events
+Android cannot spell literally are MAPPED, with the mapping named beside it: a
+hidden page is `presentationForeground` inverted, and `canplay`/`playing`/
+`timeControlStatus` join `onIsPlayingChanged` on the one inert event Media3
+actually has.
+
+`Controller` now publishes `StateFlow<PlaybackSurface>` and the `onError:
+(String) -> Unit` constructor parameter, `playbackNotice` and `PlayerScreen`'s
+`playFailure` are deleted. `PlaybackFailed` is opaque and reads the fault's
+title, sentence and actions; `PlayerInputState.Failed` is a blocking surface
+whose class is a prompt or a terminal, so a full-screen progress surface keeps
+today's routing. The recovery owner gains its one obligation at the sites §3.4
+names — the sessionless second stall, the spent reopen budget and the
+target-deadline terminal all set `playWhenReady = false` **before** they raise
+`exhausted`, and `onPlayerError` → `Fail` does the same before `stopped`, which
+also resets the open-stall tracker and closes the restart-under-overlay path by
+construction. `PlaybackSurfaceOwner.stopAndRaise` is the only route to a
+blocking class, and it samples `playWhenReady` after the stop: a site that
+forgot to stop produces a `blocking_without_stop` log line and no surface, not
+an overlay over a moving picture.
+
+The adapter reads refusal bodies for the first time: `createHlsSession` decodes
+a non-2xx into `RefusalException(status, code, message, positionMs)` and keeps
+`HttpException` for bodiless answers, and `onPlayerError` unwraps Media3's
+`InvalidResponseCodeException` and classifies 503 / 410 / 401 / 403.
+`PlaybackPolicy.playbackErrorAction` is untouched — the adapter runs after it,
+on its outcome, and its tests pass unmodified. Playback debug gains the SURFACE
+section (kind, fault, source, attached/intent, and the last sixteen faults with
+the player as it was at each raise), and the four client-log events go out
+through `PlaybackTelemetry.report`. `scripts/playback-surface-fence` now scans
+three Kotlin files with no migration budget at all.
+
+**Two things to watch.** Ruling D1 says the control-plane `terminal` verdict
+arms wording and never tears down, so `applyStallVerdict` no longer raises
+anything — and because that branch returns before the reopen and the stall
+tracker stays latched on a frozen playhead, a stream that ends there now shows
+nothing where it used to show an overlay. That is what §3.4's Android row asks
+for, and it is flagged rather than quietly re-decided. And `recovering`
+indicators are recorded in the ledger and the log but drawn nowhere yet: the
+existing waiting spinner still owns that pixel, deliberately, so this PR stays
+behaviour-neutral outside the stop-before-raise obligation.
 ## The Apple playback surface is one projection of the player (M2)
 
 **Built 2026-09-13 on `apple/playback-surface`, Apple build 147, WIP PR #280,
