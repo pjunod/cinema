@@ -10,6 +10,14 @@ test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvTest.kt"
 test_anchor = "liveConfigurationLeavesTheTargetOffsetToThePlaylist"
 
 [[fixes]]
+id = "apple.live-tv-fullscreen-focus"
+commits = ["861c6e24"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = ".focusable(!overlayVisible && !temporaryGuide)"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testTheRevealLayerIsNotFocusableWhileTheOverlayOrTheGuideIsVisible"
+
+[[fixes]]
 id = "android.library-channel-start-failure"
 commits = ["4dd00603"]
 source = "clients/android/app/src/main/java/tv/plurx/app/librarychannels/LibraryChannelStartFailure.kt"

@@ -831,6 +831,16 @@ final class LiveTvTests: XCTestCase {
         LiveTvStarted(sessionId: capability, channel: channel, live: true)
     }
 
+    private func liveTvViewSource() throws -> String {
+        let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        return try String(
+            contentsOf: testsDirectory.appendingPathComponent(
+                "../Sources/LiveTvView.swift"
+            ).standardizedFileURL,
+            encoding: .utf8
+        )
+    }
+
     func testProtectedChannelsStayVisibleAndUnwatchable() {
         let protected = LiveTvChannel(id: "107.1", guideNumber: "107.1", guideName: "Protected",
                                       favorite: false, drm: true, support: "drm_unsupported",
@@ -900,6 +910,346 @@ final class LiveTvTests: XCTestCase {
         XCTAssertEqual(LiveTvPlayerController.playerFailure(nil).code, "stream_failed")
         let decoder = NSError(domain: AVFoundationErrorDomain, code: AVError.Code.decoderNotFound.rawValue)
         XCTAssertEqual(LiveTvPlayerController.playerFailure(decoder).code, "codec_unsupported")
+    }
+
+    func testWaitingIsOnlyDrawnForAStallAndNeverForBufferingRateEvaluation() {
+        XCTAssertTrue(LiveTvPlayerController.waitingDecision(
+            status: .waitingToPlayAtSpecifiedRate,
+            reason: .toMinimizeStalls
+        ))
+        for reason: AVPlayer.WaitingReason? in [
+            .evaluatingBufferingRate, .noItemToPlay, nil,
+        ] {
+            XCTAssertFalse(LiveTvPlayerController.waitingDecision(
+                status: .waitingToPlayAtSpecifiedRate,
+                reason: reason
+            ))
+        }
+        for status: AVPlayer.TimeControlStatus in [.playing, .paused] {
+            for reason: AVPlayer.WaitingReason? in [
+                .toMinimizeStalls, .evaluatingBufferingRate, .noItemToPlay, nil,
+            ] {
+                XCTAssertFalse(LiveTvPlayerController.waitingDecision(
+                    status: status,
+                    reason: reason
+                ))
+            }
+        }
+    }
+
+    func testWaitingIsDebouncedAndClearsOnDetach() async {
+        let controller = LiveTvPlayerController.testing(
+            requests: LiveTvMockRequests(result: started())
+        )
+        controller.applyTimeControl(
+            status: .waitingToPlayAtSpecifiedRate,
+            reason: .toMinimizeStalls
+        )
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertFalse(controller.waiting, "a 200 ms transport pause is not viewer-facing")
+        controller.applyTimeControl(status: .playing, reason: nil)
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertFalse(controller.waiting, "clearing a short wait must cancel its delayed publish")
+
+        controller.applyTimeControl(
+            status: .waitingToPlayAtSpecifiedRate,
+            reason: .toMinimizeStalls
+        )
+        try? await Task.sleep(nanoseconds: 400_000_000)
+        XCTAssertTrue(controller.waiting, "350 ms of sustained stall must become visible")
+        await controller.stop()
+        XCTAssertFalse(controller.waiting)
+        XCTAssertNil(controller.behindEdgeSeconds)
+        XCTAssertNil(controller.bufferedSeconds)
+    }
+
+    func testTheTelemetryStripOmitsWhatItDoesNotKnow() {
+        let output = LiveTvDeliveryOutput(
+            container: "mpegts", videoCodec: "mpeg2video", audioCodec: "ac3",
+            width: 1920, height: 1080, bitDepth: nil, frameRate: nil,
+            hdr: nil, audioChannels: 6
+        )
+        let copied = LiveTvDelivery(
+            output: output, videoAction: "copy", audioAction: "copy",
+            packaging: "mpegts"
+        )
+        let empty = LiveTvView.liveSurfaceChips(
+            status: nil, delivery: nil, behindEdge: nil, paused: nil
+        )
+        XCTAssertNil(empty.first { $0.kind == .signal })
+        XCTAssertNil(empty.first { $0.kind == .behind })
+
+        let status = LiveTvStatus(
+            state: "active", channel: nil, ownerNodeId: "owner",
+            encoder: "pending", outputHeight: 720,
+            signal: LiveTvSignal(
+                strengthPercent: 92, qualityPercent: nil,
+                symbolQualityPercent: nil
+            )
+        )
+        let direct = LiveTvView.liveSurfaceChips(
+            status: status, delivery: copied, behindEdge: nil, paused: nil
+        )
+        XCTAssertTrue(direct.first { $0.kind == .signal }?.text.contains("92% signal") == true)
+        XCTAssertFalse(direct.first { $0.kind == .signal }?.text.contains("quality") == true)
+        XCTAssertEqual(direct.first { $0.kind == .method }?.text, "direct mpeg2video")
+        XCTAssertEqual(direct.first { $0.kind == .audio }?.text, "ac3 5.1 copied")
+
+        let encoded = LiveTvDelivery(
+            output: LiveTvDeliveryOutput(
+                container: "mpegts", videoCodec: "h264", audioCodec: "aac",
+                width: 1280, height: 720, bitDepth: nil, frameRate: nil,
+                hdr: nil, audioChannels: 2
+            ),
+            videoAction: "encode", audioAction: "encode", packaging: "mpegts"
+        )
+        let transcode = LiveTvView.liveSurfaceChips(
+            status: nil, delivery: encoded, behindEdge: 3.25, paused: nil
+        )
+        XCTAssertEqual(transcode.first { $0.kind == .method }?.text, "transcode 720p h264")
+        XCTAssertEqual(transcode.first { $0.kind == .behind }?.text, "3.2 s behind the edge")
+    }
+
+    func testTheSurfaceMessageIsNotTheLineupMessage() async throws {
+        let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let source = try String(
+            contentsOf: testsDirectory.appendingPathComponent(
+                "../Sources/LiveTvView.swift"
+            ).standardizedFileURL,
+            encoding: .utf8
+        )
+        let load = source
+            .components(separatedBy: "func load(origin: String, token: String?) async {")[1]
+            .components(separatedBy: "private func resumeIfRecent")[0]
+        XCTAssertFalse(load.contains("surfaceMessage"),
+                       "loading lineup copy must never write on the picture")
+
+        let controller = LiveTvPlayerController.testing(
+            requests: LiveTvMockRequests(result: started())
+        )
+        XCTAssertNil(controller.surfaceMessage)
+        await controller.watch(channel)
+        XCTAssertEqual(controller.message, "Playing live · no recording or rewind")
+        XCTAssertNil(controller.surfaceMessage, "attach clears stale surface copy")
+        controller.togglePause()
+        XCTAssertEqual(
+            controller.surfaceMessage,
+            "Paused. The tuner is released after 30 seconds without playback; resuming has no rewind guarantee."
+        )
+        await controller.stop()
+        await controller.watch(channel)
+        XCTAssertNil(controller.surfaceMessage, "a fresh attachment owns a fresh surface")
+        await controller.stop()
+    }
+
+    func testTheRevealLayerIsNotFocusableWhileTheOverlayOrTheGuideIsVisible() throws {
+        let source = try liveTvViewSource()
+        let fullscreen = source
+            .components(separatedBy: "private var fullscreenSurface: some View {")[1]
+            .components(separatedBy: "private func applyLiveOutcome")[0]
+        XCTAssertTrue(fullscreen.contains(
+            ".focusable(!overlayVisible && !temporaryGuide)"
+        ))
+        XCTAssertFalse(fullscreen.contains(".focusable(true)"))
+    }
+
+    func testFullscreenFocusDefaultsToPauseAndReturnsThereFromTheRevealLayer() throws {
+        let source = try liveTvViewSource()
+        let fullscreen = source
+            .components(separatedBy: "private var fullscreenSurface: some View {")[1]
+            .components(separatedBy: "private func applyLiveOutcome")[0]
+        XCTAssertTrue(fullscreen.contains(
+            ".onAppear { focusedControl = overlayVisible ? .play : .reveal }"
+        ))
+        XCTAssertTrue(fullscreen.contains(
+            "target == .reveal { focusedControl = .play }"
+        ))
+        for guardPart in [
+            "guard fullscreen",
+            "!overlayVisible",
+            "!temporaryGuide",
+            "!showingInfo",
+            "!showingMore",
+            "!showingLayout",
+            "detail == nil",
+        ] {
+            XCTAssertTrue(fullscreen.contains(guardPart), guardPart)
+        }
+        let infoDismissal = fullscreen
+            .components(separatedBy: ".onChange(of: showingInfo)")[1]
+            .components(separatedBy: ".onChange(of: showingMore)")[0]
+        XCTAssertTrue(infoDismissal.contains(
+            "guard !visible, fullscreen, overlayVisible else { return }"
+        ))
+        XCTAssertTrue(infoDismissal.contains("focusedControl = nil"))
+        XCTAssertTrue(infoDismissal.contains("await Task.yield()"))
+        XCTAssertTrue(infoDismissal.contains("focusedControl = .play"))
+    }
+
+    func testTheProgressRowSurvivesAMissingNextProgramme() {
+        let programme = LiveTvProgramme(
+            start: 1_700_000_000,
+            end: 1_700_001_800,
+            title: "The programme"
+        )
+        let values = LiveTvView.liveProgressText(
+            airing: LiveTvAiring(now: programme, next: nil, progress: 0.5),
+            now: 1_700_000_600
+        )
+        XCTAssertEqual(values.count, 3)
+        XCTAssertFalse(values.contains { $0.contains("Next") })
+        XCTAssertEqual(values.last, "20 min left")
+    }
+
+    func testFiveFullscreenActionsAndNoFavorite() throws {
+        let source = try liveTvViewSource()
+        let buttons = source
+            .components(separatedBy: "private var liveSurfaceButtons: some View {")[1]
+            .components(separatedBy: "#endif")[0]
+        XCTAssertEqual(buttons.components(separatedBy: "Label(").count - 1, 5)
+        for action in [
+            "\"Play live\" : \"Pause\"",
+            "Label(\"Guide\"",
+            "Label(\"Channels\"",
+            "Label(\"Info\"",
+            "Label(\"More\"",
+        ] {
+            XCTAssertTrue(buttons.contains(action), action)
+        }
+        XCTAssertFalse(buttons.contains("Favorite"))
+    }
+
+    func testTheStreamInfoPanelReadsEveryFieldTheModelsCarryAndSumsTheAccessLog() {
+        #if os(tvOS)
+        let current = LiveTvProgramme(
+            start: 1_700_000_000,
+            end: 1_700_001_800,
+            title: "The Late Edition",
+            episodeTitle: "Tuesday",
+            episode: "S12 E184",
+            synopsis: "Local news and weather.",
+            originalAirDate: "2026-09-13",
+            filters: ["TV-PG"]
+        )
+        let next = LiveTvProgramme(
+            start: 1_700_001_800,
+            end: 1_700_003_600,
+            title: "Local Weather Tonight"
+        )
+        let source = LiveTvSourceFormat(
+            videoWidth: 1920,
+            videoHeight: 1080,
+            scan: "interlaced",
+            audioChannels: 6,
+            audioLayout: "5.1",
+            observedAt: 1_700_000_000
+        )
+        let channel = LiveTvChannel(
+            id: "7.1",
+            guideNumber: "7.1",
+            guideName: "WPLX-DT",
+            favorite: true,
+            drm: false,
+            support: "ready",
+            hd: true,
+            videoCodec: "mpeg2video",
+            audioCodec: "ac3",
+            sourceFormat: source
+        )
+        let delivery = LiveTvDelivery(
+            output: LiveTvDeliveryOutput(
+                container: "mpegts",
+                videoCodec: "h264",
+                audioCodec: "ac3",
+                width: 1280,
+                height: 720,
+                bitDepth: 8,
+                frameRate: nil,
+                hdr: nil,
+                audioChannels: 6
+            ),
+            videoAction: "encode",
+            audioAction: "copy",
+            packaging: "mpegts"
+        )
+        let status = LiveTvStatus(
+            state: "active",
+            channel: channel,
+            ownerNodeId: "nynuc",
+            encoder: "nvenc",
+            outputHeight: 720,
+            signal: LiveTvSignal(
+                strengthPercent: 92,
+                qualityPercent: 100,
+                symbolQualityPercent: 100
+            ),
+            delivery: delivery
+        )
+        let asOf = Date(timeIntervalSince1970: 1_700_000_900)
+        let player = LiveTvPlayerFacts.from(
+            events: [
+                LiveTvAccessEventFacts(
+                    observedBitrate: 6_000_000,
+                    droppedFrames: 2,
+                    stalls: 1
+                ),
+                LiveTvAccessEventFacts(
+                    observedBitrate: 8_000_000,
+                    droppedFrames: 3,
+                    stalls: 2
+                ),
+            ],
+            behindEdgeSeconds: 4.2,
+            bufferedSeconds: 3.8,
+            attachedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            asOf: asOf
+        )
+        let rows = LiveTvStreamInfoPanel.rows(
+            programme: LiveTvAiring(now: current, next: next, progress: 0.5),
+            channel: channel,
+            status: status,
+            delivery: delivery,
+            player: player
+        )
+        XCTAssertEqual(rows.map(\.label), [
+            "title", "episode", "airing", "next", "synopsis", "aired",
+            "channel", "source", "observed",
+            "method", "video", "audio", "stream",
+            "strength", "quality", "symbol",
+            "behind the edge · buffered", "rate", "session",
+        ])
+        let rate = rows.first { $0.label == "rate" }?.value
+        XCTAssertTrue(rate?.contains("8.0 Mb/s observed") == true)
+        XCTAssertTrue(rate?.contains("5 dropped frames") == true)
+        XCTAssertTrue(rate?.contains("3 stalls") == true)
+        XCTAssertFalse(rows.first { $0.label == "stream" }?.value.contains("segments") == true)
+
+        let unknown = LiveTvPlayerFacts.from(
+            events: [
+                LiveTvAccessEventFacts(
+                    observedBitrate: -1,
+                    droppedFrames: -1,
+                    stalls: -1
+                ),
+            ],
+            behindEdgeSeconds: nil,
+            bufferedSeconds: nil,
+            attachedAt: nil,
+            asOf: asOf
+        )
+        let sparse = LiveTvStreamInfoPanel.rows(
+            programme: .none,
+            channel: self.channel,
+            status: nil,
+            delivery: nil,
+            player: unknown
+        )
+        XCTAssertEqual(sparse.map(\.label), ["channel", "rate"])
+        XCTAssertEqual(
+            sparse.last?.value,
+            "unknown dropped frames · unknown stalls"
+        )
+        #endif
     }
 
     func testLiveTvOwnsThePlaybackAudioSessionForItsSeparatePlayer() async {
