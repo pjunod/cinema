@@ -1235,6 +1235,18 @@ mod tests {
             (Method::DELETE, "/api/v1/live-tv/sessions/cap"),
             (Method::POST, crate::live_tv::RESOURCE_PATH),
             (Method::POST, crate::live_tv::STOP_PATH),
+            // A viewer must be able to let go of a tuner, or rejoin the stream
+            // they already hold, precisely while the node is being worked on.
+            (Method::POST, crate::live_tv::RETIRE_PATH),
+            (Method::POST, crate::live_tv::RESUME_PATH),
+            (
+                Method::DELETE,
+                "/api/v1/live-tv/starts/0123456789abcdef0123456789abcdef",
+            ),
+            (
+                Method::POST,
+                "/api/v1/live-tv/starts/0123456789abcdef0123456789abcdef/resume",
+            ),
         ] {
             assert!(maintenance_route_eligible(&method, path), "{method} {path}");
         }
@@ -1410,6 +1422,33 @@ mod tests {
         assert_eq!(
             safe_trace_target(&publication),
             "/api/v1/publication/[REDACTED]/OEBPS/chapter.xhtml"
+        );
+
+        // A public start id is not a capability, but it derives one through
+        // replay and resume, so the access log must not carry it either.
+        let retire: Uri = "/api/v1/live-tv/starts/0123456789abcdef0123456789abcdef"
+            .parse()
+            .expect("uri");
+        assert_eq!(
+            safe_trace_target(&retire),
+            "/api/v1/live-tv/starts/[REDACTED]"
+        );
+        let resume: Uri = "/api/v1/live-tv/starts/0123456789abcdef0123456789abcdef/resume"
+            .parse()
+            .expect("uri");
+        assert_eq!(
+            safe_trace_target(&resume),
+            "/api/v1/live-tv/starts/[REDACTED]/resume"
+        );
+
+        // The marker only redacts under `live-tv`; an unrelated route that
+        // happens to contain the word keeps its shape.
+        let elsewhere: Uri = "/api/v1/library-channels/starts/summary"
+            .parse()
+            .expect("uri");
+        assert_eq!(
+            safe_trace_target(&elsewhere),
+            "/api/v1/library-channels/starts/summary"
         );
     }
 

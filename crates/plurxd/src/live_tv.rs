@@ -6756,6 +6756,462 @@ mod tests {
         })
     }
 
+    /// Put a session in the registry under a public identity, and give it the
+    /// fake worker `cancel_and_wait` waits for: on cancellation it retires the
+    /// session the way `run_live_session` would.
+    fn register_test_session(
+        manager: &Arc<LiveTvManager>,
+        user_id: i64,
+        request_id: &str,
+        phase: LiveTvSessionPhase,
+        last_touch: tokio::time::Instant,
+    ) -> Arc<LiveTvSession> {
+        register_test_session_at(manager, user_id, request_id, phase, last_touch, 0)
+    }
+
+    /// `serving_generation` distinguishes two sessions under one public
+    /// identity: `LiveTvRequestKey` includes it, so a fence blip between a POST
+    /// and its replay is exactly how a viewer ends up with two.
+    fn register_test_session_at(
+        manager: &Arc<LiveTvManager>,
+        user_id: i64,
+        request_id: &str,
+        phase: LiveTvSessionPhase,
+        last_touch: tokio::time::Instant,
+        serving_generation: u64,
+    ) -> Arc<LiveTvSession> {
+        let session = test_session(
+            manager.scratch_root.join(uuid::Uuid::new_v4().to_string()),
+            1,
+        );
+        // `test_session` builds an owned request; rewrite the identity fields
+        // through a fresh Arc so the registry key is the one under test.
+        let mut request = session.request.clone();
+        request.user_id = user_id;
+        request.request_id = request_id.to_owned();
+        request.source_serving_generation = serving_generation;
+        let session = Arc::new(LiveTvSession {
+            request,
+            state: StdMutex::new(LiveTvSessionState {
+                phase,
+                startup: None,
+                activated: phase == LiveTvSessionPhase::Active,
+                provisional_at: Some(last_touch),
+                last_touch,
+                last_progress: last_touch,
+                media_sequence: 0,
+                publication: None,
+                encoder: "software".into(),
+                error: None,
+                terminal_error: None,
+                cleanup: None,
+            }),
+            capability: session.capability.clone(),
+            activation_token: session.activation_token.clone(),
+            channel: session.channel.clone(),
+            device_id: session.device_id.clone(),
+            output: StdMutex::new(session.output()),
+            delivery: StdMutex::new(None),
+            device_ipv4: None,
+            owner_serving_generation: 0,
+            started: last_touch,
+            directory: session.directory.clone(),
+            cancel: CancellationToken::new(),
+            changed: tokio::sync::Notify::new(),
+            startup_waiters: AtomicUsize::new(0),
+            worker: StdMutex::new(None),
+            process: tokio::sync::Mutex::new(None),
+            decoder_unavailable: Arc::new(AtomicBool::new(false)),
+            source_format: Arc::new(StdMutex::new(None)),
+            source_format_expires_at: Arc::new(AtomicI64::new(0)),
+            tuner_bytes: Arc::new(AtomicU64::new(0)),
+            resource_admission: Arc::new(tokio::sync::Semaphore::new(LOCAL_RESOURCE_CONCURRENCY)),
+            signal_cache: tokio::sync::Mutex::new(None),
+        });
+        {
+            let mut registry = manager
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            registry.requests.insert(
+                LiveTvRequestKey::from(&session.request),
+                session.capability.clone(),
+            );
+            registry
+                .sessions
+                .insert(session.capability.clone(), Arc::clone(&session));
+        }
+        let worker_manager = Arc::clone(manager);
+        let worker_session = Arc::clone(&session);
+        tokio::spawn(async move {
+            worker_session.cancel.cancelled().await;
+            worker_session
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .cleanup = Some(Ok(()));
+            worker_manager.retire_session(&worker_session);
+            worker_session.changed.notify_waiters();
+        });
+        session
+    }
+
+    fn hex_request_id(seed: u8) -> String {
+        format!("{seed:02x}").repeat(16)
+    }
+
+    #[tokio::test]
+    async fn a_retired_request_id_can_never_start_again() {
+        let root = crate::test_tempdir().expect("root");
+        let manager = test_manager(root.path());
+        let id = hex_request_id(1);
+        let mut request = test_session(root.path().join("x"), 1).request.clone();
+        request.user_id = 7;
+        request.request_id = id.clone();
+
+        {
+            let mut registry = manager
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(
+                registry.request_session(&request).expect("fresh").is_none(),
+                "an id nobody has seen is simply new"
+            );
+            registry.retire(7, id.clone(), tokio::time::Instant::now());
+            assert!(matches!(
+                registry.request_session(&request),
+                Err(LiveTvError::Conflict(_))
+            ));
+            // A different viewer's identical id is a different fact.
+            let mut other = request.clone();
+            other.user_id = 8;
+            assert!(registry
+                .request_session(&other)
+                .expect("other user")
+                .is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn one_viewer_cannot_fill_the_shared_recovery_history_by_retiring() {
+        let root = crate::test_tempdir().expect("root");
+        let manager = test_manager(root.path());
+        let now = tokio::time::Instant::now();
+        {
+            let mut registry = manager
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for seed in 0..40u8 {
+                registry.retire(
+                    7,
+                    hex_request_id(seed),
+                    now + Duration::from_millis(seed.into()),
+                );
+            }
+            assert_eq!(
+                registry
+                    .retired
+                    .keys()
+                    .filter(|(user, _)| *user == 7)
+                    .count(),
+                MAX_RETIRED_PER_USER,
+                "a viewer holds at most MAX_RETIRED_PER_USER ids, oldest evicted"
+            );
+            assert!(
+                registry.is_retired(7, &hex_request_id(39)),
+                "the newest survives"
+            );
+            assert!(
+                !registry.is_retired(7, &hex_request_id(0)),
+                "the oldest does not"
+            );
+            assert!(
+                registry.terminals.is_empty(),
+                "retires are not tombstones: they must never consume the shared cap"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn retire_stops_every_session_one_public_identity_produced() {
+        let root = crate::test_tempdir().expect("root");
+        let manager = test_manager(root.path());
+        tokio::fs::create_dir_all(&manager.scratch_root)
+            .await
+            .expect("root");
+        let id = hex_request_id(2);
+        let now = tokio::time::Instant::now();
+        // Two sessions for one identity: legitimate, because the registry key
+        // includes the ingress's serving generation and a fence blip between a
+        // POST and its replay makes a second one.
+        let first = register_test_session_at(&manager, 7, &id, LiveTvSessionPhase::Active, now, 0);
+        let second = register_test_session_at(&manager, 7, &id, LiveTvSessionPhase::Active, now, 1);
+        assert_eq!(
+            manager
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .sessions_for_public_request(7, &id)
+                .len(),
+            2,
+            "one public identity, two registry keys — the race the plan names"
+        );
+
+        assert_eq!(
+            manager.retire_local(7, &id).await,
+            LiveTvRetireOutcome::Stopped
+        );
+        assert!(first.cancel.is_cancelled());
+        assert!(second.cancel.is_cancelled());
+
+        // And a start racing the retire finds the fence, never a fresh slot.
+        let mut racing = first.request.clone();
+        racing.source_serving_generation = 9;
+        assert!(matches!(
+            manager
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .request_session(&racing),
+            Err(LiveTvError::Conflict(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn retire_reports_what_it_actually_did() {
+        let root = crate::test_tempdir().expect("root");
+        let manager = test_manager(root.path());
+        assert_eq!(
+            manager.retire_local(7, &hex_request_id(3)).await,
+            LiveTvRetireOutcome::Retired,
+            "nothing to stop, and now nothing ever will be"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_hands_back_one_stream_and_cancels_the_rest() {
+        let root = crate::test_tempdir().expect("root");
+        let manager = test_manager(root.path());
+        tokio::fs::create_dir_all(&manager.scratch_root)
+            .await
+            .expect("root");
+        let id = hex_request_id(4);
+        let now = tokio::time::Instant::now();
+
+        let stale = register_test_session_at(
+            &manager,
+            7,
+            &id,
+            LiveTvSessionPhase::Active,
+            now - Duration::from_secs(30),
+            0,
+        );
+        let freshest =
+            register_test_session_at(&manager, 7, &id, LiveTvSessionPhase::Active, now, 1);
+
+        let answer = manager.resume_local(7, &id).await;
+        assert_eq!(answer.outcome, LiveTvResumeOutcome::Live);
+        assert_eq!(
+            answer.session.as_ref().expect("session").session_id,
+            freshest.capability,
+            "the one the viewer most recently touched"
+        );
+        assert!(
+            stale.cancel.is_cancelled(),
+            "one public identity, one stream"
+        );
+        assert!(!freshest.cancel.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn resume_answers_pending_ended_and_retired_apart() {
+        let root = crate::test_tempdir().expect("root");
+        let manager = test_manager(root.path());
+        tokio::fs::create_dir_all(&manager.scratch_root)
+            .await
+            .expect("root");
+        let now = tokio::time::Instant::now();
+
+        let pending_id = hex_request_id(5);
+        let provisional = register_test_session(
+            &manager,
+            7,
+            &pending_id,
+            LiveTvSessionPhase::Provisional,
+            now,
+        );
+        let answer = manager.resume_local(7, &pending_id).await;
+        assert_eq!(
+            answer.outcome,
+            LiveTvResumeOutcome::Pending,
+            "an activation in flight from an ingress is that ingress's to finish"
+        );
+        assert!(answer.session.is_none());
+        assert!(
+            !provisional.cancel.is_cancelled(),
+            "resume never cancels the session it is waiting on"
+        );
+
+        let ended_id = hex_request_id(6);
+        let ended = register_test_session(&manager, 7, &ended_id, LiveTvSessionPhase::Active, now);
+        ended.cancel.cancel();
+        manager.retire_session(&ended);
+        assert_eq!(
+            manager.resume_local(7, &ended_id).await.outcome,
+            LiveTvResumeOutcome::Ended
+        );
+
+        let unknown_id = hex_request_id(7);
+        assert_eq!(
+            manager.resume_local(7, &unknown_id).await.outcome,
+            LiveTvResumeOutcome::Retired
+        );
+        assert!(
+            manager
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_retired(7, &unknown_id),
+            "an id the owner has never heard of is retired on the spot, so a \
+             racing start cannot revive it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_full_owner_evicts_this_viewers_stray_and_nobody_elses() {
+        // The five capacity fixtures the plan names, decided by the same
+        // predicate the start path uses.
+        let now = tokio::time::Instant::now();
+        let idle = now - STRAY_EVICTION_IDLE - Duration::from_secs(1);
+        let evictable =
+            |phase: LiveTvSessionPhase, activated: bool, touch: tokio::time::Instant| {
+                activated
+                    && phase == LiveTvSessionPhase::Active
+                    && now.duration_since(touch) >= STRAY_EVICTION_IDLE
+            };
+
+        assert!(
+            evictable(LiveTvSessionPhase::Active, true, idle),
+            "an active session that has missed three heartbeats is a stray"
+        );
+        assert!(
+            !evictable(LiveTvSessionPhase::Active, true, now),
+            "an active session being watched right now is not"
+        );
+        assert!(
+            !evictable(LiveTvSessionPhase::Starting, false, idle),
+            "a start has no heartbeat to miss; STARTUP_TIMEOUT already bounds it"
+        );
+        assert!(
+            !evictable(LiveTvSessionPhase::Provisional, false, idle),
+            "nor does a session awaiting activation; PROVISIONAL_TIMEOUT bounds it"
+        );
+        assert_eq!(
+            STRAY_EVICTION_IDLE,
+            Duration::from_secs(15),
+            "three missed 5 s heartbeats, and well inside CAPABILITY_IDLE_TIMEOUT"
+        );
+        assert!(
+            STRAY_EVICTION_IDLE < CAPABILITY_IDLE_TIMEOUT,
+            "a viewer must be able to reclaim their own slot before the owner \
+             reaps it, or the eviction never fires"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_retired_id_evicts_a_session_in_any_phase() {
+        let root = crate::test_tempdir().expect("root");
+        let manager = test_manager(root.path());
+        let id = hex_request_id(8);
+        let now = tokio::time::Instant::now();
+        let provisional =
+            register_test_session(&manager, 7, &id, LiveTvSessionPhase::Provisional, now);
+        let registry = manager
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(!registry.is_retired(7, &id));
+        drop(registry);
+        manager
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retire(7, id.clone(), now);
+        assert!(
+            manager
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_retired(7, &provisional.request.request_id),
+            "a retired id is evictable whatever phase its session is in — the \
+             viewer has said they will never use it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_started_session_reports_its_state_without_handing_back_a_capability() {
+        let root = crate::test_tempdir().expect("root");
+        let manager = test_manager(root.path());
+        let id = hex_request_id(9);
+        let now = tokio::time::Instant::now();
+        assert_eq!(manager.start_state_local(7, &id).state, "unknown");
+        let session = register_test_session(&manager, 7, &id, LiveTvSessionPhase::Active, now);
+        assert_eq!(manager.start_state_local(7, &id).state, "active");
+        session.cancel.cancel();
+        manager.retire_session(&session);
+        let ended = manager.start_state_local(7, &id);
+        assert_eq!(ended.state, "ended");
+        assert_eq!(ended.code, Some("capability_expired"));
+        let json = serde_json::to_string(&ended).expect("encode");
+        assert!(
+            !json.contains(&session.capability),
+            "a status read is never a handle: {json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_clean_release_is_counted_apart_from_a_failure() {
+        let root = crate::test_tempdir().expect("root");
+        let manager = test_manager(root.path());
+        let now = tokio::time::Instant::now();
+        let released = register_test_session(
+            &manager,
+            7,
+            &hex_request_id(10),
+            LiveTvSessionPhase::Active,
+            now,
+        );
+        released.cancel.cancel();
+        manager.retire_session(&released);
+
+        let failed = register_test_session(
+            &manager,
+            7,
+            &hex_request_id(11),
+            LiveTvSessionPhase::Active,
+            now,
+        );
+        failed
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .terminal_error = Some(LiveTvError::StreamFailed("the tuner stopped".into()));
+        failed.cancel.cancel();
+        manager.retire_session(&failed);
+
+        let prometheus = manager.metrics.session_ends_prometheus();
+        assert!(
+            prometheus.contains("plurx_live_tv_session_ends_total{reason=\"released\"} 1"),
+            "a stop, a drain and an idle reap are releases, not failures: {prometheus}"
+        );
+        assert!(
+            prometheus.contains("plurx_live_tv_session_ends_total{reason=\"stream_failed\"} 1"),
+            "and a real failure is visible on its own line: {prometheus}"
+        );
+    }
+
     async fn seed_test_config(manager: &LiveTvManager) {
         manager
             .store
