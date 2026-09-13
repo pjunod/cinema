@@ -5981,6 +5981,7 @@ pub(crate) enum RollingResponseObject {
     ByteRange,
     NotModified,
     RangeNotSatisfiable,
+    SessionStatus,
     ProtocolResponse,
 }
 
@@ -10463,7 +10464,10 @@ impl RollingControlActor {
                 producer_attempt,
                 media_segment_index,
             } => {
-                if publication.object == RollingResponseObject::ProtocolResponse {
+                if matches!(
+                    publication.object,
+                    RollingResponseObject::ProtocolResponse | RollingResponseObject::SessionStatus
+                ) {
                     return Err(ResponsePublicationRejection::InvalidBinding);
                 }
                 let valid_segment_binding = match publication.object {
@@ -14652,6 +14656,10 @@ mod tests {
             delivered_bytes: delivered_bps.map_or(0, |_| 4_194_304),
             delivered_bps,
             delivered_idle_ms: 0,
+            http_wait_count: 0,
+            http_wait_oldest_ms: None,
+            http_wait_segment: None,
+            status_generated_unix_ms: crate::media_sessions::unix_ms(),
             id: "vod-session".to_owned(),
             file_id: 7,
             target_height: 1080,
@@ -14661,6 +14669,17 @@ mod tests {
             producer_hold: Some("working_set"),
             producer_failed: None,
             producer_decision: None,
+            control_demand: Some("active"),
+            reported_position_ms: Some(fetched_end_ms),
+            client_runway_ms: Some(0),
+            render_state: Some("waiting"),
+            server_ready_state: "ready",
+            server_ready_anchor_ms: Some(fetched_end_ms),
+            server_ready_end_ms: ready_ahead_end_ms,
+            server_ready_seconds: ready_ahead_end_ms
+                .map(|end| end.saturating_sub(fetched_end_ms) as f64 / 1_000.0),
+            server_next_ready_start_ms: Some(fetched_end_ms),
+            server_next_ready_end_ms: ready_ahead_end_ms,
             published_end_ms,
             ready_ahead_end_ms,
             fetched_end_ms,
@@ -24340,6 +24359,111 @@ mod tests {
         let mut actor = prepublication_actor(now);
         assert_eq!(actor.register_producer_executor_at(), Ok(()));
         actor
+    }
+
+    #[test]
+    fn rolling_status_authz_keeps_its_exact_attempt_and_binding() {
+        let started = Instant::now();
+        let mut actor = registered_prepublication_actor(started);
+        assert_eq!(
+            actor.begin_initial_producer_attempt_at(
+                started,
+                InitialProducerPolicy::software(
+                    "session-status".to_owned(),
+                    PRODUCER_PROGRESS_BUDGET,
+                ),
+            ),
+            Ok(1)
+        );
+
+        let status =
+            || RollingResponsePublication::attempt_status(RollingResponseObject::SessionStatus, 1);
+        let before_media = actor
+            .authorize_response_publication_at(started, status())
+            .expect("status before first media");
+        assert!(!before_media.first_producer_media_publication);
+        assert_eq!(
+            actor.authorize_response_publication_at(
+                started,
+                RollingResponsePublication::attempt_status(
+                    RollingResponseObject::SessionStatus,
+                    2,
+                ),
+            ),
+            Err(ResponsePublicationRejection::StaleAttempt)
+        );
+        assert_eq!(
+            actor.authorize_response_publication_at(
+                started,
+                RollingResponsePublication::attempt_media(
+                    RollingResponseObject::SessionStatus,
+                    1,
+                    None,
+                ),
+            ),
+            Err(ResponsePublicationRejection::InvalidBinding)
+        );
+        assert_eq!(
+            actor.authorize_response_publication_at(
+                started,
+                RollingResponsePublication::protocol_only(RollingResponseObject::SessionStatus, 1,),
+            ),
+            Err(ResponsePublicationRejection::InvalidBinding)
+        );
+        assert_eq!(
+            actor.authorize_response_publication_at(
+                started,
+                RollingResponsePublication::generation_metadata(
+                    RollingResponseObject::SessionStatus,
+                    "session-status".to_owned(),
+                ),
+            ),
+            Err(ResponsePublicationRejection::InvalidBinding)
+        );
+
+        actor.apply_producer_flow_applied_at(
+            started + Duration::from_millis(1),
+            ProducerFlowApplied {
+                revision: 1,
+                producer_attempt: 1,
+                state: ProducerPhysicalFlowState::Held,
+                published_at: started + Duration::from_millis(1),
+            },
+        );
+        let held_at = started + Duration::from_millis(2);
+        let held_before = actor.snapshot_at(held_at);
+        let while_held = actor
+            .authorize_response_publication_at(held_at, status())
+            .expect("status while held");
+        let held_after = actor.snapshot_at(held_at);
+        assert!(!while_held.first_producer_media_publication);
+        assert_eq!(
+            held_after, held_before,
+            "status must be fully observational"
+        );
+
+        let first_media = actor
+            .authorize_response_publication_at(
+                held_at,
+                RollingResponsePublication::attempt_media(
+                    RollingResponseObject::VideoMediaPlaylist,
+                    1,
+                    None,
+                ),
+            )
+            .expect("first media while held");
+        assert!(first_media.first_producer_media_publication);
+        let published_at = started + Duration::from_millis(3);
+        let published_before = actor.snapshot_at(published_at);
+        let after_media = actor
+            .authorize_response_publication_at(published_at, status())
+            .expect("status after first media");
+        let published_after = actor.snapshot_at(published_at);
+        assert!(!after_media.first_producer_media_publication);
+        assert_eq!(
+            published_after, published_before,
+            "status cannot mutate retry, frontier, decision, recovery, or lease state"
+        );
     }
 
     #[tokio::test(start_paused = true)]

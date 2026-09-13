@@ -1,0 +1,15 @@
+version = 1
+
+[[coverage]]
+commits = ["f22c965b", "6fc14ec1"]
+reason = """
+Status-document corrections for issue #267. The first records what the
+proportions work changed and what it did not prove; the second fixes four
+stale claims the review of this PR found — a four-second toast the shipped
+code does not draw, a 968-case count the remediated head exceeds, a 24 dp
+Android toolbar the shipped row is not, and a three-entry layout menu that is
+now two. Neither commit changes executable behaviour: the regressions that
+would catch the underlying defects are the arrangement contracts anchored in
+tests/client-fixes.toml against the client fixes themselves.
+"""
+ignore = true

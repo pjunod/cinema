@@ -202,6 +202,23 @@ class PlaybackTelemetryTest {
     }
 
     @Test
+    fun presentationProgressAgeIsUnknownUntilTheFirstActualAdvance() {
+        val tracker = OpenPlaybackStallTracker()
+        assertNull(tracker.progressAgeMs(5_000))
+        assertNull(tracker.sample(true, false, true, 5_000, 5_000))
+        assertNull(tracker.progressAgeMs(5_250))
+        assertNull(tracker.sample(true, false, true, 5_300, 5_300))
+        assertEquals(200L, tracker.progressAgeMs(5_500))
+    }
+
+    @Test
+    fun pausedBufferingIsNotPresentedAsAnActiveWait() {
+        assertTrue(playbackIsWaiting(true, androidx.media3.common.Player.STATE_BUFFERING))
+        assertFalse(playbackIsWaiting(false, androidx.media3.common.Player.STATE_BUFFERING))
+        assertFalse(playbackIsWaiting(true, androidx.media3.common.Player.STATE_READY))
+    }
+
+    @Test
     fun startupReadyFreezeAndStateFlapsHaveFiniteDeadlines() {
         val tracker = OpenPlaybackStallTracker()
 

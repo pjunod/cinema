@@ -13,12 +13,10 @@ import androidx.activity.compose.LocalActivity
 import androidx.core.util.Consumer
 import androidx.core.app.PictureInPictureModeChangedInfo
 import androidx.compose.foundation.background
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -26,18 +24,34 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.PictureInPictureAlt
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.VolumeOff
+import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Text
-import tv.plurx.app.ui.components.TvButton as Button
+import tv.plurx.app.ui.components.TvIconButton
 import tv.plurx.app.ui.components.TvTextButton as TextButton
 import tv.plurx.app.ui.components.RequestInitialFocus
 import tv.plurx.app.ui.components.tvFocusRing
@@ -63,8 +77,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
@@ -86,6 +102,7 @@ fun LiveTvScreen(origin: String, onBack: () -> Unit) {
     val controller = LiveTvPlayer.get(context)
     val state by controller.state.collectAsStateWithLifecycle()
     var search by remember { mutableStateOf("") }
+    var searchOpen by remember { mutableStateOf(false) }
     var fullscreen by remember { mutableStateOf(false) }
     val settings = remember(context) { SettingsStore(context) }
     val persistedView by settings.liveTvView.collectAsStateWithLifecycle(initialValue = null)
@@ -121,9 +138,13 @@ fun LiveTvScreen(origin: String, onBack: () -> Unit) {
     var now by remember { mutableLongStateOf(System.currentTimeMillis() / 1000) }
     val scope = rememberCoroutineScope()
     val backFocus = remember { FocusRequester() }
-    RequestInitialFocus(backFocus)
     val formFactor = currentFormFactor()
     val television = formFactor == FormFactor.Television
+    // `backFocus` is attached to the phone nav bar's Back button, which no
+    // longer exists on television. Asking for it there is a silent no-op that
+    // leaves the guide layouts opening with nothing focused; the television
+    // browser seeds its own toolbar instead.
+    RequestInitialFocus(backFocus, enabled = !television)
     val activity = LocalActivity.current
     val componentActivity = activity as? ComponentActivity
     val canUsePip = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
@@ -207,7 +228,8 @@ fun LiveTvScreen(origin: String, onBack: () -> Unit) {
             now = now,
         )
     }
-    val guidePageSpan = 3 * LiveTvGuideReducer.SLOT_SECONDS
+    val guidePageSpan = LiveTvGridMetrics.TELEVISION_VISIBLE_SLOTS *
+        LiveTvGuideReducer.SLOT_SECONDS
     fun guidePage(delta: Int): Long {
         val available = state.guide?.window ?: return guideWindowStart
         val latest = maxOf(available.start, available.end - guidePageSpan)
@@ -320,13 +342,21 @@ fun LiveTvScreen(origin: String, onBack: () -> Unit) {
                 handled
             },
     ) {
-        if (!fullscreen && !isInPip) {
-            TextButton(onClick = onBack, modifier = Modifier.focusRequester(backFocus)) { Text("Back") }
-            Text("Live TV", style = MaterialTheme.typography.headlineMedium)
-        }
-        if (!isInPip && !fullscreen) {
-            Text(state.title, style = MaterialTheme.typography.titleMedium)
-            Text(state.message)
+        // The Back button, the headline, the title line and the status line
+        // were four bands of chrome above the content. The phone gets a nav
+        // bar; the television gets one 24 dp toolbar inside the browser.
+        if (!television && !fullscreen && !isInPip) {
+            LiveTvPhoneTopBar(
+                onBack = onBack,
+                backFocus = backFocus,
+                onSearch = { searchOpen = true },
+                onRefresh = controller::refresh,
+                hideProtected = hideProtected,
+                onToggleProtected = { hideProtected = !hideProtected },
+                cleanupUnconfirmed = state.message.contains("leanup", ignoreCase = false),
+                onRetryCleanup = { controller.stop() },
+                onLeave = { controller.stop(); onBack() },
+            )
         }
         if (television && !fullscreen && !isInPip) {
             TelevisionLiveTvBrowser(
@@ -391,6 +421,54 @@ fun LiveTvScreen(origin: String, onBack: () -> Unit) {
                 ) { applyOutcome(LiveTvInputPolicy.route(surface, inputState(), LiveTvContractInput.TapSurface)) },
             ) {
                 playerSurface()
+                if (!fullscreen && !isInPip) {
+                    // The chips live on the picture. Six lines of `nowBar`
+                    // under it left one list row on an iPhone-sized screen.
+                    Text(
+                        "● LIVE · ${state.watching?.guide_number.orEmpty()} " +
+                            state.watching?.guide_name.orEmpty(),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color.White,
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .padding(10.dp)
+                            .background(Color(0x99000000), MaterialTheme.shapes.small)
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                    )
+                    Row(
+                        Modifier.align(Alignment.TopEnd).padding(6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        if (canUsePip) {
+                            TvIconButton(onClick = ::enterPip, modifier = Modifier.size(30.dp)) {
+                                Icon(
+                                    Icons.Filled.PictureInPictureAlt,
+                                    contentDescription = "Picture-in-picture",
+                                    tint = Color.White,
+                                )
+                            }
+                        }
+                        TvIconButton(
+                            onClick = { fullscreen = true },
+                            modifier = Modifier.size(30.dp),
+                        ) {
+                            Icon(
+                                Icons.Filled.Fullscreen,
+                                contentDescription = "Fullscreen",
+                                tint = Color.White,
+                            )
+                        }
+                    }
+                    LinearProgressIndicator(
+                        progress = {
+                            state.watching?.let { controller.airing(it, now).progress } ?: 0f
+                        },
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .fillMaxWidth()
+                            .height(3.dp),
+                    )
+                }
                 if (fullscreen && overlayVisible && !isInPip) {
                     LiveTvOverlay(
                         channel = state.watching,
@@ -442,17 +520,14 @@ fun LiveTvScreen(origin: String, onBack: () -> Unit) {
                 }
             }
             if (!isInPip && !fullscreen) {
-                LiveTvNowBar(
+                LiveTvPhoneCaption(
                     channel = state.watching,
                     airing = state.watching?.let { controller.airing(it, now) } ?: LiveTvAiring(),
-                    paused = state.paused,
+                    now = now,
                     muted = state.muted,
-                    fullscreen = fullscreen,
-                    canUsePip = canUsePip,
+                    paused = state.paused,
                     onTogglePause = controller::togglePause,
                     onToggleMute = controller::toggleMute,
-                    onToggleFullscreen = { fullscreen = !fullscreen },
-                    onPip = ::enterPip,
                     onInfo = { showingInfo = true },
                     onStop = { controller.stop() },
                 )
@@ -461,36 +536,29 @@ fun LiveTvScreen(origin: String, onBack: () -> Unit) {
             TextButton(onClick = { controller.stop() }) { Text("Stop / retry cleanup") }
         }
         if (!fullscreen && !isInPip) {
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                TextButton(enabled = !state.busy, onClick = controller::refresh) {
-                    Text("Reload channels")
-                }
-                // A focus-navigable half-hour grid is a milestone of its own on
-                // each ten-foot platform. Until then the television gets the
-                // list, which the focus engine already handles.
-                if (!television) {
-                    TextButton(onClick = {
-                        browse = if (browse == LiveTvBrowseView.List) {
-                            LiveTvBrowseView.Guide
-                        } else {
-                            LiveTvBrowseView.List
-                        }
-                        scope.launch { settings.saveLiveTvView(browse.storage) }
-                    }) { Text(if (browse == LiveTvBrowseView.List) "Guide" else "On now") }
-                }
-                TextButton(onClick = { favoritesOnly = !favoritesOnly }) {
-                    Text(if (favoritesOnly) "All channels" else "Favorites")
-                }
-                TextButton(onClick = { hideProtected = !hideProtected }) {
-                    Text(if (hideProtected) "Show protected" else "Hide protected")
-                }
-            }
-            OutlinedTextField(
-                search,
-                onValueChange = { search = it },
-                label = { Text("Number, name, or what is on") },
-                modifier = Modifier.fillMaxWidth().testTag("live-tv-channel-search").tvFocusRing(),
-                singleLine = true,
+            // One 48 dp toolbar: On now · Guide · Favorites, and the count.
+            // The FlowRow of four buttons and the always-visible search field
+            // were another 130 dp of chrome above a one-row list.
+            LiveTvStatusLine(state.message)
+            LiveTvPhoneToolbar(
+                browse = browse,
+                favoritesOnly = favoritesOnly,
+                summary = buildString {
+                    append("${state.channels.size} channels")
+                    if (state.guide?.freshness != null && state.guide?.freshness != "fresh") {
+                        append(if (state.guide?.freshness == "stale") " · guide is stale" else " · no guide data")
+                    }
+                },
+                onBrowse = { selected, favorites ->
+                    // Favorites is a filter, not a saved browse view: only a
+                    // real On now / Guide choice writes `liveTvView`.
+                    val changed = selected != browse
+                    browse = selected
+                    favoritesOnly = favorites
+                    if (changed && !favorites) {
+                        scope.launch { settings.saveLiveTvView(selected.storage) }
+                    }
+                },
             )
             if (browse == LiveTvBrowseView.Guide && !television &&
                 (formFactor != FormFactor.Compact || mobileGuideGrid)
@@ -542,7 +610,7 @@ fun LiveTvScreen(origin: String, onBack: () -> Unit) {
                 )
             } else {
                 LazyColumn(
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
                     modifier = Modifier.weight(1f),
                 ) {
                     items(visible, key = { it.id }) { channel ->
@@ -567,6 +635,27 @@ fun LiveTvScreen(origin: String, onBack: () -> Unit) {
     // scroll — so a long synopsis (guide text is relayed third-party content
     // and only the 2 MiB document cap bounds it) pushed Close off the screen
     // and the only way out was system Back, which drops the tuner.
+    if (searchOpen) {
+        // The shape Apple already had: a dialog the viewer asks for, not a
+        // 260 dp text field standing in the toolbar forever.
+        AlertDialog(
+            onDismissRequest = { searchOpen = false },
+            title = { Text("Find a channel") },
+            text = {
+                OutlinedTextField(
+                    search,
+                    onValueChange = { search = it },
+                    label = { Text("Number, name, or what is on") },
+                    modifier = Modifier.fillMaxWidth().testTag("live-tv-channel-search").tvFocusRing(),
+                    singleLine = true,
+                )
+            },
+            confirmButton = { TextButton(onClick = { searchOpen = false }) { Text("Done") } },
+            dismissButton = {
+                TextButton(onClick = { search = ""; searchOpen = false }) { Text("Clear") }
+            },
+        )
+    }
     detail?.let { (channel, programme) ->
         ModalBottomSheet(onDismissRequest = { detail = null }) {
             LiveTvProgrammeDetail(channel, programme) { detail = null }
@@ -580,6 +669,174 @@ fun LiveTvScreen(origin: String, onBack: () -> Unit) {
                 TextButton(onClick = { showingInfo = false }) { Text("Close") }
             }
         }
+    }
+}
+
+/** 64 dp of nav bar: the title, search, and everything else in one menu. */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@Composable
+private fun LiveTvPhoneTopBar(
+    onBack: () -> Unit,
+    backFocus: FocusRequester,
+    onSearch: () -> Unit,
+    onRefresh: () -> Unit,
+    hideProtected: Boolean,
+    onToggleProtected: () -> Unit,
+    cleanupUnconfirmed: Boolean,
+    onRetryCleanup: () -> Unit,
+    onLeave: () -> Unit,
+) {
+    var moreOpen by remember { mutableStateOf(false) }
+    Row(
+        Modifier.fillMaxWidth().height(64.dp).padding(horizontal = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        TextButton(onClick = onBack, modifier = Modifier.focusRequester(backFocus)) { Text("Back") }
+        Text("Live TV", style = MaterialTheme.typography.titleMedium)
+        Spacer(Modifier.weight(1f))
+        TvIconButton(onClick = onSearch) {
+            Icon(Icons.Filled.Search, contentDescription = "Search channels")
+        }
+        Box {
+            TvIconButton(onClick = { moreOpen = true }) {
+                Icon(Icons.Filled.MoreVert, contentDescription = "More")
+            }
+            DropdownMenu(expanded = moreOpen, onDismissRequest = { moreOpen = false }) {
+                DropdownMenuItem(
+                    text = { Text("Refresh channels") },
+                    onClick = { moreOpen = false; onRefresh() },
+                )
+                DropdownMenuItem(
+                    text = { Text(if (hideProtected) "Show protected" else "Hide protected") },
+                    onClick = { moreOpen = false; onToggleProtected() },
+                )
+                if (cleanupUnconfirmed) {
+                    DropdownMenuItem(
+                        text = { Text("Retry cleanup") },
+                        onClick = { moreOpen = false; onRetryCleanup() },
+                    )
+                }
+                DropdownMenuItem(
+                    text = { Text("Leave Live TV") },
+                    onClick = { moreOpen = false; onLeave() },
+                )
+            }
+        }
+    }
+}
+
+/** One 56 dp caption line where the six-line now bar used to be. */
+@Composable
+private fun LiveTvPhoneCaption(
+    channel: LiveTvChannel?,
+    airing: LiveTvAiring,
+    now: Long,
+    muted: Boolean,
+    paused: Boolean,
+    onTogglePause: () -> Unit,
+    onToggleMute: () -> Unit,
+    onInfo: () -> Unit,
+    onStop: () -> Unit,
+) {
+    val detail = listOfNotNull(
+        airing.now?.let { "${liveTvTime(it.start)}–${liveTvTime(it.end)}" },
+        airing.now?.takeIf { it.end > now }?.let { "${(it.end - now) / 60} min left" },
+        airing.next?.let { "Next: ${it.title}" },
+    ).joinToString(" · ")
+    Row(
+        Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                airing.now?.title ?: channel?.guide_name ?: "Live television",
+                style = MaterialTheme.typography.titleSmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                detail,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        TvIconButton(onClick = onTogglePause, modifier = Modifier.size(32.dp)) {
+            Icon(
+                if (paused) Icons.Filled.PlayArrow else Icons.Filled.Pause,
+                contentDescription = if (paused) "Play live" else "Pause",
+            )
+        }
+        TvIconButton(onClick = onToggleMute, modifier = Modifier.size(32.dp)) {
+            Icon(
+                if (muted) Icons.Filled.VolumeOff else Icons.Filled.VolumeUp,
+                contentDescription = if (muted) "Unmute" else "Mute",
+            )
+        }
+        TvIconButton(onClick = onInfo, modifier = Modifier.size(32.dp)) {
+            Icon(Icons.Filled.Info, contentDescription = "Stream info")
+        }
+        TvIconButton(onClick = onStop, modifier = Modifier.size(32.dp)) {
+            Icon(Icons.Filled.Stop, contentDescription = "Stop")
+        }
+    }
+}
+
+/** 48 dp: On now · Guide · Favorites, and what the lineup holds. */
+@Composable
+private fun LiveTvPhoneToolbar(
+    browse: LiveTvBrowseView,
+    favoritesOnly: Boolean,
+    summary: String,
+    onBrowse: (LiveTvBrowseView, Boolean) -> Unit,
+) {
+    Row(
+        Modifier.fillMaxWidth().height(48.dp).padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        LiveTvSegment("On now", browse == LiveTvBrowseView.List && !favoritesOnly) {
+            onBrowse(LiveTvBrowseView.List, false)
+        }
+        LiveTvSegment("Guide", browse == LiveTvBrowseView.Guide) {
+            onBrowse(LiveTvBrowseView.Guide, favoritesOnly)
+        }
+        LiveTvSegment("Favorites", favoritesOnly) {
+            onBrowse(LiveTvBrowseView.List, true)
+        }
+        Spacer(Modifier.weight(1f))
+        Text(
+            summary,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
+private fun LiveTvSegment(
+    label: String,
+    active: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    val television = currentFormFactor() == FormFactor.Television
+    TextButton(onClick = onClick, compact = true, modifier = modifier) {
+        Text(
+            label,
+            // 13 sp is the phone's segmented-control size; a television row is
+            // 28 dp tall and reads 11 sp from ten feet.
+            fontSize = if (television) 11.sp else 13.sp,
+            color = if (active) {
+                MaterialTheme.colorScheme.primary
+            } else {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            },
+        )
     }
 }
 
@@ -597,10 +854,15 @@ private fun LiveTvMobileSchedule(
 ) {
     var pickerOpen by remember { mutableStateOf(false) }
     Column(modifier) {
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        // The channel picker and the Grid toggle share one 44 dp row, so the
+        // schedule itself gets the screen.
+        Row(
+            Modifier.fillMaxWidth().height(44.dp).padding(horizontal = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             Box {
-                TextButton(onClick = { pickerOpen = true }) {
-                    Text(channel?.title ?: "Choose channel")
+                TextButton(onClick = { pickerOpen = true }, compact = true) {
+                    Text(channel?.title ?: "Choose channel", fontSize = 13.sp)
                 }
                 DropdownMenu(expanded = pickerOpen, onDismissRequest = { pickerOpen = false }) {
                     channels.forEach { choice ->
@@ -611,12 +873,12 @@ private fun LiveTvMobileSchedule(
                     }
                 }
             }
-            TextButton(onClick = onGrid) { Text("Grid") }
+            Spacer(Modifier.weight(1f))
+            TextButton(onClick = onGrid, compact = true) { Text("Grid", fontSize = 13.sp) }
         }
-        Text("Schedule from ${liveTvTime(now - now.mod(LiveTvGuideReducer.SLOT_SECONDS))}", style = MaterialTheme.typography.labelSmall)
         val programmes = channel?.let { LiveTvGuideReducer.channel(guide, it.id)?.programmes }.orEmpty()
             .filter { it.end > now - LiveTvGuideReducer.SLOT_SECONDS }
-        LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        LazyColumn(Modifier.weight(1f)) {
             if (channel != null && programmes.isEmpty()) {
                 item {
                     TextButton(onClick = { if (channel.watchable) onAiring(channel) }, enabled = channel.watchable) {
@@ -626,14 +888,29 @@ private fun LiveTvMobileSchedule(
             }
             items(programmes, key = { "${it.start}:${it.end}:${it.title}" }) { programme ->
                 val airing = programme.start <= now && now < programme.end
-                TextButton(onClick = {
-                    if (airing && channel != null) onAiring(channel)
-                    else if (channel != null) onFuture(channel, programme)
-                }) {
-                    Column(Modifier.fillMaxWidth()) {
-                        Text("${liveTvTime(programme.start)}–${liveTvTime(programme.end)}")
-                        Text(programme.title, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                        if (airing) Text("On now", style = MaterialTheme.typography.labelSmall)
+                Row(
+                    Modifier.fillMaxWidth().height(44.dp).padding(horizontal = 12.dp)
+                        .clickable {
+                            if (airing && channel != null) onAiring(channel)
+                            else if (channel != null) onFuture(channel, programme)
+                        },
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Text(
+                        liveTvTime(programme.start),
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        programme.title,
+                        fontSize = 14.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                    if (airing) {
+                        Text("NOW", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
                     }
                 }
             }
@@ -707,43 +984,83 @@ private fun TelevisionLiveTvBrowser(
         null
     } ?: focusedAiring.now
 
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        TextButton(
-            onClick = { onBrowse(LiveTvBrowseView.Guide) },
-            modifier = Modifier.focusRequester(guideFocus),
-        ) { Text("Guide") }
-        TextButton(onClick = { onBrowse(LiveTvBrowseView.List) }) { Text("On now") }
-        if (browse == LiveTvBrowseView.Guide) {
-            TextButton(enabled = canGuideEarlier, onClick = onGuideEarlier) { Text("Earlier") }
-            TextButton(onClick = onGuideNow) { Text("Now") }
-            TextButton(enabled = canGuideLater, onClick = onGuideLater) { Text("Later") }
+    var searchOpen by remember { mutableStateOf(false) }
+    val type = LiveTvTypography.current()
+
+    // One 24 dp row. Earlier / Now / Later moved into the grid header, Return
+    // to live went away because the picture is a focus target, and the search
+    // field became a dialog — three bands of chrome became one.
+    // `heightIn`, not `height`: an 11 sp label inside `TvCompactContentPadding`
+    // is about 23 dp, so a fixed 24 dp row clips as soon as the television's
+    // font scale moves at all. The trailing actions are declared before the
+    // status text takes the slack, so a long search term cannot push Layout
+    // and More off the row.
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = 28.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        LiveTvSegment("On now", browse == LiveTvBrowseView.List) {
+            onBrowse(LiveTvBrowseView.List)
         }
-        TextButton(onClick = onToggleFavorites) {
-            Text(if (favoritesOnly) "All channels" else "Favorites")
+        LiveTvSegment("Guide", browse == LiveTvBrowseView.Guide, Modifier.focusRequester(guideFocus)) {
+            onBrowse(LiveTvBrowseView.Guide)
         }
-        OutlinedTextField(
-            value = search,
-            onValueChange = onSearch,
-            label = { Text("Search") },
-            modifier = Modifier.width(260.dp).testTag("live-tv-channel-search").tvFocusRing(),
-            singleLine = true,
+        Text(
+            buildString {
+                val shown = channels.size
+                val total = state.channels.size
+                append(if (shown == total) "$total channels" else "$shown of $total channels")
+                if (state.playing) append(" · 1 tuner in use")
+                state.guide?.freshness?.takeIf { it != "fresh" }?.let {
+                    append(if (it == "stale") " · guide is stale" else " · no guide data")
+                }
+                state.message.takeIf { it.isNotEmpty() && it != LIVE_TV_STEADY_MESSAGE }
+                    ?.let { append(" · $it") }
+            },
+            style = type.secondary,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f, fill = false),
         )
+        Spacer(Modifier.weight(1f))
+        TextButton(onClick = onToggleFavorites, compact = true) {
+            Text(if (favoritesOnly) "★ All" else "★ Favorites", style = type.primary)
+        }
+        TextButton(onClick = { searchOpen = true }, compact = true) {
+            Text(
+                if (search.isEmpty()) "⌕ Search" else "⌕ ${search.take(12)}",
+                style = type.primary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
         Box {
-            TextButton(onClick = { layoutOpen = true }) { Text("Layout") }
+            TextButton(onClick = { layoutOpen = true }, compact = true) {
+                Text("Layout", style = type.primary)
+            }
             DropdownMenu(expanded = layoutOpen, onDismissRequest = { layoutOpen = false }) {
-                TvLiveLayout.entries.forEach { choice ->
+                TvLiveLayout.offered.forEach { choice ->
                     DropdownMenuItem(
-                        text = { Text(choice.label + if (choice == layout) " · Selected" else "") },
+                        text = {
+                            Text(choice.label + if (choice == layout.presented) " · Selected" else "")
+                        },
                         onClick = { layoutOpen = false; onLayout(choice) },
                     )
                 }
             }
         }
-        if (state.playing) TextButton(onClick = onFullscreen) { Text("Return to live") }
         Box {
-            TextButton(onClick = { moreOpen = true }) { Text("More") }
+            TextButton(onClick = { moreOpen = true }, compact = true) {
+                Text("More", style = type.primary)
+            }
             DropdownMenu(expanded = moreOpen, onDismissRequest = { moreOpen = false }) {
-                DropdownMenuItem(text = { Text("Refresh channels") }, onClick = { moreOpen = false; onReload() })
+                DropdownMenuItem(
+                    text = { Text("Refresh channels") },
+                    enabled = !state.busy,
+                    onClick = { moreOpen = false; onReload() },
+                )
                 DropdownMenuItem(
                     text = { Text(if (hideProtected) "Show protected" else "Hide protected") },
                     onClick = { moreOpen = false; onToggleProtected() },
@@ -754,40 +1071,169 @@ private fun TelevisionLiveTvBrowser(
         }
     }
 
+    if (searchOpen) {
+        AlertDialog(
+            onDismissRequest = { searchOpen = false },
+            title = { Text("Find a channel") },
+            text = {
+                OutlinedTextField(
+                    value = search,
+                    onValueChange = onSearch,
+                    label = { Text("Number, name, or what is on") },
+                    modifier = Modifier.fillMaxWidth().testTag("live-tv-channel-search").tvFocusRing(),
+                    singleLine = true,
+                )
+            },
+            confirmButton = { TextButton(onClick = { searchOpen = false }) { Text("Done") } },
+            dismissButton = {
+                TextButton(onClick = { onSearch(""); searchOpen = false }) { Text("Clear") }
+            },
+        )
+    }
+
     if (channels.isEmpty()) {
         Box(Modifier.fillMaxSize().background(Color.Black)) {
             if (state.playing) playerSurface()
             Column(
-                Modifier.align(androidx.compose.ui.Alignment.Center)
+                Modifier.align(Alignment.Center)
                     .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.94f)).padding(20.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                Text("No matching channels. Clear search or filters.")
-                TextButton(onClick = onClearFilters) { Text("Clear filters") }
+                Text(
+                    state.message.takeIf { it.isNotEmpty() && state.channels.isEmpty() }
+                        ?: "No matching channels. Clear search or filters.",
+                    style = type.primary,
+                )
+                TextButton(onClick = onClearFilters, compact = true) { Text("Clear filters") }
             }
         }
         return
     }
 
-    val window = remember(guideWindowStart) {
-        LiveTvGuideWindow(guideWindowStart, guideWindowStart + 3 * LiveTvGuideReducer.SLOT_SECONDS)
-    }
-    val grid = remember(state.guide, channels, window, now) {
-        LiveTvGuideReducer.gridLayout(
-            guide = state.guide,
-            channels = channels,
-            window = window,
-            now = now,
-            pxPerSlot = LiveTvGridMetrics.slotWidth.value,
-        )
-    }
     val selectAiring: (LiveTvChannel) -> Unit = { channel ->
         onFocusedChannel(channel)
         if (state.watching?.id == channel.id && state.playing) onFullscreen() else controller.watch(channel)
     }
+    val paging = LiveTvGuidePaging(
+        canEarlier = canGuideEarlier,
+        canLater = canGuideLater,
+        onEarlier = onGuideEarlier,
+        onNow = onGuideNow,
+        onLater = onGuideLater,
+    )
 
-    if (layout == TvLiveLayout.ChannelBrowser && browse == LiveTvBrowseView.List) {
-        Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+    // Lists are tall and narrow; grids are wide.
+    if (layout.presented == TvLiveLayout.GuideOverlay) {
+        Box(Modifier.fillMaxSize().background(Color.Black)) {
+            // The picture draws full-bleed but its focus rect stops at the top
+            // of the panel. A focus target whose bounds are the whole screen
+            // has no candidate below, left or right of it, so it also always
+            // wins Down from the toolbar — which made the panel, its Close and
+            // its Favorites unreachable by D-pad.
+            LiveTvPicture(
+                state,
+                playerSurface,
+                onFullscreen,
+                Modifier.fillMaxSize(),
+                focusModifier = Modifier.fillMaxWidth().fillMaxHeight().padding(bottom = 260.dp),
+            )
+            Column(
+                Modifier.fillMaxWidth().height(260.dp).align(Alignment.BottomCenter)
+                    .background(MaterialTheme.colorScheme.surface).padding(10.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        listOfNotNull(
+                            "Guide",
+                            focused?.let { "Focused: ${it.guide_number} ${it.guide_name}" },
+                            focusedProgramme?.title,
+                            focusedProgramme?.let { liveTvTime(it.start) },
+                        ).joinToString(" · "),
+                        style = type.primary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Spacer(Modifier.weight(1f))
+                    TextButton(onClick = onToggleFavorites, compact = true) {
+                        Text(if (favoritesOnly) "★ All" else "★ Favorites", style = type.primary)
+                    }
+                    TextButton(
+                        onClick = { onLayout(TvLiveLayout.GuidePreview) },
+                        compact = true,
+                    ) { Text("Close", style = type.primary) }
+                }
+                if (browse == LiveTvBrowseView.Guide) {
+                    LiveTvTelevisionGrid(
+                        state = state,
+                        channels = channels,
+                        now = now,
+                        guideWindowStart = guideWindowStart,
+                        paging = paging,
+                        playingChannelId = state.watching?.id,
+                        onAiring = selectAiring,
+                        onFuture = onDetail,
+                        guideFocusTarget = guideFocusTarget,
+                        guideAnchorTime = guideAnchorTime,
+                        onGuideNavigation = onGuideNavigation,
+                        onFocusedChannel = onFocusedChannel,
+                        onToolbarBoundary = { guideFocus.requestFocus() },
+                        modifier = Modifier.weight(1f),
+                    )
+                } else {
+                    // The segmented control has to mean something here too:
+                    // On now over the picture is the list, not the grid.
+                    LiveTvOnNowList(
+                        channels = channels,
+                        controller = controller,
+                        now = now,
+                        watchingChannelId = state.watching?.id,
+                        focusedChannelId = focusedChannelId,
+                        onFocused = onFocusedChannel,
+                        onSelect = selectAiring,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
+        }
+    } else if (browse == LiveTvBrowseView.Guide) {
+        Column(Modifier.fillMaxSize()) {
+            // A fixed stage, never a weight: a `fillMaxSize` child of a Column
+            // takes the remaining height, so a weight shrinks the picture the
+            // moment anything above it wraps.
+            Row(
+                Modifier.fillMaxWidth().height(151.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                LiveTvPicture(
+                    state, playerSurface, onFullscreen,
+                    Modifier.width(268.dp).height(151.dp),
+                )
+                Column(Modifier.weight(1f)) {
+                    LiveTvFocusedProgramme(
+                        focused, focusedAiring, state.status, focusedProgramme,
+                        eyebrow = true, technical = false,
+                    )
+                }
+            }
+            LiveTvTelevisionGrid(
+                state = state,
+                channels = channels,
+                now = now,
+                guideWindowStart = guideWindowStart,
+                paging = paging,
+                playingChannelId = state.watching?.id,
+                onAiring = selectAiring,
+                onFuture = onDetail,
+                guideFocusTarget = guideFocusTarget,
+                guideAnchorTime = guideAnchorTime,
+                onGuideNavigation = onGuideNavigation,
+                onFocusedChannel = onFocusedChannel,
+                onToolbarBoundary = { guideFocus.requestFocus() },
+                modifier = Modifier.weight(1f),
+            )
+        }
+    } else {
+        Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             LiveTvOnNowList(
                 channels = channels,
                 controller = controller,
@@ -796,111 +1242,181 @@ private fun TelevisionLiveTvBrowser(
                 focusedChannelId = focusedChannelId,
                 onFocused = onFocusedChannel,
                 onSelect = selectAiring,
-                modifier = Modifier.weight(0.34f).fillMaxHeight(),
+                modifier = Modifier.width(310.dp).fillMaxHeight(),
             )
-            Column(Modifier.weight(0.66f).fillMaxHeight()) {
-                Box(Modifier.fillMaxWidth().weight(0.58f).background(Color.Black)) { playerSurface() }
+            Column(Modifier.weight(1f).fillMaxHeight()) {
+                LiveTvPicture(
+                    state, playerSurface, onFullscreen,
+                    Modifier.fillMaxWidth().aspectRatio(16f / 9f),
+                )
                 LiveTvFocusedProgramme(focused, focusedAiring, state.status, focusedProgramme)
                 focused?.let { channel ->
                     val upcoming = LiveTvGuideReducer.channel(state.guide, channel.id)?.programmes.orEmpty()
-                        .filter { it.end > now }.take(4)
+                        .filter { it.end > now }.take(3)
+                    if (upcoming.isNotEmpty()) {
+                        Text(
+                            "UP NEXT",
+                            style = type.badge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                     upcoming.forEach { programme ->
-                        TextButton(onClick = {
-                            if (programme.start <= now && now < programme.end) selectAiring(channel)
-                            else onDetail(channel, programme)
-                        }) {
-                            Text("${liveTvTime(programme.start)} · ${programme.title}")
+                        TextButton(
+                            compact = true,
+                            onClick = {
+                                if (programme.start <= now && now < programme.end) selectAiring(channel)
+                                else onDetail(channel, programme)
+                            },
+                        ) {
+                            Text("${liveTvTime(programme.start)} · ${programme.title}", style = type.tertiary)
                         }
                     }
                 }
             }
         }
-    } else if (browse == LiveTvBrowseView.Guide && layout != TvLiveLayout.GuideOverlay) {
-        Column(Modifier.fillMaxSize()) {
-            Row(Modifier.fillMaxWidth().weight(0.34f), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                Column(Modifier.weight(1f)) {
-                    LiveTvFocusedProgramme(focused, focusedAiring, state.status, focusedProgramme)
+    }
+}
+
+/**
+ * The picture is a focus target now: Select on it is Fullscreen, which is what
+ * let "Return to live" leave the toolbar.
+ */
+@Composable
+private fun LiveTvPicture(
+    state: LiveTvPlayerState,
+    playerSurface: @Composable () -> Unit,
+    onFullscreen: () -> Unit,
+    modifier: Modifier = Modifier,
+    /// Where the focus target actually sits inside the drawn box. Defaults to
+    /// the whole box; the Over picture layout shrinks it above the panel.
+    focusModifier: Modifier? = null,
+) {
+    val type = LiveTvTypography.current()
+    Box(modifier.background(Color.Black)) {
+        Box(
+            (focusModifier ?: Modifier.matchParentSize())
+                .tvFocusRing()
+                .clickable(enabled = state.playing, onClick = onFullscreen),
+        )
+        if (state.playing) {
+            playerSurface()
+            state.watching?.let { watching ->
+                Row(
+                    Modifier.align(Alignment.TopStart).padding(6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        watching.guide_name,
+                        style = type.badge,
+                        color = Color.White,
+                        modifier = Modifier
+                            .background(Color(0x99000000), MaterialTheme.shapes.small)
+                            .padding(horizontal = 5.dp, vertical = 2.dp),
+                    )
+                    Text(watching.title, style = type.secondary, color = Color.White)
+                    Text(
+                        "LIVE",
+                        style = type.eyebrow,
+                        color = Color.White,
+                        modifier = Modifier
+                            .background(Color(0xFFE23A2E), MaterialTheme.shapes.small)
+                            .padding(horizontal = 4.dp, vertical = 1.dp),
+                    )
                 }
-                Box(Modifier.weight(1f).fillMaxHeight().background(Color.Black)) { playerSurface() }
             }
-            LiveTvGuideGrid(
-                layout = grid,
-                slots = remember(window) { LiveTvGuideReducer.gridSlots(window) },
-                playingChannelId = state.watching?.id,
-                onAiring = selectAiring,
-                onFuture = onDetail,
-                dpadNavigation = true,
-                navigationTarget = guideFocusTarget,
-                navigationAnchorTime = guideAnchorTime,
-                onNavigationState = onGuideNavigation,
-                onFocus = { channel, _ -> onFocusedChannel(channel) },
-                onToolbarBoundary = { guideFocus.requestFocus() },
-                modifier = Modifier.weight(0.66f),
+            Text(
+                "Select · Fullscreen",
+                style = type.tertiary,
+                color = Color.White.copy(alpha = 0.75f),
+                modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp),
+            )
+        } else {
+            Text(
+                "Select a channel to watch live",
+                style = type.secondary,
+                color = Color.White.copy(alpha = 0.7f),
+                modifier = Modifier.align(Alignment.Center),
             )
         }
-    } else if (browse == LiveTvBrowseView.Guide) {
-        Box(Modifier.fillMaxSize().background(Color.Black)) {
-            playerSurface()
-            Column(
-                Modifier.fillMaxWidth().fillMaxHeight(0.55f).align(androidx.compose.ui.Alignment.BottomCenter)
-                    .background(MaterialTheme.colorScheme.surface).padding(10.dp),
-            ) {
-                LiveTvFocusedProgramme(focused, focusedAiring, state.status, focusedProgramme)
-                LiveTvGuideGrid(
-                    layout = grid,
-                    slots = remember(window) { LiveTvGuideReducer.gridSlots(window) },
-                    playingChannelId = state.watching?.id,
-                    onAiring = selectAiring,
-                    onFuture = onDetail,
-                    dpadNavigation = true,
-                    navigationTarget = guideFocusTarget,
-                    navigationAnchorTime = guideAnchorTime,
-                    onNavigationState = onGuideNavigation,
-                    onFocus = { channel, _ -> onFocusedChannel(channel) },
-                    onToolbarBoundary = { guideFocus.requestFocus() },
-                    modifier = Modifier.weight(1f),
-                )
-            }
+    }
+}
+
+/**
+ * One muted line for whatever the controller is saying. It replaced a
+ * `titleMedium` title plus a full-width status paragraph; it is not optional,
+ * because `LiveTvPlayer` puts the tuner failure, the empty-lineup reason and
+ * the refused picture-in-picture in exactly this string and nothing else
+ * shows them.
+ */
+@Composable
+private fun LiveTvStatusLine(message: String) {
+    if (message.isEmpty() || message == LIVE_TV_STEADY_MESSAGE) return
+    Text(
+        message,
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        maxLines = 2,
+        overflow = TextOverflow.Ellipsis,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp),
+    )
+}
+
+/** While a channel plays normally there is nothing to say. */
+private const val LIVE_TV_STEADY_MESSAGE = "Playing live · no recording or rewind"
+
+/** The television grid, sized from the width it is actually given. */
+@Composable
+private fun LiveTvTelevisionGrid(
+    state: LiveTvPlayerState,
+    channels: List<LiveTvChannel>,
+    now: Long,
+    guideWindowStart: Long,
+    paging: LiveTvGuidePaging,
+    playingChannelId: String?,
+    onAiring: (LiveTvChannel) -> Unit,
+    onFuture: (LiveTvChannel, LiveTvProgramme) -> Unit,
+    guideFocusTarget: LiveTvGuideFocusTarget?,
+    guideAnchorTime: Long?,
+    onGuideNavigation: (LiveTvGuideFocusTarget, Long?) -> Unit,
+    onFocusedChannel: (LiveTvChannel) -> Unit,
+    onToolbarBoundary: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    BoxWithConstraints(modifier) {
+        val dimensions = LiveTvGridMetrics.forTelevision(maxWidth)
+        val window = remember(guideWindowStart) {
+            LiveTvGuideWindow(
+                guideWindowStart,
+                guideWindowStart +
+                    LiveTvGridMetrics.TELEVISION_VISIBLE_SLOTS * LiveTvGuideReducer.SLOT_SECONDS,
+            )
         }
-    } else if (layout == TvLiveLayout.GuidePreview) {
-        Column(Modifier.fillMaxSize()) {
-            Row(Modifier.fillMaxWidth().weight(0.34f), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                Column(Modifier.weight(1f)) {
-                    LiveTvFocusedProgramme(focused, focusedAiring, state.status, focusedProgramme)
-                }
-                Box(Modifier.weight(1f).fillMaxHeight().background(Color.Black)) { playerSurface() }
-            }
-            LiveTvOnNowList(
+        val grid = remember(state.guide, channels, window, now, dimensions) {
+            LiveTvGuideReducer.gridLayout(
+                guide = state.guide,
                 channels = channels,
-                controller = controller,
+                window = window,
                 now = now,
-                watchingChannelId = state.watching?.id,
-                focusedChannelId = focusedChannelId,
-                onFocused = onFocusedChannel,
-                onSelect = selectAiring,
-                modifier = Modifier.weight(0.66f),
+                pxPerSlot = dimensions.slotWidth.value,
             )
         }
-    } else {
-        Box(Modifier.fillMaxSize().background(Color.Black)) {
-            playerSurface()
-            Column(
-                Modifier.fillMaxWidth().fillMaxHeight(0.55f).align(androidx.compose.ui.Alignment.BottomCenter)
-                    .background(MaterialTheme.colorScheme.surface).padding(10.dp),
-            ) {
-                LiveTvFocusedProgramme(focused, focusedAiring, state.status, focusedProgramme)
-                LiveTvOnNowList(
-                    channels = channels,
-                    controller = controller,
-                    now = now,
-                    watchingChannelId = state.watching?.id,
-                    focusedChannelId = focusedChannelId,
-                    onFocused = onFocusedChannel,
-                    onSelect = selectAiring,
-                    modifier = Modifier.weight(1f),
-                )
-            }
-        }
+        LiveTvGuideGrid(
+            layout = grid,
+            slots = remember(window) { LiveTvGuideReducer.gridSlots(window) },
+            playingChannelId = playingChannelId,
+            dimensions = dimensions,
+            paging = paging,
+            onAiring = onAiring,
+            onFuture = onFuture,
+            dpadNavigation = true,
+            navigationTarget = guideFocusTarget,
+            navigationAnchorTime = guideAnchorTime,
+            onNavigationState = onGuideNavigation,
+            onFocus = { channel, _ -> onFocusedChannel(channel) },
+            onToolbarBoundary = onToolbarBoundary,
+            modifier = Modifier.fillMaxSize(),
+        )
     }
 }
 
@@ -928,7 +1444,7 @@ private fun LiveTvOnNowList(
             requester.requestFocus()
         }
     }
-    LazyColumn(modifier, state = listState, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    LazyColumn(modifier, state = listState, verticalArrangement = Arrangement.spacedBy(2.dp)) {
         items(channels, key = { it.id }) { channel ->
             val requester = remember(channel.id) { FocusRequester() }
             DisposableEffect(channel.id, requester) {
@@ -960,24 +1476,65 @@ private fun LiveTvBrowserRow(
     onSelect: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val type = LiveTvTypography.current()
     TextButton(
         onClick = onSelect,
         enabled = channel.watchable,
-        modifier = modifier.fillMaxWidth().onFocusChanged { if (it.isFocused) onFocused() },
+        compact = true,
+        modifier = modifier.fillMaxWidth().height(36.dp)
+            .onFocusChanged { if (it.isFocused) onFocused() },
     ) {
-        Column(Modifier.fillMaxWidth()) {
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(channel.title, style = MaterialTheme.typography.titleSmall)
-                LiveTvFormatBadges(channel)
-                if (watching) Text("Watching", style = MaterialTheme.typography.labelSmall)
-            }
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(7.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             Text(
-                airing.now?.title ?: if (channel.watchable) "No programme information · Watch live" else "Protected · unavailable",
+                channel.guide_name.take(5),
+                style = type.eyebrow,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                modifier = Modifier
+                    .size(width = 42.dp, height = 20.dp)
+                    .background(MaterialTheme.colorScheme.surfaceVariant, MaterialTheme.shapes.small)
+                    .wrapContentHeight(),
             )
-            airing.progress?.let { progress -> LinearProgressIndicator(progress = { progress }, Modifier.fillMaxWidth()) }
-            airing.next?.let { Text("Next: ${it.title}", style = MaterialTheme.typography.labelSmall) }
+            Column(Modifier.weight(1f)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                    Text(
+                        channel.title,
+                        style = type.primary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    if (watching) {
+                        Text("● LIVE", style = type.eyebrow, color = MaterialTheme.colorScheme.primary)
+                    }
+                }
+                Text(
+                    airing.now?.title
+                        ?: if (channel.watchable) "No programme information" else "Protected · not playable",
+                    style = type.secondary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                airing.progress?.let { progress ->
+                    LinearProgressIndicator(
+                        progress = { progress },
+                        modifier = Modifier.fillMaxWidth().height(2.dp),
+                    )
+                }
+            }
+            airing.now?.let {
+                Text(
+                    "until ${liveTvTime(it.end)}",
+                    style = type.tertiary,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                )
+            }
         }
     }
 }
@@ -988,64 +1545,53 @@ private fun LiveTvFocusedProgramme(
     airing: LiveTvAiring,
     status: LiveTvStatus?,
     selectedProgramme: LiveTvProgramme? = airing.now,
+    eyebrow: Boolean = false,
+    /// A fixed-height stage measures its children in order, so the signal
+    /// meters would push the badges to zero height. They are one Info press
+    /// away in fullscreen; the stage does without them.
+    technical: Boolean = true,
 ) {
-    Text(selectedProgramme?.title ?: channel?.guide_name ?: "Select a channel", style = MaterialTheme.typography.titleLarge)
-    channel?.let {
-        Text(it.title, style = MaterialTheme.typography.labelMedium)
-        LiveTvFormatBadges(it)
-        selectedProgramme?.let { programme ->
-            Text("${liveTvTime(programme.start)}–${liveTvTime(programme.end)}")
-            programme.synopsis?.let { Text(it, maxLines = 3, overflow = TextOverflow.Ellipsis) }
-        }
-        LiveTvTechnicalDetails(it, status?.takeIf { observed -> observed.channel?.id == null || observed.channel.id == it.id })
-    }
-}
-
-@Composable
-private fun LiveTvNowBar(
-    channel: LiveTvChannel?,
-    airing: LiveTvAiring,
-    paused: Boolean,
-    muted: Boolean,
-    fullscreen: Boolean,
-    canUsePip: Boolean,
-    onTogglePause: () -> Unit,
-    onToggleMute: () -> Unit,
-    onToggleFullscreen: () -> Unit,
-    onPip: () -> Unit,
-    onInfo: () -> Unit,
-    onStop: () -> Unit,
-) {
-    Column(Modifier.fillMaxWidth()) {
+    val type = LiveTvTypography.current()
+    if (eyebrow && channel != null) {
         Text(
-            airing.now?.title ?: channel?.guide_name ?: "Live television",
-            style = MaterialTheme.typography.titleMedium,
+            "FOCUSED · ${channel.guide_number} ${channel.guide_name}" +
+                (selectedProgramme?.let { " · ${liveTvTime(it.start)}–${liveTvTime(it.end)}" } ?: ""),
+            style = type.eyebrow,
+            color = MaterialTheme.colorScheme.primary,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
-        airing.now?.let { programme ->
-            LinearProgressIndicator(
-                progress = { airing.progress ?: 0f },
-                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-            )
+    }
+    Text(
+        selectedProgramme?.title ?: channel?.guide_name ?: "Select a channel",
+        style = type.title,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+    )
+    channel?.let {
+        if (!eyebrow) {
             Text(
-                "${liveTvTime(programme.start)}–${liveTvTime(programme.end)}" +
-                    (airing.next?.let { " · Next: ${it.title}" } ?: ""),
-                style = MaterialTheme.typography.labelSmall,
+                listOfNotNull(
+                    it.title,
+                    selectedProgramme?.let { p -> "${liveTvTime(p.start)}–${liveTvTime(p.end)}" },
+                ).joinToString(" · "),
+                style = type.secondary,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        channel?.let { LiveTvFormatBadges(it) }
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = onTogglePause) { Text(if (paused) "Play live" else "Pause") }
-            TextButton(onClick = onToggleMute) { Text(if (muted) "Unmute" else "Mute") }
-            if (canUsePip) TextButton(onClick = onPip) { Text("Picture-in-picture") }
-            TextButton(onClick = onInfo) { Text("Info") }
-            TextButton(onClick = onToggleFullscreen) {
-                Text(if (fullscreen) "Exit fullscreen" else "Fullscreen")
-            }
-            TextButton(onClick = onStop) { Text("Stop") }
+        selectedProgramme?.synopsis?.let { synopsis ->
+            Text(
+                synopsis,
+                style = type.secondary,
+                maxLines = if (eyebrow) 3 else 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        LiveTvFormatBadges(it)
+        if (technical) {
+            LiveTvTechnicalDetails(it, status?.takeIf { observed -> observed.channel?.id == null || observed.channel.id == it.id })
         }
     }
 }
@@ -1091,6 +1637,7 @@ private fun LiveTvOverlay(
     onLeave: () -> Unit,
 ) {
     val guideFocus = remember { FocusRequester() }
+    val type = LiveTvTypography.current()
     RequestInitialFocus(guideFocus, enabled = !temporaryGuide && !showingInfo && !moreOpen)
     Column(
         Modifier
@@ -1127,45 +1674,69 @@ private fun LiveTvOverlay(
         }
         Column {
             if (temporaryGuide) {
-                val window = remember(guideWindowStart) {
-                    LiveTvGuideWindow(
-                        guideWindowStart,
-                        guideWindowStart + 3 * LiveTvGuideReducer.SLOT_SECONDS,
-                    )
-                }
-                val layout = remember(guide, neighbours, window, now) {
-                    LiveTvGuideReducer.gridLayout(
-                        guide = guide,
-                        channels = neighbours,
-                        window = window,
-                        now = now,
-                        pxPerSlot = LiveTvGridMetrics.slotWidth.value,
-                    )
-                }
+                // The identical panel the Over picture layout draws, so the
+                // grid a viewer meets from fullscreen is the grid they know.
                 Column(
-                    Modifier.fillMaxWidth().fillMaxHeight(0.48f)
-                        .background(MaterialTheme.colorScheme.surface).padding(8.dp),
+                    Modifier.fillMaxWidth().height(260.dp)
+                        .background(MaterialTheme.colorScheme.surface).padding(10.dp),
                 ) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("Guide", style = MaterialTheme.typography.titleMedium)
-                        TextButton(enabled = canGuideEarlier, onClick = onGuideEarlier) { Text("Earlier") }
-                        TextButton(onClick = onGuideNow) { Text("Now") }
-                        TextButton(enabled = canGuideLater, onClick = onGuideLater) { Text("Later") }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            listOfNotNull(
+                                "Guide",
+                                channel?.let { "Focused: ${it.guide_number} ${it.guide_name}" },
+                                airing.now?.title,
+                            ).joinToString(" · "),
+                            style = type.primary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Spacer(Modifier.weight(1f))
+                        TextButton(onClick = onClosePanel, compact = true) {
+                            Text("Close", style = type.primary)
+                        }
                     }
-                    LiveTvGuideGrid(
-                        layout = layout,
-                        slots = remember(window) { LiveTvGuideReducer.gridSlots(window) },
-                        playingChannelId = channel?.id,
-                        onAiring = onSelect,
-                        onFuture = onFuture,
-                        dpadNavigation = true,
-                        navigationTarget = guideFocusTarget,
-                        navigationAnchorTime = guideAnchorTime,
-                        onNavigationState = onGuideNavigation,
-                        onToolbarBoundary = { guideFocus.requestFocus() },
-                        modifier = Modifier.weight(1f),
-                    )
-                    TextButton(onClick = onClosePanel) { Text("Close guide") }
+                    BoxWithConstraints(Modifier.weight(1f)) {
+                        val dimensions = LiveTvGridMetrics.forTelevision(maxWidth)
+                        val window = remember(guideWindowStart) {
+                            LiveTvGuideWindow(
+                                guideWindowStart,
+                                guideWindowStart +
+                                    LiveTvGridMetrics.TELEVISION_VISIBLE_SLOTS *
+                                    LiveTvGuideReducer.SLOT_SECONDS,
+                            )
+                        }
+                        val grid = remember(guide, neighbours, window, now, dimensions) {
+                            LiveTvGuideReducer.gridLayout(
+                                guide = guide,
+                                channels = neighbours,
+                                window = window,
+                                now = now,
+                                pxPerSlot = dimensions.slotWidth.value,
+                            )
+                        }
+                        LiveTvGuideGrid(
+                            layout = grid,
+                            slots = remember(window) { LiveTvGuideReducer.gridSlots(window) },
+                            playingChannelId = channel?.id,
+                            dimensions = dimensions,
+                            paging = LiveTvGuidePaging(
+                                canEarlier = canGuideEarlier,
+                                canLater = canGuideLater,
+                                onEarlier = onGuideEarlier,
+                                onNow = onGuideNow,
+                                onLater = onGuideLater,
+                            ),
+                            onAiring = onSelect,
+                            onFuture = onFuture,
+                            dpadNavigation = true,
+                            navigationTarget = guideFocusTarget,
+                            navigationAnchorTime = guideAnchorTime,
+                            onNavigationState = onGuideNavigation,
+                            onToolbarBoundary = { guideFocus.requestFocus() },
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    }
                 }
             } else if (showingInfo) {
                 Column(
@@ -1192,12 +1763,12 @@ private fun LiveTvOverlay(
                 Box {
                     TextButton(onClick = onMore) { Text("More", color = Color.White) }
                     DropdownMenu(expanded = moreOpen, onDismissRequest = onDismissMore) {
-                        TvLiveLayout.entries.forEach { choice ->
+                        TvLiveLayout.offered.forEach { choice ->
                             DropdownMenuItem(
                                 text = {
                                     Text(
                                         "Layout: ${choice.label}" +
-                                            if (choice == layout) " · Selected" else "",
+                                            if (choice == layout.presented) " · Selected" else "",
                                     )
                                 },
                                 onClick = { onLayout(choice) },

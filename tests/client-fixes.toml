@@ -1250,3 +1250,63 @@ source = "clients/apple/Sources/LiveTvDeveloperView.swift"
 source_anchor = "Fleet and link evidence: Not met · Checked during playback"
 test = "tests/operations/test_evidence_workflows.py"
 test_anchor = "test_apple_prepared_enablement_is_visible_and_advisory"
+
+[[fixes]]
+# The visible-wait correction must sample the controller's attached player;
+# there is deliberately no shadow player binding in that overlay scope.
+id = "android.presentation-wait-samples-attached-player"
+commits = ["6f800466"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"
+source_anchor = "controller.player.bufferedPosition - controller.player.currentPosition"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackInfoContractTest.kt"
+test_anchor = "waitingCopyDoesNotCallServerWaitsClientBuffering"
+
+[[fixes]]
+# The final combined review found that a buffering Media3 state outlived the
+# viewer's play intent. The shared predicate and focused test keep paused
+# buffering from being presented as an active playback wait; the same commit
+# carries the reviewed server, web and Apple observability corrections and
+# their direct regressions.
+id = "android.paused-buffering-is-not-an-active-wait"
+commits = ["09cd99c4"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackTelemetry.kt"
+source_anchor = "internal fun playbackIsWaiting"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackTelemetryTest.kt"
+test_anchor = "pausedBufferingIsNotPresentedAsAnActiveWait"
+
+[[fixes]]
+# The final validation repair places the Apple progress clock on the stall
+# detector that owns it and keeps the web preparation fixtures aligned with
+# the asynchronous frame-callback and settings-card contracts.
+id = "clients.final-playback-regression-fixtures"
+commits = ["4e0991f0"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "private(set) var lastAdvanceAt: TimeInterval?"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testPresentationProgressAgeKeepsUnavailableDistinctFromZero"
+
+[[fixes]]
+# The adversarial review found the guide's new paging chips focusable inside
+# the remote adapter with no focus key of their own. `onMoveCommand` consumes
+# every direction it is handed, so a chip could not be left in any direction,
+# and the inline page has no root adapter to answer Back with. Every focusable
+# inside the adapter now owns a key, and the arrangement contract asserts it.
+id = "apple.live-tv-paging-chips-own-a-focus-key"
+commits = ["d572c565"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = "private func movePagingFocus"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testTheLiveTvArrangementIsWiredToTheDerivedGeometry"
+
+[[fixes]]
+# The adversarial review found the Over picture layout a D-pad dead end: the
+# picture became a focus target drawn `fillMaxSize`, so its focus rect was the
+# whole screen and nothing in the guide panel was below, left or right of it.
+# The picture now takes a focus modifier that stops above the panel, and the
+# arrangement contract asserts that it has one.
+id = "android.live-tv-picture-focus-rect-stops-at-the-panel"
+commits = ["44bce59a"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvScreen.kt"
+source_anchor = "focusModifier: Modifier? = null,"
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvProportionsTest.kt"
+test_anchor = "theTelevisionScreenIsWiredToTheDerivedGeometryAndOneToolbar"

@@ -7,10 +7,9 @@ package tv.plurx.app.player
  * names it once, the client primes a second pipeline, reports how far it got,
  * switches, and settles. Every rule about *when* an acknowledgement may be sent
  * and *which* one lives here rather than beside the ExoPlayer instances,
- * because none of those rules needs a player to be wrong — and on Android the
- * whole path is unreachable in production today (see
- * [controlCapabilities]'s `dualPlayerPreparation`), so a test is the only place
- * it is ever exercised.
+ * because none of those rules needs a player to be wrong. Android advertises
+ * the path by default; Settings → Developer owns the explicit opt-out and
+ * shows device/session evidence as advice rather than changing that choice.
  *
  * `docs/playback-control/M6-CLIENT-REPLACEMENT-CONTRACT.md` §C7 and §C8 are what this encodes.
  */

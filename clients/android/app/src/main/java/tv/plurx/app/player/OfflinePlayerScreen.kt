@@ -350,7 +350,8 @@ fun OfflinePlayerScreen(downloadId: String, onExit: () -> Unit) {
                     fileId = record?.fileId ?: 0,
                     delivery = "Downloaded",
                     position = "${formatTime(positionMs)} / ${formatTime(durationMs)}",
-                    buffer = String.format(java.util.Locale.US, "%.1f s", (player.bufferedPosition - player.currentPosition).coerceAtLeast(0) / 1_000.0),
+                    clientLoadedSeconds = (player.bufferedPosition - player.currentPosition)
+                        .coerceAtLeast(0) / 1_000.0,
                     decodeResolution = player.videoFormat?.takeIf { it.width > 0 && it.height > 0 }
                         ?.let { "${it.width}×${it.height}" },
                     streamRate = player.videoFormat?.bitrate?.takeIf { it > 0 }?.toLong()?.let(::formatBitrate),

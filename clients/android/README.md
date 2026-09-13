@@ -20,8 +20,14 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `87` — native viewer parity across phone, foldable,
-> and TV. Build 84 includes the required Live TV protocol version in every start request. Build 83 sends the active Live TV playback envelope, preserves
+> Status: **v0.3.0**, build `89` — native viewer parity across phone, foldable,
+> and TV. Build 89 gives Live TV the web page's proportions on Google TV and on
+> the phone: one explicit ten-foot type scale, one 24 dp toolbar, a guide whose
+> slot width is derived from the width it is given so two hours always fit, a
+> 310 dp On now column beside a focusable picture whose Select is fullscreen,
+> and a full-bleed phone player over one caption and one toolbar. The Layout
+> menu offers Preview and Over picture; a stored `channel_browser` still
+> decodes and renders as Preview. Build 84 includes the required Live TV protocol version in every start request. Build 83 sends the active Live TV playback envelope, preserves
 > compatible broadcast tracks, and reports the selected delivery. Build 82 uses the canonical Library-channel collection route while
 > the server preserves the first native spelling during rollout. Build 81 adds
 > Library channel browsing and authoring plus fenced

@@ -158,7 +158,11 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit, onOpenDeveloper: () -> 
                     ChoicePicker(
                         "Live TV layout",
                         TvLiveLayout.fromStorage(liveTvLayoutValue),
-                        TvLiveLayout.entries,
+                        // `offered`, not `entries`: `channel_browser` renders
+                        // as Preview, so listing all three showed two rows
+                        // labelled Preview and picking the second one moved
+                        // the selection to the first.
+                        TvLiveLayout.offered,
                         { it.label },
                         { selected -> settingsScope.launch { deviceSettings.saveLiveTvLayout(selected.storageValue) } },
                     )

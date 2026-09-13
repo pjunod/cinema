@@ -575,7 +575,6 @@ _Generated from [`tests/playback/playback-info-fields.json`](../../tests/playbac
 | `Resolution` | ✓ | ✓ | ✓ | resolution | grid | all |  |
 | `Dynamic range` | ✓ | ✓ | ✓ | text | notes | all | Mini shows the chip form ("DV P7 → HDR10"); the ledger shows the sentence. |
 | `Audio` | – | – | ✓ | list | notes | all | What the player's audio output actually is (route-aware where the platform says). |
-| `Buffer` | ✓ | ✓ | ✓ | seconds | grid | all | Runway ahead of the playhead. Seconds only — no clock form, no percentage. |
 | `Frames` | – | ✓ | ✓ | fraction | grid | web · android | dropped / total. AVPlayer does not expose it. |
 | `Frame rate` | – | – | ✓ | text | grid | web |  |
 | `Player state` | – | – | ✓ | text | grid | all | One vocabulary: Playing · Paused · Buffering · Ended · Failed. |
@@ -584,17 +583,33 @@ _Generated from [`tests/playback/playback-info-fields.json`](../../tests/playbac
 | `Stalls` | – | ✓ | ✓ | text | grid | all | "2 (1 supply · 1 decode)" — player-side stall count this session. |
 | `Subtitles` | – | ✓ | ✓ | text | grid | all | Track name; the delivery clause (native · burned · overlay) is a note under the same label. |
 
+**BUFFERING / DELIVERY**
+
+| Row | mini | standard | debug | Format | Placement | Available on | Note |
+|---|---|---|---|---|---|---|---|
+| `Source read` | – | – | ✓ | text | grid | all | always shown Measured source read activity only. Configured input pacing is not a measurement; unsupported clients show Unavailable. |
+| `Server ready` | – | ✓ | ✓ | seconds | grid | all | always shown Contiguous complete media beginning at the latest accepted absolute playhead or seek anchor. Missing is 0.0 s; unobservable or evicted coverage is Unavailable. |
+| `Ready state` | – | – | ✓ | text | grid | all | always shown Ready · Missing · Unavailable; kept separate so unknown is never rendered as zero. |
+| `Ready anchor` | – | – | ✓ | millis | grid | all |  |
+| `Ready end` | – | – | ✓ | millis | grid | all |  |
+| `Later ready` | – | – | ✓ | text | notes | all | A later contiguous ready island is diagnostic context, never runway at the current playhead. |
+| `HTTP wait` | – | ✓ | ✓ | text | grid | all | Active server-side media responses waiting for publication. This does not describe client buffering. |
+| `Client loaded` | ✓ | ✓ | ✓ | seconds | grid | all | Contiguous native/browser loaded media ahead of the attached current playhead. Prepared successors never contribute. |
+| `Presentation` | – | ✓ | ✓ | text | grid | all | The player's observed presentation state; it does not infer a server or network cause. |
+| `Last advance` | – | ✓ | ✓ | millis | grid | all | Age of the last observed film-clock or frame advance. Unavailable until an advance has been observed. |
+| `Delivery rate` | ✓ | ✓ | ✓ | bitrate | grid | all | Server-reported completed-response rate; "· idle" appended when delivery has gone quiet. Completion is not proof of receipt or decode. |
+| `Delivered` | – | ✓ | ✓ | bytes | grid | all | Server-reported completed response bytes for this session. Never labelled Transferred. |
+| `Delivery idle` | – | – | ✓ | millis | grid | all |  |
+| `Status sample age` | – | – | ✓ | millis | grid | all | Age since this client received the currently displayed server sample. |
+
 **NETWORK**
 
 | Row | mini | standard | debug | Format | Placement | Available on | Note |
 |---|---|---|---|---|---|---|---|
-| `Delivery rate` | ✓ | ✓ | ✓ | bitrate | grid | all | Server-reported delivered rate; "· idle" appended when delivery has gone quiet. One label — not Delivery in one mode and Delivery rate in another. |
 | `Observed rate` | – | – | ✓ | bitrate | grid | all | The player's own throughput estimate. |
 | `Stream rate` | – | – | ✓ | bitrate | grid | all | The declared rate of the rendition being played. |
-| `Delivered` | – | ✓ | ✓ | bytes | grid | all | Server-reported bytes for this session. Never labelled Transferred. |
 | `Transferred` | – | – | ✓ | bytes | grid | apple | Client access-log bytes — a different number from Delivered, so a different label. |
 | `Requests` | – | – | ✓ | count | grid | apple |  |
-| `Delivery idle` | – | – | ✓ | millis | grid | all |  |
 | `Started in` | – | – | ✓ | seconds | grid | all | Time to first frame. |
 
 **SERVER**
@@ -604,8 +619,11 @@ _Generated from [`tests/playback/playback-info-fields.json`](../../tests/playbac
 | `Status` | – | ✓ | ✓ | text | grid | all | always shown One vocabulary: No server-side session · Active · Holding buffer · Served from cache (+ the VOD states on the web). Debug shows it too. |
 | `Encoder` | – | ✓ | ✓ | text | grid | all |  |
 | `Encode speed` | – | ✓ | ✓ | speed | grid | all | "(avg)" appended when only the cumulative figure exists. Never abbreviated to Encode. |
-| `Server ahead` | – | ✓ | ✓ | seconds | grid | all | Produced beyond the playhead. Held state and time-release are a note under the same label, never inlined into the value. One label — not Ahead / Buffer ahead / Server ahead. |
-| `Ahead bytes` | – | – | ✓ | bytes | grid | all |  |
+| `Production actual` | – | ✓ | ✓ | seconds | grid | all | Actor-owned media produced beyond accepted client demand. This is producer control, not a client or server-ready buffer. |
+| `Production target` | – | ✓ | ✓ | seconds | grid | all | Actor-owned pacing target. Advisory policy is never relabelled as measured buffer. |
+| `Producer` | – | ✓ | ✓ | text | grid | all |  |
+| `Fetch reserve` | – | – | ✓ | seconds | grid | all | Compatibility frontier measured beyond the last fetched segment, not beyond the playhead. |
+| `Fetch reserve bytes` | – | – | ✓ | bytes | grid | all |  |
 | `Produced` | – | – | ✓ | clock | grid | all |  |
 | `Pacing` | – | – | ✓ | speed | grid | all |  |
 | `Held` | – | – | ✓ | yesno | grid | all |  |

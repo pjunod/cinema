@@ -1,9 +1,15 @@
 # Playback lifecycle — implementation status
 
-**Status:** one adversarial review addressed; PR #259 fast lane correcting operations truth ·
-**Updated:** 2026-09-12 · **Base:** `30cd51afc` · **Effort:**
-`effort/playback-lifecycle` at `491aac64` before this receipt · **Latest task:**
-`codex/playback-lifecycle-p3-p4` at `139ad01f`
+> **Next-work reconciliation, 2026-09-12:** The lifecycle implementation landed
+> through PR #259 at `5548c3d3`. For remaining work and current execution rules,
+> read the [rewrite remainder](PLAYBACK-REWRITE-REMAINDER.md). The test-deferral
+> and fast-lane-only instructions below describe the earlier campaign; Paul’s
+> replacement AGENTS.md requires focused local tests and current qualification
+> for the new effort. Historical receipts below remain unchanged.
+
+**Status:** combined B01–B05 implementation, review, qualification and main
+promotion complete · **Updated:** 2026-09-12 · **Promotion:**
+[PR #263](http://192.168.4.7:3000/noirr/plurx/pulls/263), merge `eaecb199`
 
 Companion to the
 [implementation contract](PLAYBACK-LIFECYCLE-IMPLEMENTATION.md) (what to build),
@@ -13,7 +19,137 @@ this is the one execution ledger for *what is built, compiled, reviewed, and
 merged*. Runtime and physical observations stay `not run` until the separate
 sweep actually executes them.
 
-## Progress — one integrated promotion, one review, one fast lane
+## Remainder execution — B01–B05 integrated
+
+**Status:** source complete; one adversarial review addressed; focused matrix
+and main-promotion lane green; merged · **Started:**
+2026-09-12 · **Base:** `10f2afe60b3d177866fdcc5741acd9f494525d73` ·
+**Effort:** `effort/playback-rewrite-remainder` · **Clone:**
+`/private/tmp/plurx-sol-remainder-20260912`
+
+| Package | State | Current evidence | Next action |
+|---|---|---|---|
+| B01 · buffer observability/UI | complete | server PR #262 and client PR #264 merged through `effort/buffer-observability`; its complete focused receipts remain in `PLAYBACK-BUFFER-OBSERVABILITY-STATUS.md` | none |
+| B02 · refill and operation races | complete; focused green | Apple rechecks session/open generation and viewer-action epoch after its ask; Android binds media-request and transport generations; web binds player, wait timestamp, playback generation, and control-intent generation | none |
+| B03 · prepared transition | complete; focused green | recipe planning, both engines, exact settlement, timeout, supersession, readiness, and terminal cleanup anchors are named below | none |
+| B04 · relocation and alternate ingress | complete; focused green | planned-fence cancellation, takeover, relay ingress, ownership settlement, and cleanup anchors are named below; destructive physical fault injection remains an explicit evidence gap | run the separately scoped physical sweep when the device/fleet is available |
+| B05 · subtitle and compatibility | complete; focused green | subtitle windows/retry, seek coalescing, VOD/rolling identity, and compatibility owners are named below; `eb8fb452` puts authoritative prepared-handoff enablement and advisory readiness together in web Developer settings | none |
+| Final promotion | complete | the one review of `83693106` was addressed by `09cd99c4` and `4e0991f0`; exact head `91eb2546` passed run 1903 and merged through PR #263 at `eaecb199` | none |
+
+### Current decisions and boundaries
+
+1. **Use one substantial effort branch and one main-bound pull request.**
+   Logical commits remain reviewable without paying for multiple broad gates.
+2. **Keep the repository's focused pre-push proofs narrow.** The current user
+   request defers tests until final review, while `AGENTS.md` requires the
+   smallest changed-behavior regression before a push. Only that focused proof
+   runs when a source commit needs it; the broad fast lane runs once, after the
+   adversarial review is addressed.
+3. **Treat all enablement requirements as advisory.** Missing device, fleet,
+   throughput, or runtime evidence is shown in Developer settings and in this
+   ledger, but it never rewrites or rejects the user's enable choice.
+4. **Do not overlap B01.** Any needed edit to shared player-input fixtures,
+   `PlaybackSessionStatus` wire models, or stats rendering is coordinated with
+   the B01 owner before commit.
+5. **Keep experimental enablement in Developer settings.** Apple and Android
+   already did. Web now places the server-wide prepared-handoff switch beside
+   its browser capability control and safety evidence; the saved switch stays
+   authoritative even when readiness is missing or unmet.
+
+### Static ownership receipt
+
+The B02 wait/control association is not inferred from a shared session ID.
+Apple accepts the status sample only for the polled session and current open,
+then rechecks both the open generation and viewer-action epoch after the
+control await. Android captures a `ControllerStallGuard.Observation` containing
+both request and transport generations and rejects it after any pause, seek,
+selection, visibility, transport, or playback-attempt change. Web's
+`persistentWait` checks the exact player, wait timestamp, playback generation,
+and control-intent generation both before and after its ask. No second recovery
+executor or new timer is required.
+
+### Remainder regression matrix
+
+The representative anchors name the real fixture that covers the package; no
+row treats source presence as a pass. These focused results were collected only
+after the one adversarial review, in the requested final validation phase.
+
+| Package | Representative retained anchors | Result |
+|---|---|---|
+| B02 · server refill | `lifecycle_refill_empty_and_loaded_waits_are_not_answered_with_their_hold` · `lifecycle_refill_loaded_native_wait_outranks_a_producer_hold` | green: 2 Rust tests |
+| B02 · client ownership | Apple `testAViewerCommandRacingAStallDropsTheStallBinding` and `testStartStopStartRestoresOnlyTheNewTitlesPlaybackIntent` · Android `PlaybackTelemetryTest` and `PlaybackRequestOwnershipTest` · `tests/playback/web-control.test.js` | green: included in 37 Apple, 22 Android, and the complete web-control run |
+| B03 · server transaction | `prepared_candidate_reuses_the_ordinary_plan_for_original_and_compound_changes` · retained settlement/timeout/abort anchors | green: representative Rust transaction test plus complete prepared client groups |
+| B03 · clients and stores | Apple prepared-replacement groups · Android `Prepared*` and `PlaybackControlPrepared*` groups · web prepared-replacement cases | green: 34 Apple prepared tests, 50 Android prepared tests, and complete web-control run |
+| B04 · ownership and ingress | `a_fresh_takeover_engine_discards_the_departed_owners_preparation` and retained relocation/relay reconciliation anchors | green: representative takeover test; destructive live-cluster fault injection not run |
+| B05 · subtitle, seek, engines | `server_ready_uses_absolute_origin_and_does_not_cross_pruned_media` · `a_far_seek_reports_the_frontier_the_client_can_actually_fetch` · `a_twenty_seek_storm_starts_work_only_for_the_settled_target` · client readiness-retry cases | green: 3 focused Rust tests plus complete selected client/web runs |
+
+### Combined adversarial review
+
+The one requested adversarial review examined frozen candidate `83693106`
+without running tests. All four findings are resolved; no second review was
+requested.
+
+| Finding | Disposition |
+|---|---|
+| Web prepared switches left predecessor health and presentation age attached to the successor | switch now clears those observations, and rollback restores the predecessor snapshot |
+| Apple and Android treated the first position sample as presentation progress | both trackers keep progress age unavailable until a later sample proves real movement |
+| Rolling and immutable VOD could publish an anchored or behind run as the later-ready island | both engines now require a strictly later materialized interval |
+| Android painted paused Media3 buffering as an active playback wait | waiting now also requires the user's play intent; the overlay consumes that shared predicate |
+
+The final test phase found one misplaced Swift field that prevented the Apple
+test bundle from compiling and two stale web fixtures. Commit `4e0991f0`
+corrects those demonstrated failures. The rebuilt Apple bundle and every
+selected test then passed.
+
+### Final focused validation receipt
+
+| Surface | Command scope | Result |
+|---|---|---|
+| Rust 1.97.1 | two refill tests plus one representative each for rolling readiness, VOD frontier, prepared planning, takeover, and seek coalescing | green: 7 passed, 0 failed |
+| Web | playback policy, input contract, player DOM, full playback-control reporter, and settings sections | green; settings sections reported 26/26 |
+| Android | `PlaybackTelemetryTest`, `PlaybackRequestOwnershipTest`, all `Prepared*`, and both `PlaybackControlPrepared*` groups | green: 72 passed, 0 failed |
+| Apple iOS simulator | exact-head `build-for-testing`, two telemetry/ownership cases, one operation-ownership case, and four prepared-replacement groups | green: 37 passed, 0 failed |
+
+### Main promotion receipt
+
+Exact candidate `91eb25464ca2ca9511c91c58c8aa294b16cf9c62` passed
+[main fast-lane run 1903](http://192.168.4.7:3000/noirr/plurx/actions/runs/1885):
+scope · mobile release version · policy/contracts · web · Rust · Apple ·
+Android · `Main promotion gate` all succeeded. Because every rostered
+`android-kvm` runner was offline, Android used one capability-matched ephemeral
+runner on trusted `nynuc`; the host is x86_64 and exposes `/dev/kvm` and Docker.
+No changed SSH host key was trusted or bypassed. The runner self-deleted after
+its one job, its temporary directory and diagnostic log were removed, and the
+four merged task/effort branches were pruned after ancestry checks.
+
+`main` was still the reviewed base `10f2afe6` immediately before merge. PR #263
+then merged the unchanged qualified head as
+`eaecb19988851c1efb1c8beb541b6a5b497643de`.
+
+### B05 action-making caller reconciliation
+
+| Symbol / path | Owner and requirement | Disposition |
+|---|---|---|
+| Server `resolve_action` | one control exchange chooses typed hold, retry, or terminal advice from fenced client/server facts | retain; this is the server decision owner, not a media attachment executor |
+| Server `process_preparation_candidate` plus `PreparationExecutor` | one durable successor transaction; client capability and saved server enablement are explicit asks, while throughput/fleet evidence is advisory | retain; exact slot, deadline, commit, abort, and cleanup ownership is already bounded |
+| Server `attempt_takeover` and release reconciliation | abrupt owner-loss authority under durable epoch/lease fencing | retain; this is cluster ownership recovery, not a duplicate client stall owner |
+| Apple `startPlaybackRecoveryMonitor` / `retrySameDeliveryAfterStall` | serialized native nudge and bounded reopen; status polling contributes facts to the same executor | retain; detector count is not executor count, and B01 needs the status observations |
+| Android `OpenPlaybackStallTracker` / `onStall` / `restartAt` | one absolute no-progress episode and one attachment mutation path | retain; pause, visibility, selection, and generation guards fence stale work |
+| Web `beginWait` / `persistentWait` | one timer per player wait episode; control is consulted before the existing bounded replacement | retain; `stallDiagnose` and `retryPlayback` are viewer actions, not automatic competitors |
+| Apple/Android `retryMediaOnNextNode` | same session and authorization retried through a different advertised ingress | retain; alternate ingress changes transport, not playback identity or durable owner |
+| Client prepared-replacement coordinators | one successor per exact action; switch requires contiguous runway and an observed successor frame | retain; failure settles once and never creates a hidden session-wide veto |
+| Native/web subtitle retry and seek coalescers | same video session for native text; latest destination/selection owns work | retain; subtitle observation does not restart video, and abandoned destinations release their work |
+| Rolling HLS and immutable VOD adapters | selected engine keeps its own pacing/materialization and terminal lifetime | retain both; rolling retirement is a separate product decision, not cleanup for this effort |
+
+The old M9 fixed-timer and blanket `/status` deletion instruction is now marked
+superseded in `REMAINING-ROADMAP-HANDOFF.md`. No caller above is deleted merely
+to satisfy that historical count.
+
+## Historical lifecycle campaign — PR #259 receipt
+
+The tables below preserve the already-merged lifecycle campaign's original
+branches, test deferral, review, and promotion evidence. They do not describe
+the active remainder candidate above.
 
 | Package | State | Current evidence | Next action |
 |---|---|---|---|
@@ -34,6 +170,7 @@ remain separate history inside the effort branch.
 
 | Source | Command | Result |
 |---|---|---|
+| `99cf1c6e` tree | `rustup run 1.97.1 cargo check -p plurxd --locked --all-targets` | passed in 1 minute 15 seconds; established the pinned compile loop without executing tests |
 | `30cd51afc` | `rustup run 1.97.1 rustc --version` | `rustc 1.97.1 (8bab26f4f 2026-07-14)` |
 | `30cd51afc` | `rustup run 1.97.1 cargo check -p plurxd --all-targets` | passed in 69 seconds; compiled test targets without executing tests |
 | `7c21d238` tree | pinned Rust fmt and Clippy | passed; Clippy completed in 16 seconds |

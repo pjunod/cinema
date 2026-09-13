@@ -806,6 +806,83 @@ impl SegmentIndex {
         self.segs.iter().find(|s| !s.pruned).map(|s| s.index)
     }
 
+    /// Complete retained media contiguous with an absolute film-time anchor.
+    ///
+    /// `published_end_ms` and every segment bound in this index are relative
+    /// to the generation's achieved origin. Applying the origin here, once,
+    /// prevents status clients from guessing which timeline a frontier uses.
+    fn server_ready(&self, media_origin_ms: i64, anchor_ms: i64) -> ReadyCoverage {
+        let relative_anchor = anchor_ms.saturating_sub(media_origin_ms);
+        let containing = self.segs.iter().position(|segment| {
+            segment.start_ms <= relative_anchor && relative_anchor < segment.end_ms
+        });
+        let retained_interval_after = |floor_ms: i64, inclusive: bool| {
+            self.segs
+                .iter()
+                .position(|segment| {
+                    !segment.pruned
+                        && if inclusive {
+                            segment.start_ms >= floor_ms
+                        } else {
+                            segment.start_ms > floor_ms
+                        }
+                })
+                .map(|start| {
+                    let first = &self.segs[start];
+                    let mut end_ms = first.end_ms;
+                    for segment in self.segs.iter().skip(start + 1) {
+                        if segment.pruned || segment.start_ms > end_ms {
+                            break;
+                        }
+                        end_ms = end_ms.max(segment.end_ms);
+                    }
+                    (
+                        media_origin_ms.saturating_add(first.start_ms),
+                        media_origin_ms.saturating_add(end_ms),
+                    )
+                })
+        };
+        let Some(start) = containing else {
+            let known_missing = relative_anchor >= 0
+                && self
+                    .produced_playable_end_ms()
+                    .is_none_or(|end| relative_anchor >= end);
+            return ReadyCoverage::without_anchor(
+                anchor_ms,
+                if known_missing {
+                    "missing"
+                } else {
+                    "unavailable"
+                },
+                retained_interval_after(relative_anchor, false),
+            );
+        };
+        if self.segs[start].pruned {
+            return ReadyCoverage::without_anchor(
+                anchor_ms,
+                "unavailable",
+                retained_interval_after(relative_anchor, false),
+            );
+        }
+        let mut end_ms = self.segs[start].end_ms;
+        for segment in self.segs.iter().skip(start + 1) {
+            if segment.pruned || segment.start_ms > end_ms {
+                break;
+            }
+            end_ms = end_ms.max(segment.end_ms);
+        }
+        let absolute_end_ms = media_origin_ms.saturating_add(end_ms);
+        let next_interval = retained_interval_after(end_ms, true);
+        ReadyCoverage {
+            state: "ready",
+            anchor_ms: Some(anchor_ms),
+            end_ms: Some(absolute_end_ms),
+            seconds: Some(absolute_end_ms.saturating_sub(anchor_ms) as f64 / 1_000.0),
+            next_start_ms: next_interval.map(|(start, _)| start),
+            next_end_ms: next_interval.map(|(_, end)| end),
+        }
+    }
+
     /// Bytes of published segments lying entirely after `ms`.
     fn bytes_after_ms(&self, ms: i64) -> i64 {
         self.segs
@@ -947,6 +1024,44 @@ impl SegmentIndex {
         }
         self.revision = self.revision.wrapping_add(1);
         Some(false)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ReadyCoverage {
+    state: &'static str,
+    anchor_ms: Option<i64>,
+    end_ms: Option<i64>,
+    seconds: Option<f64>,
+    next_start_ms: Option<i64>,
+    next_end_ms: Option<i64>,
+}
+
+impl ReadyCoverage {
+    fn unavailable() -> Self {
+        Self {
+            state: "unavailable",
+            anchor_ms: None,
+            end_ms: None,
+            seconds: None,
+            next_start_ms: None,
+            next_end_ms: None,
+        }
+    }
+
+    fn without_anchor(
+        anchor_ms: i64,
+        state: &'static str,
+        next_interval: Option<(i64, i64)>,
+    ) -> Self {
+        Self {
+            state,
+            anchor_ms: Some(anchor_ms),
+            end_ms: (state == "missing").then_some(anchor_ms),
+            seconds: (state == "missing").then_some(0.0),
+            next_start_ms: next_interval.map(|(start, _)| start),
+            next_end_ms: next_interval.map(|(_, end)| end),
+        }
     }
 }
 
@@ -7113,6 +7228,10 @@ async fn session_info(
     global_ahead_bytes: i64,
 ) -> SessionInfo {
     let lease = s.control.snapshot().await;
+    let demand = lease.as_ref().and_then(|lease| lease.demand.as_ref());
+    let media_origin_ms = (s.media_origin_seconds * 1_000.0).round() as i64;
+    let ready_anchor_ms =
+        demand.map(crate::playback_control::PlaybackDemandSnapshot::buffer_anchor_ms);
     #[cfg(test)]
     {
         let pause = s
@@ -7126,11 +7245,14 @@ async fn session_info(
         }
     }
     let (fetched_end_ms, published_end_ms) = delivery_frontier(s, lease.as_ref()).await;
-    let (ahead, first_retained_segment) = {
+    let (ahead, first_retained_segment, server_ready) = {
         let index = s.segments.lock().await;
         (
             ahead_of(&index, fetched_end_ms.max(0)),
             index.first_retained_index(),
+            ready_anchor_ms.map_or_else(ReadyCoverage::unavailable, |anchor| {
+                index.server_ready(media_origin_ms, anchor)
+            }),
         )
     };
     let idle_seconds = lease
@@ -7148,7 +7270,6 @@ async fn session_info(
         Some(lease) => lease.terminal.map_or("active", |cause| cause.status()),
         None => "unavailable",
     };
-    let demand = lease.as_ref().and_then(|lease| lease.demand.as_ref());
     let delivery = lease.as_ref().map(|lease| &lease.delivery);
     let control_demand = demand.map(|demand| match demand.demand {
         crate::playback_control::PlaybackDemand::Active => "active",
@@ -7171,7 +7292,7 @@ async fn session_info(
             published_end_ms,
             // Status reports the flow; it never spends the grant.
             startup_grant_spent: s.startup_grant_spent.load(Relaxed),
-            media_origin_ms: (s.media_origin_seconds * 1_000.0).round() as i64,
+            media_origin_ms,
             lease_mode: lease.mode,
             demand: lease.demand.as_ref(),
             global_live_bytes,
@@ -7249,6 +7370,12 @@ async fn session_info(
         reported_position_ms: demand.map(|demand| demand.position_ms),
         client_runway_ms: demand.map(|demand| demand.runway_ms()),
         render_state,
+        server_ready_state: server_ready.state,
+        server_ready_anchor_ms: server_ready.anchor_ms,
+        server_ready_end_ms: server_ready.end_ms,
+        server_ready_seconds: server_ready.seconds,
+        server_next_ready_start_ms: server_ready.next_start_ms,
+        server_next_ready_end_ms: server_ready.next_end_ms,
         production_policy: flow.map_or("unavailable", |flow| flow.policy),
         production_ahead_seconds: flow.and_then(|flow| flow.production_ahead_seconds),
         production_target_seconds: flow.and_then(|flow| flow.production_target_seconds),
@@ -7302,6 +7429,10 @@ async fn session_info(
         delivered_bytes: s.delivery.total_bytes(),
         delivered_bps: s.delivery.recent_bps().map(|b| b * 8),
         delivered_idle_ms: s.delivery.idle_for_ms(),
+        http_wait_count: 0,
+        http_wait_oldest_ms: None,
+        http_wait_segment: None,
+        status_generated_unix_ms: crate::media_sessions::unix_ms(),
         readrate: s.readrate,
         suspended,
         suspend_count: s.suspend_count.load(Relaxed),
@@ -7328,6 +7459,12 @@ fn vod_delivery_session_info(info: crate::vodserve::VodDeliveryInfo) -> SessionI
         reported_position_ms: None,
         client_runway_ms: None,
         render_state: None,
+        server_ready_state: "unavailable",
+        server_ready_anchor_ms: None,
+        server_ready_end_ms: None,
+        server_ready_seconds: None,
+        server_next_ready_start_ms: None,
+        server_next_ready_end_ms: None,
         production_policy: "immutable_vod",
         production_ahead_seconds: None,
         production_target_seconds: None,
@@ -7362,6 +7499,10 @@ fn vod_delivery_session_info(info: crate::vodserve::VodDeliveryInfo) -> SessionI
         delivered_bytes: info.delivered_bytes,
         delivered_bps: info.delivered_bps,
         delivered_idle_ms: info.delivered_idle_ms,
+        http_wait_count: 0,
+        http_wait_oldest_ms: None,
+        http_wait_segment: None,
+        status_generated_unix_ms: crate::media_sessions::unix_ms(),
         readrate: 0.0,
         suspended: false,
         suspend_count: 0,
@@ -7564,6 +7705,7 @@ impl MediaResponsePublication {
             "segment-not-modified" => Object::NotModified,
             "segment-range-not-satisfiable" => Object::RangeNotSatisfiable,
             "segment-range" => Object::ByteRange,
+            "status" => Object::SessionStatus,
             _ => Object::ProtocolResponse,
         }
     }
@@ -8629,6 +8771,17 @@ pub struct SessionInfo {
     pub reported_position_ms: Option<i64>,
     pub client_runway_ms: Option<i64>,
     pub render_state: Option<&'static str>,
+    /// Contiguous, complete, retained media at the latest accepted absolute
+    /// film-time anchor. `missing` carries a measured zero; `unavailable`
+    /// deliberately carries no seconds.
+    pub server_ready_state: &'static str,
+    pub server_ready_anchor_ms: Option<i64>,
+    pub server_ready_end_ms: Option<i64>,
+    pub server_ready_seconds: Option<f64>,
+    /// A retained interval after an unavailable anchor. Debug consumers may
+    /// show it, but it is never runway at the playhead.
+    pub server_next_ready_start_ms: Option<i64>,
+    pub server_next_ready_end_ms: Option<i64>,
     /// The pacing authority and its measured high-water coordinates. The
     /// legacy policy is download-frontier inference; explicit policy is
     /// actor-owned demand plus reported playhead/runway.
@@ -8713,6 +8866,14 @@ pub struct SessionInfo {
     /// its last real value and this says how old it is, so a reader can tell a
     /// measurement from a memory.
     pub delivered_idle_ms: i64,
+    /// Rolling delivery never parks a response waiting for publication; VOD
+    /// fills these fields from its bounded wait pool.
+    pub http_wait_count: usize,
+    pub http_wait_oldest_ms: Option<i64>,
+    pub http_wait_segment: Option<i64>,
+    /// Server generation time. Clients also retain receipt time so wire age
+    /// and local display age remain different observations.
+    pub status_generated_unix_ms: i64,
     /// Effective ffmpeg input pace, matching `StreamInfo.readrate`.
     pub readrate: f64,
     pub suspended: bool,
@@ -24983,6 +25144,7 @@ pub(crate) struct HlsDeliveryFixture {
     pub(crate) store: Arc<dyn Store>,
     pub(crate) state: crate::state::AppState,
     session: Arc<Session>,
+    _executor_registration: Option<crate::playback_control::RollingProducerExecutorRegistration>,
 }
 
 #[cfg(test)]
@@ -25019,7 +25181,18 @@ impl HlsDeliveryFixture {
     /// Publish a producer-less session under `session_id`, serving whatever
     /// files the caller writes into `dir`.
     pub(crate) async fn publish(dir: &std::path::Path, session_id: &str) -> Self {
-        Self::publish_with_takeover(dir, session_id, None).await
+        Self::publish_with_takeover(dir, session_id, None, false, false).await
+    }
+
+    pub(crate) async fn publish_actor_managed(dir: &std::path::Path, session_id: &str) -> Self {
+        Self::publish_with_takeover(dir, session_id, None, false, true).await
+    }
+
+    pub(crate) async fn publish_copy_actor_managed(
+        dir: &std::path::Path,
+        session_id: &str,
+    ) -> Self {
+        Self::publish_with_takeover(dir, session_id, None, true, true).await
     }
 
     pub(crate) async fn publish_takeover(
@@ -25041,6 +25214,8 @@ impl HlsDeliveryFixture {
                 discontinuity_sequence: owner_epoch.saturating_sub(1),
                 owner_epoch,
             }),
+            false,
+            false,
         )
         .await
     }
@@ -25050,15 +25225,33 @@ impl HlsDeliveryFixture {
         state_root: &std::path::Path,
         session_id: &str,
     ) -> Self {
-        Self::publish_with_takeover_and_state_root(session_dir, state_root, session_id, None).await
+        Self::publish_with_takeover_and_state_root(
+            session_dir,
+            state_root,
+            session_id,
+            None,
+            false,
+            false,
+        )
+        .await
     }
 
     async fn publish_with_takeover(
         dir: &std::path::Path,
         session_id: &str,
         takeover: Option<SessionTakeoverStart>,
+        copy: bool,
+        actor_managed: bool,
     ) -> Self {
-        Self::publish_with_takeover_and_state_root(dir, dir, session_id, takeover).await
+        Self::publish_with_takeover_and_state_root(
+            dir,
+            dir,
+            session_id,
+            takeover,
+            copy,
+            actor_managed,
+        )
+        .await
     }
 
     async fn publish_with_takeover_and_state_root(
@@ -25066,6 +25259,8 @@ impl HlsDeliveryFixture {
         state_root: &std::path::Path,
         session_id: &str,
         takeover: Option<SessionTakeoverStart>,
+        copy: bool,
+        actor_managed: bool,
     ) -> Self {
         use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
         use plurx_core::store::SqliteStore;
@@ -25106,9 +25301,35 @@ impl HlsDeliveryFixture {
             .await
             .expect("file");
 
-        let mut raw_session = test_session(session_dir.to_path_buf());
+        let (control, mut executor_registration) = if actor_managed {
+            let (control, registration) = if copy {
+                crate::playback_control::RollingControlHandle::spawn_prepublication_producer(
+                    "test-copy-start",
+                )
+            } else {
+                crate::playback_control::RollingControlHandle::spawn_prepublication_transcode(
+                    "test-transcode-start",
+                )
+            };
+            (control, Some(registration))
+        } else {
+            (
+                crate::playback_control::RollingControlHandle::spawn("test-start"),
+                None,
+            )
+        };
+        let mut raw_session = test_session_with_control(session_dir.to_path_buf(), control);
         raw_session.takeover = takeover;
         raw_session.file_id = file_id;
+        if copy {
+            raw_session.kind = SessionKind::Copy {
+                aac: true,
+                preserve_dolby_vision: false,
+                convert_dolby_vision: false,
+            };
+            raw_session.method = crate::delivery::Method::HlsCopy;
+            raw_session.encoder_label = Mutex::new("copy");
+        }
         let frozen_file = store
             .get_file(file_id)
             .await
@@ -25126,6 +25347,48 @@ impl HlsDeliveryFixture {
             },
             &raw_session.kind,
         ));
+        if let Some(registration) = executor_registration.as_mut() {
+            registration
+                .register()
+                .await
+                .expect("register actor-managed fixture executor");
+            let presentation_contract = raw_session
+                .frozen_presentation
+                .as_ref()
+                .expect("fixture presentation")
+                .contract_fingerprint
+                .clone();
+            raw_session
+                .control
+                .bind_response_publication_contract(
+                    presentation_contract.clone(),
+                    Arc::clone(&raw_session.failed),
+                )
+                .await
+                .expect("bind actor-managed fixture response contract");
+            let policy = if copy {
+                crate::playback_control::InitialProducerPolicy::copy_immediate(
+                    presentation_contract,
+                    PROGRESS_STALL,
+                )
+            } else {
+                crate::playback_control::InitialProducerPolicy::software(
+                    presentation_contract,
+                    PROGRESS_STALL,
+                )
+            };
+            let attempt = raw_session
+                .control
+                .begin_initial_producer_attempt(policy)
+                .await
+                .expect("admit actor-managed fixture producer");
+            raw_session.bind_retry_compatibility_attempt(attempt).await;
+            raw_session.actor_managed_response_publication = true;
+            raw_session.actor_managed_prepublication_process = true;
+            raw_session
+                .actor_prepublication_producer
+                .store(true, Release);
+        }
         let session = Arc::new(raw_session);
         let state = crate::state::AppState::new(
             "test".into(),
@@ -25151,7 +25414,46 @@ impl HlsDeliveryFixture {
             store,
             state,
             session,
+            _executor_registration: executor_registration,
         }
+    }
+
+    pub(crate) async fn hold_actor_managed_producer(&self) {
+        let attempt = self.session.control.current_producer_attempt();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        assert!(matches!(
+            self.session
+                .control
+                .request_producer_flow_before(attempt, true, deadline)
+                .await,
+            crate::playback_control::ProducerFlowIntentionOutcome::Issue { hold: true, .. }
+        ));
+        {
+            let transition = self.session.control.lock_producer_transition();
+            assert!(self
+                .session
+                .control
+                .reserve_producer_flow_applied(&transition, attempt));
+            self.session
+                .control
+                .finish_producer_flow_applied(&transition, attempt, true, true);
+        }
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if self
+                    .session
+                    .control
+                    .snapshot()
+                    .await
+                    .is_some_and(|snapshot| snapshot.producer_control.physical_flow == "held")
+                {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("actor applies fixture hold");
     }
 
     /// What this session's delivery meter has recorded — the figure behind
@@ -25180,6 +25482,14 @@ impl HlsDeliveryFixture {
             .await
             .expect("fixture control actor")
             .last_renewal_kind
+    }
+
+    pub(crate) async fn actor_snapshot(&self) -> crate::playback_control::RollingLeaseSnapshot {
+        self.session
+            .control
+            .snapshot()
+            .await
+            .expect("fixture control actor")
     }
 
     pub(crate) fn fetched_segment(&self) -> i64 {
@@ -25372,6 +25682,17 @@ impl HlsDeliveryFixture {
 /// real (idle) process because `Session` owns one; nothing here signals it.
 #[cfg(test)]
 fn test_session(dir: PathBuf) -> Session {
+    test_session_with_control(
+        dir,
+        crate::playback_control::RollingControlHandle::spawn("test-start"),
+    )
+}
+
+#[cfg(test)]
+fn test_session_with_control(
+    dir: PathBuf,
+    control: crate::playback_control::RollingControlHandle,
+) -> Session {
     let child = tokio::process::Command::new("sleep")
         .arg("30")
         .stdin(std::process::Stdio::null())
@@ -25380,7 +25701,6 @@ fn test_session(dir: PathBuf) -> Session {
         .kill_on_drop(true)
         .spawn()
         .expect("spawn placeholder child");
-    let control = crate::playback_control::RollingControlHandle::spawn("test-start");
     Session {
         dir,
         recovery: None,
@@ -30313,6 +30633,52 @@ pub(crate) mod tests {
         assert_eq!(recent_rate_step(2_000, 1_000, -50), None);
     }
 
+    #[test]
+    fn server_ready_uses_absolute_origin_and_does_not_cross_pruned_media() {
+        let segment = |index, start_ms, end_ms, pruned| SegmentMeta {
+            index,
+            name: format!("seg{index:05}.ts"),
+            start_ms,
+            end_ms,
+            bytes: if pruned { 0 } else { 1_024 },
+            pruned,
+        };
+        let index = SegmentIndex {
+            segs: vec![
+                segment(0, 0, 4_000, true),
+                segment(1, 4_000, 8_000, false),
+                segment(2, 8_000, 12_000, false),
+            ],
+            revision: 1,
+        };
+
+        let ready = index.server_ready(720_000, 725_500);
+        assert_eq!(ready.state, "ready");
+        assert_eq!(ready.anchor_ms, Some(725_500));
+        assert_eq!(ready.end_ms, Some(732_000));
+        assert_eq!(ready.seconds, Some(6.5));
+        assert_eq!(
+            ready.next_start_ms, None,
+            "the anchored run is not a later island"
+        );
+        assert_eq!(ready.next_end_ms, None);
+
+        let evicted = index.server_ready(720_000, 721_000);
+        assert_eq!(evicted.state, "unavailable");
+        assert_eq!(evicted.seconds, None, "evicted is not a measured zero");
+        assert_eq!(evicted.next_start_ms, Some(724_000));
+        assert_eq!(evicted.next_end_ms, Some(732_000));
+
+        let beyond = index.server_ready(720_000, 733_000);
+        assert_eq!(beyond.state, "missing");
+        assert_eq!(beyond.seconds, Some(0.0));
+        assert_eq!(
+            beyond.next_start_ms, None,
+            "media behind the anchor is not later"
+        );
+        assert_eq!(beyond.next_end_ms, None);
+    }
+
     /// End to end through the atomics: the rate appears, and a gapped sample
     /// leaves it alone.
     #[test]
@@ -30420,6 +30786,31 @@ pub(crate) mod tests {
             "fetching from a session is what keeps it alive"
         );
         assert!(mgr.stop_session(session_id, "test").await);
+    }
+
+    #[tokio::test]
+    async fn rolling_status_authz_maps_to_attempt_status() {
+        let root = crate::test_tempdir().expect("status fixture");
+        let session_id = "status-publication";
+        let fixture = HlsDeliveryFixture::publish_actor_managed(root.path(), session_id).await;
+        let publication = fixture
+            .state
+            .transcode
+            .hls_session_status_publication(session_id)
+            .await
+            .expect("rolling status publication");
+
+        fixture
+            .state
+            .transcode
+            .authorize_response_publication(
+                session_id,
+                &publication.owner,
+                MediaResponsePublication::attempt_status("status", None),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .expect("session status must use a typed attempt-status object");
     }
 
     /// The playlist is the only place a copied segment's true duration is

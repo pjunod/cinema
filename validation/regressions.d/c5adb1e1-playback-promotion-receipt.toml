@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["c5adb1e1"]
+ignore = true
+reason = "This documentation-only commit closes the playback rewrite and buffer-observability ledgers with the already-completed review, exact-head qualification, main merge, and cleanup receipts. It changes no runtime behavior; the maintained docs-index test verifies that every updated document remains indexed and linked."

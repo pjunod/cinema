@@ -1,8 +1,71 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-09-09 · Kept current by the working agent in the same
+**Updated:** 2026-09-12 · Kept current by the working agent in the same
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
+
+## Live TV gets the web page's proportions on Apple TV and iPhone
+
+**Built for issue #267; iOS and tvOS compile green and the full simulator
+suite is green at 970 cases on the lab Mac.** tvOS resolves the semantic text
+styles two to two and a half times larger than iOS does — `.subheadline` is
+38 pt there and `.title2` 57 — so a channel row ran the width of the screen
+and three bands of chrome left the live preview a fifth of it. Live TV now
+sizes itself through one explicit scale and spends one 48 pt toolbar row.
+
+The arrangement follows the rule the web page follows: lists are tall and
+narrow, grids are wide. On now is a 620 pt column beside a large picture that
+is itself a focus target, so Select on it is Fullscreen and "Return to live"
+left the toolbar. Guide is a 302 pt stage over a full-width grid whose slot
+width is derived from the width the grid actually got — a hard-coded 300 pt
+filled 58% of a 1920 pt screen and could never fit two hours — and the fixed
+`rows * rowHeight + 54` frame that pushed the last rows off the bottom is
+gone. Earlier / Now / Later became chips in the grid header; the status banner
+became a channel count in the toolbar plus one muted line along the bottom of
+the content. The adversarial review rejected the four seconds the spec asked
+for: a toast cannot repeat itself when the same failure happens twice, and it
+hid every cleanup message on a phone.
+
+The Layout menu offers Preview and Over picture. A stored `channel_browser`
+still decodes and keeps its raw value; it renders as Preview, because the two
+only ever differed in which browse view they opened with. On iPhone the
+picture is full-bleed with its chips on it, and the six-line now bar, the
+always-visible search field and the filter toggles are gone — four to five
+channel rows are visible while a channel plays instead of one.
+
+Nothing about playback, the lease, the input contract or enablement changed.
+Apple build 146.
+
+## Live TV gets the web page's proportions on Google TV and Android phones
+
+**Built for issue #267; `:app:compileDebugKotlin` and `lintDebug` green and
+the whole JVM unit suite green at 553 cases, including four new proportion
+and arrangement contracts.**
+The Google TV screen spent about 180 dp on chrome — a Back button, a
+`headlineMedium` title, a title line, a status line and a seven-item
+`FlowRow` carrying a 260 dp search field — before any content, and then drew
+the guide with the phone's single `LiveTvGridMetrics`: 160 dp slots and 56 dp
+rows, which are 320 and 112 px on a television. Six channels filled the
+screen and the grid showed barely an hour.
+
+Live TV now sizes itself through one explicit `LiveTvTypography` scale on
+television and spends one toolbar row of 28 dp minimum — a fixed 24 dp clipped
+its own labels as soon as the television's font scale moved. `LiveTvGridMetrics.forTelevision`
+derives the slot width from the width the grid actually got, so two hours fit
+any panel; Earlier / Now / Later are chips in the grid header, and the search
+field is a dialog the viewer asks for. On now is a 310 dp column beside a
+picture that is a focus target — Select on it is Fullscreen, so "Return to
+live" left the toolbar. The Layout menu offers Preview and Over picture, and a
+stored `channel_browser` renders as Preview.
+
+On the phone the picture is full-bleed with its chips and its
+picture-in-picture and fullscreen actions on it, followed by one 56 dp caption
+and one 48 dp toolbar. `LiveTvNowBar`, the filter row and the always-visible
+text field are gone, so four to five channel rows are visible while a channel
+plays instead of two.
+
+Nothing about playback, the lease, the input policy or enablement changed.
+Android versionCode 89.
 
 ## Fresh Dolby Vision recovery converts, and tvOS can arm Live TV starts
 
