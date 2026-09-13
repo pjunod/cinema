@@ -4,6 +4,18 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## Live TV start, stall, and tvOS surface is being promoted to main
+
+**[#301](http://192.168.4.7:3000/noirr/plurx/pulls/301), from
+`effort/live-tv-start-stall` into `main`; final adversarial findings are being
+folded before the Main promotion gate.** The server, Android, and Apple task
+PRs are merged into the effort and their focused automated evidence is green.
+Paul explicitly directed promotion without waiting for the HDHomeRun, Apple TV,
+Android-phone, and web physical results. Those results and the authenticated
+tvOS simulator screenshots remain unclaimed; the exact hand-off prompts stay
+in the task PR bodies. The promotion adds no feature gate and does not edit the
+forbidden input-routing, remote-adapter, fixture, wire-shape, or timeout seams.
+
 ## Apple Live TV now distinguishes a stall and owns its fullscreen surface
 
 **[#300](http://192.168.4.7:3000/noirr/plurx/pulls/300), from
@@ -18,8 +30,9 @@ guide are present. Info is a fixed two-column snapshot ledger with programme,
 channel, delivery, signal, and summed AVPlayer access-log facts. The iPhone
 surface, Live TV input routing, remote adapter, playback-surface fixture, wire
 shapes, timeouts, and feature-gate state are unchanged. The exact Apple TV,
-HDHomeRun, phone, and web physical prompt is in the PR body and remains required
-before the effort can be promoted to `main`. The review's three findings
+HDHomeRun, phone, and web physical prompt is in the PR body; that evidence
+remains pending, and Paul later explicitly directed promotion without it as
+recorded above. The review's three findings
 are closed: Info dismissal yields focus back to Pause, the corrective
 fullscreen commit has its durable source-to-test anchor, and the iOS fullscreen
 branch is restored unchanged. `make apple-build` compiled both schemes and

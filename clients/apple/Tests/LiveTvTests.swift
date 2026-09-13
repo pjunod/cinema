@@ -841,6 +841,25 @@ final class LiveTvTests: XCTestCase {
         )
     }
 
+    private func themeSource() throws -> String {
+        let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        return try String(
+            contentsOf: testsDirectory.appendingPathComponent(
+                "../Sources/Theme.swift"
+            ).standardizedFileURL,
+            encoding: .utf8
+        )
+    }
+
+    func testTheLiveSurfacePillRendererDoesNotShadowButtonStyleBody() throws {
+        let source = try themeSource()
+        let style = source
+            .components(separatedBy: "struct LiveSurfacePillStyle: ButtonStyle {")[1]
+        XCTAssertTrue(style.contains("Renderer(configuration: configuration)"))
+        XCTAssertTrue(style.contains("private struct Renderer: View"))
+        XCTAssertFalse(style.contains("struct Body: View"))
+    }
+
     func testProtectedChannelsStayVisibleAndUnwatchable() {
         let protected = LiveTvChannel(id: "107.1", guideNumber: "107.1", guideName: "Protected",
                                       favorite: false, drm: true, support: "drm_unsupported",

@@ -18,6 +18,22 @@ test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "testTheRevealLayerIsNotFocusableWhileTheOverlayOrTheGuideIsVisible"
 
 [[fixes]]
+id = "apple.live-tv-info-focus-review"
+commits = ["90c18453"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = "guard !visible, fullscreen, overlayVisible else { return }"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testFullscreenFocusDefaultsToPauseAndReturnsThereFromTheRevealLayer"
+
+[[fixes]]
+id = "apple.live-tv-pill-renderer"
+commits = ["1cc7f883"]
+source = "clients/apple/Sources/Theme.swift"
+source_anchor = "private struct Renderer: View"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testTheLiveSurfacePillRendererDoesNotShadowButtonStyleBody"
+
+[[fixes]]
 id = "android.library-channel-start-failure"
 commits = ["4dd00603"]
 source = "clients/android/app/src/main/java/tv/plurx/app/librarychannels/LibraryChannelStartFailure.kt"
