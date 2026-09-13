@@ -3093,32 +3093,19 @@ struct LiveTvView: View {
                                 .font(LiveTvType.title)
                             Text(channel?.title ?? "").font(.caption)
                             if let channel {
-                                Text(liveTvTechnicalSummary(
-                                    channel,
-                                    status: live.status,
-                                    delivery: live.delivery
-                                ))
-                                .font(.caption2)
-                                .opacity(0.78)
+                                Text(liveTvTechnicalSummary(channel, status: live.status, delivery: live.delivery))
+                                    .font(.caption2).opacity(0.78)
                             }
-                            if let programme = airing.now {
-                                Text(
-                                    "\(liveTvTime(programme.start))–\(liveTvTime(programme.end))"
-                                        + (airing.next.map { " · Next: \($0.title)" } ?? "")
-                                )
-                                .font(.caption2)
-                                .opacity(0.85)
+                            if let now = airing.now {
+                                Text("\(liveTvTime(now.start))–\(liveTvTime(now.end))"
+                                     + (airing.next.map { " · Next: \($0.title)" } ?? ""))
+                                    .font(.caption2).opacity(0.85)
                             }
                         }
                         Spacer()
                         HStack {
-                            Button(muted ? "Unmute" : "Mute") {
-                                muted.toggle()
-                                live.player.isMuted = muted
-                            }
-                            if pictureInPicture.isSupported {
-                                Button("PiP") { pictureInPicture.toggle() }
-                            }
+                            Button(muted ? "Unmute" : "Mute") { muted.toggle(); live.player.isMuted = muted }
+                            if pictureInPicture.isSupported { Button("PiP") { pictureInPicture.toggle() } }
                             Button("Exit") { fullscreen = false }
                         }
                     }
@@ -3128,6 +3115,9 @@ struct LiveTvView: View {
                         ScrollView(.horizontal, showsIndicators: false) {
                             HStack(spacing: 8) {
                                 ForEach(visible) { entry in
+                                    // Through the coalescer, not straight to
+                                    // `watch`: running along the strip must be
+                                    // one tuner start, not one per card.
                                     Button { live.requestChannel(entry) } label: {
                                         VStack(alignment: .leading, spacing: 2) {
                                             Text(entry.title).font(.caption.weight(.semibold))
@@ -3136,10 +3126,7 @@ struct LiveTvView: View {
                                         }
                                         .frame(width: 150, alignment: .leading)
                                         .padding(8)
-                                        .background(
-                                            entry.id == channel?.id
-                                                ? .white.opacity(0.18) : .black.opacity(0.5)
-                                        )
+                                        .background(entry.id == channel?.id ? .white.opacity(0.18) : .black.opacity(0.5))
                                         .clipShape(RoundedRectangle(cornerRadius: 6))
                                     }
                                     .buttonStyle(.plain)
@@ -3233,7 +3220,20 @@ struct LiveTvView: View {
             if !up, fullscreen { focusedControl = overlayVisible ? .play : .reveal }
         }
         #endif
-        .onChange(of: showingInfo) { _, _ in overlayGeneration &+= 1 }
+        .onChange(of: showingInfo) { _, visible in
+            overlayGeneration &+= 1
+            #if os(tvOS)
+            guard !visible, fullscreen, overlayVisible else { return }
+            focusedControl = nil
+            Task { @MainActor in
+                await Task.yield()
+                guard fullscreen, overlayVisible, !temporaryGuide,
+                      !showingInfo, !showingMore, !showingLayout, detail == nil
+                else { return }
+                focusedControl = .play
+            }
+            #endif
+        }
         .onChange(of: showingMore) { _, _ in overlayGeneration &+= 1 }
         .onChange(of: showingLayout) { _, _ in overlayGeneration &+= 1 }
         .onChange(of: live.paused) { _, _ in overlayGeneration &+= 1 }

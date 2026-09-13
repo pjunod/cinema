@@ -1075,6 +1075,15 @@ final class LiveTvTests: XCTestCase {
         ] {
             XCTAssertTrue(fullscreen.contains(guardPart), guardPart)
         }
+        let infoDismissal = fullscreen
+            .components(separatedBy: ".onChange(of: showingInfo)")[1]
+            .components(separatedBy: ".onChange(of: showingMore)")[0]
+        XCTAssertTrue(infoDismissal.contains(
+            "guard !visible, fullscreen, overlayVisible else { return }"
+        ))
+        XCTAssertTrue(infoDismissal.contains("focusedControl = nil"))
+        XCTAssertTrue(infoDismissal.contains("await Task.yield()"))
+        XCTAssertTrue(infoDismissal.contains("focusedControl = .play"))
     }
 
     func testTheProgressRowSurvivesAMissingNextProgramme() {
