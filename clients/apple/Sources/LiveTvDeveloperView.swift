@@ -8,6 +8,7 @@ struct LiveTvDeveloperView: View {
     @State private var api: LiveTvAPI?
     @State private var saved: LiveTvSettings?
     @State private var readiness: LiveTvReadiness?
+    @State private var guideReadiness: LiveTvGuideReadiness?
     @State private var developerReadiness: DeveloperReadiness?
     @State private var ipv4 = ""
     @State private var owner = ""
@@ -109,11 +110,32 @@ struct LiveTvDeveloperView: View {
                 }
             }
             if let readiness {
+                // Every row the server sends, drawn the same way — including
+                // rows this build has never heard of. `start_recovery` arrives
+                // here without a line of its own, which is the point: an
+                // advisory card that has to be extended for each new check is
+                // one that silently drops the check nobody remembered.
                 Section(readiness.ready ? "Saved configuration is ready" : "Readiness needs attention") {
                     ForEach(readiness.checks) { check in
                         Label(check.message, systemImage: check.ready ? "checkmark.circle" : "exclamationmark.triangle")
                     }
                 }
+            }
+            Section("Programme guide · advisory readiness") {
+                Text("What the guide needs to fill in, and whether it is true right now. Nothing here refuses a save, a toggle, or a start — a guide that will not load leaves a working page with number and callsign rows.")
+                if let guideReadiness {
+                    ForEach(guideReadiness.checks) { check in
+                        Label(check.message, systemImage: check.ready ? "checkmark.circle" : "exclamationmark.triangle")
+                    }
+                    Text(guideReadiness.allMet
+                         ? "Source \(guideReadiness.source) · \(guideReadiness.freshness) · \(guideReadiness.programmes) programmes across \(guideReadiness.matchedChannels) of \(guideReadiness.lineupChannels) lineup channels."
+                         : "Source \(guideReadiness.source) · \(guideReadiness.freshness). Unmet rows explain what is missing; the guide is still served, and Live TV still starts.")
+                        .font(.caption)
+                        .accessibilityIdentifier("live-tv-guide-readiness-summary")
+                } else {
+                    Text("The guide card has not been read yet, or this node is not the tuner owner.").font(.caption)
+                }
+                Button("Check the guide") { Task { await loadGuideReadiness() } }.disabled(busy)
             }
             Section {
                 Text(message).accessibilityIdentifier("live-tv-developer-status")
@@ -132,6 +154,9 @@ struct LiveTvDeveloperView: View {
         sessions = settings.liveTvMaxSessions
         height = settings.liveTvMaxOutputHeight
         readiness = nil
+        // A save can change the guide source, so the card that described the
+        // previous one is cleared rather than left to look current.
+        guideReadiness = nil
         attested = false
     }
 
@@ -146,6 +171,7 @@ struct LiveTvDeveloperView: View {
             guard revision == expected else { return }
             apply(settings)
             await loadDeveloperReadiness()
+            await loadGuideReadiness()
             message = "Settings loaded. Save, check readiness, then enable."
         } catch {
             guard revision == expected else { return }
@@ -164,6 +190,7 @@ struct LiveTvDeveloperView: View {
                 let settings = try await api.update(change, generation: saved.liveTvConfigGeneration)
                 guard revision == expected else { return }
                 apply(settings)
+                await loadGuideReadiness()
                 message = "Saved. Library channels are \(settings.libraryChannelsEnabled ? "enabled" : "disabled"); Live TV is \(settings.liveTvEnabled ? "enabled" : "disabled")."
             } catch {
                 guard revision == expected else { return }
@@ -197,6 +224,15 @@ struct LiveTvDeveloperView: View {
             }
             busy = false
         }
+    }
+
+    /// Advisory in the strongest sense: a card that cannot be read is an empty
+    /// card, never an error banner and never a reason to stop the operator
+    /// saving or enabling. A non-owner node answers `owner_unavailable` here
+    /// and that is a normal, expected answer.
+    @MainActor private func loadGuideReadiness() async {
+        guard let api else { return }
+        guideReadiness = try? await api.guideReadiness()
     }
 
     @MainActor private func loadDeveloperReadiness() async {

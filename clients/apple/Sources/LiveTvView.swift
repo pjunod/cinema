@@ -88,8 +88,28 @@ final class LiveTvPlayerController: ObservableObject {
             message = lineup.freshness == "stale"
                 ? "Cached lineup (\(lineup.ageSeconds)s old). Starting a channel requires a fresh tuner check."
                 : "\(channels.count) channels. DRM-protected channels cannot be played."
+            await resumeIfRecent(loading)
         } catch {
             if loadId == loading { message = error.localizedDescription }
+        }
+    }
+
+    /// The open-time step of the start contract: a session an unclean end left
+    /// running comes back with no press at all. It is not an auto-tune — the
+    /// owner only ever answers `live` for a session this viewer already owns,
+    /// and every other answer leaves the channel list on screen.
+    private func resumeIfRecent(_ loading: UUID) async {
+        guard !playing, watching == nil, let lease, let api else { return }
+        guard let resumed = await lease.resumeIfRecent(), loadId == loading else { return }
+        serial += 1
+        let expected = serial
+        do {
+            try attach(resumed, channel: resumed.channel, api: api,
+                       expected: expected, compatibilityRetry: false)
+        } catch {
+            message = error.localizedDescription
+            do { try await lease.stop() } catch { message += " Cleanup is unconfirmed; use Stop to retry." }
+            endAudioSession()
         }
     }
 
@@ -108,79 +128,8 @@ final class LiveTvPlayerController: ObservableObject {
         do {
             let info = try await lease.start(channel.id)
             guard serial == expected, let info else { return }
-            let item = AVPlayerItem(url: try api.playlistURL(info.sessionId))
-            item.preferredForwardBufferDuration = 12
-            player.replaceCurrentItem(with: item)
-            // Live TV owns a separate AVPlayer from finite-media playback, so
-            // it must establish the same playback audio session itself. The
-            // default category follows the iPhone silent switch: video moves,
-            // but the AAC track is inaudible.
-            beginAudioSession()
-            title = channel.title
-            watching = info.channel
-            delivery = info.delivery
-            playing = true
-            player.play()
-            message = "Playing live · no recording or rewind"
-            heartbeat = Task { @MainActor [weak self] in
-                var progress = LiveTvPlaybackWatchdog()
-                while !Task.isCancelled {
-                    do { try await Task.sleep(nanoseconds: 5_000_000_000) } catch { return }
-                    guard let self, self.serial == expected else { return }
-                    do {
-                        if item.status == .failed { throw Self.playerFailure(item.error) }
-                        let position = self.player.currentTime().seconds
-                        if !self.paused && progress.observe(position: position) {
-                            try await api.keepalive(info.sessionId)
-                            guard self.serial == expected else { return }
-                            let status = try await api.status(info.sessionId)
-                            guard self.serial == expected else { return }
-                            if status.state != "active" { throw LiveTvFailure(code: "stream_failed") }
-                            if let observed = status.channel,
-                               observed.id == self.watching?.id {
-                                self.watching = observed
-                                self.channels = self.channels.map {
-                                    $0.id == observed.id ? observed : $0
-                                }
-                            }
-                            self.status = status
-                            self.delivery = status.delivery ?? info.delivery
-                            self.expireSourceFormats(now: Int(Date().timeIntervalSince1970))
-                        } else if progress.expired {
-                            if self.paused {
-                                self.message = "Paused for 30 seconds. The tuner was released; select a channel to resume live."
-                                await self.stop()
-                                return
-                            }
-                            throw LiveTvFailure(code: "stream_failed")
-                        }
-                    } catch {
-                        guard self.serial == expected else { return }
-                        let failureCode = (error as? LiveTvFailure)?.code ?? ""
-                        if ["codec_unsupported", "source_format_changed"].contains(failureCode),
-                           !compatibilityRetry {
-                            self.message = failureCode == "source_format_changed"
-                                ? "The broadcast changed format. Selecting a fresh route once…"
-                                : "The original route was rejected. Retrying once with a compatible conversion…"
-                            do { try await self.stopChecked() }
-                            catch {
-                                self.message = "Cleanup is unconfirmed; retry Stop before opening another channel."
-                                return
-                            }
-                            if failureCode == "codec_unsupported" {
-                                api.retryCompatibility(LiveTvCompatibility(
-                                    failedVideo: true, failedAudio: true, failedContainer: true
-                                ))
-                            }
-                            await self.watch(channel, compatibilityRetry: true)
-                            return
-                        }
-                        self.message = error.localizedDescription
-                        await self.stop()
-                        return
-                    }
-                }
-            }
+            try attach(info, channel: channel, api: api,
+                       expected: expected, compatibilityRetry: compatibilityRetry)
         } catch {
             guard serial == expected else { return }
             message = error.localizedDescription
@@ -192,10 +141,122 @@ final class LiveTvPlayerController: ObservableObject {
         if serial == expected { busy = false }
     }
 
-    /// Twenty minutes, matching the owner's own refresh cadence. Kept on the
-    /// controller rather than in `.task {}` on a view, for the same reason the
-    /// heartbeat is: leaving a tab must not forget the guide.
-    static let guideRefreshNanoseconds: UInt64 = 20 * 60 * 1_000_000_000
+    /// Everything a granted session does after the POST answers: the player
+    /// item, the audio session, the published state and the heartbeat. A
+    /// resume enters playback through this exact path, so a session recovered
+    /// at open time is indistinguishable from one the viewer just pressed for.
+    private func attach(
+        _ info: LiveTvStarted,
+        channel: LiveTvChannel,
+        api: LiveTvAPI,
+        expected: Int,
+        compatibilityRetry: Bool
+    ) throws {
+        let item = AVPlayerItem(url: try api.playlistURL(info.sessionId))
+        item.preferredForwardBufferDuration = 12
+        player.replaceCurrentItem(with: item)
+        // Live TV owns a separate AVPlayer from finite-media playback, so
+        // it must establish the same playback audio session itself. The
+        // default category follows the iPhone silent switch: video moves,
+        // but the AAC track is inaudible.
+        beginAudioSession()
+        title = channel.title
+        watching = info.channel
+        delivery = info.delivery
+        playing = true
+        player.play()
+        message = "Playing live · no recording or rewind"
+        heartbeat = Task { @MainActor [weak self] in
+            var progress = LiveTvPlaybackWatchdog()
+            while !Task.isCancelled {
+                do { try await Task.sleep(nanoseconds: 5_000_000_000) } catch { return }
+                guard let self, self.serial == expected else { return }
+                do {
+                    if item.status == .failed { throw Self.playerFailure(item.error) }
+                    let position = self.player.currentTime().seconds
+                    if !self.paused && progress.observe(position: position) {
+                        try await api.keepalive(info.sessionId)
+                        guard self.serial == expected else { return }
+                        // The other half of the keepalive: the hint's
+                        // `touched_at` is what tells a later press how long
+                        // ago something was really watching this start.
+                        self.lease?.touchHint()
+                        let status = try await api.status(info.sessionId)
+                        guard self.serial == expected else { return }
+                        if status.state != "active" { throw LiveTvFailure(code: "stream_failed") }
+                        if let observed = status.channel,
+                           observed.id == self.watching?.id {
+                            self.watching = observed
+                            self.channels = self.channels.map {
+                                $0.id == observed.id ? observed : $0
+                            }
+                        }
+                        self.status = status
+                        self.delivery = status.delivery ?? info.delivery
+                        self.expireSourceFormats(now: Int(Date().timeIntervalSince1970))
+                    } else if progress.expired {
+                        if self.paused {
+                            self.message = "Paused for 30 seconds. The tuner was released; select a channel to resume live."
+                            await self.stop()
+                            return
+                        }
+                        throw LiveTvFailure(code: "stream_failed")
+                    }
+                } catch {
+                    guard self.serial == expected else { return }
+                    let failureCode = (error as? LiveTvFailure)?.code ?? ""
+                    if ["codec_unsupported", "source_format_changed"].contains(failureCode),
+                       !compatibilityRetry {
+                        self.message = failureCode == "source_format_changed"
+                            ? "The broadcast changed format. Selecting a fresh route once…"
+                            : "The original route was rejected. Retrying once with a compatible conversion…"
+                        do { try await self.stopChecked() }
+                        catch {
+                            self.message = "Cleanup is unconfirmed; retry Stop before opening another channel."
+                            return
+                        }
+                        if failureCode == "codec_unsupported" {
+                            api.retryCompatibility(LiveTvCompatibility(
+                                failedVideo: true, failedAudio: true, failedContainer: true
+                            ))
+                        }
+                        await self.watch(channel, compatibilityRetry: true)
+                        return
+                    }
+                    self.message = error.localizedDescription
+                    await self.stop()
+                    return
+                }
+            }
+        }
+    }
+
+    /// Where the next guide poll lands, in seconds from now.
+    ///
+    /// The owner publishes `next_refresh_at`, so the client asks once the
+    /// answer exists rather than on a cadence of its own; a guide that is
+    /// `unavailable` and says nothing about coming back is asked for more
+    /// often, because an owner with nothing to serve is usually an owner about
+    /// to have something. Clamped at both ends: a nonsense clock off the wire
+    /// can neither spin this loop nor park it for a day. Every number comes
+    /// from `tests/playback/player-input-contract.json` `live.timings`.
+    static func guidePollSeconds(nextRefreshAt: Int?, freshness: String, now: Int) -> Int {
+        let floor = LiveTvInputRouting.guidePollMinSeconds
+        guard let next = nextRefreshAt else {
+            return freshness == "unavailable" ? LiveTvInputRouting.guidePollUnavailableSeconds : floor
+        }
+        let difference = next.subtractingReportingOverflow(now)
+        let gap = difference.overflow ? 0 : min(max(difference.partialValue, -guidePollCeilingSeconds),
+                                                guidePollCeilingSeconds)
+        return min(max(gap + LiveTvInputRouting.guidePollAfterNextRefreshSeconds, floor),
+                   guidePollCeilingSeconds)
+    }
+
+    /// Never sleep longer than the owner's own refresh cadence, whatever the
+    /// document claims. Kept on the controller rather than in `.task {}` on a
+    /// view, for the same reason the heartbeat is: leaving a tab must not
+    /// forget the guide.
+    static let guidePollCeilingSeconds = 20 * 60
 
     private func startGuideRefresh(_ loading: UUID) {
         guideRefresh?.cancel()
@@ -210,12 +271,19 @@ final class LiveTvPlayerController: ObservableObject {
                 // even where the owner had data.
                 let current = Int(Date().timeIntervalSince1970)
                 let from = current - current % LiveTvGridMetrics.slotSeconds
+                // A read that failed says nothing about when the owner comes
+                // back, so the floor is the whole of the answer.
+                var seconds = LiveTvInputRouting.guidePollMinSeconds
                 if let fetched = try? await api.guide(
                     from: from, hours: LiveTvGridMetrics.requestedHours) {
                     guard self.loadId == loading else { return }
                     self.guide = fetched
+                    seconds = Self.guidePollSeconds(
+                        nextRefreshAt: fetched.nextRefreshAt,
+                        freshness: fetched.freshness,
+                        now: Int(Date().timeIntervalSince1970))
                 }
-                do { try await Task.sleep(nanoseconds: Self.guideRefreshNanoseconds) } catch { return }
+                do { try await Task.sleep(nanoseconds: UInt64(seconds) * 1_000_000_000) } catch { return }
             }
         }
     }

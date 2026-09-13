@@ -55,6 +55,14 @@ struct LiveTvGuide: Codable, Equatable, Sendable {
     let freshness: String
     let ageSeconds: Int
     let fetchedAt: Int?
+    /// When the owner's own refresh loop next intends to run, unix seconds.
+    /// Clients poll on this rather than on a cadence of their own, so a guide
+    /// that arrives a minute after a deploy is drawn a minute after a deploy.
+    /// Absent from an owner whose loop has not completed a tick yet — and from
+    /// one older than this contract — in which case the client falls back to
+    /// the contract's floor. Served on an `unavailable` answer too: an owner
+    /// with nothing to give still knows when it will have something.
+    var nextRefreshAt: Int?
     let window: LiveTvGuideWindow
     let refreshError: String?
     let matchedChannels: Int?
