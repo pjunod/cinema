@@ -16805,8 +16805,8 @@ function playbackSurfaceReadinessCard(){
       <h3 class="devcheck-group">Client builds</h3>
       ${devStaticReq("Apple client build and unit suite","not verified",
         "Nothing Swift in M2 or M5 has been compiled. Met when <code>clients/apple/README.md</code> claims a build at or above the one that carried them (147 for M2, 149 for M5) and <code>docs/clients/PLAYBACK-SURFACE-APPLE-BUILD-PROMPT.md</code> has been run to green on both the iOS and the tvOS destination.","warn")}
-      ${devStaticReq("Android client build and unit suite","not verified",
-        "Nothing Kotlin in M3 or M5 has been compiled. Met when <code>clients/android/README.md</code> claims a build at or above the one that carried them (90 for M3, 92 for M5) and <code>docs/clients/PLAYBACK-SURFACE-ANDROID-BUILD-PROMPT.md</code> has been run to green.","warn")}
+      ${devStaticReq("Android client build and unit suite","JVM green, hardware owed",
+        "Compiled and run on 2026-09-13 against <code>clients/android/README.md</code>'s claimed build 92: <code>:app:compileDebugKotlin</code>, <code>:app:testDebugUnitTest</code> (612 tests, 0 failures), <code>:app:lintDebug</code> and <code>:app:assembleDebug</code>, on the pinned Docker image and on a local SDK, with the same answer from each. Not met because <code>docs/clients/PLAYBACK-SURFACE-ANDROID-BUILD-PROMPT.md</code> §5 is still owed — the instrumented suite and the twelve device recipes have never been run.","")}
       <h3 class="devcheck-group">Devices</h3>
       ${devStaticReq("Physical verification of the four recipes","not run",
         "The network drop, the failed change on a cold NAS, the Android remux seek and the iPhone lock screen — implementation plan §7, on an Apple TV, an iPhone and an Android TV. Met when a <code>docs/clients/PLAYBACK-SURFACE-PHYSICAL-VERIFICATION-&lt;date&gt;.md</code> record exists; the script is <code>docs/clients/PLAYBACK-SURFACE-PHYSICAL-VERIFICATION-PROMPT.md</code>.","warn")}

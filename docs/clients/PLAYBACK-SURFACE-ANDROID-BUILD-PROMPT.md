@@ -1,8 +1,10 @@
 # Android build and test — compile the playback surface contract
 
-**Status:** open · **For:** a session with an Android toolchain (Docker, or a
-local SDK) · **Covers:** M3 (PR #279) and M5 (PR #282) of the [playback
-surface contract](PLAYBACK-SURFACE-CONTRACT.md), both merged to `main`
+**Status:** §§1–3 and 6 done 2026-09-13 (compile, tests, lint, APK, K1–K8);
+§5 still open, it needs hardware · **For:** a session with an Android
+toolchain (Docker, or a local SDK) · **Covers:** M3 (PR #279) and M5 (PR #282)
+of the [playback surface contract](PLAYBACK-SURFACE-CONTRACT.md), both merged
+to `main`
 
 Every line of Kotlin in those two PRs was written on a Linux box with no
 Android SDK and no disk for a Gradle build. **Nothing has been compiled and no
@@ -21,7 +23,40 @@ green.
 
 ## 0. What you need
 
-Either route works.
+Either route works, and on Paul's LAN both of them do. **Where, concretely
+(2026-09-13):**
+
+- **The image.** `m6` (192.168.4.14) runs Docker 29.1.3 on x86_64, and so do
+  `nuc3` (192.168.4.7) and `nuc4` (192.168.4.8); `pjunod` is in the `docker`
+  group on all three and the deploy key reaches them. `linux/amd64` is native
+  there, so nothing is emulated. `make android-image` is about two minutes
+  cold, `make android-test` about two and a half, `make android` about one
+  and a half. `nuc1` (192.168.4.5) and `nuc2` (192.168.4.6) answer on 22 but
+  refuse that key.
+- **The local SDK.** `pauls.macbook.air.lan` (192.168.5.115) has no Docker,
+  but Homebrew `openjdk@25`, `android-commandlinetools` and
+  `android-platform-tools` are installed — none of them on `PATH`, and the
+  platform and build-tools have to be fetched once:
+
+```bash
+export JAVA_HOME=$(ls -d /opt/homebrew/Cellar/openjdk@25/*/libexec/openjdk.jdk/Contents/Home | head -1)
+export ANDROID_HOME=$HOME/agent-build/android-sdk        # anywhere writable
+SM=/opt/homebrew/share/android-commandlinetools/cmdline-tools/latest/bin/sdkmanager
+yes | $SM --sdk_root=$ANDROID_HOME --licenses
+$SM --sdk_root=$ANDROID_HOME --channel=3 --install \
+  "platform-tools" "platforms;android-37.0" "build-tools;36.0.0" "build-tools;37.0.0"
+```
+
+Those are the same packages `clients/android/Dockerfile` pins, and the
+Homebrew command-line-tools build (15859902) is the same one the image
+downloads. The whole `:app:testDebugUnitTest :app:lintDebug :app:assembleDebug`
+run takes about four minutes cold on that machine.
+
+**One trap on the agent VM, wherever you drive this from.** `/sessions` is
+that VM's `$TMPDIR` and it sits at 100% full. Two things follow and neither
+announces itself: `tests/playback/network-shaping.test.js` fails with
+`ENOSPC`, and a detached `nohup` job can die mid-run with nothing in its log
+to say why. Point `TMPDIR` at something on `/` before running either.
 
 - **Pinned image (preferred).** Docker, and `make android-test` from the
   repository root — it builds `clients/android`'s image (JDK 25 + SDK) and
