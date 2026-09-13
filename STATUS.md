@@ -24,7 +24,9 @@ are closed: Info dismissal yields focus back to Pause, the corrective
 fullscreen commit has its durable source-to-test anchor, and the iOS fullscreen
 branch is restored unchanged. `make apple-build` compiled both schemes and
 the nine named tvOS tests executed on the Apple TV 4K simulator with nine
-passes, zero failures, and zero skips.
+passes, zero failures, and zero skips. `make history-check` names only the
+known corrective commits already red on this fixed `main`; this PR's
+corrective fullscreen commit is anchored and absent from that report.
 
 ## Android now lets each HLS playlist choose its live hold-back
 
