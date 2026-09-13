@@ -5195,6 +5195,56 @@ test("only the fixture's `create_503_not_yet` codes are retried", () => {
   );
 });
 
+// Ruling 4: §3.3 row 8 is "playlist/segment 503 WITH a 'not yet' code", and the
+// row now carries the list the server can actually answer those two resources
+// with. Both halves, because a list nothing falls through is the same defect as
+// no list at all.
+test("every fixture `segment_503_not_yet` code recovers an attached playback", () => {
+  const row = JSON.parse(
+    fs.readFileSync(path.join(__dirname, "playback-surface-contract.json"), "utf8"),
+  ).sources.find((entry) => entry.id === "segment_503_not_yet");
+  assert.ok(row.codes && row.codes.length, "the row must carry its codes");
+  for (const code of row.codes) {
+    assert.equal(
+      policy.classifyStreamFailure({ status: 503, code, context: "attached" }),
+      "segment_503_not_yet",
+      code,
+    );
+  }
+});
+
+test("an attached 503 the row does not list falls through to the code's own row", () => {
+  const row = JSON.parse(
+    fs.readFileSync(path.join(__dirname, "playback-surface-contract.json"), "utf8"),
+  ).sources.find((entry) => entry.id === "segment_503_not_yet");
+  // The defect this ruling closes: the service being switched OFF was read as
+  // the segment not being ready yet, because the row matched on the status
+  // alone. It is a start-context row, so on an attached playback no row claims
+  // it and the caller keeps the handling it had.
+  assert.ok(!row.codes.includes("vod_disabled"));
+  assert.equal(
+    policy.classifyStreamFailure({ status: 503, code: "vod_disabled", context: "attached" }),
+    null,
+  );
+  assert.equal(
+    policy.classifyStreamFailure({ status: 503, code: "vod_disabled", context: "start" }),
+    "vod_disabled",
+  );
+  // A 503 nobody explained is not a "not yet" answer either — same rule as the
+  // create row above.
+  assert.equal(
+    policy.classifyStreamFailure({ status: 503, code: null, context: "attached" }),
+    null,
+  );
+  // …and a code that only means "not yet" on a 503 does not claim another
+  // status. `media_owner_transition` is in both 503 rows; a 425 carrying it is
+  // neither.
+  assert.equal(
+    policy.classifyStreamFailure({ status: 425, code: "media_owner_transition", context: "attached" }),
+    null,
+  );
+});
+
 test("the create-retry deadline is absolute and never schedules past itself", () => {
   const step = (attempt, elapsedMs) =>
     policy.createRetryStep({ attempt, elapsedMs, source: "create_503_not_yet" });

@@ -228,7 +228,25 @@
     {
       "id": "segment_503_not_yet",
       "context": "attached",
-      "class": "recovering"
+      "class": "recovering",
+      "codes": [
+        "startup_timeout",
+        "playlist_state_changed",
+        "segment_pending",
+        "segment_wait_busy",
+        "node_wait_capacity",
+        "media_owner_transition",
+        "vod_resurrection_unavailable",
+        "response_owner_transition",
+        "response_state_changed",
+        "response_owner_reclassification_unavailable",
+        "response_publication_timeout",
+        "response_completion_capacity",
+        "response_snapshot_capacity",
+        "node_maintenance",
+        "node_removal_fenced",
+        "learner_route_ineligible"
+      ]
     },
     {
       "id": "media_owner_lost_410",

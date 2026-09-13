@@ -438,7 +438,7 @@ Rows are evaluated in order; the first row whose `context` matches wins.
 | 9 | `create_503_not_yet` | start | `preparing` | no | class default | codes: `startup_timeout` · `media_owner_transition` · `vod_index_pending` · `vod_engine_unattested`; retryable by the owner (M5) |
 | 10 | `client_preparing` | any | `preparing` | no | class default |  |
 | 11 | `change_failed` | change | `refused` | no | `retry` |  |
-| 12 | `segment_503_not_yet` | attached | `recovering` | no | class default |  |
+| 12 | `segment_503_not_yet` | attached | `recovering` | no | class default | codes: `startup_timeout` · `playlist_state_changed` · `segment_pending` · `segment_wait_busy` · `node_wait_capacity` · `media_owner_transition` · `vod_resurrection_unavailable` · `response_owner_transition` · `response_state_changed` · `response_owner_reclassification_unavailable` · `response_publication_timeout` · `response_completion_capacity` · `response_snapshot_capacity` · `node_maintenance` · `node_removal_fenced` · `learner_route_ineligible` |
 | 13 | `media_owner_lost_410` | any | `recovering` | no | class default | re-classes to `stopped` when the owner stops; carries `position_ms` |
 | 14 | `control_hold` | attached | `hold` | no | class default |  |
 | 15 | `media_waiting` | attached | `buffering` | no | class default |  |
