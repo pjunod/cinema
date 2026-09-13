@@ -176,6 +176,27 @@ somewhere that survives — a `screen` on a node, not a shell that can be
 reaped. `docker compose start` in `/opt/noirr/plurx/deploy` brings a node back
 without waiting for the rebuild.
 
+### What the deploy proved, on the fleet
+
+All four nodes report `v0.3.0-2236-g3062f3c9` and `ready`. `nynuc` writes
+`/srv/plurx/cache/runtime/live-tv/guide.json` - 564 KB, 1772 programme rows.
+
+Then the objective itself, measured by restarting `plurxd` on `nynuc` and
+polling `/metrics` every five seconds:
+
+| | `guide_age_seconds` | `guide_programmes` |
+|---|---|---|
+| before the restart | 1059 | 1772 |
+| t+10 s | **1080** | 1772 |
+| t+15 s | **1** | 1771 |
+| t+60 s | 46 | 1771 |
+
+The first row is objective 1: the process came back and served the previous
+guide at its *true* age - 1059 plus the twenty-odd seconds it was gone - not
+zero, not `NaN`, not absent. The second row is objective 2: the first refresh
+after a restart landed fifteen seconds later. The behaviour this effort exists
+to fix was an empty grid and a twenty-minute wait.
+
 ### What the clients need
 
 Neither client artifact can be built anywhere but the Mac that owns the Xcode
