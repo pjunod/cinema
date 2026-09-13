@@ -1839,7 +1839,7 @@ test_anchor = "aSeekWindowIsTheClientPreparingRow"
 id = "clients.build-counters-claimed-by-their-generators"
 commits = ["0f68b0a1"]
 source = "clients/apple/project.yml"
-source_anchor = "CURRENT_PROJECT_VERSION: \"153\""
+source_anchor = "CURRENT_PROJECT_VERSION: \"154\""
 test = "tests/operations/test_apple_build_claims.py"
 test_anchor = "def test_a_generated_next_build_satisfies_the_document_claim_sweep"
 

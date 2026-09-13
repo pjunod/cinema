@@ -7,8 +7,8 @@ first.
 ## Live TV start, stall, and tvOS surface is being promoted to main
 
 **[#301](http://192.168.4.7:3000/noirr/plurx/pulls/301), from
-`effort/live-tv-start-stall` into `main`; final adversarial findings are being
-folded before the Main promotion gate.** The server, Android, and Apple task
+`effort/live-tv-start-stall` into `main`; final adversarial findings are folded
+and the candidate is being re-qualified after merging current `main`.** The server, Android, and Apple task
 PRs are merged into the effort and their focused automated evidence is green.
 Paul explicitly directed promotion without waiting for the HDHomeRun, Apple TV,
 Android-phone, and web physical results. Those results and the authenticated

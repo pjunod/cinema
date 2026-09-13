@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["fe5b64b9"]
+ignore = true
+reason = "Documentation only: this commit records the Android task review and focused regression result; it changes no runtime or validation behavior."

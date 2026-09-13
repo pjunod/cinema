@@ -1,6 +1,6 @@
 # Live TV now says what the player is doing
 
-Build: 153
+Build: 154
 Issue: #300
 
 The tvOS Live TV player now separates an ordinary start from a playback stall.
