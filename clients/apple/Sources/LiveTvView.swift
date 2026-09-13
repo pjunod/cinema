@@ -596,6 +596,12 @@ enum LiveTvType {
     static let badge = Font.system(size: 16, weight: .bold)
     static let eyebrow = Font.system(size: 14, weight: .bold)
     static let chip = Font.system(size: 18, weight: .bold)
+    static let surfaceTitle = Font.system(size: 46, weight: .semibold)
+    static let surfaceBody = Font.system(size: 24)
+    static let surfaceButton = Font.system(size: 24, weight: .semibold)
+    static let surfaceMono = Font.system(size: 20, weight: .medium, design: .monospaced)
+    static let surfaceEyebrow = Font.system(size: 22, weight: .medium, design: .monospaced)
+    static let surfaceHint = Font.system(size: 18, design: .monospaced)
     #else
     static let title = Font.headline
     static let primary = Font.subheadline.weight(.semibold)
@@ -1460,6 +1466,19 @@ struct LiveTvView: View {
     private static func livePauseDuration(from start: Date, to end: Date) -> String {
         let seconds = max(0, Int(end.timeIntervalSince(start)))
         return String(format: "%d:%02d", seconds / 60, seconds % 60)
+    }
+
+    static func liveProgressText(airing: LiveTvAiring, now: Int) -> [String] {
+        guard let programme = airing.now else { return [] }
+        var values = [
+            liveTvTime(programme.start),
+            liveTvTime(programme.end),
+            "\(max(0, (programme.end - now) / 60)) min left",
+        ]
+        if let next = airing.next {
+            values.append("Next \(liveTvTime(next.start)) · \(next.title)")
+        }
+        return values
     }
 
     /// Leaving the tab or backgrounding the app releases the tuner — unless
@@ -2462,6 +2481,220 @@ struct LiveTvView: View {
         }
     }
 
+    #if os(tvOS)
+    private var liveTelemetryStrip: some View {
+        let chips = Self.liveSurfaceChips(
+            status: live.status,
+            delivery: live.status?.delivery ?? live.delivery,
+            behindEdge: live.behindEdgeSeconds,
+            paused: live.pausedAt
+        )
+        return HStack(spacing: 12) {
+            ForEach(chips.filter { [.live, .behind].contains($0.kind) }) {
+                liveSurfaceChip($0)
+            }
+            Spacer()
+            ForEach(chips.filter { ![.live, .behind].contains($0.kind) }) {
+                liveSurfaceChip($0)
+            }
+        }
+        .padding(.horizontal, 80)
+        .padding(.top, 48)
+    }
+
+    private func liveSurfaceChip(_ chip: LiveSurfaceChip) -> some View {
+        HStack(spacing: 8) {
+            if chip.kind == .live {
+                Circle()
+                    .fill(live.paused ? .white.opacity(0.36) : Palette.accent)
+                    .frame(width: 10, height: 10)
+                    .shadow(
+                        color: Palette.accent.opacity(live.paused ? 0 : 0.65),
+                        radius: 7
+                    )
+            }
+            Text(chip.text).font(LiveTvType.surfaceMono)
+        }
+        .foregroundStyle(chip.kind == .live && !live.paused ? Palette.accent : .white.opacity(0.72))
+        .padding(.horizontal, 16)
+        .frame(height: 42)
+        .background(
+            Palette.playerChrome.opacity(0.62),
+            in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+        )
+    }
+
+    @ViewBuilder
+    private var liveWaitingTile: some View {
+        if live.waiting && !live.paused {
+            VStack(spacing: 20) {
+                ProgressView().controlSize(.large)
+                Text("Catching up to live")
+                    .font(.system(size: 28, weight: .semibold))
+                if let behind = live.behindEdgeSeconds {
+                    Text(String(format: "%.1f s behind the edge", behind))
+                        .font(LiveTvType.surfaceMono)
+                        .foregroundStyle(.white.opacity(0.6))
+                }
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 44)
+            .padding(.vertical, 34)
+            .background(
+                .ultraThinMaterial,
+                in: RoundedRectangle(cornerRadius: 20, style: .continuous)
+            )
+        }
+    }
+
+    @ViewBuilder
+    private var livePausedGlyph: some View {
+        if live.paused {
+            Circle()
+                .fill(Palette.playerChrome.opacity(0.72))
+                .frame(width: 132, height: 132)
+                .overlay {
+                    Image(systemName: "pause.fill")
+                        .font(.system(size: 64, weight: .semibold))
+                        .foregroundStyle(.white)
+                }
+        }
+    }
+
+    private func liveIdentityRow(
+        channel: LiveTvChannel?,
+        airing: LiveTvAiring
+    ) -> some View {
+        HStack(spacing: 28) {
+            if let channel {
+                Text(channel.guideNumber)
+                    .font(.system(size: 40, weight: .bold, design: .monospaced))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                    .frame(width: 112, height: 112)
+                    .background(
+                        Palette.playerChrome.opacity(0.72),
+                        in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    )
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                if let channel {
+                    Text(
+                        [channel.guideNumber, channel.guideName, channel.pictureClass]
+                            .compactMap { $0 }
+                            .joined(separator: " · ")
+                    )
+                    .font(LiveTvType.surfaceEyebrow)
+                    .foregroundStyle(.white.opacity(0.6))
+                    .lineLimit(1)
+                }
+                Text(airing.now?.title ?? live.title ?? "Live television")
+                    .font(LiveTvType.surfaceTitle)
+                    .lineLimit(1)
+                let detail = [
+                    airing.now?.episode,
+                    airing.now?.episodeTitle,
+                    airing.now?.synopsis,
+                ].compactMap { $0 }.joined(separator: " · ")
+                if !detail.isEmpty {
+                    Text(detail)
+                        .font(LiveTvType.surfaceBody)
+                        .foregroundStyle(.white.opacity(0.6))
+                        .lineLimit(1)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    @ViewBuilder
+    private func liveProgressRow(_ airing: LiveTvAiring) -> some View {
+        if airing.now != nil {
+            let values = Self.liveProgressText(airing: airing, now: now)
+            HStack(spacing: 18) {
+                Text(values[0])
+                GeometryReader { geometry in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(.white.opacity(0.18))
+                        Capsule()
+                            .fill(Palette.accent)
+                            .frame(width: geometry.size.width * (airing.progress ?? 0))
+                    }
+                }
+                .frame(height: 6)
+                Text(values[1])
+                Text(values[2])
+                    .foregroundStyle(.white.opacity(0.6))
+                if values.count == 4 {
+                    Text("·").foregroundStyle(.white.opacity(0.36))
+                    Text(values[3])
+                        .foregroundStyle(.white.opacity(0.6))
+                        .lineLimit(1)
+                }
+            }
+            .font(LiveTvType.surfaceMono)
+        }
+    }
+
+    private func liveBottomBand(
+        channel: LiveTvChannel?,
+        airing: LiveTvAiring
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 28) {
+            liveIdentityRow(channel: channel, airing: airing)
+            liveProgressRow(airing)
+            if let message = live.surfaceMessage {
+                Text(message)
+                    .font(LiveTvType.surfaceMono)
+                    .foregroundStyle(.white.opacity(0.6))
+                    .lineLimit(2)
+            }
+            liveSurfaceButtons
+        }
+        .padding(.horizontal, 80)
+        .padding(.bottom, 64)
+        .foregroundStyle(.white)
+    }
+
+    private var liveSurfaceButtons: some View {
+        HStack(spacing: 16) {
+            Button { live.togglePause() } label: {
+                Label(
+                    live.paused ? "Play live" : "Pause",
+                    systemImage: live.paused ? "play.fill" : "pause.fill"
+                )
+            }
+            .focused($focusedControl, equals: .play)
+            Button {
+                temporaryGuide = true
+                overlayGeneration &+= 1
+                requestGuideFocus()
+            } label: {
+                Label("Guide", systemImage: "rectangle.grid.3x2")
+            }
+            .focused($focusedControl, equals: .guide)
+            Button { requestChannelFocus(); fullscreen = false } label: {
+                Label("Channels", systemImage: "list.bullet")
+            }
+            .focused($focusedControl, equals: .channels)
+            Button { showingInfo = true } label: {
+                Label("Info", systemImage: "info.circle")
+            }
+            .focused($focusedControl, equals: .info)
+            Button { showingMore = true } label: {
+                Label("More", systemImage: "ellipsis")
+            }
+            .focused($focusedControl, equals: .more)
+            Spacer()
+            Text("MENU hides · PLAY/PAUSE \(live.paused ? "resumes" : "pauses")")
+                .font(LiveTvType.surfaceHint)
+                .foregroundStyle(.white.opacity(0.36))
+        }
+        .buttonStyle(LiveSurfacePillStyle())
+        .focusEffectDisabled()
+    }
+    #endif
+
     /// Fullscreen is a surface, not a bare element: channel and programme in
     /// the corner, a strip of neighbours along the bottom, and a progress bar —
     /// all auto-hiding after the contract's four seconds while playing.
@@ -2484,7 +2717,7 @@ struct LiveTvView: View {
             // player solves it the same way (PlayerView.swift's `.reveal`).
             Color.clear
                 .contentShape(Rectangle())
-                .focusable(true)
+                .focusable(!overlayVisible && !temporaryGuide)
                 .focused($focusedControl, equals: FocusTarget.reveal)
                 .accessibilityHidden(true)
                 .liveTvRemoteAdapter(
@@ -2493,6 +2726,33 @@ struct LiveTvView: View {
                     apply: { outcome, _ in applyLiveOutcome(outcome) }
                 )
             #endif
+            #if os(tvOS)
+            liveWaitingTile
+            livePausedGlyph
+            if overlayVisible && !temporaryGuide {
+                ZStack(alignment: .top) {
+                    LinearGradient(
+                        colors: [.black.opacity(0.76), .clear],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                    .frame(height: 190)
+                    liveTelemetryStrip
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+
+                ZStack(alignment: .bottom) {
+                    LinearGradient(
+                        colors: [.clear, .black.opacity(0.92)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                    .frame(height: 520)
+                    liveBottomBand(channel: channel, airing: airing)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+            }
+            #else
             if overlayVisible {
                 VStack {
                     HStack(alignment: .top) {
@@ -2501,53 +2761,41 @@ struct LiveTvView: View {
                                 .font(LiveTvType.title)
                             Text(channel?.title ?? "").font(.caption)
                             if let channel {
-                                Text(liveTvTechnicalSummary(channel, status: live.status, delivery: live.delivery))
-                                    .font(.caption2).opacity(0.78)
+                                Text(liveTvTechnicalSummary(
+                                    channel,
+                                    status: live.status,
+                                    delivery: live.delivery
+                                ))
+                                .font(.caption2)
+                                .opacity(0.78)
                             }
-                            if let now = airing.now {
-                                Text("\(liveTvTime(now.start))–\(liveTvTime(now.end))"
-                                     + (airing.next.map { " · Next: \($0.title)" } ?? ""))
-                                    .font(.caption2).opacity(0.85)
+                            if let programme = airing.now {
+                                Text(
+                                    "\(liveTvTime(programme.start))–\(liveTvTime(programme.end))"
+                                        + (airing.next.map { " · Next: \($0.title)" } ?? "")
+                                )
+                                .font(.caption2)
+                                .opacity(0.85)
                             }
                         }
                         Spacer()
                         HStack {
-                            #if os(tvOS)
-                            Button("Guide") {
-                                temporaryGuide = true
-                                overlayGeneration &+= 1
-                                requestGuideFocus()
+                            Button(muted ? "Unmute" : "Mute") {
+                                muted.toggle()
+                                live.player.isMuted = muted
                             }
-                                .focused($focusedControl, equals: .guide)
-                            Button("Channels") { requestChannelFocus(); fullscreen = false }
-                                .focused($focusedControl, equals: .channels)
-                            Button(live.paused ? "Play live" : "Pause") { live.togglePause() }
-                                .focused($focusedControl, equals: .play)
-                            Button("Info") { showingInfo = true }
-                                .focused($focusedControl, equals: .info)
-                            Button("More") { showingMore = true }
-                            .focused($focusedControl, equals: .more)
-                            #else
-                            Button(muted ? "Unmute" : "Mute") { muted.toggle(); live.player.isMuted = muted }
-                            if pictureInPicture.isSupported { Button("PiP") { pictureInPicture.toggle() } }
+                            if pictureInPicture.isSupported {
+                                Button("PiP") { pictureInPicture.toggle() }
+                            }
                             Button("Exit") { fullscreen = false }
-                            #endif
                         }
-                        #if os(tvOS)
-                        .buttonStyle(TVReadableButtonStyle(prominent: false))
-                        .focusEffectDisabled()
-                        #endif
                     }
                     Spacer()
                     VStack(alignment: .leading, spacing: 8) {
                         ProgressView(value: airing.progress ?? 0).tint(.white)
-                        #if os(iOS)
                         ScrollView(.horizontal, showsIndicators: false) {
                             HStack(spacing: 8) {
                                 ForEach(visible) { entry in
-                                    // Through the coalescer, not straight to
-                                    // `watch`: running along the strip must be
-                                    // one tuner start, not one per card.
                                     Button { live.requestChannel(entry) } label: {
                                         VStack(alignment: .leading, spacing: 2) {
                                             Text(entry.title).font(.caption.weight(.semibold))
@@ -2556,7 +2804,10 @@ struct LiveTvView: View {
                                         }
                                         .frame(width: 150, alignment: .leading)
                                         .padding(8)
-                                        .background(entry.id == channel?.id ? .white.opacity(0.18) : .black.opacity(0.5))
+                                        .background(
+                                            entry.id == channel?.id
+                                                ? .white.opacity(0.18) : .black.opacity(0.5)
+                                        )
                                         .clipShape(RoundedRectangle(cornerRadius: 6))
                                     }
                                     .buttonStyle(.plain)
@@ -2564,12 +2815,12 @@ struct LiveTvView: View {
                                 }
                             }
                         }
-                        #endif
                     }
                 }
                 .padding()
                 .foregroundStyle(.white)
             }
+            #endif
             #if os(tvOS)
             if temporaryGuide {
                 // The identical panel the Over picture layout draws, so the
@@ -2626,30 +2877,39 @@ struct LiveTvView: View {
             overlayVisible = false
         }
         #if os(tvOS)
-        // Focus must land on the reveal layer whenever the overlay is not
-        // there to hold it, or the next press goes nowhere.
-        .onAppear { focusedControl = overlayVisible ? .guide : .reveal }
+        .onAppear { focusedControl = overlayVisible ? .play : .reveal }
         .onChange(of: overlayVisible) { _, visible in
-            focusedControl = visible ? .guide : .reveal
+            if visible {
+                focusedControl = .play
+            } else {
+                focusedControl = nil
+                Task { @MainActor in
+                    await Task.yield()
+                    guard fullscreen, !overlayVisible, !temporaryGuide,
+                          !showingInfo, !showingMore, !showingLayout, detail == nil
+                    else { return }
+                    focusedControl = .reveal
+                }
+            }
         }
-        .onChange(of: focusedControl) { _, _ in
+        .onChange(of: focusedControl) { _, target in
             if overlayVisible { overlayGeneration &+= 1 }
+            if overlayVisible, target == .reveal { focusedControl = .play }
+        }
+        .onChange(of: temporaryGuide) { _, up in
+            overlayGeneration &+= 1
+            if !up, fullscreen { focusedControl = overlayVisible ? .play : .reveal }
         }
         #endif
-        .onChange(of: temporaryGuide) { _, _ in overlayGeneration &+= 1 }
         .onChange(of: showingInfo) { _, _ in overlayGeneration &+= 1 }
         .onChange(of: showingMore) { _, _ in overlayGeneration &+= 1 }
         .onChange(of: showingLayout) { _, _ in overlayGeneration &+= 1 }
         .onChange(of: live.paused) { _, _ in overlayGeneration &+= 1 }
-        // Deliberately NOT `onChange(of: live.playing)`. `watch()` detaches
-        // before it awaits the new lease, so `playing` goes false mid-tune —
-        // which dismissed the cover, ran `onDismiss`, stopped the session that
-        // was still being granted, and left the viewer on the inline page with
-        // nothing playing. On tvOS that was the only tune path in the overlay,
-        // so `activate → tune` never worked at all. Only a session that has
-        // actually finished closes the surface.
-        .onChange(of: live.busy) { _, busy in
-            if !busy && !live.playing { fullscreen = false }
+        .onChange(of: live.playing) { _, playing in
+            if !playing && !live.busy {
+                fullscreen = false
+                temporaryGuide = false
+            }
         }
     }
 

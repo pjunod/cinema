@@ -831,6 +831,16 @@ final class LiveTvTests: XCTestCase {
         LiveTvStarted(sessionId: capability, channel: channel, live: true)
     }
 
+    private func liveTvViewSource() throws -> String {
+        let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        return try String(
+            contentsOf: testsDirectory.appendingPathComponent(
+                "../Sources/LiveTvView.swift"
+            ).standardizedFileURL,
+            encoding: .utf8
+        )
+    }
+
     func testProtectedChannelsStayVisibleAndUnwatchable() {
         let protected = LiveTvChannel(id: "107.1", guideNumber: "107.1", guideName: "Protected",
                                       favorite: false, drm: true, support: "drm_unsupported",
@@ -1030,6 +1040,74 @@ final class LiveTvTests: XCTestCase {
         await controller.watch(channel)
         XCTAssertNil(controller.surfaceMessage, "a fresh attachment owns a fresh surface")
         await controller.stop()
+    }
+
+    func testTheRevealLayerIsNotFocusableWhileTheOverlayOrTheGuideIsVisible() throws {
+        let source = try liveTvViewSource()
+        let fullscreen = source
+            .components(separatedBy: "private var fullscreenSurface: some View {")[1]
+            .components(separatedBy: "private func applyLiveOutcome")[0]
+        XCTAssertTrue(fullscreen.contains(
+            ".focusable(!overlayVisible && !temporaryGuide)"
+        ))
+        XCTAssertFalse(fullscreen.contains(".focusable(true)"))
+    }
+
+    func testFullscreenFocusDefaultsToPauseAndReturnsThereFromTheRevealLayer() throws {
+        let source = try liveTvViewSource()
+        let fullscreen = source
+            .components(separatedBy: "private var fullscreenSurface: some View {")[1]
+            .components(separatedBy: "private func applyLiveOutcome")[0]
+        XCTAssertTrue(fullscreen.contains(
+            ".onAppear { focusedControl = overlayVisible ? .play : .reveal }"
+        ))
+        XCTAssertTrue(fullscreen.contains(
+            "target == .reveal { focusedControl = .play }"
+        ))
+        for guardPart in [
+            "guard fullscreen",
+            "!overlayVisible",
+            "!temporaryGuide",
+            "!showingInfo",
+            "!showingMore",
+            "!showingLayout",
+            "detail == nil",
+        ] {
+            XCTAssertTrue(fullscreen.contains(guardPart), guardPart)
+        }
+    }
+
+    func testTheProgressRowSurvivesAMissingNextProgramme() {
+        let programme = LiveTvProgramme(
+            start: 1_700_000_000,
+            end: 1_700_001_800,
+            title: "The programme"
+        )
+        let values = LiveTvView.liveProgressText(
+            airing: LiveTvAiring(now: programme, next: nil, progress: 0.5),
+            now: 1_700_000_600
+        )
+        XCTAssertEqual(values.count, 3)
+        XCTAssertFalse(values.contains { $0.contains("Next") })
+        XCTAssertEqual(values.last, "20 min left")
+    }
+
+    func testFiveFullscreenActionsAndNoFavorite() throws {
+        let source = try liveTvViewSource()
+        let buttons = source
+            .components(separatedBy: "private var liveSurfaceButtons: some View {")[1]
+            .components(separatedBy: "#endif")[0]
+        XCTAssertEqual(buttons.components(separatedBy: "Label(").count - 1, 5)
+        for action in [
+            "\"Play live\" : \"Pause\"",
+            "Label(\"Guide\"",
+            "Label(\"Channels\"",
+            "Label(\"Info\"",
+            "Label(\"More\"",
+        ] {
+            XCTAssertTrue(buttons.contains(action), action)
+        }
+        XCTAssertFalse(buttons.contains("Favorite"))
     }
 
     func testLiveTvOwnsThePlaybackAudioSessionForItsSeparatePlayer() async {

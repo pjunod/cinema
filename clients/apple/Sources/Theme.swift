@@ -175,6 +175,47 @@ struct TVReadableButtonStyle: ButtonStyle {
     }
 }
 
+/// Fullscreen Live TV chrome keeps the house focus ring, lift and glow while
+/// staying on player black in every app theme.
+struct LiveSurfacePillStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        Body(configuration: configuration)
+    }
+
+    struct Body: View {
+        let configuration: ButtonStyle.Configuration
+        @Environment(\.isFocused) private var isFocused
+
+        var body: some View {
+            configuration.label
+                .labelStyle(.titleAndIcon)
+                .font(LiveTvType.surfaceButton)
+                .foregroundStyle(.white)
+                .padding(.leading, 22)
+                .padding(.trailing, 26)
+                .frame(height: 56)
+                .background(
+                    Palette.playerChrome.opacity(isFocused ? 0.92 : 0.72),
+                    in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(
+                            isFocused ? Palette.accent : .white.opacity(0.10),
+                            lineWidth: isFocused ? 4 : 1
+                        )
+                }
+                .scaleEffect(isFocused ? 1.045 : (configuration.isPressed ? 0.98 : 1))
+                .shadow(
+                    color: Palette.accent.opacity(isFocused ? 0.35 : 0),
+                    radius: 14,
+                    y: 10
+                )
+                .animation(.easeOut(duration: 0.14), value: isFocused)
+        }
+    }
+}
+
 /// Compact trailing action for shelf headers. tvOS 26 can tint a default
 /// NavigationLink's label and background identically, leaving only an empty
 /// accent-colored capsule. This style owns that contrast pair explicitly.
