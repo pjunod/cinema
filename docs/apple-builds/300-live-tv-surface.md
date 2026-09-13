@@ -23,7 +23,8 @@ including summed AVPlayer access-log stalls and dropped frames. Unknown
 counters say `unknown`; absent values omit their row; the stream row reports
 the delivered packaging without inventing a segment duration.
 
-The simulator compilation and nine focused Live TV regressions are recorded in
-PR #300. The Apple TV focus, pause-expiry, first-frame, and first-minute stall
-checks remain part of the combined HDHomeRun physical pass before this effort
-can be promoted to `main`.
+`make apple-build` compiled the iOS and tvOS schemes. The nine focused Live
+TV regressions executed on an Apple TV 4K (3rd generation) tvOS 26.5 simulator:
+nine passed, none failed, and none were skipped. The Apple TV focus,
+pause-expiry, first-frame, and first-minute stall checks remain part of the
+combined HDHomeRun physical pass before this effort can be promoted to `main`.
