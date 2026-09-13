@@ -194,29 +194,46 @@ the first time on 2026-09-13.
 
 On a Mac (macOS 26.6.2, Xcode 26.6, xcodegen 2.46.0), against this branch:
 `make apple-build` compiled **both** schemes clean, and `make apple-test` ran
-the whole suite on **iPhone 17 Pro (iOS 26.5)** — 531 tests — and on **Apple
-TV 4K (3rd generation) (tvOS 26.5)** — 517 tests — with **0 failures on
+the whole suite on **iPhone 17 Pro (iOS 26.5)** — 532 tests — and on **Apple
+TV 4K (3rd generation) (tvOS 26.5)** — 518 tests — with **0 failures on
 each**. Every test the hand-off prompt names by name ran and passed under both
 destinations.
 
-Four defects had to be fixed to get there, all of them in code written blind:
-one compile error (a test still read `PlayerController.failed`, the flag M2
-deleted) and three test failures (a blocking raise set up over a still
-`presenting` picture, which §3.2 demotes on the spot; a source-shape assertion
-looking for the literal `player.pause()` that M2 had moved into
-`stopForBlockingSurface()`; and M5's change-context test, which asserted a
-second `/decision` request that a warm — prepared — quality change never makes,
-and whose precondition no headless test could reach). No threshold, budget,
-detector or ladder was retuned.
+Four defects in code written blind had to be fixed to get there: one compile
+error (a test still read `PlayerController.failed`, the flag M2 deleted) and
+three test failures (a source-shape assertion looking for the literal
+`player.pause()` that M2 had moved into `stopForBlockingSurface()`; M5's
+change-context test, which asserted a second `/decision` request that a warm —
+prepared — quality change never makes, and whose precondition no headless test
+could reach; and a blocking raise set up over a still-`presenting` picture).
+
+**That third one was not a test bug. It was the code reporting a shipped
+defect, and adjusting the test is what hid it.** `stopForBlockingSurface()`
+paused the player but never told the presenter the picture had stopped
+presenting, and every owner site raises its blocking fault synchronously right
+after. So a 401 or 403 during a quality change — the R1 case, over a picture
+that was playing — raised its `stopped` terminal into a model that still
+believed the picture was moving, §3.2 resolved the disagreement against it,
+and the viewer got a "Playback recovered" banner with **no Sign in and no
+Close**. Permanently: a demoted fault is never promoted again, by design. Not
+a race — the raise always precedes the next sampler tick. The owner's stop now
+records its own evidence, which is the one-line fix, and the assertion that it
+still does is pinned in `testOnlyTheEvidenceSamplerEverFeedsAPresentingEvent`.
+No threshold, budget, detector or ladder was retuned.
 
 The prompt's six pinned mutations were applied and reverted one at a time.
-**A1, A2, A4 and A5 were killed by the test each was pinned to.** A5 and A6
-are also killed by `tests/playback/web-policy.test.js`, as predicted. **A3 —
-deciding `sampleSurfacePresentation` on `timeControlStatus` instead of the
-position delta — killed nothing, anywhere.** That is a finding, not a pass:
-Apple's presentation *detector* has no test of either kind, because the one
-test pinned to it exercises `PlaybackSurfaceModel` directly and never reaches
-`PlayerController`. It wants a test.
+**A1, A2, A4 and A5 were each killed by the test pinned to it**; A5 and A6 are
+also killed by `tests/playback/web-policy.test.js`, as predicted. A3 —
+deciding presentation on `timeControlStatus` instead of the position delta —
+**is killed by `testOnlyTheEvidenceSamplerEverFeedsAPresentingEvent`**, which
+forbids the token outright. But that is a source-shape pin, and the
+semantically identical mutation that avoids the banned word — dropping the
+position delta and keeping the rate — survived all 531 tests. So the detector
+was pinned by spelling and proved by nothing. `surfaceIsPresenting` is now a
+pure function of the evidence, and
+`testPresentationEvidenceIsAMovingPositionAndNeverATransportStatus` kills that
+survivor. **A6 is the one genuine survivor**: no Swift test, exactly as the
+prompt predicted, and the field route is §6.6.
 
 ### Exactly what is not done
 
@@ -231,8 +248,8 @@ test pinned to it exercises `PlaybackSurfaceModel` directly and never reaches
    answers 503 `startup_timeout`, a forced 401 on a quality change, a create
    that lands after the 60 s deadline — and no server was reachable from the
    build machine. The unit suite cannot see any of those behaviours, and one
-   mutation (A3) proves the point: the presentation detector those recipes
-   exercise is untested.
+   shipped defect this branch fixes — the 401 terminal demoting itself to a
+   banner — is exactly the kind of thing only §6.2 would have caught.
 2. **The Kotlin compiles and its JVM tests pass. Nothing has run on a
    device.** M3 and M5's Android code was written on Linux with no SDK and no
    disk for a Gradle build; it was compiled for the first time on 2026-09-13,
@@ -261,12 +278,12 @@ test pinned to it exercises `PlaybackSurfaceModel` directly and never reaches
    test; K7, as the hand-off predicts, is killed by
    `tests/playback/web-policy.test.js` and by no JVM test. What is still
    missing is every part that needs hardware: no instrumented test, no
-   emulator, and none of the twelve recipes in §5 of   [PLAYBACK-SURFACE-ANDROID-BUILD-PROMPT.md](docs/clients/PLAYBACK-SURFACE-ANDROID-BUILD-PROMPT.md).
+   emulator, and none of the twelve recipes in §5 of
+   [PLAYBACK-SURFACE-ANDROID-BUILD-PROMPT.md](docs/clients/PLAYBACK-SURFACE-ANDROID-BUILD-PROMPT.md).
    What was done before any of this, and is evidence about the semantics and
    not about the Kotlin: the shipped reducer was transliterated into Python,
    run against every fixture case, and fuzzed 3,500 sequences differentially
-   against the shipped JS reducer with zero divergences.
-3. **M4 — physical verification — has not been run.** Not one of §7's four
+   against the shipped JS reducer with zero divergences.3. **M4 — physical verification — has not been run.** Not one of §7's four
    recipes has been executed on an Apple TV, an iPhone or an Android TV. No
    `surface_disagreement` has been observed, and that is an absence of looking
    rather than an absence of rows. The script is
