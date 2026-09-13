@@ -425,7 +425,7 @@ final class PlayerOperationOwnershipTests: XCTestCase {
                 && controller.surface.kind == .blocking
         }
         XCTAssertEqual(controller.surface.surface.cls, .buffering)
-        XCTAssertTrue(controller.showsProgressSurface)
+        XCTAssertEqual(controller.progressSurfaceRender, .blocking)
         XCTAssertFalse(controller.isPlaybackBlocked, "a spinner asks the viewer nothing")
         XCTAssertTrue(controller.wantsPlayback)
 
@@ -530,7 +530,7 @@ final class PlayerOperationOwnershipTests: XCTestCase {
             controller.surface.kind, .blocking,
             "nothing is presenting yet, so the staged overlay covers the picture"
         )
-        XCTAssertTrue(controller.showsProgressSurface)
+        XCTAssertEqual(controller.progressSurfaceRender, .blocking)
         XCTAssertFalse(
             controller.isPlaybackBlocked,
             "a spinner covers pixels and asks nothing; it is not the input contract's `failed`"

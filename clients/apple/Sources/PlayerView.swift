@@ -830,10 +830,16 @@ struct PlayerView: View {
                 // `isPlaybackWaiting` a second box below it, so two things
                 // decided what covered the picture — the exact defect the
                 // contract exists to kill. Both are faults now
-                // (`client_preparing`, `media_waiting`), and this draws
-                // whichever one the presenter says owns the surface.
-                if controller.showsProgressSurface && !findingNext {
-                    playbackProgressSurface
+                // (`client_preparing`, `media_waiting`).
+                //
+                // One owner, two renders, and §3.1 is emphatic about the
+                // difference: the box covers the picture, the indicator sits
+                // beside one that is playing. They must never be the same view.
+                if let progress = controller.progressSurfaceRender, !findingNext {
+                    switch progress {
+                    case .blocking: playbackProgressSurface
+                    case .indicator: playbackProgressIndicator
+                    }
                 }
 
                 if findingNext {
@@ -1473,11 +1479,42 @@ struct PlayerView: View {
         #endif
     }
 
-    /// The presenter's progress fault, in the two shapes this player has
-    /// always drawn: a bare spinner for a fault with nothing to say (the
-    /// staged open), and the spinner with the fault's own sentence under it
-    /// for one that does (a wait, a recovery rung). No new copy — the words
-    /// are the ones the raising owner put on the fault.
+    /// A progress fault over a picture that IS presenting (§3.1's `indicator`):
+    /// a small capsule in the corner of the chrome, covering nothing.
+    ///
+    /// Deliberately not the full-screen box. `recovering` is retired by
+    /// presentation that postdates its raise, so a compatibility rung, a node
+    /// failover or a readiness deadline is an indicator over a picture that is
+    /// playing perfectly well — and giving it the centered full-screen box
+    /// would put a modal spinner over a moving picture, which is the defect
+    /// this contract exists to remove. It takes no hits: a viewer's tap and a
+    /// remote's focus belong to the chrome behind it.
+    @ViewBuilder
+    private var playbackProgressIndicator: some View {
+        let surface = controller.surface.surface
+        HStack(spacing: 8) {
+            ProgressView().tint(.white)
+            if let title = surface.title, !title.isEmpty {
+                Text(title)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundColor(.white.opacity(0.85))
+                    .lineLimit(1)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(.ultraThinMaterial, in: Capsule())
+        .padding(20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+        .allowsHitTesting(false)
+    }
+
+    /// A progress fault over a picture that is NOT presenting (§3.1's
+    /// full-screen half), in the two shapes this player has always drawn: a
+    /// bare spinner for a fault with nothing to say (the staged open), and the
+    /// spinner with the fault's own sentence under it for one that does (a
+    /// wait). No new copy — the words are the ones the raising owner put on
+    /// the fault.
     @ViewBuilder
     private var playbackProgressSurface: some View {
         let surface = controller.surface.surface

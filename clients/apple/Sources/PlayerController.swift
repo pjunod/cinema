@@ -965,9 +965,12 @@ struct PlaybackStallEvent: Equatable {
     let durationMs: Int
 }
 
+/// What a spent stall ladder tells the viewer. The transport half of it used
+/// to live here as two constant `false`s the two call sites copied into
+/// `isPlaying` and `wantsPlayback`; both now go through
+/// `stopForBlockingSurface(revokingPlaybackIntent:)`, which is where stopping
+/// a player belongs, and what is left is the sentence.
 struct PlaybackStallTerminalState: Equatable {
-    let isPlaying = false
-    let wantsPlayback = false
     let message: String
 }
 
@@ -1856,23 +1859,42 @@ final class PlayerController: ObservableObject {
     /// routing (PLAYBACK-SURFACE-CONTRACT.md §4).
     var isPlaybackBlocked: Bool { surface.entersFailedRouting }
 
-    /// The presenter's PROGRESS surface — `preparing`, `buffering` or
-    /// `recovering` — full-screen while the attached picture is not
-    /// presenting, an in-chrome indicator while it is (§3.1). It is blocking
-    /// pixels and not routing, so it draws a spinner and asks the viewer
-    /// nothing (PLAYBACK-SURFACE-CONTRACT.md §3.1, §4).
+    /// Which of the two shapes a PROGRESS fault — `preparing`, `buffering` or
+    /// `recovering` — is drawn in, or `nil` for nothing at all.
     ///
-    /// One flag, because there is now one owner of that pixel. Until this
+    /// One property, because there is now one owner of that pixel. Until this
     /// branch the same pixel had two: `isChangingStream` drew a spinner and
     /// the legacy `isPlaybackWaiting` drew a second one straight off
     /// `timeControlStatus`, and which of them covered the picture was decided
-    /// by the order of two `if`s in a view. Both are now faults, and the
-    /// presenter decides.
-    var showsProgressSurface: Bool {
+    /// by the order of two `if`s in a view. Both are now faults.
+    ///
+    /// But one owner is not one render. §3.1 gives a progress fault two, and
+    /// the difference is the whole point of the class: full-screen **while the
+    /// attached picture is not presenting**, an in-chrome indicator **while it
+    /// is**. `recovering` retires on presentation that postdates the raise, so
+    /// a compatibility rung, a node failover or a readiness deadline is an
+    /// indicator over a picture that is playing perfectly well — and drawing
+    /// that as the full-screen box is the overlay-over-a-moving-picture this
+    /// contract exists to remove. Neither is the input contract's `failed`:
+    /// both cover pixels and ask the viewer nothing (§4).
+    var progressSurfaceRender: ProgressRender? {
+        Self.progressRender(for: surface.surface)
+    }
+
+    enum ProgressRender: String, Equatable, Sendable, CaseIterable {
+        /// Covers the picture. Only ever over one that is not presenting.
+        case blocking
+        /// Beside the picture, which is presenting behind it.
+        case indicator
+    }
+
+    /// Pure, so the distinction is provable rather than read off a view: a
+    /// SwiftUI body is not something a unit test can look at.
+    nonisolated static func progressRender(for surface: PlaybackSurface) -> ProgressRender? {
         switch surface.kind {
-        case .blocking: return !surface.entersFailedRouting
-        case .indicator: return true
-        case .none, .banner: return false
+        case .blocking: return surface.entersFailedRouting ? nil : .blocking
+        case .indicator: return .indicator
+        case .none, .banner: return nil
         }
     }
 
@@ -2204,15 +2226,22 @@ final class PlayerController: ObservableObject {
     /// The transport the viewer asked for, which is not what AVPlayer reports
     /// while it buffers or after an item fails. Reopens restore this.
     ///
-    /// It is also the presenter's `playback_requested`, and it is the right
-    /// fact for it twice over. A `buffering` fault is about a player that WANTS
-    /// media, so a viewer who pauses makes it about nothing (contract §3.1,
-    /// ruled 2026-09-13) — and the owner's own stop is exactly the thing that
-    /// must NOT retire one. `stopForBlockingSurface()` pauses the player and
-    /// leaves this alone, deliberately and for its own reasons, so keying the
-    /// event here filters the owner out by construction rather than by a rule
-    /// somebody has to remember. No new detector and no new timer: this is a
-    /// flag the client already keeps.
+    /// It is also the presenter's `playback_requested` (contract §3.1, ruled
+    /// 2026-09-13): a `buffering` fault is about a player that WANTS media, so
+    /// a viewer who pauses makes it about nothing.
+    ///
+    /// Two writers, and the split is the honest statement of what happens —
+    /// the earlier claim that the owner could never move this was simply not
+    /// true, because five terminal stops did. The viewer's own pause and play
+    /// is `togglePlayPause`. The owner's is
+    /// `stopForBlockingSurface(revokingPlaybackIntent:)`, the single stop
+    /// helper §3.4 obliges, and it moves this only on the stops that genuinely
+    /// have nothing left to want. When it does, the presenter is told, and
+    /// that is right rather than incidental: a wait standing under a prompt
+    /// the owner has just stopped the player for is about nothing either.
+    /// What cannot happen is the reverse — a stop that leaves the intent alone
+    /// quietly retiring a fault — because the flag IS the event. No new
+    /// detector and no new timer.
     private(set) var wantsPlayback = true {
         didSet {
             guard wantsPlayback != oldValue else { return }
@@ -4610,9 +4639,7 @@ final class PlayerController: ObservableObject {
                 ))
             )
         case .stop(let terminal):
-            player.pause()
-            isPlaying = terminal.isPlaying
-            wantsPlayback = terminal.wantsPlayback
+            stopForBlockingSurface(revokingPlaybackIntent: true)
             isChangingStream = false
             // The ladder and the budgets are spent and the owner has stopped
             // the player: that is `exhausted`, and it is raised only after the
@@ -4747,9 +4774,7 @@ final class PlayerController: ObservableObject {
             // function means — so the only thing the verdict changes is whose
             // words the viewer reads.
             let terminal = event.kind.terminalState
-            player.pause()
-            isPlaying = terminal.isPlaying
-            wantsPlayback = terminal.wantsPlayback
+            stopForBlockingSurface(revokingPlaybackIntent: true)
             isChangingStream = false
             raiseOwnerFault(
                 source: "owner_stopped",
@@ -5211,9 +5236,28 @@ final class PlayerController: ObservableObject {
 
     /// The recovery owner's one obligation, in one place: stop the player, and
     /// make the published transport say so, before raising a blocking fault.
-    private func stopForBlockingSurface() {
+    ///
+    /// `revokingPlaybackIntent` is the difference between the two shapes of
+    /// stop this controller has, and it is the caller's to declare. Most owner
+    /// stops leave the viewer's intent alone — a viewer who was watching when a
+    /// 401 arrived still wants to be watching, and Try again resumes them.
+    /// The terminal ones revoke it, because nothing is coming that they could
+    /// want: a film that ended early twice, a stall ladder spent, an
+    /// established HDR delivery that will not descend to SDR.
+    ///
+    /// Those five used to write `player.pause()`, `isPlaying` and
+    /// `wantsPlayback` out by hand, three lines at a time, immediately before
+    /// raising. One helper is the point: §3.4's obligation has one
+    /// implementation, and `wantsPlayback` — which is also the presenter's
+    /// `playback_requested` — has one owner-side writer rather than five.
+    private func stopForBlockingSurface(revokingPlaybackIntent: Bool = false) {
         player.pause()
         isPlaying = false
+        // Deliberate, and told to the presenter: a `buffering` fault is about a
+        // player that WANTS media, and a player whose owner has stopped for
+        // good wants none. A wait still standing under the prompt this stop is
+        // about to raise is about nothing either.
+        if revokingPlaybackIntent { wantsPlayback = false }
         // The stop is presentation evidence too, and it has to be recorded
         // HERE rather than left to the next sampler tick. Every owner site
         // raises its blocking fault synchronously after this call, so a model
@@ -6193,11 +6237,9 @@ final class PlayerController: ObservableObject {
         isGrowingPlaylist: Bool
     ) {
         lastUncorroboratedEndMs = nil
-        player.pause()
         currentMs = max(0, endedAt)
         report(currentMs)
-        isPlaying = false
-        wantsPlayback = false
+        stopForBlockingSurface(revokingPlaybackIntent: true)
         finished = false
         raiseOwnerFault(
             source: "repeated_early_end",
@@ -6404,9 +6446,7 @@ final class PlayerController: ObservableObject {
             if isCompatibilityFailure,
                await retryWithNextCompatibilityFallback(at: position) { return }
         }
-        player.pause()
-        isPlaying = false
-        wantsPlayback = false
+        stopForBlockingSurface(revokingPlaybackIntent: true)
         isChangingStream = false
         // AVPlayer's own error object is a generic fallback and its message
         // can carry a media URL, so an armed server verdict is both more
@@ -7115,9 +7155,7 @@ final class PlayerController: ObservableObject {
             establishedPlayback: attachmentRecovery.establishedPlayback
         ) else { return false }
         guard !establishedHDRRetryAttempted, !unchangedRetryRuledOut else {
-            player.pause()
-            isPlaying = false
-            wantsPlayback = false
+            stopForBlockingSurface(revokingPlaybackIntent: true)
             isChangingStream = false
             // A silent stall reaches this rung before the stall funnel's own
             // stop, so leaving it out would hide the verdict on the path most

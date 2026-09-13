@@ -3430,9 +3430,11 @@ final class AppleClientTests: XCTestCase {
         XCTAssertEqual(
             view.components(separatedBy: "playbackProgressSurface").count - 1,
             2,
-            "one progress overlay: one definition and one use"
+            "one full-screen progress overlay: one definition and one use"
         )
-        XCTAssertTrue(view.contains("if controller.showsProgressSurface && !findingNext {"))
+        XCTAssertTrue(
+            view.contains("if let progress = controller.progressSurfaceRender, !findingNext {")
+        )
     }
 
     /// The presenter's own clock. Without it nothing ever recomputes a surface
@@ -3693,6 +3695,176 @@ final class AppleClientTests: XCTestCase {
         XCTAssertEqual(model.kind, .none, "and the viewer, not the transport, is what answers it")
     }
 
+    /// §3.1 gives a progress fault two renders and the difference is the whole
+    /// point of the class: the box covers the picture, the indicator sits
+    /// beside one that is playing. An indicator drawn as the box is a modal
+    /// spinner over a moving picture — the defect this contract exists to
+    /// remove, and one this branch briefly reintroduced.
+    func testAnIndicatorIsNeverDrawnAsTheBlockingBox() throws {
+        func surface(_ kind: PlaybackSurface.Kind, _ cls: PlaybackFault.Class) -> PlaybackSurface {
+            PlaybackSurface(
+                kind: kind,
+                fault: kind == .none ? nil : PlaybackFault(
+                    cls: cls, source: "owner_recovery_step", attached: 1,
+                    raisedAt: ContinuousClock.now, playerStopped: true
+                )
+            )
+        }
+        // The whole cross-product, so a render cannot be decided by the class
+        // when the contract decides it by the kind.
+        for cls in PlaybackFault.Class.allCases {
+            let rule = PlaybackSurfaceContract.rule(for: cls)
+            let asksTheViewer = rule.severity == .prompt || rule.severity == .terminal
+            XCTAssertEqual(
+                PlayerController.progressRender(for: surface(.indicator, cls)), .indicator,
+                "\(cls) as an indicator is in-chrome, whatever class it is"
+            )
+            XCTAssertEqual(
+                PlayerController.progressRender(for: surface(.blocking, cls)),
+                asksTheViewer ? nil : .blocking,
+                "\(cls) as a blocking surface is the box unless it asks the viewer something"
+            )
+            XCTAssertNil(PlayerController.progressRender(for: surface(.banner, cls)), "\(cls)")
+            XCTAssertNil(PlayerController.progressRender(for: surface(.none, cls)), "\(cls)")
+        }
+        // …and they are two different views. The full-frame modal box belongs
+        // to the blocking half alone.
+        let view = try playerViewSource()
+        XCTAssertTrue(
+            view.contains("case .blocking: playbackProgressSurface")
+                && view.contains("case .indicator: playbackProgressIndicator"),
+            "the two kinds must not share a render"
+        )
+        func body(_ declaration: String) throws -> String {
+            let start = try XCTUnwrap(view.range(of: declaration), "no \(declaration)")
+            let end = try XCTUnwrap(
+                view.range(of: "\n    }\n", range: start.upperBound..<view.endIndex)
+            )
+            return String(view[start.upperBound..<end.lowerBound])
+        }
+        let indicator = try body("private var playbackProgressIndicator: some View {")
+        let blocking = try body("private var playbackProgressSurface: some View {")
+        XCTAssertTrue(
+            blocking.contains(".frame(maxWidth: .infinity, maxHeight: .infinity)"),
+            "the blocking half covers the picture; that is what blocking means"
+        )
+        XCTAssertFalse(
+            indicator.contains(".frame(maxWidth: .infinity, maxHeight: .infinity)"),
+            "an indicator that fills the frame IS the blocking box, whatever it is called"
+        )
+        XCTAssertTrue(
+            indicator.contains("alignment: .topTrailing"),
+            "an in-chrome indicator sits in the chrome, not over the picture"
+        )
+        XCTAssertTrue(
+            indicator.contains(".allowsHitTesting(false)"),
+            "and it takes no tap and no focus from the chrome behind it"
+        )
+    }
+
+    /// The owner's stop has one implementation, and `wantsPlayback` — which is
+    /// also the presenter's `playback_requested` — has one owner-side writer.
+    ///
+    /// Five terminal stops used to spell `player.pause()`, `isPlaying` and
+    /// `wantsPlayback` out by hand immediately before raising, so the claim
+    /// that an owner stop could never retire a fault was simply false. It is
+    /// true of the helper, and the helper is now the only one.
+    func testTheOwnerStopsThePlayerInExactlyOnePlace() throws {
+        let source = try playerControllerSource()
+        XCTAssertFalse(
+            source.contains("player.pause()\n        isPlaying = false\n        wantsPlayback = false"),
+            "an owner stop written out by hand is a second implementation of §3.4"
+        )
+        // One hand-written stop survives, and it is the viewer's own pause
+        // rather than an owner's — which is the distinction the whole property
+        // turns on.
+        let byHand = "player.pause()\n            isPlaying = false\n            wantsPlayback = false"
+        XCTAssertEqual(
+            source.components(separatedBy: byHand).count - 1, 1,
+            "an owner stop written out by hand is a second implementation of §3.4"
+        )
+        let toggle = try XCTUnwrap(source.range(of: "func togglePlayPause() {"))
+        let toggleEnd = try XCTUnwrap(
+            source.range(of: "\n    }\n", range: toggle.upperBound..<source.endIndex)
+        )
+        XCTAssertTrue(
+            String(source[toggle.upperBound..<toggleEnd.lowerBound]).contains(byHand),
+            "the one stop written out by hand is the viewer's own pause"
+        )
+        // Every remaining writer, named. Two are the viewer (the on-screen
+        // transport and the lock screen), one is the end of the film, one is
+        // teardown, and one is the owner's single helper.
+        let writers = source.components(separatedBy: "wantsPlayback = false").count - 1
+        XCTAssertEqual(
+            writers, 5,
+            "a sixth writer of the viewer's transport intent wants a reason in this test"
+        )
+        let start = try XCTUnwrap(source.range(
+            of: "private func stopForBlockingSurface(revokingPlaybackIntent: Bool = false) {"
+        ))
+        let end = try XCTUnwrap(
+            source.range(of: "\n    }\n", range: start.upperBound..<source.endIndex)
+        )
+        let helper = String(source[start.upperBound..<end.lowerBound])
+        XCTAssertTrue(helper.contains("player.pause()"))
+        XCTAssertTrue(
+            helper.contains("if revokingPlaybackIntent { wantsPlayback = false }"),
+            "the owner revokes the viewer's intent only where it says it does"
+        )
+        XCTAssertTrue(
+            helper.contains("present(.presenting(false"),
+            "and the stop is presentation evidence"
+        )
+        // The five terminal stops, each reaching the helper AND declaring the
+        // revocation rather than writing the flag out beside it.
+        for site in [
+            "case .stop(let terminal):",
+            "let terminal = event.kind.terminalState",
+            "func stopAfterRepeatedEarlyEnd(",
+            "guard !establishedHDRRetryAttempted, !unchangedRetryRuledOut else {",
+            "// AVPlayer's own error object is a generic fallback",
+        ] {
+            let open = try XCTUnwrap(source.range(of: site), "site vanished: \(site)")
+            let before = String(source[..<open.lowerBound].suffix(400))
+            let after = String(source[open.lowerBound...].prefix(700))
+            XCTAssertTrue(
+                (before + after).contains("stopForBlockingSurface(revokingPlaybackIntent: true)"),
+                "\(site) stops the player without going through the one helper"
+            )
+        }
+    }
+
+    /// The benign case, pinned rather than asserted away: a terminal stop that
+    /// DOES revoke the intent retires a wait still standing under it, and the
+    /// prompt it raises is untouched.
+    func testATerminalStopRetiresAStaleWaitAndKeepsItsOwnPrompt() {
+        let origin = ContinuousClock.now
+        var model = PlaybackSurfaceModel()
+        model.apply(.attach(1), now: origin)
+        model.apply(
+            PlaybackSurfaceModel.raise(source: "media_waiting", context: .attached, attached: 1),
+            now: origin
+        )
+        // What `stopForBlockingSurface(revokingPlaybackIntent: true)` does, in
+        // the order it does it: the intent goes, then the evidence, then the
+        // owner raises.
+        let retired = model.apply(.playbackRequested(false), now: origin.advanced(by: .seconds(1)))
+        XCTAssertEqual(retired.map(\.by), [.playbackNotRequested])
+        model.apply(.presenting(false, attached: 1), now: origin.advanced(by: .seconds(1)))
+        model.apply(
+            PlaybackSurfaceModel.raise(
+                source: "owner_stopped", context: .attached, attached: 1, playerStopped: true
+            ),
+            now: origin.advanced(by: .seconds(1))
+        )
+        XCTAssertEqual(model.currentFault?.cls, .stopped)
+        XCTAssertEqual(
+            model.faults.count, 1,
+            "the wait was about a player that wanted media; nothing does now"
+        )
+        XCTAssertTrue(model.entersFailedRouting)
+    }
+
     /// The adapter, pinned — because the reducer cannot pin this.
     ///
     /// `.inert` returns before the reducer's switch, so a model test fed inert
@@ -3712,7 +3884,7 @@ final class AppleClientTests: XCTestCase {
             "presentation evidence has two call sites: the evidence sampler, and the owner's stop"
         )
         let stopStart = try XCTUnwrap(
-            source.range(of: "private func stopForBlockingSurface() {")
+            source.range(of: "private func stopForBlockingSurface(revokingPlaybackIntent: Bool = false) {")
         )
         let stopEnd = try XCTUnwrap(
             source.range(of: "\n    }\n", range: stopStart.upperBound..<source.endIndex)
@@ -3915,7 +4087,7 @@ final class AppleClientTests: XCTestCase {
             )
             let block = String(source[start.lowerBound..<end.upperBound])
             XCTAssertTrue(
-                block.contains("player.pause()") || block.contains("stopForBlockingSurface()"),
+                block.contains("player.pause()") || block.contains("stopForBlockingSurface("),
                 "\(open) raises \(raise) without stopping the player first"
             )
         }
@@ -3928,13 +4100,15 @@ final class AppleClientTests: XCTestCase {
         let failureRaise = try XCTUnwrap(
             source.range(of: "Self.mediaFailureSurfaceSource(", range: failureStart.upperBound..<source.endIndex)
         )
+        let failureBlock = String(source[failureStart.lowerBound..<failureRaise.upperBound])
         XCTAssertTrue(
-            String(source[failureStart.lowerBound..<failureRaise.upperBound]).contains("player.pause()"),
+            failureBlock.contains("player.pause()")
+                || failureBlock.contains("stopForBlockingSurface("),
             "handleItemFailure raises a terminal without stopping the player first"
         )
         // And the helper itself, so "stop" cannot quietly become "log".
         let helper = try XCTUnwrap(
-            source.range(of: "private func stopForBlockingSurface() {")
+            source.range(of: "private func stopForBlockingSurface(revokingPlaybackIntent: Bool = false) {")
         )
         let helperEnd = try XCTUnwrap(
             source.range(of: "\n    }\n", range: helper.upperBound..<source.endIndex)
@@ -5310,7 +5484,7 @@ final class AppleClientTests: XCTestCase {
 
         // The delivery kind reaches the server beacon as its own reason.
         XCTAssertEqual(PlaybackStallKind.delivery.rawValue, "delivery")
-        XCTAssertFalse(PlaybackStallKind.delivery.terminalState.isPlaying)
+        XCTAssertFalse(PlaybackStallKind.delivery.terminalState.message.isEmpty)
     }
 
     /// The build 63 field regression, pinned. Server-side evidence alone —
@@ -5401,8 +5575,14 @@ final class AppleClientTests: XCTestCase {
         XCTAssertEqual(repeated, .stop(PlaybackStallKind.buffering.terminalState))
 
         let terminal = PlaybackStallKind.buffering.terminalState
-        XCTAssertFalse(terminal.isPlaying)
-        XCTAssertFalse(terminal.wantsPlayback)
+        XCTAssertFalse(terminal.message.isEmpty, "a spent ladder owes the viewer a sentence")
+        // The transport half of this used to live on the struct, as two
+        // constant `false`s the two `.stop` call sites copied into `isPlaying`
+        // and `wantsPlayback` by hand. It lives in the owner's one stop helper
+        // now — `stopForBlockingSurface(revokingPlaybackIntent: true)` — and
+        // `testTheOwnerStopsThePlayerInExactlyOnePlace` pins that both sites
+        // reach it, which is a stronger statement than two constants on a
+        // struct nobody had to read.
         // The struct no longer carries a `failed` flag. Whether the viewer sees
         // a blocking surface is the fault class's answer now, and the stall
         // funnel's `.stop` raises `owner_exhausted` — `exhausted`, which the
