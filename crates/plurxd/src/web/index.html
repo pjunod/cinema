@@ -4063,7 +4063,7 @@ async function persistentWait(v,p,began,generation,actionGeneration){
     raisePlaybackSurface("owner_exhausted",{player_stopped:true,
       title:"Playback is still stalled.",
       detail:"One automatic recovery was already tried. Your place is saved.",
-      actions:playbackStallActions(p)});
+      actions:playbackExhaustedActions(p)});
     return;
   }
   const estimateBps=(p.hls&&p.hls.bandwidthEstimate)||p.bandwidthSeedBps;
@@ -4111,7 +4111,7 @@ function showStallRecoveryFailure(note){
   stopPlayerForExhaustion();
   raisePlaybackSurface("owner_exhausted",{player_stopped:true,
     title:"Playback could not reconnect.",detail:note||"Your place is saved.",
-    actions:playbackStallActions(p)});
+    actions:playbackExhaustedActions(p)});
 }
 // The failure every per-frame counter forgives: hardware decode, a full
 // buffer, and the presentation clock quietly running at three-quarter speed.
@@ -8673,14 +8673,10 @@ async function openSessionRetryingNotYet(fileId, opts, signal, options){
     if(!sequence.raised){
       sequence.raised=true;
       stopPlayerForExhaustion();
-      // Deliberately NOT the class's `keep_waiting`: on this path there is no
-      // stream to keep waiting on and no detector to re-arm, so offering it
-      // would be a button that does nothing. Try again re-runs the whole open,
-      // which IS the honest "one more bounded attempt" here.
       raisePlaybackSurface("owner_exhausted",{context:where,player_stopped:true,
         title:"Playback is stalled.",
         detail:"the server is still building this stream and did not finish in a minute",
-        actions:["retry","close"]});
+        actions:["keep_waiting","retry","close"]});
     }
     return Object.assign(new Error("The server did not finish starting this stream."),
       {name:"PlaybackCreateExhausted",surfaceRaised:true,createRetryReason:reason});
@@ -11454,6 +11450,17 @@ function playbackSurfaceHasLiveFault(source,attached){
 function playbackStallActions(p,transcodeReason){
   if(p) p.surfaceTranscodeReason=transcodeReason||"stall-manual";
   return ["retry"].concat(p&&p.method!=='transcode'?["force_transcode"]:[]).concat(["close"]);
+}
+// The same list for an `exhausted` PROMPT, which leads with one more bounded
+// attempt. Ruled 2026-09-13: the web offers Keep waiting. The class's default
+// actions are `keep_waiting · retry · close` and the label and handler have
+// been in place since M1 — the only thing missing was a site that offered it.
+// Deliberately not folded into `playbackStallActions`: that list is also what a
+// `stopped` terminal carries, and a server verdict that ended the recipe has
+// nothing left to wait for, so re-arming a detector over it would be a button
+// that lies.
+function playbackExhaustedActions(p,transcodeReason){
+  return ["keep_waiting"].concat(playbackStallActions(p,transcodeReason));
 }
 // One step of the presenter: feed the event, keep the state, emit what it says,
 // render what it returns. The only way a surface changes.

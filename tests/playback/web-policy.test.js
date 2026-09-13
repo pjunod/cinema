@@ -2823,6 +2823,95 @@ test("the shipped canplay listener feeds an inert event and nothing else", () =>
   assert.equal(after.class, before.class);
 });
 
+// ---- Keep waiting: the button, and exactly what pressing it does -----------
+//
+// Ruled 2026-09-13. The label and the handler were in place from M1 and no site
+// offered the action, so `keep_waiting` was vocabulary the viewer could never
+// reach. Two halves are pinned here: that the prompt still offers it, and that
+// pressing it is ONE MORE BOUNDED ATTEMPT from the existing ladder and nothing
+// else — §3.1's web definition is `armStall` re-armed and `recoveringStall`
+// cleared, and a handler that also reopened, seeked or reported would make the
+// presenter's button a second recovery actor.
+function keepWaitingHarness() {
+  const calls = [];
+  const player = { method: "remux", recoveringStall: { at: 1, action: "reconnect" } };
+  const act = new Function(
+    "PLAYER", "playbackSurfaceStep", "retryPlayback", "closePlayer",
+    "startTranscodeFallback", "logout", "armStall", "pbPosSec",
+    [
+      shippedSource("playbackSurfaceAction"),
+      "return playbackSurfaceAction;",
+    ].join("\n"),
+  )(
+    player,
+    (event) => calls.push(["step", event]),
+    () => calls.push(["retryPlayback"]),
+    () => calls.push(["closePlayer"]),
+    (reason) => calls.push(["startTranscodeFallback", reason]),
+    (options) => calls.push(["logout", options]),
+    (from) => calls.push(["armStall", from]),
+    () => 742,
+  );
+  return { act, calls, player };
+}
+
+test("Keep waiting re-arms the ladder, and does nothing else", () => {
+  const h = keepWaitingHarness();
+  const answer = h.act("keep_waiting");
+  assert.equal(answer, undefined, "Keep waiting returns no recovery to await");
+  assert.deepEqual(h.calls, [
+    ["step", { user_action: "keep_waiting" }],
+    ["armStall", 742],
+  ], "the reducer clears the fault, the owner re-arms, and that is the whole of it");
+  assert.equal(h.player.recoveringStall, null,
+    "the spent recovery is cleared, so the next stall is a fresh episode");
+});
+
+test("every other action is still its own effect", () => {
+  for (const [action, effect] of [
+    ["retry", "retryPlayback"],
+    ["close", "closePlayer"],
+    ["force_transcode", "startTranscodeFallback"],
+  ]) {
+    const h = keepWaitingHarness();
+    h.act(action);
+    assert.deepEqual(h.calls.map((call) => call[0]),
+      ["step", effect], `${action} must not have become Keep waiting`);
+  }
+});
+
+test("the exhausted prompt offers Keep waiting on every path that raises it", () => {
+  // The two stall sites share one list; the create-exhaustion site names its
+  // own. All three are `exhausted`, and the class leads with `keep_waiting`.
+  const shared = new Function(
+    "PLAYER",
+    [
+      shippedSource("playbackStallActions"),
+      shippedSource("playbackExhaustedActions"),
+      "return playbackExhaustedActions;",
+    ].join("\n"),
+  );
+  assert.deepEqual(shared({ method: "remux" })({ method: "remux" }),
+    ["keep_waiting", "retry", "force_transcode", "close"]);
+  assert.deepEqual(shared({ method: "transcode" })({ method: "transcode" }),
+    ["keep_waiting", "retry", "close"],
+    "Force transcode is still not offered on a session that already is one");
+  // …and a `stopped` terminal keeps the list it had: there is nothing left to
+  // wait for when the server has ended the recipe.
+  const stall = new Function("PLAYER",
+    [shippedSource("playbackStallActions"), "return playbackStallActions;"].join("\n"));
+  assert.deepEqual(stall({})({ method: "remux" }), ["retry", "force_transcode", "close"]);
+  // The create-exhaustion owner names the actions inline, so read them back.
+  const exhaust = shippedSource("openSessionRetryingNotYet");
+  assert.match(exhaust, /actions:\["keep_waiting","retry","close"\]/,
+    "the create-exhaustion prompt offers Keep waiting too");
+  assert.equal(
+    policy.SURFACE_CLASSES.exhausted.default_actions[0],
+    "keep_waiting",
+    "and the fixture's own class default is what all three follow",
+  );
+});
+
 // MUTATION (i): delete the stop from showStallRecoveryFailure and this fails.
 // A blocking surface is only ever drawn over a player its owner has stopped.
 test("the stall-recovery prompt stops the player before it raises", () => {
@@ -2832,6 +2921,7 @@ test("the stall-recovery prompt stops the player before it raises", () => {
     "PLAYER", "document", "pausePlaybackInternally", "stopPlayerTimers", "raisePlaybackSurface",
     [
       shippedSource("playbackStallActions"),
+      shippedSource("playbackExhaustedActions"),
       shippedSource("stopPlayerForExhaustion"),
       shippedSource("showStallRecoveryFailure"),
       "return showStallRecoveryFailure;",
@@ -2851,7 +2941,11 @@ test("the stall-recovery prompt stops the player before it raises", () => {
     "the owner stops the player, and only then raises (contract §3.4)");
   assert.equal(raised.source, "owner_exhausted");
   assert.equal(raised.fault.player_stopped, true);
-  assert.deepEqual(raised.fault.actions, ["retry", "force_transcode", "close"]);
+  // Ruled 2026-09-13: an `exhausted` prompt leads with Keep waiting, which is
+  // the class's own default action list. MUTATION: drop `keep_waiting` from
+  // `playbackExhaustedActions` and this line fails.
+  assert.deepEqual(raised.fault.actions,
+    ["keep_waiting", "retry", "force_transcode", "close"]);
 
   // The reducer's half of the same rule: without the stop this is a fixture
   // error and no surface at all.
