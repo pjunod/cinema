@@ -78,6 +78,11 @@ enum LiveTvInputRouting {
     /// once the answer exists rather than just before it does.
     static let guidePollAfterNextRefreshSeconds: Int = 5
 
+    /// Never sleep longer than this between guide reads, whatever the document
+    /// claims — the far end of the same clamp `guidePollMinSeconds` holds.
+    /// Transcribed like its siblings: the contract's `guide_poll_ceiling_s`.
+    static let guidePollCeilingSeconds: Int = 1200
+
     /// How long a pressing *web* document waits for a sibling tab to claim a
     /// start hint before treating it as an orphan. Transcribed because the
     /// contract pins all of `live.timings` in every client; Apple has one

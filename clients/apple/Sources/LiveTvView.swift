@@ -233,30 +233,40 @@ final class LiveTvPlayerController: ObservableObject {
 
     /// Where the next guide poll lands, in seconds from now.
     ///
-    /// The owner publishes `next_refresh_at`, so the client asks once the
-    /// answer exists rather than on a cadence of its own; a guide that is
-    /// `unavailable` and says nothing about coming back is asked for more
-    /// often, because an owner with nothing to serve is usually an owner about
-    /// to have something. Clamped at both ends: a nonsense clock off the wire
-    /// can neither spin this loop nor park it for a day. Every number comes
-    /// from `tests/playback/player-input-contract.json` `live.timings`.
+    /// **The owner's clock wins whenever it exists.** A document that carries
+    /// `next_refresh_at` is polled on that — `unavailable` ones included. The
+    /// plan specified a flat `guide_poll_unavailable_s` for an unavailable
+    /// guide; now that the owner serves `next_refresh_at` on unavailable
+    /// answers too, an owner that knows when it comes back is a better answer
+    /// than a constant, and that constant is the fallback for a document that
+    /// says nothing. (A deliberate, recorded deviation from §3.16, shared with
+    /// the web and Android reducers.)
+    ///
+    /// **The clamp guards the wire, not the contract.** Only the
+    /// `next_refresh_at` branch is clamped, because only it reads a number off
+    /// the network: a far-future answer must not park the grid for hours, and
+    /// one far in the past must not spin the loop. The two early returns are
+    /// contract constants handed back verbatim — clamping those would make the
+    /// client disagree with the value the shared fixture pins, which is a worse
+    /// failure than the one it would prevent.
+    ///
+    /// **The floor is applied last, so the floor wins.** If `guide_poll_min_s`
+    /// and `guide_poll_ceiling_s` ever crossed, clamping ceiling-last would
+    /// return a delay *below* the floor and poll a struggling owner harder than
+    /// the contract allows — the dangerous direction. Every number comes from
+    /// `tests/playback/player-input-contract.json` `live.timings`.
     static func guidePollSeconds(nextRefreshAt: Int?, freshness: String, now: Int) -> Int {
+        let ceiling = LiveTvInputRouting.guidePollCeilingSeconds
         let floor = LiveTvInputRouting.guidePollMinSeconds
         guard let next = nextRefreshAt else {
             return freshness == "unavailable" ? LiveTvInputRouting.guidePollUnavailableSeconds : floor
         }
+        // Bound the gap before adding to it: `next` is off the wire and
+        // `gap + after` would otherwise overflow on a value near `Int.max`.
         let difference = next.subtractingReportingOverflow(now)
-        let gap = difference.overflow ? 0 : min(max(difference.partialValue, -guidePollCeilingSeconds),
-                                                guidePollCeilingSeconds)
-        return min(max(gap + LiveTvInputRouting.guidePollAfterNextRefreshSeconds, floor),
-                   guidePollCeilingSeconds)
+        let gap = difference.overflow ? 0 : min(max(difference.partialValue, -ceiling), ceiling)
+        return max(min(gap + LiveTvInputRouting.guidePollAfterNextRefreshSeconds, ceiling), floor)
     }
-
-    /// Never sleep longer than the owner's own refresh cadence, whatever the
-    /// document claims. Kept on the controller rather than in `.task {}` on a
-    /// view, for the same reason the heartbeat is: leaving a tab must not
-    /// forget the guide.
-    static let guidePollCeilingSeconds = 20 * 60
 
     private func startGuideRefresh(_ loading: UUID) {
         guideRefresh?.cancel()
@@ -271,9 +281,13 @@ final class LiveTvPlayerController: ObservableObject {
                 // even where the owner had data.
                 let current = Int(Date().timeIntervalSince1970)
                 let from = current - current % LiveTvGridMetrics.slotSeconds
-                // A read that failed says nothing about when the owner comes
-                // back, so the floor is the whole of the answer.
-                var seconds = LiveTvInputRouting.guidePollMinSeconds
+                // A read that failed carries exactly the information an
+                // `unavailable` document with no `next_refresh_at` carries —
+                // the owner has nothing to give and has not said when it will
+                // — so it is paced the same way, and all three clients agree.
+                // The floor would poll a struggling owner twice as hard for no
+                // extra information.
+                var seconds = LiveTvInputRouting.guidePollUnavailableSeconds
                 if let fetched = try? await api.guide(
                     from: from, hours: LiveTvGridMetrics.requestedHours) {
                     guard self.loadId == loading else { return }

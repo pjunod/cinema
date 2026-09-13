@@ -1090,6 +1090,15 @@ final class LiveTvLease {
     /// The POST, and the one replay the contract allows. Every outcome runs
     /// through the shared reducer, so what is rendered and what survives on
     /// disk are the fixture's answers rather than this file's opinion.
+    ///
+    /// The replay is what actually recovers a start whose answer was lost, and
+    /// it works only because nothing fences the request id underneath it: the
+    /// owner's keyed idempotency joins the second POST to the session the first
+    /// one may already have made. An ingress that retired the id on a failed
+    /// start would turn this replay into a `settings_conflict` — an
+    /// owner-decided code, so the reducer would forget the hint and the viewer
+    /// would lose the only handle on a session that exists. If that behaviour
+    /// ever comes back, this loop is the thing it breaks.
     private func dispatch(_ channel: String, requestId: String?) async throws -> LiveTvStarted {
         var verdict = LiveTvStartReducer.noAnswer
         for attempt in 0...LiveTvInputRouting.startReplayAttempts {
@@ -1108,8 +1117,12 @@ final class LiveTvLease {
     // MARK: - opening
 
     /// The open-time step of §3.16. Answers the session to attach when the
-    /// owner still has it, and `nil` for everything else — including a resume
-    /// that never answered, which keeps the hint for the next press.
+    /// owner still has it, and `nil` for everything else.
+    ///
+    /// Whether the hint survives is the reducer's call in every branch: the
+    /// owner saying `ended`/`retired`, and the owner *refusing*, both spend the
+    /// id; `pending`, a refusal no owner decided, and no answer at all all keep
+    /// it for the next press.
     func resumeIfRecent() async -> LiveTvStarted? {
         guard current == nil, let hint = hints.read(),
               await requests.recoveryRoutesAvailable() else { return nil }
@@ -1118,10 +1131,25 @@ final class LiveTvLease {
         let operation = Task { @MainActor in
             await previous?.value
             guard generation == expected, current == nil else { return nil as LiveTvStarted? }
-            let answer = try? await requests.resume(hint.requestId)
-            switch LiveTvStartReducer.resumeAction(outcome: answer?.outcome) {
+            let answer: LiveTvResumeAnswer
+            do { answer = try await requests.resume(hint.requestId) }
+            catch {
+                // A *refused* resume is still an answer about this request id,
+                // so it goes through the same reducer a refused start does. An
+                // owner that decided has spent the id: keeping the hint would
+                // make the next press waste a retire on it and would run this
+                // resume again at every launch, for ever. Anything the owner
+                // did not decide — an ingress refusal, a deploy blip that
+                // never reached the owner, a transport failure — keeps it,
+                // because none of those prove the session is gone.
+                if !LiveTvStartReducer.verdict(LiveTvStartAnswer(error: error)).keepHint {
+                    forget(hint.requestId)
+                }
+                return nil
+            }
+            switch LiveTvStartReducer.resumeAction(outcome: answer.outcome) {
             case .reattach:
-                guard let session = answer?.session, session.live,
+                guard let session = answer.session, session.live,
                       !session.sessionId.isEmpty, session.sessionId.utf8.count <= 1024
                 else { return nil }
                 // A press that superseded this resume already released

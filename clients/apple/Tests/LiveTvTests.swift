@@ -718,6 +718,64 @@ final class LiveTvTests: XCTestCase {
         XCTAssertEqual(hints.value?.requestId, id)
     }
 
+    func testARefusedResumeForgetsTheHintOnlyWhenTheOwnerDecidedIt() async throws {
+        let hints = LiveTvMemoryHintStore()
+        let id = String(repeating: "f", count: 32)
+        let requests = LiveTvMockRequests(result: started())
+        requests.protocols = [1, 2, 3]
+
+        // The owner decided: this request id is spent. Keeping the hint would
+        // make the next press waste a retire on it and would run this resume
+        // again at every launch, for ever.
+        try hints.write(LiveTvStartHint(requestId: id, touchedAt: 1))
+        requests.resumeFailure = LiveTvFailure(code: "channel_not_found", retry: "never",
+                                               ownerDecided: true, status: 409)
+        let decided = await LiveTvLease(requests: requests, hints: hints).resumeIfRecent()
+        XCTAssertNil(decided)
+        XCTAssertNil(hints.value, "an owner-decided refusal spends the id")
+
+        // The ingress refused the request itself before any owner saw it —
+        // also spent, and for the same reason the start reducer says so.
+        try hints.write(LiveTvStartHint(requestId: id, touchedAt: 1))
+        requests.resumeFailure = LiveTvFailure(code: "invalid_request", status: 400)
+        let refusedById = await LiveTvLease(requests: requests, hints: hints).resumeIfRecent()
+        XCTAssertNil(refusedById)
+        XCTAssertNil(hints.value)
+    }
+
+    func testARefusedResumeTheOwnerDidNotDecideKeepsTheHint() async throws {
+        let hints = LiveTvMemoryHintStore()
+        let id = String(repeating: "0", count: 32)
+        let requests = LiveTvMockRequests(result: started())
+        requests.protocols = [1, 2, 3]
+
+        // A deploy blip. The ingress never reached the owner, so nothing here
+        // proves the session is gone — and a peer failure is stamped
+        // `owner_decided: false` precisely so this case keeps its handle.
+        for refusal in [LiveTvFailure(code: "owner_unavailable", retry: "now",
+                                      ownerDecided: false, status: 503),
+                        // A typed refusal minted outside the Live TV module
+                        // carries no verdict at all.
+                        LiveTvFailure(code: "node_maintenance", status: 503),
+                        // An older ingress has no resume route to answer with.
+                        LiveTvFailure(code: "owner_unavailable", status: 404)] {
+            try hints.write(LiveTvStartHint(requestId: id, touchedAt: 1))
+            requests.resumeFailure = refusal
+            let kept = await LiveTvLease(requests: requests, hints: hints).resumeIfRecent()
+            XCTAssertNil(kept)
+            XCTAssertEqual(hints.value?.requestId, id,
+                           "\(refusal.code) is not proof the session is gone")
+        }
+
+        // And the transport failure the fixture already pins, for the same
+        // reason: no answer is not a verdict.
+        try hints.write(LiveTvStartHint(requestId: id, touchedAt: 1))
+        requests.resumeFailure = URLError(.timedOut)
+        let dropped = await LiveTvLease(requests: requests, hints: hints).resumeIfRecent()
+        XCTAssertNil(dropped)
+        XCTAssertEqual(hints.value?.requestId, id)
+    }
+
     func testResumeIsNotAttemptedWithoutAHintOrWithoutTheRecoveryRoutes() async throws {
         let hints = LiveTvMemoryHintStore()
         let requests = LiveTvMockRequests(result: started())
@@ -1187,6 +1245,7 @@ final class LiveTvTests: XCTestCase {
                 let retireLivenessProbeMs: Int
                 let retireOrphanAfterKeepalives: Int
                 let startReplayAttempts: Int
+                let guidePollCeilingS: Int
                 enum CodingKeys: String, CodingKey {
                     case hideAfterMs = "hide_after_ms"
                     case channelCoalesceMs = "channel_coalesce_ms"
@@ -1196,6 +1255,7 @@ final class LiveTvTests: XCTestCase {
                     case retireLivenessProbeMs = "retire_liveness_probe_ms"
                     case retireOrphanAfterKeepalives = "retire_orphan_after_keepalives"
                     case startReplayAttempts = "start_replay_attempts"
+                    case guidePollCeilingS = "guide_poll_ceiling_s"
                 }
             }
             // Spelled out rather than decoded with `.convertFromSnakeCase`:
@@ -1250,6 +1310,11 @@ final class LiveTvTests: XCTestCase {
                        fixture.live.timings.retireOrphanAfterKeepalives)
         XCTAssertEqual(LiveTvInputRouting.startReplayAttempts,
                        fixture.live.timings.startReplayAttempts)
+        // The far end of the guide-poll clamp is a contract number like the
+        // rest: a missing `guide_poll_ceiling_s` now fails the decode rather
+        // than passing silently, which is the whole point of pinning it.
+        XCTAssertEqual(LiveTvInputRouting.guidePollCeilingSeconds,
+                       fixture.live.timings.guidePollCeilingS)
     }
 
     // ---- the two narrowings, pinned in the source they live in ----------
@@ -1379,7 +1444,17 @@ final class LiveTvTests: XCTestCase {
         XCTAssertFalse(source.contains("guideRefreshNanoseconds"),
                        "a fixed twenty-minute cadence cannot see an owner that came back in one")
         XCTAssertTrue(source.contains("seconds = Self.guidePollSeconds("))
-        XCTAssertEqual(LiveTvPlayerController.guidePollCeilingSeconds, 20 * 60)
+        // A failed read is paced like an unavailable document that says
+        // nothing about coming back — the same information, the same wait.
+        XCTAssertTrue(
+            source.contains("var seconds = LiveTvInputRouting.guidePollUnavailableSeconds"),
+            "a failed guide read must not poll a struggling owner at the floor")
+        // The poll ceiling is a contract number transcribed beside its six
+        // siblings, not one invented in the view. (The `20 * 60` still in this
+        // file is the unrelated source-format TTL.)
+        XCTAssertFalse(source.contains("static let guidePollCeilingSeconds"),
+                       "the ceiling must not be redefined here")
+        XCTAssertTrue(source.contains("let ceiling = LiveTvInputRouting.guidePollCeilingSeconds"))
     }
 
     /// The poll lands where the owner said it should, floored, ceilinged, and
@@ -1401,19 +1476,55 @@ final class LiveTvTests: XCTestCase {
         XCTAssertEqual(poll(nil, "unavailable"), LiveTvInputRouting.guidePollUnavailableSeconds)
         XCTAssertEqual(poll(nil, "stale"), LiveTvInputRouting.guidePollMinSeconds)
         XCTAssertEqual(poll(nil, "fresh"), LiveTvInputRouting.guidePollMinSeconds)
-        // An unavailable guide that DOES say when it comes back is polled on
-        // that, not on the unavailable cadence.
+        // The owner's clock wins whenever it exists: an unavailable guide that
+        // DOES say when it comes back is polled on that, not on the flat
+        // unavailable cadence. A recorded deviation from the plan's §3.16,
+        // shared with the web and Android reducers.
         XCTAssertEqual(poll(now + 100, "unavailable"), 105)
+        XCTAssertEqual(poll(now + 1, "unavailable"), LiveTvInputRouting.guidePollMinSeconds,
+                       "the floor still applies to an unavailable document")
         // Nonsense off the wire can neither spin the loop nor park it.
-        XCTAssertEqual(poll(Int.max), LiveTvPlayerController.guidePollCeilingSeconds)
+        XCTAssertEqual(poll(Int.max), LiveTvInputRouting.guidePollCeilingSeconds)
         XCTAssertEqual(poll(Int.min), LiveTvInputRouting.guidePollMinSeconds)
-        XCTAssertEqual(poll(now + 86_400), LiveTvPlayerController.guidePollCeilingSeconds)
-        for next in [nil, Int.min, -1, 0, now - 1, now, now + 14, now + 15, Int.max] {
-            let seconds = poll(next)
-            XCTAssertGreaterThanOrEqual(seconds, LiveTvInputRouting.guidePollMinSeconds, "\(String(describing: next))")
-            XCTAssertLessThanOrEqual(seconds, LiveTvPlayerController.guidePollCeilingSeconds,
-                                     "\(String(describing: next))")
+        XCTAssertEqual(poll(now + 86_400), LiveTvInputRouting.guidePollCeilingSeconds)
+        // The clamp guards the wire, not the contract: it is applied to the
+        // `next_refresh_at` branch only. The two constants come back verbatim,
+        // because a client that silently rewrote them would disagree with the
+        // value the shared fixture pins.
+        XCTAssertEqual(poll(nil, "unavailable"), LiveTvInputRouting.guidePollUnavailableSeconds)
+        XCTAssertEqual(poll(nil, "fresh"), LiveTvInputRouting.guidePollMinSeconds)
+        // Whatever comes off the wire, the answer lands inside the contract's
+        // own bounds — and never under the floor, which is the direction that
+        // would poll a struggling owner harder than the contract allows.
+        for next in [nil, Int.min, Int.min + 1, -1, 0, now - 86_400, now - 1, now, now + 14,
+                     now + 15, now + 1_195, now + 1_200, now + 86_400, Int.max - 1, Int.max] {
+            for freshness in ["fresh", "stale", "unavailable"] {
+                let seconds = poll(next, freshness)
+                let where_ = "\(String(describing: next))/\(freshness)"
+                XCTAssertGreaterThanOrEqual(seconds, LiveTvInputRouting.guidePollMinSeconds, where_)
+                XCTAssertLessThanOrEqual(seconds, LiveTvInputRouting.guidePollCeilingSeconds, where_)
+            }
         }
+    }
+
+    /// The floor is applied last on purpose. `min(max(gap, floor), ceiling)`
+    /// looks equivalent and is not: if the two contract numbers ever crossed it
+    /// would return a delay *below* `guide_poll_min_s`. Identical for every
+    /// value the contract actually carries, which is why only the source says
+    /// so — and why it would be swapped back by someone tidying up.
+    func testTheGuidePollAppliesItsFloorLastSoTheFloorWins() throws {
+        let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let source = try String(
+            contentsOf: testsDirectory.appendingPathComponent("../Sources/LiveTvView.swift").standardizedFileURL,
+            encoding: .utf8)
+        XCTAssertTrue(
+            source.contains("return max(min(gap + LiveTvInputRouting.guidePollAfterNextRefreshSeconds, ceiling), floor)"),
+            "the floor must be the outermost clamp")
+        XCTAssertFalse(source.contains("floor), ceiling)"),
+                       "clamping the ceiling last lets a crossed pair poll below the floor")
+        XCTAssertLessThan(LiveTvInputRouting.guidePollMinSeconds,
+                          LiveTvInputRouting.guidePollCeilingSeconds,
+                          "the contract's own pair must not be crossed")
     }
 
     func testTheGuideDocumentCarriesTheOwnersNextRefreshTime() throws {
