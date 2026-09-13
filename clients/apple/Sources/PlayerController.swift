@@ -5196,12 +5196,15 @@ final class PlayerController: ObservableObject {
                 throw PlaybackCreateRetryError.exhausted(reason: "deadline")
             }
             do {
-                let started = try await requestHlsSession(model, file, request)
+                // Not `started`: that is the controller's own "is this player
+                // running" flag, and shadowing it inside a recovery sequence is
+                // the kind of thing a reader has to stop and check.
+                let opened = try await requestHlsSession(model, file, request)
                 guard !createRetryExpired || createRetryEpoch != epoch else {
-                    await release(session: started.sessionId)
+                    await release(session: opened.sessionId)
                     throw PlaybackCreateRetryError.exhausted(reason: "deadline")
                 }
-                return started
+                return opened
             } catch let spent as PlaybackCreateRetryError {
                 throw spent
             } catch {
