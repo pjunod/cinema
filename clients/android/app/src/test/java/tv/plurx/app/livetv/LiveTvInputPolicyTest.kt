@@ -100,6 +100,7 @@ class LiveTvInputPolicyTest {
             pinned("guide_poll_after_next_refresh_s").toLong(),
             LiveTvInputPolicy.GUIDE_POLL_AFTER_NEXT_REFRESH_S,
         )
+        assertEquals(pinned("guide_poll_ceiling_s").toLong(), LiveTvInputPolicy.GUIDE_POLL_CEILING_S)
         assertEquals(pinned("retire_liveness_probe_ms").toLong(), LiveTvInputPolicy.RETIRE_LIVENESS_PROBE_MS)
         assertEquals(
             pinned("retire_orphan_after_keepalives"),
@@ -147,12 +148,46 @@ class LiveTvInputPolicyTest {
             LiveTvInputPolicy.GUIDE_POLL_UNAVAILABLE_S,
             LiveTvGuideReducer.nextPollDelaySeconds(null, 1_000),
         )
-        // A nonsense far-future value cannot overflow into a negative delay.
-        assertTrue(
+    }
+
+    /**
+     * The ceiling. An owner whose clock is skewed, whose refresh interval is
+     * misconfigured, or whose loop has stopped can answer with a
+     * `next_refresh_at` hours out; the grid must still come back on its own
+     * rather than sit on a stale document until the viewer leaves the screen.
+     */
+    @Test
+    fun aFarFutureNextRefreshCannotParkTheGrid() {
+        val ceiling = LiveTvInputPolicy.GUIDE_POLL_CEILING_S
+        val fresh = LiveTvGuide(freshness = "fresh")
+        val now = 1_000L
+
+        // Six hours out, an owner-day out, and the end of time all clamp.
+        listOf(now + 6 * 3_600, now + 86_400, Long.MAX_VALUE).forEach { announced ->
+            assertEquals(
+                "next_refresh_at $announced must clamp to the ceiling",
+                ceiling,
+                LiveTvGuideReducer.nextPollDelaySeconds(fresh.copy(next_refresh_at = announced), now),
+            )
+        }
+        // An unavailable guide with a far-future refresh clamps the same way:
+        // the ceiling is about the answer, not about the freshness.
+        assertEquals(
+            ceiling,
             LiveTvGuideReducer.nextPollDelaySeconds(
-                fresh.copy(next_refresh_at = Long.MAX_VALUE), 1_000,
-            ) > 0,
+                LiveTvGuide(freshness = "unavailable", next_refresh_at = Long.MAX_VALUE), now,
+            ),
         )
+        // Just inside the ceiling is still honoured exactly, so the clamp never
+        // becomes the cadence for an owner that is behaving.
+        val inside = now + ceiling - LiveTvInputPolicy.GUIDE_POLL_AFTER_NEXT_REFRESH_S - 1
+        assertEquals(
+            ceiling - 1,
+            LiveTvGuideReducer.nextPollDelaySeconds(fresh.copy(next_refresh_at = inside), now),
+        )
+        // And the ceiling can never undercut the floor.
+        assertTrue(ceiling > LiveTvInputPolicy.GUIDE_POLL_MIN_S)
+        assertTrue(ceiling > LiveTvInputPolicy.GUIDE_POLL_UNAVAILABLE_S)
     }
 }
 

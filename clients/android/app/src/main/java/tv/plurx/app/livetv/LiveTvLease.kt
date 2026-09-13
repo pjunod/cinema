@@ -165,6 +165,20 @@ internal val INGRESS_DECIDED_START_REFUSALS = setOf(
     "live_tv_disabled",
 )
 
+/**
+ * Whether an answer is one of those refusals *and* arrived the way an ingress
+ * refusal arrives.
+ *
+ * The status is not a formality. These four codes mean "the ingress rejected
+ * the request before it reached an owner" only at a 4xx; the same code at a
+ * 5xx is a server that got as far as trying, and may have left a tuner open
+ * behind it. A missing status is a failure this client minted itself, which is
+ * no evidence of an ingress refusal either — so both fall to the safe side and
+ * keep the hint.
+ */
+internal fun isIngressDecidedRefusal(code: String, status: Int?): Boolean =
+    code in INGRESS_DECIDED_START_REFUSALS && status != null && status in 400..499
+
 /** A start answer, as the transport saw it. */
 internal sealed interface LiveTvStartAnswer {
     /**
@@ -174,11 +188,15 @@ internal sealed interface LiveTvStartAnswer {
      */
     data object NoAnswer : LiveTvStartAnswer
 
-    /** A typed envelope: `code`, plus the optional `retry` and `owner_decided`. */
+    /**
+     * A typed envelope: `code`, plus the optional `retry` and `owner_decided`,
+     * and the [status] it arrived with — see [isIngressDecidedRefusal].
+     */
     data class Typed(
         val code: String,
         val retry: String? = null,
         val ownerDecided: Boolean? = null,
+        val status: Int? = null,
     ) : LiveTvStartAnswer
 }
 
@@ -190,7 +208,7 @@ internal sealed interface LiveTvStartAnswer {
 internal fun liveTvStartAnswerOf(error: Exception): LiveTvStartAnswer = when {
     error !is LiveTvFailure -> LiveTvStartAnswer.NoAnswer
     error.code == "no_answer" -> LiveTvStartAnswer.NoAnswer
-    else -> LiveTvStartAnswer.Typed(error.code, error.retry, error.ownerDecided)
+    else -> LiveTvStartAnswer.Typed(error.code, error.retry, error.ownerDecided, error.status)
 }
 
 /** What the lease and the screen do with one start answer. */
@@ -206,7 +224,7 @@ internal data class LiveTvStartDecision(
 internal sealed interface LiveTvResumeResult {
     data class Answered(val outcome: String, val session: LiveTvStarted? = null) : LiveTvResumeResult
     data object NoAnswer : LiveTvResumeResult
-    data class Refused(val code: String) : LiveTvResumeResult
+    data class Refused(val answer: LiveTvStartAnswer.Typed) : LiveTvResumeResult
 }
 
 internal enum class LiveTvResumeAction { Reattach, ClearHintWait, KeepHintWait }
@@ -242,7 +260,7 @@ internal object LiveTvStartReducer {
             render = "no_answer", offerRetry = true, keepHint = true, replay = true,
         )
         is LiveTvStartAnswer.Typed -> {
-            val ingressDecided = answer.code in INGRESS_DECIDED_START_REFUSALS
+            val ingressDecided = isIngressDecidedRefusal(answer.code, answer.status)
             LiveTvStartDecision(
                 // A typed refusal minted outside the Live TV module carries no
                 // verdict and no copy of its own. `owner_unavailable` is the
@@ -271,11 +289,18 @@ internal object LiveTvStartReducer {
         }
         // A resume that did not answer says nothing about the session.
         LiveTvResumeResult.NoAnswer -> LiveTvResumeAction.KeepHintWait
+        // A refused resume is the same question a refused start asks — is this
+        // id spent? — so it gets the same answer from the same reducer. An
+        // owner that refuses has decided the id's fate and the hint is done
+        // with; anything the owner did not decide (an ingress refusal, a
+        // transport failure, a 404 from an owner too old to know the route)
+        // leaves a session that may still exist, and the hint is the only
+        // handle for it.
         is LiveTvResumeResult.Refused ->
-            if (result.code in INGRESS_DECIDED_START_REFUSALS) {
-                LiveTvResumeAction.ClearHintWait
-            } else {
+            if (decide(result.answer).keepHint) {
                 LiveTvResumeAction.KeepHintWait
+            } else {
+                LiveTvResumeAction.ClearHintWait
             }
     }
 }
@@ -337,7 +362,10 @@ internal class LiveTvLease(
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Exception) {
-            if (error is LiveTvFailure) LiveTvResumeResult.Refused(error.code) else LiveTvResumeResult.NoAnswer
+            when (val answer = liveTvStartAnswerOf(error)) {
+                LiveTvStartAnswer.NoAnswer -> LiveTvResumeResult.NoAnswer
+                is LiveTvStartAnswer.Typed -> LiveTvResumeResult.Refused(answer)
+            }
         }
         when (LiveTvStartReducer.resume(result)) {
             LiveTvResumeAction.Reattach -> {

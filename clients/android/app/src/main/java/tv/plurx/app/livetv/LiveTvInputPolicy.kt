@@ -87,6 +87,14 @@ internal object LiveTvInputPolicy {
     const val GUIDE_POLL_AFTER_NEXT_REFRESH_S: Long = 5L
 
     /**
+     * Never wait longer than this between guide polls, whatever
+     * `next_refresh_at` says. A ceiling to the floor above: an owner that
+     * answers with a far-future refresh — a clock skew, a misconfigured
+     * interval, a stopped loop — must not park the grid for hours.
+     */
+    const val GUIDE_POLL_CEILING_S: Long = 1_200L
+
+    /**
      * How long a pressing *web* document waits for a sibling tab to claim a
      * hint before treating it as an orphan. Transcribed because §3.14 pins all
      * six of the contract's live timings in every client; Android has one

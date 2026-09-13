@@ -133,13 +133,19 @@ object LiveTvGuideReducer {
      *
      * A guide that names its `next_refresh_at` is asked again just after the
      * answer exists rather than just before it does, never faster than the
-     * contract's floor. A guide that is `unavailable` and says nothing about
-     * when it comes back is asked again sooner, because an owner with nothing
-     * to serve is usually an owner about to have something.
+     * contract's floor and never slower than its ceiling — an owner whose
+     * clock is skewed, or whose loop has stopped, must not park the grid for
+     * hours. A guide that is `unavailable` and says nothing about when it comes
+     * back is asked again sooner, because an owner with nothing to serve is
+     * usually an owner about to have something.
      *
-     * [fetched] is null when the read itself did not answer, which carries
-     * exactly the information an unavailable guide with no `next_refresh_at`
-     * does, and is paced the same way.
+     * [fetched] is null when the read itself did not answer. That is paced as
+     * `guide_poll_unavailable_s`, not as the floor: a read that failed carries
+     * exactly the information an `unavailable` document with no
+     * `next_refresh_at` carries — the guide is not there and the owner has said
+     * nothing about when it will be — so the two are the same case and are
+     * paced the same way. This is the ruled cross-client behaviour (F13), not a
+     * local judgement: the web and Apple reducers answer it identically.
      */
     fun nextPollDelaySeconds(fetched: LiveTvGuide?, now: Long): Long {
         val floor = LiveTvInputPolicy.GUIDE_POLL_MIN_S
@@ -150,7 +156,7 @@ object LiveTvGuideReducer {
             } else {
                 announced + LiveTvInputPolicy.GUIDE_POLL_AFTER_NEXT_REFRESH_S
             }
-            return maxOf(after - now, floor)
+            return maxOf(after - now, floor).coerceAtMost(LiveTvInputPolicy.GUIDE_POLL_CEILING_S)
         }
         return if (fetched == null || fetched.freshness == "unavailable") {
             LiveTvInputPolicy.GUIDE_POLL_UNAVAILABLE_S

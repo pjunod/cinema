@@ -345,6 +345,13 @@ class LiveTvFailure(
     val code: String,
     val retry: String? = null,
     val ownerDecided: Boolean? = null,
+    /**
+     * The HTTP status the envelope arrived with, or null when this failure was
+     * minted locally. The start reducer needs it: "the ingress decided this
+     * before an owner saw it" is a claim about a 4xx, and the same code at 5xx
+     * is a server that got as far as trying.
+     */
+    val status: Int? = null,
 ) : Exception(liveTvMessage(code))
 
 /**
@@ -401,6 +408,7 @@ internal fun liveTvTypedFailure(body: String, status: Int, starting: Boolean): L
         // no `code` is not this contract's envelope.
         retry = if (code == null) null else field("retry")?.contentOrNull,
         ownerDecided = if (code == null) null else field("owner_decided")?.booleanOrNull,
+        status = status,
     )
 }
 
@@ -574,8 +582,17 @@ class LiveTvApi(origin: String, private val token: String, context: Context? = n
         request(url("live-tv", "starts", requestId), "DELETE", authenticated = true, timeout = 8)
     }
 
+    /**
+     * `starting = true` because the question a resume asks is the same one a
+     * start asks: an answer that never arrived, or arrived untyped, says
+     * nothing about the id — so it must classify as no answer rather than as a
+     * refusal, and the hint must survive it.
+     */
     override suspend fun resume(requestId: String): LiveTvResumeAnswer = Net.json.decodeFromString(
-        request(url("live-tv", "starts", requestId, "resume"), "POST", authenticated = true, timeout = 20),
+        request(
+            url("live-tv", "starts", requestId, "resume"), "POST",
+            authenticated = true, timeout = 20, starting = true,
+        ),
     )
 
     override suspend fun release(capability: String) {

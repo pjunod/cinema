@@ -54,6 +54,11 @@ class LiveTvStartCasesTest {
      */
     private fun failureFor(row: JsonObject): LiveTvFailure {
         if (row["transport"]?.jsonPrimitive?.content == "timeout") return LiveTvFailure("no_answer")
+        // A row that names no status is an owner-typed answer, which the
+        // ingress relays as a 503. That matters since F15: the four ingress
+        // codes only count as ingress-decided at a real 4xx, and the two rows
+        // here that carry one of them carry `owner_decided: true` as well, so
+        // the owner's verdict — not the status — is what settles them.
         val status = row["status"]?.jsonPrimitive?.int ?: 503
         val body = row["body"]?.jsonObject?.toString() ?: ""
         return liveTvTypedFailure(body, status, starting = true)
@@ -175,6 +180,109 @@ class LiveTvStartCasesTest {
         assertNull(Net.json.decodeFromString<LiveTvLineup>("""{"channels":[]}""").protocols)
     }
 
+    /**
+     * F15. The four ingress codes only mean "no owner ever saw this" when they
+     * arrive as a 4xx. The same code at 5xx is a server that got as far as
+     * trying, and a start that may have opened a tuner before it failed: that
+     * hint is the only handle for retiring it, so it survives.
+     */
+    @Test
+    fun anIngressCodeAtFiveHundredIsNotAnIngressDecision() {
+        INGRESS_DECIDED_START_REFUSALS.forEach { code ->
+            val fourxx = LiveTvStartReducer.decide(
+                LiveTvStartAnswer.Typed(code, status = 400),
+            )
+            assertFalse("$code at 400 is the ingress' own refusal", fourxx.keepHint)
+            assertFalse("$code at 400 offers no retry", fourxx.offerRetry)
+
+            val fivexx = LiveTvStartReducer.decide(
+                LiveTvStartAnswer.Typed(code, status = 503),
+            )
+            assertTrue("$code at 503 may have reached an owner", fivexx.keepHint)
+
+            // A failure this client minted carries no status at all, and is no
+            // evidence of an ingress refusal either.
+            assertTrue(code, LiveTvStartReducer.decide(LiveTvStartAnswer.Typed(code)).keepHint)
+        }
+        // The owner's own verdict still settles it at any status.
+        assertFalse(
+            LiveTvStartReducer.decide(
+                LiveTvStartAnswer.Typed("live_tv_disabled", "never", ownerDecided = true, status = 503),
+            ).keepHint,
+        )
+        // And the status is carried off the wire, not invented here.
+        assertEquals(503, liveTvTypedFailure("""{"code":"invalid_settings"}""", 503, true).status)
+        assertNull(LiveTvFailure("no_answer").status)
+    }
+
+    /**
+     * F16. A refused resume asks the same question a refused start asks — is
+     * this id spent? — so it is answered by the same reducer.
+     */
+    @Test
+    fun aRefusedResumeForgetsTheHintOnlyWhenTheOwnerDecidedIt() {
+        // The owner answered and said no. The id is spent.
+        assertEquals(
+            LiveTvResumeAction.ClearHintWait,
+            LiveTvStartReducer.resume(
+                LiveTvResumeResult.Refused(
+                    LiveTvStartAnswer.Typed("channel_not_found", "never", ownerDecided = true, status = 404),
+                ),
+            ),
+        )
+        // The ingress refused the request itself, at a real 4xx.
+        assertEquals(
+            LiveTvResumeAction.ClearHintWait,
+            LiveTvStartReducer.resume(
+                LiveTvResumeResult.Refused(LiveTvStartAnswer.Typed("admin_required", status = 403)),
+            ),
+        )
+        // Everything the owner did not decide keeps the handle. The first of
+        // these is the deploy blip: `owner_unavailable` is minted when no
+        // reachable committed voter is the owner, and it is explicitly NOT
+        // owner-decided — a resume during a rolling restart must not throw away
+        // the id of a session that is still running.
+        listOf(
+            LiveTvStartAnswer.Typed("owner_unavailable", "now", ownerDecided = false, status = 503),
+            LiveTvStartAnswer.Typed("node_maintenance", status = 503),
+            // An owner too old to know the route answers 404, which the ingress
+            // turns into a typed, not-owner-decided answer.
+            LiveTvStartAnswer.Typed("owner_unavailable", "now", ownerDecided = false, status = 404),
+            // An ingress code at 5xx, per F15.
+            LiveTvStartAnswer.Typed("invalid_settings", status = 503),
+        ).forEach {
+            assertEquals(
+                "${it.code}/${it.status} must keep the hint",
+                LiveTvResumeAction.KeepHintWait,
+                LiveTvStartReducer.resume(LiveTvResumeResult.Refused(it)),
+            )
+        }
+    }
+
+    @Test
+    fun aResumeRefusedByTheOwnerForgetsTheHintThroughTheLease() = runTest {
+        fun scope() = CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(testScheduler))
+
+        val spent = Hints(LiveTvStartHint(STRAY, 1_000))
+        val decided = Requests().apply {
+            resumeError = { LiveTvFailure("channel_not_found", "never", ownerDecided = true, status = 404) }
+        }
+        assertNull(LiveTvLease(decided, spent, scope()) { 90_000 }.resumeIfRecent())
+        assertNull("an owner-decided refusal spends the id", spent.hint)
+
+        val blip = Hints(LiveTvStartHint(STRAY, 1_000))
+        val undecided = Requests().apply {
+            resumeError = { LiveTvFailure("owner_unavailable", "now", ownerDecided = false, status = 503) }
+        }
+        assertNull(LiveTvLease(undecided, blip, scope()) { 90_000 }.resumeIfRecent())
+        assertNotNull("a deploy blip must not throw the id away", blip.hint)
+
+        val silent = Hints(LiveTvStartHint(STRAY, 1_000))
+        val nothing = Requests().apply { resumeError = { LiveTvFailure("no_answer") } }
+        assertNull(LiveTvLease(nothing, silent, scope()) { 90_000 }.resumeIfRecent())
+        assertNotNull("a resume that did not answer says nothing", silent.hint)
+    }
+
     @Test
     fun aStartIdIsThirtyTwoLowerCaseHexCharacters() {
         repeat(64) {
@@ -275,7 +383,11 @@ class LiveTvStartCasesTest {
         )
         assertNull(
             "the ingress refused the body before an owner saw it",
-            press(LiveTvFailure("invalid_request")).hint,
+            press(LiveTvFailure("invalid_request", status = 400)).hint,
+        )
+        assertNotNull(
+            "the same code at 5xx reached something that could have tuned",
+            press(LiveTvFailure("invalid_request", status = 503)).hint,
         )
     }
 
@@ -385,6 +497,7 @@ class LiveTvStartCasesTest {
         var retireBlocks = false
         var retireFinished = false
         var resumeAnswer = LiveTvResumeAnswer("pending")
+        var resumeError: (() -> LiveTvFailure)? = null
         override var recoveryRoutes = true
         private val neverAnswers = CompletableDeferred<Unit>()
 
@@ -399,6 +512,9 @@ class LiveTvStartCasesTest {
             if (retireBlocks) neverAnswers.await()
             retireFinished = true
         }
-        override suspend fun resume(requestId: String): LiveTvResumeAnswer = resumeAnswer
+        override suspend fun resume(requestId: String): LiveTvResumeAnswer {
+            resumeError?.let { throw it() }
+            return resumeAnswer
+        }
     }
 }
