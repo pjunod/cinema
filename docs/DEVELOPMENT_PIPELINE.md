@@ -1,10 +1,16 @@
 # Development pipeline — fast effort branches, deliberate qualification
 
-> **Workflow correction, 2026-09-10:** Main-bound pull requests use only
+> **Workflow correction, 2026-09-10, amended 2026-09-13:** Main-bound pull
+> requests use only
 > [main-fast-lane.yml](../.github/workflows/main-fast-lane.yml): open as draft,
-> obtain exactly one adversarial review, address it, mark ready, then apply
-> `fast-lane`. Removing the label cancels the lane; draft PRs allocate no
-> jobs. Full CI runs only by manual dispatch or an explicit release tag.
+> obtain exactly one adversarial review, address it, then mark ready. Marking
+> ready starts the lane; returning the PR to draft cancels it; draft PRs
+> allocate no jobs. The `fast-lane` label is gone — it was an opt-in on top of
+> the draft gate, and on 2026-09-13 three lanes merged without it, so the
+> gate never ran for any of them and the third was carrying a fix for a
+> regression the first had already shipped to the fleet. Draft alone still
+> buys what the label was for: a PR opened early costs nothing until it is
+> ready. Full CI runs only by manual dispatch or an explicit release tag.
 > Effort compiler checks and evidence proofs are manual. Merge does not
 > build or deploy an image. Runtime-test schedules are disabled; the weekly
 > dependency audit remains. These rules supersede the older automatic
