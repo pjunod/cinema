@@ -1,6 +1,6 @@
 # Playback surface contract — the overlay is a projection of the player, not a message
 
-**Status:** proposed 2026-09-13, awaiting Paul's ruling · **Investigated at:**
+**Status:** ruled 2026-09-13, ready to build (§9) · **Investigated at:**
 `main` @ `10f2afe6` · **Source of truth once built:**
 `tests/playback/playback-surface-contract.json` · **Kept honest by:**
 `tests/playback/playback-surface-contract.test.js` (web), a fixture test per
@@ -305,10 +305,15 @@ none of the three clients has today.
 The mapping lives in the fixture so all three clients agree. The table is the
 intent; the fixture is the contract.
 
-Rows marked ▲ are the only three places this contract changes what the
-player *does* rather than what it shows; each is bounded, lands in its own
-client's PR, and is pinned by a `cases` row. Everything else maps an existing
-outcome to a class.
+Rows marked ▲ are the only three places this contract would change what the
+player *does* rather than what it shows. Ruled 2026-09-13: they are **not**
+part of the surface PRs — they land together as their own PR (M5 in §8)
+after the surface work, so M1–M3 stay behaviour-neutral. Until M5, each ▲
+row's class still applies to the outcome the client produces *today*: a
+create 503 that is not retried is `refused` (mid-play) or `stopped` (start),
+an hls.js network fatal with no `startLoad()` goes straight to the reopen
+step as `recovering`, and `BEHIND_LIVE_WINDOW` is `stopped`. Everything else
+maps an existing outcome to a class.
 
 | Raw event | Class | Notes |
 |---|---|---|
@@ -465,9 +470,9 @@ What does **not** change: the recovery ladders themselves (same-delivery
 reopen, node failover, compatibility fallback, Auto), the control-plane
 verdict semantics (D1 included), the stall detectors and their thresholds,
 the input routing table. Those decide *what the player does*; this contract
-decides only *what the viewer is told and when it goes away* — with the
-three ▲ exceptions in §3.3, each of which turns a dead end into the bounded
-retry the neighbouring client already has.
+decides only *what the viewer is told and when it goes away*. The three ▲
+rows in §3.3 are recovery changes and are deliberately kept out of the
+surface PRs (M5).
 
 ---
 
@@ -550,11 +555,11 @@ listed so they are not mistaken for this one:
 
 ## 7. Non-goals
 
-- **No new watchdogs or thresholds, and no recovery changes beyond the
-  three ▲ rows in §3.3.** Every detector and budget stays where it is with
-  the numbers it has. Each ▲ row is a bounded retry that one client already
-  performs and another dead-ends on; anything wider under this contract's
-  name would make the review of either change impossible.
+- **No new watchdogs, thresholds or recovery steps in M0–M4.** Every
+  detector and budget stays where it is with the numbers it has. The three
+  ▲ rows in §3.3 are bounded retries one client already performs and
+  another dead-ends on; they are real fixes, and they get their own PR (M5)
+  precisely so the surface PRs can be reviewed as behaviour-neutral.
 - **No wording pass.** Copy moves into the fixture as it is today unless a
   sentence is wrong about the state (e.g. "failed to start" for a mid-film
   network fatal); a copy review is a later, separate change.
@@ -574,19 +579,22 @@ listed so they are not mistaken for this one:
 
 ## 8. Build plan
 
-Four PRs, fast lane until each is together, opened as drafts, adversarial
+Six PRs, fast lane until each is together, opened as drafts, adversarial
 review, findings, one full run, then merged — per
-[`DEVELOPMENT_PIPELINE.md`](../DEVELOPMENT_PIPELINE.md). Client PRs are
+[`DEVELOPMENT_PIPELINE.md`](../DEVELOPMENT_PIPELINE.md). M1–M3 are
 independent of each other and can run in parallel across sessions; each owns
 its client's files and `tests/playback/` rows tagged for it, nothing else.
+M5 and M6 follow M1–M3 and are the only two that change player behaviour.
 
 | # | Scope | Acceptance |
 |---|---|---|
 | M0 | Fixture + this doc rendered from it + `scripts/player-contract-table` second fixture + `playback-surface-fence` (allow-listing every current site, so the fence lands red-free and the client PRs shrink its allow list to zero) | `make web-check` runs the fixture's `cases` against a reference reducer; `test_docs_index` green; fence green with its allow list |
-| M1 | Web: adapter (`parseStreamFailure` moves in, hls.js fatal network → `recovering` with one `startLoad()` retry), `PlaybackPolicy.presentSurface`, `setLoading` demoted to render, input `failed` from the model, ledger section, log events | `web-policy.test.js` runs every `cases` row against the shipped `presentSurface` via `shippedSource()`; a mutation that removes the pause on `stopped` fails a test; Chrome + Safari smoke on a 4K remux with a mid-film network drop shows an indicator, not a black screen |
+| M1 | Web: adapter (`parseStreamFailure` moves in, hls.js fatal network → `recovering` on the existing reopen path), `PlaybackPolicy.presentSurface`, `setLoading` demoted to render, input `failed` from the model, ledger section, log events | `web-policy.test.js` runs every `cases` row against the shipped `presentSurface` via `shippedSource()`; a mutation that removes the pause on `stopped` fails a test; Chrome + Safari smoke on a 4K remux with a mid-film network drop shows an indicator, not a black screen |
 | M2 | Apple: `PlurxAPI.check` decodes `{code,message}` for every non-2xx; `PlaybackSurfaceModel` replaces the four fields; `fail()` and the 12 writers raise faults; lock-screen command routed; PiP error joins the model | `AppleClientTests` runs `cases`; `make apple-test` on `mba` green; a 15 s readiness timeout on a cold transcode shows `stalled` with a paused player and resumes on Keep waiting when the server publishes |
-| M3 | Android: `PlaybackSurface` on a `StateFlow` replaces `playFailure`/`onError`; `Fail` pauses; the stall watchdog is told about the surface (it may raise `recovering`, never restart under `stopped`); refusal bodies read; `BEHIND_LIVE_WINDOW` recovers; `PlaybackFailed` opaque | `:app:testDebugUnitTest` runs `cases`; a test pins that `Fail` leaves `playWhenReady == false` and that a later `onIsPlayingChanged(true)` produces `surface_disagreement`, not a silent overlay |
+| M3 | Android: `PlaybackSurface` on a `StateFlow` replaces `playFailure`/`onError`; `Fail` pauses; the stall watchdog is told about the surface (it may raise `recovering`, never restart under `stopped`); refusal bodies read; `PlaybackFailed` opaque | `:app:testDebugUnitTest` runs `cases`; a test pins that `Fail` leaves `playWhenReady == false` and that a later `onIsPlayingChanged(true)` produces `surface_disagreement`, not a silent overlay |
 | M4 | Physical verification on the Apple TV, an iPhone and an Android TV: the three reproduction recipes below | Recorded in a `PLAYBACK-SURFACE-PHYSICAL-VERIFICATION-<date>.md` beside this page; `surface_disagreement` count over a 30 min session is zero or every instance is explained |
+| M5 | The three ▲ recovery additions from §3.3, one PR: create-503 retry with backoff inside the startup budget (all three clients), one bounded hls.js `startLoad()` retry before the reopen step (web), `seekToDefaultPosition()` + `prepare()` on `BEHIND_LIVE_WINDOW` (Android) — each mapped to the class the fixture already names, so M5 changes what the player *does* and nothing about what it shows | A `cases` row per addition; a mutation that removes any one retry fails a test; the web-policy suite pins that `startLoad()` is called at most once per fatal |
+| M6 | Android keyframe landing (§6.1): seek the attached item forward by `requested − media_origin_ms` on copy-HLS and progressive-remux seeks, the way `successorAttachPositionMs` already does for a prepared successor — **after** recipe (c) confirms the defect on a device | `PlaybackIntentTest` gains a keyframe-origin case (target 90 000, origin 86 000 → lands); recipe (c) passes on the Android TV |
 
 Reproduction recipes for M4 (and for confirming today's behaviour before
 M1–M3 land): (a) play a 4K remux, pull the server's network for 5 s at
@@ -613,18 +621,18 @@ Prompt for the GPT session that has device access, for (c):
 
 ---
 
-## 9. What needs a ruling
+## 9. Rulings
 
-1. The eight classes and their surfaces (§3.1) — in particular that a
-   progress fault is full-screen only while the picture is not moving, and
-   that a readiness timeout is `stalled` (prompt, paused) rather than
-   `stopped`.
-2. The agreement rule's resolution (§3.2): the picture wins and the fault
-   demotes to a banner. The alternative — re-pausing to make the overlay
-   true — is defensible but it is the one that fights the lock screen.
-3. Whether §6.1 (Android keyframe landing) is built inside M3 or as its own
-   PR once the device check confirms it. My recommendation: its own PR;
-   it is a timeline bug, not a surface bug, and M3 should stay reviewable.
-4. The three ▲ recovery additions in §3.3 (create-503 retry, one hls.js
-   `startLoad()` retry, `BEHIND_LIVE_WINDOW` recovery): in scope, or a
-   follow-up so the surface PRs stay behaviour-neutral.
+Ruled by Paul, 2026-09-13:
+
+1. **The eight classes and their surfaces (§3.1) — accepted.** A progress
+   fault is full-screen only while the picture is not moving; a readiness
+   timeout is `stalled` (prompt, paused), not `stopped`.
+2. **The agreement rule (§3.2) — the picture wins.** A blocking surface
+   under which the player has started demotes to a banner and is logged as
+   `surface_disagreement`; the presenter never re-pauses to make the overlay
+   true.
+3. **Android keyframe landing (§6.1) — its own PR, M6,** after the device
+   check in §8 confirms it.
+4. **The three ▲ recovery additions (§3.3) — their own PR, M5,** after the
+   surface PRs, so M1–M3 are reviewable as behaviour-neutral.

@@ -8,7 +8,7 @@ first.
 
 **Investigated 2026-09-13; proposal open as
 [docs/clients/PLAYBACK-SURFACE-CONTRACT.md](docs/clients/PLAYBACK-SURFACE-CONTRACT.md),
-awaiting a ruling — nothing built yet.** Paul reported a full-screen playback
+ruled the same day (§9) — ready to build, nothing built yet.** Paul reported a full-screen playback
 error while the picture keeps playing, or one that stays up after playback
 stopped and came back. It is one defect with three spellings: the blocking
 overlay is an imperative message channel — 40 `setLoading` sites on the web,
@@ -25,10 +25,13 @@ The proposal is a Playback Surface Contract in the input contract's shape:
 typed faults with a fixed severity, a blocking surface only over a player the
 presenter itself paused, progress evidence retires the fault, faults keyed to
 the open generation, a surface ledger in Playback debug, and a fence. Four
-PRs (fixture, web, Apple, Android), each independently reviewable. One
-separate probable defect surfaced on the way — Android copy-HLS seeks never
-land within the 250 ms tolerance because the item is not seeked forward from
-the keyframe origin — and needs a device check before it is built.
+surface PRs (fixture, web, Apple, Android), behaviour-neutral by ruling, then
+one PR for the three bounded recovery additions and one for a separate
+probable defect surfaced on the way — Android copied-video seeks never land
+within the 250 ms tolerance because the item is not seeked forward from the
+keyframe origin — which needs a device check before it is built. Paul's
+tablet supplied the field evidence: "Playback stopped
+(ERROR_CODE_IO_BAD_HTTP_STATUS)" over a moving picture.
 
 ## Live TV gets the web page's proportions on Apple TV and iPhone
 
