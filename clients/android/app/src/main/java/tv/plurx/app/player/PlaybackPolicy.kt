@@ -119,6 +119,98 @@ internal fun isCompatibilityPlaybackError(errorCode: Int): Boolean = errorCode i
     4005, // ERROR_CODE_DECODING_FORMAT_UNSUPPORTED
 )
 
+// ---- M5: the two bounded recovery additions this client owns ----------------
+
+/**
+ * The create "not yet" retry ladder (PLAYBACK-SURFACE-CONTRACT.md §3.3 row 6,
+ * implementation plan §4.6).
+ *
+ * Restated from `crates/plurxd/src/web/playback-policy.js` (`CREATE_RETRY`),
+ * because all three clients have to agree on these numbers and only one of them
+ * can run that file; `tests/playback/web-policy.test.js` reads this declaration
+ * back out of the Kotlin and fails if a number drifts.
+ */
+internal object CreateRetry {
+    /** The review's ladder, as a CLOSED list: after the third retry it is spent. */
+    val backoffMs: List<Int> = listOf(1_000, 2_000, 4_000)
+
+    /**
+     * ABSOLUTE, measured from the FIRST attempt — not per attempt. A server
+     * that holds every create for three minutes cannot stretch the sequence,
+     * which is why the review asked for a deadline rather than a retry count.
+     */
+    const val DEADLINE_MS: Int = 60_000
+
+    /** The fixture's `create_503_not_yet` codes, and only these. */
+    val codes: Set<String> = setOf(
+        "startup_timeout",
+        "media_owner_transition",
+        "vod_index_pending",
+        "vod_engine_unattested",
+    )
+}
+
+internal sealed interface CreateRetryStep {
+    /** Not a "not yet" answer: the caller's existing handling stands. */
+    data object Fail : CreateRetryStep
+
+    /** Wait this long, then re-post the SAME request identity. */
+    data class Retry(val delayMs: Int) : CreateRetryStep
+
+    /** Nothing left: stop the player, then raise `exhausted`. */
+    data class Exhausted(val reason: String) : CreateRetryStep
+}
+
+/**
+ * [attempt] counts retries already made (0 before the first one); [elapsedMs]
+ * is measured from the first attempt.
+ *
+ * The deadline is checked twice on purpose: once for time already spent, and
+ * once for the retry that would START after it. Scheduling an attempt that
+ * could only begin past the deadline is how an "absolute" bound turns back into
+ * a per-attempt one.
+ */
+internal fun createRetryStep(
+    attempt: Int,
+    elapsedMs: Long,
+    isNotYet: Boolean,
+): CreateRetryStep {
+    if (!isNotYet) return CreateRetryStep.Fail
+    val spent = maxOf(0L, elapsedMs)
+    if (spent >= CreateRetry.DEADLINE_MS) return CreateRetryStep.Exhausted("deadline")
+    val index = maxOf(0, attempt)
+    if (index >= CreateRetry.backoffMs.size) return CreateRetryStep.Exhausted("ladder_spent")
+    val delayMs = CreateRetry.backoffMs[index]
+    if (spent + delayMs >= CreateRetry.DEADLINE_MS) return CreateRetryStep.Exhausted("deadline")
+    return CreateRetryStep.Retry(delayMs)
+}
+
+/** `ERROR_CODE_BEHIND_LIVE_WINDOW`. Restated rather than imported for the same
+ *  reason the colour constants below are: this file stays free of ExoPlayer. */
+internal const val ERROR_CODE_BEHIND_LIVE_WINDOW = 1002
+
+/**
+ * Does a `BEHIND_LIVE_WINDOW` error get M5's seek-and-prepare recovery?
+ *
+ * Finite timelines ONLY. Media3's own answer is `seekToDefaultPosition()`,
+ * which is a LIVE-EDGE policy: on a finite timeline it jumps to the start of
+ * the window and skips content the viewer has not watched. The contract forbids
+ * it outright, so the recovery here is `seekTo(lastRealPosition)` + `prepare()`
+ * and it is offered only where that position means something.
+ *
+ * A live item keeps today's `Fail`: there is no last real position on a window
+ * that has moved past the viewer, and inventing one is the skip this rule
+ * exists to prevent.
+ *
+ * Once per attach. [used] is that attach's spent budget — a second 1002 on the
+ * same item is the recovery not having worked, and repeating it is a loop.
+ */
+internal fun behindLiveWindowRecovers(
+    errorCode: Int,
+    live: Boolean,
+    used: Int,
+): Boolean = errorCode == ERROR_CODE_BEHIND_LIVE_WINDOW && !live && used < 1
+
 // ---- §5.6 The quality menu is the server's ladder ---------------------------
 
 internal data class QualityOption(val quality: PlaybackQuality, val label: String)

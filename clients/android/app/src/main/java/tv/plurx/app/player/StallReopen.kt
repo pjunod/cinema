@@ -1,6 +1,9 @@
 package tv.plurx.app.player
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import tv.plurx.app.data.CreateSessionReq
@@ -150,6 +153,10 @@ internal class SessionCreateCoordinator(
     private val isBadRequest: (Throwable) -> Boolean,
     private val freshRequestId: () -> String,
     private val releaseSession: (String) -> Unit,
+    // M5's retry needs a clock and a sleep. Injected so the ladder and its
+    // absolute deadline are testable on the JVM without a real minute passing.
+    private val nowMs: () -> Long = { System.nanoTime() / 1_000_000L },
+    private val sleep: suspend (Long) -> Unit = { delay(it) },
 ) {
     private val createMutex = Mutex()
 
@@ -181,6 +188,100 @@ internal class SessionCreateCoordinator(
         } catch (cancelled: CancellationException) {
             throw cancelled
         }
+    }
+
+    /**
+     * M5 addition 1 — the create "not yet" retry
+     * (PLAYBACK-SURFACE-CONTRACT.md §3.3 row 6, implementation plan §4.6).
+     *
+     * Re-post the SAME create, under the SAME request identity, while the
+     * server says it is still building this stream. Three properties the
+     * review asked for, and each is a line below:
+     *
+     * * the deadline is ABSOLUTE and runs on a watchdog rather than between
+     *   attempts, so a server that holds every create for three minutes cannot
+     *   stretch the sequence;
+     * * a success that lands AFTER the deadline is released, never attached —
+     *   the viewer has already been told this attempt is over, and an encoder
+     *   nobody is watching is a hardware slot held for nobody;
+     * * a newer intent ends it: [isCurrent] is re-asked before every attempt,
+     *   after every failure, and the sleep between attempts is cancelled with
+     *   the coroutine that is waiting on it.
+     *
+     * `null` means "this sequence produced nothing you should attach", and it
+     * is NOT a failure the caller should surface: either a newer intent owns
+     * the surface now, or [onExhausted] has already raised the prompt. A
+     * refusal the ladder does not claim is rethrown, so the caller's existing
+     * handling is untouched.
+     *
+     * The delays happen OUTSIDE the mutex on purpose: a sequence sleeping four
+     * seconds must not hold the create lock a newer user action needs.
+     */
+    suspend fun createRetryingNotYet(
+        body: CreateSessionReq,
+        isCurrent: () -> Boolean = { true },
+        isNotYet: (Throwable) -> Boolean,
+        onRetrying: (Throwable) -> Unit = {},
+        onExhausted: (String) -> Unit = {},
+    ): HlsStart? = coroutineScope {
+        val began = nowMs()
+        var expired = false
+        // ONE identity for the whole sequence: the server persists a create's
+        // answer under `request_id`, so replaying one recovers the session it
+        // already made instead of spawning a second encoder — which is what
+        // makes retrying a create safe at all.
+        val request =
+            if (body.request_id.isNullOrBlank()) body.copy(request_id = freshRequestId()) else body
+        val watchdog = launch {
+            sleep(CreateRetry.DEADLINE_MS.toLong())
+            if (!expired) {
+                expired = true
+                if (isCurrent()) onExhausted("deadline")
+            }
+        }
+        var outcome: HlsStart? = null
+        try {
+            var attempt = 0
+            attempts@ while (true) {
+                if (!isCurrent() || expired) break@attempts
+                var started: HlsStart? = null
+                try {
+                    started = createMutex.withLock {
+                        if (isCurrent()) retainIfCurrent(callCreate(request), isCurrent) else null
+                    }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (failure: Throwable) {
+                    if (!isCurrent() || expired) break@attempts
+                    when (val step = createRetryStep(attempt, nowMs() - began, isNotYet(failure))) {
+                        is CreateRetryStep.Fail -> throw failure
+                        is CreateRetryStep.Exhausted -> {
+                            onExhausted(step.reason)
+                            break@attempts
+                        }
+                        is CreateRetryStep.Retry -> {
+                            // ONE `preparing` fault for the sequence, not one
+                            // per attempt: a viewer watching a spinner does not
+                            // need four identical rows behind it.
+                            if (attempt == 0) onRetrying(failure)
+                            sleep(step.delayMs.toLong())
+                            attempt += 1
+                            continue@attempts
+                        }
+                    }
+                }
+                // A session the sequence no longer owns belongs to nobody.
+                if (expired) {
+                    started?.session_id?.let(releaseSession)
+                    break@attempts
+                }
+                outcome = started
+                break@attempts
+            }
+        } finally {
+            watchdog.cancel()
+        }
+        outcome
     }
 
     suspend fun reopenAfterStall(

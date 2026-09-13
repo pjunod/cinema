@@ -20,13 +20,22 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `91` — native viewer parity across phone, foldable,
-> and TV. Build 91 makes Live TV starts recoverable rather than refusable: the
-> 90-second start barrier is gone, a press persists a `{request_id, touched_at}`
-> hint the owner can retire, a start that gets no answer replays once with the
-> same id and says so instead of locking the screen, reopening the app rejoins a
-> session the viewer never meant to leave, and the guide polls on the owner's
-> own `next_refresh_at`. Build 90 makes the playback failure surface a projection of the
+> Status: **v0.3.0**, build `92` — native viewer parity across phone, foldable,
+> and TV. Build 92 adds the two bounded recovery steps this client owns under
+> the playback surface contract (M5): a session create the server answers with
+> "still building" is re-posted under the same request identity on a
+> 1 s · 2 s · 4 s ladder bounded by an absolute sixty seconds — a success that
+> lands after that is released rather than attached — and a
+> `BEHIND_LIVE_WINDOW` error on a FINITE timeline seeks back to where the
+> picture was and prepares again, once per attach, instead of failing. Media3's
+> `seekToDefaultPosition()` is a live-edge policy and is not used; a live item
+> keeps the failure it has today. Build 91 makes Live TV starts recoverable
+> rather than refusable: the 90-second start barrier is gone, a press persists a
+> `{request_id, touched_at}` hint the owner can retire, a start that gets no
+> answer replays once with the same id and says so instead of locking the
+> screen, reopening the app rejoins a session the viewer never meant to leave,
+> and the guide polls on the owner's own `next_refresh_at`.
+> Build 90 makes the playback failure surface a projection of the
 > player: one `PlaybackSurface` StateFlow fed by a pure reducer that runs the
 > shared contract fixture, typed faults with a class and two identities instead
 > of an `onError` string, the recovery owner stopping ExoPlayer before it raises

@@ -314,7 +314,19 @@ class Controller(
         selectionRecipe = recipe
         textSelectionArmed = true
         audioSelectionArmed = true
+        // M5 addition 3's budget is per ATTACH, and this is the one function
+        // every `setMediaItem` + `prepare` in this file goes through. The
+        // recovery itself re-prepares WITHOUT a new item, so it cannot refill
+        // its own budget.
+        behindLiveWindowRecoveryUsed = 0
     }
+
+    /**
+     * M5 addition 3: how many times this attach has taken the
+     * `BEHIND_LIVE_WINDOW` seek-and-prepare recovery. Once, and then the
+     * ladder's ordinary answer.
+     */
+    private var behindLiveWindowRecoveryUsed = 0
 
     /**
      * The dynamic range the *current* delivery puts on the wire, as the server
@@ -626,6 +638,41 @@ class Controller(
             val refusal = mediaRefusal(error)
             if (isTransportPlaybackError(error.errorCode) && retryMediaOnNextNode(error)) {
                 raiseRecoveryStep(refusal, "Reconnecting on another server address.")
+                return
+            }
+            // M5 addition 3 — `BEHIND_LIVE_WINDOW` (1002) on a FINITE timeline.
+            //
+            // Media3's own answer is `seekToDefaultPosition()`, which is a
+            // LIVE-EDGE policy: on a finite timeline it jumps to the start of
+            // the available window and skips content nobody asked to skip. The
+            // contract forbids it, so this seeks back to where the picture
+            // actually was and prepares again — ONCE per attach, because a
+            // second 1002 on the same item is the recovery not having worked
+            // and repeating it is a loop. A live item keeps today's `Fail`,
+            // which is what the rest of this function does with it.
+            //
+            // Placed above `playbackErrorAction` deliberately: 1002 is neither
+            // a transport nor a compatibility failure, so the ladder answers it
+            // with `Fail` (or, on an established HDR delivery, with a recipe
+            // retry that changes nothing about a window that moved).
+            if (behindLiveWindowRecovers(
+                    errorCode = error.errorCode,
+                    live = player.isCurrentMediaItemLive,
+                    used = behindLiveWindowRecoveryUsed,
+                )
+            ) {
+                behindLiveWindowRecoveryUsed += 1
+                val filmPositionMs = realPosition()
+                playbackTelemetry.report(
+                    event = "playback_behind_live_window",
+                    level = "warn",
+                    message = error.errorCodeName,
+                    code = error.errorCode,
+                    detail = "finite timeline — seeking back to ${filmPositionMs}ms and preparing again",
+                )
+                player.seekTo(playerTimelinePositionMs(filmPositionMs))
+                player.prepare()
+                raiseRecoveryStep(refusal, "Reloading this stream.")
                 return
             }
             val action = playbackErrorAction(
@@ -964,6 +1011,23 @@ class Controller(
             sessionBaseMs = baseMs,
         )
     }
+
+    /**
+     * Where a FILM position sits on the player's own timeline.
+     *
+     * [realPosition] maps the other way, and M5's `BEHIND_LIVE_WINDOW`
+     * recovery needs this one: it reads the last real position in film time and
+     * then has to hand `ExoPlayer.seekTo` a number in the player's.
+     */
+    private fun playerTimelinePositionMs(filmPositionMs: Long): Long =
+        playerLocalPositionMs(
+            filmPositionMs = filmPositionMs,
+            directTransport = directTransport,
+            sessionIsVod = sessionIsVod,
+            progressiveTransport = progressiveTransport,
+            progressiveOriginMs = progressiveMediaOrigin.currentOriginMs(),
+            sessionBaseMs = baseMs,
+        )
 
     /** A refusal Media3 carried, classified. */
     private data class MediaRefusal(val source: String, val message: String?, val positionMs: Long?)
@@ -1359,10 +1423,30 @@ class Controller(
         sessionIsVod = false
         scope.launch {
             try {
+                // M5 §4.6.1: row 6 is the START context, so the retry runs
+                // only where there is nothing behind this create. A create over
+                // a predecessor the viewer is still watching is a refused
+                // CHANGE (row 7), keeps its banner, and is not retried.
+                val startContext = !predecessorAttached()
+                val retryEpoch = mediaMutationEpoch
                 val hls = try {
-                    sessionCreateCoordinator.create(
+                    sessionCreateCoordinator.createRetryingNotYet(
                         body = createBody.copy(control_sequence = playbackIntent.orderedControlSequence(playbackControl.controlSequence())),
                         isCurrent = { stallGuard.isCurrent(requestVersion) },
+                        isNotYet = { failure -> startContext && createIsStillBuilding(failure) },
+                        onRetrying = { failure ->
+                            surfaceOwner.preparingSessionCreate(
+                                retryEpoch,
+                                failure.message ?: STILL_BUILDING_SENTENCE,
+                            )
+                        },
+                        onExhausted = { _ ->
+                            playbackTelemetry.cancel(attempt)
+                            surfaceOwner.exhaustedAfterCreateRetries(
+                                retryEpoch,
+                                CREATE_RETRY_EXHAUSTED_SENTENCE,
+                            )
+                        },
                     ) ?: return@launch
                 } catch (cancelled: CancellationException) {
                     // The screen left composition (or a newer request superseded
@@ -2606,12 +2690,30 @@ class Controller(
     }
 
     /**
+     * Is this create refusal the fixture's `create_503_not_yet` row (M5)?
+     *
+     * The server's own code is what says so. A bodiless 503 is not a "still
+     * building" answer — it is a 503 nobody explained — and retrying one would
+     * be guessing.
+     */
+    private fun createIsStillBuilding(failure: Throwable): Boolean {
+        val code = (failure as? RefusalException)?.code ?: return false
+        return code in CreateRetry.codes
+    }
+
+    /**
      * A create refusal as a contract source id.
      *
      * The VOD refusals have their own terminal rows, and 401/403 keeps its Sign
-     * in whether or not the body was legible. A "not yet" 503 stays the owner's
-     * `stopped` with the server's sentence: the create retry that would make it
-     * a `preparing` is M5, and this change is behaviour-neutral (§3.3 row 9).
+     * in whether or not the body was legible.
+     *
+     * A "not yet" 503 is still the owner's `stopped` here, and after M5 that is
+     * a narrower statement than it looks: the START-context creates that could
+     * produce one are consumed by `createRetryingNotYet`, which raises
+     * `create_503_not_yet` while it retries and `owner_exhausted` when it gives
+     * up. What reaches this function is a "not yet" in a context row 6 does not
+     * claim — a pending change, or a stall reopen — where the honest answer is
+     * the one the client already gave.
      */
     private fun createFailureSource(refusal: RefusalException?): String = when {
         refusal == null -> SurfaceSources.OWNER_STOPPED
@@ -3223,6 +3325,15 @@ class Controller(
 internal const val CONTROL_ASK_MS = 1_500L
 internal const val CONTROL_ASK_CAP_MS = 3_000L
 internal const val SEEK_COALESCE_MS = 100L
+
+/**
+ * What M5's create retry says while it runs, and what the owner says when its
+ * ladder or its absolute deadline is spent. The first is a fallback: the
+ * server's own sentence is preferred wherever it sent one.
+ */
+internal const val STILL_BUILDING_SENTENCE = "The server is still building this stream."
+internal const val CREATE_RETRY_EXHAUSTED_SENTENCE =
+    "The server is still building this stream and did not finish in a minute."
 
 /**
  * How far apart two `realPosition()` reads must be for "the film clock did not

@@ -386,4 +386,72 @@ class LadderVerdictTest {
             ),
         )
     }
+
+    // ---- M5 addition 3: BEHIND_LIVE_WINDOW on a finite timeline ------------
+    //
+    // UNRUN on the machine this was written on: there is no Android toolchain
+    // there. See the PR's "Needs an Android toolchain or a device" list.
+
+    @Test
+    fun behindLiveWindowRecoversOnceOnAFiniteTimeline() {
+        assertEquals(
+            PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW,
+            ERROR_CODE_BEHIND_LIVE_WINDOW,
+        )
+        assertTrue(
+            behindLiveWindowRecovers(
+                errorCode = ERROR_CODE_BEHIND_LIVE_WINDOW,
+                live = false,
+                used = 0,
+            ),
+        )
+        assertFalse(
+            "a second 1002 on the same attach is the recovery not having worked",
+            behindLiveWindowRecovers(
+                errorCode = ERROR_CODE_BEHIND_LIVE_WINDOW,
+                live = false,
+                used = 1,
+            ),
+        )
+    }
+
+    @Test
+    fun aLiveItemKeepsTodaysFailAndNeverSeeksToTheDefaultPosition() {
+        assertFalse(
+            "seekToDefaultPosition is a live-edge policy the contract forbids",
+            behindLiveWindowRecovers(
+                errorCode = ERROR_CODE_BEHIND_LIVE_WINDOW,
+                live = true,
+                used = 0,
+            ),
+        )
+    }
+
+    @Test
+    fun noOtherErrorCodeTakesTheBehindLiveWindowRecovery() {
+        for (code in listOf(
+            PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS,
+            PlaybackException.ERROR_CODE_DECODING_FAILED,
+            PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
+            PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
+        )) {
+            assertFalse(
+                "code $code is not BEHIND_LIVE_WINDOW",
+                behindLiveWindowRecovers(errorCode = code, live = false, used = 0),
+            )
+        }
+        // …and 1002 is still whatever the ladder says it is: the recovery is an
+        // addition above `playbackErrorAction`, not a change to it.
+        assertEquals(
+            PlaybackErrorAction.Fail,
+            playbackErrorAction(
+                deliveryMode = "transcode",
+                preservesDolbyVision = false,
+                remuxRescueAlreadyUsed = false,
+                transcodeRescueAlreadyUsed = false,
+                mediaCompatibilityFailure =
+                    isCompatibilityPlaybackError(ERROR_CODE_BEHIND_LIVE_WINDOW),
+            ),
+        )
+    }
 }
