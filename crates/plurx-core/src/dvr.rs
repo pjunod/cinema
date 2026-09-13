@@ -457,6 +457,9 @@ pub enum DvrStatePatch {
     },
     /// Reconciliation re-pointed a rule row at a different rule.
     Rule { rule_id: Option<String> },
+    /// The files are gone. Clearing the path is what stops the owner's sweep
+    /// trying to remove them again on every tick for ever.
+    Purged,
 }
 
 /// One conditional move of a recording from one state to another.
@@ -534,6 +537,22 @@ pub struct DvrReminder {
     pub updated_at_ms: i64,
 }
 
+/// The cursor that continues a recordings page after this row.
+///
+/// `(airing_start, id)` rather than an id alone: the list is ordered by when
+/// the programme aired, and a v4 UUID orders by nothing a person recognises.
+pub fn recording_cursor(row: &DvrRecording) -> String {
+    format!("{}:{}", row.airing_start, row.id)
+}
+
+/// Split a cursor back into its parts. An unparseable one starts from the top
+/// rather than failing the request: a stale cursor in a bookmarked URL should
+/// show the first page, not an error.
+pub fn parse_recording_cursor(cursor: &str) -> Option<(i64, &str)> {
+    let (start, id) = cursor.split_once(':')?;
+    Some((start.parse().ok()?, id))
+}
+
 /// The title a `Title` rule stores and compares against.
 ///
 /// Case, Unicode width and stray whitespace all vary between a guide's bulk
@@ -542,7 +561,19 @@ pub struct DvrReminder {
 /// once, at both write and match time, is what makes "record this every week"
 /// keep working when the source's spelling drifts.
 pub fn normalise_title(value: &str) -> String {
-    let lowered = value.to_lowercase();
+    // Compatibility width folding by hand: the fullwidth forms are one
+    // contiguous block mapped to ASCII by a fixed offset, and the ideographic
+    // space is the other character a guide actually emits. A crate for this
+    // would be a dependency for two ranges.
+    let folded = value
+        .chars()
+        .map(|character| match character as u32 {
+            0xFF01..=0xFF5E => char::from_u32(character as u32 - 0xFEE0).unwrap_or(character),
+            0x3000 => ' ',
+            _ => character,
+        })
+        .collect::<String>();
+    let lowered = folded.to_lowercase();
     let collapsed = lowered.split_whitespace().collect::<Vec<_>>().join(" ");
     strip_trailing_year(&collapsed).to_owned()
 }
@@ -689,6 +720,11 @@ mod tests {
             normalise_title("Kitchen Table (Special)"),
             "kitchen table (special)",
             "only a four-digit year is a disambiguator worth stripping"
+        );
+        assert_eq!(
+            normalise_title("Ｋｉｔｃｈｅｎ　Ｔａｂｌｅ"),
+            "kitchen table",
+            "a fullwidth spelling is the same programme, and some guides send one"
         );
     }
 

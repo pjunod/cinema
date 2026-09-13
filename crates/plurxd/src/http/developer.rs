@@ -815,7 +815,10 @@ async fn dvr(
     dvr: &crate::live_tv::DvrConfig,
 ) -> DeveloperEnableItem {
     let owner = live_tv.owner_node_id == state.node_id;
-    let mut requirements = vec![root_writable(state, dvr, owner), free_space(dvr, owner)];
+    let mut requirements = vec![
+        root_writable(state, dvr, owner).await,
+        free_space(dvr, owner),
+    ];
     requirements.push(guide_horizon(state, live_tv).await);
     requirements.push(tuner_reserve(live_tv, dvr));
     requirements.push(DeveloperRequirement {
@@ -843,7 +846,7 @@ async fn dvr(
     }
 }
 
-fn root_writable(
+async fn root_writable(
     state: &AppState,
     dvr: &crate::live_tv::DvrConfig,
     owner: bool,
@@ -863,14 +866,22 @@ fn root_writable(
             ),
         )
     } else {
-        match probe_root(&dvr.root) {
-            Ok(()) => (
+        // On a blocking thread: the DVR root is by design a shared mount, and
+        // a hung NFS server would otherwise park a runtime worker for as long
+        // as the mount stayed hung — on a *diagnostic* page.
+        let root = dvr.root.clone();
+        match tokio::task::spawn_blocking(move || probe_root(&root)).await {
+            Ok(Ok(())) => (
                 RequirementStatus::Met,
                 format!("Created and removed a probe file under `{}`.", dvr.root),
             ),
-            Err(error) => (
+            Ok(Err(error)) => (
                 RequirementStatus::Unmet,
                 format!("Could not write under `{}`: {error}.", dvr.root),
+            ),
+            Err(error) => (
+                RequirementStatus::Unobservable,
+                format!("The probe of `{}` did not finish: {error}.", dvr.root),
             ),
         }
     };
@@ -886,9 +897,18 @@ fn root_writable(
 /// Write and remove one small file rather than checking permission bits. A
 /// read-only remount, a full filesystem and an ACL that says yes but means no
 /// all look identical to `statx`.
+///
+/// It does **not** create the root. A readiness page is a question, and a
+/// question that silently makes a directory on a shared mount is a side
+/// effect nobody asked for — the engine creates it when a capture starts.
 fn probe_root(root: &str) -> std::io::Result<()> {
     let directory = std::path::Path::new(root);
-    std::fs::create_dir_all(directory)?;
+    if !directory.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "the DVR root does not exist yet; recording creates it when it first captures",
+        ));
+    }
     let probe = directory.join(".plurx-probe");
     std::fs::write(&probe, b"plurx")?;
     std::fs::remove_file(&probe)

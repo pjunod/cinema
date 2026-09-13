@@ -1034,6 +1034,15 @@ fn wire_api_error(status: reqwest::StatusCode, body: &[u8]) -> ApiError {
         .map(|error| sanitize_public_error(&error.message))
         .unwrap_or_else(|| "The tuner owner could not complete the request".into());
     let status = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::SERVICE_UNAVAILABLE);
+    // The owner is the only node that knows what holds its tuners, so an
+    // ingress that dropped this field would make the "stop a recording and
+    // watch" offer exist on one node and not the others. Re-parsed rather
+    // than forwarded whole: a peer may not inject arbitrary fields, and this
+    // one has a shape.
+    let holders = serde_json::from_slice::<WireCapacityDetail>(body)
+        .ok()
+        .map(|detail| detail.holders)
+        .filter(|holders| !holders.is_empty());
     let stable = match code.as_str() {
         "live_tv_disabled" => "live_tv_disabled",
         "tuner_capacity" => "tuner_capacity",
@@ -1048,7 +1057,29 @@ fn wire_api_error(status: reqwest::StatusCode, body: &[u8]) -> ApiError {
         "capability_expired" => "capability_expired",
         _ => "owner_unavailable",
     };
+    if stable == "tuner_capacity" {
+        if let Some(holders) = holders {
+            let mut detail = serde_json::Map::new();
+            detail.insert(
+                "holders".to_owned(),
+                serde_json::to_value(&holders).unwrap_or(serde_json::Value::Null),
+            );
+            return ApiError::TypedDetail {
+                status,
+                code: stable,
+                message,
+                detail,
+            };
+        }
+    }
     ApiError::typed(status, stable, message)
+}
+
+/// The one extra field a relayed capacity refusal may carry.
+#[derive(Deserialize)]
+struct WireCapacityDetail {
+    #[serde(default)]
+    holders: Vec<crate::live_tv::dvr::DvrHolder>,
 }
 
 async fn owner_snapshot(

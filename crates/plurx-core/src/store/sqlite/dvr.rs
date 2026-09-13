@@ -407,13 +407,39 @@ impl DvrStore for SqliteStore {
         self.with_read(move |conn| load_recording(conn, &id)).await
     }
 
+    async fn get_dvr_recording_for_airing(
+        &self,
+        channel_id: &str,
+        airing_start: i64,
+    ) -> Result<Option<crate::dvr::DvrRecording>, StoreError> {
+        let channel_id = channel_id.to_owned();
+        self.with_read(move |conn| {
+            Ok(conn
+                .query_row(
+                    &format!(
+                        "SELECT {RECORDING_COLS} FROM dvr_recordings \
+                         WHERE channel_id = ?1 AND airing_start = ?2"
+                    ),
+                    params![channel_id, airing_start],
+                    recording_from_row,
+                )
+                .optional()?)
+        })
+        .await
+    }
+
     async fn list_dvr_recordings(
         &self,
         filter: &crate::dvr::DvrRecordingFilter,
-        after_id: Option<&str>,
+        after: Option<&str>,
         limit: i64,
     ) -> Result<Vec<crate::dvr::DvrRecording>, StoreError> {
-        let after_id = after_id.unwrap_or_default().to_owned();
+        // A first page starts above every real airing, so the same descending
+        // comparison serves both cases without a second statement.
+        let (after_start, after_id) = after
+            .and_then(crate::dvr::parse_recording_cursor)
+            .map(|(start, id)| (start, id.to_owned()))
+            .unwrap_or((i64::MAX, String::new()));
         let limit = limit.clamp(1, DVR_RECORDINGS_LIST_PAGE);
         let states = state_json(&filter.states)?;
         // An explicit list is honoured as written — naming `deleted` is how a
@@ -430,16 +456,20 @@ impl DvrStore for SqliteStore {
         };
         let before = filter.before_capture_start;
         self.with_read(move |conn| {
-            // `id` is the cursor and the order, so a page boundary cannot be
-            // moved by a row the owner loop rewrites between two requests.
+            // Newest airing first, with the id breaking a tie so the order is
+            // total: two channels can carry a programme at the same instant,
+            // and a page boundary that was not total would repeat or skip one.
             let sql = format!(
                 "SELECT {RECORDING_COLS} FROM dvr_recordings \
-                 WHERE id > ?1 AND {state_clause} AND (?3 IS NULL OR capture_start < ?3) \
-                 ORDER BY id LIMIT ?4"
+                 WHERE (airing_start < ?1 OR (airing_start = ?1 AND id > ?2)) \
+                   AND {state_clause} AND (?3 IS NULL OR capture_start < ?3) \
+                 ORDER BY airing_start DESC, id LIMIT ?4"
             );
             let mut statement = conn.prepare(&sql)?;
-            let rows = statement
-                .query_map(params![after_id, states, before, limit], recording_from_row)?;
+            let rows = statement.query_map(
+                params![after_start, after_id, states, before, limit],
+                recording_from_row,
+            )?;
             Ok(rows.collect::<Result<Vec<_>, _>>()?)
         })
         .await
@@ -576,6 +606,12 @@ impl DvrStore for SqliteStore {
                 DvrStatePatch::Rule { rule_id } => conn.execute(
                     &format!("{head}, rule_id = ?7{tail}"),
                     params![to, reason, now_ms, id, from, fence_generation, rule_id],
+                )?,
+                // A plain `NULL`, not a `COALESCE`: this is the one write
+                // whose whole purpose is to forget where the file was.
+                DvrStatePatch::Purged => conn.execute(
+                    &format!("{head}, path = NULL{tail}"),
+                    params![to, reason, now_ms, id, from, fence_generation],
                 )?,
             };
             Ok(changed == 1)
@@ -724,7 +760,12 @@ impl DvrStore for SqliteStore {
             )?;
             if existing == 0 {
                 let owned: i64 = tx.query_row(
-                    "SELECT COUNT(*) FROM dvr_reminders WHERE user_id = ?1",
+                    // Only reminders that are still going to do something.
+                    // Counting every row ever written would let a viewer's
+                    // two-hundredth reminder of all time refuse them for ever,
+                    // with an empty list in front of them saying otherwise.
+                    "SELECT COUNT(*) FROM dvr_reminders \
+                     WHERE user_id = ?1 AND state IN ('armed', 'fired')",
                     [reminder.user_id],
                     |row| row.get(0),
                 )?;
@@ -802,7 +843,7 @@ impl DvrStore for SqliteStore {
                 // tick and read as an alert about something half over.
                 "SELECT {REMINDER_COLS} FROM dvr_reminders \
                  WHERE state = 'armed' AND airing_start - lead_s <= ?1 \
-                   AND airing_start > ?1 \
+                   AND airing_start >= ?1 \
                  ORDER BY airing_start, id"
             ))?;
             let due = statement
@@ -831,7 +872,7 @@ impl DvrStore for SqliteStore {
             // row any client should still be drawing an overlay for.
             tx.execute(
                 "UPDATE dvr_reminders SET state = 'expired', updated_at_ms = ?1 \
-                 WHERE state IN ('armed', 'fired') AND airing_start <= ?2",
+                 WHERE state IN ('armed', 'fired') AND airing_start < ?2",
                 params![now_ms, now_seconds],
             )?;
             tx.commit()?;

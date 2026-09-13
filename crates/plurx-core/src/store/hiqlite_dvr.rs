@@ -532,6 +532,10 @@ fn transition_statement(
         DvrStatePatch::Rule { rule_id } => {
             binder.set("rule_id", rule_id.as_deref());
         }
+        // A literal `NULL` rather than a bound `None`: this is the one write
+        // whose whole purpose is to forget where the file was, so it must not
+        // go through `set_or_keep`.
+        DvrStatePatch::Purged => binder.sets.push("path = NULL".to_owned()),
     }
     let mut predicate = format!("id = {}", binder.bind(id));
     let states = binder.bind_states(from);
@@ -552,11 +556,19 @@ fn transition_statement(
 /// the same reason [`transition_statement`] is.
 fn recording_page_statement(
     filter: &DvrRecordingFilter,
-    after_id: Option<&str>,
+    after: Option<&str>,
     limit: i64,
 ) -> (String, Vec<Param>) {
     let mut binder = Binder::default();
-    let mut predicate = format!("id > {}", binder.bind(after_id.unwrap_or_default()));
+    // A first page starts above every real airing, so one descending
+    // comparison serves both cases.
+    let (after_start, after_id) = after
+        .and_then(crate::dvr::parse_recording_cursor)
+        .unwrap_or((i64::MAX, ""));
+    let start = binder.bind(after_start);
+    let id = binder.bind(after_id);
+    let mut predicate =
+        format!("(airing_start < {start} OR (airing_start = {start} AND id > {id}))");
     if filter.states.is_empty() {
         // Deleted rows are history rather than schedule. They come back only
         // when the caller asks for them, by flag or by name.
@@ -573,8 +585,11 @@ fn recording_page_statement(
     let page = binder.bind(limit.clamp(1, DVR_RECORDINGS_LIST_PAGE));
     (
         format!(
+            // Newest airing first, with the id breaking a tie so the order is
+            // total: two channels can carry a programme at the same instant,
+            // and a boundary that was not total would repeat or skip one.
             "SELECT {RECORDING_COLS} FROM dvr_recordings \
-             WHERE {predicate} ORDER BY id LIMIT {page}"
+             WHERE {predicate} ORDER BY airing_start DESC, id LIMIT {page}"
         ),
         binder.values,
     )
@@ -872,13 +887,31 @@ impl DvrStore for HiqliteAuthStore {
     /// finished between two pages cannot make a third row skip past the reader
     /// — the guide ticks every fifteen seconds, so that is the normal case
     /// rather than a rare one.
+    async fn get_dvr_recording_for_airing(
+        &self,
+        channel_id: &str,
+        airing_start: i64,
+    ) -> Result<Option<DvrRecording>, StoreError> {
+        Ok(read_recordings(
+            self,
+            format!(
+                "SELECT {RECORDING_COLS} FROM dvr_recordings \
+                 WHERE channel_id = $1 AND airing_start = $2"
+            ),
+            params!(channel_id, airing_start),
+        )
+        .await?
+        .into_iter()
+        .next())
+    }
+
     async fn list_dvr_recordings(
         &self,
         filter: &DvrRecordingFilter,
-        after_id: Option<&str>,
+        after: Option<&str>,
         limit: i64,
     ) -> Result<Vec<DvrRecording>, StoreError> {
-        let (sql, values) = recording_page_statement(filter, after_id, limit);
+        let (sql, values) = recording_page_statement(filter, after, limit);
         read_recordings(self, sql, values).await
     }
 
@@ -1106,7 +1139,8 @@ impl DvrStore for HiqliteAuthStore {
                     "INSERT INTO dvr_reminders ({REMINDER_COLS}) \
                      SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13 \
                      WHERE EXISTS(SELECT 1 FROM dvr_reminders WHERE id = $1) \
-                        OR (SELECT COUNT(*) FROM dvr_reminders WHERE user_id = $2) < $14 \
+                        OR (SELECT COUNT(*) FROM dvr_reminders \
+                              WHERE user_id = $2 AND state IN ('armed', 'fired')) < $14 \
                      ON CONFLICT(id) DO UPDATE SET \
                        user_id = excluded.user_id, channel_id = excluded.channel_id, \
                        guide_number = excluded.guide_number, \
@@ -1175,7 +1209,7 @@ impl DvrStore for HiqliteAuthStore {
                     "UPDATE dvr_reminders SET state = 'fired', fired_at_ms = $1, \
                        updated_at_ms = $1 \
                      WHERE state = 'armed' AND airing_start - lead_s <= $2 \
-                       AND airing_start > $2 \
+                       AND airing_start >= $2 \
                      RETURNING {REMINDER_COLS}"
                 ),
                 params!(now_ms, now_seconds),
@@ -1190,7 +1224,7 @@ impl DvrStore for HiqliteAuthStore {
         // should still be drawing an overlay for.
         self.execute(
             "UPDATE dvr_reminders SET state = 'expired', updated_at_ms = $1 \
-             WHERE state IN ('armed', 'fired') AND airing_start <= $2",
+             WHERE state IN ('armed', 'fired') AND airing_start < $2",
             params!(now_ms, now_seconds),
         )
         .await?;
@@ -1311,6 +1345,7 @@ mod schema_tests {
                 stopped_by_user_id: Some(4),
             },
             DvrStatePatch::Rule { rule_id: None },
+            DvrStatePatch::Purged,
         ];
         for patch in &patches {
             for fence in [None, Some(7)] {

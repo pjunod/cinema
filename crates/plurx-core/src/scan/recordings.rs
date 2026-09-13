@@ -238,9 +238,21 @@ pub async fn after_record(
         // The shelf joins on this. Without it a finished capture is a file in
         // a library with no way back to the row that asked for it, so "play
         // this recording" would have to match on a path.
-        store
-            .link_dvr_recording_media(&recording_id, placed.id, file_id, now_ms)
-            .await?;
+        //
+        // The row must already name this exact file. A sidecar is a document
+        // in a folder an operator can write to, and without the check anyone
+        // who could drop a file into a recordings library could re-point any
+        // recording's media at it.
+        let owns_this_file = store
+            .get_dvr_recording(&recording_id)
+            .await?
+            .and_then(|row| row.path)
+            .is_some_and(|stored| std::path::Path::new(&stored) == path);
+        if owns_this_file {
+            store
+                .link_dvr_recording_media(&recording_id, placed.id, file_id, now_ms)
+                .await?;
+        }
     }
     Ok(true)
 }

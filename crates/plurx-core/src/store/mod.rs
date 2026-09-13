@@ -2088,10 +2088,27 @@ pub trait DvrStore: Send + Sync + 'static {
         id: &str,
     ) -> Result<Option<crate::dvr::DvrRecording>, StoreError>;
 
+    /// The row that owns this airing, by the identity the unique index keeps.
+    ///
+    /// Needed because "one airing is one row" is only useful if the row can be
+    /// found that way. Scanning a page of the list instead would answer "no
+    /// such airing" the moment a server holds more recordings than a page.
+    async fn get_dvr_recording_for_airing(
+        &self,
+        channel_id: &str,
+        airing_start: i64,
+    ) -> Result<Option<crate::dvr::DvrRecording>, StoreError>;
+
+    /// One page, newest airing first.
+    ///
+    /// `after` is the cursor a previous page's last row produced
+    /// ([`crate::dvr::recording_cursor`]) — `(airing_start, id)`, not an id
+    /// alone, because ordering by a v4 UUID would hand a viewer an arbitrary
+    /// hundred of their recordings and call it their library.
     async fn list_dvr_recordings(
         &self,
         filter: &crate::dvr::DvrRecordingFilter,
-        after_id: Option<&str>,
+        after: Option<&str>,
         limit: i64,
     ) -> Result<Vec<crate::dvr::DvrRecording>, StoreError>;
 

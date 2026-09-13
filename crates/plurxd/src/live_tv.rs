@@ -1313,8 +1313,20 @@ struct LiveTvTerminalTombstone {
 
 impl LiveTvRegistry {
     /// Tuner sessions in use: viewers plus recording transports.
+    ///
+    /// A cancelled session is not occupancy. Its worker takes a moment to
+    /// exit, and counting it would refuse a viewer who stopped and
+    /// immediately restarted — the commonest thing a person does when a
+    /// channel misbehaves.
+    fn live_sessions(&self) -> usize {
+        self.sessions
+            .values()
+            .filter(|session| !session.cancel.is_cancelled())
+            .count()
+    }
+
     fn held(&self) -> usize {
-        self.sessions.len() + self.transports.len()
+        self.live_sessions() + self.transports.len()
     }
 
     /// Whether a *new* transport may be opened. A sink joining one that is
@@ -1328,7 +1340,7 @@ impl LiveTvRegistry {
     /// whichever order they arrived in.
     fn may_open_transport(&self, max_sessions: u8, reserve: u8) -> bool {
         Self::occupancy_admits(
-            self.sessions.len(),
+            self.live_sessions(),
             self.transports.len(),
             max_sessions,
             reserve,
@@ -2062,13 +2074,20 @@ fn merge_carried_guide(
 /// deliberately so. `approved_guide_url` pins scheme, port and a two-host
 /// allowlist because it carries a credential to a vendor's API. This carries
 /// no credential and no secret — a reminder and a recording's start and finish
-/// — and its whole point is Home Assistant at `http://ha.lan:8123`, which no
+/// — and its whole point is a box on the operator's own network, which no
 /// allowlist could name in advance.
 ///
 /// So the rule is about *reach* rather than identity: https to anywhere, or
-/// plain http only to a private or link-local address. Userinfo is refused
-/// outright, because a URL carrying a credential is a credential this process
-/// would then hold and log.
+/// plain http only to a private or link-local **literal address**. Userinfo is
+/// refused outright, because a URL carrying a credential is a credential this
+/// process would then hold and log.
+///
+/// A *name* over plain http is refused even when it currently resolves
+/// privately, so `http://ha.lan:8123` has to be written
+/// `http://192.168.4.7:8123`. That is a real cost and it is the deliberate
+/// choice: this check runs when a setting is saved, a name that resolves
+/// privately today can resolve publicly tomorrow, and the setting would not be
+/// re-examined. The Developer row says exactly this when it refuses one.
 ///
 /// Redirects are refused by the client that uses this (as the artwork client
 /// does), so the host checked here is the host contacted.

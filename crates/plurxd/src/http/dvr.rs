@@ -232,11 +232,21 @@ pub(crate) struct RecordingsQuery {
     limit: Option<i64>,
 }
 
+#[derive(Serialize)]
+pub(crate) struct RecordingsPage {
+    rows: Vec<DvrRecording>,
+    /// Pass back as `?after=` for the next page. Absent on the last one, so a
+    /// client knows it has the whole library rather than guessing from a
+    /// short page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next: Option<String>,
+}
+
 pub(crate) async fn list_recordings(
     _user: AuthUser,
     State(state): State<AppState>,
     Query(query): Query<RecordingsQuery>,
-) -> Result<Json<Vec<DvrRecording>>, ApiError> {
+) -> Result<Json<RecordingsPage>, ApiError> {
     let states = parse_states(query.state.as_deref())?;
     let include_deleted = states.contains(&DvrState::Deleted);
     let filter = DvrRecordingFilter {
@@ -244,16 +254,18 @@ pub(crate) async fn list_recordings(
         include_deleted,
         before_capture_start: None,
     };
-    Ok(Json(
-        state
-            .store
-            .list_dvr_recordings(
-                &filter,
-                query.after.as_deref(),
-                query.limit.unwrap_or(DVR_RECORDINGS_LIST_PAGE),
-            )
-            .await?,
-    ))
+    let limit = query.limit.unwrap_or(DVR_RECORDINGS_LIST_PAGE);
+    let rows = state
+        .store
+        .list_dvr_recordings(&filter, query.after.as_deref(), limit)
+        .await?;
+    // A cursor only when the page was full: a short page is the end of the
+    // library, and offering a cursor there would have every client make one
+    // more request to learn nothing.
+    let next = (rows.len() as i64 >= limit.clamp(1, DVR_RECORDINGS_LIST_PAGE))
+        .then(|| rows.last().map(plurx_core::dvr::recording_cursor))
+        .flatten();
+    Ok(Json(RecordingsPage { rows, next }))
 }
 
 /// `?state=scheduled,recording`. An unknown name is refused rather than
@@ -330,21 +342,8 @@ pub(crate) async fn create_recording(
             // both wanted the same thing and both got it.
             let existing = state
                 .store
-                .list_dvr_recordings(
-                    &DvrRecordingFilter {
-                        states: Vec::new(),
-                        include_deleted: true,
-                        before_capture_start: None,
-                    },
-                    None,
-                    DVR_RECORDINGS_LIST_PAGE,
-                )
+                .get_dvr_recording_for_airing(&row.channel_id, row.airing_start)
                 .await?
-                .into_iter()
-                .find(|candidate| {
-                    candidate.channel_id == row.channel_id
-                        && candidate.airing_start == row.airing_start
-                })
                 .ok_or_else(airing_unknown)?;
             Ok((StatusCode::OK, Json(existing)))
         }
@@ -995,10 +994,18 @@ pub(crate) async fn create_reminder(
             "that programme has already started",
         ));
     }
-    let existing = state
+    // Armed and fired both count, matching what the Store charges: a fired
+    // reminder is still on someone's screen waiting to be acknowledged.
+    let mut existing = state
         .store
         .list_dvr_reminders(user.id, Some(DvrReminderState::Armed))
         .await?;
+    existing.extend(
+        state
+            .store
+            .list_dvr_reminders(user.id, Some(DvrReminderState::Fired))
+            .await?,
+    );
     if existing.len() as i64 >= DVR_REMINDERS_PER_USER_MAX {
         return Err(ApiError::typed(
             StatusCode::CONFLICT,

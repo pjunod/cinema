@@ -4986,8 +4986,11 @@ mod tests {
             }
         }
 
-        // These two rows describe facts this single-node fixture can prove:
-        // the authoritative catalogue responds and server-side handoff exists.
+        // These three rows describe facts this single-node fixture can prove:
+        // the authoritative catalogue responds, server-side handoff exists,
+        // and the DVR's tuner arithmetic leaves a recording somewhere to go —
+        // that last one is a sum of two configured numbers, so it is knowable
+        // on a node that has never seen a tuner.
         let green = seen
             .iter()
             .filter(|(_, status)| status.as_str() == "met")
@@ -4995,7 +4998,11 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             green,
-            vec!["authoritative_store", "server_preparation_is_real"]
+            vec![
+                "authoritative_store",
+                "server_preparation_is_real",
+                "tuner_reserve"
+            ]
         );
         // Order-independent because no row reachable here has a `met` branch a
         // sibling test could reach: the retained engine's two rows refuse
@@ -5212,7 +5219,9 @@ mod tests {
 
     /// The webhook boundary is deliberately weaker than the guide's, because
     /// it carries no credential and its whole point is a box on the operator's
-    /// own LAN. "Weaker" still has a shape.
+    /// own LAN. "Weaker" still has a shape — and the shape costs the operator
+    /// a literal address rather than a name, which is asserted here so nobody
+    /// relaxes it without meaning to.
     #[test]
     fn the_webhook_policy_admits_the_lan_and_refuses_the_open_internet_in_the_clear() {
         let approved = |raw: &str| crate::live_tv::approved_webhook_url(raw).is_ok();

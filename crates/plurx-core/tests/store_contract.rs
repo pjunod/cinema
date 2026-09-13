@@ -284,6 +284,7 @@ const DVR_METHODS: &[&str] = &[
     "reorder_dvr_rules",
     "insert_dvr_airing_if_absent",
     "get_dvr_recording",
+    "get_dvr_recording_for_airing",
     "list_dvr_recordings",
     "list_dvr_recordings_in",
     "transition_dvr_recording",
@@ -16361,7 +16362,7 @@ fn contract_inventory_matches_every_store_method() {
     // Both independently reviewed method sets survive this integration. Read
     // the total from the merged trait rather than carrying either parent's
     // count across the promotion merge.
-    assert_eq!(declared.len(), 348, "review the Store method count");
+    assert_eq!(declared.len(), 349, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

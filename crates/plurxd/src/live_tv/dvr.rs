@@ -50,6 +50,14 @@ const DVR_PROGRESS_INTERVAL_MS: i64 = 30_000;
 /// recordings and deletes files, and neither is work worth doing 240 times an
 /// hour.
 const DVR_RETENTION_INTERVAL_S: i64 = 3600;
+/// How long a spent reminder is kept before it is swept. Long enough that a
+/// viewer can still see what fired yesterday, short enough that it never
+/// becomes the reason they cannot set another one.
+const REMINDER_RETENTION_S: i64 = 7 * 24 * 3600;
+/// How long after a capture finishes the library sweep keeps offering it to
+/// the scanner. Past this, a row that still has no item is one the scan cannot
+/// place, and repeating the request cannot change that.
+const UNLINKED_SCAN_WINDOW_S: i64 = 24 * 3600;
 
 /// One tuner GET, feeding every sink on its channel.
 pub(crate) struct DvrTransport {
@@ -107,12 +115,39 @@ pub(crate) struct DvrSink {
 
 impl DvrSink {
     fn part_path(&self) -> PathBuf {
-        self.base.with_extension(format!("a{}.part", self.attempt))
+        attempt_path(&self.base, self.attempt)
     }
 
     fn final_path(&self) -> PathBuf {
-        self.base.with_extension("ts")
+        final_path(&self.base)
     }
+}
+
+/// Every path a recording owns, built by appending to the basename rather than
+/// through `Path::with_extension`.
+///
+/// `with_extension` replaces everything after the *last* dot in the file name,
+/// and a recording's basename ends `… - 7.1 - abcdef01`. It would therefore
+/// truncate at the dot inside the channel number, throwing away the
+/// sub-channel and the id — which are precisely what makes the name unique.
+/// Two sub-channels carrying a programme called `News` at six o'clock would
+/// have collided on one file.
+fn final_path(base: &std::path::Path) -> PathBuf {
+    sibling(base, ".ts")
+}
+
+fn sidecar_path(base: &std::path::Path) -> PathBuf {
+    sibling(base, ".json")
+}
+
+fn attempt_path(base: &std::path::Path, attempt: i64) -> PathBuf {
+    sibling(base, &format!(".a{attempt}.part"))
+}
+
+fn sibling(base: &std::path::Path, suffix: &str) -> PathBuf {
+    let mut name = base.as_os_str().to_os_string();
+    name.push(suffix);
+    PathBuf::from(name)
 }
 
 /// What `tuner_capacity` tells a refused viewer: which channels are held, and
@@ -304,6 +339,7 @@ impl LiveTvManager {
         self.dvr_start(live_tv, dvr, events, generation, now)
             .await?;
         self.dvr_finish(events, generation, now).await?;
+        self.dvr_purge_deleted().await?;
         if now - *last_retention >= DVR_RETENTION_INTERVAL_S {
             *last_retention = now;
             self.dvr_retain(now).await?;
@@ -334,7 +370,15 @@ impl LiveTvManager {
             if live.contains(&row.id) {
                 continue;
             }
-            let last_progress = row.last_progress_ms.unwrap_or(row.created_at_ms) / 1000;
+            // `started_at_ms`, never `created_at_ms`: the row was inserted by
+            // expansion, possibly a fortnight before the capture opened, and a
+            // capture that failed before its first 30-second progress write
+            // would otherwise report a two-week gap.
+            let last_progress = row
+                .last_progress_ms
+                .or(row.started_at_ms)
+                .unwrap_or(row.created_at_ms)
+                / 1000;
             let gap = (now - last_progress).max(0);
             if now < row.capture_end - DVR_MIN_USEFUL_S && row.attempt < DVR_ATTEMPTS_MAX {
                 let attempt = row.attempt + 1;
@@ -471,17 +515,22 @@ impl LiveTvManager {
         if rows.is_empty() {
             return Ok(());
         }
+        // An empty guide is what the cache returns while it is cold, for a
+        // generation that has just changed, and past the stale window — none
+        // of which is evidence that a programme moved. Reconciling against one
+        // would withdraw every rule row and, worse, mark every manual row
+        // `stale`, from which nothing brings it back. A settings save would
+        // have silently killed every recording a person had asked for.
         let guide = if live_tv.guide_fetches() {
-            Some(
-                self.local_guide(
-                    live_tv,
-                    GuideWindow {
-                        start: now - 3600,
-                        end: now + DVR_SCHEDULE_DAYS_MAX * 86_400,
-                    },
-                )
-                .await,
+            self.local_guide(
+                live_tv,
+                GuideWindow {
+                    start: now - 3600,
+                    end: now + DVR_SCHEDULE_DAYS_MAX * 86_400,
+                },
             )
+            .await
+            .into_some_if_populated()
         } else {
             None
         };
@@ -528,6 +577,22 @@ impl LiveTvManager {
                 continue;
             }
             if row.origin != DvrOrigin::Rule {
+                // A manual row marked `stale` because its programme vanished
+                // is scheduled again the moment the guide lists it once more.
+                // Without this, `stale` is a one-way door: nothing else moves
+                // a row out of it, and the viewer cannot even re-create the
+                // recording, because the airing is already spoken for.
+                if row.state == DvrState::Stale && still_listed == Some(true) {
+                    self.transition(
+                        &row.id,
+                        &[DvrState::Stale],
+                        DvrState::Scheduled,
+                        None,
+                        DvrStatePatch::None,
+                        Some(generation),
+                    )
+                    .await?;
+                }
                 continue;
             }
             let owner = guide.as_ref().and_then(|guide| {
@@ -602,9 +667,15 @@ impl LiveTvManager {
                 continue;
             }
             let now = unix_seconds();
+            // Read the probe's facts before the transport closes: `stop_sink`
+            // may take the last sink with it, and a sidecar without the source
+            // codec is the one thing a stopped recording would otherwise lack
+            // that a completed one has.
+            let facts = self.transport_source_facts(&row.channel_id);
             self.stop_sink(&row.id).await;
-            self.finish_row(
+            self.finish_row_with_facts(
                 &row,
+                facts,
                 events,
                 now,
                 0,
@@ -731,24 +802,37 @@ impl LiveTvManager {
                 continue;
             }
             let late = (now - row.capture_start).max(0);
-            self.transition(
-                &row.id,
-                &[DvrState::Scheduled],
-                DvrState::Recording,
-                (late > 0).then_some("started late"),
-                DvrStatePatch::Started {
-                    attempt: 1,
-                    tuner_owner_node_id: self.node_id.clone(),
-                    started_at_ms: now.saturating_mul(1000),
-                    late_start_s: late,
-                    path: self
-                        .recording_final_path(dvr, &row)
-                        .to_string_lossy()
-                        .into_owned(),
-                },
-                Some(generation),
-            )
-            .await?;
+            // If the row moved under us — a viewer cancelled it, or the
+            // configuration generation changed — the capture that is already
+            // opened has no row to belong to. Close it rather than letting a
+            // file grow for a recording nobody asked for.
+            let claimed = self
+                .transition(
+                    &row.id,
+                    &[DvrState::Scheduled],
+                    DvrState::Recording,
+                    (late > 0).then_some("started late"),
+                    DvrStatePatch::Started {
+                        attempt: 1,
+                        tuner_owner_node_id: self.node_id.clone(),
+                        started_at_ms: now.saturating_mul(1000),
+                        late_start_s: late,
+                        path: self
+                            .recording_final_path(dvr, &row)
+                            .to_string_lossy()
+                            .into_owned(),
+                    },
+                    Some(generation),
+                )
+                .await?;
+            if !claimed {
+                tracing::info!(
+                    recording = %row.id,
+                    "the recording changed under its own start; closing the capture"
+                );
+                self.stop_sink(&row.id).await;
+                continue;
+            }
             tracing::info!(
                 recording = %row.id,
                 title = %row.title,
@@ -787,7 +871,6 @@ impl LiveTvManager {
                 if now < sink.window.1 {
                     continue;
                 }
-                sink.cancel.cancel();
                 finished.insert(sink.recording_id.clone());
             }
         }
@@ -795,15 +878,42 @@ impl LiveTvManager {
             if !finished.contains(&row.id) && now < row.capture_end {
                 continue;
             }
-            if !finished.contains(&row.id) {
-                // Its window closed but no sink was holding it — the recover
-                // step already accounted for the gap, so just close it out.
-                self.stop_sink(&row.id).await;
-            }
+            // Always through `stop_sink`, which flushes and takes the file.
+            // Cancelling alone leaves a buffered `tokio::fs::File` whose last
+            // writes have not reached the kernel, and the concatenation below
+            // would then copy a short part and unlink it — losing exactly the
+            // end of every recording that finished normally.
+            self.stop_sink(&row.id).await;
             self.finish_row(&row, events, now, 0, None, "capture complete", generation)
                 .await?;
         }
         self.close_finished_transports().await;
+        Ok(())
+    }
+
+    /// Remove the files of recordings a person deleted.
+    ///
+    /// The route writes the decision and cannot act on it: a viewer may press
+    /// Delete on any node, and only the owner has the DVR root. So a `deleted`
+    /// row that still names a path is a standing instruction, consumed here
+    /// and then cleared — which is also what stops this running twice on the
+    /// same file for ever.
+    async fn dvr_purge_deleted(&self) -> Result<(), LiveTvError> {
+        for row in self.dvr_rows(&[DvrState::Deleted]).await? {
+            if row.path.is_none() {
+                continue;
+            }
+            self.delete_recording_files(&row).await;
+            self.transition(
+                &row.id,
+                &[DvrState::Deleted],
+                DvrState::Deleted,
+                row.state_reason.as_deref(),
+                DvrStatePatch::Purged,
+                None,
+            )
+            .await?;
+        }
         Ok(())
     }
 
@@ -824,10 +934,29 @@ impl LiveTvManager {
                     .iter()
                     .filter(|row| now - row.airing_start > rule.keep_value.max(0) * 86_400)
                     .collect(),
-                // Watch state is the owner's to read, and a recording nobody
-                // has watched is exactly the one to keep. Handled where watch
-                // state lives rather than guessed at here.
-                DvrKeepMode::UntilWatched => Vec::new(),
+                DvrKeepMode::UntilWatched => {
+                    // "Until watched" means the rule's owner watched it — not
+                    // anyone in the house. A recording deleted because a
+                    // different viewer finished it is the failure this policy
+                    // exists to avoid. A row the scan has not linked yet has
+                    // no item to have been watched, and is therefore kept.
+                    let mut watched = Vec::new();
+                    for row in &mine {
+                        let Some(item_id) = row.item_id else {
+                            continue;
+                        };
+                        let seen = self
+                            .store
+                            .watch_state(rule.owner_user_id, item_id)
+                            .await
+                            .map_err(store_error)?
+                            .is_some_and(|state| state.watched);
+                        if seen {
+                            watched.push(*row);
+                        }
+                    }
+                    mine.iter().filter(|row| watched.contains(row)).collect()
+                }
             };
             for row in doomed {
                 self.delete_recording_files(row).await;
@@ -883,11 +1012,26 @@ impl LiveTvManager {
             ));
         }
         let base = self.recording_base_path(dvr, row);
-        if let Some(parent) = base.parent() {
-            tokio::fs::create_dir_all(parent).await.map_err(|error| {
-                LiveTvError::StreamFailed(format!("creating the recording folder: {error}"))
-            })?;
-        }
+        let address = live_tv.device_ipv4.ok_or_else(|| {
+            LiveTvError::InvalidConfig("an HDHomeRun IPv4 address is required".to_owned())
+        })?;
+        let client = self
+            .client
+            .as_ref()
+            .map_err(|error| {
+                LiveTvError::DeviceUnavailable(format!("the HTTP client is unavailable: {error}"))
+            })?
+            .clone();
+        let serving_generation = self.serving.admit().ok_or_else(|| {
+            LiveTvError::OwnerUnavailable(crate::serving_fence::SERVING_FENCED_MESSAGE.to_owned())
+        })?;
+
+        // Decide about the tuner before touching the disk. The attempt file is
+        // created with `O_EXCL`, so a file left behind by a refusal makes this
+        // attempt number unusable for ever: the retry next tick would find its
+        // own orphan and read it as a fenced predecessor's. Every fallible step
+        // that does not need the file therefore happens first, and the two
+        // that remain after it undo themselves.
         let sink = Arc::new(DvrSink {
             recording_id: row.id.clone(),
             title: row.title.clone(),
@@ -898,6 +1042,38 @@ impl LiveTvManager {
             bytes: AtomicU64::new(0),
             cancel: CancellationToken::new(),
         });
+        let joined = {
+            let registry = self
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if registry.closing {
+                return Err(LiveTvError::OwnerUnavailable(
+                    "this node is shutting down".to_owned(),
+                ));
+            }
+            match registry.transports.get(&row.channel_id).cloned() {
+                Some(transport)
+                    if schedule::may_share_transport(transport.open_until(), row.capture_start) =>
+                {
+                    Some(transport)
+                }
+                _ => {
+                    if !registry.may_open_transport(live_tv.max_sessions, dvr.tuner_reserve) {
+                        return Err(LiveTvError::Capacity(
+                            "no tuner is free for this recording".to_owned(),
+                        ));
+                    }
+                    None
+                }
+            }
+        };
+
+        if let Some(parent) = base.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(|error| {
+                LiveTvError::StreamFailed(format!("creating the recording folder: {error}"))
+            })?;
+        }
         // `create_new` is the whole guarantee against a fenced predecessor: an
         // attempt file that already exists means another process owns it, and
         // this attempt takes the next number rather than truncating it.
@@ -913,41 +1089,14 @@ impl LiveTvManager {
             })?;
         *sink.file.lock().await = Some(file);
 
-        let serving_generation = self.serving.admit().ok_or_else(|| {
-            LiveTvError::OwnerUnavailable(crate::serving_fence::SERVING_FENCED_MESSAGE.to_owned())
-        })?;
-        let existing = {
-            let registry = self
-                .registry
+        if let Some(transport) = joined {
+            // Publish the sink only once its file is open, so the fan-out
+            // never sees a sink it cannot write to.
+            transport
+                .sinks
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if registry.closing {
-                return Err(LiveTvError::OwnerUnavailable(
-                    "this node is shutting down".to_owned(),
-                ));
-            }
-            match registry.transports.get(&row.channel_id).cloned() {
-                Some(transport)
-                    if schedule::may_share_transport(transport.open_until(), row.capture_start) =>
-                {
-                    transport
-                        .sinks
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .push(Arc::clone(&sink));
-                    Some(transport)
-                }
-                _ => {
-                    if !registry.may_open_transport(live_tv.max_sessions, dvr.tuner_reserve) {
-                        return Err(LiveTvError::Capacity(
-                            "no tuner is free for this recording".to_owned(),
-                        ));
-                    }
-                    None
-                }
-            }
-        };
-        if existing.is_some() {
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(Arc::clone(&sink));
             return Ok(());
         }
 
@@ -972,19 +1121,9 @@ impl LiveTvManager {
         }
         let manager = Arc::downgrade(self);
         let worker_transport = Arc::clone(&transport);
-        let address = live_tv.device_ipv4.ok_or_else(|| {
-            LiveTvError::InvalidConfig("an HDHomeRun IPv4 address is required".to_owned())
-        })?;
         let guide_number = channel.guide_number.clone();
         let scratch = self.scratch_root.join(format!("dvr-{}", channel.id));
         let serving = self.serving.clone();
-        let client = self
-            .client
-            .as_ref()
-            .map_err(|error| {
-                LiveTvError::DeviceUnavailable(format!("the HTTP client is unavailable: {error}"))
-            })?
-            .clone();
         let worker = tokio::spawn(async move {
             let result = run_transport(
                 client,
@@ -1023,10 +1162,18 @@ impl LiveTvManager {
         for transport in transports {
             for sink in transport.live_sinks() {
                 if sink.recording_id == recording_id {
+                    // Cancel first so the fan-out stops choosing this sink,
+                    // then take the file: `flush` on a `tokio::fs::File` is
+                    // what pushes the last buffered write to the kernel, and
+                    // `sync_all` is what makes it survive the concatenation
+                    // that reads the same bytes back immediately.
                     sink.cancel.cancel();
                     if let Some(mut file) = sink.file.lock().await.take() {
                         use tokio::io::AsyncWriteExt as _;
-                        let _ = file.flush().await;
+                        if let Err(error) = file.flush().await {
+                            tracing::warn!(%error, recording = %recording_id, "flushing a capture");
+                        }
+                        let _ = file.sync_all().await;
                     }
                     stopped = true;
                 }
@@ -1153,7 +1300,7 @@ impl LiveTvManager {
     }
 
     fn recording_final_path(&self, dvr: &DvrConfig, row: &DvrRecording) -> PathBuf {
-        self.recording_base_path(dvr, row).with_extension("ts")
+        final_path(&self.recording_base_path(dvr, row))
     }
 
     /// Close a capture out: join its attempts into one file, write the
@@ -1169,9 +1316,27 @@ impl LiveTvManager {
         reason: &str,
         generation: i64,
     ) -> Result<(), LiveTvError> {
+        let facts = self.transport_source_facts(&row.channel_id);
+        self.finish_row_with_facts(
+            row, facts, events, now, extra_gap, stopped_by, reason, generation,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn finish_row_with_facts(
+        &self,
+        row: &DvrRecording,
+        facts: Option<crate::live_tv_delivery::LiveSourceFacts>,
+        events: &super::webhook::DvrEventSink,
+        now: i64,
+        extra_gap: i64,
+        stopped_by: Option<i64>,
+        reason: &str,
+        generation: i64,
+    ) -> Result<(), LiveTvError> {
         let (_, dvr) = self.dvr_configs().await?;
         let base = self.recording_base_path(&dvr, row);
-        let facts = self.transport_source_facts(&row.channel_id);
         let gap = row.gap_s + extra_gap;
         let bytes = match concatenate_attempts(&base, row.attempt).await {
             Ok(bytes) => bytes,
@@ -1208,7 +1373,7 @@ impl LiveTvManager {
                 finished_at_ms: now.saturating_mul(1000),
                 bytes: i64::try_from(bytes).unwrap_or(i64::MAX),
                 gap_s: gap,
-                path: base.with_extension("ts").to_str().map(str::to_owned),
+                path: final_path(&base).to_str().map(str::to_owned),
                 stopped_by_user_id: stopped_by,
             },
             Some(generation),
@@ -1237,7 +1402,7 @@ impl LiveTvManager {
                 state: state.as_str().to_owned(),
                 bytes: i64::try_from(bytes).unwrap_or(i64::MAX),
                 gap_s: gap,
-                path: base.with_extension("ts").to_str().map(str::to_owned),
+                path: final_path(&base).to_str().map(str::to_owned),
             }
         });
         Ok(())
@@ -1270,7 +1435,14 @@ impl LiveTvManager {
             return;
         };
         let base = PathBuf::from(path);
-        for candidate in [base.clone(), base.with_extension("json")] {
+        // The row stores the final `.ts` path, so the sidecar is found by
+        // dropping that one suffix — never by `with_extension`, which would
+        // cut the name at the dot inside the channel number.
+        let sidecar = base
+            .to_str()
+            .and_then(|path| path.strip_suffix(".ts"))
+            .map(|stem| PathBuf::from(format!("{stem}.json")));
+        for candidate in std::iter::once(base.clone()).chain(sidecar) {
             if let Err(error) = tokio::fs::remove_file(&candidate).await {
                 if error.kind() != std::io::ErrorKind::NotFound {
                     tracing::warn!(%error, path = %candidate.display(), "could not remove a recording");
@@ -1412,10 +1584,10 @@ async fn pump_tuner_fanout(
 async fn concatenate_attempts(base: &std::path::Path, attempts: i64) -> std::io::Result<u64> {
     use tokio::io::AsyncWriteExt as _;
 
-    let final_path = base.with_extension("ts");
+    let final_path = final_path(base);
     let mut parts = Vec::new();
     for attempt in 1..=attempts.max(1) {
-        let part = base.with_extension(format!("a{attempt}.part"));
+        let part = attempt_path(base, attempt);
         if tokio::fs::metadata(&part).await.is_ok() {
             parts.push(part);
         }
@@ -1489,7 +1661,7 @@ async fn write_sidecar(
         "state": state.as_str(),
         "bytes": bytes,
     });
-    let path = base.with_extension("json");
+    let path = sidecar_path(base);
     let body = match serde_json::to_vec_pretty(&document) {
         Ok(body) => body,
         Err(error) => {
@@ -1634,6 +1806,37 @@ async fn reminder_tick(
         // No guide is not evidence that a programme moved.
         return Ok(());
     }
+    // Spent reminders are history, and history is not a quota. Without this
+    // sweep a long-lived account eventually cannot set another one.
+    for reminder in manager
+        .store
+        .list_dvr_reminders_in(plurx_core::dvr::DvrReminderState::Acked)
+        .await
+        .map_err(store_error)?
+        .into_iter()
+        .chain(
+            manager
+                .store
+                .list_dvr_reminders_in(plurx_core::dvr::DvrReminderState::Expired)
+                .await
+                .map_err(store_error)?,
+        )
+        .chain(
+            manager
+                .store
+                .list_dvr_reminders_in(plurx_core::dvr::DvrReminderState::Moved)
+                .await
+                .map_err(store_error)?,
+        )
+    {
+        if now - reminder.airing_end > REMINDER_RETENTION_S {
+            let _ = manager
+                .store
+                .delete_dvr_reminder(reminder.user_id, &reminder.id)
+                .await;
+        }
+    }
+
     for reminder in armed {
         let listed = guide.channels.iter().any(|channel| {
             channel.id == reminder.channel_id
@@ -1703,12 +1906,18 @@ async fn sweep_recordings_library(
         Some(library) => library,
         None => return Ok(()),
     };
+    // Recent finishes only. A recording whose sidecar could not be written —
+    // a full disk, a permission change — will never link, and asking the
+    // scanner about it every sixty seconds for the life of the server is a
+    // load with no possible outcome.
+    let now = crate::live_tv::unix_seconds();
     let unlinked = state
         .store
         .list_dvr_recordings_in(&[DvrState::Done, DvrState::Partial])
         .await?
         .into_iter()
         .filter(|row| row.item_id.is_none())
+        .filter(|row| now - row.finished_at_ms.unwrap_or(0) / 1000 < UNLINKED_SCAN_WINDOW_S)
         .filter_map(|row| row.path.clone())
         .collect::<Vec<_>>();
     for path in unlinked {
@@ -1775,4 +1984,214 @@ async fn ensure_recordings_library(
         "created the recordings library for the configured DVR root"
     );
     Ok(Some(created))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base(root: &str, title: &str, start: i64, number: &str, id: &str) -> PathBuf {
+        PathBuf::from(root)
+            .join(recording_folder(title))
+            .join(recording_basename(title, start, number, id))
+    }
+
+    /// The bug this test exists for: `Path::with_extension` replaces
+    /// everything after the *last* dot, and a recording's basename ends
+    /// `… - 7.1 - abcdef01`. Building paths that way truncated at the dot
+    /// inside the channel number, throwing away the sub-channel and the id —
+    /// which are exactly what makes the name unique. Two sub-channels showing
+    /// a programme called `News` at six o'clock collided on one file.
+    #[test]
+    fn a_channel_number_is_not_mistaken_for_a_file_extension() {
+        let seven_one = base("/20t/dvr", "News", 1_789_000_800, "7.1", "aaaaaaaa1111");
+        let seven_two = base("/20t/dvr", "News", 1_789_000_800, "7.2", "bbbbbbbb2222");
+
+        assert!(
+            final_path(&seven_one)
+                .to_string_lossy()
+                .ends_with("7.1 - aaaaaaaa.ts"),
+            "the sub-channel and the id survive: {}",
+            final_path(&seven_one).display()
+        );
+        assert_ne!(
+            final_path(&seven_one),
+            final_path(&seven_two),
+            "two sub-channels, one programme title, one instant"
+        );
+        assert_ne!(attempt_path(&seven_one, 1), attempt_path(&seven_two, 1));
+        assert_ne!(sidecar_path(&seven_one), sidecar_path(&seven_two));
+        assert_eq!(
+            attempt_path(&seven_one, 2),
+            PathBuf::from(format!("{}.a2.part", seven_one.display())),
+            "an attempt is a suffix on the whole basename, never an extension swap"
+        );
+    }
+
+    /// Every path a recording owns is the same basename plus one suffix, so
+    /// the sidecar is always found beside the file the row names.
+    #[test]
+    fn a_recordings_paths_are_all_siblings_of_one_basename() {
+        let base = base(
+            "/20t/dvr",
+            "Kitchen Table",
+            1_789_000_800,
+            "7.1",
+            "abcdef012345",
+        );
+        let stem = base.to_string_lossy().into_owned();
+        assert_eq!(final_path(&base).to_string_lossy(), format!("{stem}.ts"));
+        assert_eq!(
+            sidecar_path(&base).to_string_lossy(),
+            format!("{stem}.json")
+        );
+        assert_eq!(
+            attempt_path(&base, 1).to_string_lossy(),
+            format!("{stem}.a1.part")
+        );
+    }
+
+    /// A single attempt is renamed rather than copied, and several are joined
+    /// in order. MPEG-TS packets concatenate, so the join is a byte copy; the
+    /// discontinuity is a gap the row and the sidecar name rather than hide.
+    #[tokio::test]
+    async fn attempts_are_joined_in_order_and_their_parts_removed() {
+        let root = tempfile::tempdir().expect("temp root");
+        let base = root
+            .path()
+            .join("Kitchen Table - 2026-09-10 0040 - 7.1 - abcdef01");
+
+        tokio::fs::write(attempt_path(&base, 1), b"first")
+            .await
+            .expect("a1");
+        let bytes = concatenate_attempts(&base, 1).await.expect("join one");
+        assert_eq!(bytes, 5);
+        assert_eq!(
+            tokio::fs::read(final_path(&base)).await.expect("final"),
+            b"first",
+            "one attempt is a rename, not a copy"
+        );
+        assert!(!attempt_path(&base, 1).exists());
+
+        // A second recovery: the final file from the first join is stale and
+        // the parts are what count.
+        tokio::fs::remove_file(final_path(&base))
+            .await
+            .expect("reset");
+        tokio::fs::write(attempt_path(&base, 1), b"first")
+            .await
+            .expect("a1");
+        tokio::fs::write(attempt_path(&base, 2), b"-second")
+            .await
+            .expect("a2");
+        let bytes = concatenate_attempts(&base, 2).await.expect("join two");
+        assert_eq!(bytes, 12);
+        assert_eq!(
+            tokio::fs::read(final_path(&base)).await.expect("final"),
+            b"first-second",
+            "attempts join in order, so the recording plays in order"
+        );
+        assert!(!attempt_path(&base, 1).exists());
+        assert!(!attempt_path(&base, 2).exists());
+    }
+
+    /// A capture that never opened a file must not be reported as a file.
+    #[tokio::test]
+    async fn a_capture_that_wrote_nothing_joins_to_nothing() {
+        let root = tempfile::tempdir().expect("temp root");
+        let base = root
+            .path()
+            .join("Nothing - 2026-09-10 0040 - 7.1 - abcdef01");
+        assert_eq!(
+            concatenate_attempts(&base, 3).await.expect("join none"),
+            0,
+            "zero bytes is what makes `finish` call it failed rather than done"
+        );
+        assert!(!final_path(&base).exists());
+    }
+
+    /// The sidecar is what the library scan reads, so it has to carry the
+    /// facts the guide supplied — and say plainly when a capture is partial.
+    #[tokio::test]
+    async fn a_sidecar_says_what_the_capture_actually_got() {
+        let root = tempfile::tempdir().expect("temp root");
+        let base = root
+            .path()
+            .join("Kitchen Table - 2026-09-10 0040 - 7.1 - abcdef01");
+        let mut row = crate::http::dvr::recording_from_programme(
+            &crate::http::dvr::ResolvedChannel {
+                id: "7.1".into(),
+                guide_number: "7.1".into(),
+                name: "WABC".into(),
+            },
+            &super::super::LiveTvProgramme {
+                start: 1_789_000_800,
+                end: 1_789_002_600,
+                title: "Kitchen Table".into(),
+                episode_title: Some("The Chase".into()),
+                episode: Some("S3E14".into()),
+                synopsis: Some("A synopsis.".into()),
+                image_url: None,
+                original_air_date: Some("2026-09-10".into()),
+                series_id: Some("EP01234567".into()),
+                programme_id: Some("EP012345670023".into()),
+                is_new: Some(true),
+                filters: Vec::new(),
+            },
+            plurx_core::dvr::DvrOrigin::Rule,
+            Some("rule-a".into()),
+            Some(1),
+            60,
+            120,
+            0,
+        );
+        row.attempt = 2;
+
+        write_sidecar(
+            &base,
+            &row,
+            &None,
+            DvrState::Partial,
+            2_048,
+            41,
+            1_789_002_700,
+        )
+        .await;
+        let parsed = plurx_core::scan::recordings::read_sidecar(&final_path(&base))
+            .expect("the scan must be able to read what the engine wrote");
+        let programme = parsed.programme.expect("programme");
+        assert_eq!(programme.title.as_deref(), Some("Kitchen Table"));
+        assert_eq!(programme.episode.as_deref(), Some("S3E14"));
+        assert_eq!(parsed.state.as_deref(), Some("partial"));
+        assert_eq!(parsed.gap_s, Some(41));
+        assert_eq!(parsed.recording_id.as_deref(), Some(row.id.as_str()));
+    }
+
+    /// The webhook queue drops its *oldest* entry. A recording that just
+    /// started is the event someone is waiting on; an hour-old reminder
+    /// nobody could deliver is not.
+    #[test]
+    fn a_full_webhook_queue_drops_the_oldest_event() {
+        let (sink, queue) = super::super::webhook::channel();
+        let event = |id: usize| super::super::webhook::DvrEvent::RecordingFailed {
+            recording_id: format!("rec-{id}"),
+            title: "Kitchen Table".into(),
+            reason: "test".into(),
+        };
+        for index in 0..plurx_core::dvr::DVR_WEBHOOK_QUEUE + 3 {
+            sink.enqueue(event(index));
+        }
+        let mut seen = Vec::new();
+        while let Some(super::super::webhook::DvrEvent::RecordingFailed { recording_id, .. }) =
+            queue.take()
+        {
+            seen.push(recording_id);
+        }
+        assert_eq!(seen.len(), plurx_core::dvr::DVR_WEBHOOK_QUEUE);
+        assert_eq!(
+            seen.first().map(String::as_str),
+            Some("rec-3"),
+            "the three oldest went, not the three newest"
+        );
+    }
 }

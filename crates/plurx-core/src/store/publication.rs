@@ -473,6 +473,13 @@ impl<'a> PublicationStore<'a> {
         .await
     }
 
+    pub async fn get_dvr_recording(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::dvr::DvrRecording>, StoreError> {
+        self.store.get_dvr_recording(id).await
+    }
+
     /// Tell the DVR which item and file its finished capture became.
     ///
     /// Unfenced: this is a back-reference on a row the scan does not own,

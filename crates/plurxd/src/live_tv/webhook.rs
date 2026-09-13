@@ -70,9 +70,30 @@ impl DvrEvent {
 }
 
 /// The producer half. Cloned into the loops; never awaits the network.
+///
+/// Backed by a queue that drops its **oldest** entry when full. A recording
+/// that just started is the event someone is waiting on; the reminder from an
+/// hour ago that nobody could deliver is not. `tokio`'s bounded channel drops
+/// the incoming message instead, which is the wrong end, so the queue is a
+/// small deque behind a mutex with a notifier — sixty-four events is not a
+/// structure worth optimising.
 #[derive(Clone)]
 pub(crate) struct DvrEventSink {
-    sender: tokio::sync::mpsc::Sender<DvrEvent>,
+    queue: Arc<DvrEventQueue>,
+}
+
+pub(crate) struct DvrEventQueue {
+    events: std::sync::Mutex<std::collections::VecDeque<DvrEvent>>,
+    arrived: tokio::sync::Notify,
+}
+
+impl DvrEventQueue {
+    pub(crate) fn take(&self) -> Option<DvrEvent> {
+        self.events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop_front()
+    }
 }
 
 impl DvrEventSink {
@@ -82,31 +103,44 @@ impl DvrEventSink {
     /// a slow endpoint into a slow recording tick, which is the exact coupling
     /// this whole module exists to prevent.
     pub(crate) fn enqueue(&self, event: DvrEvent) {
-        if let Err(error) = self.sender.try_send(event) {
-            match error {
-                tokio::sync::mpsc::error::TrySendError::Full(event) => tracing::warn!(
-                    event = event.name(),
-                    "the DVR webhook queue is full; this event was dropped"
-                ),
-                tokio::sync::mpsc::error::TrySendError::Closed(event) => tracing::warn!(
-                    event = event.name(),
-                    "the DVR webhook worker has stopped; this event was dropped"
-                ),
+        {
+            let mut events = self
+                .queue
+                .events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            while events.len() >= DVR_WEBHOOK_QUEUE {
+                if let Some(dropped) = events.pop_front() {
+                    tracing::warn!(
+                        event = dropped.name(),
+                        "the DVR webhook queue is full; the oldest event was dropped"
+                    );
+                }
             }
+            events.push_back(event);
         }
+        self.queue.arrived.notify_one();
     }
 }
 
 /// Build the queue. The sink goes to the loops, the worker runs on its own
 /// task and owns every network call the DVR makes.
-pub(crate) fn channel() -> (DvrEventSink, tokio::sync::mpsc::Receiver<DvrEvent>) {
-    let (sender, receiver) = tokio::sync::mpsc::channel(DVR_WEBHOOK_QUEUE);
-    (DvrEventSink { sender }, receiver)
+pub(crate) fn channel() -> (DvrEventSink, Arc<DvrEventQueue>) {
+    let queue = Arc::new(DvrEventQueue {
+        events: std::sync::Mutex::new(std::collections::VecDeque::new()),
+        arrived: tokio::sync::Notify::new(),
+    });
+    (
+        DvrEventSink {
+            queue: Arc::clone(&queue),
+        },
+        queue,
+    )
 }
 
 pub(crate) async fn webhook_worker(
     manager: Arc<LiveTvManager>,
-    mut events: tokio::sync::mpsc::Receiver<DvrEvent>,
+    events: Arc<DvrEventQueue>,
     shutdown: CancellationToken,
 ) {
     // A client of its own, with redirects refused: the URL an operator
@@ -126,12 +160,14 @@ pub(crate) async fn webhook_worker(
         }
     };
     loop {
-        let event = tokio::select! {
-            _ = shutdown.cancelled() => return,
-            event = events.recv() => match event {
-                Some(event) => event,
-                None => return,
-            },
+        let event = match events.take() {
+            Some(event) => event,
+            None => {
+                tokio::select! {
+                    _ = shutdown.cancelled() => return,
+                    _ = events.arrived.notified() => continue,
+                }
+            }
         };
         let Ok((_, dvr)) = manager.dvr_configs().await else {
             continue;

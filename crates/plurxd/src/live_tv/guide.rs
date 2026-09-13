@@ -202,6 +202,15 @@ impl LiveTvGuide {
         }
     }
 
+    /// The document, but only when it actually carries a lineup.
+    ///
+    /// An `unavailable` guide and a guide whose channels all happen to be
+    /// empty are the same thing to any caller asking "is this programme still
+    /// listed?" — and the answer there has to be "I cannot tell", never "no".
+    pub(crate) fn into_some_if_populated(self) -> Option<Self> {
+        (!self.channels.is_empty()).then_some(self)
+    }
+
     pub(crate) fn total_programmes(&self) -> usize {
         self.channels.iter().map(|c| c.programmes.len()).sum()
     }
