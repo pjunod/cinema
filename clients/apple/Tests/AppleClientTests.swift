@@ -3361,17 +3361,83 @@ final class AppleClientTests: XCTestCase {
         )
         // The contract's evidence is the position delta and the rate, plus the
         // first-frame proof — never a transport status (§3.4).
-        XCTAssertTrue(body.contains("player.rate > 0"))
-        XCTAssertTrue(body.contains("!isChangingStream"))
         XCTAssertTrue(body.contains("blackFrameWatchdog.presentedVideo"))
+        XCTAssertTrue(body.contains("rate: player.rate"))
+        // The decision the sampler defers to, pinned in the same breath: the
+        // evidence is collected here and weighed there, and neither half may
+        // name a transport status.
+        let verdictStart = try XCTUnwrap(
+            source.range(of: "nonisolated static func surfaceIsPresenting(")
+        )
+        let verdictEnd = try XCTUnwrap(
+            source.range(of: "\n    }\n", range: verdictStart.upperBound..<source.endIndex)
+        )
+        let verdict = String(source[verdictStart.upperBound..<verdictEnd.lowerBound])
+        XCTAssertTrue(verdict.contains("rate > 0"))
+        XCTAssertTrue(verdict.contains("!isChangingStream"))
+        for half in [body, verdict] {
+            XCTAssertFalse(
+                half.contains("timeControlStatus"),
+                "a transport status is an event, not presentation proof"
+            )
+            XCTAssertFalse(
+                half.contains("isPlaying"),
+                "the published transport flag is not presentation proof either"
+            )
+        }
+    }
+
+    /// A3, pinned. The source-shape test above forbids the WORD; this one
+    /// forbids the BEHAVIOUR, which is what actually matters. Swapping the
+    /// position delta for the transport's own opinion of itself compiles,
+    /// leaves every other test on both destinations green, and turns §4.3's
+    /// disagreement detector into a detector of nothing: a player that reports
+    /// itself playing over a frozen picture would keep publishing
+    /// `presenting`, and §3.2 would demote every blocking fault raised over it
+    /// to a banner the viewer cannot act on.
+    func testPresentationEvidenceIsAMovingPositionAndNeverATransportStatus() {
+        // Everything a presenting sample needs, except movement.
         XCTAssertFalse(
-            body.contains("timeControlStatus"),
-            "a transport status is an event, not presentation proof"
+            PlayerController.surfaceIsPresenting(
+                observedPosition: 42_000, lastSampleMs: 42_000,
+                isChangingStream: false, rate: 1.0, picture: true
+            ),
+            "a rate over a position that has not moved is the disagreement, not presentation"
         )
         XCTAssertFalse(
-            body.contains("isPlaying"),
-            "the published transport flag is not presentation proof either"
+            PlayerController.surfaceIsPresenting(
+                observedPosition: 41_000, lastSampleMs: 42_000,
+                isChangingStream: false, rate: 1.0, picture: true
+            ),
+            "a position that went backwards is not progress either"
         )
+        // The same evidence, one millisecond of film later.
+        XCTAssertTrue(
+            PlayerController.surfaceIsPresenting(
+                observedPosition: 42_001, lastSampleMs: 42_000,
+                isChangingStream: false, rate: 1.0, picture: true
+            )
+        )
+        // The first sample of an attachment has no predecessor to beat.
+        XCTAssertTrue(
+            PlayerController.surfaceIsPresenting(
+                observedPosition: 0, lastSampleMs: nil,
+                isChangingStream: false, rate: 1.0, picture: true
+            )
+        )
+        // And none of the other three stops being necessary.
+        XCTAssertFalse(PlayerController.surfaceIsPresenting(
+            observedPosition: 42_001, lastSampleMs: 42_000,
+            isChangingStream: true, rate: 1.0, picture: true
+        ), "a stream still changing is not presenting whatever the position does")
+        XCTAssertFalse(PlayerController.surfaceIsPresenting(
+            observedPosition: 42_001, lastSampleMs: 42_000,
+            isChangingStream: false, rate: 0, picture: true
+        ))
+        XCTAssertFalse(PlayerController.surfaceIsPresenting(
+            observedPosition: 42_001, lastSampleMs: 42_000,
+            isChangingStream: false, rate: 1.0, picture: false
+        ))
     }
 
     func testApplePlatformEventsAreNeverPresentationEvidence() {

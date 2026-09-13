@@ -5609,11 +5609,38 @@ final class PlayerController: ObservableObject {
             || blackFrameWatchdog.presentedVideo
             || (size.width > 0 && size.height > 0)
             || declared
-        let moved = observedPosition > (lastSurfaceSampleMs ?? observedPosition - 1)
+        let presenting = Self.surfaceIsPresenting(
+            observedPosition: observedPosition,
+            lastSampleMs: lastSurfaceSampleMs,
+            isChangingStream: isChangingStream,
+            rate: player.rate,
+            picture: picture
+        )
         lastSurfaceSampleMs = observedPosition
-        let presenting = !isChangingStream && player.rate > 0 && moved && picture
         if presenting { surfaceHasPresented = true }
         present(.presenting(presenting, attached: attached))
+    }
+
+    /// §4.3's disagreement detector, as a pure function of the evidence the
+    /// sampler collected — so a unit test can drive the decision itself, which
+    /// is otherwise reachable only from a periodic observer over a decoding
+    /// `AVPlayer` no headless test has.
+    ///
+    /// The film position must have ADVANCED since the previous sample. A
+    /// transport that reports itself as playing over a frozen position is
+    /// precisely the disagreement this exists to find, so a rate — or a
+    /// `timeControlStatus`, or the published `isPlaying` — is necessary and
+    /// can never be sufficient. The first sample of an attachment has no
+    /// predecessor to beat and counts as movement.
+    nonisolated static func surfaceIsPresenting(
+        observedPosition: Int,
+        lastSampleMs: Int?,
+        isChangingStream: Bool,
+        rate: Float,
+        picture: Bool
+    ) -> Bool {
+        let moved = observedPosition > (lastSampleMs ?? observedPosition - 1)
+        return !isChangingStream && rate > 0 && moved && picture
     }
 
     #if DEBUG
