@@ -20,7 +20,7 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `93` — native viewer parity across phone, foldable,
+> Status: **v0.3.0**, build `94` — native viewer parity across phone, foldable,
 > and TV. Build 94 adds recording and reminders to the guide: every cell offers
 > Record, Record series and Remind me beside Watch, the grid marks what is
 > already asked for from one marks read per visible window rather than a lookup
