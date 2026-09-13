@@ -1110,6 +1110,139 @@ final class LiveTvTests: XCTestCase {
         XCTAssertFalse(buttons.contains("Favorite"))
     }
 
+    func testTheStreamInfoPanelReadsEveryFieldTheModelsCarryAndSumsTheAccessLog() {
+        #if os(tvOS)
+        let current = LiveTvProgramme(
+            start: 1_700_000_000,
+            end: 1_700_001_800,
+            title: "The Late Edition",
+            episodeTitle: "Tuesday",
+            episode: "S12 E184",
+            synopsis: "Local news and weather.",
+            originalAirDate: "2026-09-13",
+            filters: ["TV-PG"]
+        )
+        let next = LiveTvProgramme(
+            start: 1_700_001_800,
+            end: 1_700_003_600,
+            title: "Local Weather Tonight"
+        )
+        let source = LiveTvSourceFormat(
+            videoWidth: 1920,
+            videoHeight: 1080,
+            scan: "interlaced",
+            audioChannels: 6,
+            audioLayout: "5.1",
+            observedAt: 1_700_000_000
+        )
+        let channel = LiveTvChannel(
+            id: "7.1",
+            guideNumber: "7.1",
+            guideName: "WPLX-DT",
+            favorite: true,
+            drm: false,
+            support: "ready",
+            hd: true,
+            videoCodec: "mpeg2video",
+            audioCodec: "ac3",
+            sourceFormat: source
+        )
+        let delivery = LiveTvDelivery(
+            output: LiveTvDeliveryOutput(
+                container: "mpegts",
+                videoCodec: "h264",
+                audioCodec: "ac3",
+                width: 1280,
+                height: 720,
+                bitDepth: 8,
+                frameRate: nil,
+                hdr: nil,
+                audioChannels: 6
+            ),
+            videoAction: "encode",
+            audioAction: "copy",
+            packaging: "mpegts"
+        )
+        let status = LiveTvStatus(
+            state: "active",
+            channel: channel,
+            ownerNodeId: "nynuc",
+            encoder: "nvenc",
+            outputHeight: 720,
+            signal: LiveTvSignal(
+                strengthPercent: 92,
+                qualityPercent: 100,
+                symbolQualityPercent: 100
+            ),
+            delivery: delivery
+        )
+        let asOf = Date(timeIntervalSince1970: 1_700_000_900)
+        let player = LiveTvPlayerFacts.from(
+            events: [
+                LiveTvAccessEventFacts(
+                    observedBitrate: 6_000_000,
+                    droppedFrames: 2,
+                    stalls: 1
+                ),
+                LiveTvAccessEventFacts(
+                    observedBitrate: 8_000_000,
+                    droppedFrames: 3,
+                    stalls: 2
+                ),
+            ],
+            behindEdgeSeconds: 4.2,
+            bufferedSeconds: 3.8,
+            attachedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            asOf: asOf
+        )
+        let rows = LiveTvStreamInfoPanel.rows(
+            programme: LiveTvAiring(now: current, next: next, progress: 0.5),
+            channel: channel,
+            status: status,
+            delivery: delivery,
+            player: player
+        )
+        XCTAssertEqual(rows.map(\.label), [
+            "title", "episode", "airing", "next", "synopsis", "aired",
+            "channel", "source", "observed",
+            "method", "video", "audio", "stream",
+            "strength", "quality", "symbol",
+            "behind the edge · buffered", "rate", "session",
+        ])
+        let rate = rows.first { $0.label == "rate" }?.value
+        XCTAssertTrue(rate?.contains("8.0 Mb/s observed") == true)
+        XCTAssertTrue(rate?.contains("5 dropped frames") == true)
+        XCTAssertTrue(rate?.contains("3 stalls") == true)
+        XCTAssertFalse(rows.first { $0.label == "stream" }?.value.contains("segments") == true)
+
+        let unknown = LiveTvPlayerFacts.from(
+            events: [
+                LiveTvAccessEventFacts(
+                    observedBitrate: -1,
+                    droppedFrames: -1,
+                    stalls: -1
+                ),
+            ],
+            behindEdgeSeconds: nil,
+            bufferedSeconds: nil,
+            attachedAt: nil,
+            asOf: asOf
+        )
+        let sparse = LiveTvStreamInfoPanel.rows(
+            programme: .none,
+            channel: self.channel,
+            status: nil,
+            delivery: nil,
+            player: unknown
+        )
+        XCTAssertEqual(sparse.map(\.label), ["channel", "rate"])
+        XCTAssertEqual(
+            sparse.last?.value,
+            "unknown dropped frames · unknown stalls"
+        )
+        #endif
+    }
+
     func testLiveTvOwnsThePlaybackAudioSessionForItsSeparatePlayer() async {
         let requests = LiveTvMockRequests(result: started())
         var audioEvents: [String] = []

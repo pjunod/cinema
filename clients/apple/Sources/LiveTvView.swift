@@ -40,6 +40,7 @@ final class LiveTvPlayerController: ObservableObject {
     /// Media available after the playhead in the loaded range that contains it.
     @Published private(set) var bufferedSeconds: Double?
     @Published private(set) var pausedAt: Date?
+    @Published private(set) var attachedAt: Date?
     /// Fullscreen copy only. Lineup status in `message` never reaches the
     /// picture merely because the browser loaded or refreshed.
     @Published private(set) var surfaceMessage: String?
@@ -178,6 +179,7 @@ final class LiveTvPlayerController: ObservableObject {
         title = channel.title
         watching = info.channel
         delivery = info.delivery
+        attachedAt = Date()
         playing = true
         player.play()
         surfaceMessage = nil
@@ -489,6 +491,7 @@ final class LiveTvPlayerController: ObservableObject {
         behindEdgeSeconds = nil
         bufferedSeconds = nil
         pausedAt = nil
+        attachedAt = nil
         watching = nil
         status = nil
         delivery = nil
@@ -624,6 +627,86 @@ struct LiveSurfaceChip: Equatable, Identifiable {
     var id: Kind { kind }
 }
 
+struct LiveTvAccessEventFacts: Equatable {
+    let observedBitrate: Double
+    let droppedFrames: Int
+    let stalls: Int
+}
+
+struct LiveTvPlayerFacts: Equatable {
+    let behindEdgeSeconds: Double?
+    let bufferedSeconds: Double?
+    let observedBitrate: Double?
+    let droppedFrames: Int?
+    let stalls: Int?
+    let hasAccessEvents: Bool
+    let attachedAt: Date?
+    let asOf: Date
+
+    static func capture(
+        item: AVPlayerItem?,
+        behindEdgeSeconds: Double?,
+        bufferedSeconds: Double?,
+        attachedAt: Date?,
+        asOf: Date = Date()
+    ) -> Self {
+        let events = item?.accessLog()?.events.map {
+            LiveTvAccessEventFacts(
+                observedBitrate: $0.observedBitrate,
+                droppedFrames: $0.numberOfDroppedVideoFrames,
+                stalls: $0.numberOfStalls
+            )
+        } ?? []
+        return from(
+            events: events,
+            behindEdgeSeconds: behindEdgeSeconds,
+            bufferedSeconds: bufferedSeconds,
+            attachedAt: attachedAt,
+            asOf: asOf
+        )
+    }
+
+    static func from(
+        events: [LiveTvAccessEventFacts],
+        behindEdgeSeconds: Double?,
+        bufferedSeconds: Double?,
+        attachedAt: Date?,
+        asOf: Date
+    ) -> Self {
+        func sumKnown(_ values: [Int]) -> Int? {
+            let known = values.filter { $0 >= 0 }
+            return known.isEmpty ? nil : known.reduce(0, +)
+        }
+        let rate = events.last?.observedBitrate
+        return Self(
+            behindEdgeSeconds: behindEdgeSeconds,
+            bufferedSeconds: bufferedSeconds,
+            observedBitrate: rate.flatMap { $0 >= 0 && $0.isFinite ? $0 : nil },
+            droppedFrames: sumKnown(events.map(\.droppedFrames)),
+            stalls: sumKnown(events.map(\.stalls)),
+            hasAccessEvents: !events.isEmpty,
+            attachedAt: attachedAt,
+            asOf: asOf
+        )
+    }
+}
+
+struct LiveTvStreamInfoRow: Equatable, Identifiable {
+    enum Section: String, CaseIterable {
+        case programme = "PROGRAMME"
+        case channel = "CHANNEL"
+        case delivery = "DELIVERY"
+        case signal = "SIGNAL"
+        case player = "PLAYER"
+    }
+
+    let section: Section
+    let label: String
+    let value: String
+    var percent: Int? = nil
+    var id: String { "\(section.rawValue)-\(label)" }
+}
+
 private let liveTvClock: DateFormatter = {
     let formatter = DateFormatter()
     formatter.timeStyle = .short
@@ -723,6 +806,231 @@ struct LiveTvTechnicalDetails: View {
         }
     }
 }
+
+#if os(tvOS)
+struct LiveTvStreamInfoPanel: View {
+    let programme: LiveTvAiring
+    let channel: LiveTvChannel
+    let status: LiveTvStatus?
+    let delivery: LiveTvDelivery?
+    let player: LiveTvPlayerFacts
+    let onClose: () -> Void
+    @FocusState private var closeFocused: Bool
+
+    static func rows(
+        programme: LiveTvAiring,
+        channel: LiveTvChannel,
+        status: LiveTvStatus?,
+        delivery: LiveTvDelivery?,
+        player: LiveTvPlayerFacts
+    ) -> [LiveTvStreamInfoRow] {
+        var rows = [LiveTvStreamInfoRow]()
+        func append(
+            _ section: LiveTvStreamInfoRow.Section,
+            _ label: String,
+            _ value: String?,
+            percent: Int? = nil
+        ) {
+            guard let value, !value.isEmpty else { return }
+            rows.append(LiveTvStreamInfoRow(
+                section: section, label: label, value: value, percent: percent
+            ))
+        }
+
+        if let current = programme.now {
+            append(.programme, "title", current.title)
+            let episode = [current.episode, current.episodeTitle]
+                .compactMap { $0 }.joined(separator: " · ")
+            append(.programme, "episode", episode)
+            let minutes = max(0, (current.end - Int(player.asOf.timeIntervalSince1970)) / 60)
+            append(
+                .programme,
+                "airing",
+                "\(liveTvTime(current.start))–\(liveTvTime(current.end)) · \(minutes) min left"
+            )
+            append(
+                .programme,
+                "next",
+                programme.next.map { "\(liveTvTime($0.start)) · \($0.title)" }
+            )
+            append(.programme, "synopsis", current.synopsis)
+            let aired = [
+                current.originalAirDate.map { "first aired \($0)" },
+                current.filters?.joined(separator: " · "),
+            ].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
+            append(.programme, "aired", aired)
+        }
+
+        append(
+            .channel,
+            "channel",
+            [
+                channel.guideNumber,
+                channel.guideName,
+                channel.pictureClass,
+                channel.favorite ? "favorite on the tuner" : nil,
+            ].compactMap { $0 }.joined(separator: " · ")
+        )
+        append(.channel, "source", channel.sourceFormatDescription)
+        append(
+            .channel,
+            "observed",
+            channel.sourceFormat.map {
+                Date(timeIntervalSince1970: TimeInterval($0.observedAt))
+                    .formatted(date: .abbreviated, time: .shortened)
+            }
+        )
+
+        let plan = status?.delivery ?? delivery
+        if let plan {
+            append(.delivery, "method", plan.playbackMethod)
+            var video = plan.videoDescription
+            if plan.videoAction == "encode",
+               let encoder = status?.encoder,
+               encoder != "pending" {
+                video += " · \(encoder)"
+            }
+            if let owner = status?.ownerNodeId, !owner.isEmpty {
+                video += " on \(owner)"
+            }
+            append(.delivery, "video", video)
+            append(.delivery, "audio", plan.audioDescription)
+            append(.delivery, "stream", "HLS · \(plan.packaging.uppercased())")
+        }
+
+        if let signal = status?.signal {
+            if let strength = signal.strengthPercent {
+                append(.signal, "strength", "\(strength)%", percent: strength)
+            }
+            if let quality = signal.qualityPercent {
+                append(.signal, "quality", "\(quality)%", percent: quality)
+            }
+            if let symbol = signal.symbolQualityPercent {
+                append(.signal, "symbol", "\(symbol)%", percent: symbol)
+            }
+        }
+
+        let live = [
+            player.behindEdgeSeconds.map {
+                String(format: "%.1f s behind the edge", $0)
+            },
+            player.bufferedSeconds.map {
+                String(format: "%.1f s buffered", $0)
+            },
+        ].compactMap { $0 }.joined(separator: " · ")
+        append(.player, "behind the edge · buffered", live)
+
+        if player.hasAccessEvents {
+            var facts = [String]()
+            if let rate = player.observedBitrate {
+                facts.append(String(format: "%.1f Mb/s observed", rate / 1_000_000))
+            }
+            facts.append(player.droppedFrames.map {
+                "\($0) dropped frames"
+            } ?? "unknown dropped frames")
+            facts.append(player.stalls.map {
+                "\($0) stalls"
+            } ?? "unknown stalls")
+            append(.player, "rate", facts.joined(separator: " · "))
+        }
+
+        var session = [String]()
+        if let owner = status?.ownerNodeId, !owner.isEmpty {
+            session.append("owner \(owner)")
+        }
+        if let attached = player.attachedAt {
+            let minutes = max(0, Int(player.asOf.timeIntervalSince(attached)) / 60)
+            session.append("\(minutes) min")
+        }
+        append(.player, "session", session.joined(separator: " · "))
+        return rows
+    }
+
+    private var rows: [LiveTvStreamInfoRow] {
+        Self.rows(
+            programme: programme,
+            channel: channel,
+            status: status,
+            delivery: delivery,
+            player: player
+        )
+    }
+
+    private func infoColumn(
+        _ sections: [LiveTvStreamInfoRow.Section]
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 24) {
+            ForEach(sections, id: \.self) { section in
+                VStack(alignment: .leading, spacing: 11) {
+                    Text(section.rawValue)
+                        .font(.system(size: 17, weight: .bold, design: .monospaced))
+                        .foregroundStyle(Palette.accent)
+                        .tracking(1.7)
+                    ForEach(rows.filter { $0.section == section }) { row in
+                        infoRow(row)
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    private func infoRow(_ row: LiveTvStreamInfoRow) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .firstTextBaseline, spacing: 20) {
+                Text(row.label)
+                    .font(.system(size: 18, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.36))
+                    .frame(width: 150, alignment: .leading)
+                Text(row.value)
+                    .font(.system(size: 22))
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if let percent = row.percent {
+                ProgressView(value: Double(percent), total: 100)
+                    .tint(Palette.accent)
+                    .frame(height: 6)
+                    .padding(.leading, 170)
+            }
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 30) {
+            HStack {
+                Text("Stream info · as of \(player.asOf.formatted(date: .omitted, time: .shortened))")
+                    .font(.system(size: 34, weight: .semibold))
+                Spacer()
+                Button(action: onClose) {
+                    Label("Close", systemImage: "xmark")
+                }
+                .buttonStyle(LiveSurfacePillStyle())
+                .focusEffectDisabled()
+                .focused($closeFocused)
+            }
+            HStack(alignment: .top, spacing: 54) {
+                infoColumn([.programme, .channel])
+                infoColumn([.delivery, .signal, .player])
+            }
+        }
+        .padding(.vertical, 40)
+        .padding(.horizontal, 44)
+        .frame(width: 1240, height: 984, alignment: .topLeading)
+        .foregroundStyle(.white)
+        .background(
+            Palette.playerChrome.opacity(0.96),
+            in: RoundedRectangle(cornerRadius: 22, style: .continuous)
+        )
+        .onAppear {
+            Task { @MainActor in
+                await Task.yield()
+                closeFocused = true
+            }
+        }
+    }
+}
+#endif
 
 /// One channel row: chip, number and callsign, what is on with a bar to its
 /// end, and when it ends. A protected channel is dimmed, never hidden.
@@ -1357,6 +1665,7 @@ struct LiveTvView: View {
     @State private var overlayVisible = true
     @State private var temporaryGuide = false
     @State private var showingInfo = false
+    @State private var streamInfoPlayer: LiveTvPlayerFacts?
     @State private var showingMore = false
     @State private var showingLayout = false
     @State private var mobileGuideGrid = SettingsStore().liveTvMobileGuideUsesGrid
@@ -1492,6 +1801,16 @@ struct LiveTvView: View {
     /// case the milestone exists for. `isStarting` covers that gap.
     private var mayRelease: Bool { !pictureInPicture.isActive && !pictureInPicture.isStarting }
 
+    private func showStreamInfo() {
+        streamInfoPlayer = LiveTvPlayerFacts.capture(
+            item: live.player.currentItem,
+            behindEdgeSeconds: live.behindEdgeSeconds,
+            bufferedSeconds: live.bufferedSeconds,
+            attachedAt: live.attachedAt
+        )
+        showingInfo = true
+    }
+
     var body: some View {
         GeometryReader { geometry in
           VStack(spacing: 0) {
@@ -1548,12 +1867,25 @@ struct LiveTvView: View {
             programmeDetail(programme)
         }
         .sheet(isPresented: $showingInfo) {
+            #if os(tvOS)
+            if let channel = live.watching, let player = streamInfoPlayer {
+                LiveTvStreamInfoPanel(
+                    programme: live.airing(channel, now: Int(player.asOf.timeIntervalSince1970)),
+                    channel: channel,
+                    status: live.status,
+                    delivery: live.delivery,
+                    player: player,
+                    onClose: { showingInfo = false }
+                )
+            }
+            #else
             if let channel = live.watching {
                 LiveTvTechnicalDetails(channel: channel, status: live.status, delivery: live.delivery)
                     .padding(48)
                     .frame(minWidth: 420, minHeight: 260, alignment: .topLeading)
                     .background(Palette.bg)
             }
+            #endif
         }
         .sheet(isPresented: $showingLayout) { layoutPanel }
         .sheet(isPresented: $showingMore) { morePanel }
@@ -2677,7 +3009,7 @@ struct LiveTvView: View {
                 Label("Channels", systemImage: "list.bullet")
             }
             .focused($focusedControl, equals: .channels)
-            Button { showingInfo = true } label: {
+            Button { showStreamInfo() } label: {
                 Label("Info", systemImage: "info.circle")
             }
             .focused($focusedControl, equals: .info)
