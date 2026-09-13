@@ -1052,9 +1052,10 @@ release forgets the hint), so it must not be the setup for the crash case
 (review R8). The abrupt case has to kill the process while it is playing
 in the foreground, without giving the app a chance to release.
 
-> plurx Live TV reliability, lane `effort/live-tv-reliability`, Apple build
-> 147 / Android 90. Install on the Apple TV, the iPhone and the Google TV
-> from the lane head with `scripts/ship-physical`. For every case record
+> plurx Live TV reliability, merged to `main` (PR #281), Apple build 147 /
+> Android 90. Install on the Apple TV, the iPhone and the Google TV from
+> `origin/main` with `scripts/ship --apple --android`, or `scripts/ship-physical`
+> if Ansible is unhealthy. The servers are already on this code. For every case record
 > the device, the build from Settings → About, what you did, whether the
 > server logged a `Live TV session ended` line before you reopened (nynuc:
 > `sudo docker logs --since 5m plurxd | grep 'Live TV session ended'`), the
