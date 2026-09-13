@@ -1,0 +1,16 @@
+<script>
+  // Every line below is a surface write outside the render. All must trip.
+  function showFailure(p, text) {
+    setLoading(true, "Playback stopped.", text, "<button>Try again</button>");
+    p.el.classList.add("failed");
+    p.el.classList.remove("failed");
+    p.stallPrompt = true;
+    ploadText.textContent = "Reconnecting…";
+    ploadSub.innerHTML = "<em>held</em>";
+  }
+</script>
+<script>
+  function bulk() {
+    Object.assign(ploadAct, { textContent: "Try again" });
+  }
+</script>

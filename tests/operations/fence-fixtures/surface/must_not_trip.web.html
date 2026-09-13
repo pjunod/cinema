@@ -1,0 +1,10 @@
+<script>
+  // Reads are never scanned: a ladder may look at anything it likes.
+  function diagnose(p, err) {
+    const failed = p.el.classList.contains("failed");
+    const prompt = p.stallPrompt;
+    if (err.errorCode === 1002 || err.status === 503) return "recover";
+    const opts = { stallPrompt: false, started: true };
+    return failed || prompt || opts.stallPrompt ? "prompt" : "wait";
+  }
+</script>

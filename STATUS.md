@@ -4,28 +4,19 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
-## The player input fence was red on `main`, on two doc comments
-
-**Fixed in `fix/player-input-fence-comments`.** `scripts/player-input-fence`
-matched `onMoveCommand` inside two `///` comments in `LiveTvView.swift` that
-explain why the guide grid handles its paging chips itself — prose about a key
-handler, with no handler in it. The fence now skips a line only when its
-first non-space characters open a comment *and* nothing executable is left on
-it — `/* named = */ onKeyEvent { … }`, a `*/` that ends a block and then calls
-something, a JS generator method (`*keys(ev)`), a private class field
-(`#onkeydown = …`) and an Objective-C `#define` all still trip, and so does a
-trailing comment after real code. `fence-fixtures/input/` and
-`tests/operations/test_player_input_fence.py` pin each of those shapes and
-drive them through the fence's own scanner rather than a second copy of its
-loop, so a widened exemption fails here.
-
 ## The error overlay and the picture disagree, on every client
 
 **Investigated 2026-09-13; contract v2 at
 [docs/clients/PLAYBACK-SURFACE-CONTRACT.md](docs/clients/PLAYBACK-SURFACE-CONTRACT.md),
-ruled, adversarially reviewed and answered, with the Opus build plan in
-[PLAYBACK-SURFACE-CONTRACT-IMPLEMENTATION.md](docs/clients/PLAYBACK-SURFACE-CONTRACT-IMPLEMENTATION.md)
-— ready to build, nothing built yet.** Paul reported a full-screen playback
+ruled, adversarially reviewed and answered, with the build plan in
+[PLAYBACK-SURFACE-CONTRACT-IMPLEMENTATION.md](docs/clients/PLAYBACK-SURFACE-CONTRACT-IMPLEMENTATION.md).
+Building now: M0 (the fixture, the reference reducer, the generated doc
+blocks, the SURFACE ledger section and the fence) is in
+`docs/playback-surface-m0`; M1 web, M2 Apple and M3 Android follow, then M5's
+three recovery additions. The fixture is 34 ordered-event cases every client's
+presenter runs; `scripts/playback-surface-fence` budgets the 109 pre-contract
+surface writes that are left (54 web, 39 Apple, 16 Android) so no new one can
+be added and each milestone drives its file to zero.** Paul reported a full-screen playback
 error while the picture keeps playing, or one that stays up after playback
 stopped and came back. It is one defect with three spellings: the blocking
 overlay is an imperative message channel — 40 `setLoading` sites on the web,
@@ -52,6 +43,21 @@ within the 250 ms tolerance because the item is not seeked forward from the
 keyframe origin — which needs a device check before it is built. Paul's
 tablet supplied the field evidence: "Playback stopped
 (ERROR_CODE_IO_BAD_HTTP_STATUS)" over a moving picture.
+
+## The player input fence was red on `main`, on two doc comments
+
+**Fixed in `fix/player-input-fence-comments`.** `scripts/player-input-fence`
+matched `onMoveCommand` inside two `///` comments in `LiveTvView.swift` that
+explain why the guide grid handles its paging chips itself — prose about a key
+handler, with no handler in it. The fence now skips a line only when its
+first non-space characters open a comment *and* nothing executable is left on
+it — `/* named = */ onKeyEvent { … }`, a `*/` that ends a block and then calls
+something, a JS generator method (`*keys(ev)`), a private class field
+(`#onkeydown = …`) and an Objective-C `#define` all still trip, and so does a
+trailing comment after real code. `fence-fixtures/input/` and
+`tests/operations/test_player_input_fence.py` pin each of those shapes and
+drive them through the fence's own scanner rather than a second copy of its
+loop, so a widened exemption fails here.
 
 ## Live TV: the empty guide and the "wait 90 seconds" refusal, diagnosed
 

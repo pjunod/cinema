@@ -59,6 +59,15 @@
   const LIVE_HOTKEYS = {"f":"fullscreen","m":"mute","p":"picture_in_picture","g":"guide_sheet","escape":"exit"};
   // ---- end generated live table ----
 
+  // ---- generated from the surface sections of
+  // tests/playback/playback-surface-contract.json by scripts/player-contract-table
+  // --embed; do not edit by hand ----
+  const SURFACE_CLASSES = {"preparing":{"severity":"progress","blocking":"while_not_presenting","retired_by":["presenting","intent_settled","attached_retired"]},"buffering":{"severity":"progress","blocking":"while_not_presenting","min_ms":350,"retired_by":["presenting","attached_retired"]},"recovering":{"severity":"progress","blocking":"while_not_presenting","retired_by":["presenting_new_attached","owner_success","attached_retired"]},"hold":{"severity":"notice","timed_ms":30000,"retired_by":["timer","presenting"]},"degraded":{"severity":"notice","timed_ms":5000,"retired_by":["timer"],"timer_paused_while_actions":true},"refused":{"severity":"notice","timed_ms":null,"retired_by":["intent_superseded","presenting_continuous_ms"],"default_actions":["retry"]},"exhausted":{"severity":"prompt","blocking":true,"requires_player_stopped":true,"retired_by":["user"],"title":"Playback is stalled.","default_actions":["keep_waiting","retry","close"]},"stopped":{"severity":"terminal","blocking":true,"requires_player_stopped":true,"retired_by":["user"],"default_actions":["retry","close"]}};
+  const SURFACE_SOURCES = [{"id":"owner_stopped","context":"any","class":"stopped","requires":{"player_stopped":true}},{"id":"owner_exhausted","context":"any","class":"exhausted","requires":{"player_stopped":true}},{"id":"auth_401_403","context":"any","class":"stopped","actions":["sign_in","close"]},{"id":"vod_source_rescan_required","context":"start","class":"stopped"},{"id":"vod_source_unsupported","context":"start","class":"stopped"},{"id":"vod_transcode_unavailable","context":"start","class":"stopped"},{"id":"vod_subtitle_burn_unavailable","context":"start","class":"stopped"},{"id":"vod_disabled","context":"start","class":"stopped"},{"id":"create_503_not_yet","context":"start","class":"preparing","codes":["startup_timeout","media_owner_transition","vod_index_pending","vod_engine_unattested"],"retryable":true},{"id":"change_failed","context":"change","class":"refused","actions":["retry"]},{"id":"segment_503_not_yet","context":"attached","class":"recovering"},{"id":"media_owner_lost_410","context":"attached","class":"recovering","then_when_stopped":"stopped","carries":["position_ms"]},{"id":"control_hold","context":"attached","class":"hold"},{"id":"media_waiting","context":"attached","class":"buffering"},{"id":"owner_recovery_step","context":"any","class":"recovering"},{"id":"readiness_deadline_rungs_left","context":"any","class":"recovering"},{"id":"decoder_failed","context":"any","class":"stopped","requires":{"player_stopped":true}},{"id":"black_frame_ladder_spent","context":"start","class":"exhausted","requires":{"player_stopped":true},"actions":["close","retry"]},{"id":"repeated_early_end","context":"attached","class":"stopped","requires":{"player_stopped":true}},{"id":"degraded_notice","context":"any","class":"degraded"},{"id":"log_only","context":"any","class":null}];
+  const SURFACE_TIMINGS = {"buffering_min_ms":350,"hold_notice_ms":30000,"degraded_notice_ms":5000,"refused_progress_ms":10000,"notes":["refused_progress_ms is CONTINUOUS presenting on the attached generation, not accumulated playback.","buffering_min_ms debounces the surface, not the fault: a `media_waiting` fault exists from the moment it is raised and is simply not drawn until it has lasted this long.","A hidden page freezes every timer as well as every evidence sample: a fault raised before the page was hidden is neither cleared nor promoted until it is visible again."]};
+  const SURFACE_SEVERITY_RANK = {"notice":1,"progress":2,"prompt":3,"terminal":4};
+  // ---- end generated surface table ----
+
   function qualityForce(quality) {
     if (quality === "auto") return "auto";
     return quality === "original" || quality === "nomse"
@@ -1068,6 +1077,334 @@
     };
   }
 
+  // ---- The playback surface presenter -------------------------------------
+  //
+  // One pure reducer, fed the same ordered event sequences on every client
+  // (tests/playback/playback-surface-contract.json). It has NO side effects:
+  // it never pauses, resumes, reopens, cancels a timer or reports anything.
+  // The recovery owner keeps every one of those powers, and gains exactly one
+  // obligation — stop the player before raising a blocking fault, which the
+  // fixture refuses to render without.
+  //
+  // docs/clients/PLAYBACK-SURFACE-CONTRACT.md §3.
+
+  const SURFACE_BLOCKING_CLASSES = Object.freeze(
+    Object.keys(SURFACE_CLASSES).filter((name) => SURFACE_CLASSES[name].blocking === true),
+  );
+
+  // The input contract's `failed` state. A full-screen `preparing` covers the
+  // picture but asks the viewer nothing, so it keeps today's routing; only a
+  // prompt or a terminal — a blocking surface with an answer to give — enters
+  // `failed` (PLAYBACK-SURFACE-CONTRACT.md §4).
+  function surfaceEntersFailedRouting(surface) {
+    if (!surface || surface.kind !== "blocking") return false;
+    const cls = SURFACE_CLASSES[surface.class];
+    if (!cls) return false;
+    return cls.severity === "prompt" || cls.severity === "terminal";
+  }
+
+  function initialSurfaceState() {
+    return {
+      faults: [],
+      attached: null,
+      hidden: false,
+      presenting: false,
+      presentingSince: null,
+      now: 0,
+      seq: 0,
+    };
+  }
+
+  function surfaceStateCopy(state) {
+    return {
+      faults: state.faults.map((fault) => ({ ...fault })),
+      attached: state.attached,
+      hidden: state.hidden,
+      presenting: state.presenting,
+      presentingSince: state.presentingSince,
+      now: state.now,
+      seq: state.seq,
+    };
+  }
+
+  function surfaceFaultLog(event, fault, extra) {
+    return Object.assign(
+      {
+        event,
+        class: fault.class,
+        source: fault.source,
+        attached: fault.attached,
+        intent: fault.intent,
+        position_ms: fault.positionMs,
+        actions: fault.actions.slice(),
+        player_stopped: fault.playerStopped,
+      },
+      extra || {},
+    );
+  }
+
+  function surfaceSourceRow(id, context) {
+    const rows = SURFACE_SOURCES.filter((row) => row.id === id);
+    if (rows.length === 0) return { error: "unknown_source" };
+    const row = rows.find((candidate) => candidate.context === "any" || candidate.context === context);
+    if (!row) return { error: "source_context_mismatch" };
+    return { row };
+  }
+
+  function surfaceDropFaults(state, log, predicate, by, extra) {
+    const kept = [];
+    for (const fault of state.faults) {
+      if (predicate(fault)) {
+        log.push(surfaceFaultLog("surface_cleared", fault, Object.assign({ by }, extra || {})));
+      } else {
+        kept.push(fault);
+      }
+    }
+    state.faults = kept;
+  }
+
+  // Evidence retires a fault only when the run of presentation began at or
+  // after the fault was raised. The picture that was already on screen when
+  // the server said "held" is not proof the hold is over.
+  function surfaceEvidencePostdates(state, fault) {
+    return state.presentingSince != null && state.presentingSince >= fault.raisedAt;
+  }
+
+  function surfaceSweep(state, log) {
+    // A hidden page samples nothing and expires nothing: a fault raised before
+    // the page was hidden is neither cleared nor promoted until it is visible.
+    if (state.hidden) return;
+    const now = state.now;
+    const drop = [];
+    for (const fault of state.faults) {
+      const cls = SURFACE_CLASSES[fault.class];
+      if (!cls) continue;
+      const retiredBy = cls.retired_by || [];
+      if (
+        cls.timed_ms != null &&
+        retiredBy.includes("timer") &&
+        !(cls.timer_paused_while_actions && fault.actions.length > 0) &&
+        now - fault.raisedAt >= cls.timed_ms
+      ) {
+        drop.push([fault, "timer"]);
+        continue;
+      }
+      if (retiredBy.includes("presenting_continuous_ms")) {
+        const from = Math.max(state.presentingSince == null ? Infinity : state.presentingSince, fault.raisedAt);
+        if (state.presentingSince != null && now - from >= SURFACE_TIMINGS.refused_progress_ms) {
+          drop.push([fault, "presenting"]);
+          continue;
+        }
+      }
+      if (fault.intent != null) continue; // evidence never retires a pending destination
+      if (!state.presenting || !surfaceEvidencePostdates(state, fault)) continue;
+      if (retiredBy.includes("presenting")) {
+        drop.push([fault, "presenting"]);
+        continue;
+      }
+      if (retiredBy.includes("presenting_new_attached") && fault.attached !== state.attached) {
+        drop.push([fault, "presenting"]);
+      }
+    }
+    if (drop.length === 0) return;
+    const reason = new Map(drop);
+    const kept = [];
+    for (const fault of state.faults) {
+      if (reason.has(fault)) {
+        log.push(surfaceFaultLog("surface_cleared", fault, { by: reason.get(fault) }));
+      } else {
+        kept.push(fault);
+      }
+    }
+    state.faults = kept;
+  }
+
+  function surfaceDrawable(state, fault) {
+    const cls = SURFACE_CLASSES[fault.class];
+    if (!cls) return false;
+    if (cls.min_ms != null && state.now - fault.raisedAt < cls.min_ms) return false;
+    return true;
+  }
+
+  function surfaceKindFor(state, fault) {
+    const cls = SURFACE_CLASSES[fault.class];
+    if (cls.blocking === true) return "blocking";
+    if (cls.blocking === "while_not_presenting") return state.presenting ? "indicator" : "blocking";
+    return "banner";
+  }
+
+  function surfaceFrom(state) {
+    let chosen = null;
+    let chosenRank = -1;
+    for (const fault of state.faults) {
+      if (!surfaceDrawable(state, fault)) continue;
+      const cls = SURFACE_CLASSES[fault.class];
+      const rank = SURFACE_SEVERITY_RANK[cls.severity] || 0;
+      if (chosen == null || rank > chosenRank || (rank === chosenRank && fault.seq > chosen.seq)) {
+        chosen = fault;
+        chosenRank = rank;
+      }
+    }
+    if (!chosen) return { kind: "none", class: null, source: null, title: null, detail: null, actions: [], attached: null, intent: null, position_ms: null, player_stopped: false, input_failed: false, fault: null };
+    const surface = {
+      kind: surfaceKindFor(state, chosen),
+      class: chosen.class,
+      source: chosen.source,
+      title: chosen.title,
+      detail: chosen.detail,
+      actions: chosen.actions.slice(),
+      attached: chosen.attached,
+      intent: chosen.intent,
+      position_ms: chosen.positionMs,
+      player_stopped: chosen.playerStopped,
+      fault: chosen,
+    };
+    surface.input_failed = surfaceEntersFailedRouting(surface);
+    return surface;
+  }
+
+  function presentSurface(state, event) {
+    const next = surfaceStateCopy(state || initialSurfaceState());
+    const log = [];
+    if (event && typeof event.t === "number") next.now = event.t;
+    const now = next.now;
+
+    if (event && Object.prototype.hasOwnProperty.call(event, "event")) {
+      // Inert by contract: canplay, playing, isPlayingChanged, timeControlStatus.
+      // They prompt a look; they are not evidence, and they never move a surface.
+      return { state: next, surface: surfaceFrom(next), log };
+    }
+
+    if (event && Object.prototype.hasOwnProperty.call(event, "attach")) {
+      const generation = event.attach;
+      surfaceDropFaults(next, log, (fault) => fault.attached !== generation, "attached_retired");
+      next.attached = generation;
+      next.presenting = false;
+      next.presentingSince = null;
+    } else if (event && Object.prototype.hasOwnProperty.call(event, "retire")) {
+      const generation = event.retire;
+      surfaceDropFaults(next, log, (fault) => fault.attached === generation, "attached_retired");
+      if (next.attached === generation) {
+        next.attached = null;
+        next.presenting = false;
+        next.presentingSince = null;
+      }
+    } else if (event && Object.prototype.hasOwnProperty.call(event, "hidden")) {
+      next.hidden = !!event.hidden;
+    } else if (event && Object.prototype.hasOwnProperty.call(event, "presenting")) {
+      if (!next.hidden && event.attached === next.attached) {
+        if (event.presenting) {
+          if (!next.presenting) {
+            next.presenting = true;
+            next.presentingSince = now;
+          }
+          // The agreement rule: a blocking surface over a moving picture is a
+          // disagreement, and the picture wins. The fault keeps its actions and
+          // its data so the viewer still gets the specific recovery.
+          for (const fault of next.faults) {
+            if (!SURFACE_BLOCKING_CLASSES.includes(fault.class)) continue;
+            if (fault.attached !== event.attached) continue;
+            log.push(
+              surfaceFaultLog("surface_disagreement", fault, {
+                by: "presenting",
+                position_ms: fault.positionMs,
+              }),
+            );
+            fault.class = "degraded";
+            fault.demoted = true;
+            fault.title = "Playback recovered";
+            fault.raisedAt = now;
+          }
+        } else {
+          next.presenting = false;
+          next.presentingSince = null;
+        }
+      }
+    } else if (event && Object.prototype.hasOwnProperty.call(event, "raise")) {
+      const found = surfaceSourceRow(event.raise, event.context);
+      if (found.error) {
+        log.push({ event: "surface_error", error: found.error, source: event.raise, context: event.context || null });
+      } else if (found.row.class == null) {
+        log.push({ event: "surface_log_only", source: found.row.id, attached: event.attached ?? null });
+      } else {
+        const cls = SURFACE_CLASSES[found.row.class];
+        const playerStopped = !!event.player_stopped;
+        if (cls.blocking === true && !playerStopped) {
+          log.push({
+            event: "surface_error",
+            error: "blocking_without_stop",
+            source: found.row.id,
+            class: found.row.class,
+            attached: event.attached ?? null,
+          });
+        } else {
+          const promoted = next.faults.find(
+            (fault) =>
+              fault.attached === (event.attached ?? null) &&
+              fault.thenWhenStopped === found.row.class &&
+              !fault.demoted,
+          );
+          if (promoted) {
+            promoted.class = found.row.class;
+            promoted.playerStopped = playerStopped;
+            promoted.raisedAt = now;
+            promoted.thenWhenStopped = null;
+            if (event.title != null) promoted.title = event.title;
+            if (event.detail != null) promoted.detail = event.detail;
+            if (Array.isArray(event.actions)) promoted.actions = event.actions.slice();
+            log.push(surfaceFaultLog("surface_raised", promoted, { by: "owner_stopped" }));
+          } else {
+            next.seq += 1;
+            const actions = Array.isArray(event.actions)
+              ? event.actions.slice()
+              : Array.isArray(found.row.actions)
+                ? found.row.actions.slice()
+                : Array.isArray(cls.default_actions)
+                  ? cls.default_actions.slice()
+                  : [];
+            const fault = {
+              class: found.row.class,
+              source: found.row.id,
+              attached: event.attached ?? null,
+              intent: event.intent ?? null,
+              raisedAt: now,
+              positionMs: event.position_ms ?? null,
+              title: event.title ?? cls.title ?? null,
+              detail: event.detail ?? null,
+              actions,
+              playerStopped,
+              thenWhenStopped: found.row.then_when_stopped || null,
+              demoted: false,
+              seq: next.seq,
+            };
+            next.faults.push(fault);
+            log.push(surfaceFaultLog("surface_raised", fault));
+          }
+        }
+      }
+    } else if (event && Object.prototype.hasOwnProperty.call(event, "intent_settled")) {
+      surfaceDropFaults(next, log, (fault) => fault.intent === event.intent_settled, "intent_settled");
+    } else if (event && Object.prototype.hasOwnProperty.call(event, "intent_superseded")) {
+      surfaceDropFaults(next, log, (fault) => fault.intent === event.intent_superseded, "intent_superseded");
+    } else if (event && Object.prototype.hasOwnProperty.call(event, "owner_success")) {
+      surfaceDropFaults(next, log, (fault) => fault.class === "recovering", "owner_success");
+    } else if (event && Object.prototype.hasOwnProperty.call(event, "user_action")) {
+      const action = event.user_action;
+      const current = surfaceFrom(next).fault;
+      const target =
+        current && current.actions.includes(action)
+          ? current
+          : next.faults.find((fault) => fault.actions.includes(action));
+      if (target) {
+        surfaceDropFaults(next, log, (fault) => fault === target, "user", { action });
+      }
+    }
+
+    surfaceSweep(next, log);
+    return { state: next, surface: surfaceFrom(next), log };
+  }
+
+
   return Object.freeze({
     DEFAULTS,
     AUTO_DEFAULTS,
@@ -1095,6 +1432,13 @@
     stallReopenSessionOptions,
     fallbackResetBeforeOpen,
     parseStreamFailure,
+    SURFACE_CLASSES,
+    SURFACE_SOURCES,
+    SURFACE_TIMINGS,
+    SURFACE_SEVERITY_RANK,
+    initialSurfaceState,
+    presentSurface,
+    surfaceEntersFailedRouting,
     streamFailureOverlay,
     waitingOverlayAction,
     subtitleBurnAction,
