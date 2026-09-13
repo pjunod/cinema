@@ -4,6 +4,101 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## M5 — the three bounded recovery additions
+
+**In `playback/recovery-additions` (Apple build 149, Android build 92), rebased
+onto `main`, open as a WIP PR and adversarially reviewed once.** The fifth
+milestone of the [playback surface
+contract](docs/clients/PLAYBACK-SURFACE-CONTRACT.md) is the only PR of the
+effort that changes what the player *does*, which is why it is its own PR by
+ruling. Three additions. No threshold, budget, detector, ladder or
+control-plane verdict semantic was retuned, and the presenter is still pure —
+the fence now checks that last claim instead of taking it on trust.
+
+**1. A create the server is still building is retried, on all three clients.**
+A 503 carrying `startup_timeout`, `media_owner_transition`, `vod_index_pending`
+or `vod_engine_unattested` is re-posted under the **same** `request_id` after
+1 s, 2 s and 4 s. The identity is the safety: the server persists a create's
+answer under it, so a replay recovers the session it already made instead of
+spawning a second encoder. The ladder is bounded by an **absolute** 60 s from
+the first attempt, armed as a watchdog rather than checked between attempts —
+a boundary check would let a server that holds each create stretch the bound,
+which is the case the review asked for a deadline to close. When the ladder or
+the deadline is spent the owner stops the player and raises `exhausted`; a
+create that succeeds after the deadline is **released**, never attached. Any
+newer intent ends the sequence and raises nothing.
+
+The whole sequence — **ladder and watchdog alike** — is the `start` context
+only. That was the review's first blocker: Android gated the ladder on it and
+armed the watchdog unconditionally, so a seek or a quality change against a
+cold NAS could stop a player the viewer was watching at exactly the boundary of
+that client's own 60 s read timeout, and release the session the change was
+going to attach. `startContext` is a parameter of the coordinator now, not a
+predicate folded into the refusal test.
+
+Web: `openSessionRetryingNotYet` in `index.html`. Apple: `createRetryingNotYet`
+and `PlaybackCreateRetry` in `PlayerController.swift`, with two new constructor
+seams (`waitCreateRetry`, `releaseHlsSession`) so the sequence is testable
+without spending a minute or guessing whether a session was released. Android:
+`SessionCreateCoordinator.createRetryingNotYet` in `StallReopen.kt`. Source
+row 6 becomes reachable on Apple and Android for the first time — before this,
+their owners produced `stopped` with the server's sentence.
+
+**2. One bounded hls.js retry per attach, on the web.** A network-class fatal
+already leaves the ladder running and raises `recovering` (M1); it now also
+schedules a single `hls.startLoad(position)` two seconds later, with the
+position read when the retry fires, because the element kept playing through
+the wait. The budget is **per attach and shared** with the
+`segment_503_not_yet` row — whichever fires first spends it — and then the
+existing reopen path is what recovers.
+
+**3. `BEHIND_LIVE_WINDOW` recovers on finite timelines, on Android.** Error
+1002 with `player.isCurrentMediaItemLive == false` seeks back to the last real
+position and prepares again, once per attach, instead of failing. Media3's
+`seekToDefaultPosition()` is a **live-edge** policy — on a finite timeline it
+skips content — and is deliberately not used. It is an object with the player
+behind three lambdas (`BehindLiveWindowRecovery`), because `Controller` cannot
+be constructed in a JVM test and the addition needs one; the per-attach budget
+is re-armed at **both** sites where an item takes the screen, `attachRecipe`
+and `commitPreparedReplacement`, which swaps in a second `ExoPlayer` without
+going near the first.
+
+**The fence grew three rules, all of which M5's own surfaces needed.** A
+computed member write (`el["class"+"Name"]="failed"`) matches no property
+pattern and never will, so the web fence now guards the element LOOKUP, which
+cannot be hidden. `PlaybackSurfaceOwner.kt` was scanned with a rule that
+required a `surfaceOwner.` receiver — a spelling that never appears inside that
+file — so a bare `raiseBlocking(...)` with no stop passed; the invariant its own
+doc comment states is now checked directly. And `PRESENTER_FILES` was exempt
+wholesale, which left contract v2's actual thesis unfenced: a presenter is now
+scanned by the inverted rule (no player call, no timer of its own, no
+control-plane call), with must-trip and must-not-trip fixtures for each.
+
+**Acceptance.** Three fixture cases — `m5_create_retry_deadline`,
+`m5_hls_retry_once`, `m5_behind_live_window_finite` — join the 57 already
+there, and every client's presenter runs all 60. They pin the SURFACE sequence
+each addition produces, which is all a pure presenter can see; the retries
+themselves are pinned at each client's own seam, and the PR is explicit about
+which is which. The mutation battery is 22 rows, every one demonstrated
+failing.
+
+**Two things this PR does not settle, and Paul's ruling is wanted on both.**
+On the web the 60 s deadline is not reachable at all: `beginPlaybackPreparation`
+bounds every open at 20 s absolute, and when it wins the sequence ends as
+`owner_stopped` rather than M5's `exhausted`, leaving the deadline branch and
+the late-release branch exercised by tests and nothing else. Closing that means
+moving a threshold, which §6 forbids here, so the question is whether the web
+should raise `exhausted` for this at all. And "backoff 1 s · 2 s · 4 s" was
+read as a closed list of three retries rather than a ramp that holds at 4 s
+until the deadline; both fit the text, and
+[the implementation doc](docs/clients/PLAYBACK-SURFACE-CONTRACT-IMPLEMENTATION.md)
+§4.6 says which was taken and why.
+
+**Unrun:** every Swift and Kotlin test in this PR — there is no Xcode and no
+Android toolchain on the machine it was written on. `make apple-test` on a Mac
+and `make android-test` are owed, and so are the device recipes in the PR's
+"Needs a Mac" and "Needs an Android toolchain or a device" lists.
+
 ## M3 — the Android playback surface is a projection of the player
 
 **In `android/playback-surface` (build 90), rebased onto M1, open as a WIP PR

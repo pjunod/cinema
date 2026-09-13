@@ -202,6 +202,25 @@ internal class PlaybackSurfaceOwner(
     }
 
     /**
+     * M5: the create-retry ladder or its absolute deadline is spent.
+     *
+     * Deliberately NOT the class's `keep_waiting`: on this path there is no
+     * stream to keep waiting on and no detector to re-arm, so offering it would
+     * be a button that does nothing. Try again re-runs the whole open, which is
+     * the honest "one more bounded attempt" here.
+     */
+    fun exhaustedAfterCreateRetries(attached: Long, detail: String) {
+        player.playbackRequested = false
+        raiseBlocking(
+            source = SurfaceSources.OWNER_EXHAUSTED,
+            context = SurfaceContext.Start,
+            attached = attached,
+            detail = detail,
+            actions = listOf(SurfaceAction.Retry, SurfaceAction.Close),
+        )
+    }
+
+    /**
      * The control plane ruled this stall terminal.
      *
      * Ruling D1 keeps the verdict from tearing anything down — no reopen starts
@@ -240,6 +259,20 @@ internal class PlaybackSurfaceOwner(
     /** An automatic downshift, an HDR-subtitle refusal, a PGS or PiP failure. */
     fun degradedNotice(attached: Long, context: SurfaceContext, detail: String) =
         raiseNotice(SurfaceSources.DEGRADED_NOTICE, context, attached, detail = detail)
+
+    /**
+     * M5: the server answered the create with "still building" and the owner is
+     * retrying it (§3.3 row 6). A progress fault: nothing is stopped, and the
+     * retry is what clears it — by producing a session, or by giving up and
+     * raising the prompt through [exhaustedAfterCreateRetries].
+     */
+    fun preparingSessionCreate(attached: Long, detail: String) =
+        raiseNotice(
+            SurfaceSources.CREATE_503_NOT_YET,
+            SurfaceContext.Start,
+            attached,
+            detail = detail,
+        )
 
     /** A playlist or segment 503 the owner is recovering from. */
     fun recoveringSegmentRefusal(attached: Long, positionMs: Long?, detail: String) =
@@ -322,12 +355,14 @@ internal class PlaybackSurfaceOwner(
         attached: Long,
         positionMs: Long? = null,
         detail: String? = null,
+        actions: List<SurfaceAction>? = null,
     ) = dispatch(
         SurfaceEvent.Raise(
             source = source,
             context = context,
             attached = attached,
             playerStopped = !player.playbackRequested,
+            actions = actions,
             positionMs = positionMs,
             detail = detail,
         ),

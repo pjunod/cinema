@@ -3551,6 +3551,14 @@ asyncTest("a burn session-open refusal reaches the surface as a refused change",
       // does not throw.
       CAPS_DOCUMENT_PRELUDE,
       shippedSource("openSession"),
+      // M5: both branches of a pending change go through the retry wrapper,
+      // which in the `change` context is a passthrough. Slicing it here is
+      // what proves that — a 501 during a change must still be one create and
+      // one `change_failed`.
+      "function releaseSession(){}",
+      shippedSource("playbackRetryDelay"),
+      shippedSource("playbackCreateRetryContext"),
+      shippedSource("openSessionRetryingNotYet"),
       shippedSource("currentStreamFailureOverlay"),
       shippedSource("playbackSurfaceSourceIsBlocking"),
       shippedSource("showSessionOpenFailure"),
@@ -5025,6 +5033,251 @@ test("the browser and the server key a learned limit identically", () => {
       row.name,
     );
   }
+});
+
+// ---- M5: the three clients' copies of one set of numbers --------------------
+//
+// The create-retry ladder, its absolute deadline and the codes it claims exist
+// three times — once in this policy module, once in Swift, once in Kotlin —
+// because only one of the three clients can run this file. Read the other two
+// back and fail on the drift rather than discovering it on a device.
+const APPLE_PLAYER = fs.readFileSync(
+  path.join(__dirname, "../../clients/apple/Sources/PlayerController.swift"),
+  "utf8",
+);
+const ANDROID_POLICY = fs.readFileSync(
+  path.join(__dirname, "../../clients/android/app/src/main/java/tv/plurx/app/player/PlaybackPolicy.kt"),
+  "utf8",
+);
+
+function declaredNumbers(source, pattern, label) {
+  const match = source.match(pattern);
+  assert.ok(match, `${label} no longer declares the value this test reads`);
+  return match[1].match(/\d[\d_]*/g).map((value) => Number(value.replace(/_/g, "")));
+}
+
+test("the create-retry ladder is one set of numbers on all three clients", () => {
+  const { backoff_ms: backoff, deadline_ms: deadline, source } = policy.CREATE_RETRY;
+  assert.deepEqual(backoff, [1000, 2000, 4000]);
+  assert.equal(deadline, 60000);
+  assert.equal(source, "create_503_not_yet");
+
+  assert.deepEqual(
+    declaredNumbers(APPLE_PLAYER, /static let backoffMs: \[Int\] = \[([^\]]*)\]/, "Apple"),
+    backoff,
+    "Apple's backoff has drifted from the web's",
+  );
+  assert.deepEqual(
+    declaredNumbers(APPLE_PLAYER, /static let deadlineMs: Int = ([\d_]+)/, "Apple"),
+    [deadline],
+    "Apple's deadline has drifted from the web's",
+  );
+  assert.deepEqual(
+    declaredNumbers(ANDROID_POLICY, /val backoffMs: List<Int> = listOf\(([^)]*)\)/, "Android"),
+    backoff,
+    "Android's backoff has drifted from the web's",
+  );
+  assert.deepEqual(
+    declaredNumbers(ANDROID_POLICY, /const val DEADLINE_MS: Int = ([\d_]+)/, "Android"),
+    [deadline],
+    "Android's deadline has drifted from the web's",
+  );
+
+  // Every client's OWNER has to actually run the ladder. These are the
+  // mutation killers a machine with no Xcode and no Android toolchain can
+  // still fire: delete either call site and this fails here.
+  assert.ok(
+    APPLE_PLAYER.includes("hls = try await createRetryingNotYet("),
+    "Apple's create must go through the retry sequence",
+  );
+  assert.ok(
+    !APPLE_PLAYER.includes("hls = try await requestHlsSession("),
+    "no Apple create may go round the retry sequence — the unbound re-post included",
+  );
+  const androidCreate = fs.readFileSync(
+    path.join(__dirname, "../../clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"),
+    "utf8",
+  );
+  assert.ok(
+    androidCreate.includes("sessionCreateCoordinator.createRetryingNotYet("),
+    "Android's create must go through the retry sequence",
+  );
+  assert.match(
+    SHIPPED_UI,
+    /openSessionRetryingNotYet\(fileId,options,signal,/,
+    "the web's create must go through the retry sequence",
+  );
+
+  // Three properties whose only other test is Swift or Kotlin, and therefore
+  // unrun on this machine. Asserting the source shape is weaker than asserting
+  // the behaviour — it cannot tell a working sequence from a broken one — but
+  // it is not nothing: each of these survived its own mutation until it was
+  // written, and each is the line a refactor would quietly drop.
+  const androidCoordinator = fs.readFileSync(
+    path.join(__dirname, "../../clients/android/app/src/main/java/tv/plurx/app/player/StallReopen.kt"),
+    "utf8",
+  );
+  assert.match(
+    androidCoordinator,
+    /if \(!startContext\) return create\(body, isCurrent\)/,
+    "outside the start context the Android sequence must be the plain create — "
+      + "ladder AND deadline watchdog, not just the ladder",
+  );
+  assert.match(
+    androidCreate,
+    /startContext = startContext,/,
+    "…and the owner must actually pass its start-context decision in",
+  );
+  assert.match(
+    APPLE_PLAYER,
+    /if createRetryEpoch == epoch \{ createRetryEpoch &\+= 1 \}/,
+    "an abandoned Apple sequence must retire ONLY its own epoch: retiring the "
+      + "counter unconditionally leaves the sequence that replaced it unwatched",
+  );
+  assert.match(
+    APPLE_PLAYER,
+    /guard createRetryExpiredEpoch != epoch else \{\s*\n\s*await release\(session: opened\.sessionId\)/,
+    "a create that lands after Apple's deadline must be RELEASED — a session "
+      + "neither attached nor released is a leaked transcode",
+  );
+
+  // …and the codes that qualify are the fixture's row, three times over.
+  const row = JSON.parse(
+    fs.readFileSync(path.join(__dirname, "playback-surface-contract.json"), "utf8"),
+  ).sources.find((entry) => entry.id === "create_503_not_yet");
+  const codes = [...row.codes].sort();
+  for (const [label, text] of [["Apple", APPLE_PLAYER], ["Android", ANDROID_POLICY]]) {
+    for (const code of codes) {
+      assert.ok(
+        text.includes(`"${code}"`),
+        `${label} does not name the fixture's ${code}`,
+      );
+    }
+  }
+});
+
+test("only the fixture's `create_503_not_yet` codes are retried", () => {
+  const row = JSON.parse(
+    fs.readFileSync(path.join(__dirname, "playback-surface-contract.json"), "utf8"),
+  ).sources.find((entry) => entry.id === "create_503_not_yet");
+  for (const code of row.codes) {
+    assert.equal(
+      policy.classifyStreamFailure({ status: 503, code, context: "start" }),
+      "create_503_not_yet",
+      code,
+    );
+    assert.deepEqual(
+      policy.createRetryStep({
+        attempt: 0,
+        elapsedMs: 0,
+        source: policy.classifyStreamFailure({ status: 503, code, context: "start" }),
+      }),
+      { action: "retry", delayMs: 1000 },
+    );
+  }
+  // A 503 nobody explained is not a "still building" answer, and a "not yet"
+  // during a pending change is a refused change (row 7 beats row 6).
+  assert.deepEqual(
+    policy.createRetryStep({
+      attempt: 0,
+      elapsedMs: 0,
+      source: policy.classifyStreamFailure({ status: 503, code: null, context: "start" }),
+    }),
+    { action: "fail" },
+  );
+  assert.equal(
+    policy.classifyStreamFailure({ status: 503, code: "startup_timeout", context: "change" }),
+    "change_failed",
+  );
+  assert.deepEqual(
+    policy.createRetryStep({ attempt: 0, elapsedMs: 0, source: "change_failed" }),
+    { action: "fail" },
+  );
+});
+
+test("the create-retry deadline is absolute and never schedules past itself", () => {
+  const step = (attempt, elapsedMs) =>
+    policy.createRetryStep({ attempt, elapsedMs, source: "create_503_not_yet" });
+  assert.deepEqual(step(0, 0), { action: "retry", delayMs: 1000 });
+  assert.deepEqual(step(1, 1000), { action: "retry", delayMs: 2000 });
+  assert.deepEqual(step(2, 3000), { action: "retry", delayMs: 4000 });
+  assert.deepEqual(step(3, 7000), { action: "exhausted", reason: "ladder_spent" });
+  // The delay is a function of the attempt index: the backoff cannot restart.
+  assert.deepEqual(step(1, 20000), { action: "retry", delayMs: 2000 });
+  // Time already spent ends it wherever it is on the ladder, and a rung that
+  // could only START after the deadline is not scheduled at all.
+  assert.deepEqual(step(0, 60000), { action: "exhausted", reason: "deadline" });
+  assert.deepEqual(step(0, 59999), { action: "exhausted", reason: "deadline" });
+  assert.deepEqual(step(0, 58999), { action: "retry", delayMs: 1000 });
+  assert.deepEqual(step(1, 90000), { action: "exhausted", reason: "deadline" });
+});
+
+test("the hls.js retry budget is one per attach, and `BEHIND_LIVE_WINDOW` is finite-only", () => {
+  assert.equal(policy.HLS_RETRY.delay_ms, 2000);
+  assert.equal(policy.HLS_RETRY.per_attach, 1);
+  assert.equal(policy.hlsRetryAllowed({ used: 0 }), true);
+  assert.equal(policy.hlsRetryAllowed({ used: 1 }), false);
+  assert.equal(policy.hlsRetryAllowed({ used: 2 }), false);
+  // The shipped page reads the budget rather than counting for itself, and
+  // both rows spend the same one.
+  assert.match(
+    SHIPPED_UI,
+    /PlaybackPolicy\.hlsRetryAllowed\(\{used:player\.hlsRetryUsed\|\|0\}\)/,
+    "the page must read the shared budget",
+  );
+  for (const site of ["scheduleHlsNetworkRetry(video,PLAYER,STREAM_FAILURE.code", "scheduleHlsNetworkRetry(video,PLAYER,String(d.details"]) {
+    assert.ok(SHIPPED_UI.includes(site), `the shared budget is spent at ${site}`);
+  }
+
+  assert.equal(policy.BEHIND_LIVE_WINDOW_CODE, 1002);
+  assert.equal(policy.behindLiveWindowRecovers({ errorCode: 1002, live: false, used: 0 }), true);
+  assert.equal(policy.behindLiveWindowRecovers({ errorCode: 1002, live: false, used: 1 }), false);
+  assert.equal(policy.behindLiveWindowRecovers({ errorCode: 1002, live: true, used: 0 }), false);
+  assert.equal(policy.behindLiveWindowRecovers({ errorCode: 2004, live: false, used: 0 }), false);
+  // Android carries the same rule, and does NOT reach for Media3's live-edge
+  // recovery — which is the constraint the review actually set.
+  const androidController = fs.readFileSync(
+    path.join(__dirname, "../../clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"),
+    "utf8",
+  );
+  assert.match(ANDROID_POLICY, /const val ERROR_CODE_BEHIND_LIVE_WINDOW = 1002/);
+  // The rule itself, not only its name: this is the mutation killer for the
+  // Kotlin predicate on a machine with no Android toolchain.
+  assert.match(
+    ANDROID_POLICY,
+    /errorCode == ERROR_CODE_BEHIND_LIVE_WINDOW && !live && used < 1/,
+    "Android's finite-timeline rule must stay finite-only and once-per-attach",
+  );
+  // Anchored inside the branch: `player.prepare()` appears at eight other
+  // sites in that file, so asserting the bare call pinned nothing. What has to
+  // be true is that the owner hands the recovery a seek target on the PLAYER's
+  // timeline and the player's own seek and prepare, and re-arms the budget
+  // wherever an item takes the screen.
+  assert.match(
+    androidController,
+    /seekTargetMs = \{ playerTimelinePositionMs\(filmPositionMs\) \},\s*\n\s*seekTo = \{ target -> player\.seekTo\(target\) \},\s*\n\s*prepare = \{ player\.prepare\(\) \},/,
+    "the recovery seeks on the player's timeline and prepares again",
+  );
+  assert.equal(
+    (androidController.match(/behindLiveWindow\.attached\(\)/g) || []).length,
+    2,
+    "the per-attach budget is re-armed at BOTH attach sites: `attachRecipe` and "
+      + "`commitPreparedReplacement`, which swaps in a second ExoPlayer without "
+      + "coming near the first",
+  );
+  assert.match(
+    androidController,
+    /\n {12}if \(behindLiveWindow\.recover\(/,
+    "the Android owner must ask the shared recovery, and nothing may gate it",
+  );
+  // A CALL, not a mention: the owner's comment explains why it does not reach
+  // for Media3's recovery, and a fence that banned the word would ban the
+  // explanation with it.
+  assert.doesNotMatch(
+    androidController,
+    /\.\s*seekToDefaultPosition\s*\(/,
+    "seekToDefaultPosition is a live-edge policy the contract forbids",
+  );
 });
 
 // Drained last, in registration order, after every synchronous case has run.

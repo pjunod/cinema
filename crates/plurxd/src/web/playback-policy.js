@@ -771,6 +771,93 @@
     return null;
   }
 
+  // ---- M5: the three bounded recovery additions ------------------------------
+  //
+  // The numbers, and the two decisions that read them, live here because all
+  // three clients have to agree on them and only one of the three can run this
+  // file. Apple (`PlayerController.CreateRetry`) and Android
+  // (`createRetryStep` in `PlaybackPolicy.kt`) restate them, and
+  // `web-policy.test.js` reads both files back and fails if a number drifts.
+  //
+  // Nothing here touches a player: these are the owner's own arithmetic, and
+  // the presenter never sees them (PLAYBACK-SURFACE-CONTRACT.md §3.0).
+
+  const CREATE_RETRY = Object.freeze({
+    // The review's ladder, as a closed list. A fourth rung is not "4 s again":
+    // the ladder is spent after the third retry and the owner says so.
+    backoff_ms: Object.freeze([1_000, 2_000, 4_000]),
+    // ABSOLUTE, from the first attempt — not per attempt. A server that holds
+    // each create for a minute cannot stretch the sequence past this, which is
+    // the whole reason the review asked for a deadline rather than a count.
+    deadline_ms: 60_000,
+    // The fixture's `create_503_not_yet` row, and only it (§3.3 row 6). A
+    // refusal the server did not explain, or explained with any other code, is
+    // not a "still building" answer and is not retried.
+    source: "create_503_not_yet",
+  });
+
+  // What the create owner does after a refusal it has already classified.
+  //
+  // `attempt` counts retries already made (0 before the first one), `elapsedMs`
+  // is measured from the FIRST attempt, and `source` is what
+  // `classifyStreamFailure` answered. Returns one of:
+  //
+  //   {action: "fail"}                — not a "not yet" answer; the caller's
+  //                                     existing handling stands, unchanged.
+  //   {action: "retry", delayMs}      — wait this long and re-post the SAME
+  //                                     request identity.
+  //   {action: "exhausted", reason}   — the owner has nothing left: stop the
+  //                                     player and raise `exhausted`.
+  //
+  // The deadline is checked twice on purpose: once for time already spent, and
+  // once for the retry that would START after it. Scheduling an attempt that
+  // could only begin past the deadline is how an "absolute" bound turns back
+  // into a per-attempt one.
+  function createRetryStep({ attempt = 0, elapsedMs = 0, source = null } = {}) {
+    if (source !== CREATE_RETRY.source) return { action: "fail" };
+    const spent = Number.isFinite(Number(elapsedMs)) ? Math.max(0, Number(elapsedMs)) : 0;
+    if (spent >= CREATE_RETRY.deadline_ms) return { action: "exhausted", reason: "deadline" };
+    const index = Math.max(0, Math.trunc(Number(attempt) || 0));
+    if (index >= CREATE_RETRY.backoff_ms.length) {
+      return { action: "exhausted", reason: "ladder_spent" };
+    }
+    const delayMs = CREATE_RETRY.backoff_ms[index];
+    if (spent + delayMs >= CREATE_RETRY.deadline_ms) {
+      return { action: "exhausted", reason: "deadline" };
+    }
+    return { action: "retry", delayMs };
+  }
+
+  // The web's hls.js retry (M5 addition 2). One `startLoad(position)` after
+  // this long, and ONE per attach shared between the network-class fatal and
+  // the `segment_503_not_yet` row — whichever fires first spends it. After
+  // that the existing reopen path is what recovers, exactly as it does today.
+  const HLS_RETRY = Object.freeze({
+    delay_ms: 2_000,
+    per_attach: 1,
+  });
+
+  // `used` is the attach's spent budget. A pure predicate so the one place
+  // that schedules the retry cannot disagree with the test that pins it.
+  function hlsRetryAllowed({ used = 0 } = {}) {
+    return (Number(used) || 0) < HLS_RETRY.per_attach;
+  }
+
+  // Android's `BEHIND_LIVE_WINDOW` recovery (M5 addition 3). Finite timelines
+  // only: Media3's own answer is `seekToDefaultPosition()`, which is a
+  // LIVE-EDGE policy — on a finite timeline it skips content — so the contract
+  // forbids it and this says when the seek-to-last-position recovery applies.
+  // Restated in `PlaybackPolicy.kt`; the parity test reads both.
+  const BEHIND_LIVE_WINDOW_CODE = 1002;
+
+  function behindLiveWindowRecovers({ errorCode = null, live = true, used = 0 } = {}) {
+    if (Number(errorCode) !== BEHIND_LIVE_WINDOW_CODE) return false;
+    // A live item keeps today's `Fail`: there is no last real position on a
+    // window that has moved past the viewer.
+    if (live !== false) return false;
+    return (Number(used) || 0) < 1;
+  }
+
   // The two overlay lines for a failure the server explained.
   //
   // A still-starting session is deliberately not called a failure: the server
@@ -1594,6 +1681,12 @@
     fallbackResetBeforeOpen,
     parseStreamFailure,
     classifyStreamFailure,
+    CREATE_RETRY,
+    createRetryStep,
+    HLS_RETRY,
+    hlsRetryAllowed,
+    BEHIND_LIVE_WINDOW_CODE,
+    behindLiveWindowRecovers,
     SURFACE_CLASSES,
     SURFACE_SOURCES,
     SURFACE_TIMINGS,

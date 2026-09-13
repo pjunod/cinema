@@ -309,11 +309,23 @@ class Controller(
         ),
     )
 
+    /**
+     * M5 addition 3, and its per-attach budget. The recovery itself
+     * re-prepares WITHOUT a new item, so it cannot refill its own budget.
+     */
+    private val behindLiveWindow = BehindLiveWindowRecovery()
+
     private fun attachRecipe(recipe: PlaybackRecipeOwnership.Claim) {
         recipeOwnership.attach(recipe)
         selectionRecipe = recipe
         textSelectionArmed = true
         audioSelectionArmed = true
+        // M5 addition 3's budget is per ATTACH, and every `setMediaItem` +
+        // `prepare` in this file goes through here. It is NOT the only way an
+        // item takes the screen — `commitPreparedReplacement` swaps in a whole
+        // second `ExoPlayer` without coming near this function — so that site
+        // re-arms it too, and this comment no longer claims otherwise.
+        behindLiveWindow.attached()
     }
 
     /**
@@ -626,6 +638,40 @@ class Controller(
             val refusal = mediaRefusal(error)
             if (isTransportPlaybackError(error.errorCode) && retryMediaOnNextNode(error)) {
                 raiseRecoveryStep(refusal, "Reconnecting on another server address.")
+                return
+            }
+            // M5 addition 3 — `BEHIND_LIVE_WINDOW` (1002) on a FINITE timeline.
+            //
+            // Media3's own answer is `seekToDefaultPosition()`, which is a
+            // LIVE-EDGE policy: on a finite timeline it jumps to the start of
+            // the available window and skips content nobody asked to skip. The
+            // contract forbids it, so this seeks back to where the picture
+            // actually was and prepares again — ONCE per attach, because a
+            // second 1002 on the same item is the recovery not having worked
+            // and repeating it is a loop. A live item keeps today's `Fail`,
+            // which is what the rest of this function does with it.
+            //
+            // Placed above `playbackErrorAction` deliberately: 1002 is neither
+            // a transport nor a compatibility failure, so the ladder answers it
+            // with `Fail` (or, on an established HDR delivery, with a recipe
+            // retry that changes nothing about a window that moved).
+            val filmPositionMs = realPosition()
+            if (behindLiveWindow.recover(
+                    errorCode = error.errorCode,
+                    live = player.isCurrentMediaItemLive,
+                    seekTargetMs = { playerTimelinePositionMs(filmPositionMs) },
+                    seekTo = { target -> player.seekTo(target) },
+                    prepare = { player.prepare() },
+                )
+            ) {
+                playbackTelemetry.report(
+                    event = "playback_behind_live_window",
+                    level = "warn",
+                    message = error.errorCodeName,
+                    code = error.errorCode,
+                    detail = "finite timeline — seeking back to ${filmPositionMs}ms and preparing again",
+                )
+                raiseRecoveryStep(refusal, "Reloading this stream.")
                 return
             }
             val action = playbackErrorAction(
@@ -964,6 +1010,23 @@ class Controller(
             sessionBaseMs = baseMs,
         )
     }
+
+    /**
+     * Where a FILM position sits on the player's own timeline.
+     *
+     * [realPosition] maps the other way, and M5's `BEHIND_LIVE_WINDOW`
+     * recovery needs this one: it reads the last real position in film time and
+     * then has to hand `ExoPlayer.seekTo` a number in the player's.
+     */
+    private fun playerTimelinePositionMs(filmPositionMs: Long): Long =
+        playerLocalPositionMs(
+            filmPositionMs = filmPositionMs,
+            directTransport = directTransport,
+            sessionIsVod = sessionIsVod,
+            progressiveTransport = progressiveTransport,
+            progressiveOriginMs = progressiveMediaOrigin.currentOriginMs(),
+            sessionBaseMs = baseMs,
+        )
 
     /** A refusal Media3 carried, classified. */
     private data class MediaRefusal(val source: String, val message: String?, val positionMs: Long?)
@@ -1359,10 +1422,34 @@ class Controller(
         sessionIsVod = false
         scope.launch {
             try {
+                // M5 §4.6.1: row 6 is the START context, so the whole sequence
+                // — the ladder AND its deadline watchdog — runs only where
+                // there is nothing behind this create. `openSession` is also
+                // the create path for seeks and quality changes, and a create
+                // over a predecessor the viewer is still watching is a refused
+                // CHANGE (row 7): stopping that player after sixty seconds is
+                // the outcome §7 recipe (b) forbids outright.
+                val startContext = !predecessorAttached()
+                val retryEpoch = mediaMutationEpoch
                 val hls = try {
-                    sessionCreateCoordinator.create(
+                    sessionCreateCoordinator.createRetryingNotYet(
                         body = createBody.copy(control_sequence = playbackIntent.orderedControlSequence(playbackControl.controlSequence())),
+                        startContext = startContext,
                         isCurrent = { stallGuard.isCurrent(requestVersion) },
+                        isNotYet = { failure -> createIsStillBuilding(failure) },
+                        onRetrying = { failure ->
+                            surfaceOwner.preparingSessionCreate(
+                                retryEpoch,
+                                failure.message ?: STILL_BUILDING_SENTENCE,
+                            )
+                        },
+                        onExhausted = { _ ->
+                            playbackTelemetry.cancel(attempt)
+                            surfaceOwner.exhaustedAfterCreateRetries(
+                                retryEpoch,
+                                CREATE_RETRY_EXHAUSTED_SENTENCE,
+                            )
+                        },
                     ) ?: return@launch
                 } catch (cancelled: CancellationException) {
                     // The screen left composition (or a newer request superseded
@@ -2606,12 +2693,30 @@ class Controller(
     }
 
     /**
+     * Is this create refusal the fixture's `create_503_not_yet` row (M5)?
+     *
+     * The server's own code is what says so. A bodiless 503 is not a "still
+     * building" answer — it is a 503 nobody explained — and retrying one would
+     * be guessing.
+     */
+    private fun createIsStillBuilding(failure: Throwable): Boolean {
+        val code = (failure as? RefusalException)?.code ?: return false
+        return code in CreateRetry.codes
+    }
+
+    /**
      * A create refusal as a contract source id.
      *
      * The VOD refusals have their own terminal rows, and 401/403 keeps its Sign
-     * in whether or not the body was legible. A "not yet" 503 stays the owner's
-     * `stopped` with the server's sentence: the create retry that would make it
-     * a `preparing` is M5, and this change is behaviour-neutral (§3.3 row 9).
+     * in whether or not the body was legible.
+     *
+     * A "not yet" 503 is still the owner's `stopped` here, and after M5 that is
+     * a narrower statement than it looks: the START-context creates that could
+     * produce one are consumed by `createRetryingNotYet`, which raises
+     * `create_503_not_yet` while it retries and `owner_exhausted` when it gives
+     * up. What reaches this function is a "not yet" in a context row 6 does not
+     * claim — a pending change, or a stall reopen — where the honest answer is
+     * the one the client already gave.
      */
     private fun createFailureSource(refusal: RefusalException?): String = when {
         refusal == null -> SurfaceSources.OWNER_STOPPED
@@ -3003,6 +3108,11 @@ class Controller(
 
         player = successor
         mediaSession.setPlayer(successor)
+        // A different `ExoPlayer` with its own item is on the screen now, so
+        // it gets its own single `BEHIND_LIVE_WINDOW` recovery. This path never
+        // reaches `attachRecipe`, which is why the budget is re-armed here
+        // rather than assumed.
+        behindLiveWindow.attached()
 
         // The successor is its own session on its own timeline. Everything the
         // controller derives from "which session am I playing" moves with it,
@@ -3223,6 +3333,15 @@ class Controller(
 internal const val CONTROL_ASK_MS = 1_500L
 internal const val CONTROL_ASK_CAP_MS = 3_000L
 internal const val SEEK_COALESCE_MS = 100L
+
+/**
+ * What M5's create retry says while it runs, and what the owner says when its
+ * ladder or its absolute deadline is spent. The first is a fallback: the
+ * server's own sentence is preferred wherever it sent one.
+ */
+internal const val STILL_BUILDING_SENTENCE = "The server is still building this stream."
+internal const val CREATE_RETRY_EXHAUSTED_SENTENCE =
+    "The server is still building this stream and did not finish in a minute."
 
 /**
  * How far apart two `realPosition()` reads must be for "the film clock did not

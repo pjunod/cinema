@@ -726,6 +726,73 @@ Acceptance: a fixture case per addition (`m5_create_retry_deadline`,
 client it applies to; a mutation removing any one retry fails its case; the
 web test pins `startLoad` called at most once per attach.
 
+#### What landed, and the two readings it had to settle
+
+**Landed** in `playback/recovery-additions`. Three decisions the text above
+left open, recorded here rather than resolved silently:
+
+1. **"Backoff 1 s · 2 s · 4 s" is a CLOSED list**, not a ramp that then holds at
+   4 s. Three retries, four attempts; the ladder is spent after the third and
+   the owner raises `exhausted` with the reason `ladder_spent`. The absolute
+   deadline is the other termination, with the reason `deadline`, and it is
+   what bounds a SLOW server rather than a refusing one — which is the case the
+   review named. Read the other way the sequence would be about fourteen
+   retries, and nothing in the review or the contract asks for that.
+2. **The absolute deadline runs on a watchdog, not between attempts.** Checking
+   elapsed time only at rung boundaries turns an absolute bound back into a
+   per-attempt one the moment the server holds a create: Apple's create session
+   has a 180 s request timeout, so a boundary-checked "60 s" could surface at
+   three minutes. All three clients arm a timer at the first attempt; when it
+   fires the owner stops the player and raises `exhausted` immediately, and the
+   create still in flight is awaited only so its session can be RELEASED.
+3. **On the web the 60 s deadline is not reachable at all, and three of M5's
+   own branches are dead there.** `beginPlaybackPreparation` (`index.html`)
+   gives every open a 20 s ABSOLUTE preparation deadline, measured from before
+   the decision call, and the M5 sequence runs inside it. The consequence is not
+   a shorter timer. When preparation wins it aborts the create's signal, so the
+   sequence throws a plain `AbortError` carrying no `surfaceRaised`, and
+   `failPreparation` raises **`owner_stopped` — "Playback could not prepare."**,
+   not M5's `exhausted` sentence. So on the web:
+
+   * the only reachable termination is `ladder_spent`, at about 7 s;
+   * the `deadline` reason, the release-a-late-success branch and the
+     `sequence.expired` guard are exercised by the test suite and by nothing on
+     a shipped path;
+   * "a late success is released, not attached" is a property of the tests, not
+     of the browser.
+
+   This is a **conflict between this plan and the code**, not a resolution.
+   Closing it means moving or restructuring a pre-existing threshold, which §6
+   forbids in this PR. The question for Paul is therefore not a timing number:
+   it is **should the web raise `exhausted` for a still-building create at all,
+   or is 20 s + `owner_stopped` the right answer for a client whose whole open
+   is bounded at 20 s?** Apple (180 s request timeout) and Android (60 s read
+   timeout) both reach the deadline on shipped paths, so whichever way it is
+   ruled, the web is the client that diverges.
+
+Scope notes worth keeping:
+
+* The create retry runs in the `start` context only on every client — **the
+  ladder and its deadline watchdog alike.** The first version of this work
+  gated only the ladder on Android and armed the watchdog unconditionally,
+  which put a sixty-second stop-the-player timer on every seek and quality
+  change: §7 recipe (b)'s explicitly not-allowed outcome, raced against that
+  client's own sixty-second read timeout. `startContext` is now a parameter of
+  `createRetryingNotYet` rather than a predicate folded into `isNotYet`, which
+  is what makes the gate one decision instead of two.
+* `startCopyHls` keeps answering `vod_index_pending` with its existing
+  progressive-remux fallback rather than waiting seven seconds for a stream it
+  can already play. Both branches of a pending change on the web now go through
+  the same wrapper, so which context a create is in is decided in one place.
+* Apple's `refusalSurfaceOutcome` still declines to classify
+  `create_503_not_yet` — that function feeds a raise that only happens after the
+  owner's stop, where a progress class would be a spinner over a stopped
+  player.
+* "Attach" for the Android `BEHIND_LIVE_WINDOW` budget means the item on the
+  screen changed. `attachRecipe` is not the only way that happens:
+  `commitPreparedReplacement` swaps in a second `ExoPlayer` without going near
+  it, so the budget is re-armed at both sites.
+
 ### 4.7 M6 — Android progressive-remux landing (`android/remux-seek-origin`)
 
 Gated on a measurement, not a reading. First, on an Android TV with a

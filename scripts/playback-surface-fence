@@ -65,6 +65,15 @@ PATTERNS = {
         ("notice attribute write", re.compile(r"\b(?:psurface|psurfText|psurfSub|psurfAct|pindicator|pindText)\b[^\n]*?setAttribute\(\s*[\"']class[\"']")),
         ("notice class toggle", re.compile(r"\b(?:psurface|pindicator)\b[^\n]*classList\s*\.\s*(?:add|remove|toggle|replace)\s*\(")),
         ("notice bulk write", re.compile(r"Object\.assign\([^)]*\b(?:psurface|psurfText|psurfSub|psurfAct|pindicator|pindText)\b")),
+        # The door, not the spellings. A computed member write —
+        # `el["class"+"Name"]="failed"` or `el["inner"+"HTML"]=msg` — matches no
+        # property pattern above and never will, because the property name does
+        # not appear in the source at all. What DOES have to appear is the
+        # lookup that got hold of the element, and every one of those already
+        # lives inside the render region.
+        ("surface element lookup", re.compile(
+            r"(?:getElementById|querySelector(?:All)?)\s*\(\s*[\"'`]#?"
+            r"(?:ploading|ploadText|ploadSub|ploadAct|psurface|psurfText|psurfSub|psurfAct|pindicator|pindText)\b")),
     ),
     "swift": (
         # The four pre-contract fields. M2 deleted them, so these now guard
@@ -111,14 +120,54 @@ PATTERNS = {
         # The generic raise. Every site in `Controller` goes through a named
         # method on `PlaybackSurfaceOwner`, so a new site has to add itself
         # where a test can name it.
+        #
+        # The receiver is optional on purpose. It was required, and that made
+        # the pattern blind inside `PlaybackSurfaceOwner.kt` itself, where a
+        # bare `raiseBlocking(...)` with no stop in front of it is exactly the
+        # defect the file exists to prevent. That file is scanned as
+        # `kotlin_owner` below — this pattern set is for everything else, where
+        # a bare one would be a second door into the same room.
         ("generic surface raise", re.compile(
-            r"\bsurfaceOwner\s*\.\s*(?:raise|raiseNotice|raiseBlocking|stopAndRaise)\s*\(")),
+            r"(?:\bsurfaceOwner\s*\.\s*)?\b(?:raiseNotice|raiseBlocking|stopAndRaise)\s*\(|"
+            r"\bsurfaceOwner\s*\.\s*raise\s*\(")),
         # The imperative channel, in the shape it would come back in: a
         # nullable message the screen holds and paints for itself.
         ("screen-held failure string", re.compile(
             r"\bmutableStateOf\s*<\s*String\s*\?\s*>\s*\(\s*null\s*\)")),
     ),
 }
+
+# `PlaybackSurfaceOwner.kt` is the one file that is SUPPOSED to call the generic
+# raises: they are its own private helpers. It gets every other Kotlin pattern
+# and, in place of the generic-raise one, a bespoke check that the invariant its
+# own doc comment states is actually true of every blocking site
+# (`owner_stop_failures`).
+PATTERNS["kotlin_owner"] = tuple(
+    (token, pattern) for token, pattern in PATTERNS["kotlin"] if token != "generic surface raise"
+)
+
+# Whole files that ARE a presenter (see PRESENTER_FILES) are exempt from the
+# write patterns, because writing the surface is all they do. That exemption
+# used to be unconditional, which left contract v2's actual thesis — "the
+# presenter has no side effects" (§3.0) — unfenced: a free function calling
+# `player.pause()` inside the presenter passed. These are the inverted rule.
+PRESENTER_FORBIDDEN = (
+    # The five verbs §3.0 and implementation §6 name, plus the two ways a
+    # presenter could move a player without naming them.
+    ("player call", re.compile(
+        r"\.\s*(?:pause|play|seek|seekTo|seekToDefaultPosition|prepare|startLoad|stopLoad"
+        r"|reopen|replaceCurrentItem|setMediaItem)\s*\(")),
+    # A timer of its own. `Timer(` alone is not it — the Android presenter has a
+    # `Timer` enum CASE — so these are creation spellings only.
+    ("timer creation", re.compile(
+        r"Timer\s*\.\s*scheduledTimer|DispatchQueue\s*\.[\w.]+\s*\.\s*asyncAfter"
+        r"|\bTask\s*[{(]|Task\s*\.\s*sleep|\bsetTimeout\s*\(|\bsetInterval\s*\("
+        r"|\blaunch\s*[{(]|\bdelay\s*\(|CoroutineScope\s*\(|kotlin\.concurrent\.timer")),
+    # Reporting to the control plane.
+    ("control-plane call", re.compile(
+        r"\bplaybackControl\b|\bnotifyPlaybackControl\s*\(|\breportControlEvidence\s*\("
+        r"|\bcontrolReporter\b")),
+)
 
 # The finite player's shipped surfaces, and nothing else. Scope is deliberate:
 # the offline players, the readers, Live TV and Library Channels' own Swift
@@ -134,7 +183,7 @@ SCANNED = {
     # The recovery owner's surface arm: it stops the player and then raises,
     # which is the one thing the presenter itself may never do. Scanned rather
     # than allow-listed, so it can never grow a pre-contract write either.
-    Path("clients/android/app/src/main/java/tv/plurx/app/player/PlaybackSurfaceOwner.kt"): "kotlin",
+    Path("clients/android/app/src/main/java/tv/plurx/app/player/PlaybackSurfaceOwner.kt"): "kotlin_owner",
 }
 
 # Named so a later reader can see the exclusion was a decision, not an
@@ -273,6 +322,49 @@ def scan_text(kind: str, text: str, allowed: set[int] | None = None) -> list[tup
     return hits
 
 
+def owner_stop_failures(text: str) -> list[tuple[int, str]]:
+    """Every `raiseBlocking(` whose enclosing function does not stop the player.
+
+    `PlaybackSurfaceOwner.kt`'s own doc comment says it outright: "each blocking
+    one does its own stop before it raises". A regex over spellings cannot say
+    that; this can. For each call, walk back to the `fun ` that encloses it and
+    require `player.playbackRequested = false` between the two — which is what
+    the owner's stop IS on this client.
+    """
+    lines = text.splitlines()
+    failures: list[tuple[int, str]] = []
+    for index, line in enumerate(lines):
+        if not re.search(r"(?<!fun )\braiseBlocking\s*\(", line):
+            continue
+        start = None
+        for back in range(index, -1, -1):
+            if re.match(r"\s*(?:private |internal |public )?fun\s", lines[back]):
+                start = back
+                break
+        if start is None:
+            failures.append((index + 1, "raiseBlocking outside any function"))
+            continue
+        body = "\n".join(lines[start:index])
+        if not re.search(r"player\.playbackRequested\s*=\s*false", body):
+            failures.append((index + 1, "raiseBlocking with no `player.playbackRequested = false` before it"))
+    return failures
+
+
+def presenter_failures(kind_text: str) -> list[tuple[int, str]]:
+    """A presenter that moves the player is not a presenter (contract §3.0)."""
+    hits: list[tuple[int, str]] = []
+    for number, line in logical_lines(kind_text):
+        stripped = line.lstrip()
+        # A doc comment naming the thing it refuses to do is not the thing.
+        if stripped.startswith("//") or stripped.startswith("*") or stripped.startswith("/*"):
+            continue
+        for token, pattern in PRESENTER_FORBIDDEN:
+            if pattern.search(line):
+                hits.append((number, token))
+                break
+    return hits
+
+
 def scan() -> list[str]:
     failures: list[str] = []
     # Fail closed: a renamed or deleted scanned file used to make a fence PASS,
@@ -307,12 +399,19 @@ def scan() -> list[str]:
             for number, token in hits[budget: budget + 5]:
                 failures.append(f"{relative}:{number}: {token}")
 
+    owner = Path("clients/android/app/src/main/java/tv/plurx/app/player/PlaybackSurfaceOwner.kt")
+    if (ROOT / owner).is_file():
+        for number, token in owner_stop_failures((ROOT / owner).read_text(encoding="utf-8")):
+            failures.append(f"{owner}:{number}: {token}")
+
     for relative, reason in PRESENTER_FILES.items():
         path = ROOT / relative
         if not path.is_file():
             continue
         if relative in SCANNED:
             failures.append(f"{relative}:1: the presenter cannot also be scanned ({reason})")
+        for number, token in presenter_failures(path.read_text(encoding="utf-8")):
+            failures.append(f"{relative}:{number}: the presenter has a side effect ({token}); {reason}")
     return failures
 
 
