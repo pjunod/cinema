@@ -2403,10 +2403,19 @@ async function main() {
     // The bootstrap exchange answers `none`. Answering it with the verdict
     // under test would stop the reporter before the ask exists — which is
     // real behaviour, and has its own test below.
-    const h = stallHarness({ answer: () => ({ type: "none" }) });
+    const began=options.began==null?100:options.began;
+    // The clamp below is `deadline - elapsed`, and `elapsed` is
+    // `performance.now() - began`. Left on the real clock it is however long
+    // this file has taken to reach this line, so `an interval past the
+    // deadline is clamped to it` asserted 8000 and got whatever the machine
+    // had spent — 7504 on a pristine `main` here. The harness already accepts
+    // an injected clock; these cases are about the clamp, not about elapsed
+    // time, so they get one frozen at the moment the wait began. A case that
+    // wants time to move passes its own.
+    const clock = options.clock || { now: () => began };
+    const h = stallHarness({ answer: () => ({ type: "none" }), clock });
     const player = Object.assign(stalledPlayer(), options.player || {});
     const video = options.video || stalledVideo;
-    const began=options.began==null?100:options.began;
     player.waitAt=began;
     h.stub.attach(player, video, bootstrap());
     h.attached.push(player);
