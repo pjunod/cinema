@@ -4352,6 +4352,7 @@ async function main() {
     return new Function("PlaybackPolicy", [
       "let PLAYER={attemptId:'a1',started:false,method:'transcode'};",
       "let now=0;const timers=new Map();let nextTimer=0;",
+      "const performance={now:()=>now};",
       "function setTimeout(fn,ms){const id=++nextTimer;timers.set(id,{fn,at:now+ms});return id;}",
       "function clearTimeout(id){timers.delete(id);}",
       // Every create this sequence sends, with the identity it sent and when.
@@ -4363,7 +4364,8 @@ async function main() {
       "function raisePlaybackSurface(source,fault,options){",
       "  if(options&&options.once&&raised.some(entry=>entry.source===source)) return null;",
       "  raised.push({source,at:now,player_stopped:!!(fault&&fault.player_stopped),",
-      "    actions:(fault&&fault.actions)||null,context:fault&&fault.context});return null;}",
+      "    actions:(fault&&fault.actions)||null,context:fault&&fault.context,",
+      "    title:fault&&fault.title,detail:fault&&fault.detail});return null;}",
       // The server: one scripted answer per attempt. `hold` never settles until
       // the harness settles it, which is how a slow server is expressed.
       "function openSession(fileId,opts,signal,requestId){",
@@ -4374,10 +4376,22 @@ async function main() {
       "  return Promise.resolve({session_id:'session-'+(index+1)});}",
       shippedSource("playbackRetryDelay"),
       shippedSource("playbackCreateRetryContext"),
+      // Ruling 2: the sequence has no absolute bound of its own any more — it
+      // runs inside the SHIPPED preparation owner, whose 20 s is the bound, and
+      // the honest ending is the one that owner's deadline produces. Slicing
+      // the owner in is what makes that a test of the wiring rather than of a
+      // copy of it.
+      shippedSource("beginPlaybackPreparation"),
       shippedSource("openSessionRetryingNotYet"),
+      "const preparations=[];",
       "return {posts,released,raised,stops,logs,answers,now:()=>now,player:()=>PLAYER,",
       "  setPlayer(p){PLAYER=p;},context:()=>playbackCreateRetryContext(),",
-      "  open(signal,options){return openSessionRetryingNotYet(7,{start:0},signal,options);},",
+      "  bare(options){return openSessionRetryingNotYet(7,{start:0},null,options);},",
+      "  open(options){const preparation=beginPlaybackPreparation(()=>true);",
+      "    preparations.push(preparation);",
+      "    return preparation.run(signal=>openSessionRetryingNotYet(7,{start:0},signal,",
+      "      Object.assign({preparation},options)),late=>releaseSession(late&&late.session_id));},",
+      "  cancel(){preparations[preparations.length-1].cancel();},",
       "  settle(index,info){const answer=answers[index];if(answer&&answer.settle)answer.settle(info);},",
       "  advance(ms){now+=ms;for(const [id,timer] of [...timers])if(timer.at<=now){timers.delete(id);timer.fn();}}};",
     ].join("\n"))(policy);
@@ -4397,7 +4411,7 @@ async function main() {
       h.answers.push({ error: refusal503(code) });
     }
     h.answers.push({ error: refusal503("startup_timeout") });
-    const opening = h.open(null, { context: "start" });
+    const opening = h.open({ context: "start" });
     let settled = null;
     opening.then((value) => { settled = { value }; }, (error) => { settled = { error }; });
     await flushDeep();
@@ -4430,42 +4444,80 @@ async function main() {
       "the owner already raised, so `failPreparation` must not raise again");
   }
   {
-    // The deadline is ABSOLUTE. A server that answers nothing at all cannot
-    // stretch the sequence past 60 s, and the prompt lands on the clock rather
-    // than when the slow create finally returns.
+    // Ruling 2. The bound is the PREPARATION owner's 20 s — a pre-existing
+    // threshold §6 forbids moving — and what it produces is now the sequence's
+    // own exhaustion with the server's own sentence, instead of the generic
+    // "Playback could not prepare." a bare `AbortError` used to produce.
     const h = createRetryHarness();
-    h.answers.push({ hold: true });
-    const opening = h.open(null, { context: "start" });
+    h.answers.push({ error: refusal503("startup_timeout") }, { hold: true });
+    const opening = h.open({ context: "start" });
     let settled = null;
     opening.then((value) => { settled = { value }; }, (error) => { settled = { error }; });
     await flushDeep();
-    h.advance(59_999); await flushDeep();
+    h.advance(1000); await flushDeep();
+    assert.equal(h.posts.length, 2, "the first refusal put the sequence on its ladder");
+    h.advance(18_999); await flushDeep();
     assert.equal(h.stops.length, 0, "nothing is raised one millisecond early");
     h.advance(1); await flushDeep();
-    assert.equal(h.stops.length, 1, "the deadline fires on the clock, not between attempts");
-    assert.equal(h.raised.filter((entry) => entry.source === "owner_exhausted").length, 1);
+    assert.equal(h.stops.length, 1, "the owner stops the player on the preparation clock");
+    const exhausted = h.raised.filter((entry) => entry.source === "owner_exhausted");
+    assert.equal(exhausted.length, 1, "…and raises the exhaustion M5 designed");
+    assert.equal(exhausted[0].player_stopped, true);
+    assert.equal(exhausted[0].detail, "the transcoder is still starting",
+      "the viewer reads the server's own sentence, not a generic preparation failure");
     assert.ok(settled && settled.error);
-    assert.equal(settled.error.createRetryReason, "deadline");
-    // …and the create that finally lands is RELEASED, never attached.
-    h.settle(0, { session_id: "late-session" });
+    assert.equal(settled.error.createRetryReason, "preparation_deadline");
+    assert.equal(settled.error.surfaceRaised, true,
+      "`failPreparation` must leave this prompt standing");
+    // …and the create that finally lands is RELEASED, never attached. On the
+    // web that is a property of the browser now, not only of this test.
+    h.settle(1, { session_id: "late-session" });
     await flushDeep();
     assert.deepEqual(h.released, ["late-session"], "a late success is released, not attached");
     assert.equal(h.raised.filter((entry) => entry.source === "owner_exhausted").length, 1,
       "releasing the late session does not raise a second prompt");
   }
   {
+    // A create that is merely SLOW — no "not yet" answer behind it — is not
+    // this owner's exhaustion, and must not borrow its sentence. The
+    // preparation deadline says what it has always said.
+    const h = createRetryHarness();
+    h.answers.push({ hold: true });
+    const opening = h.open({ context: "start" });
+    let settled = null;
+    opening.then((value) => { settled = { value }; }, (error) => { settled = { error }; });
+    await flushDeep();
+    h.advance(20_000); await flushDeep();
+    assert.equal(h.stops.length, 0, "nothing was exhausted — nothing had refused");
+    assert.equal(h.raised.filter((entry) => entry.source === "owner_exhausted").length, 0);
+    assert.ok(settled && settled.error);
+    assert.equal(settled.error.name, "TimeoutError");
+    assert.equal(settled.error.surfaceRaised, undefined,
+      "so `failPreparation` still owns this one");
+  }
+  {
+    // A sequence with no preparation owner is refused rather than left
+    // unbounded: deleting M5's own 60 s watchdog is only safe because every
+    // create runs inside one.
+    const h = createRetryHarness();
+    let settled = null;
+    await Promise.resolve(h.bare({ context: "start" }))
+      .then((value) => { settled = { value }; }, (error) => { settled = { error }; });
+    assert.equal(settled.error.name, "TypeError");
+    assert.equal(h.posts.length, 0, "and it never reached the wire");
+  }
+  {
     // A newer intent cancels the whole sequence: the attempt in flight, the
     // sleep between attempts, and the deadline watchdog with them. Nothing is
     // raised — the newer intent owns the surface now.
-    const controller = new AbortController();
     const h = createRetryHarness();
     h.answers.push({ error: refusal503("startup_timeout") });
-    const opening = h.open(controller.signal, { context: "start" });
+    const opening = h.open({ context: "start" });
     let settled = null;
     opening.then((value) => { settled = { value }; }, (error) => { settled = { error }; });
     await flushDeep();
     assert.equal(h.posts.length, 1);
-    controller.abort();
+    h.cancel();
     await flushDeep();
     assert.ok(settled && settled.error, "the sequence ends when its intent does");
     assert.equal(settled.error.name, "AbortError");
@@ -4481,7 +4533,7 @@ async function main() {
     h.answers.push({ error: Object.assign(new Error("gone"), { status: 410, code: "media_owner_lost",
       streamFailure: { status: 410, code: "media_owner_lost", message: "the node is gone", position_ms: 90_000 } }) });
     let settled = null;
-    h.open(null, { context: "start" }).then((value) => { settled = { value }; }, (error) => { settled = { error }; });
+    h.open({ context: "start" }).then((value) => { settled = { value }; }, (error) => { settled = { error }; });
     await flushDeep();
     h.advance(120_000); await flushDeep();
     assert.equal(h.posts.length, 1, "only a `create_503_not_yet` answer is retried");
@@ -4494,7 +4546,7 @@ async function main() {
     const h = createRetryHarness();
     h.answers.push({ error: refusal503("startup_timeout") });
     let settled = null;
-    h.open(null, { context: "change" }).then((value) => { settled = { value }; }, (error) => { settled = { error }; });
+    h.open({ context: "change" }).then((value) => { settled = { value }; }, (error) => { settled = { error }; });
     await flushDeep();
     h.advance(120_000); await flushDeep();
     assert.equal(h.posts.length, 1, "the change context is not retried");
@@ -4506,7 +4558,7 @@ async function main() {
     const h = createRetryHarness();
     h.answers.push({ error: refusal503("vod_index_pending") });
     let settled = null;
-    h.open(null, { context: "start",
+    h.open({ context: "start",
       answeredLocally: (failure) => failure.code === "vod_index_pending" })
       .then((value) => { settled = { value }; }, (error) => { settled = { error }; });
     await flushDeep();
@@ -4520,7 +4572,7 @@ async function main() {
     const h = createRetryHarness();
     h.answers.push({ error: refusal503("startup_timeout") }, { error: null });
     let settled = null;
-    h.open(null, { context: "start" }).then((value) => { settled = { value }; }, (error) => { settled = { error }; });
+    h.open({ context: "start" }).then((value) => { settled = { value }; }, (error) => { settled = { error }; });
     await flushDeep();
     h.advance(1000); await flushDeep();
     assert.equal(h.posts.length, 2);
@@ -4608,7 +4660,7 @@ async function main() {
     h.setPlayer({ attemptId: "a4", started: true });
     h.answers.push({ error: refusal503("startup_timeout") });
     let settled = null;
-    h.open(null, {}).then((value) => { settled = { value }; }, (error) => { settled = { error }; });
+    h.open({}).then((value) => { settled = { value }; }, (error) => { settled = { error }; });
     await flushDeep();
     h.advance(120_000);
     await flushDeep();

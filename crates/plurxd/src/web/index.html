@@ -3693,8 +3693,23 @@ function beginPlaybackPreparation(isCurrent){
   const controller=new AbortController(), began=performance.now();
   let abandoned=false, rejectPending=null;
   const cancelled=()=>Object.assign(new Error("Playback preparation superseded."),{name:"AbortError"});
-  const timedOut=()=>Object.assign(new Error("Playback preparation timed out. Your place is saved."),{name:"TimeoutError"});
+  // The 20 s bound stays where it is (§6: it is a pre-existing threshold), and
+  // ruling 2 makes what it PRODUCES honest. An operation that has its own
+  // truthful answer for this deadline leaves it in `expiry`; M5's create-retry
+  // sequence is the one that does, because when the server has been answering
+  // "not yet" the end of that sequence is the sequence's own exhaustion and not
+  // a generic preparation failure. The hook raises before it returns, so the
+  // error carries `surfaceRaised` and `failPreparation` leaves the prompt
+  // standing instead of painting "Playback could not prepare." over it.
+  const timedOut=()=>{
+    const own=owner.expiry&&owner.expiry();
+    return own||Object.assign(new Error("Playback preparation timed out. Your place is saved."),{name:"TimeoutError"});
+  };
   const owner={
+    // Set by the running operation, cleared when it leaves. A supersede does
+    // not consult it: cancelling an open raises nothing, because the newer
+    // intent owns the surface.
+    expiry:null,
     cancel(){abandoned=true;controller.abort();rejectPending?.(cancelled());},
     finish(){if(beginPlaybackPreparation.active===owner)beginPlaybackPreparation.active=null;},
     async run(operation,release){
@@ -8662,45 +8677,52 @@ async function openSessionRetryingNotYet(fileId, opts, signal, options){
   const settings=options||{};
   const where=settings.context||playbackCreateRetryContext();
   const answeredLocally=settings.answeredLocally||null;
+  // The preparation owner this sequence runs inside, and the only absolute
+  // bound it has (ruling 2). Every shipped create already runs inside one —
+  // `startCopyHls` refuses to open without it — and M5's own 60 s watchdog
+  // could never fire behind a 20 s one, so it is gone rather than left as a
+  // branch that reads like a bound and is not. Refuse an ownerless sequence
+  // rather than leave the next caller an unbounded one.
+  const preparation=settings.preparation||null;
+  if(!preparation) throw Object.assign(
+    new Error("A create-retry sequence needs a preparation owner to bound and cancel it."),
+    {name:"TypeError"});
   const requestId=newRequestId();
   const began=Date.now();
-  const sequence={expired:false,raised:false};
-  let deadlineTimer=null;
-  const disarm=()=>{ if(deadlineTimer!=null){clearTimeout(deadlineTimer);deadlineTimer=null;} };
+  const sequence={raised:false,refusal:null};
   const superseded=()=>Object.assign(new Error("Playback preparation superseded."),
     {name:"AbortError"});
   const exhaust=reason=>{
     if(!sequence.raised){
       sequence.raised=true;
       stopPlayerForExhaustion();
+      // The server's own sentence, which is the last thing it said about this
+      // stream. Both ways the sequence ends have one — the ladder is spent only
+      // after a refusal, and the preparation deadline ends the SEQUENCE only
+      // when one has already arrived — so the viewer reads why the stream is
+      // not here rather than "Playback could not prepare."
       raisePlaybackSurface("owner_exhausted",{context:where,player_stopped:true,
         title:"Playback is stalled.",
-        detail:"the server is still building this stream and did not finish in a minute",
+        detail:(sequence.refusal&&sequence.refusal.message)
+          ||"the server did not finish starting this stream",
         actions:["keep_waiting","retry","close"]});
     }
     return Object.assign(new Error("The server did not finish starting this stream."),
       {name:"PlaybackCreateExhausted",surfaceRaised:true,createRetryReason:reason});
   };
-  const deadline=new Promise((_,reject)=>{
-    deadlineTimer=setTimeout(()=>{
-      deadlineTimer=null;
-      sequence.expired=true;
-      reject(exhaust("deadline"));
-    },PlaybackPolicy.CREATE_RETRY.deadline_ms);
-  });
-  const attempts=(async()=>{
+  // What the preparation deadline MEANS to a sequence the server has been
+  // answering "not yet" to: this owner's ladder ending, on the owner's clock.
+  // Nothing to answer with before the first refusal — a create that is merely
+  // slow is a preparation that timed out, and says so.
+  preparation.expiry=()=>(sequence.refusal?exhaust("preparation_deadline"):null);
+  try{
     for(let attempt=0;;attempt+=1){
       if(signal&&signal.aborted) throw superseded();
-      // Belt and braces on the absolute deadline: `createRetryStep` never
-      // schedules a rung that would BEGIN past it, but a drifting timer or a
-      // clock that jumped must not be able to post one either.
-      if(sequence.expired) throw superseded();
       let info;
       try{
         info=await openSession(fileId,opts,signal,requestId);
       }catch(error){
         if(signal&&signal.aborted) throw superseded();
-        if(sequence.expired) throw superseded();
         const failure=error&&error.streamFailure;
         if(answeredLocally&&failure&&answeredLocally(failure)) throw error;
         const source=failure?PlaybackPolicy.classifyStreamFailure({
@@ -8708,6 +8730,10 @@ async function openSessionRetryingNotYet(fileId, opts, signal, options){
         const step=PlaybackPolicy.createRetryStep({
           attempt,elapsedMs:Date.now()-began,source});
         if(step.action==="fail") throw error;
+        // The refusal this sequence is about, kept before either ending can
+        // use it: the ladder's own exhaustion and the preparation deadline's
+        // read the same sentence.
+        sequence.refusal=failure;
         if(step.action==="exhausted") throw exhaust(step.reason);
         // Still building. One fault for the sequence, not one per attempt: the
         // ring is for distinct faults, and a viewer watching a spinner does not
@@ -8723,19 +8749,20 @@ async function openSessionRetryingNotYet(fileId, opts, signal, options){
         await playbackRetryDelay(step.delayMs,signal);
         continue;
       }
-      // A session the sequence no longer owns belongs to nobody.
-      if(sequence.expired||(signal&&signal.aborted)){
+      // A session the sequence no longer owns belongs to nobody. Reachable now
+      // that the preparation deadline is the one that ends this: it aborts the
+      // signal, and the create already in flight still lands.
+      if(signal&&signal.aborted){
         releaseSession(info&&info.session_id);
-        throw sequence.expired?exhaust("deadline"):superseded();
+        throw superseded();
       }
       return info;
     }
-  })();
-  // The deadline may answer first; the attempt behind it is still running and
-  // will release whatever it produces. Its rejection is not an unhandled one.
-  attempts.catch(()=>{});
-  try{ return await Promise.race([attempts,deadline]); }
-  finally{ disarm(); }
+  }finally{
+    // A hook left behind would answer the NEXT operation's deadline with this
+    // sequence's exhaustion.
+    preparation.expiry=null;
+  }
 }
 // Take on a newly-opened session's identity, and attach it.
 //
@@ -9679,7 +9706,7 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
     const options=transcodeOpts(startSec,initialAudio);
     const retryContext=playbackCreateRetryContext();
     let info; try{info=await preparation.run(
-      signal=>openSessionRetryingNotYet(fileId,options,signal,{context:retryContext}),
+      signal=>openSessionRetryingNotYet(fileId,options,signal,{context:retryContext,preparation}),
       late=>releaseSession(late&&late.session_id));}catch(e){
       if(openIsAttached())failPreparation(e);
       return;
@@ -9842,7 +9869,7 @@ async function executePlaybackMediaChange(p,change){
       // point: which context a create is in is decided in ONE place, not by
       // which branch of this function happened to call which function.
       const info=await preparation.run(
-        signal=>openSessionRetryingNotYet(p.fileId,opts,signal,{}),
+        signal=>openSessionRetryingNotYet(p.fileId,opts,signal,{preparation}),
         late=>releaseSession(late&&late.session_id));
       if(!live()){ releaseSession(info&&info.session_id); return false; }
       retirePlaybackPredecessor(p);
@@ -9933,7 +9960,7 @@ async function startCopyHls(v, startSec, live, openAttempt, preparation, beforeA
       audio_offset_ms:PLAYER.aoffset||0};
     // `vod_index_pending` has a better answer than waiting on this path — the
     // progressive remux below — so it is answered locally instead of retried.
-    const retry={context:playbackCreateRetryContext(),
+    const retry={context:playbackCreateRetryContext(),preparation,
       answeredLocally:failure=>PlaybackPolicy.indexPendingFallback({
         code:failure&&failure.code,method:PLAYER&&PLAYER.method,nativeHls:native
       })==="progressive_remux"};
