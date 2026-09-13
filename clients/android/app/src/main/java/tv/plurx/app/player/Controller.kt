@@ -2549,16 +2549,30 @@ class Controller(
      * same loop, and the 350 ms debounce the class carries is the reducer's. No
      * threshold, budget or detector moves — what moves is who owns the pixel.
      *
-     * `establishedPlayback` is the row's `attached` context: before the first
-     * frame the same wait is the open itself, which is `client_preparing`.
+     * `establishedPlayback` picks the row: with a picture established the wait
+     * is `media_waiting`; before the first frame it is not a wait but the open,
+     * and [mediaWaitSource] says which. Both halves matter here and not only in
+     * [restartAt] — `executeSeek` deliberately bypasses `restartAt`, and its
+     * four transports and the node failover all call [beginPlaybackAttempt],
+     * which clears `establishedPlayback` right after `attachSurfaceGeneration`
+     * has retired every fault about the outgoing generation. Without the
+     * `client_preparing` answer the sampler makes, every seek and every failover
+     * is a frozen or black picture with nothing drawn over it until the first
+     * frame renders — which is precisely what the retired spinner covered.
+     *
      * `playWhenReady` is inside [playbackIsWaiting]: a viewer who paused is not
      * waiting for the stream, and the presenter's evidence needs the same flag,
      * so a fault raised over a paused player would have nothing to retire it.
      */
     private fun sampleSurfaceWait() {
-        if (!establishedPlayback) return
-        if (!playbackIsWaiting(player.playWhenReady, player.playbackState)) return
-        surfaceOwner.bufferingMediaWait(mediaMutationEpoch, realPosition())
+        val waiting = playbackIsWaiting(player.playWhenReady, player.playbackState)
+        when (mediaWaitSource(waiting, establishedPlayback)) {
+            SurfaceSources.MEDIA_WAITING ->
+                surfaceOwner.bufferingMediaWait(mediaMutationEpoch, realPosition())
+            SurfaceSources.CLIENT_PREPARING ->
+                surfaceOwner.preparingClientOpen(mediaMutationEpoch, SurfaceContext.Start)
+            else -> Unit
+        }
     }
 
     /** A destination that landed settles its faults; one replaced supersedes them. */

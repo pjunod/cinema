@@ -68,25 +68,24 @@ A playlist or segment 503 was unconditionally `segment_503_not_yet`. Contract
 §3.3 row 8 is a 503 *with a "not yet" code*, and Android is the one client that
 can read the body (`InvalidResponseCodeException.responseBody`).
 
-**The fixture change this was to be written against has not landed.** The web
-session was adding a `codes` list to the row as a separate cherry-pickable
-commit; as of this branch, `origin/main` and every other branch in the remote
-still carry `segment_503_not_yet` with no `codes`. So the adapter is written to
-be correct under *both* states rather than to assume one: `surfaceRowAdmitsCode`
-reads the row's own list off the transcribed table, and a row that lists no
-codes is claiming its status outright — demanding a code from it would make the
-row unreachable, which is the defect this whole change removes, not one to add.
-A row that *does* list codes claims only those, so a 503 whose code the row does
-not name falls through to whatever row the code actually names (via
-`surfaceSourceForCode`), and otherwise to what the owner's ladder was already
-doing, instead of borrowing `recovering`.
-
-The consequence is that today Android behaves exactly as it did, and the day the
-fixture adds the list the same adapter narrows — the only Kotlin edit needed is
-adding the codes to `SURFACE_SOURCES`'s row, and `PlaybackSurfaceReducerTest`'s
-fixture-verbatim assertion fails until someone does, which is the forcing
-function you want. 401/403 and 410 stay status-based per §3.5, and the server's
+The adapter asks the ROW rather than deciding: `surfaceRowAdmitsCode` reads the
+row's own list off the transcribed table. A row that lists no codes is claiming
+its status outright — demanding a code from one would make the row unreachable,
+which is the defect this change removes, not one to add. A row that *does* list
+codes claims only those, so a 503 whose code the row does not name falls through
+to whatever row the code actually names (`surfaceSourceForCode`), and otherwise
+to nothing. 401/403 and 410 stay status-based per §3.5, and the server's
 sentence and position survive either way.
+
+**What that changes is the attribution, not the class.** On the recovery path the
+owner is recovering, because `PlaybackPolicy.playbackErrorAction` said so — and
+that is a ladder decision this work may not move (§3.5 puts the adapter *after*
+it, on the outcome). So an unadmitted 503 still surfaces as `recovering`; what it
+no longer does is claim to be `segment_503_not_yet` while doing it. It is
+reported as `owner_recovery_step`, which is what it actually is, and the ledger
+stops attributing the owner's own reconnect to a server refusal that never said
+"not yet". Making such a 503 *stop* the player instead would be a ladder change,
+and it is not in this PR.
 
 ### `SurfaceAction.ForceTranscode`
 
@@ -132,7 +131,33 @@ branch carries the two cherry-picked fixture commits plus the Kotlin port:
 The sixteen `segment_503_not_yet` codes are transcribed into `SURFACE_SOURCES`
 off the fixture. `surfaceRowAdmitsCode` already asked the row rather than
 deciding, so nothing else in the adapter moved — the row simply stopped claiming
-every 503, and `vod_disabled` on a segment is no longer `recovering`.
+every 503. A `vod_disabled` on a segment is no longer *named*
+`segment_503_not_yet`; it is `owner_recovery_step`, and its class is still
+`recovering` because the owner is in fact recovering. See the attribution note
+above: changing that would be a ladder change.
+
+### The blocker review found, and the regression it was
+
+Retiring `isPlaybackWaiting` left a hole the first round did not see.
+`sampleSurfaceWait` answered only past the first frame, and `client_preparing`
+was raised from exactly one place — `restartAt`. But `executeSeek` **bypasses**
+`restartAt` on purpose (its own comment says so), and all four of its transports
+call `beginPlaybackAttempt`, which clears `establishedPlayback`;
+`retryMediaOnNextNode` does the same. In those windows the player is
+`STATE_BUFFERING` with `playWhenReady` true and `attachSurfaceGeneration` has
+just retired every fault about the outgoing generation — so the surface was
+`None` and the screen drew nothing. **Every seek and every node failover was a
+frozen or black picture with no spinner and no text until the first frame
+rendered**, which is exactly the window the legacy spinner used to cover and the
+one regression its deletion had to avoid.
+
+The sampler now answers the wait by context rather than only past the first
+frame, which is the split Apple's presenter already makes: `media_waiting` with a
+picture established, `client_preparing` in the `start` context before one,
+because before the first frame the same wait is not a wait — it is the open.
+`mediaWaitSource` is that decision as a function rather than two branches at a
+call site no JVM test can reach, so the tests can name the entry path each one
+stands for.
 
 ### Evidence
 
@@ -140,12 +165,16 @@ every 503, and `vod_disabled` on a segment is no longer `recovering`.
 android`): `:app:compileDebugKotlin`, `:app:testDebugUnitTest`,
 `:app:lintDebug`, `:app:assembleDebug`. Counts read from
 `app/build/test-results/testDebugUnitTest/*.xml`, not from the log —
-**629 tests, 0 failures, 0 errors, 0 skipped** across 88 files, against 612 on
-`main` at the branch point. Both fences, all five node playback tests (62
-surface cases), `make web-check` exit 0, `tests/operations` 355 OK and
-`scripts/validate lint` on the VM. **Ten mutations** applied on the build host,
-each failing a named test against a run whose XML shows 629 tests executed, each
-reverted; the table is in the PR.
+**634 tests, 0 failures, 0 errors, 0 skipped** across 88 files. `main` was 612
+when this branch opened and has changed no Android source since (#290 is web,
+fixture and docs), so the 22 new tests are this branch's. Both fences, all five
+node playback tests (62 surface cases), `make web-check` exit 0,
+`tests/operations` 356 OK and `scripts/validate lint` on the VM. **Eleven
+mutations** applied on the build host, each failing a named test against a run
+whose XML shows 634 tests executed, each reverted; the table is in the PR.
+
+Rebased onto `origin/main` after #290 merged; both cherry-picked fixture commits
+dropped out as duplicates, exactly as expected.
 
 **Unrun:** no emulator or physical device. §4.4's recorded emulator run — inject
 a 503 on a segment after 30 s of playback — has not been done, and M4's recipes

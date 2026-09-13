@@ -34,6 +34,34 @@ internal interface SurfaceOwnerPlayer {
 }
 
 /**
+ * Which source a media wait is, by context (§3.3 rows 10 and 12).
+ *
+ * The same wait means two different things either side of the first frame. With
+ * a picture established it is `media_waiting` — the stream this viewer is
+ * watching has run out of media. Before one it is not a wait at all, it is the
+ * open: `client_preparing`, in the `start` context, which is the row the staged
+ * loading overlay every client paints belongs to. Apple's presenter makes the
+ * same split.
+ *
+ * A FUNCTION rather than two branches at the call site because `Controller`
+ * cannot be built on the JVM, and this is the decision every entry into a new
+ * attempt depends on: `restartAt` raises the open itself, but `executeSeek`
+ * deliberately bypasses `restartAt` (its own comment says so) and all four of
+ * its transports call `beginPlaybackAttempt`, as does the node failover — so in
+ * those windows this is the only thing that draws anything at all. Deleting the
+ * `client_preparing` answer here is a black picture with no spinner and no text
+ * for the length of every seek, which is exactly what the legacy spinner used to
+ * cover and what its deletion had to replace.
+ *
+ * Returns null when the player is not waiting, which is most of the time.
+ */
+internal fun mediaWaitSource(waiting: Boolean, establishedPlayback: Boolean): String? = when {
+    !waiting -> null
+    establishedPlayback -> SurfaceSources.MEDIA_WAITING
+    else -> SurfaceSources.CLIENT_PREPARING
+}
+
+/**
  * Tells the owner's own stop apart from the viewer's pause.
  *
  * `playback_not_requested` retires a `buffering` fault because the VIEWER no

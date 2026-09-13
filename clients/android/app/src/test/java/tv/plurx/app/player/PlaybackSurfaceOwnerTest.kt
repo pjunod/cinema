@@ -456,6 +456,70 @@ class PlaybackSurfaceOwnerTest {
         }
     }
 
+    // ------------------------------- what a wait is, either side of a frame
+    //
+    // `Controller` cannot be built on the JVM, so these name the entry path each
+    // one stands for and pin the DECISION that path depends on. Every one of
+    // them reaches the presenter through the same two facts: the player is
+    // waiting, and `beginPlaybackAttempt` has cleared `establishedPlayback`.
+
+    @Test
+    fun anAttachedWaitIsTheBufferingRow() {
+        assertEquals(
+            SurfaceSources.MEDIA_WAITING,
+            mediaWaitSource(waiting = true, establishedPlayback = true),
+        )
+    }
+
+    @Test
+    fun aSeekWindowIsTheClientPreparingRow() {
+        // `executeSeek` bypasses `restartAt` on purpose, and all four of its
+        // transports — direct, remux, cached-VOD and the reopen — call
+        // `beginPlaybackAttempt`, which clears `establishedPlayback` just after
+        // the attach retired every fault about the outgoing generation. If this
+        // answers null or `media_waiting` the seek draws nothing at all: nothing
+        // is presenting, so `buffering` would be refused a raise by its context
+        // row and `media_waiting` is an `attached`-only source.
+        assertEquals(
+            SurfaceSources.CLIENT_PREPARING,
+            mediaWaitSource(waiting = true, establishedPlayback = false),
+        )
+    }
+
+    @Test
+    fun aNodeFailoverWindowIsTheClientPreparingRow() {
+        // `retryMediaOnNextNode` calls `beginPlaybackAttempt("node-failover")`
+        // and never reaches `restartAt` either. Same window, same answer.
+        assertEquals(
+            SurfaceSources.CLIENT_PREPARING,
+            mediaWaitSource(waiting = true, establishedPlayback = false),
+        )
+    }
+
+    @Test
+    fun aPlayerThatIsNotWaitingOwesNothing() {
+        assertNull(mediaWaitSource(waiting = false, establishedPlayback = true))
+        assertNull(mediaWaitSource(waiting = false, establishedPlayback = false))
+    }
+
+    @Test
+    fun aSeekWindowDrawsSomethingOverThePicture() {
+        // The end-to-end shape of the two above, through the owner: a fresh
+        // generation with nothing presenting, waiting, not yet established.
+        val seekEpoch = epoch + 1
+        owner.attach(seekEpoch)
+        now = 2_000
+        val source = checkNotNull(mediaWaitSource(waiting = true, establishedPlayback = false))
+        assertEquals(SurfaceSources.CLIENT_PREPARING, source)
+        owner.preparingClientOpen(seekEpoch, SurfaceContext.Start)
+        val surface = owner.current
+        assertTrue(
+            "a seek must never be a black picture with nothing over it",
+            surface is PlaybackSurface.Blocking,
+        )
+        assertEquals(SurfaceClass.Preparing, checkNotNull(surface.fault).cls)
+    }
+
     // ------------------------------------ the viewer's own transport intent
 
     @Test
