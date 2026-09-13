@@ -67,11 +67,25 @@ PATTERNS = {
         ("notice bulk write", re.compile(r"Object\.assign\([^)]*\b(?:psurface|psurfText|psurfSub|psurfAct|pindicator|pindText)\b")),
     ),
     "swift": (
+        # The four pre-contract fields. M2 deleted them, so these now guard
+        # names that must never come back rather than names that exist.
         ("failure field write", re.compile(r"(?<!var )(?<!let )(?<![=!<>])\b(?:failed|playbackError|playbackFailureTitle|playbackNotice)\s*(?:=|\+=)(?!=)")),
         ("failure field mutation", re.compile(r"\b(?:failed|playbackError|playbackFailureTitle|playbackNotice)\s*\.\s*(?:toggle|negate)\s*\(")),
         ("failure field key path", re.compile(r"keyPath:\s*\\\.(?:failed|playbackError|playbackFailureTitle|playbackNotice)\b")),
         ("failure field by name", re.compile(r"forKey:\s*[\"'](?:failed|playbackError|playbackFailureTitle|playbackNotice)[\"']")),
         ("failure field tuple write", re.compile(r"\(\s*(?:self\.)?(?:failed|playbackError|playbackFailureTitle|playbackNotice)\s*,[^)]*\)\s*=(?!=)")),
+        # And the field that replaced them. A fence that only guards deleted
+        # names guards nothing: every spelling below got a surface write past
+        # the first M2 fence in review. `var` and `let` are excused because a
+        # declaration and a local binding are not writes — `let surface =
+        # controller.surface.surface` is how the view READS it, and reads are
+        # never scanned.
+        ("surface write", re.compile(r"(?<!var )(?<!let )(?<![=!<>])\bsurface\s*(?:=|\+=)(?!=)")),
+        ("surface reducer call", re.compile(r"\bsurface\s*\.\s*apply\s*\(")),
+        ("surface key path", re.compile(r"keyPath:\s*\\\.surface(?:History)?\b")),
+        ("surface by name", re.compile(r"forKey:\s*[\"']surface(?:History)?[\"']")),
+        ("published storage write", re.compile(r"\b_surface(?:History)?\s*(?:=|\+=)(?!=)")),
+        ("surface ledger write", re.compile(r"(?<!var )(?<!let )(?<![=!<>])\bsurfaceHistory\s*(?:=(?!=)|\+=|\.\s*record\s*\()")),
     ),
     "kotlin": (
         ("onError call", re.compile(r"\bonError\s*(?:\(|\.invoke\s*\()")),
@@ -130,8 +144,11 @@ REGIONS = {
         (
             "// playback-surface-publish:begin",
             "// playback-surface-publish:end",
-            "The single assignment that publishes the presenter's surface.",
-            False,
+            "The Apple presenter's publication: the only code that writes `surface`, "
+            "resets it, or records a fault in the ledger ring.",
+            # Required, now that M2 has landed. Leaving it optional made
+            # deleting the two anchors a silent way to exempt the whole file.
+            True,
         ),
     ),
     Path("clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"): (
@@ -147,12 +164,12 @@ REGIONS = {
 # The migration budget: how many pre-contract write sites each file may still
 # have, and why. A milestone that lands drops its file's entry to zero and then
 # removes it. A NEW write site fails the fence today, which is the point.
-# `index.html` is not here any more: M1 landed, and a file with no entry is held
-# at zero by `MIGRATION_BUDGET.get(relative, (0, ""))` below — every web surface
-# write is inside the render anchors.
+# Neither `index.html` nor `PlayerController.swift` is here any more: M1 and M2
+# landed, and a file with no entry is held at zero by
+# `MIGRATION_BUDGET.get(relative, (0, ""))` below — every web surface write is
+# inside the render anchors and every Apple one is inside the publish region.
 MIGRATION_BUDGET = {
     Path("crates/plurxd/src/web/playback-policy.js"): (0, "The policy module never touched the DOM; it stays at zero."),
-    Path("clients/apple/Sources/PlayerController.swift"): (39, "M2 removes these: failed/playbackError/playbackFailureTitle/playbackNotice are still fields."),
     Path("clients/apple/Sources/PlayerView.swift"): (0, "The Apple view reads the model; it never wrote one."),
     Path("clients/apple/Sources/PlayerSurface.swift"): (0, "The Apple surface reads the model; it never wrote one."),
     Path("clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"): (15, "M3 removes these: onError is still a constructor callback."),

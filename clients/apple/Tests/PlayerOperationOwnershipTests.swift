@@ -145,7 +145,7 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         }
         await loadA.value
         XCTAssertNil(controller.decision)
-        XCTAssertFalse(controller.failed)
+        XCTAssertFalse(controller.isPlaybackBlocked)
         XCTAssertFalse(controller.wantsPlayback)
         XCTAssertEqual(controller.pendingPlaybackIntentForTesting.targetMs, before.targetMs)
         XCTAssertEqual(controller.pendingPlaybackIntentForTesting.generation, before.generation)
@@ -340,7 +340,7 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         decisions.resolve(1, with: .success((try coldDecision(), caps)))
         await originalLoad.value
         XCTAssertNil(controller.decision)
-        XCTAssertFalse(controller.failed)
+        XCTAssertFalse(controller.isPlaybackBlocked)
         XCTAssertTrue(creates.isEmpty)
         decisions.resolve(3, with: .success((try coldDecision(), caps)))
         await finalLoad.value
@@ -418,7 +418,7 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         controller.seek(toMs: 90_000)
         controller.togglePlayPause()
         deadlines.fire(0)
-        try await waitUntil("decision times out") { controller.failed }
+        try await waitUntil("decision times out") { controller.isPlaybackBlocked }
         XCTAssertTrue(controller.canRetryPlaybackFailure)
         XCTAssertNil(controller.decision)
         XCTAssertEqual(controller.currentMs, 90_000)
@@ -426,7 +426,7 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         controller.retryAfterPlaybackFailure()
         let retry = try XCTUnwrap(controller.loadingTask)
         try await waitUntil("retry request and deadline") { decisions.requests.count == 2 && deadlines.waits.count == 2 }
-        XCTAssertFalse(controller.failed)
+        XCTAssertFalse(controller.isPlaybackBlocked)
         XCTAssertEqual(decisions.requests[1].quality, .p720)
         decisions.resolve(0, with: .success((try coldDecision(), caps)))
         await timedOut.value
@@ -456,10 +456,10 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         try await waitUntil("replacement deadline") { decisions.requests.count == 2 && deadlines.waits.count == 2 }
         deadlines.fire(0)
         for _ in 0..<10 { await Task.yield() }
-        XCTAssertFalse(controller.failed)
+        XCTAssertFalse(controller.isPlaybackBlocked)
         XCTAssertEqual(controller.selectedAudio, 7)
         deadlines.fire(1)
-        try await waitUntil("current deadline fails") { controller.failed }
+        try await waitUntil("current deadline fails") { controller.isPlaybackBlocked }
         controller.stop()
         XCTAssertFalse(controller.canRetryPlaybackFailure)
     }
@@ -478,13 +478,13 @@ final class PlayerOperationOwnershipTests: XCTestCase {
                          durationMs: 600_000, title: "Cold create retry", initialHeight: 720)
         controller.togglePlayPause()
         await controller.loadingTask?.value
-        XCTAssertTrue(controller.failed)
+        XCTAssertTrue(controller.isPlaybackBlocked)
         XCTAssertNotNil(controller.decision)
         XCTAssertNil(controller.player.currentItem)
         XCTAssertEqual(controller.currentMs, 40_000)
         for count in 2...3 {
             controller.retryAfterPlaybackFailure()
-            try await waitUntil("retry create completes") { creates.count == count && controller.failed }
+            try await waitUntil("retry create completes") { creates.count == count && controller.isPlaybackBlocked }
             XCTAssertFalse(controller.wantsPlayback)
             XCTAssertEqual(controller.currentMs, 40_000)
             XCTAssertEqual(creates.last?.start, 40)
@@ -522,7 +522,7 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         await old.value
         XCTAssertTrue(files.isEmpty, "revoked recipe cannot issue a create, even against its original file")
         XCTAssertNil(controller.decision)
-        XCTAssertFalse(controller.failed)
+        XCTAssertFalse(controller.isPlaybackBlocked)
         decisions.resolve(1, with: .success((try coldDecision(file: 2), caps)))
         await latest.value
         XCTAssertEqual(files, [2])
@@ -550,7 +550,7 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         try await waitUntil("held quality decision") { decisions.requests.count == 2 && deadlines.waits.count == 2 }
         timer()
         deadlines.fire(1)
-        try await waitUntil("resume decision timeout") { controller.failed }
+        try await waitUntil("resume decision timeout") { controller.isPlaybackBlocked }
         XCTAssertEqual(controller.currentMs, 40_000)
         controller.retryAfterPlaybackFailure()
         try await waitUntil("resume Retry decision") { decisions.requests.count == 3 }

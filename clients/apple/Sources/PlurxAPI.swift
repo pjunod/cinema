@@ -2,8 +2,14 @@ import Foundation
 
 enum APIError: Error, LocalizedError {
     case badURL
+    /// A non-2xx answer with no legible `{code, message}` body — and every
+    /// 401/403, whose match stays status-based (`AppModel.isSessionExpired`).
     case http(Int)
     case conflict(code: String, message: String)
+    /// A refusal the server explained. The playback surface adapter classifies
+    /// on `code` (PLAYBACK-SURFACE-CONTRACT.md §3.3) and shows `message`; a
+    /// `media_owner_lost` also carries the film position to reopen at.
+    case refused(status: Int, code: String, message: String, positionMs: Int?)
     case transport(String)
 
     var errorDescription: String? {
@@ -11,8 +17,47 @@ enum APIError: Error, LocalizedError {
         case .badURL: return "Invalid server address"
         case .http(let code): return "Server returned \(code)"
         case .conflict(let code, let message): return "\(message) (\(code), HTTP 409)"
+        // The server's own sentence, unadorned: it is the answer, and the
+        // code and status travel in the surface ledger rather than in the
+        // line the viewer reads.
+        case .refused(_, _, let message, _): return message
         case .transport(let message): return message
         }
+    }
+
+    /// The refusal code a typed answer carried, for the callers that classify
+    /// on it. `.conflict` keeps its own shape for the matchers that predate
+    /// the surface contract.
+    var refusalCode: String? {
+        switch self {
+        case .conflict(let code, _): return code
+        case .refused(_, let code, _, _): return code
+        case .badURL, .http, .transport: return nil
+        }
+    }
+
+    /// The HTTP status behind this error, when there was one.
+    var httpStatus: Int? {
+        switch self {
+        case .http(let code): return code
+        case .conflict: return 409
+        case .refused(let status, _, _, _): return status
+        case .badURL, .transport: return nil
+        }
+    }
+}
+
+/// The server's typed refusal body: `{code, message}` plus whatever recovery
+/// data the code carries (`ApiError::TypedDetail`).
+private struct Refusal: Decodable {
+    let code: String
+    let message: String
+    let filmPositionMs: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case code
+        case message
+        case filmPositionMs = "film_position_ms"
     }
 }
 
@@ -189,20 +234,44 @@ struct PlurxAPI {
         return APIError.transport(error.localizedDescription)
     }
 
+    /// Every refusal the server explained, kept instead of thrown away.
+    ///
+    /// The playback surface contract classifies on the server's `code`
+    /// (PLAYBACK-SURFACE-CONTRACT.md §3.3), so a 503 `startup_timeout` can be
+    /// "still building" rather than "Server returned 503". Two shapes are
+    /// preserved deliberately:
+    ///
+    /// * `401`/`403` short-circuit to `.http(status)` before the body is read
+    ///   at all, because `AppModel.isSessionExpired` matches on the status and
+    ///   a server that starts explaining its 401 must not log the viewer out
+    ///   any less reliably.
+    /// * `409` keeps `.conflict(code:message:)` for the matchers that predate
+    ///   this, so nothing that reads a session-create conflict changes.
+    ///
+    /// Everything else with a legible `{code, message}` body becomes
+    /// `.refused`; anything bodiless or unparseable stays `.http(status)`.
     static func check(_ resp: URLResponse, data: Data? = nil) throws {
-        if let http = resp as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-            // Playback conflicts carry actionable server reasons. Retain the
-            // numeric error for untyped responses and authentication handling.
-            if http.statusCode == 409, let data, data.count <= 16_384 {
-                struct Conflict: Decodable { let code: String; let message: String }
-                if let detail = try? JSONDecoder().decode(Conflict.self, from: data),
-                   !detail.code.isEmpty, !detail.message.isEmpty {
-                    throw APIError.conflict(code: String(detail.code.prefix(80)),
-                                            message: String(detail.message.prefix(512)))
-                }
-            }
+        guard let http = resp as? HTTPURLResponse,
+              !(200..<300).contains(http.statusCode) else { return }
+        if http.statusCode == 401 || http.statusCode == 403 {
             throw APIError.http(http.statusCode)
         }
+        if let data, data.count <= 16_384,
+           let detail = try? JSONDecoder().decode(Refusal.self, from: data),
+           !detail.code.isEmpty, !detail.message.isEmpty {
+            let code = String(detail.code.prefix(80))
+            let message = String(detail.message.prefix(512))
+            if http.statusCode == 409 {
+                throw APIError.conflict(code: code, message: message)
+            }
+            throw APIError.refused(
+                status: http.statusCode,
+                code: code,
+                message: message,
+                positionMs: detail.filmPositionMs
+            )
+        }
+        throw APIError.http(http.statusCode)
     }
 
     // MARK: - Endpoints
@@ -323,10 +392,12 @@ struct PlurxAPI {
         }
     }
 
+    /// Behaviour-preserving across the `.refused` split: a server that now
+    /// explains its 400/404/405 in a typed body answers `.refused` rather than
+    /// `.http`, and the legacy decision fallback has to keep firing for it or
+    /// an older server becomes unreachable the day it grows a code.
     static func shouldFallBackToLegacyDecision(after error: Error) -> Bool {
-        guard let apiError = error as? APIError,
-              case .http(let status) = apiError
-        else { return false }
+        guard let status = (error as? APIError)?.httpStatus else { return false }
         return status == 400 || status == 404 || status == 405
     }
 

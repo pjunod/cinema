@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib.machinery
 import importlib.util
 from pathlib import Path
+import re
 import unittest
 
 
@@ -37,7 +38,7 @@ class PlaybackSurfaceFenceTest(unittest.TestCase):
         # and reflected `setLoading`, and every one of them again against the
         # two surfaces M1 added. An exact count, because a pattern that stops
         # matching is a hole, and so is a fixture line nobody notices is dead.
-        expected = {"web": 37, "swift": 10, "kotlin": 8}
+        expected = {"web": 37, "swift": 17, "kotlin": 8}
         names = {"web": "must_trip.web.html", "swift": "must_trip.swift", "kotlin": "must_trip.kt"}
         for kind, name in names.items():
             with self.subTest(kind=kind):
@@ -113,6 +114,15 @@ class PlaybackSurfaceFenceTest(unittest.TestCase):
         for path in self.fence.MIGRATION_BUDGET:
             self.assertIn(path, self.fence.SCANNED, f"{path} is budgeted but never scanned")
 
+    def test_a_migrated_file_is_budgeted_at_zero_without_an_entry(self):
+        # M2's own ratchet: PlayerController no longer has a budget row, and
+        # the fence must still hold it to zero rather than to "unbudgeted".
+        player = Path("clients/apple/Sources/PlayerController.swift")
+        self.assertIn(player, self.fence.SCANNED)
+        self.assertNotIn(player, self.fence.MIGRATION_BUDGET)
+        budget, _reason = self.fence.MIGRATION_BUDGET.get(player, (0, ""))
+        self.assertEqual(budget, 0)
+
     def test_the_budget_is_tight_against_the_tree(self):
         # The fence itself is a ratchet (`len(hits) > budget`), so nothing can
         # be ADDED. This assertion is the other half: the budget must equal
@@ -133,6 +143,72 @@ class PlaybackSurfaceFenceTest(unittest.TestCase):
                 len(hits), budget,
                 f"{path}: {len(hits)} write sites against a budget of {budget} — lower the budget in the same commit",
             )
+
+    def test_the_surface_itself_is_fenced_not_only_the_fields_it_replaced(self):
+        # A fence that guards only deleted names guards nothing. Each spelling
+        # below got a surface write past the first M2 fence during review, so
+        # each one is asserted individually rather than trusted to the fixture
+        # count — a count can be satisfied by seventeen copies of one pattern.
+        bypasses = [
+            "        surface = PlaybackSurfaceModel()",
+            "        self.surface.apply(.raise(fault, context: .attached), now: .now)",
+            "        self[keyPath: \\.surface] = PlaybackSurfaceModel()",
+            "        _surface = Published(initialValue: PlaybackSurfaceModel())",
+            '        setValue(nil, forKey: "surfaceHistory")',
+            "        surfaceHistory = PlaybackSurfaceHistory()",
+            "        surfaceHistory.record(entry, atMs: 0, player: snapshot)",
+        ]
+        for line in bypasses:
+            with self.subTest(line=line.strip()):
+                self.assertEqual(
+                    len(self.fence.scan_text("swift", line)), 1,
+                    f"the fence let this surface write through: {line.strip()}",
+                )
+
+    def test_reading_the_surface_is_not_writing_it(self):
+        # The contract says the fence says nothing about reads, and the view,
+        # the ledger and every recovery ladder depend on that.
+        reads = [
+            "        let surface = controller.surface.surface",
+            "        let history = controller.surfaceHistory.ledgerSummary",
+            "        if surface.kind == .blocking { return history }",
+            "    @Published private(set) var surface = PlaybackSurfaceModel()",
+            "    private(set) var surfaceHistory = PlaybackSurfaceHistory()",
+            "        if item.status == .failed { return }",
+        ]
+        for line in reads:
+            with self.subTest(line=line.strip()):
+                self.assertEqual(
+                    self.fence.scan_text("swift", line), [],
+                    f"the fence tripped on a read: {line.strip()}",
+                )
+
+    def test_the_apple_publish_anchors_may_not_simply_be_deleted(self):
+        # M2 has landed, so its region is `required`: removing the two anchors
+        # used to exempt the whole file silently, which is the one answer a
+        # fence must never give by accident.
+        path = Path("clients/apple/Sources/PlayerController.swift")
+        begin, end, _reason, required = self.fence.REGIONS[path][0]
+        self.assertTrue(required, "a landed milestone's region must be required")
+        with self.assertRaises(ValueError):
+            self.fence.region_allowed_lines(path, ["nothing();"])
+
+    def test_the_player_controllers_published_surface_inventory_is_pinned(self):
+        # The one bypass no name-based pattern can catch is a BRAND-NEW
+        # published field used as a second surface. It cannot be caught by a
+        # regex, so it is caught by inventory: adding one is a visible diff
+        # here, and the reviewer's question is "why does the player publish two
+        # surfaces?".
+        source = (ROOT / "clients/apple/Sources/PlayerController.swift").read_text(encoding="utf-8")
+        published = sorted(set(re.findall(r"@Published\s+(?:private\(set\)\s+)?var\s+(\w+)", source)))
+        self.assertEqual(published, [
+            "currentMs", "decision", "deliveredDolbyVisionProfile", "deliveredRange",
+            "encoder", "finished", "isChangingStream", "isPlaying", "isVOD",
+            "knownDurationMs", "lastTTFFMs", "pgsOverlayStatus", "pgsOverlayWindow",
+            "playbackControlSummary", "preparedFallbackInterruptionMs",
+            "selectedAudio", "selectedHeight", "selectedQualityIsOriginal",
+            "selectedSubtitle", "sessionStatus", "surface",
+        ])
 
     def test_out_of_scope_files_are_named_not_forgotten(self):
         for path in self.fence.NEVER_SCANNED:

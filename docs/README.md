@@ -81,6 +81,7 @@ Apple build 137: [Library channel startup and contrast](apple-builds/245-library
 Apple build 138: [Library channel playback decision](apple-builds/245-library-channel-playback-decision.md).
 Apple build 141: [Library channel buffering demand](apple-builds/245-library-channel-buffering-demand.md).
 Apple build 143: [Playback lifecycle recovery and prepared handoff](apple-builds/257-playback-lifecycle.md).
+Apple build 147: [The playback surface contract](apple-builds/278-playback-surface-contract.md).
 
 Previous: [Live TV playback method](apple-builds/245-live-tv-playback-method.md).
 
