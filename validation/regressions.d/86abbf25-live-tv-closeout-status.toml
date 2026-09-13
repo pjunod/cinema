@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["86abbf25"]
+ignore = true
+reason = "Documentation only: this commit records the already-passing closeout regression in STATUS.md; it changes no runtime or validation behavior."
