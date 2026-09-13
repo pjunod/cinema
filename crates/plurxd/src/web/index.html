@@ -3200,13 +3200,14 @@
   /* Library channels reuse the guide card language, not the tuner controller. */
   .lc-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}
   .lc-card{display:flex;flex-direction:column;gap:10px;min-height:190px}
+  .lc-programme>span{min-width:0;overflow-wrap:anywhere}
   .lc-now{font-size:18px;font-weight:700}.lc-next,.lc-time{color:var(--muted);font-size:13px}
-  .lc-guide{display:grid;gap:8px}.lc-programme{display:grid;grid-template-columns:100px 1fr auto;gap:12px;align-items:center;padding:10px;border-top:1px solid var(--line)}
+  .lc-guide{display:grid;gap:8px}.lc-programme{display:grid;grid-template-columns:100px minmax(0,1fr) auto;gap:12px;align-items:center;padding:10px;border-top:1px solid var(--line)}
   .lc-editor{display:grid;grid-template-columns:minmax(0,1fr) minmax(260px,.7fr);gap:16px}.lc-steps{display:flex;gap:8px;margin-bottom:14px}
   .lc-steps .pill.on{border-color:var(--accent);color:var(--accent)}.lc-checks{display:flex;flex-wrap:wrap;gap:12px}.lc-checks label{display:flex;gap:6px;align-items:center}
   .lc-preview{position:sticky;top:16px;align-self:start}.lc-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
   .lc-following #ptimeline,.lc-following #pbback,.lc-following #pbforward{display:none!important}
-  @media(max-width:760px){.lc-editor{grid-template-columns:1fr}.lc-preview{position:static}.lc-programme{grid-template-columns:76px 1fr}.lc-programme>button{grid-column:2}.lc-grid{grid-template-columns:1fr}}
+  @media(max-width:760px){.lc-editor{grid-template-columns:minmax(0,1fr)}.lc-preview{position:static}.lc-programme{grid-template-columns:76px minmax(0,1fr)}.lc-programme>button{grid-column:2}.lc-grid{grid-template-columns:minmax(0,1fr)}}
 </style>
 <script>
 // Theme engine. Runs in <head> before first paint so there's no flash of the
