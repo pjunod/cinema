@@ -111,8 +111,8 @@ Both clients now compile and both unit suites pass — the Kotlin on 2026-09-13
 on both of the hand-off's routes (see (2) below), the Swift the same day on
 both simulator destinations (see "What the Apple build and test run found"
 below). M4 and M6 are not done, and no physical device has run any of it.**
-The effort replaced three imperative error
-channels — the web's `setLoading()`, Apple's
+The effort replaced three imperative error channels — the web's
+`setLoading()`, Apple's
 `failed`/`playbackError`/`playbackFailureTitle`/`playbackNotice`, Android's
 `onError`/`playFailure`/`playbackNotice` — with one fixture-driven presenter
 per client that renders a surface from typed faults and the player's own
@@ -283,7 +283,8 @@ prompt predicted, and the field route is §6.6.
    What was done before any of this, and is evidence about the semantics and
    not about the Kotlin: the shipped reducer was transliterated into Python,
    run against every fixture case, and fuzzed 3,500 sequences differentially
-   against the shipped JS reducer with zero divergences.3. **M4 — physical verification — has not been run.** Not one of §7's four
+   against the shipped JS reducer with zero divergences.
+3. **M4 — physical verification — has not been run.** Not one of §7's four
    recipes has been executed on an Apple TV, an iPhone or an Android TV. No
    `surface_disagreement` has been observed, and that is an absence of looking
    rather than an absence of rows. The script is
