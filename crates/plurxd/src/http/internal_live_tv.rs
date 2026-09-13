@@ -10,8 +10,9 @@ use super::peer_transport::exact_auth_from_headers;
 use crate::live_tv::{
     LiveTvActivateRequest, LiveTvDrainAck, LiveTvDrainRequest, LiveTvResourceRequest,
     LiveTvResumeRequest, LiveTvRetireRequest, LiveTvStartRequest, LiveTvStartRequestV2,
-    LiveTvStopRequest, SnapshotRequest, ACTIVATE_PATH, DRAIN_PATH, GUIDE_PATH, RESOURCE_PATH,
-    RESUME_PATH, RETIRE_PATH, SNAPSHOT_PATH, START_PATH, START_V2_PATH, STOP_PATH,
+    LiveTvStartStateRequest, LiveTvStopRequest, SnapshotRequest, ACTIVATE_PATH, DRAIN_PATH,
+    GUIDE_PATH, RESOURCE_PATH, RESUME_PATH, RETIRE_PATH, SNAPSHOT_PATH, START_PATH,
+    START_STATE_PATH, START_V2_PATH, STOP_PATH,
 };
 use crate::state::AppState;
 
@@ -287,6 +288,26 @@ pub(crate) async fn resume(
         .resume_local(request.user_id, &request.request_id)
         .await;
     signed_json_response(&state, &headers, RESUME_PATH, StatusCode::OK, &answer)
+}
+
+/// A read: what became of a viewer's start id. Deliberately separate from
+/// `resume`, which selects a session, cancels the others and fences an id it
+/// has never seen — none of which a status read may do.
+pub(crate) async fn start_state(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, StatusCode> {
+    authorize(&state, &headers, &body, START_STATE_PATH).await?;
+    let request = serde_json::from_slice::<LiveTvStartStateRequest>(&body)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    if request.expected_owner_node_id != state.node_id {
+        return Err(StatusCode::CONFLICT);
+    }
+    let answer = state
+        .live_tv
+        .start_state_local(request.user_id, &request.request_id);
+    signed_json_response(&state, &headers, START_STATE_PATH, StatusCode::OK, &answer)
 }
 
 pub(crate) async fn drain(

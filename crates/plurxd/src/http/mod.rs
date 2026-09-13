@@ -531,6 +531,10 @@ pub fn router(state: AppState) -> Router {
             post(internal_live_tv::resume).layer(DefaultBodyLimit::max(1_024)),
         )
         .route(
+            crate::live_tv::START_STATE_PATH,
+            post(internal_live_tv::start_state).layer(DefaultBodyLimit::max(1_024)),
+        )
+        .route(
             crate::live_tv::DRAIN_PATH,
             post(internal_live_tv::drain).layer(DefaultBodyLimit::max(
                 crate::live_tv::MAX_INTERNAL_BODY_BYTES,
@@ -678,6 +682,7 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
                 // maintenance refuses it precisely when a client needs it.
                 | crate::live_tv::RETIRE_PATH
                 | crate::live_tv::RESUME_PATH
+                | crate::live_tv::START_STATE_PATH
         )
     {
         return true;
@@ -1239,6 +1244,7 @@ mod tests {
             // they already hold, precisely while the node is being worked on.
             (Method::POST, crate::live_tv::RETIRE_PATH),
             (Method::POST, crate::live_tv::RESUME_PATH),
+            (Method::POST, crate::live_tv::START_STATE_PATH),
             (
                 Method::DELETE,
                 "/api/v1/live-tv/starts/0123456789abcdef0123456789abcdef",

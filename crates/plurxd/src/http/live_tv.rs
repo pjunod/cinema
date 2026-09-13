@@ -16,7 +16,7 @@ use crate::live_tv::{
     LiveTvDrainAck, LiveTvError, LiveTvGuide, LiveTvResourceRequest, LiveTvSnapshot,
     LiveTvStartRequest, LiveTvStartRequestV2, LiveTvStopRequest, SnapshotFreshness,
     SnapshotRequest, ACTIVATE_PATH, GUIDE_PATH, MAX_SNAPSHOT_BYTES, RESOURCE_PATH, RESUME_PATH,
-    RETIRE_PATH, SNAPSHOT_PATH, START_PATH, START_V2_PATH, STOP_PATH,
+    RETIRE_PATH, SNAPSHOT_PATH, START_PATH, START_STATE_PATH, START_V2_PATH, STOP_PATH,
 };
 use crate::live_tv_delivery::LivePlaybackRequest;
 use crate::state::AppState;
@@ -27,9 +27,16 @@ const CONTROL_EXCHANGE_DEADLINE: Duration = Duration::from_secs(5);
 /// Everything a public start may spend, snapshot read through activation. The
 /// clients give up at 45 s; a start that outlives that leaves a session with
 /// nobody holding it, which is the whole failure this effort exists to end.
+///
+/// Deliberately 35 rather than 40: a start that fails after a provisional was
+/// issued still has to stop it, and that stop is awaited on the response path
+/// with its own budget — `CONTROL_EXCHANGE_DEADLINE` to a peer, or
+/// `SESSION_DRAIN_TIMEOUT` locally. Thirty-five plus five is inside the
+/// clients' forty-five; forty plus five is exactly on it.
+///
 /// The owner's own lifecycle constants are untouched — this bounds the
 /// ingress's exchanges, not how long a tuner is given to feed.
-const PUBLIC_START_DEADLINE: Duration = Duration::from_secs(40);
+const PUBLIC_START_DEADLINE: Duration = Duration::from_secs(35);
 const DRAIN_EXCHANGE_DEADLINE: Duration = Duration::from_secs(20);
 const RESOURCE_EXCHANGE_DEADLINE: Duration = Duration::from_secs(12);
 const MAX_START_RESPONSE_BYTES: usize = 32 * 1024;
@@ -86,11 +93,9 @@ pub(crate) async fn guide_document(
 ) -> Result<Json<LiveTvGuide>, ApiError> {
     let config = state.live_tv.config().await.map_err(api_error)?;
     if !config.enabled {
-        return Err(ApiError::typed(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "live_tv_disabled",
-            "Live TV is disabled; an administrator can enable it in Settings → Developer",
-        ));
+        return Err(api_error(LiveTvError::Disabled(
+            "Live TV is disabled; an administrator can enable it in Settings → Developer".into(),
+        )));
     }
     let window = requested_window(&config, query);
     Ok(Json(owner_guide(&state, &config, window).await))
@@ -504,16 +509,14 @@ pub(crate) async fn start_session(
         source_serving_generation: ingress_generation,
         playback,
     };
-    let provisional = match owner_start_within(&state, &config, &request, deadline).await {
-        Ok(provisional) => provisional,
-        Err(error) => {
-            // The start may have been admitted on the owner even though the
-            // answer never got back here. The request id is the only handle
-            // this ingress has, so spend it rather than leaving a tuner held.
-            retire_detached(&state, &config, user.id, request_id);
-            return Err(error);
-        }
-    };
+    // A failure here is deliberately *not* followed by a retire from this node.
+    // The start may have been admitted on the owner, and the client's answer
+    // says so: anything the owner did not decide leaves the client holding its
+    // hint, and its replay carries the same id and joins that very session.
+    // Fencing the id here turned that replay into a 409 — it removed the
+    // recovery it was meant to provide. The client retires the hint itself on
+    // its next press, and the owner reaps an unheld session at 45 s.
+    let provisional = owner_start_within(&state, &config, &request, deadline).await?;
     let activation = LiveTvActivateRequest {
         expected_owner_node_id: config.owner_node_id.clone(),
         capability: provisional.capability.clone(),
@@ -524,15 +527,16 @@ pub(crate) async fn start_session(
     let activated = match owner_activate_within(&state, &config, &activation, deadline).await {
         Ok(activated) => activated,
         Err(error) => {
+            // The capability is stopped, which tombstones the request on the
+            // owner; a replay of the same id gets that tombstone, which is an
+            // owner-decided answer. Nothing else to fence.
             let _ = owner_stop(&state, &config.owner_node_id, &provisional.capability).await;
-            retire_detached(&state, &config, user.id, request_id);
             return Err(error);
         }
     };
     let current = state.live_tv.config().await.map_err(api_error)?;
     if current != config || !state.serving.authority().is_current(ingress_generation) {
         let _ = owner_stop(&state, &config.owner_node_id, &provisional.capability).await;
-        retire_detached(&state, &config, user.id, request_id);
         return Err(ApiError::typed_detail(
             StatusCode::SERVICE_UNAVAILABLE,
             "owner_unavailable",
@@ -541,26 +545,6 @@ pub(crate) async fn start_session(
         ));
     }
     Ok(Json(activated))
-}
-
-/// Retire the request id without making the caller wait for it. Not awaited on
-/// the response path: it has its own fresh 5 s deadline rather than whatever
-/// remains of an exhausted budget, and it logs either way, so a start that ran
-/// out of time never silently abandons the retirement.
-fn retire_detached(state: &AppState, config: &LiveTvConfig, user_id: i64, request_id: String) {
-    let state = state.clone();
-    let config = config.clone();
-    tokio::spawn(async move {
-        if owner_retire(&state, &config, user_id, &request_id)
-            .await
-            .is_err()
-        {
-            tracing::warn!(
-                user = user_id,
-                "could not retire an abandoned live-TV start on the tuner owner"
-            );
-        }
-    });
 }
 
 /// Stop whatever this request id produced and fence it. Idempotent: a client
@@ -599,34 +583,28 @@ pub(crate) async fn start_state(
 ) -> Result<Json<crate::live_tv::LiveTvStartState>, ApiError> {
     let request_id = parse_public_request_id(&request_id)?.to_owned();
     let config = live_tv_enabled_config(&state).await?;
-    if config.owner_node_id != state.node_id {
-        // The owner's registry is the only place this is known, and a resume
-        // is the operation that answers it authoritatively across nodes.
-        return Ok(Json(
-            match owner_resume(&state, &config, user.id, &request_id)
-                .await?
-                .outcome
-            {
-                crate::live_tv::LiveTvResumeOutcome::Live => crate::live_tv::LiveTvStartState {
-                    state: "active",
-                    code: None,
-                },
-                crate::live_tv::LiveTvResumeOutcome::Pending => crate::live_tv::LiveTvStartState {
-                    state: "starting",
-                    code: None,
-                },
-                crate::live_tv::LiveTvResumeOutcome::Ended => crate::live_tv::LiveTvStartState {
-                    state: "ended",
-                    code: None,
-                },
-                crate::live_tv::LiveTvResumeOutcome::Retired => crate::live_tv::LiveTvStartState {
-                    state: "retired",
-                    code: None,
-                },
-            },
-        ));
+    if config.owner_node_id == state.node_id {
+        return Ok(Json(state.live_tv.start_state_local(user.id, &request_id)));
     }
-    Ok(Json(state.live_tv.start_state_local(user.id, &request_id)))
+    // Its own owner path, not a resume: a resume selects one session, cancels
+    // the others, touches what it keeps and retires an id it has never seen.
+    // Folding a status read into it meant looking at a start fenced it.
+    let body = serde_json::to_vec(&crate::live_tv::LiveTvStartStateRequest {
+        expected_owner_node_id: config.owner_node_id.clone(),
+        user_id: user.id,
+        request_id: request_id.clone(),
+    })
+    .map_err(|error| ApiError::Internal(error.to_string()))?;
+    Ok(Json(
+        owner_recovery_exchange(
+            &state,
+            &config,
+            START_STATE_PATH,
+            body,
+            "report start state yet",
+        )
+        .await?,
+    ))
 }
 
 async fn live_tv_enabled_config(state: &AppState) -> Result<LiveTvConfig, ApiError> {
@@ -727,11 +705,9 @@ pub(crate) async fn channels(
 ) -> Result<Json<LiveTvChannelsResponse>, ApiError> {
     let config = state.live_tv.config().await.map_err(api_error)?;
     if !config.enabled {
-        return Err(ApiError::typed(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "live_tv_disabled",
-            "Live TV is disabled; an administrator can enable it in Settings → Developer",
-        ));
+        return Err(api_error(LiveTvError::Disabled(
+            "Live TV is disabled; an administrator can enable it in Settings → Developer".into(),
+        )));
     }
     let snapshot = owner_snapshot(&state, &config, false, false)
         .await
@@ -1367,24 +1343,40 @@ pub(crate) async fn drain_owner(
     Ok(())
 }
 
+/// Every failure here happens *before* a request leaves this node, so none of
+/// them is the owner's verdict — and a client that reads one as a verdict
+/// throws away the hint that is its only handle on a session the owner may
+/// still be feeding. A fleet deploy fences peers for a fraction of a second
+/// several times a night; that window lands here.
 async fn owner_peer(state: &AppState, expected: &str) -> Result<(String, String), ApiError> {
     if !state.membership.is_replicated() {
-        return Err(api_error(LiveTvError::OwnerUnavailable(
-            "the selected owner is not this single-node server".into(),
-        )));
+        return Err(api_error_from(
+            LiveTvError::OwnerUnavailable(
+                "the selected owner is not this single-node server".into(),
+            ),
+            Decided::Ingress,
+        ));
     }
     state
         .membership
         .activity_peers()
         .await
-        .map_err(|error| api_error(LiveTvError::OwnerUnavailable(error.to_string())))?
+        .map_err(|error| {
+            api_error_from(
+                LiveTvError::OwnerUnavailable(error.to_string()),
+                Decided::Ingress,
+            )
+        })?
         .into_iter()
         .find(|peer| peer.node_id == expected && peer.reachable)
         .and_then(|peer| peer.http_base.map(|base| (peer.node_id, base)))
         .ok_or_else(|| {
-            api_error(LiveTvError::OwnerUnavailable(
-                "the selected tuner owner is not a reachable committed voter".into(),
-            ))
+            api_error_from(
+                LiveTvError::OwnerUnavailable(
+                    "the selected tuner owner is not a reachable committed voter".into(),
+                ),
+                Decided::Ingress,
+            )
         })
 }
 
@@ -1784,7 +1776,19 @@ mod tests {
         // The clients give up at 45 s. A start that outlives that leaves a
         // session with nobody holding it, which is the failure this whole
         // effort exists to end.
-        assert!(PUBLIC_START_DEADLINE < Duration::from_secs(45));
+        //
+        // The budget alone is not the answer: a start that fails after a
+        // provisional was issued still has to stop it, and that stop is
+        // awaited on the response path with a budget of its own. The sum is
+        // what the client experiences, so the sum is what is asserted.
+        const CLIENT_START_TIMEOUT: Duration = Duration::from_secs(45);
+        let worst_case_cleanup =
+            CONTROL_EXCHANGE_DEADLINE.max(crate::live_tv::SESSION_DRAIN_TIMEOUT);
+        assert!(
+            PUBLIC_START_DEADLINE + worst_case_cleanup < CLIENT_START_TIMEOUT,
+            "budget {PUBLIC_START_DEADLINE:?} plus the awaited stop              {worst_case_cleanup:?} must land inside {CLIENT_START_TIMEOUT:?}"
+        );
+        assert!(PUBLIC_START_DEADLINE < CLIENT_START_TIMEOUT);
         assert!(
             START_EXCHANGE_ATTEMPT < PUBLIC_START_DEADLINE,
             "one attempt must never be able to consume the entire budget"
