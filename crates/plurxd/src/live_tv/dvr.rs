@@ -1658,3 +1658,121 @@ async fn reminder_tick(
     }
     Ok(())
 }
+
+/// Keep the recordings library in step with what the engine wrote.
+///
+/// Two jobs, both deliberately done by polling rather than by a signal from
+/// the capture path:
+///
+/// 1. Create the `recordings` library the first time a DVR root is set, so an
+///    operator who turns recording on does not also have to know they must
+///    add a library pointed at the same folder.
+/// 2. Ask for a targeted scan of every finished capture that is not yet in
+///    the library, so a recording becomes playable within a minute of ending.
+///
+/// Polling, because the alternative is a signal that can be missed: a capture
+/// that finishes while the scanner is busy, or while this node is restarting,
+/// still has to reach the shelf. A row with no `item_id` is a standing request
+/// that survives both.
+pub(crate) async fn dvr_library_loop(state: crate::state::AppState, shutdown: CancellationToken) {
+    const SWEEP: std::time::Duration = std::time::Duration::from_secs(60);
+    loop {
+        tokio::select! {
+            _ = shutdown.cancelled() => return,
+            _ = tokio::time::sleep(SWEEP) => {}
+        }
+        if let Err(error) = sweep_recordings_library(&state).await {
+            tracing::warn!(%error, "could not reconcile the recordings library");
+        }
+    }
+}
+
+async fn sweep_recordings_library(
+    state: &crate::state::AppState,
+) -> Result<(), plurx_core::error::StoreError> {
+    let settings = state.store.settings_snapshot().await?;
+    let live_tv = LiveTvConfig::from_snapshot(&settings, &state.node_id);
+    let dvr = DvrConfig::from_snapshot(&settings);
+    // The owner is the node that wrote the files; every other node would be
+    // racing it to index the same paths.
+    if !dvr.enabled || dvr.root.is_empty() || live_tv.owner_node_id != state.node_id {
+        return Ok(());
+    }
+    let root = std::path::PathBuf::from(&dvr.root);
+    let library = match ensure_recordings_library(state, &root).await? {
+        Some(library) => library,
+        None => return Ok(()),
+    };
+    let unlinked = state
+        .store
+        .list_dvr_recordings_in(&[DvrState::Done, DvrState::Partial])
+        .await?
+        .into_iter()
+        .filter(|row| row.item_id.is_none())
+        .filter_map(|row| row.path.clone())
+        .collect::<Vec<_>>();
+    for path in unlinked {
+        let path = std::path::PathBuf::from(path);
+        if tokio::fs::metadata(&path).await.is_err() {
+            continue;
+        }
+        let request = crate::state::ScanRequest {
+            id: uuid::Uuid::new_v4().to_string(),
+            library_id: library.id,
+            path,
+            ids: None,
+            book: None,
+            correlation_id: None,
+            source: Some("dvr".to_owned()),
+        };
+        // Queued rather than dropped when a scan is already running, which is
+        // what makes a burst of finishes all reach the shelf.
+        if let Err(error) = state.jobs.request_scan(request).await {
+            tracing::warn!(%error, "could not ask for a scan of a finished recording");
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// Find the recordings library for this root, creating it once if there is
+/// none. Never creates a second: an operator who deleted it deliberately gets
+/// it back, and an operator who renamed it keeps their name.
+async fn ensure_recordings_library(
+    state: &crate::state::AppState,
+    root: &std::path::Path,
+) -> Result<Option<plurx_core::domain::Library>, plurx_core::error::StoreError> {
+    use plurx_core::domain::{LibraryKind, NewLibrary};
+
+    let libraries = state.store.list_libraries().await?;
+    if let Some(existing) = libraries.iter().find(|library| {
+        library.kind == LibraryKind::Recordings && library.paths.iter().any(|path| path == root)
+    }) {
+        return Ok(Some(existing.clone()));
+    }
+    // `name` is unique, so a library called "Recordings" pointed somewhere
+    // else must not make this fail for ever.
+    let taken = libraries
+        .iter()
+        .any(|library| library.name.eq_ignore_ascii_case("Recordings"));
+    let name = if taken {
+        format!("Recordings ({})", root.display())
+    } else {
+        "Recordings".to_owned()
+    };
+    let created = state
+        .store
+        .create_library(&NewLibrary {
+            name,
+            kind: LibraryKind::Recordings,
+            paths: vec![root.to_path_buf()],
+            anime: false,
+        })
+        .await?;
+    tracing::info!(
+        library = created.id,
+        root = %root.display(),
+        "created the recordings library for the configured DVR root"
+    );
+    Ok(Some(created))
+}

@@ -1193,7 +1193,7 @@ async fn refresh_metadata_with_store(
                 .filter(|library| library_id.is_none_or(|id| library.id == id))
             {
                 match library.kind {
-                    LibraryKind::Books | LibraryKind::Home => {
+                    LibraryKind::Books | LibraryKind::Home | LibraryKind::Recordings => {
                         println!("{}: skipped provider artwork", library.name);
                     }
                     LibraryKind::Shows if library.anime => {
@@ -2239,6 +2239,10 @@ fn spawn_background_loops(
     tokio::spawn(crate::live_tv::dvr::reminder_loop(
         std::sync::Arc::clone(&state.live_tv),
         dvr_events,
+        background_shutdown.clone(),
+    ));
+    tokio::spawn(crate::live_tv::dvr::dvr_library_loop(
+        state.clone(),
         background_shutdown.clone(),
     ));
     tokio::spawn(crate::live_tv::dvr::dvr_progress_loop(

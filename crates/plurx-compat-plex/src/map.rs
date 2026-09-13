@@ -28,14 +28,17 @@ impl From<Option<WatchState>> for View {
 }
 
 /// The Plex section type for a library, or `None` for library kinds the
-/// façade doesn't expose. Home and Books libraries are deliberately absent:
-/// Plex has no faithful section/item model for either surface, and a
-/// half-mapped section breaks Kodi clients harder than an absent one.
+/// façade doesn't expose. Home, Books and Recordings libraries are
+/// deliberately absent: Plex has no faithful section/item model for any of
+/// them, and a half-mapped section breaks Kodi clients harder than an absent
+/// one. A recording in particular is an airing, not a movie or an episode,
+/// and filing it as either would make Plex clients offer to "fix match" it
+/// against a stranger.
 fn section_type(kind: LibraryKind) -> Option<&'static str> {
     match kind {
         LibraryKind::Movies => Some("movie"),
         LibraryKind::Shows => Some("show"),
-        LibraryKind::Books | LibraryKind::Home => None,
+        LibraryKind::Books | LibraryKind::Home | LibraryKind::Recordings => None,
     }
 }
 

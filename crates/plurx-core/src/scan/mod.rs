@@ -11,6 +11,7 @@ pub mod home;
 pub mod nfo;
 pub mod parse;
 pub mod probe;
+pub mod recordings;
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
@@ -896,6 +897,15 @@ fn wanted_file(library: &Library, path: &Path) -> bool {
     }
 }
 
+/// Wall-clock milliseconds. The DVR's rows carry `updated_at_ms`, and the
+/// scan is the one place outside the engine that writes to them.
+fn scan_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or_default()
+}
+
 /// Records one batch of candidate files into the library.
 ///
 /// Split out of [`scan_library_with_progress`] so the targeted scan can run
@@ -1090,6 +1100,12 @@ async fn record_candidates(
                 report.note(note);
             }
         }
+        if library.kind == LibraryKind::Recordings
+            && recordings::after_record(store, placed, file_id, &path, &probe, mtime, scan_now_ms())
+                .await?
+        {
+            report.seeded += 1;
+        }
         if is_new {
             report.added += 1;
         } else {
@@ -1233,6 +1249,12 @@ async fn place_item(
         LibraryKind::Home => Ok(match home::place(store, library, path).await? {
             Some(placed) => Placement::Placed(placed),
             None => Placement::Skipped("it isn't a video or a photo this library can hold"),
+        }),
+        // One folder per programme, which is exactly what the engine writes,
+        // so the same folder mirroring home video uses gives the right shape.
+        LibraryKind::Recordings => Ok(match recordings::place(store, library, path).await? {
+            Some(placed) => Placement::Placed(placed),
+            None => Placement::Skipped("it is not under any of this library's roots"),
         }),
         LibraryKind::Shows => {
             // Anime libraries use absolute numbering; regular shows use S/E.

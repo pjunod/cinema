@@ -14672,7 +14672,7 @@ function openLibDrawer(id){
   const first=document.querySelector(".setdrawer input"); if(first) first.focus();
 }
 function libKindSelect(id,sel){
-  return `<select id="${id}">${[["movies","Movies"],["shows","TV Shows"],["anime","Anime"],["books","Books &amp; audiobooks"],["home","Home videos &amp; photos"]]
+  return `<select id="${id}">${[["movies","Movies"],["shows","TV Shows"],["anime","Anime"],["books","Books &amp; audiobooks"],["home","Home videos &amp; photos"],["recordings","Recordings"]]
     .map(([v,label])=>`<option value="${v}"${sel===v?" selected":""}>${label}</option>`).join("")}</select>`;
 }
 // The drawer holds everything that configures one library: its identity, its
