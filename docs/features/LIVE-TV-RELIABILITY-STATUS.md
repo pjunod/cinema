@@ -1,14 +1,15 @@
 # Live TV reliability — build status
 
-What is built, what is pushed, and what is still open on the
-`effort/live-tv-reliability` lane. Companion to
+What is built, what is merged, what is deployed, and what is still open on
+the Live TV reliability effort. Companion to
 [LIVE-TV-RELIABILITY-IMPLEMENTATION.md](LIVE-TV-RELIABILITY-IMPLEMENTATION.md)
 (the *what*, exactly) and
 [LIVE-TV-GUIDE-AND-START-RELIABILITY.md](LIVE-TV-GUIDE-AND-START-RELIABILITY.md)
 (the *why*). Read this one to answer "how far along is it" without asking.
 
-**Lane:** `effort/live-tv-reliability`, based on `main` at `75edcb4` ·
-**Pull request:** one, into `main`, opened `WIP:` ·
+**Lane:** `effort/live-tv-reliability`, merged into `main` at `755195a` ·
+**Pull request:** [#281](http://192.168.4.7:3000/noirr/plurx/pulls/281), merged ·
+**Fast lane:** all eight jobs green on `644316f` ·
 **Last updated:** 2026-09-13
 
 ---
@@ -23,6 +24,8 @@ What is built, what is pushed, and what is still open on the
 | M3 | `request_id`, retire/resume/start-state, stray eviction, one public start budget, typed envelope, session-end logging | built |
 | M4 | Barrier removal on all three clients, from the one fixture | built |
 | M5 | Developer-tab enable section, release counters, deploy, physical verification prompt | built |
+
+All five are merged. `main` carries the effort as of `755195a`.
 
 One adversarial review has run against the whole lane (§4). Everything it
 found that would bite in production is fixed.
@@ -59,7 +62,7 @@ the changed behaviour.
 | Server | `cargo test -p plurxd --bin plurxd live_tv::` | 95 passed, 3 failed — see below |
 | Web | `node --test tests/web/live-tv.test.js` | green, 50 tests |
 | Android | `./gradlew testDebugUnitTest lintDebug` | green, 571 tests; lint findings unchanged |
-| Apple | — | no Swift toolchain in the session that built this; see §5 |
+| Apple | fast lane `fast Apple compile` on `644316f` | **green** — the lane type-checks on a real Swift toolchain |
 | Docs | `python3 -m unittest tests.operations.test_api_doc_routes tests.operations.test_docs_index tests.operations.test_apple_build_claims` | green |
 
 **The three Rust failures are pre-existing on `main`.** Checked out `75edcb4`
@@ -107,21 +110,28 @@ an owner decided it.
 
 ## 5. What is not proven here
 
-- **Nothing Apple was compiled.** There is no Swift toolchain in the session
-  that built this; `make apple-test` on the lane is the first real type-check.
-  The constructs most likely to need a one-line fix, in order: the async
-  `recoveryRoutesAvailable()` witness, `nextRefreshAt`'s implicit `nil` in
-  `LiveTvGuide`'s memberwise init, `LiveTvResumeAnswer`'s explicit
-  `CodingKeys`, the nested generic `read<T: Decodable>` in
-  `LiveTvGuideReadiness.init(from:)`, and `StartBody`'s nil `requestId` being
-  omitted by the synthesised encoder — that last one is the mechanism that
-  stops an older `deny_unknown_fields` ingress answering 400.
+- **Nothing Apple was *run*.** The fast lane compiles the Apple target on a
+  real Swift toolchain and it is green, so the five constructs §5 used to
+  worry about are settled: the async `recoveryRoutesAvailable()` witness,
+  `nextRefreshAt`'s implicit `nil` in `LiveTvGuide`'s memberwise init,
+  `LiveTvResumeAnswer`'s explicit `CodingKeys`, the nested generic
+  `read<T: Decodable>` in `LiveTvGuideReadiness.init(from:)`, and `StartBody`'s
+  nil `requestId` being omitted by the synthesised encoder. No XCTest run.
 - **No Android instrumented test ran.** The hint store's real `AtomicFile`
   behaviour, the Developer tab's guide panel and the resume-to-playback path
-  are compile- and lint-verified only.
+  are compile-, unit- and lint-verified only.
 - **Nothing ran against a live server or a tuner.** The physical script in the
   plan's §7 is what settles the tvOS Caches-purge path, the resume-to-picture
-  transition, and cases (1) through (6) generally.
+  transition, and cases (1) through (6) generally. §7 below records where that
+  stands.
+- **Three Rust tests fail, all pre-existing on `main`.** Verified against
+  `75edcb4` in a separate worktree before this lane existed: 0 passed, 3
+  failed, the same three. They are
+  `live_tv_software_hls_argument_baseline_is_stable`,
+  `live_hls_publishes_short_startup_segments_before_steady_cadence` and
+  `one_tuner_get_runs_the_full_hls_lifecycle_and_stop_waits_for_cleanup`, all
+  in FFmpeg argument construction this lane does not touch. They belong to the
+  batch pass over full-suite failures, not here.
 
 ## 6. What is deliberately not in this lane
 
@@ -138,3 +148,56 @@ met right now — `start_recovery` on the readiness document, and `guide_age`,
 readiness document. It is advisory: no readiness value reaches a disabled
 control on any client, and `start_recovery` is excluded from the overall
 verdict so a fleet mid-rollout is never shown as broken for lacking it.
+
+---
+
+## 7. Shipping it
+
+| Step | Who can do it | State |
+|---|---|---|
+| Merge into `main` | this session | done — [#281](http://192.168.4.7:3000/noirr/plurx/pulls/281) at `755195a` |
+| Server deploy to `nynuc`, `m6`, `nuc4`, `nuc3` | this session | run from `media/deploy.yml`, `-e only=plurx` |
+| Apple build 147 → the Apple TV and the iPhone | Paul's Mac | not done — needs the Xcode signing identity |
+| Android `versionCode` 90 → the Google TV and the phones | Paul's Mac | not done — needs the paired devices |
+| Physical verification, cases (1)–(6) | Paul's Mac | not done — §8 |
+
+### The server deploy
+
+`media/deploy.yml` with `--limit noirr -e sync=false -e only=plurx`. `sync=false`
+skips the play that fast-forwards the Mac's own `~/code/*` checkouts; it changes
+nothing about what the nodes deploy, because each node fetches from its own
+`origin` and computes its own `BUILD_REF` from its own `git describe` after the
+reset. The four nodes are the whole `noirr` group.
+
+One operational note, recorded because it cost four minutes of downtime on
+`nynuc`: the playbook stops the stack to copy a consistent database before it
+rebuilds, so a controller that dies mid-run leaves that node down. Run it
+somewhere that survives — a `screen` on a node, not a shell that can be
+reaped. `docker compose start` in `/opt/noirr/plurx/deploy` brings a node back
+without waiting for the rebuild.
+
+### What the clients need
+
+Neither client artifact can be built anywhere but the Mac that owns the Xcode
+signing identity and the device pairings. `scripts/ship --apple` and
+`scripts/ship --android` drive the Ansible `mobile_release` role; the
+standalone `scripts/ship-physical` does the same work for plurx alone when
+Ansible is not healthy. Until one of them runs, the fleet is a new server and
+three old clients — which is a state this lane is explicitly built to survive:
+an older client sends no `request_id`, the ingress mints one, and the start
+behaves exactly as it did before.
+
+## 8. Physical verification — the handoff
+
+The prompt is [LIVE-TV-RELIABILITY-IMPLEMENTATION.md §7](LIVE-TV-RELIABILITY-IMPLEMENTATION.md#7-physical-verification--the-prompt-for-the-gpt-session-at-pauls-mac),
+with one change now that the lane has merged: build from `main`, not from
+`effort/live-tv-reliability`. Cases (1) through (6) are what settle the tvOS
+Caches-purge path, the resume-to-picture transition, and whether the words
+"Wait 90 seconds" can still be produced by any sequence.
+
+Case (2) is the one that matters most and the easiest to run wrong: the kill
+has to happen while the app is playing in the foreground. Pressing Home first
+is a *clean* release on Apple — the `scenePhase` handler stops the session and
+a confirmed release forgets the hint — so it tests case (4) instead. On
+Android, `am force-stop` runs `onStop` and is likewise not abrupt enough;
+`kill -9` on the pid is.
