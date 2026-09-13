@@ -38,6 +38,38 @@ keyframe origin — which needs a device check before it is built. Paul's
 tablet supplied the field evidence: "Playback stopped
 (ERROR_CODE_IO_BAD_HTTP_STATUS)" over a moving picture.
 
+## Live TV: the empty guide and the "wait 90 seconds" refusal, diagnosed
+
+**Diagnosis in [#273](http://192.168.4.7:3000/noirr/plurx/pulls/273); Paul
+ruled 2026-09-13 (doc §7): cache the guide, the client never guesses, and a
+possibly-held tuner is never a reason to refuse a viewer — Opus builds it from
+[docs/features/LIVE-TV-RELIABILITY-IMPLEMENTATION.md](docs/features/LIVE-TV-RELIABILITY-IMPLEMENTATION.md)
+— Astra reviewed it 2026-09-13 (eight findings, all accepted and folded in,
+plan §8); lane `effort/live-tv-reliability`.** Both complaints trace to a client guessing at something
+the owner knows. The guide is memory-only on the owner, its first refresh
+after a restart is a full 20 minutes away (the first loop tick runs before
+the serving fence admits the node, is *skipped*, and the skip path sleeps the
+whole interval — nynuc's metrics show exactly one skip at boot and the first
+success 20 minutes later), a refresh cannot run until a client has read the
+lineup, and the web never re-asks while Apple and Android re-ask 20 minutes
+after *they* opened. `start_outcome_unknown` is never sent by the server: it
+is the client's start barrier finding a marker it holds for the whole session,
+so every tab close, tvOS suspension or mid-stream deploy costs the next open
+90 s from the moment Live TV is opened, long after the owner reaped the
+session at 45 s idle. Eight starts today, zero failed on the owner.
+
+The fix in [docs/features/LIVE-TV-GUIDE-AND-START-RELIABILITY.md](docs/features/LIVE-TV-GUIDE-AND-START-RELIABILITY.md):
+a durable owner-local guide under the cache root with an event-driven loop
+and a server-published `next_refresh_at` the clients poll on; and a public
+`request_id` (the marker the clients already persist) plus
+`DELETE /live-tv/starts/{id}`, so a press retires whatever the last start
+produced and starts afresh in one round trip to the owner — which already
+keys and tombstones starts by request id on the internal leg — with the
+owner evicting a viewer's own stray before ever answering `tuner_capacity`.
+The client-side barrier is deleted, not rewritten; opening Live TV asks the
+owner to resume the last stream if it is still live, and otherwise waits for
+the viewer to pick a channel.
+
 ## Live TV gets the web page's proportions on Apple TV and iPhone
 
 **Built for issue #267; iOS and tvOS compile green and the full simulator
