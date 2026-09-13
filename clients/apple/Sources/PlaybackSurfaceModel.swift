@@ -168,6 +168,11 @@ struct PlaybackSurfaceLog: Equatable, Sendable {
     let event: Event
     var cls: PlaybackFault.Class?
     var source: String?
+    /// The raiser's own sentence. Carried for every event, and load-bearing
+    /// for `surface_log_only`: `log_only` is one source id standing for three
+    /// unrelated facts (contract §3.3 row 18), so a row without this says
+    /// "something the viewer was right not to see happened" and nothing else.
+    var detail: String?
     var attached: Int?
     var intent: Int?
     var positionMs: Int?
@@ -182,6 +187,7 @@ struct PlaybackSurfaceLog: Equatable, Sendable {
         event: Event,
         cls: PlaybackFault.Class? = nil,
         source: String? = nil,
+        detail: String? = nil,
         attached: Int? = nil,
         intent: Int? = nil,
         positionMs: Int? = nil,
@@ -195,6 +201,7 @@ struct PlaybackSurfaceLog: Equatable, Sendable {
         self.event = event
         self.cls = cls
         self.source = source
+        self.detail = detail
         self.attached = attached
         self.intent = intent
         self.positionMs = positionMs
@@ -211,6 +218,7 @@ struct PlaybackSurfaceLog: Equatable, Sendable {
             event: event,
             cls: fault.cls,
             source: fault.source,
+            detail: fault.detail,
             attached: fault.attached,
             intent: fault.intent,
             positionMs: fault.positionMs,
@@ -691,6 +699,7 @@ struct PlaybackSurfaceModel: Equatable, Sendable {
             log.append(PlaybackSurfaceLog(
                 event: .logOnly,
                 source: row.id,
+                detail: proposed.detail,
                 attached: proposed.attached
             ))
             return

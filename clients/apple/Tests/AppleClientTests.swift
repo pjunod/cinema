@@ -3491,6 +3491,80 @@ final class AppleClientTests: XCTestCase {
         )
     }
 
+    /// Row 18. `log_only` maps to no class at all: the presenter emits the
+    /// event and draws nothing, over any surface and in any context.
+    func testALogOnlyRaiseEmitsItsEventAndNeverTouchesTheSurface() {
+        let origin = ContinuousClock.now
+        var model = PlaybackSurfaceModel()
+        model.apply(.attach(9), now: origin)
+        model.apply(.presenting(true, attached: 9), now: origin)
+        let log = model.apply(
+            PlaybackSurfaceModel.raise(
+                source: "log_only", context: .attached, attached: 9,
+                detail: "prepared_successor_abandoned:failed"
+            ),
+            now: origin
+        )
+        XCTAssertEqual(log.map(\.event), [.logOnly])
+        XCTAssertEqual(log.first?.source, "log_only")
+        XCTAssertEqual(log.first?.attached, 9)
+        XCTAssertEqual(
+            log.first?.detail, "prepared_successor_abandoned:failed",
+            "one source id stands for three unrelated facts; the row has to say which"
+        )
+        XCTAssertEqual(model.kind, .none)
+        XCTAssertTrue(model.faults.isEmpty, "log only means no fault, not an invisible one")
+
+        // Over a blocking prompt it is still nothing but a log line.
+        var prompted = PlaybackSurfaceModel()
+        prompted.apply(.attach(2), now: origin)
+        prompted.apply(
+            PlaybackSurfaceModel.raise(
+                source: "owner_exhausted", context: .start, attached: 2, playerStopped: true
+            ),
+            now: origin
+        )
+        XCTAssertEqual(prompted.currentFault?.cls, .exhausted)
+        let quiet = prompted.apply(
+            PlaybackSurfaceModel.raise(
+                source: "log_only", context: .attached, attached: 2,
+                detail: "control_exchange:transport:404:session_gone"
+            ),
+            now: origin
+        )
+        XCTAssertEqual(quiet.map(\.event), [.logOnly])
+        XCTAssertEqual(prompted.currentFault?.cls, .exhausted, "the incumbent is untouched")
+    }
+
+    /// The controller half of row 18: the three Apple equivalents reach the
+    /// presenter, they draw nothing, and one fact is one row rather than one
+    /// per cadence tick.
+    @MainActor
+    func testTheRowEighteenSitesLogOnceAndDrawNothing() {
+        let controller = PlayerController()
+        let model = AppModel()
+        defer { controller.stop() }
+        XCTAssertFalse(
+            controller.noteSurfaceLogOnly("prepared_successor_abandoned:failed"),
+            "a player that never started has nothing to log against"
+        )
+        controller.start(
+            model: model, itemId: 1, fileId: 1, startMs: 0,
+            durationMs: 600_000, title: "Title"
+        )
+        XCTAssertTrue(controller.noteSurfaceLogOnly("prepared_successor_abandoned:failed"))
+        XCTAssertFalse(
+            controller.noteSurfaceLogOnly("prepared_successor_abandoned:failed"),
+            "one fact, one row — a reporter that fails every cadence is not thirty posts"
+        )
+        XCTAssertTrue(controller.noteSurfaceLogOnly("control_exchange:transport:404:session_gone"))
+        XCTAssertTrue(controller.noteSurfaceLogOnly("session_status_unavailable"))
+        XCTAssertEqual(
+            controller.surface.kind, .none,
+            "row 18 is the row that draws nothing; the incumbent is untouched"
+        )
+    }
+
     /// The adapter, pinned — because the reducer cannot pin this.
     ///
     /// `.inert` returns before the reducer's switch, so a model test fed inert

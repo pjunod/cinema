@@ -363,6 +363,11 @@ protocol PreparedSuccessorHost: AnyObject {
     /// server is holding a slot for should not wait out `next_exchange_ms`.
     func preparedSuccessorOwesAnExchange()
 
+    /// A live staging was given up. Contract §3.3 row 18: the incumbent is
+    /// untouched — nothing was ever switched to — so this draws nothing and
+    /// the event is the only trace it happened at all.
+    func notePreparedSuccessorAbandoned(_ reason: PreparedReplacementAbandonment)
+
     /// Record how long the viewer's picture was interrupted by a fallback.
     /// Apple's fallback interruption is unmeasured because Apple passed dual
     /// preparation and never exercised it; this is the instrument that closes
@@ -489,6 +494,7 @@ final class PreparedReplacementCoordinator {
     /// ordinary path once the switch has resolved.
     func abandonWithoutFallback(_ reason: PreparedReplacementAbandonment) {
         guard let action = ledger.active, !ledger.isSwitching else { return }
+        host?.notePreparedSuccessorAbandoned(reason)
         host?.discardPreparedSuccessor()
         ledger.noteAbandoned(action, reason)
         openedAtMs = nil
@@ -499,6 +505,7 @@ final class PreparedReplacementCoordinator {
         _ reason: PreparedReplacementAbandonment,
         settling action: PreparedReplacementAction
     ) {
+        host?.notePreparedSuccessorAbandoned(reason)
         host?.discardPreparedSuccessor()
         ledger.noteAbandoned(action, reason)
         openedAtMs = nil
@@ -536,12 +543,14 @@ final class PreparedReplacementCoordinator {
             ledger.noteCommitted(action, firstFrameUnixMs: firstFrameUnixMs)
             host?.preparedSuccessorOwesAnExchange()
         case .refused:
+            host?.notePreparedSuccessorAbandoned(.aborted)
             host?.discardPreparedSuccessor()
             ledger.noteAbandoned(action, .aborted)
             host?.preparedSuccessorOwesAnExchange()
             host?.fallBackToInPlaceReplacement(action)
         case .switchedWithoutAFrame:
             host?.recordPreparedFallbackInterruption(ms: max(0, now() - startedAt))
+            host?.notePreparedSuccessorAbandoned(.failed)
             host?.discardPreparedSuccessor()
             ledger.noteAbandoned(action, .failed)
             host?.preparedSuccessorOwesAnExchange()

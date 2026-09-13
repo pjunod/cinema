@@ -51,6 +51,10 @@ private struct ApplePlaybackSurfaceLog: Encodable {
     let event: String
     let surfaceClass: String?
     let source: String?
+    /// The raiser's own sentence. `log_only` is one source id standing for
+    /// three unrelated facts (contract §3.3 row 18), and a row that cannot say
+    /// which of them happened is not a trace of anything.
+    let detail: String?
     let attached: Int?
     let intent: Int?
     let by: String?
@@ -70,7 +74,7 @@ private struct ApplePlaybackSurfaceLog: Encodable {
     let ua = "Apple AVPlayer"
 
     enum CodingKeys: String, CodingKey {
-        case level, event, source, attached, intent, by, action, error, actions, method, title, ua
+        case level, event, source, detail, attached, intent, by, action, error, actions, method, title, ua
         case surfaceClass = "class"
         case positionMs = "position_ms"
         case playerStopped = "player_stopped"
@@ -2043,6 +2047,9 @@ final class PlayerController: ObservableObject {
     /// raised with, so the settle names the request the raise named even after
     /// the viewer has moved the epoch on.
     private var streamChangePreparingIntent: Int?
+    /// Which row-18 facts this playback has already logged, so a reporter that
+    /// fails every cadence is one `surface_log_only` and not thirty.
+    private var surfaceLogOnlyReasons: Set<String> = []
     /// The last position the surface's evidence sampler saw, so "the clock
     /// moved" is a delta rather than a guess.
     private var lastSurfaceSampleMs: Int?
@@ -4359,6 +4366,11 @@ final class PlayerController: ObservableObject {
                       self.sessionId == polledSessionId
                 else { return }
                 self.sessionStatus = status
+                if status == nil {
+                    // Row 18: a stats poll is telemetry. The picture is
+                    // untouched and the log line is the only trace.
+                    self.noteSurfaceLogOnly("session_status_unavailable")
+                }
                 if let status {
                     self.diagnosticSessionStatus = status
                     self.diagnosticSessionStatusObservedAt = Date()
@@ -5386,6 +5398,7 @@ final class PlayerController: ObservableObject {
         lastSurfaceSampleMs = nil
         surfaceHasPresented = false
         streamChangePreparingIntent = nil
+        surfaceLogOnlyReasons.removeAll()
     }
 
     /// The ledger ring and the four client-log events of the contract's §3.6.
@@ -5743,6 +5756,32 @@ final class PlayerController: ObservableObject {
 
     static let surfaceClockIntervalMs = 500
 
+    /// Contract §3.3 row 18: prepared-successor abandonment, `session_gone` on
+    /// a successor's first exchange, and telemetry/reporter/stats failures.
+    /// The incumbent is untouched, `log_only` maps to no class at all, and the
+    /// event is the only trace — which is the point, and which the fence keeps
+    /// true.
+    ///
+    /// One row per distinct reason per attached generation: a control reporter
+    /// that fails every cadence, or a status poll that answers nothing for a
+    /// minute, is one fact and not thirty `/client-log` posts.
+    ///
+    /// `postClientLog` is deliberately not a site. This raise posts a client
+    /// log, so a failed post that raised here would be a loop.
+    @discardableResult
+    func noteSurfaceLogOnly(_ reason: String) -> Bool {
+        guard started else { return false }
+        let generation = surfaceAttachedGeneration
+        guard surfaceLogOnlyReasons.insert("\(reason)@\(generation)").inserted else { return false }
+        present(PlaybackSurfaceModel.raise(
+            source: "log_only",
+            context: surfaceContext,
+            attached: generation,
+            detail: reason
+        ))
+        return true
+    }
+
     /// PiP and AirPlay report presentation through the platform's own flags,
     /// so the view hands them over rather than this controller guessing.
     func notePictureInPictureActive(_ active: Bool) {
@@ -5844,6 +5883,7 @@ final class PlayerController: ObservableObject {
             event: entry.event.rawValue,
             surfaceClass: entry.cls?.rawValue,
             source: entry.source,
+            detail: entry.detail,
             attached: entry.attached,
             intent: entry.intent,
             by: entry.by?.rawValue,
@@ -8181,6 +8221,9 @@ extension PlayerController {
             },
             onAcknowledgementDelivered: { [weak self] acknowledgement in
                 self?.preparedReplacement.acknowledgementDelivered(acknowledgement)
+            },
+            onExchangeFailure: { [weak self] failure in
+                self?.noteSurfaceLogOnly("control_exchange:\(failure)")
             }
         )
         playbackControlSummary = "Owner epoch \(bootstrap.controlEpoch) · reporting"
@@ -8418,6 +8461,15 @@ extension PlayerController: PreparedSuccessorHost {
                     }
                 }
         ]
+    }
+
+    /// Row 18. Nothing the viewer can see changed — the incumbent's item, its
+    /// session and its pointer are exactly as they were — so this raises the
+    /// one source that maps to no class and draws nothing.
+    func notePreparedSuccessorAbandoned(_ reason: PreparedReplacementAbandonment) {
+        noteSurfaceLogOnly(
+            "prepared_successor_abandoned:\(reason == .failed ? "failed" : "aborted")"
+        )
     }
 
     func discardPreparedSuccessor() {
