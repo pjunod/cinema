@@ -28,11 +28,13 @@ signal readout appears, then it plays on without incident.
 ([`live_tv.rs:127–138`](../../crates/plurxd/src/live_tv.rs)) and answers the
 start POST the moment `inspect_scratch` returns a playlist with **one**
 listed segment ([`live_tv.rs:4796–4842`](../../crates/plurxd/src/live_tv.rs);
-`inventory.segments.is_empty()` is the only gate, at 5758). FFmpeg's hlsenc
+`parsed.segments.is_empty()` at 5758 is the only gate). FFmpeg's hlsenc
 cuts segments at `init_time` until the list is full, then a catch-up
 segment, then `hls_time`. Measured here with the owner's exact producer
 arguments (`LIVE_HLS_OUTPUT_ARGS` plus the encode-route keyframe arguments
-at 5375–5382) against a realtime source:
+at 5375–5382; the encoder itself ran `ultrafast` at 640×360, which changes
+encode latency and nothing about where hlsenc cuts) against a realtime
+source:
 
 | Listed at | Media sequence | `TARGETDURATION` | Segments in the window |
 |---|---|---|---|
@@ -57,11 +59,17 @@ instantaneous, so these are lower bounds):
 | ExoPlayer — `setTargetOffsetMs(4_000)` ([`LiveTvPlayer.kt:196`](../../clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvPlayer.kt)) | same | same | same |
 
 All three are identical because the playlist gives none of them more than
-1 s to start from; their live-sync settings never get a say. A real player
-merges these into one visible pause: AVPlayer's
-`automaticallyWaitsToMinimizeStalling` (the default, and `LiveTvView.swift`
-sets nothing else) rebuffers until it believes it can keep up, which is
-exactly "a few seconds in, one pause of a few seconds".
+1 s to start from; their live-sync settings never get a say. These are
+model numbers — no real player was run against the recording (headless
+Chromium here has no H.264 decoder, and there is no AVPlayer) — so how the
+three events present is inferred, not measured: AVPlayer's
+`automaticallyWaitsToMinimizeStalling` (the default; `LiveTvView.swift` sets
+nothing else) rebuffers until it believes it can keep up, and ExoPlayer's
+`setBufferDurationsMs(4_000, 12_000, 1_000, 2_000)`
+([`LiveTvPlayer.kt:166`](../../clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvPlayer.kt))
+needs 2 s buffered after any rebuffer, so both lengthen and merge the
+events. The physical pass (§8) reads `numberOfStalls` and the stall
+durations off `accessLog` and settles it.
 
 **How to read it:** `-hls_init_time 1` buys a first frame ~3 s sooner and
 pays for it with 3.6 s of freeze between 5 and 14 s of playback. The
@@ -73,12 +81,17 @@ The Apple heartbeat ([`LiveTvView.swift:169–196`](../../clients/apple/Sources/
 sleeps 5 s, and if the position advanced (`LiveTvPlaybackWatchdog.observe`,
 [`LiveTv.swift:1010–1015`](../../clients/apple/Sources/LiveTv.swift)) it
 sends the keepalive and then reads `/status`, which is when `status.signal`
-first exists and the strength/quality percentages appear. Tick 1 lands at
-5.65 s after publish — inside the first stall. The status handler holds only
-the per-session `signal_cache` mutex and fetches `/status.json` from the
-HDHomeRun ([`live_tv.rs:3079–3124`](../../crates/plurxd/src/live_tv.rs)); it
-never touches the producer, the scratch inventory, or `session.state`. The
-stream resumes because segment 8 landed, not because the signal did.
+first exists and the strength/quality percentages appear. Tick 1 lands 5 s
+after publish — in the model, 0.5 s after the first stall ends and 2.5 s
+before the second begins, i.e. in the middle of the cluster; where it
+lands relative to the *visible* pause depends on how the player merges the
+events (above). What it cannot be is the cause: the status handler takes
+`session.state` for microseconds to check the phase and stamp `last_touch`
+(2960–2976, 1254–1273), holds the per-session `signal_cache` mutex across
+one `/status.json` GET to the HDHomeRun
+([`live_tv.rs:3079–3124`](../../crates/plurxd/src/live_tv.rs)), and never
+touches the producer or the scratch inventory. The stream resumes because
+segment 8 landed, not because the signal did.
 
 ### Why it reads as a pause rather than as buffering
 
@@ -103,6 +116,16 @@ A frozen frame with the overlay hidden is indistinguishable from a pause.
   that delays everything equally and changes nothing here.)
 - **The start barrier / request-id work** — that decided whether a start
   is allowed; this happens after it is.
+- **Not ruled out, and cheap to check on the device:** on tvOS a start
+  plays *inline* first (`selectAiring`, 2289–2295) and goes fullscreen on a
+  later press, which dismantles the inline `PlayerSurface`
+  (`playerLayer.player = nil`, [`PlayerSurface.swift:290–299`](../../clients/apple/Sources/PlayerSurface.swift))
+  and re-hosts the `AVPlayer` in a new layer under the cover. That is also
+  "a few seconds in". The web and Android pause the same way with no such
+  re-hosting, so it is not *the* cause, but the hand-off in §8 records
+  whether the freeze happens while still inline. Nothing else on any client
+  pauses, seeks or replaces the item after `play()` (Apple 155–167, web
+  16517–16522, Android 194–199).
 
 ## 3. The fix — give the client a whole segment of margin from the first frame
 
@@ -137,21 +160,51 @@ reintroduces a drifting `TARGETDURATION` and needs hls.js moved to
   drop `-hls_init_time 1`; `-hls_time 2`; `-hls_list_size 12`;
   `-hls_delete_threshold 2` so the deletion lag stays 4 s of wall time for a
   client holding the previous manifest.
-- `MAX_LISTED_SEGMENTS` 6 → 12 and `MAX_DELETION_LAG_SEGMENTS` 1 → 2
-  ([`live_tv.rs:142–143`](../../crates/plurxd/src/live_tv.rs)); the
-  inventory budget checks at 5776 and 5877 follow the constants.
+- `MAX_LISTED_SEGMENTS` 6 → 12 and `MAX_DELETION_LAG_SEGMENTS` 1 → **3**
+  ([`live_tv.rs:142–143`](../../crates/plurxd/src/live_tv.rs)). Three, not
+  two: hlsenc renames a finished segment to its final name *before* it
+  rewrites the playlist, so for an instant the scratch holds
+  `threshold + 1` final segments that the playlist does not list. Measured
+  with the proposed arguments, sampling every 2 ms: unlisted count
+  `{0, 1, 2}` throughout, and `3` once in one of two 45 s runs — rare,
+  and a 250 ms `SESSION_TICK` sample that lands in it is fatal. `inspect_scratch` at 5776 answers that instant with
+  `StreamFailed("… exceeded its segment inventory budget")`, which ends the
+  session — the constant must be `threshold + 1`. (Today's `1 / 1` pair has
+  the same hole: two unlisted for a few milliseconds every four seconds,
+  and a 250 ms `SESSION_TICK` sample that lands in it kills a healthy
+  stream. Fix it in the same commit; it is the latent version of the same
+  bug.) The literal "exceeds six segments" at 5879 and the `+ 1` at 9008
+  are hard-coded and follow the constants by hand.
 - The publish gate in the producer loop ([`live_tv.rs:4816`](../../crates/plurxd/src/live_tv.rs)):
-  `published` becomes true when `inventory.segments.len() >= 2`, not when it
-  is non-empty. `state.publication` keeps updating from the first segment
-  as it does now, so nothing served can be older than the inventory.
-  `STARTUP_FEEDING_TIMEOUT` (30 s) still covers the measured 18.1 s ATSC 3.0
-  first segment plus one more.
+  `published` becomes true when the playlist **lists** two segments.
+  `ScratchInventory.segments` is `final_segments` — every final file on
+  disk, listed or not (5772–5790) — so it is the wrong thing to count: in
+  the rename-before-rewrite instant above it would answer the start with a
+  one-segment playlist and reproduce today's stall for that viewer. Add a
+  `listed: usize` field carrying `parsed.segments.len()` to
+  `ScratchInventory`, read it *before* line 4814 moves the inventory into
+  `state.publication`, and gate on `listed >= 2`. `state.publication` keeps
+  updating from the first segment as it does now, so nothing served can be
+  older than the inventory.
+- The budget the second segment must fit is the relay's, not the
+  producer's: a non-owner ingress gives the owner `START_EXCHANGE_ATTEMPT`
+  = 20 s per POST ([`http/live_tv.rs:25`](../../crates/plurxd/src/http/live_tv.rs)),
+  and when the last HTTP waiter leaves an unpublished session
+  `StartupWaiter::drop` cancels it (4318–4334). The measured ATSC 3.0 first
+  segment after the probesize fix is 8.997 s
+  ([HDHOMERUN-LIVE-TV-STATUS.md](HDHOMERUN-LIVE-TV-STATUS.md), 2026-09-05
+  row); a 2 s first segment plus one more lands at about 12 s. The 18.1 s
+  figure that predates that fix would not have fitted, so the hardware
+  check in §7.1 records the new number.
 - Tests that pin the old numbers change in the same commit:
   `live_hls_publishes_short_startup_segments_before_steady_cadence`
   (8493–8506) becomes the assertion that `init_time` is absent and the pair
-  is `2 / 12`; `live_tv_software_hls_argument_baseline_is_stable` (8376)
-  re-freezes the argument list; the inventory tests at 8985–9008 use the
-  constants already.
+  is `2 / 12` — note it currently looks for `-force_key_frames` inside
+  `LIVE_HLS_OUTPUT_ARGS`, which does not contain it (the keyframe arguments
+  are added at 5375–5382), so as written its closure panics; the builder
+  confirms what the gate actually runs. `live_tv_software_hls_argument_baseline_is_stable`
+  (8376) re-freezes the argument list; the inventory tests at 8985–9008
+  take `MAX_LISTED_SEGMENTS` but hard-code the lag.
 - Copy routes (ATSC 3.0 HEVC, fmp4) cut at the source's own keyframes, so a
   3 s GOP gives 3 s segments; the rule "two listed segments" still gives one
   segment of margin by construction, which is why the gate is a count and
@@ -159,17 +212,27 @@ reintroduces a drifting `TARGETDURATION` and needs hls.js moved to
 
 ### 3.2 What changes on the clients
 
-Nothing is *required*. The web (`liveSyncDurationCount: 2`), Android
-(`4_000` ms) and Apple (default) start rules all sit ≥ 4 s behind the edge
-once the playlist offers it. Two things are worth doing in the same lane:
+Nothing is *required* for the stall. The web (`liveSyncDurationCount: 2`),
+Android (`4_000` ms) and Apple (default) start rules all sit ≥ 4 s behind
+the edge once the playlist offers it. Two settings change meaning and are
+worth a line in the lane:
 
-- **Apple: draw waiting.** Observe `player.timeControlStatus`; while it is
-  `.waitingToPlayAtSpecifiedRate` show the catching-up tile (§5.4) over the
-  picture with the overlay hidden. This is what the finite player already
-  does; without it any residual rebuffer is a "pause" again.
-- **Apple: raise `preferredForwardBufferDuration` to 0** (let AVFoundation
-  choose) or leave it at 12 — it has no effect on a live playlist shorter
-  than that and was measured to change nothing; leave it, note it.
+- **Web `liveMaxLatencyDurationCount: 4`** (same line as the sync count)
+  is a multiple of `TARGETDURATION`: hls.js's forced catch-up seek moves
+  from 16 s behind to 8 s behind. Still twice the sync distance; keep it,
+  but it is a halved tolerance and the builder should know.
+- **Android `maxOffsetMs 8_000`** is absolute and unchanged; the min
+  buffer for playback to resume after a rebuffer is 2 s (`setBufferDurationsMs`
+  above), one segment — fine with a segment of margin, which is the point.
+- **Apple `preferredForwardBufferDuration = 12`** ([`LiveTvView.swift:156`](../../clients/apple/Sources/LiveTvView.swift))
+  stays. Nothing here measured AVPlayer; the window is 24 s either way and
+  the 4 s distance to the edge is what bounds the buffer, not this.
+
+And one thing the Apple lane should do regardless: **draw waiting.**
+Observe `player.timeControlStatus`; while it is
+`.waitingToPlayAtSpecifiedRate` show the catching-up tile (§5.4) over the
+picture with the overlay hidden. This is what the finite player already
+does; without it any residual rebuffer is a "pause" again.
 
 ## 4. Ruling wanted on the fix
 
@@ -189,23 +252,33 @@ title (30 pt), channel (`.caption`, 25 pt on tvOS), the technical summary
 busy channel) and the airing line; five text-only buttons top-right in
 `TVReadableButtonStyle(prominent: false)` with `.focusEffectDisabled()`
 (2346–2371) — app-palette plates (`surfaceHi` / `onBg`, so in a light
-appearance they are white plates on video), a 4 pt stroke as the only focus
-cue; and a 4 pt white `ProgressView` with no times (2374–2375). Info opens
-the phone sheet `LiveTvTechnicalDetails` (551–608) unchanged: 9 pt labels
-in a 54 pt column, `.caption` values.
+appearance they are white plates on video) whose focus cue is the style's
+own 4 pt accent stroke, 1.045 lift and glow, on a plate that is otherwise
+the same grey as its neighbours; and a default-height white `ProgressView`
+with no times (2374–2375). Info opens the phone sheet
+`LiveTvTechnicalDetails` (551–612) unchanged: 9 pt labels in a 54 pt
+column, `.caption` values.
 
-**Why the buttons stop being navigable.** The reveal layer
+**Why the buttons stop being navigable — inferred from the source, not yet
+seen on a device.** The reveal layer
 (`Color.clear.contentShape(Rectangle()).focusable(true)`, 2317–2326) exists
 so a hidden overlay still has something focused to receive a press. It is
-full-screen and it stays focusable *while the overlay is visible*. From any
-button, Down (or Left from "Guide") is a shorter focus move to the giant
-layer than to a neighbour, so the engine moves there; its adapter is wired
-with `state: { .fullscreenHidden }`, which routes every direction to
-`.reveal` — the overlay is already visible, so nothing changes and focus
-never leaves the layer. `onChange(of: overlayVisible)` (2464–2466) only
-resets focus when visibility flips, so the trap holds until the 4 s
-auto-hide fires and the layer becomes the legitimate owner. The buttons
-were never unfocusable; they were unreachable.
+full-screen and it stays focusable *while the overlay is visible*. SwiftUI's
+tvOS focus engine picks the nearest focusable frame in the pressed
+direction and does not occlusion-test, so from any button Down, Up, Left
+from "Guide" or Right from "More" is a move onto the giant layer rather
+than to a neighbour; its adapter is wired with `state: { .fullscreenHidden }`
+(2324), which routes every direction to `.reveal` — a no-op when the overlay
+is already visible (2493–2496) — and `onMoveCommand` on the focused layer
+swallows the press (`PlayerRemoteAdapter.swift:80–83`). Every trapped
+press bumps `overlayGeneration`, so the 4 s auto-hide restarts each time;
+the trap ends only after 4 s *without* a press, or with Menu (`.hide`), and
+never by auto-hide while paused (2453–2457). `onChange(of: overlayVisible)`
+(2464–2466) only resets focus when visibility flips. The buttons were never
+unfocusable; they were unreachable. The finite player's equivalent layer
+sits *in front of* its buttons and is inserted only when the chrome is
+gone, then focused (`PlayerView.swift:741–745`, 1264) — that insert-then-
+focus order is the pattern to copy.
 
 ### 5.2 The new surface, controls revealed
 
@@ -230,11 +303,16 @@ brand's "playback is always midnight" rule and what the finite player does.
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
+Colour names below are the brand kit's (`ink` `#ededef` · `dim` `#9a9aa3`
+· `faint` `#5c5c66` · `raised` `#16161b` · accent `#e5484d`); the Swift
+side spells the first four `Palette.onBg` / `.muted` / a new
+`Palette.faint` / `.surfaceHi`, or literal values on player chrome.
+
 | Element | Content and source | Type (tvOS pt) |
 |---|---|---|
 | Top-left status | `LIVE` (accent dot, glows while live; dims to `faint` when paused) · behind-live seconds from `seekableTimeRanges.end − currentTime` | mono 20, chips 40 pt |
-| Top-right telemetry | signal bars + `strengthPercent` / `qualityPercent` from `LiveTvStatus.signal` · delivery method from `LiveTvDelivery.videoAction`/`output` · audio from `audioAction`/`audioCodec`/`audioChannels` · clock | mono 20 · clock 24 |
-| Logo tile | 112 pt, `raised` with scanlines; `guideNumber` in mono 40, or the guide channel `imageUrl` when it exists | mono 40/700 |
+| Top-right telemetry | signal bars + `strengthPercent` / `qualityPercent` from `LiveTvStatus.signal` · delivery method from `LiveTvDelivery.videoAction` and `.output.height`/`.videoCodec` · audio from `audioAction` and `.output.audioCodec`/`.audioChannels` · clock | mono 20 · clock 24 |
+| Logo tile | 112 pt, `raised` with scanlines; `guideNumber` in mono 40, or `LiveTvGuideChannel.imageUrl` (via `live.guide?.channels`, matched on `id`) when it exists | mono 40/700 |
 | Eyebrow | `guideNumber · guideName · HD/SD` (`pictureClass`) | mono 22 |
 | Title | `airing.now.title`, else `live.title` | 46/600, one line |
 | Sub | `episode · episodeTitle · synopsis`, one line, ellipsis | 24 dim |
@@ -252,9 +330,13 @@ button would have nothing to call.
 
 ### 5.3 Focus, and the end of the trap
 
-- The reveal layer is `.focusable(!overlayVisible)`. While the overlay is
-  showing there is exactly one focus region, the button row, wrapped in a
-  `.focusSection()` so the engine keeps directions inside it.
+- The reveal layer is `.focusable(!overlayVisible)` — flipped in the same
+  transaction as the focus move, in the finite player's insert-then-focus
+  order. While the overlay is showing, the button row is the only focusable
+  thing on the cover, which is what keeps directions inside it; a
+  `.focusSection()` on the row only makes the row's whole frame a target for
+  moves *into* it, so it is a convenience for the reveal → row hop, not the
+  confinement.
 - Default focus on reveal is **Pause** (`.play`), not Guide — it is the
   button a viewer reaches for on a playback surface.
 - Belt and braces: `onChange(of: focusedControl)` — if focus is `.reveal`
@@ -311,7 +393,7 @@ Files: `crates/plurxd/src/live_tv.rs` only (§3.1). Acceptance:
 ```bash
 cargo test -p plurxd live_hls -- --nocapture          # the re-pinned argument tests
 cargo test -p plurxd inventory                        # 12-segment window, 2-segment deletion lag
-scripts/live-tv-hardware --self-host --device <ipv4>  # "real segment duration" reads 2.0 s; startup latency +≈2 s
+scripts/live-tv-hardware --self-host --device <ipv4>  # "real segment duration" reads 2.0 s; startup latency ≈ 12 s on ATSC 3.0, inside the relay's 20 s
 ```
 
 Plus the measurement that matters and that only a device can give: on the
@@ -322,9 +404,9 @@ Apple TV, start a channel and confirm no stall in the first 30 s
 
 Files: `clients/apple/Sources/LiveTvView.swift` (`fullscreenSurface`, the
 Info sheet call site, `LiveTvTechnicalDetails` gets a tvOS body),
-`clients/apple/Sources/LiveTv.swift` (a `LiveTvPlayerController` publisher
-for `waiting` from `timeControlStatus`, and `behindLive`/`buffered`
-from the item), `clients/apple/Tests/LiveTvTests.swift`. The phone surface
+`LiveTvPlayerController` (top of `LiveTvView.swift`; a publisher for
+`waiting` from `timeControlStatus`, and `behindLive`/`buffered` from the
+item), `clients/apple/Tests/LiveTvTests.swift`. The phone surface
 is untouched. Acceptance: `xcodebuild test` on the tvOS destination; a
 1080p simulator screenshot of each of the four states beside its render;
 and on the physical Apple TV, Down from every button reaches a button.
@@ -333,9 +415,12 @@ and on the physical Apple TV, Down from every button reaches a button.
 
 Paste to a session with the hardware after both PRs merge:
 
-> On the Apple TV (plurx build ≥ the one carrying PR "Live TV: 2 s segments"
-> and PR "tvOS Live TV fullscreen surface"): open Live TV, start channel
-> 7.1 (or any ATSC 1.0 channel), and time from Select to first frame with a
+> First, on today's build, so there is a before: open Live TV on the Apple
+> TV, start any ATSC 1.0 channel, stay on the inline preview for 30 s and
+> say whether it freezes and roughly when; then start it again, go
+> fullscreen immediately, and say the same. Then on the build carrying PR
+> "Live TV: 2 s segments" and PR "tvOS Live TV fullscreen surface": open
+> Live TV, start the same channel, time from Select to first frame with a
 > stopwatch; then watch 30 s and note any freeze. Open Info and read the
 > PLAYER rows — report "behind live", "buffered", and "stalls". Then press
 > Menu to hide the overlay, press Select to reveal it, and from each of the
