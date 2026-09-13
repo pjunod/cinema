@@ -1810,3 +1810,20 @@ source = "clients/apple/project.yml"
 source_anchor = "CURRENT_PROJECT_VERSION: \"153\""
 test = "tests/operations/test_apple_build_claims.py"
 test_anchor = "def test_a_generated_next_build_satisfies_the_document_claim_sweep"
+
+[[fixes]]
+# The first Android compile this branch has ever had found exactly one error,
+# and it was a real one: `add(id)` inside `putJsonArray` takes a `JsonElement`,
+# not a `String`, so `reorderRules` — the admin call that decides which rule
+# gets a tuner when two want one — could not compile. Nothing caught it because
+# no Kotlin on this branch had been compiled until the fast lane ran it.
+#
+# The body is now built by a pure `dvrReorderBody`, so the shape is asserted
+# without a socket: the ids are JSON strings, and they keep the order the
+# caller gave, because the order is the entire request.
+id = "android.dvr-reorder-body-carries-json-strings"
+commits = ["775db1a4"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/DvrApi.kt"
+source_anchor = "internal fun dvrReorderBody(ids: List<String>): JsonObject ="
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/DvrUiTest.kt"
+test_anchor = "theReorderBodyCarriesTheIdsAsJsonStringsInOrder"
