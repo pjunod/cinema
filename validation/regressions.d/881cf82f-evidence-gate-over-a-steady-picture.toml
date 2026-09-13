@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["881cf82f"]
+points = ["playback.pipeline", "web.experience"]
+checks = ["web-static"]
+reason = "Every evidence retirement was gated on the run of presentation having begun at or after the fault was raised. That is right for `presenting_after_raise` and wrong for plain `presenting`: Safari fires `waiting` at every fMP4 boundary on healthy 4K, so a `media_waiting` raised over a picture that never stopped presenting had no sample that could ever postdate it, and the spinner stayed up for the rest of the film. The change has two halves and each has its own pin. The reducer half is the retained fixture case `buffering_retired_by_unbroken_presentation`, which raises `media_waiting` over a picture presenting since before the raise and requires the surface to be none at the raise and at the next tick; it fails on the old reducer, which is what makes it evidence rather than description. The table half is the `hold` class moving to `presenting_after_raise`, so a server hold over a picture that was already there still expires on its timer instead of on that picture, and `the shipped policy carries the fixture verbatim` requires the `SURFACE_CLASSES` embedded in playback-policy.js to be the fixture's classes exactly, while `every retirement reason a class names is reachable, and none is invented` refuses a class that retires on a reason the reducer does not implement. Both run in the embedded-JavaScript gate against the shipped reducer."

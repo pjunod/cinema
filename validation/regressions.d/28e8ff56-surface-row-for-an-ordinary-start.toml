@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["28e8ff56"]
+points = ["playback.pipeline", "web.experience"]
+checks = ["web-static"]
+reason = "The source table produced `preparing` from one row, `create_503_not_yet`, which is a server refusal, so an ordinary staged start had no row of its own and would have had to borrow `owner_recovery_step` and tell the ledger a cold start was a recovery. The retained fixture case `client_preparing_is_the_staged_start` requires a `client_preparing` raise at a start to draw the `preparing` class and to retire on the first presenting sample, and `the shipped policy carries the fixture verbatim` requires the `SURFACE_SOURCES` embedded in playback-policy.js to be the fixture's rows in the fixture's order, so deleting the row from either side turns one of the two red. `every source row is exercised by at least one case` keeps the row from being added back without a case, and the first-match order the new row sits in is what `every class is reachable from at least one source` reads. All of it runs in the embedded-JavaScript gate against the shipped reducer."

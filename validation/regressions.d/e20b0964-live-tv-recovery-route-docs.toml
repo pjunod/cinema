@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["e20b0964"]
+reason = "Documentation only: three public rows and one internal row in docs/API.md with the route count they imply, and a status page for the lane. No runtime behaviour. The rows themselves are enforced by tests/operations/test_api_doc_routes.py, which fails if a registered route has no row or the claimed count rots, and the status page by tests/operations/test_docs_index.py."
+ignore = true

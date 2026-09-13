@@ -1343,3 +1343,116 @@ source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvLease.kt"
 source_anchor = "fun isIngressDecidedRefusal"
 test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvStartCasesTest.kt"
 test_anchor = "anIngressCodeAtFiveHundredIsNotAnIngressDecision"
+
+[[fixes]]
+# `PlurxAPI.check` decoded `{code, message}` for 409 and nothing else, so every
+# other explained refusal reached the viewer as "Server returned 503" - the
+# three the server documents as retry and the four that are permanent verdicts
+# about the source alike. The playback surface classifies on the server's code,
+# so the code has to survive the throw. The decision is pinned at `check`
+# itself, which is where the status is read and where the two deliberate
+# exceptions live: 401 and 403 short-circuit before the body is read at all, so
+# `AppModel.isSessionExpired` keeps matching on the status, and 409 still throws
+# `.conflict` for the matchers that predate the split. The test walks 409, a
+# typed 503, a 410 carrying `film_position_ms`, and a bodiless 503, and requires
+# each to keep the shape named here.
+id = "apple.refusal-bodies-survive-the-throw"
+commits = ["b7318b0e"]
+source = "clients/apple/Sources/PlurxAPI.swift"
+source_anchor = "static func check(_ resp: URLResponse, data: Data? = nil) throws"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testRefusalBodiesAreKeptWithoutDisturbingTheMatchersThatPredateThem"
+
+[[fixes]]
+# M2 deleted `failed`, `playbackError`, `playbackFailureTitle` and
+# `playbackNotice` and put one published surface in their place. The site pinned
+# here is the one whose old behaviour a viewer could see: with the compatibility
+# ladder spent, `handleBlackFrameDecodeFailure` used to do nothing at all,
+# leaving audio playing over a black picture with no surface on it. It stops the
+# player and raises `black_frame_ladder_spent` now, and the actions are left to
+# the source row rather than copied here. The test requires the stop to precede
+# the raise and the fault to arrive with the row's Close and Try again; a raise
+# without the stop is refused by the presenter, so losing the pause is a
+# blocking surface that draws nothing.
+id = "apple.black-frame-ladder-stops-then-raises"
+commits = ["01576805"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "source: \"black_frame_ladder_spent\","
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testTheBlackFrameLadderStopsThePlayerBeforeItRaises"
+
+[[fixes]]
+# The review of the Apple milestone: a 401 or 403 during a pending change drew
+# NOTHING. The raise passed `playerStopped: false` while the adapter classified
+# it into a `stopped`-class row, so the presenter refused it and the viewer got
+# a frozen picture with no banner, no prompt and no way to sign in. `fail()`
+# tests the status before it tests the context now, matching the source table's
+# first-match order, and stops the player before it raises. The call site is
+# pinned rather than the adapter, so moving the decision into a helper cannot
+# quietly leave the stop behind. The same commit ports the three upstream
+# reducer and table fixes to the Swift presenter and repairs a test that read a
+# deleted enum case and stopped the whole target building.
+id = "apple.auth-refusal-beats-context-and-takes-the-stop"
+commits = ["96f7a3ca"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "raiseOwnerFault(source: \"auth_401_403\", error: error, title: title, detail: detail)"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testACredentialRefusalDuringAPendingChangeIsATerminalWithSignIn"
+
+[[fixes]]
+# The Android recovery owner's evidence rule: presentation is the client's own
+# proof - the film clock advancing on the current generation, in the foreground,
+# with playback requested - and a Media3 state flag is not proof of anything.
+# `onIsPlayingChanged` is fed in as INERT for exactly that reason, and the test
+# requires a real clock advance after a stop to log a surface disagreement while
+# `onIsPlayingChanged` alone logs none. Feeding the flag as evidence instead
+# would retire faults over a picture that is not moving, which is the shape of
+# the defect the whole surface contract exists to stop.
+id = "android.a-state-flag-is-not-presentation-evidence"
+commits = ["e288d637"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "surfaceOwner.inert(\"isPlayingChanged\")"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackSurfaceOwnerTest.kt"
+test_anchor = "anIsPlayingChangedAloneIsNotADisagreement"
+
+[[fixes]]
+# The surface review found a SECOND `PlaybackFailed` call site: the plan-load
+# failure path, before any `Controller` exists, still called the deleted
+# `(message, onRetry, onExit)` signature, so the module did not compile and no
+# JVM test in it ran at all. It builds the contract's `stopped` terminal now -
+# Retry and Back, `attached = 0`, `player_stopped = true`, because there is no
+# player to stop and no generation for the fault to be about - through the
+# presenter's own factory, which is also what keeps the fence's "fault
+# constructed" arm quiet on this file. The test named here is the module's
+# surface contract runner: it is what goes red when this call site does not
+# compile, which is precisely the failure this finding was. The commit's other
+# half - `prepareViewerRetry` restoring the viewer's transport intent after the
+# owner's stop cleared it, and the banner preferring the fault's title to its
+# sentence - has no test of its own and is held by the source alone.
+id = "android.plan-load-failure-is-the-contracts-terminal"
+commits = ["316d12e7"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"
+source_anchor = "fault = preplayerStoppedFault(\"Couldn't start playback.\"),"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackSurfaceReducerTest.kt"
+test_anchor = "everyFixtureCaseRuns"
+
+[[fixes]]
+# The second review's blocker. The contract's Android row for a control-plane
+# terminal verdict said "no stop, no fault; the wording is consumed by the later
+# `stopped`", and there is no later `stopped`: the branch returns before the
+# open-stall tracker is reset, so it stays latched on a playhead that will never
+# move; `playWhenReady` is still true so the tracker's own escape never fires;
+# the target-presentation deadline needs a pending seek a mid-film stall does not
+# have; and no player error ever arrives, because ExoPlayer is buffering rather
+# than failing. Followed literally the row produced a frozen picture with no
+# surface at all. The owner stops the player and raises `owner_stopped` in the
+# server's words, and the row is amended with the reasoning. Each blocking site
+# now owns its own stop so that deleting one fails exactly one test; this is that
+# site's. The same commit carries the review's seven should-fixes and the port of
+# three upstream reducer changes, each with its own case in the shared fixture.
+id = "android.terminal-verdict-stops-and-says-so"
+commits = ["351b204b"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "surfaceOwner.stoppedAfterControlVerdict("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackSurfaceOwnerTest.kt"
+test_anchor = "theControlPlaneTerminalVerdictStopsBeforeItRaises"
