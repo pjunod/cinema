@@ -3551,6 +3551,14 @@ asyncTest("a burn session-open refusal reaches the surface as a refused change",
       // does not throw.
       CAPS_DOCUMENT_PRELUDE,
       shippedSource("openSession"),
+      // M5: both branches of a pending change go through the retry wrapper,
+      // which in the `change` context is a passthrough. Slicing it here is
+      // what proves that — a 501 during a change must still be one create and
+      // one `change_failed`.
+      "function releaseSession(){}",
+      shippedSource("playbackRetryDelay"),
+      shippedSource("playbackCreateRetryContext"),
+      shippedSource("openSessionRetryingNotYet"),
       shippedSource("currentStreamFailureOverlay"),
       shippedSource("playbackSurfaceSourceIsBlocking"),
       shippedSource("showSessionOpenFailure"),
@@ -5207,14 +5215,27 @@ test("the hls.js retry budget is one per attach, and `BEHIND_LIVE_WINDOW` is fin
     /errorCode == ERROR_CODE_BEHIND_LIVE_WINDOW && !live && used < 1/,
     "Android's finite-timeline rule must stay finite-only and once-per-attach",
   );
-  assert.ok(
-    androidController.includes("player.prepare()"),
-    "the recovery prepares again after its seek",
+  // Anchored inside the branch: `player.prepare()` appears at eight other
+  // sites in that file, so asserting the bare call pinned nothing. What has to
+  // be true is that the owner hands the recovery a seek target on the PLAYER's
+  // timeline and the player's own seek and prepare, and re-arms the budget
+  // wherever an item takes the screen.
+  assert.match(
+    androidController,
+    /seekTargetMs = \{ playerTimelinePositionMs\(filmPositionMs\) \},\s*\n\s*seekTo = \{ target -> player\.seekTo\(target\) \},\s*\n\s*prepare = \{ player\.prepare\(\) \},/,
+    "the recovery seeks on the player's timeline and prepares again",
+  );
+  assert.equal(
+    (androidController.match(/behindLiveWindow\.attached\(\)/g) || []).length,
+    2,
+    "the per-attach budget is re-armed at BOTH attach sites: `attachRecipe` and "
+      + "`commitPreparedReplacement`, which swaps in a second ExoPlayer without "
+      + "coming near the first",
   );
   assert.match(
     androidController,
-    /\n {12}if \(behindLiveWindowRecovers\(/,
-    "the Android owner must ask the shared rule, and nothing may gate it",
+    /\n {12}if \(behindLiveWindow\.recover\(/,
+    "the Android owner must ask the shared recovery, and nothing may gate it",
   );
   // A CALL, not a mention: the owner's comment explains why it does not reach
   // for Media3's recovery, and a fence that banned the word would ban the

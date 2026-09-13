@@ -9823,7 +9823,13 @@ async function executePlaybackMediaChange(p,change){
     title:"Preparing the stream…",detail:"your place and selections are saved"});
   try{
     if(method==='transcode'){
-      const info=await preparation.run(signal=>openSession(p.fileId,opts,signal),
+      // The same door as the copy-HLS branch below. In a pending change this
+      // wrapper is a passthrough — `playbackCreateRetryContext()` answers
+      // `change`, row 7 beats row 6 and nothing is retried — and that is the
+      // point: which context a create is in is decided in ONE place, not by
+      // which branch of this function happened to call which function.
+      const info=await preparation.run(
+        signal=>openSessionRetryingNotYet(p.fileId,opts,signal,{}),
         late=>releaseSession(late&&late.session_id));
       if(!live()){ releaseSession(info&&info.session_id); return false; }
       retirePlaybackPredecessor(p);
@@ -9918,11 +9924,17 @@ async function startCopyHls(v, startSec, live, openAttempt, preparation, beforeA
       answeredLocally:failure=>PlaybackPolicy.indexPendingFallback({
         code:failure&&failure.code,method:PLAYER&&PLAYER.method,nativeHls:native
       })==="progressive_remux"};
-    info=preparation
-      ?await preparation.run(
-        signal=>openSessionRetryingNotYet(fileId,options,signal,retry),
-        late=>releaseSession(late&&late.session_id))
-      :await openSessionRetryingNotYet(fileId,options,null,retry);
+    // Both shipped call sites pass a preparation owner, and this is the only
+    // thing that bounds and CANCELS an open — a create with no signal cannot
+    // be cancelled by a newer intent at all, and M5's sequence would keep
+    // posting behind one. Refuse it rather than leave the hole for the next
+    // caller to find.
+    if(!preparation) throw Object.assign(
+      new Error("A copy-HLS open needs a preparation owner to bound and cancel it."),
+      {name:"TypeError"});
+    info=await preparation.run(
+      signal=>openSessionRetryingNotYet(fileId,options,signal,retry),
+      late=>releaseSession(late&&late.session_id));
   }catch(error){
     if(live && !live()) return false;
     const fallback=PlaybackPolicy.indexPendingFallback({

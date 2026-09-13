@@ -80,7 +80,7 @@ function fullOpenHarness() {
     "const loading=[],posted=[],ITEM_FOR_FILE={film:'film-item','new-title':'new-item'};function api(path,{body}={}){posted.push({path,body});return Promise.resolve({});}function wirePlayer(){} function setLoading(...args){loading.push(args);} function toast(){} function closeMenu(){} const location={hash:'#/'};function exitPresentationModes(){}function cancelPendingSeek(){}",
     "function clientLog(){} function playbackContext(){return {};} function decodeLimits(){return {};} function playerPixelHeight(){return 1080;}",
     "function askDecision(file,force,selection,signal){return new Promise(resolve=>decisions.push({file,selection:selection&&{...selection},signal,resolve}));}",
-    "function openSession(file,opts,signal){return new Promise(resolve=>sessions.push({file,opts,signal,resolve(info={}){resolve({...info,session_id:info.session_id||'session-'+sessions.length,opts});}}));}",
+    "function openSession(file,opts,signal,requestId){return new Promise((resolve,reject)=>sessions.push({file,opts,signal,requestId,reject,resolve(info={}){resolve({...info,session_id:info.session_id||'session-'+sessions.length,opts});}}));}",
     "function attachSession(v,p,info,pos){p.sessionId=info.session_id;p.offset=0;p.vod=true;media.push({attached:info.opts});markPlaybackControlSeekExecuted(p,pos);return pos;}",
     "function stopPlayerTimers(){} function releaseSession(id){released.push(id);} function teardownHls(){} function clearSubs(){}",
     // M5's create-retry owner is shipped code, so the harness runs it rather
@@ -122,7 +122,7 @@ function fullOpenHarness() {
     shippedSource("retirePlaybackPredecessor"),
     shippedSource("handlePlaybackTransportEvent"),
     shippedSource("beginPlaybackMediaAttachment"), shippedSource("applyPlaybackAttachmentPosition"),
-    shippedSource("attachHls"),
+    shippedSource("scheduleHlsNetworkRetry"), shippedSource("attachHls"),
     shippedSource("resetMediaSource"), shippedSource("play"), shippedSource("setQuality"),
     shippedSource("seekTo"), shippedSource("switchAudio"), shippedSource("setSub"),shippedSource("burnSub"),
     shippedSource("offsetLabel"), shippedSource("setSync"), shippedSource("togglePlay"),
@@ -138,7 +138,7 @@ function fullOpenHarness() {
       shippedSource('wirePlayerMedia').match(/v\.addEventListener\("waiting",\(\)=>\{[\s\S]*?\n  \}\);/)[0]+"handler();}",
     "function incumbentError(){let handler;const v=Object.create(video);v.addEventListener=(_,fn)=>{handler=fn;};"+
       shippedSource('wirePlayerMedia').match(/v\.addEventListener\("error",\(\)=>\{[\s\S]*?\n  \}\);/)[0]+"handler();}",
-    "return {attach(p){PLAYER=p;},setOpen(value){modalOpen=value;},isOpen:()=>modalOpen,node,current:()=>PLAYER,decisions,sessions,released,media,loading,requestIds,surface:surfacePainted,stops:()=>surfaceStops.length,posted,video,play,setQuality,seekTo,switchAudio,setSub,setSync,togglePlay,retryPlayback,closePlayer,incumbentError,incumbentWaiting,checkMarkers,skipCurrent,skipMarker,ttff,pbTick,reportProgress,attachHls:()=>attachHls(video,'/A/index.m3u8',10),hlsInstances,settle:()=>settlePlaybackControlSeek(video,PLAYER,video.currentTime,100),playing:()=>handlePlaybackPlaying(video,PLAYER),startTranscodeFallback,switchAutoRung,resetMediaSource,applyPlaybackTransportIntent,handlePlaybackTransportEvent,advance(ms){now+=ms;for(const [id,timer] of [...timers])if(timer.at<=now){timers.delete(id);timer.fn();}}};",
+    "return {attach(p){PLAYER=p;},setOpen(value){modalOpen=value;},isOpen:()=>modalOpen,node,current:()=>PLAYER,decisions,sessions,released,media,loading,requestIds,surface:surfacePainted,stops:()=>surfaceStops.length,posted,video,play,setQuality,seekTo,switchAudio,setSub,setSync,togglePlay,retryPlayback,closePlayer,incumbentError,incumbentWaiting,checkMarkers,skipCurrent,skipMarker,ttff,pbTick,reportProgress,attachHls:()=>attachHls(video,'/A/index.m3u8',10),spendHlsRetry:()=>scheduleHlsNetworkRetry(video,PLAYER,'network'),hlsInstances,settle:()=>settlePlaybackControlSeek(video,PLAYER,video.currentTime,100),playing:()=>handlePlaybackPlaying(video,PLAYER),startTranscodeFallback,switchAutoRung,resetMediaSource,applyPlaybackTransportIntent,handlePlaybackTransportEvent,advance(ms){now+=ms;for(const [id,timer] of [...timers])if(timer.at<=now){timers.delete(id);timer.fn();}}};",
   ].join("\n"))(policy);
 }
 
@@ -205,11 +205,18 @@ function deferred() {
   return { promise, resolve };
 }
 
-// Enough microtask turns for the deepest shipped await chain in this file.
-// M5's create-retry owner sits between `startCopyHls` and `openSession` — a
-// race against its own deadline around an async sequence — so a two-turn flush
-// no longer reaches the attachment that follows a resolved create.
 async function flush() {
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
+// M5's create-retry owner sits between `startCopyHls`/`play` and
+// `openSession` — a race against its own deadline around an async sequence —
+// so the await chain past a resolved create is deeper than two microtask
+// turns. Deepening `flush` itself would change the timing every other case in
+// this file runs at for the sake of one section, which is how a suite stops
+// pinning what it used to; this is local to the section that needs it.
+async function flushDeep() {
   for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
 }
 
@@ -967,7 +974,10 @@ async function main() {
     h.sessions[0].resolve({session_id:'obsolete'});await opening;await flush();
     assert.deepEqual(h.released,['obsolete']);
     assert.equal(h.media.filter(x=>x.attached).length,0,'stale success cannot attach');
-    h.sessions[1].resolve({session_id:'current'});await flush();await flush();
+    // M5 put the retry wrapper between this create and its attachment, on both
+    // branches of a pending change, so the chain past a resolved create is
+    // deeper than two microtask turns.
+    h.sessions[1].resolve({session_id:'current'});await flushDeep();
     assert.equal(p.pendingMediaChange,null);
     assert.equal(p.controlSeek.targetMs,120_000);
     assert.equal(p.controlSeek.executed,true);
@@ -4314,6 +4324,7 @@ async function main() {
       shippedSource("playbackCreateRetryContext"),
       shippedSource("openSessionRetryingNotYet"),
       "return {posts,released,raised,stops,logs,answers,now:()=>now,player:()=>PLAYER,",
+      "  setPlayer(p){PLAYER=p;},context:()=>playbackCreateRetryContext(),",
       "  open(signal,options){return openSessionRetryingNotYet(7,{start:0},signal,options);},",
       "  settle(index,info){const answer=answers[index];if(answer&&answer.settle)answer.settle(info);},",
       "  advance(ms){now+=ms;for(const [id,timer] of [...timers])if(timer.at<=now){timers.delete(id);timer.fn();}}};",
@@ -4337,12 +4348,12 @@ async function main() {
     const opening = h.open(null, { context: "start" });
     let settled = null;
     opening.then((value) => { settled = { value }; }, (error) => { settled = { error }; });
-    await flush();
+    await flushDeep();
     assert.equal(h.posts.length, 1, "the first attempt is immediate");
     for (const [delay, attempts] of [[1000, 2], [2000, 3], [4000, 4]]) {
-      h.advance(delay - 1); await flush();
+      h.advance(delay - 1); await flushDeep();
       assert.equal(h.posts.length, attempts - 1, `nothing is re-posted before ${delay}ms`);
-      h.advance(1); await flush();
+      h.advance(1); await flushDeep();
       assert.equal(h.posts.length, attempts, `the ladder's next rung fires at ${delay}ms`);
     }
     assert.deepEqual(
@@ -4352,7 +4363,7 @@ async function main() {
     );
     assert.deepEqual(h.posts.map((post) => post.at), [0, 1000, 3000, 7000],
       "1 s · 2 s · 4 s, and the backoff does not restart");
-    await flush();
+    await flushDeep();
     assert.equal(h.raised.filter((entry) => entry.source === "create_503_not_yet").length, 1,
       "one `preparing` fault for the sequence, not one per attempt");
     assert.equal(h.stops.length, 1, "the owner stops the player before it raises the prompt");
@@ -4374,17 +4385,17 @@ async function main() {
     const opening = h.open(null, { context: "start" });
     let settled = null;
     opening.then((value) => { settled = { value }; }, (error) => { settled = { error }; });
-    await flush();
-    h.advance(59_999); await flush();
+    await flushDeep();
+    h.advance(59_999); await flushDeep();
     assert.equal(h.stops.length, 0, "nothing is raised one millisecond early");
-    h.advance(1); await flush();
+    h.advance(1); await flushDeep();
     assert.equal(h.stops.length, 1, "the deadline fires on the clock, not between attempts");
     assert.equal(h.raised.filter((entry) => entry.source === "owner_exhausted").length, 1);
     assert.ok(settled && settled.error);
     assert.equal(settled.error.createRetryReason, "deadline");
     // …and the create that finally lands is RELEASED, never attached.
     h.settle(0, { session_id: "late-session" });
-    await flush();
+    await flushDeep();
     assert.deepEqual(h.released, ["late-session"], "a late success is released, not attached");
     assert.equal(h.raised.filter((entry) => entry.source === "owner_exhausted").length, 1,
       "releasing the late session does not raise a second prompt");
@@ -4399,13 +4410,13 @@ async function main() {
     const opening = h.open(controller.signal, { context: "start" });
     let settled = null;
     opening.then((value) => { settled = { value }; }, (error) => { settled = { error }; });
-    await flush();
+    await flushDeep();
     assert.equal(h.posts.length, 1);
     controller.abort();
-    await flush();
+    await flushDeep();
     assert.ok(settled && settled.error, "the sequence ends when its intent does");
     assert.equal(settled.error.name, "AbortError");
-    h.advance(120_000); await flush();
+    h.advance(120_000); await flushDeep();
     assert.equal(h.posts.length, 1, "a cancelled sequence never posts again");
     assert.equal(h.stops.length, 0, "a cancelled sequence is not an exhausted one");
     assert.equal(h.raised.filter((entry) => entry.source === "owner_exhausted").length, 0);
@@ -4418,8 +4429,8 @@ async function main() {
       streamFailure: { status: 410, code: "media_owner_lost", message: "the node is gone", position_ms: 90_000 } }) });
     let settled = null;
     h.open(null, { context: "start" }).then((value) => { settled = { value }; }, (error) => { settled = { error }; });
-    await flush();
-    h.advance(120_000); await flush();
+    await flushDeep();
+    h.advance(120_000); await flushDeep();
     assert.equal(h.posts.length, 1, "only a `create_503_not_yet` answer is retried");
     assert.equal(settled.error.status, 410);
     assert.equal(settled.error.surfaceRaised, undefined, "the caller still owns this failure");
@@ -4431,8 +4442,8 @@ async function main() {
     h.answers.push({ error: refusal503("startup_timeout") });
     let settled = null;
     h.open(null, { context: "change" }).then((value) => { settled = { value }; }, (error) => { settled = { error }; });
-    await flush();
-    h.advance(120_000); await flush();
+    await flushDeep();
+    h.advance(120_000); await flushDeep();
     assert.equal(h.posts.length, 1, "the change context is not retried");
     assert.equal(h.stops.length, 0);
     assert.ok(settled.error);
@@ -4445,8 +4456,8 @@ async function main() {
     h.open(null, { context: "start",
       answeredLocally: (failure) => failure.code === "vod_index_pending" })
       .then((value) => { settled = { value }; }, (error) => { settled = { error }; });
-    await flush();
-    h.advance(120_000); await flush();
+    await flushDeep();
+    h.advance(120_000); await flushDeep();
     assert.equal(h.posts.length, 1, "a locally answered refusal is not retried");
     assert.equal(settled.error.code, "vod_index_pending");
   }
@@ -4457,13 +4468,13 @@ async function main() {
     h.answers.push({ error: refusal503("startup_timeout") }, { error: null });
     let settled = null;
     h.open(null, { context: "start" }).then((value) => { settled = { value }; }, (error) => { settled = { error }; });
-    await flush();
-    h.advance(1000); await flush();
+    await flushDeep();
+    h.advance(1000); await flushDeep();
     assert.equal(h.posts.length, 2);
     assert.equal(settled.value.session_id, "session-2");
     assert.deepEqual(h.released, []);
     assert.equal(h.stops.length, 0, "a sequence that worked never stopped the player");
-    h.advance(120_000); await flush();
+    h.advance(120_000); await flushDeep();
     assert.equal(h.raised.filter((entry) => entry.source === "owner_exhausted").length, 0,
       "the deadline watchdog is disarmed when the sequence settles");
   }
@@ -4524,6 +4535,91 @@ async function main() {
     h.replaceInstance();
     h.advance(2000);
     assert.deepEqual(h.loads, [], "the reload belongs to the instance that failed");
+  }
+
+  {
+    // The row 6 / row 7 boundary, computed by the SHIPPED function rather than
+    // supplied by every case. Answer "start" over an attached predecessor and a
+    // create refusal gets four retries and then `stopPlayerForExhaustion()` on
+    // a stream the viewer is watching.
+    const h = createRetryHarness();
+    assert.equal(h.context(), "start", "a cold start has nothing behind it");
+    h.setPlayer({ attemptId: "a1", started: true });
+    assert.equal(h.context(), "change", "an attached predecessor makes this a refused change");
+    h.setPlayer({ attemptId: "a2", started: false, mediaPredecessor: { started: true } });
+    assert.equal(h.context(), "change", "…and the PREDECESSOR answers, not the incoming player");
+    h.setPlayer({ attemptId: "a3", started: false, mediaPredecessor: { started: false } });
+    assert.equal(h.context(), "start");
+    // …and the sequence uses it when no context is supplied: a refused change
+    // is not retried, and nobody is stopped.
+    h.setPlayer({ attemptId: "a4", started: true });
+    h.answers.push({ error: refusal503("startup_timeout") });
+    let settled = null;
+    h.open(null, {}).then((value) => { settled = { value }; }, (error) => { settled = { error }; });
+    await flushDeep();
+    h.advance(120_000);
+    await flushDeep();
+    assert.equal(h.posts.length, 1, "a create over an attached predecessor is not retried");
+    assert.equal(h.stops.length, 0, "and the predecessor is never stopped");
+    assert.ok(settled && settled.error);
+  }
+  {
+    // The line that makes the hls.js budget per ATTACH, exercised through the
+    // SHIPPED `attachHls` rather than a hand-made PLAYER.
+    const h = fullOpenHarness();
+    const p = fullPlayer();
+    h.attach(p);
+    h.attachHls();
+    assert.equal(p.hlsRetryUsed, 0, "an attach arrives with a fresh budget");
+    assert.equal(h.spendHlsRetry(), true);
+    assert.equal(p.hlsRetryUsed, 1);
+    assert.equal(h.spendHlsRetry(), false, "one retry per attach");
+    h.attachHls();
+    assert.equal(p.hlsRetryUsed, 0, "the shipped attach restores the budget");
+    assert.equal(h.spendHlsRetry(), true, "…and the new attach gets its own single retry");
+  }
+  {
+    // `failPreparation` must not raise over a fault the create-retry owner has
+    // already raised: without its `surfaceRaised` guard an `owner_stopped`
+    // lands on top of the owner's `exhausted` prompt and tells the viewer a
+    // different story about the same failure.
+    const notYet = () => Object.assign(new Error("still building"), {
+      status: 503, code: "startup_timeout",
+      streamFailure: { status: 503, code: "startup_timeout", message: "the transcoder is still starting", position_ms: null },
+    });
+    // A COLD start: the ladder is the `start` context and nothing else, so
+    // there is deliberately no predecessor attached here.
+    const h = fullOpenHarness();
+    const opening = h.play("cold", "Cold film", 0, 600_000, null);
+    await flushDeep();
+    h.decisions[0].resolve({ method: "transcode", source: { video_codec: "h264" }, audio: [{ index: 0, default: true }], subtitles: [], ladder: [] });
+    await flushDeep();
+    assert.equal(h.sessions.length, 1, "the transcode create is issued");
+    h.sessions[0].reject(notYet());
+    for (const delay of [1_000, 2_000, 4_000]) {
+      await flushDeep();
+      h.advance(delay);
+      await flushDeep();
+      h.sessions[h.sessions.length - 1].reject(notYet());
+    }
+    await flushDeep();
+    await opening;
+    assert.equal(h.sessions.length, 4, "the shipped ladder is 1 s · 2 s · 4 s through play()");
+    const identities = new Set(h.sessions.map((session) => session.requestId));
+    assert.equal(identities.size, 1, "every attempt replays ONE request identity");
+    assert.ok([...identities][0], "…and it is a real identity, not undefined");
+    const raised = h.surface();
+    assert.deepEqual(
+      raised.filter((entry) => entry.source === "owner_exhausted").length,
+      1,
+      "the owner raises its prompt exactly once",
+    );
+    assert.deepEqual(
+      raised.filter((entry) => entry.source === "owner_stopped"),
+      [],
+      "`failPreparation` must not stack `owner_stopped` on the owner's prompt",
+    );
+    assert.equal(h.stops(), 1, "and the player was stopped before it was raised");
   }
 
   process.stdout.write("PASS the M5 recovery additions: create retry, hls retry, shared budget\n");
