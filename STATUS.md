@@ -4,6 +4,83 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## Live TV start, stall, and tvOS surface is being promoted to main
+
+**[#301](http://192.168.4.7:3000/noirr/plurx/pulls/301), from
+`effort/live-tv-start-stall` into `main`; final adversarial findings are folded
+and the candidate is being re-qualified after merging current `main`.** The server, Android, and Apple task
+PRs are merged into the effort and their focused automated evidence is green.
+Paul explicitly directed promotion without waiting for the HDHomeRun, Apple TV,
+Android-phone, and web physical results. Those results and the authenticated
+tvOS simulator screenshots remain unclaimed; the exact hand-off prompts stay
+in the task PR bodies. The promotion adds no feature gate and does not edit the
+forbidden input-routing, remote-adapter, fixture, wire-shape, or timeout seams.
+
+## Apple Live TV now distinguishes a stall and owns its fullscreen surface
+
+**[#300](http://192.168.4.7:3000/noirr/plurx/pulls/300), from
+`codex/live-tv-start-stall-apple` into `effort/live-tv-start-stall`;
+implementation complete, adversarial review and focused qualification green,
+physical evidence pending.** Apple build 153 publishes a debounced
+stall-only waiting state, truthful behind-the-edge and buffered measurements,
+and fullscreen-owned status copy. The tvOS fullscreen surface is now the
+reviewed telemetry strip, programme band, waiting tile, paused state, and
+five-action focus row; its reveal layer cannot take focus while controls or the
+guide are present. Info is a fixed two-column snapshot ledger with programme,
+channel, delivery, signal, and summed AVPlayer access-log facts. The iPhone
+surface, Live TV input routing, remote adapter, playback-surface fixture, wire
+shapes, timeouts, and feature-gate state are unchanged. The exact Apple TV,
+HDHomeRun, phone, and web physical prompt is in the PR body; that evidence
+remains pending, and Paul later explicitly directed promotion without it as
+recorded above. The review's three findings
+are closed: Info dismissal yields focus back to Pause, the corrective
+fullscreen commit has its durable source-to-test anchor, and the iOS fullscreen
+branch is restored unchanged. `make apple-build` compiled both schemes and
+the nine named tvOS tests executed on the Apple TV 4K simulator with nine
+passes, zero failures, and zero skips. `make history-check` names only the
+known corrective commits already red on this fixed `main`; this PR's
+corrective fullscreen commit is anchored and absent from that report.
+
+## Android now lets each HLS playlist choose its live hold-back
+
+**PR #299, from `codex/live-tv-start-stall-android` into
+`effort/live-tv-start-stall`; implementation complete, review and
+focused qualification green.** The Android
+player no longer imposes an absolute four-second target offset on every live
+playlist. Media3 now derives the target from the playlist while the existing
+eight-second ceiling remains in force, so a newly published two-segment live
+window starts at its first listed segment. The named JVM regression pins both
+the built configuration and the production call site. The Android-device
+first-minute check remains the physical hand-off and ships with the server
+candidate qualification; no buffer duration, input route, wire shape, phone
+surface, timeout, or feature gate moved.
+The adversarial review's two findings are closed: the test now reads the
+configuration from a built `MediaItem`, and the corrective commit has its
+durable `tests/client-fixes.toml` source-to-test anchor. The exact named JVM
+test passed on the installed Android toolchain; the device evidence is still
+pending.
+
+## Live TV starts are being rebuilt around a stable one-second cadence
+
+**[#298](http://192.168.4.7:3000/noirr/plurx/pulls/298), from
+`codex/live-tv-start-stall-server` into `effort/live-tv-start-stall`;
+implementation complete, physical evidence pending.** The server half now has
+the reviewed 24-entry uniform one-second HLS
+window, a two-listed-segment / two-target-duration publication barrier,
+progress at the newest listed segment, startup counts in its timeout message,
+and a graph probe built by the production command path. The two-node harness
+requires two entries in its first playlist, serves every listed name and rolls
+the full 24-entry window. `scripts/live-tv-hardware` measures first-list and
+answer times, durations, target duration and bitrate; `--copy` selects the real
+HEVC/AC-3 route and `--via` records the non-owner relay outcome under the
+runtime's existing 35 s public deadline. HDHomeRun and client evidence remains
+the physical hand-off. The ten named S1/S2 regressions, all four two-node
+cluster cases, the hardware-script syntax check, and pinned Rust 1.97.1
+check/Clippy/format are green. `make history-check` now reports only the
+pre-existing corrective commits already red on this exact `main`; this lane's
+four corrections have their own `live-tv.integration` evidence mapping. No
+timeout, signed request, route, client input contract, or feature gate moved.
+
 ## plurx records now, and tells you before a programme starts
 
 **[#294](http://192.168.4.7:3000/noirr/plurx/pulls/294), titled `WIP:`.**

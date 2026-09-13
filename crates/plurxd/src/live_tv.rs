@@ -134,27 +134,38 @@ const SOURCE_PREFIX_BYTES: usize = 8 * 1024 * 1024;
 const SOURCE_PREFIX_TIME: Duration = Duration::from_secs(3);
 const SOURCE_PROBE_TIME: Duration = Duration::from_secs(2);
 const MAX_SOURCE_PROBE_JSON_BYTES: usize = 256 * 1024;
-// Publish one short segment so a channel can reach the player promptly, then
-// return to the four-second steady cadence that keeps the six-segment live
-// window resilient. Encoded routes add forced startup keyframes; copy routes
-// wait for real source random-access points.
-const LIVE_HLS_OUTPUT_ARGS: [&str; 10] = [
+/// Uniform one-second segments, for the whole session. The short first
+/// segment `-hls_init_time 1` used to cut is what keeps a start no slower
+/// than the tuner; what it also did was let the cadence grow to 4 s once the
+/// list filled, which left every client -- attached 1 s behind the edge --
+/// waiting a whole segment at each jump. Keeping the cadence at 1 s removes
+/// the jump. Encode routes already force a keyframe every second; copy routes
+/// cut at the broadcast's own keyframes. The window is 24 entries: 24 s on an
+/// encode route and 24 source GOPs on a copy route.
+const LIVE_HLS_OUTPUT_ARGS: [&str; 8] = [
     "-f",
     "hls",
-    "-hls_init_time",
-    "1",
     "-hls_time",
-    "4",
-    "-hls_list_size",
-    "6",
-    "-hls_delete_threshold",
     "1",
+    "-hls_list_size",
+    "24",
+    "-hls_delete_threshold",
+    "4",
 ];
+/// The owner answers a start once the playlist lists this many segments and
+/// this many target durations of media. Both values are enforced against the
+/// playlist, never against the scratch directory's transient files.
+const STARTUP_LISTED_SEGMENTS: usize = 2;
+const STARTUP_LISTED_TARGET_DURATIONS: f64 = 2.0;
+const HLS_DELETE_THRESHOLD: usize = 4;
 pub(crate) const MAX_PLAYLIST_BYTES: u64 = 64 * 1024;
 pub(crate) const MAX_SEGMENT_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_SESSION_BYTES: u64 = MAX_SEGMENT_BYTES;
-const MAX_LISTED_SEGMENTS: usize = 6;
-const MAX_DELETION_LAG_SEGMENTS: usize = 1;
+const MAX_LISTED_SEGMENTS: usize = 24;
+/// hlsenc renames a finished segment before it rewrites the playlist, so for
+/// an instant the scratch holds `threshold + 1` final files that the playlist
+/// does not list. Deletion precedes the rewrite, so it is never `+ 2`.
+const MAX_DELETION_LAG_SEGMENTS: usize = HLS_DELETE_THRESHOLD + 1;
 const PUMP_CHANNEL_CAPACITY: usize = 2;
 const LOCAL_RESOURCE_CHUNK_BYTES: usize = 64 * 1024;
 const LOCAL_RESOURCE_CONCURRENCY: usize = 4;
@@ -1261,6 +1272,7 @@ struct LiveTvSessionState {
     provisional_at: Option<tokio::time::Instant>,
     last_touch: tokio::time::Instant,
     last_progress: tokio::time::Instant,
+    newest_listed: Option<u64>,
     media_sequence: u64,
     publication: Option<ScratchInventory>,
     encoder: String,
@@ -2950,14 +2962,7 @@ impl LiveTvManager {
             );
         }
         drop(scratch_creation);
-        let result = run_graph_probe(
-            &self.system.ffmpeg,
-            encoder,
-            &self.system,
-            height,
-            &probe_dir,
-        )
-        .await;
+        let result = run_graph_probe(encoder, &self.system, height, &probe_dir).await;
         let _ = tokio::fs::remove_dir_all(&probe_dir).await;
         match result {
             Ok(()) => (
@@ -3094,6 +3099,7 @@ impl LiveTvManager {
                 provisional_at: None,
                 last_touch: now,
                 last_progress: now,
+                newest_listed: None,
                 media_sequence: 0,
                 publication: None,
                 encoder: "pending".to_owned(),
@@ -4776,8 +4782,45 @@ impl Drop for LiveTvManager {
 struct ScratchInventory {
     playlist: Vec<u8>,
     media_sequence: u64,
+    /// How many segments the playlist lists, and how much playable media that
+    /// list contains. `segments` includes every final file on disk, including
+    /// deletion lag and rename-before-rewrite transients, and must never be
+    /// used as the publication gate.
+    listed: usize,
+    listed_seconds: f64,
+    target_duration: u64,
     init: Option<(String, u64)>,
     segments: HashMap<u64, (String, u64)>,
+}
+
+impl ScratchInventory {
+    /// The newest sequence number the playlist lists. Unlike
+    /// `media_sequence`, this advances before the 24-entry window is full and
+    /// therefore measures producer progress from the first segment onward.
+    fn newest_listed(&self) -> Option<u64> {
+        self.listed
+            .checked_sub(1)
+            .map(|offset| self.media_sequence + offset as u64)
+    }
+}
+
+fn record_producer_inventory(
+    state: &mut LiveTvSessionState,
+    inventory: ScratchInventory,
+    now: tokio::time::Instant,
+) -> bool {
+    let publishable = startup_publishable(&inventory);
+    let newest = inventory.newest_listed();
+    if newest > state.newest_listed || state.publication.is_none() {
+        state.last_progress = now;
+    }
+    state.newest_listed = newest;
+    state.media_sequence = inventory.media_sequence;
+    // Manifest bytes and their complete current/deletion-lag inventory cross
+    // the lock together. A client can never receive a playlist from one
+    // sample and authorization from another.
+    state.publication = Some(inventory);
+    publishable
 }
 
 async fn wait_for_startup(
@@ -4816,13 +4859,20 @@ async fn wait_for_startup(
         // Registered before the state is read, so a publication between the two
         // cannot be missed.
         let notified = session.changed.notified();
-        if let Some(result) = session
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .startup
-            .clone()
-        {
+        let now = tokio::time::Instant::now();
+        let verdict = {
+            let state = session
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            startup_waiter_verdict(
+                &state,
+                session.started,
+                now + Duration::from_secs(2),
+                session.tuner_bytes.load(Ordering::Acquire),
+            )
+        };
+        if let Some(result) = verdict {
             return result.map(|mut provisional| {
                 if recovered {
                     provisional.outcome = LiveTvStartOutcome::Recovered;
@@ -4830,23 +4880,40 @@ async fn wait_for_startup(
                 provisional
             });
         }
-        let now = tokio::time::Instant::now();
-        // The same decision the producer makes, plus the two seconds that let
-        // the producer's own verdict reach this waiter first -- a caller should
-        // hear why a start failed, not just that it timed out.
-        if let Some(reason) = startup_overdue(
-            session.started,
-            now + Duration::from_secs(2),
-            session.tuner_bytes.load(Ordering::Acquire),
-        ) {
-            return Err(LiveTvError::StartupTimeout(reason));
-        }
         // Waiting in slices rather than to the deadline: the budget can grow
         // while this request is parked, and a wait pinned to the budget in
         // force when it began would refuse a channel that started feeding a
         // moment later.
         let _ = tokio::time::timeout(STARTUP_BUDGET_REVIEW, notified).await;
     }
+}
+
+/// Snapshot the producer's answer and publication under one lock. Once the
+/// gate is satisfied, the producer may be awaiting its serving fence before it
+/// installs the provisional; that interval is not a startup timeout, and can
+/// never produce the impossible "2 segments, but not 2" verdict.
+fn startup_waiter_verdict(
+    state: &LiveTvSessionState,
+    started: tokio::time::Instant,
+    review_at: tokio::time::Instant,
+    tuner_bytes: u64,
+) -> Option<Result<LiveTvProvisional, LiveTvError>> {
+    if let Some(result) = &state.startup {
+        return Some(result.clone());
+    }
+    if state.publication.as_ref().is_some_and(startup_publishable) {
+        return None;
+    }
+    startup_overdue(
+        started,
+        review_at,
+        tuner_bytes,
+        state
+            .publication
+            .as_ref()
+            .map_or(0, |publication| publication.listed),
+    )
+    .map(|reason| Err(LiveTvError::StartupTimeout(reason)))
 }
 
 /// A live-TV request id is 128 bits written as 32 lower-case hex characters,
@@ -5269,24 +5336,14 @@ async fn run_live_session_inner(
             match inspect_scratch(&session.directory).await {
                 Ok(Some(inventory)) => {
                     let now = tokio::time::Instant::now();
-                    {
+                    let publishable = {
                         let mut state = session
                             .state
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        if inventory.media_sequence > state.media_sequence
-                            || state.publication.is_none()
-                        {
-                            state.last_progress = now;
-                        }
-                        state.media_sequence = inventory.media_sequence;
-                        // Manifest bytes and their complete current/deletion-lag
-                        // inventory cross the lock together. A client can never
-                        // receive a playlist from one sample and authorization
-                        // from another.
-                        state.publication = Some(inventory);
-                    }
-                    if !published {
+                        record_producer_inventory(&mut state, inventory, now)
+                    };
+                    if !published && publishable {
                         let owner = manager.upgrade().ok_or_else(|| {
                             LiveTvError::StreamFailed("live-TV manager stopped".into())
                         })?;
@@ -5324,6 +5381,13 @@ async fn run_live_session_inner(
                     session.started,
                     now,
                     session.tuner_bytes.load(Ordering::Acquire),
+                    session
+                        .state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .publication
+                        .as_ref()
+                        .map_or(0, |publication| publication.listed),
                 ) {
                     break Err(LiveTvError::StartupTimeout(reason));
                 }
@@ -5345,8 +5409,7 @@ async fn run_live_session_inner(
                         "the live-TV capability became idle".into(),
                     ));
                 }
-                if published && now.duration_since(state.last_progress) >= PRODUCER_PROGRESS_TIMEOUT
-                {
+                if producer_progress_overdue(published, &state, now) {
                     break Err(LiveTvError::StreamFailed(
                         "the live-TV producer stopped advancing".into(),
                     ));
@@ -5403,6 +5466,7 @@ fn startup_overdue(
     started: tokio::time::Instant,
     now: tokio::time::Instant,
     tuner_bytes: u64,
+    listed: usize,
 ) -> Option<String> {
     if tuner_bytes == 0 {
         return (now.duration_since(started) >= STARTUP_TIMEOUT).then(|| {
@@ -5411,8 +5475,21 @@ fn startup_overdue(
                 .to_owned()
         });
     }
-    (now.duration_since(started) >= STARTUP_FEEDING_TIMEOUT)
-        .then(|| format!("the tuner sent {tuner_bytes} bytes but no complete live segment in time"))
+    (now.duration_since(started) >= STARTUP_FEEDING_TIMEOUT).then(|| match listed {
+        0 => format!("the tuner sent {tuner_bytes} bytes but no complete live segment in time"),
+        count => format!(
+            "the tuner sent {tuner_bytes} bytes and {count} live segment(s), but not the \
+             {STARTUP_LISTED_SEGMENTS} a player needs to start without stalling"
+        ),
+    })
+}
+
+fn producer_progress_overdue(
+    published: bool,
+    state: &LiveTvSessionState,
+    now: tokio::time::Instant,
+) -> bool {
+    published && now.duration_since(state.last_progress) >= PRODUCER_PROGRESS_TIMEOUT
 }
 
 fn provisional_expired(state: &LiveTvSessionState, now: tokio::time::Instant) -> bool {
@@ -5795,6 +5872,21 @@ fn live_ffmpeg_command(
     plan: &LiveTvTranscodePlan,
     directory: &Path,
 ) -> Result<tokio::process::Command, LiveTvError> {
+    live_ffmpeg_command_for_input(system, plan, directory, LiveTvFfmpegInput::Tuner)
+}
+
+#[derive(Clone, Copy)]
+enum LiveTvFfmpegInput {
+    Tuner,
+    GraphProbe,
+}
+
+fn live_ffmpeg_command_for_input(
+    system: &SystemInfo,
+    plan: &LiveTvTranscodePlan,
+    directory: &Path,
+    input: LiveTvFfmpegInput,
+) -> Result<tokio::process::Command, LiveTvError> {
     let playlist = directory.join("index.m3u8");
     let extension = match plan.delivery.packaging {
         LivePackaging::Mpegts => "ts",
@@ -5815,17 +5907,29 @@ fn live_ffmpeg_command(
     command
         .args(["-hwaccel", "none"])
         .args(["-fflags", "+genpts+discardcorrupt"])
-        .args(live_probe_args())
-        .args([
-            "-i",
-            "pipe:0",
-            "-map",
-            plan.video_map,
-            "-map",
-            "0:a:0",
-            "-sn",
-            "-dn",
-        ]);
+        .args(live_probe_args());
+    let audio_map = match input {
+        LiveTvFfmpegInput::Tuner => {
+            command.args(["-i", "pipe:0"]);
+            "0:a:0"
+        }
+        LiveTvFfmpegInput::GraphProbe => {
+            command.args([
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=1920x1080:rate=30",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=1000:sample_rate=48000",
+                "-t",
+                "4.25",
+            ]);
+            "1:a:0"
+        }
+    };
+    command.args(["-map", plan.video_map, "-map", audio_map, "-sn", "-dn"]);
     match plan.delivery.video_action {
         LiveTrackAction::Copy => {
             command.args(["-c:v", "copy"]);
@@ -6254,6 +6358,9 @@ async fn inspect_scratch(directory: &Path) -> Result<Option<ScratchInventory>, L
     Ok(Some(ScratchInventory {
         playlist,
         media_sequence: parsed.media_sequence,
+        listed: parsed.segments.len(),
+        listed_seconds: parsed.listed_seconds,
+        target_duration: parsed.target_duration,
         init,
         // Include FFmpeg's one deletion-lag segment. A browser which received
         // the immediately previous manifest may still request it after the
@@ -6265,6 +6372,8 @@ async fn inspect_scratch(directory: &Path) -> Result<Option<ScratchInventory>, L
 
 struct ParsedPlaylist {
     media_sequence: u64,
+    target_duration: u64,
+    listed_seconds: f64,
     init: Option<String>,
     segments: Vec<u64>,
 }
@@ -6288,6 +6397,8 @@ fn parse_playlist_bytes(bytes: &[u8]) -> Result<ParsedPlaylist, LiveTvError> {
         ));
     }
     let mut media_sequence = None;
+    let mut target_duration = None;
+    let mut listed_seconds = 0.0;
     let mut init = None;
     let mut segments = Vec::new();
     let mut expect_segment = false;
@@ -6302,6 +6413,21 @@ fn parse_playlist_bytes(bytes: &[u8]) -> Result<ParsedPlaylist, LiveTvError> {
             media_sequence = Some(value.trim().parse::<u64>().map_err(|_| {
                 LiveTvError::StreamFailed("live-TV media sequence is invalid".into())
             })?);
+        } else if let Some(value) = line.strip_prefix("#EXT-X-TARGETDURATION:") {
+            if target_duration.is_some() {
+                return Err(LiveTvError::StreamFailed(
+                    "live-TV playlist repeats its target duration".into(),
+                ));
+            }
+            let parsed = value.trim().parse::<u64>().map_err(|_| {
+                LiveTvError::StreamFailed("live-TV target duration is invalid".into())
+            })?;
+            if parsed == 0 {
+                return Err(LiveTvError::StreamFailed(
+                    "live-TV target duration is invalid".into(),
+                ));
+            }
+            target_duration = Some(parsed);
         } else if line == "#EXT-X-MAP:URI=\"init.mp4\"" {
             if init.replace("init.mp4".to_owned()).is_some() {
                 return Err(LiveTvError::StreamFailed(
@@ -6314,12 +6440,26 @@ fn parse_playlist_bytes(bytes: &[u8]) -> Result<ParsedPlaylist, LiveTvError> {
             return Err(LiveTvError::StreamFailed(
                 "live-TV playlist contains an unauthorized resource URI".into(),
             ));
-        } else if line.starts_with("#EXTINF:") {
+        } else if let Some(value) = line.strip_prefix("#EXTINF:") {
             if expect_segment {
                 return Err(LiveTvError::StreamFailed(
                     "live-TV playlist has a segment without a resource".into(),
                 ));
             }
+            let duration = value
+                .split_once(',')
+                .map_or(value, |(duration, _)| duration)
+                .trim()
+                .parse::<f64>()
+                .map_err(|_| {
+                    LiveTvError::StreamFailed("live-TV segment duration is invalid".into())
+                })?;
+            if !duration.is_finite() || duration.is_sign_negative() || duration > 60.0 {
+                return Err(LiveTvError::StreamFailed(
+                    "live-TV segment duration is invalid".into(),
+                ));
+            }
+            listed_seconds += duration;
             expect_segment = true;
         } else if !line.is_empty() && !line.starts_with('#') {
             if !expect_segment {
@@ -6348,9 +6488,9 @@ fn parse_playlist_bytes(bytes: &[u8]) -> Result<ParsedPlaylist, LiveTvError> {
         ));
     }
     if segments.len() > MAX_LISTED_SEGMENTS {
-        return Err(LiveTvError::StreamFailed(
-            "live-TV playlist exceeds six segments".into(),
-        ));
+        return Err(LiveTvError::StreamFailed(format!(
+            "live-TV playlist exceeds {MAX_LISTED_SEGMENTS} segments"
+        )));
     }
     let media_sequence = match (media_sequence, segments.first().copied()) {
         (Some(sequence), _) => sequence,
@@ -6369,11 +6509,24 @@ fn parse_playlist_bytes(bytes: &[u8]) -> Result<ParsedPlaylist, LiveTvError> {
             "live-TV media sequence does not match its first segment".into(),
         ));
     }
+    let target_duration = target_duration.ok_or_else(|| {
+        LiveTvError::StreamFailed("live-TV playlist is missing its target duration".into())
+    })?;
     Ok(ParsedPlaylist {
         media_sequence,
+        target_duration,
+        listed_seconds,
         init,
         segments,
     })
+}
+
+/// Publish only when the viewer receives one full segment after the one it
+/// starts on, including a full target duration on a long-GOP copy route.
+fn startup_publishable(inventory: &ScratchInventory) -> bool {
+    inventory.listed >= STARTUP_LISTED_SEGMENTS
+        && inventory.listed_seconds
+            >= STARTUP_LISTED_TARGET_DURATIONS * inventory.target_duration as f64
 }
 
 fn parse_segment_name(name: &str, temporary: bool) -> Option<u64> {
@@ -7123,40 +7276,22 @@ pub(crate) async fn fetch_bounded(
 }
 
 async fn run_graph_probe(
-    ffmpeg: &str,
     encoder: Encoder,
     system: &SystemInfo,
     height: u16,
     directory: &Path,
 ) -> Result<(), String> {
     let playlist = directory.join("index.m3u8");
-    let segments = directory.join("segment-%06d.ts");
-    let mut command = tokio::process::Command::new(ffmpeg);
-    command.args(["-hide_banner", "-loglevel", "error", "-y"]);
-    command.args(encoder.init_args());
-    command.args([
-        "-f",
-        "lavfi",
-        "-i",
-        "testsrc2=size=1920x1080:rate=30",
-        "-f",
-        "lavfi",
-        "-i",
-        "sine=frequency=1000:sample_rate=48000",
-        "-t",
-        "4.25",
-    ]);
-    let filter = live_video_filter(encoder, 1080, height, false);
-    command.args(["-vf", &filter]);
-    command.args(encoder.encode_args(
-        if height == 1080 { 8_000 } else { 4_000 },
-        EffectiveRateControl::Vbr,
-        system.encoders.forced_idr.wanted_by(encoder),
+    let plan = LiveTvTranscodePlan::new(
+        system,
+        graph_probe_delivery(height),
+        Some(encoder),
         (encoder == Encoder::Software).then_some(2),
-    ));
-    command.args(LIVE_HLS_OUTPUT_ARGS);
-    command.arg(segments).arg(&playlist);
-    command.kill_on_drop(true);
+    )
+    .map_err(|error| format!("could not prepare live-TV graph probe: {error}"))?;
+    let mut command =
+        live_ffmpeg_command_for_input(system, &plan, directory, LiveTvFfmpegInput::GraphProbe)
+            .map_err(|error| format!("could not build live-TV graph probe: {error}"))?;
     let output = tokio::time::timeout(Duration::from_secs(20), command.output())
         .await
         .map_err(|_| "live-TV FFmpeg graph probe timed out".to_owned())?
@@ -7171,10 +7306,51 @@ async fn run_graph_probe(
     let manifest = tokio::fs::read_to_string(&playlist)
         .await
         .map_err(|error| format!("live-TV probe did not publish a playlist: {error}"))?;
-    if manifest.contains("#EXT-X-ENDLIST") || !manifest.contains(".ts") {
+    let one_second_segments = manifest
+        .lines()
+        .filter(|line| line.starts_with("#EXTINF:1."))
+        .count();
+    if manifest.contains("#EXT-X-ENDLIST")
+        || !manifest.contains("#EXT-X-TARGETDURATION:1")
+        || one_second_segments < 3
+        || !manifest.contains(".ts")
+    {
         return Err("live-TV probe published an invalid live playlist".to_owned());
     }
     Ok(())
+}
+
+fn graph_probe_delivery(height: u16) -> LiveDeliveryPlan {
+    LiveDeliveryPlan {
+        source: LiveSourceFacts {
+            video_codec: Some("mpeg2video".into()),
+            width: Some(1920),
+            height: Some(1080),
+            audio_codec: Some("ac3".into()),
+            audio_channels: Some(2),
+            ..LiveSourceFacts::default()
+        },
+        output: crate::live_tv_delivery::LiveDeliveryOutput {
+            container: "mpegts".into(),
+            video_codec: "h264".into(),
+            audio_codec: "aac".into(),
+            width: height.saturating_mul(16) / 9,
+            height,
+            bit_depth: Some(8),
+            frame_rate: None,
+            hdr: None,
+            audio_channels: 2,
+        },
+        video_action: LiveTrackAction::Encode,
+        audio_action: LiveTrackAction::Encode,
+        packaging: LivePackaging::Mpegts,
+        reasons: vec![crate::live_tv_delivery::LiveDeliveryReason {
+            code: "graph_probe".into(),
+            explanation: "exercise the encoded live path".into(),
+        }],
+        deinterlace: false,
+        max_bitrate_bps: None,
+    }
 }
 
 fn sanitize_error(message: &str) -> String {
@@ -7371,6 +7547,7 @@ mod tests {
                 provisional_at: Some(now),
                 last_touch: now,
                 last_progress: now,
+                newest_listed: None,
                 media_sequence: 0,
                 publication: None,
                 encoder: "software".into(),
@@ -7425,6 +7602,7 @@ mod tests {
                 provisional_at: Some(last_touch),
                 last_touch,
                 last_progress: last_touch,
+                newest_listed: None,
                 media_sequence: 0,
                 publication: None,
                 encoder: "software".into(),
@@ -8075,7 +8253,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn one_tuner_get_runs_the_full_hls_lifecycle_and_stop_waits_for_cleanup() {
+    async fn the_producer_answers_only_once_two_segments_are_listed() {
         use std::os::unix::fs::PermissionsExt;
         use std::sync::atomic::AtomicUsize;
 
@@ -8086,16 +8264,32 @@ mod tests {
             r#"#!/bin/sh
 for output do playlist="$output"; done
 directory=${playlist%/*}
+root=${directory%/*}
 printf 'transport-stream' > "$directory/segment-000001.ts"
-printf '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:4.000,\nsegment-000001.ts\n' > "$playlist"
+printf '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:1.000000,\nsegment-000001.ts\n' > "$playlist"
+while [ ! -f "$root/release-second" ]; do sleep 0.01; done
+printf 'transport-stream-two' > "$directory/segment-000002.ts"
+printf '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:1.000000,\nsegment-000001.ts\n#EXTINF:1.000000,\nsegment-000002.ts\n' > "$playlist.tmp"
+mv "$playlist.tmp" "$playlist"
 exec /bin/cat >/dev/null
 "#,
         )
         .expect("fake FFmpeg");
         std::fs::set_permissions(&ffmpeg, std::fs::Permissions::from_mode(0o755))
             .expect("executable fake FFmpeg");
+        let ffprobe = root.path().join("fake-ffprobe");
+        std::fs::write(
+            &ffprobe,
+            r#"#!/bin/sh
+printf '%s' '{"streams":[{"codec_type":"video","codec_name":"mpeg2video","width":1920,"height":1080,"field_order":"progressive"},{"codec_type":"audio","codec_name":"ac3","channels":2}]}'
+"#,
+        )
+        .expect("fake FFprobe");
+        std::fs::set_permissions(&ffprobe, std::fs::Permissions::from_mode(0o755))
+            .expect("executable fake FFprobe");
         let system = SystemInfo {
             ffmpeg: ffmpeg.to_string_lossy().into_owned(),
+            ffprobe: ffprobe.to_string_lossy().into_owned(),
             ..SystemInfo::default()
         };
         let mut manager = test_manager_with_system(root.path(), system);
@@ -8158,10 +8352,47 @@ exec /bin/cat >/dev/null
         });
 
         let request = test_session(root.path().join("unused"), 1).request.clone();
-        let provisional = manager
-            .start_local(request.clone())
+        let mut start = Box::pin(manager.start_local(request.clone()));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(700), &mut start)
+                .await
+                .is_err(),
+            "one listed segment must not answer the start"
+        );
+        // The fixture drip-feeds fewer than SOURCE_PREFIX_BYTES, so the real
+        // source-observation stage spends SOURCE_PREFIX_TIME before FFmpeg is
+        // launched. Bound the publication wait from that production contract,
+        // not from a scheduler-sensitive subsecond guess.
+        let first_publication_deadline =
+            tokio::time::Instant::now() + SOURCE_PREFIX_TIME + Duration::from_secs(3);
+        loop {
+            let observed = {
+                let registry = manager.registry.lock().expect("registry");
+                let session = registry.sessions.values().next().expect("starting session");
+                let state = session.state.lock().expect("session state");
+                assert!(state.startup.is_none());
+                state
+                    .publication
+                    .as_ref()
+                    .map(|publication| publication.listed)
+            };
+            if observed == Some(1) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < first_publication_deadline,
+                "producer never published its first listed segment; last count {observed:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        tokio::fs::write(manager.scratch_root.join("release-second"), b"release")
             .await
+            .expect("release second segment");
+        let provisional = tokio::time::timeout(Duration::from_secs(2), &mut start)
+            .await
+            .expect("second segment publication deadline")
             .expect("first HLS publication");
+        drop(start);
         let recovered = manager
             .start_local(request.clone())
             .await
@@ -8196,7 +8427,7 @@ exec /bin/cat >/dev/null
         let playlist = axum::body::to_bytes(playlist.into_body(), MAX_PLAYLIST_BYTES as usize)
             .await
             .expect("playlist bytes");
-        assert!(playlist.ends_with(b"segment-000001.ts\n"));
+        assert!(playlist.ends_with(b"segment-000002.ts\n"));
         let segment = manager
             .resource_local(LiveTvResourceRequest::Segment {
                 capability: provisional.capability.clone(),
@@ -8906,7 +9137,13 @@ Output #0, hls, to 'index.m3u8':
             "-sn",
             "-dn",
             "-vf",
-            "bwdif=mode=send_frame:parity=auto:deint=interlaced,scale=-2:720,format=yuv420p",
+            "scale=-2:720,format=yuv420p",
+            "-force_key_frames",
+            "expr:gte(t,n_forced*1)",
+            "-g",
+            "120",
+            "-keyint_min",
+            "1",
             "-c:v",
             "libx264",
             "-preset",
@@ -8921,12 +9158,6 @@ Output #0, hls, to 'index.m3u8':
             "high",
             "-threads",
             "2",
-            "-force_key_frames",
-            "expr:gte(t,n_forced*1)",
-            "-g",
-            "120",
-            "-keyint_min",
-            "1",
             "-c:a",
             "aac",
             "-b:a",
@@ -8935,14 +9166,12 @@ Output #0, hls, to 'index.m3u8':
             "2",
             "-f",
             "hls",
-            "-hls_init_time",
-            "1",
             "-hls_time",
-            "4",
-            "-hls_list_size",
-            "6",
-            "-hls_delete_threshold",
             "1",
+            "-hls_list_size",
+            "24",
+            "-hls_delete_threshold",
+            "4",
             "-hls_flags",
             "delete_segments+temp_file+independent_segments+omit_endlist",
             "-hls_segment_filename",
@@ -8958,12 +9187,10 @@ Output #0, hls, to 'index.m3u8':
         );
     }
 
-    /// Startup should not make the viewer wait for the normal four-second
-    /// segment cadence. Keep the short initial cadence, steady cadence, and
-    /// live window explicit here so tuning cannot silently regress while the
-    /// runtime and graph-probe commands continue to share one argument list.
+    /// The cadence must stay uniform after startup so a player attached near
+    /// the edge never catches a segment-duration jump.
     #[test]
-    fn live_hls_publishes_short_startup_segments_before_steady_cadence() {
+    fn live_hls_cuts_uniform_one_second_segments_and_keeps_a_24_entry_window() {
         let value_after = |flag: &str| {
             LIVE_HLS_OUTPUT_ARGS
                 .windows(2)
@@ -8971,10 +9198,62 @@ Output #0, hls, to 'index.m3u8':
                 .unwrap_or_else(|| panic!("missing {flag} from live HLS arguments"))
         };
 
-        assert_eq!(value_after("-hls_init_time"), "1");
-        assert_eq!(value_after("-hls_time"), "4");
-        assert_eq!(value_after("-hls_list_size"), "6");
-        assert_eq!(value_after("-force_key_frames"), "expr:gte(t,n_forced*1)");
+        assert!(!LIVE_HLS_OUTPUT_ARGS.contains(&"-hls_init_time"));
+        assert_eq!(value_after("-hls_time"), "1");
+        assert_eq!(value_after("-hls_list_size"), "24");
+        assert_eq!(
+            value_after("-hls_delete_threshold")
+                .parse::<usize>()
+                .expect("numeric threshold"),
+            HLS_DELETE_THRESHOLD
+        );
+        assert_eq!(MAX_DELETION_LAG_SEGMENTS, HLS_DELETE_THRESHOLD + 1);
+
+        let system = SystemInfo {
+            ffmpeg: "/fixture/ffmpeg".to_owned(),
+            ..SystemInfo::default()
+        };
+        let plan = LiveTvTranscodePlan::new(
+            &system,
+            test_encode_delivery(720),
+            Some(Encoder::Software),
+            Some(2),
+        )
+        .expect("prepare live-TV plan");
+        let command = live_ffmpeg_command(&system, &plan, Path::new("/fixture/live"))
+            .expect("build live-TV command");
+        let arguments = command
+            .as_std()
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(arguments
+            .windows(2)
+            .any(|pair| pair == ["-force_key_frames", "expr:gte(t,n_forced*1)"]));
+    }
+
+    #[tokio::test]
+    async fn the_graph_probe_publishes_the_production_cadence() {
+        let temp = crate::test_tempdir().expect("graph probe scratch");
+        let system = SystemInfo {
+            ffmpeg: "ffmpeg".to_owned(),
+            ..SystemInfo::default()
+        };
+        run_graph_probe(Encoder::Software, &system, 720, temp.path())
+            .await
+            .expect("production graph probe");
+        let manifest = tokio::fs::read_to_string(temp.path().join("index.m3u8"))
+            .await
+            .expect("graph probe playlist");
+        assert!(manifest.contains("#EXT-X-TARGETDURATION:1"));
+        assert!(
+            manifest
+                .lines()
+                .filter(|line| line.starts_with("#EXTINF:1."))
+                .count()
+                >= 3
+        );
+        assert!(!manifest.contains("#EXT-X-ENDLIST"));
     }
 
     #[test]
@@ -9030,8 +9309,9 @@ Output #0, hls, to 'index.m3u8':
 
         // Silent: prompt, and the message says the channel may have no signal
         // rather than blaming the segment that never came.
-        assert!(startup_overdue(started, at(14), 0).is_none());
-        let silent = startup_overdue(started, at(15), 0).expect("silent tuner is overdue at 15s");
+        assert!(startup_overdue(started, at(14), 0, 0).is_none());
+        let silent =
+            startup_overdue(started, at(15), 0, 0).expect("silent tuner is overdue at 15s");
         assert!(
             silent.contains("no data"),
             "a silent tuner must say so, not blame a missing segment: {silent}"
@@ -9040,17 +9320,17 @@ Output #0, hls, to 'index.m3u8':
         // Feeding: the 18.1 s real measurement is INSIDE the budget. This is
         // the assertion the unfixed implementation fails.
         assert!(
-            startup_overdue(started, at(16), 1).is_none(),
+            startup_overdue(started, at(16), 1, 0).is_none(),
             "one byte from the tuner must buy more than the silent budget"
         );
         assert!(
-            startup_overdue(started, at(19), 4_000_000).is_none(),
+            startup_overdue(started, at(19), 4_000_000, 0).is_none(),
             "18.1s is what a real ATSC 3.0 channel needed; refusing it is the defect"
         );
 
         // But feeding is not forever, and the eventual refusal is specific
         // enough to tell a stalled producer from an absent channel.
-        let stalled = startup_overdue(started, at(30), 4_000_000)
+        let stalled = startup_overdue(started, at(30), 4_000_000, 0)
             .expect("a feeding tuner that never publishes is overdue eventually");
         assert!(
             stalled.contains("4000000") && stalled.contains("no complete live segment"),
@@ -9062,6 +9342,19 @@ Output #0, hls, to 'index.m3u8':
             STARTUP_FEEDING_TIMEOUT > STARTUP_TIMEOUT,
             "a feeding tuner must never get less time than a silent one"
         );
+    }
+
+    #[test]
+    fn startup_overdue_says_how_many_segments_it_has() {
+        let started = tokio::time::Instant::now();
+        let overdue = started + STARTUP_FEEDING_TIMEOUT;
+        let none =
+            startup_overdue(started, overdue, 4_000_000, 0).expect("zero-segment start is overdue");
+        assert!(none.contains("no complete live segment"));
+        let one =
+            startup_overdue(started, overdue, 4_000_000, 1).expect("one-segment start is overdue");
+        assert!(one.contains("1 live segment(s)"));
+        assert!(one.contains("2 a player needs"));
     }
 
     #[test]
@@ -9369,9 +9662,12 @@ Output #0, hls, to 'index.m3u8':
     }
 
     fn live_playlist(first: u64, count: usize) -> Vec<u8> {
-        let mut playlist = format!("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-MEDIA-SEQUENCE:{first}\n");
+        let mut playlist = format!(
+            "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n\
+             #EXT-X-MEDIA-SEQUENCE:{first}\n"
+        );
         for sequence in first..first + count as u64 {
-            playlist.push_str(&format!("#EXTINF:4.000,\nsegment-{sequence:06}.ts\n"));
+            playlist.push_str(&format!("#EXTINF:1.000000,\nsegment-{sequence:06}.ts\n"));
         }
         playlist.into_bytes()
     }
@@ -9400,9 +9696,12 @@ Output #0, hls, to 'index.m3u8':
 
     #[test]
     fn live_playlist_accepts_only_the_closed_numeric_inventory() {
-        let parsed = parse_playlist_bytes(&live_playlist(41, 6)).expect("bounded playlist");
+        let parsed = parse_playlist_bytes(&live_playlist(41, MAX_LISTED_SEGMENTS))
+            .expect("bounded playlist");
         assert_eq!(parsed.media_sequence, 41);
-        assert_eq!(parsed.segments, vec![41, 42, 43, 44, 45, 46]);
+        assert_eq!(parsed.target_duration, 1);
+        assert_eq!(parsed.listed_seconds, 24.0);
+        assert_eq!(parsed.segments.len(), MAX_LISTED_SEGMENTS);
 
         for refused in [
             b"#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:4,\n../secret.ts\n".as_slice(),
@@ -9411,11 +9710,114 @@ Output #0, hls, to 'index.m3u8':
             b"#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:4,\nsegment-000001.ts\n#EXT-X-ENDLIST\n"
                 .as_slice(),
             b"#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:4,\n".as_slice(),
+            b"#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:1,\nsegment-000001.ts\n"
+                .as_slice(),
             b"#EXTM3U\n#EXTINF:4,\nsegment-000001.ts\n".as_slice(),
+            b"#EXTM3U\n#EXT-X-TARGETDURATION:0\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:1.0,\nsegment-000001.ts\n"
+                .as_slice(),
+            b"#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:nan,\nsegment-000001.ts\n"
+                .as_slice(),
         ] {
             assert!(parse_playlist_bytes(refused).is_err());
         }
-        assert!(parse_playlist_bytes(&live_playlist(1, 7)).is_err());
+        let titled = b"#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:1.0,title\nsegment-000001.ts\n";
+        assert!(parse_playlist_bytes(titled).is_ok());
+        assert!(parse_playlist_bytes(&live_playlist(1, MAX_LISTED_SEGMENTS + 1)).is_err());
+    }
+
+    #[test]
+    fn the_start_is_answered_at_the_second_listed_segment() {
+        let inventory = |listed: usize, listed_seconds: f64, target_duration: u64, files: usize| {
+            ScratchInventory {
+                playlist: Vec::new(),
+                media_sequence: 10,
+                listed,
+                listed_seconds,
+                target_duration,
+                init: None,
+                segments: (0..files)
+                    .map(|offset| {
+                        let sequence = 10 + offset as u64;
+                        (sequence, (format!("segment-{sequence:06}.ts"), 1))
+                    })
+                    .collect(),
+            }
+        };
+
+        assert!(!startup_publishable(&inventory(1, 1.0, 1, 2)));
+        assert!(startup_publishable(&inventory(2, 2.0, 1, 2)));
+        assert!(!startup_publishable(&inventory(2, 4.0, 3, 2)));
+        assert!(startup_publishable(&inventory(3, 7.0, 3, 3)));
+
+        let temp = crate::test_tempdir().expect("startup verdict root");
+        let session = test_session(temp.path().join("startup-verdict"), 1);
+        let mut state = session.state.lock().expect("session state");
+        state.publication = Some(inventory(2, 2.0, 1, 2));
+        assert!(
+            startup_waiter_verdict(
+                &state,
+                session.started,
+                session.started + STARTUP_FEEDING_TIMEOUT + Duration::from_secs(2),
+                4_000_000,
+            )
+            .is_none(),
+            "a publishable inventory awaiting its serving fence is not overdue"
+        );
+        state.publication = Some(inventory(1, 1.0, 1, 1));
+        assert!(matches!(
+            startup_waiter_verdict(
+                &state,
+                session.started,
+                session.started + STARTUP_FEEDING_TIMEOUT + Duration::from_secs(2),
+                4_000_000,
+            ),
+            Some(Err(LiveTvError::StartupTimeout(_)))
+        ));
+    }
+
+    #[test]
+    fn progress_is_the_newest_listed_segment_not_the_window_sliding() {
+        let temp = crate::test_tempdir().expect("session root");
+        let session = test_session(temp.path().join("progress"), 1);
+        let base = tokio::time::Instant::now();
+        let mut state = session.state.lock().expect("session state");
+        state.last_progress = base;
+        state.newest_listed = None;
+        state.publication = None;
+
+        for tick in 1_u64..=40 {
+            let listed =
+                usize::try_from(tick.min(MAX_LISTED_SEGMENTS as u64)).expect("listed count");
+            let media_sequence = tick.saturating_sub(MAX_LISTED_SEGMENTS as u64);
+            let now = base + Duration::from_secs(tick);
+            record_producer_inventory(
+                &mut state,
+                ScratchInventory {
+                    playlist: Vec::new(),
+                    media_sequence,
+                    listed,
+                    listed_seconds: listed as f64,
+                    target_duration: 1,
+                    init: None,
+                    segments: HashMap::new(),
+                },
+                now,
+            );
+            assert_eq!(state.newest_listed, Some(tick - 1));
+            assert_eq!(state.last_progress, now);
+            assert!(!producer_progress_overdue(true, &state, now));
+        }
+
+        assert!(!producer_progress_overdue(
+            true,
+            &state,
+            state.last_progress + PRODUCER_PROGRESS_TIMEOUT - Duration::from_millis(1)
+        ));
+        assert!(producer_progress_overdue(
+            true,
+            &state,
+            state.last_progress + PRODUCER_PROGRESS_TIMEOUT
+        ));
     }
 
     #[tokio::test]
@@ -9438,15 +9840,47 @@ Output #0, hls, to 'index.m3u8':
             .expect("scratch")
             .expect("published");
         assert_eq!(inventory.media_sequence, 10);
+        assert_eq!(inventory.listed, 3);
+        assert_eq!(inventory.newest_listed(), Some(12));
         assert_eq!(inventory.segments.len(), 3);
 
-        tokio::fs::write(directory.join("segment-000009.ts"), b"lag")
+        for sequence in (5..=9).rev() {
+            tokio::fs::write(directory.join(format!("segment-{sequence:06}.ts")), b"lag")
+                .await
+                .expect("permitted deletion lag");
+            assert!(inspect_scratch(directory).await.is_ok());
+        }
+        tokio::fs::write(directory.join("segment-000004.ts"), b"excess lag")
             .await
-            .expect("one deletion lag");
-        assert!(inspect_scratch(directory).await.is_ok());
-        tokio::fs::write(directory.join("segment-000008.ts"), b"excess lag")
+            .expect("sixth deletion lag");
+        assert!(inspect_scratch(directory).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn the_rename_before_rewrite_instant_is_not_a_failure() {
+        let temp = crate::test_tempdir().expect("scratch root");
+        let directory = temp.path();
+        tokio::fs::write(directory.join("index.m3u8"), live_playlist(10, 3))
             .await
-            .expect("second deletion lag");
+            .expect("playlist");
+        for sequence in 6..=13 {
+            tokio::fs::write(
+                directory.join(format!("segment-{sequence:06}.ts")),
+                b"transport",
+            )
+            .await
+            .expect("segment");
+        }
+        let inventory = inspect_scratch(directory)
+            .await
+            .expect("threshold plus rename transient")
+            .expect("published inventory");
+        assert_eq!(inventory.listed, 3);
+        assert_eq!(inventory.segments.len(), 8);
+
+        tokio::fs::write(directory.join("segment-000005.ts"), b"excess")
+            .await
+            .expect("sixth unlisted segment");
         assert!(inspect_scratch(directory).await.is_err());
     }
 

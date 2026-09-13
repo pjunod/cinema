@@ -30,6 +30,20 @@ final class LiveTvPlayerController: ObservableObject {
     @Published private(set) var busy = false
     @Published private(set) var playing = false
     @Published private(set) var paused = false
+    /// True only for a sustained mid-stream stall. AVPlayer's ordinary
+    /// buffering-rate evaluation at startup is not something the viewer
+    /// should be told about.
+    @Published private(set) var waiting = false
+    /// Distance from the playhead to the edge the current playlist offers.
+    /// This is not end-to-end broadcast latency.
+    @Published private(set) var behindEdgeSeconds: Double?
+    /// Media available after the playhead in the loaded range that contains it.
+    @Published private(set) var bufferedSeconds: Double?
+    @Published private(set) var pausedAt: Date?
+    @Published private(set) var attachedAt: Date?
+    /// Fullscreen copy only. Lineup status in `message` never reaches the
+    /// picture merely because the browser loaded or refreshed.
+    @Published private(set) var surfaceMessage: String?
     /// The guide is a second, independent read. It never gates the lineup and
     /// never gates a start: a page that waited on it would be a page that
     /// cannot tune while a guide host is slow.
@@ -47,6 +61,8 @@ final class LiveTvPlayerController: ObservableObject {
     private var heartbeat: Task<Void, Never>?
     private var guideRefresh: Task<Void, Never>?
     private var channelChange: Task<Void, Never>?
+    private var timeControlObservation: NSKeyValueObservation?
+    private var waitingDebounce: Task<Void, Never>?
     private var ownsAudioSession = false
     private var activateAudioSession: () -> Void = {
 #if os(iOS)
@@ -163,9 +179,22 @@ final class LiveTvPlayerController: ObservableObject {
         title = channel.title
         watching = info.channel
         delivery = info.delivery
+        attachedAt = Date()
         playing = true
         player.play()
+        surfaceMessage = nil
         message = "Playing live · no recording or rewind"
+        timeControlObservation = player.observe(
+            \.timeControlStatus,
+            options: [.initial, .new]
+        ) { [weak self] player, _ in
+            let status = player.timeControlStatus
+            let reason = player.reasonForWaitingToPlay
+            Task { @MainActor [weak self] in
+                guard let self, self.serial == expected else { return }
+                self.applyTimeControl(status: status, reason: reason)
+            }
+        }
         heartbeat = Task { @MainActor [weak self] in
             var progress = LiveTvPlaybackWatchdog()
             while !Task.isCancelled {
@@ -174,6 +203,7 @@ final class LiveTvPlayerController: ObservableObject {
                 do {
                     if item.status == .failed { throw Self.playerFailure(item.error) }
                     let position = self.player.currentTime().seconds
+                    self.sampleLiveEdge(item: item, position: position)
                     if !self.paused && progress.observe(position: position) {
                         try await api.keepalive(info.sessionId)
                         guard self.serial == expected else { return }
@@ -197,6 +227,7 @@ final class LiveTvPlayerController: ObservableObject {
                     } else if progress.expired {
                         if self.paused {
                             self.message = "Paused for 30 seconds. The tuner was released; select a channel to resume live."
+                            self.surfaceMessage = self.message
                             await self.stop()
                             return
                         }
@@ -210,9 +241,11 @@ final class LiveTvPlayerController: ObservableObject {
                         self.message = failureCode == "source_format_changed"
                             ? "The broadcast changed format. Selecting a fresh route once…"
                             : "The original route was rejected. Retrying once with a compatible conversion…"
+                        self.surfaceMessage = self.message
                         do { try await self.stopChecked() }
                         catch {
                             self.message = "Cleanup is unconfirmed; retry Stop before opening another channel."
+                            self.surfaceMessage = self.message
                             return
                         }
                         if failureCode == "codec_unsupported" {
@@ -224,6 +257,7 @@ final class LiveTvPlayerController: ObservableObject {
                         return
                     }
                     self.message = error.localizedDescription
+                    self.surfaceMessage = self.message
                     await self.stop()
                     return
                 }
@@ -345,15 +379,76 @@ final class LiveTvPlayerController: ObservableObject {
                              ? "codec_unsupported" : "stream_failed")
     }
 
+    /// Pure classification kept separate from the debounce so tests can cover
+    /// every AVPlayer reason without constructing a player item.
+    static func waitingDecision(
+        status: AVPlayer.TimeControlStatus,
+        reason: AVPlayer.WaitingReason?
+    ) -> Bool {
+        status == .waitingToPlayAtSpecifiedRate && reason == .toMinimizeStalls
+    }
+
+    /// The observation seam: production KVO and tests enter through the same
+    /// debounce, while neither needs to manufacture a fake AVPlayer.
+    func applyTimeControl(
+        status: AVPlayer.TimeControlStatus,
+        reason: AVPlayer.WaitingReason?
+    ) {
+        let expected = serial
+        waitingDebounce?.cancel()
+        waitingDebounce = nil
+        guard Self.waitingDecision(status: status, reason: reason) else {
+            waiting = false
+            return
+        }
+        waitingDebounce = Task { @MainActor [weak self] in
+            do { try await Task.sleep(nanoseconds: 350_000_000) } catch { return }
+            guard !Task.isCancelled, let self, self.serial == expected else { return }
+            self.waiting = true
+        }
+    }
+
+    private func sampleLiveEdge(item: AVPlayerItem, position: Double) {
+        guard position.isFinite else {
+            behindEdgeSeconds = nil
+            bufferedSeconds = nil
+            return
+        }
+        let seekable = item.seekableTimeRanges.compactMap { value -> Double? in
+            let range = value.timeRangeValue
+            let end = CMTimeGetSeconds(CMTimeRangeGetEnd(range))
+            return end.isFinite ? end : nil
+        }
+        behindEdgeSeconds = seekable.max().map { max(0, $0 - position) }
+
+        let loaded = item.loadedTimeRanges.compactMap { value -> (Double, Double)? in
+            let range = value.timeRangeValue
+            let start = CMTimeGetSeconds(range.start)
+            let end = CMTimeGetSeconds(CMTimeRangeGetEnd(range))
+            guard start.isFinite, end.isFinite else { return nil }
+            return (start, end)
+        }
+        guard !loaded.isEmpty else {
+            bufferedSeconds = nil
+            return
+        }
+        bufferedSeconds = loaded.first(where: { $0.0 <= position && position < $0.1 })
+            .map { max(0, $0.1 - position) } ?? 0
+    }
+
     func togglePause() {
         guard playing else { return }
         paused.toggle()
         if paused {
             player.pause()
+            pausedAt = Date()
             message = "Paused. The tuner is released after 30 seconds without playback; resuming has no rewind guarantee."
+            surfaceMessage = message
         } else {
             player.play()
+            pausedAt = nil
             message = "Playing live · no recording or rewind"
+            surfaceMessage = nil
         }
     }
 
@@ -388,6 +483,15 @@ final class LiveTvPlayerController: ObservableObject {
         heartbeat = nil
         channelChange?.cancel()
         channelChange = nil
+        timeControlObservation?.invalidate()
+        timeControlObservation = nil
+        waitingDebounce?.cancel()
+        waitingDebounce = nil
+        waiting = false
+        behindEdgeSeconds = nil
+        bufferedSeconds = nil
+        pausedAt = nil
+        attachedAt = nil
         watching = nil
         status = nil
         delivery = nil
@@ -502,6 +606,12 @@ enum LiveTvType {
     static let badge = Font.system(size: 16, weight: .bold)
     static let eyebrow = Font.system(size: 14, weight: .bold)
     static let chip = Font.system(size: 18, weight: .bold)
+    static let surfaceTitle = Font.system(size: 46, weight: .semibold)
+    static let surfaceBody = Font.system(size: 24)
+    static let surfaceButton = Font.system(size: 24, weight: .semibold)
+    static let surfaceMono = Font.system(size: 20, weight: .medium, design: .monospaced)
+    static let surfaceEyebrow = Font.system(size: 22, weight: .medium, design: .monospaced)
+    static let surfaceHint = Font.system(size: 18, design: .monospaced)
     #else
     static let title = Font.headline
     static let primary = Font.subheadline.weight(.semibold)
@@ -512,6 +622,96 @@ enum LiveTvType {
     static let eyebrow = Font.caption2.weight(.bold)
     static let chip = Font.system(size: 10.5, weight: .bold)
     #endif
+}
+
+struct LiveSurfaceChip: Equatable, Identifiable {
+    enum Kind: String {
+        case live, behind, signal, method, audio, clock
+    }
+
+    let kind: Kind
+    let text: String
+    var id: Kind { kind }
+}
+
+struct LiveTvAccessEventFacts: Equatable {
+    let observedBitrate: Double
+    let droppedFrames: Int
+    let stalls: Int
+}
+
+struct LiveTvPlayerFacts: Equatable {
+    let behindEdgeSeconds: Double?
+    let bufferedSeconds: Double?
+    let observedBitrate: Double?
+    let droppedFrames: Int?
+    let stalls: Int?
+    let hasAccessEvents: Bool
+    let attachedAt: Date?
+    let asOf: Date
+
+    static func capture(
+        item: AVPlayerItem?,
+        behindEdgeSeconds: Double?,
+        bufferedSeconds: Double?,
+        attachedAt: Date?,
+        asOf: Date = Date()
+    ) -> Self {
+        let events = item?.accessLog()?.events.map {
+            LiveTvAccessEventFacts(
+                observedBitrate: $0.observedBitrate,
+                droppedFrames: $0.numberOfDroppedVideoFrames,
+                stalls: $0.numberOfStalls
+            )
+        } ?? []
+        return from(
+            events: events,
+            behindEdgeSeconds: behindEdgeSeconds,
+            bufferedSeconds: bufferedSeconds,
+            attachedAt: attachedAt,
+            asOf: asOf
+        )
+    }
+
+    static func from(
+        events: [LiveTvAccessEventFacts],
+        behindEdgeSeconds: Double?,
+        bufferedSeconds: Double?,
+        attachedAt: Date?,
+        asOf: Date
+    ) -> Self {
+        func sumKnown(_ values: [Int]) -> Int? {
+            let known = values.filter { $0 >= 0 }
+            return known.isEmpty ? nil : known.reduce(0, +)
+        }
+        let rate = events.last?.observedBitrate
+        return Self(
+            behindEdgeSeconds: behindEdgeSeconds,
+            bufferedSeconds: bufferedSeconds,
+            observedBitrate: rate.flatMap { $0 >= 0 && $0.isFinite ? $0 : nil },
+            droppedFrames: sumKnown(events.map(\.droppedFrames)),
+            stalls: sumKnown(events.map(\.stalls)),
+            hasAccessEvents: !events.isEmpty,
+            attachedAt: attachedAt,
+            asOf: asOf
+        )
+    }
+}
+
+struct LiveTvStreamInfoRow: Equatable, Identifiable {
+    enum Section: String, CaseIterable {
+        case programme = "PROGRAMME"
+        case channel = "CHANNEL"
+        case delivery = "DELIVERY"
+        case signal = "SIGNAL"
+        case player = "PLAYER"
+    }
+
+    let section: Section
+    let label: String
+    let value: String
+    var percent: Int? = nil
+    var id: String { "\(section.rawValue)-\(label)" }
 }
 
 private let liveTvClock: DateFormatter = {
@@ -613,6 +813,231 @@ struct LiveTvTechnicalDetails: View {
         }
     }
 }
+
+#if os(tvOS)
+struct LiveTvStreamInfoPanel: View {
+    let programme: LiveTvAiring
+    let channel: LiveTvChannel
+    let status: LiveTvStatus?
+    let delivery: LiveTvDelivery?
+    let player: LiveTvPlayerFacts
+    let onClose: () -> Void
+    @FocusState private var closeFocused: Bool
+
+    static func rows(
+        programme: LiveTvAiring,
+        channel: LiveTvChannel,
+        status: LiveTvStatus?,
+        delivery: LiveTvDelivery?,
+        player: LiveTvPlayerFacts
+    ) -> [LiveTvStreamInfoRow] {
+        var rows = [LiveTvStreamInfoRow]()
+        func append(
+            _ section: LiveTvStreamInfoRow.Section,
+            _ label: String,
+            _ value: String?,
+            percent: Int? = nil
+        ) {
+            guard let value, !value.isEmpty else { return }
+            rows.append(LiveTvStreamInfoRow(
+                section: section, label: label, value: value, percent: percent
+            ))
+        }
+
+        if let current = programme.now {
+            append(.programme, "title", current.title)
+            let episode = [current.episode, current.episodeTitle]
+                .compactMap { $0 }.joined(separator: " · ")
+            append(.programme, "episode", episode)
+            let minutes = max(0, (current.end - Int(player.asOf.timeIntervalSince1970)) / 60)
+            append(
+                .programme,
+                "airing",
+                "\(liveTvTime(current.start))–\(liveTvTime(current.end)) · \(minutes) min left"
+            )
+            append(
+                .programme,
+                "next",
+                programme.next.map { "\(liveTvTime($0.start)) · \($0.title)" }
+            )
+            append(.programme, "synopsis", current.synopsis)
+            let aired = [
+                current.originalAirDate.map { "first aired \($0)" },
+                current.filters?.joined(separator: " · "),
+            ].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
+            append(.programme, "aired", aired)
+        }
+
+        append(
+            .channel,
+            "channel",
+            [
+                channel.guideNumber,
+                channel.guideName,
+                channel.pictureClass,
+                channel.favorite ? "favorite on the tuner" : nil,
+            ].compactMap { $0 }.joined(separator: " · ")
+        )
+        append(.channel, "source", channel.sourceFormatDescription)
+        append(
+            .channel,
+            "observed",
+            channel.sourceFormat.map {
+                Date(timeIntervalSince1970: TimeInterval($0.observedAt))
+                    .formatted(date: .abbreviated, time: .shortened)
+            }
+        )
+
+        let plan = status?.delivery ?? delivery
+        if let plan {
+            append(.delivery, "method", plan.playbackMethod)
+            var video = plan.videoDescription
+            if plan.videoAction == "encode",
+               let encoder = status?.encoder,
+               encoder != "pending" {
+                video += " · \(encoder)"
+            }
+            if let owner = status?.ownerNodeId, !owner.isEmpty {
+                video += " on \(owner)"
+            }
+            append(.delivery, "video", video)
+            append(.delivery, "audio", plan.audioDescription)
+            append(.delivery, "stream", "HLS · \(plan.packaging.uppercased())")
+        }
+
+        if let signal = status?.signal {
+            if let strength = signal.strengthPercent {
+                append(.signal, "strength", "\(strength)%", percent: strength)
+            }
+            if let quality = signal.qualityPercent {
+                append(.signal, "quality", "\(quality)%", percent: quality)
+            }
+            if let symbol = signal.symbolQualityPercent {
+                append(.signal, "symbol", "\(symbol)%", percent: symbol)
+            }
+        }
+
+        let live = [
+            player.behindEdgeSeconds.map {
+                String(format: "%.1f s behind the edge", $0)
+            },
+            player.bufferedSeconds.map {
+                String(format: "%.1f s buffered", $0)
+            },
+        ].compactMap { $0 }.joined(separator: " · ")
+        append(.player, "behind the edge · buffered", live)
+
+        if player.hasAccessEvents {
+            var facts = [String]()
+            if let rate = player.observedBitrate {
+                facts.append(String(format: "%.1f Mb/s observed", rate / 1_000_000))
+            }
+            facts.append(player.droppedFrames.map {
+                "\($0) dropped frames"
+            } ?? "unknown dropped frames")
+            facts.append(player.stalls.map {
+                "\($0) stalls"
+            } ?? "unknown stalls")
+            append(.player, "rate", facts.joined(separator: " · "))
+        }
+
+        var session = [String]()
+        if let owner = status?.ownerNodeId, !owner.isEmpty {
+            session.append("owner \(owner)")
+        }
+        if let attached = player.attachedAt {
+            let minutes = max(0, Int(player.asOf.timeIntervalSince(attached)) / 60)
+            session.append("\(minutes) min")
+        }
+        append(.player, "session", session.joined(separator: " · "))
+        return rows
+    }
+
+    private var rows: [LiveTvStreamInfoRow] {
+        Self.rows(
+            programme: programme,
+            channel: channel,
+            status: status,
+            delivery: delivery,
+            player: player
+        )
+    }
+
+    private func infoColumn(
+        _ sections: [LiveTvStreamInfoRow.Section]
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 24) {
+            ForEach(sections, id: \.self) { section in
+                VStack(alignment: .leading, spacing: 11) {
+                    Text(section.rawValue)
+                        .font(.system(size: 17, weight: .bold, design: .monospaced))
+                        .foregroundStyle(Palette.accent)
+                        .tracking(1.7)
+                    ForEach(rows.filter { $0.section == section }) { row in
+                        infoRow(row)
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    private func infoRow(_ row: LiveTvStreamInfoRow) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .firstTextBaseline, spacing: 20) {
+                Text(row.label)
+                    .font(.system(size: 18, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.36))
+                    .frame(width: 150, alignment: .leading)
+                Text(row.value)
+                    .font(.system(size: 22))
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if let percent = row.percent {
+                ProgressView(value: Double(percent), total: 100)
+                    .tint(Palette.accent)
+                    .frame(height: 6)
+                    .padding(.leading, 170)
+            }
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 30) {
+            HStack {
+                Text("Stream info · as of \(player.asOf.formatted(date: .omitted, time: .shortened))")
+                    .font(.system(size: 34, weight: .semibold))
+                Spacer()
+                Button(action: onClose) {
+                    Label("Close", systemImage: "xmark")
+                }
+                .buttonStyle(LiveSurfacePillStyle())
+                .focusEffectDisabled()
+                .focused($closeFocused)
+            }
+            HStack(alignment: .top, spacing: 54) {
+                infoColumn([.programme, .channel])
+                infoColumn([.delivery, .signal, .player])
+            }
+        }
+        .padding(.vertical, 40)
+        .padding(.horizontal, 44)
+        .frame(width: 1240, height: 984, alignment: .topLeading)
+        .foregroundStyle(.white)
+        .background(
+            Palette.playerChrome.opacity(0.96),
+            in: RoundedRectangle(cornerRadius: 22, style: .continuous)
+        )
+        .onAppear {
+            Task { @MainActor in
+                await Task.yield()
+                closeFocused = true
+            }
+        }
+    }
+}
+#endif
 
 /// One channel row: chip, number and callsign, what is on with a bar to its
 /// end, and when it ends. A protected channel is dimmed, never hidden.
@@ -1273,6 +1698,7 @@ struct LiveTvView: View {
     @State private var overlayVisible = true
     @State private var temporaryGuide = false
     @State private var showingInfo = false
+    @State private var streamInfoPlayer: LiveTvPlayerFacts?
     @State private var showingMore = false
     @State private var showingLayout = false
     @State private var mobileGuideGrid = SettingsStore().liveTvMobileGuideUsesGrid
@@ -1333,6 +1759,76 @@ struct LiveTvView: View {
         nonmutating set { tvLayoutRaw = newValue.rawValue }
     }
 
+    static func liveSurfaceChips(
+        status: LiveTvStatus?,
+        delivery: LiveTvDelivery?,
+        behindEdge: Double?,
+        paused: Date?,
+        now: Date = Date()
+    ) -> [LiveSurfaceChip] {
+        var chips = [LiveSurfaceChip(kind: .live, text: "LIVE")]
+        if let behindEdge {
+            let behind = if let paused {
+                "paused · \(Self.livePauseDuration(from: paused, to: now))"
+            } else {
+                String(format: "%.1f s behind the edge", max(0, behindEdge))
+            }
+            chips.append(LiveSurfaceChip(kind: .behind, text: behind))
+        }
+        if let signal = status?.signal {
+            var facts = [String]()
+            if let strength = signal.strengthPercent {
+                let bars = String(repeating: "▮", count: min(5, max(0, strength / 20)))
+                facts.append([bars, "\(strength)% signal"].filter { !$0.isEmpty }.joined(separator: " "))
+            }
+            if let quality = signal.qualityPercent { facts.append("\(quality)% quality") }
+            if !facts.isEmpty {
+                chips.append(LiveSurfaceChip(kind: .signal, text: facts.joined(separator: " · ")))
+            }
+        }
+        if let delivery {
+            let output = delivery.output
+            let method = delivery.videoAction == "copy"
+                ? "direct \(output.videoCodec)"
+                : "transcode \(output.height)p \(output.videoCodec)"
+            chips.append(LiveSurfaceChip(kind: .method, text: method))
+            let channels = switch output.audioChannels {
+            case 1: "mono"
+            case 2: "stereo"
+            case 6: "5.1"
+            default: "\(output.audioChannels) ch"
+            }
+            let action = delivery.audioAction == "copy" ? "copied" : "transcoded"
+            chips.append(LiveSurfaceChip(
+                kind: .audio,
+                text: "\(output.audioCodec) \(channels) \(action)"
+            ))
+        }
+        chips.append(LiveSurfaceChip(
+            kind: .clock,
+            text: now.formatted(date: .omitted, time: .shortened)
+        ))
+        return chips
+    }
+
+    private static func livePauseDuration(from start: Date, to end: Date) -> String {
+        let seconds = max(0, Int(end.timeIntervalSince(start)))
+        return String(format: "%d:%02d", seconds / 60, seconds % 60)
+    }
+
+    static func liveProgressText(airing: LiveTvAiring, now: Int) -> [String] {
+        guard let programme = airing.now else { return [] }
+        var values = [
+            liveTvTime(programme.start),
+            liveTvTime(programme.end),
+            "\(max(0, (programme.end - now) / 60)) min left",
+        ]
+        if let next = airing.next {
+            values.append("Next \(liveTvTime(next.start)) · \(next.title)")
+        }
+        return values
+    }
+
     /// Leaving the tab or backgrounding the app releases the tuner — unless
     /// picture-in-picture is running or about to be, which is the one case
     /// where the video is still on screen and its tuner is still in use.
@@ -1343,6 +1839,16 @@ struct LiveTvView: View {
     /// test released the tuner before PiP could ever start — killing the exact
     /// case the milestone exists for. `isStarting` covers that gap.
     private var mayRelease: Bool { !pictureInPicture.isActive && !pictureInPicture.isStarting }
+
+    private func showStreamInfo() {
+        streamInfoPlayer = LiveTvPlayerFacts.capture(
+            item: live.player.currentItem,
+            behindEdgeSeconds: live.behindEdgeSeconds,
+            bufferedSeconds: live.bufferedSeconds,
+            attachedAt: live.attachedAt
+        )
+        showingInfo = true
+    }
 
     var body: some View {
         GeometryReader { geometry in
@@ -1412,12 +1918,25 @@ struct LiveTvView: View {
             programmeDetail(programme)
         }
         .sheet(isPresented: $showingInfo) {
+            #if os(tvOS)
+            if let channel = live.watching, let player = streamInfoPlayer {
+                LiveTvStreamInfoPanel(
+                    programme: live.airing(channel, now: Int(player.asOf.timeIntervalSince1970)),
+                    channel: channel,
+                    status: live.status,
+                    delivery: live.delivery,
+                    player: player,
+                    onClose: { showingInfo = false }
+                )
+            }
+            #else
             if let channel = live.watching {
                 LiveTvTechnicalDetails(channel: channel, status: live.status, delivery: live.delivery)
                     .padding(48)
                     .frame(minWidth: 420, minHeight: 260, alignment: .topLeading)
                     .background(Palette.bg)
             }
+            #endif
         }
         .sheet(isPresented: $showingLayout) { layoutPanel }
         .sheet(isPresented: $showingMore) { morePanel }
@@ -2544,6 +3063,220 @@ struct LiveTvView: View {
         }
     }
 
+    #if os(tvOS)
+    private var liveTelemetryStrip: some View {
+        let chips = Self.liveSurfaceChips(
+            status: live.status,
+            delivery: live.status?.delivery ?? live.delivery,
+            behindEdge: live.behindEdgeSeconds,
+            paused: live.pausedAt
+        )
+        return HStack(spacing: 12) {
+            ForEach(chips.filter { [.live, .behind].contains($0.kind) }) {
+                liveSurfaceChip($0)
+            }
+            Spacer()
+            ForEach(chips.filter { ![.live, .behind].contains($0.kind) }) {
+                liveSurfaceChip($0)
+            }
+        }
+        .padding(.horizontal, 80)
+        .padding(.top, 48)
+    }
+
+    private func liveSurfaceChip(_ chip: LiveSurfaceChip) -> some View {
+        HStack(spacing: 8) {
+            if chip.kind == .live {
+                Circle()
+                    .fill(live.paused ? .white.opacity(0.36) : Palette.accent)
+                    .frame(width: 10, height: 10)
+                    .shadow(
+                        color: Palette.accent.opacity(live.paused ? 0 : 0.65),
+                        radius: 7
+                    )
+            }
+            Text(chip.text).font(LiveTvType.surfaceMono)
+        }
+        .foregroundStyle(chip.kind == .live && !live.paused ? Palette.accent : .white.opacity(0.72))
+        .padding(.horizontal, 16)
+        .frame(height: 42)
+        .background(
+            Palette.playerChrome.opacity(0.62),
+            in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+        )
+    }
+
+    @ViewBuilder
+    private var liveWaitingTile: some View {
+        if live.waiting && !live.paused {
+            VStack(spacing: 20) {
+                ProgressView().controlSize(.large)
+                Text("Catching up to live")
+                    .font(.system(size: 28, weight: .semibold))
+                if let behind = live.behindEdgeSeconds {
+                    Text(String(format: "%.1f s behind the edge", behind))
+                        .font(LiveTvType.surfaceMono)
+                        .foregroundStyle(.white.opacity(0.6))
+                }
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 44)
+            .padding(.vertical, 34)
+            .background(
+                .ultraThinMaterial,
+                in: RoundedRectangle(cornerRadius: 20, style: .continuous)
+            )
+        }
+    }
+
+    @ViewBuilder
+    private var livePausedGlyph: some View {
+        if live.paused {
+            Circle()
+                .fill(Palette.playerChrome.opacity(0.72))
+                .frame(width: 132, height: 132)
+                .overlay {
+                    Image(systemName: "pause.fill")
+                        .font(.system(size: 64, weight: .semibold))
+                        .foregroundStyle(.white)
+                }
+        }
+    }
+
+    private func liveIdentityRow(
+        channel: LiveTvChannel?,
+        airing: LiveTvAiring
+    ) -> some View {
+        HStack(spacing: 28) {
+            if let channel {
+                Text(channel.guideNumber)
+                    .font(.system(size: 40, weight: .bold, design: .monospaced))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                    .frame(width: 112, height: 112)
+                    .background(
+                        Palette.playerChrome.opacity(0.72),
+                        in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    )
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                if let channel {
+                    Text(
+                        [channel.guideNumber, channel.guideName, channel.pictureClass]
+                            .compactMap { $0 }
+                            .joined(separator: " · ")
+                    )
+                    .font(LiveTvType.surfaceEyebrow)
+                    .foregroundStyle(.white.opacity(0.6))
+                    .lineLimit(1)
+                }
+                Text(airing.now?.title ?? live.title ?? "Live television")
+                    .font(LiveTvType.surfaceTitle)
+                    .lineLimit(1)
+                let detail = [
+                    airing.now?.episode,
+                    airing.now?.episodeTitle,
+                    airing.now?.synopsis,
+                ].compactMap { $0 }.joined(separator: " · ")
+                if !detail.isEmpty {
+                    Text(detail)
+                        .font(LiveTvType.surfaceBody)
+                        .foregroundStyle(.white.opacity(0.6))
+                        .lineLimit(1)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    @ViewBuilder
+    private func liveProgressRow(_ airing: LiveTvAiring) -> some View {
+        if airing.now != nil {
+            let values = Self.liveProgressText(airing: airing, now: now)
+            HStack(spacing: 18) {
+                Text(values[0])
+                GeometryReader { geometry in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(.white.opacity(0.18))
+                        Capsule()
+                            .fill(Palette.accent)
+                            .frame(width: geometry.size.width * (airing.progress ?? 0))
+                    }
+                }
+                .frame(height: 6)
+                Text(values[1])
+                Text(values[2])
+                    .foregroundStyle(.white.opacity(0.6))
+                if values.count == 4 {
+                    Text("·").foregroundStyle(.white.opacity(0.36))
+                    Text(values[3])
+                        .foregroundStyle(.white.opacity(0.6))
+                        .lineLimit(1)
+                }
+            }
+            .font(LiveTvType.surfaceMono)
+        }
+    }
+
+    private func liveBottomBand(
+        channel: LiveTvChannel?,
+        airing: LiveTvAiring
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 28) {
+            liveIdentityRow(channel: channel, airing: airing)
+            liveProgressRow(airing)
+            if let message = live.surfaceMessage {
+                Text(message)
+                    .font(LiveTvType.surfaceMono)
+                    .foregroundStyle(.white.opacity(0.6))
+                    .lineLimit(2)
+            }
+            liveSurfaceButtons
+        }
+        .padding(.horizontal, 80)
+        .padding(.bottom, 64)
+        .foregroundStyle(.white)
+    }
+
+    private var liveSurfaceButtons: some View {
+        HStack(spacing: 16) {
+            Button { live.togglePause() } label: {
+                Label(
+                    live.paused ? "Play live" : "Pause",
+                    systemImage: live.paused ? "play.fill" : "pause.fill"
+                )
+            }
+            .focused($focusedControl, equals: .play)
+            Button {
+                temporaryGuide = true
+                overlayGeneration &+= 1
+                requestGuideFocus()
+            } label: {
+                Label("Guide", systemImage: "rectangle.grid.3x2")
+            }
+            .focused($focusedControl, equals: .guide)
+            Button { requestChannelFocus(); fullscreen = false } label: {
+                Label("Channels", systemImage: "list.bullet")
+            }
+            .focused($focusedControl, equals: .channels)
+            Button { showStreamInfo() } label: {
+                Label("Info", systemImage: "info.circle")
+            }
+            .focused($focusedControl, equals: .info)
+            Button { showingMore = true } label: {
+                Label("More", systemImage: "ellipsis")
+            }
+            .focused($focusedControl, equals: .more)
+            Spacer()
+            Text("MENU hides · PLAY/PAUSE \(live.paused ? "resumes" : "pauses")")
+                .font(LiveTvType.surfaceHint)
+                .foregroundStyle(.white.opacity(0.36))
+        }
+        .buttonStyle(LiveSurfacePillStyle())
+        .focusEffectDisabled()
+    }
+    #endif
+
     /// Fullscreen is a surface, not a bare element: channel and programme in
     /// the corner, a strip of neighbours along the bottom, and a progress bar —
     /// all auto-hiding after the contract's four seconds while playing.
@@ -2566,7 +3299,7 @@ struct LiveTvView: View {
             // player solves it the same way (PlayerView.swift's `.reveal`).
             Color.clear
                 .contentShape(Rectangle())
-                .focusable(true)
+                .focusable(!overlayVisible && !temporaryGuide)
                 .focused($focusedControl, equals: FocusTarget.reveal)
                 .accessibilityHidden(true)
                 .liveTvRemoteAdapter(
@@ -2575,6 +3308,33 @@ struct LiveTvView: View {
                     apply: { outcome, _ in applyLiveOutcome(outcome) }
                 )
             #endif
+            #if os(tvOS)
+            liveWaitingTile
+            livePausedGlyph
+            if overlayVisible && !temporaryGuide {
+                ZStack(alignment: .top) {
+                    LinearGradient(
+                        colors: [.black.opacity(0.76), .clear],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                    .frame(height: 190)
+                    liveTelemetryStrip
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+
+                ZStack(alignment: .bottom) {
+                    LinearGradient(
+                        colors: [.clear, .black.opacity(0.92)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                    .frame(height: 520)
+                    liveBottomBand(channel: channel, airing: airing)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+            }
+            #else
             if overlayVisible {
                 VStack {
                     HStack(alignment: .top) {
@@ -2594,36 +3354,14 @@ struct LiveTvView: View {
                         }
                         Spacer()
                         HStack {
-                            #if os(tvOS)
-                            Button("Guide") {
-                                temporaryGuide = true
-                                overlayGeneration &+= 1
-                                requestGuideFocus()
-                            }
-                                .focused($focusedControl, equals: .guide)
-                            Button("Channels") { requestChannelFocus(); fullscreen = false }
-                                .focused($focusedControl, equals: .channels)
-                            Button(live.paused ? "Play live" : "Pause") { live.togglePause() }
-                                .focused($focusedControl, equals: .play)
-                            Button("Info") { showingInfo = true }
-                                .focused($focusedControl, equals: .info)
-                            Button("More") { showingMore = true }
-                            .focused($focusedControl, equals: .more)
-                            #else
                             Button(muted ? "Unmute" : "Mute") { muted.toggle(); live.player.isMuted = muted }
                             if pictureInPicture.isSupported { Button("PiP") { pictureInPicture.toggle() } }
                             Button("Exit") { fullscreen = false }
-                            #endif
                         }
-                        #if os(tvOS)
-                        .buttonStyle(TVReadableButtonStyle(prominent: false))
-                        .focusEffectDisabled()
-                        #endif
                     }
                     Spacer()
                     VStack(alignment: .leading, spacing: 8) {
                         ProgressView(value: airing.progress ?? 0).tint(.white)
-                        #if os(iOS)
                         ScrollView(.horizontal, showsIndicators: false) {
                             HStack(spacing: 8) {
                                 ForEach(visible) { entry in
@@ -2646,12 +3384,12 @@ struct LiveTvView: View {
                                 }
                             }
                         }
-                        #endif
                     }
                 }
                 .padding()
                 .foregroundStyle(.white)
             }
+            #endif
             #if os(tvOS)
             if temporaryGuide {
                 // The identical panel the Over picture layout draws, so the
@@ -2708,30 +3446,52 @@ struct LiveTvView: View {
             overlayVisible = false
         }
         #if os(tvOS)
-        // Focus must land on the reveal layer whenever the overlay is not
-        // there to hold it, or the next press goes nowhere.
-        .onAppear { focusedControl = overlayVisible ? .guide : .reveal }
+        .onAppear { focusedControl = overlayVisible ? .play : .reveal }
         .onChange(of: overlayVisible) { _, visible in
-            focusedControl = visible ? .guide : .reveal
+            if visible {
+                focusedControl = .play
+            } else {
+                focusedControl = nil
+                Task { @MainActor in
+                    await Task.yield()
+                    guard fullscreen, !overlayVisible, !temporaryGuide,
+                          !showingInfo, !showingMore, !showingLayout, detail == nil
+                    else { return }
+                    focusedControl = .reveal
+                }
+            }
         }
-        .onChange(of: focusedControl) { _, _ in
+        .onChange(of: focusedControl) { _, target in
             if overlayVisible { overlayGeneration &+= 1 }
+            if overlayVisible, target == .reveal { focusedControl = .play }
+        }
+        .onChange(of: temporaryGuide) { _, up in
+            overlayGeneration &+= 1
+            if !up, fullscreen { focusedControl = overlayVisible ? .play : .reveal }
         }
         #endif
-        .onChange(of: temporaryGuide) { _, _ in overlayGeneration &+= 1 }
-        .onChange(of: showingInfo) { _, _ in overlayGeneration &+= 1 }
+        .onChange(of: showingInfo) { _, visible in
+            overlayGeneration &+= 1
+            #if os(tvOS)
+            guard !visible, fullscreen, overlayVisible else { return }
+            focusedControl = nil
+            Task { @MainActor in
+                await Task.yield()
+                guard fullscreen, overlayVisible, !temporaryGuide,
+                      !showingInfo, !showingMore, !showingLayout, detail == nil
+                else { return }
+                focusedControl = .play
+            }
+            #endif
+        }
         .onChange(of: showingMore) { _, _ in overlayGeneration &+= 1 }
         .onChange(of: showingLayout) { _, _ in overlayGeneration &+= 1 }
         .onChange(of: live.paused) { _, _ in overlayGeneration &+= 1 }
-        // Deliberately NOT `onChange(of: live.playing)`. `watch()` detaches
-        // before it awaits the new lease, so `playing` goes false mid-tune —
-        // which dismissed the cover, ran `onDismiss`, stopped the session that
-        // was still being granted, and left the viewer on the inline page with
-        // nothing playing. On tvOS that was the only tune path in the overlay,
-        // so `activate → tune` never worked at all. Only a session that has
-        // actually finished closes the surface.
-        .onChange(of: live.busy) { _, busy in
-            if !busy && !live.playing { fullscreen = false }
+        .onChange(of: live.playing) { _, playing in
+            if !playing && !live.busy {
+                fullscreen = false
+                temporaryGuide = false
+            }
         }
         // Outside the remote adapter on purpose: a press that lands on one of
         // the reminder's buttons is the button's, and the routing table never

@@ -2,6 +2,38 @@ version = 1
 enforce_after = "e8a910f"
 
 [[fixes]]
+id = "android.live-tv-playlist-hold-back"
+commits = ["ad524065"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvPlayer.kt"
+source_anchor = ".setLiveConfiguration(MediaItem.LiveConfiguration.Builder().setMaxOffsetMs(8_000).build())"
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvTest.kt"
+test_anchor = "liveConfigurationLeavesTheTargetOffsetToThePlaylist"
+
+[[fixes]]
+id = "apple.live-tv-fullscreen-focus"
+commits = ["861c6e24"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = ".focusable(!overlayVisible && !temporaryGuide)"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testTheRevealLayerIsNotFocusableWhileTheOverlayOrTheGuideIsVisible"
+
+[[fixes]]
+id = "apple.live-tv-info-focus-review"
+commits = ["90c18453"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = "guard !visible, fullscreen, overlayVisible else { return }"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testFullscreenFocusDefaultsToPauseAndReturnsThereFromTheRevealLayer"
+
+[[fixes]]
+id = "apple.live-tv-pill-renderer"
+commits = ["1cc7f883"]
+source = "clients/apple/Sources/Theme.swift"
+source_anchor = "private struct Renderer: View"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testTheLiveSurfacePillRendererDoesNotShadowButtonStyleBody"
+
+[[fixes]]
 id = "android.library-channel-start-failure"
 commits = ["4dd00603"]
 source = "clients/android/app/src/main/java/tv/plurx/app/librarychannels/LibraryChannelStartFailure.kt"
@@ -1807,7 +1839,7 @@ test_anchor = "aSeekWindowIsTheClientPreparingRow"
 id = "clients.build-counters-claimed-by-their-generators"
 commits = ["0f68b0a1"]
 source = "clients/apple/project.yml"
-source_anchor = "CURRENT_PROJECT_VERSION: \"153\""
+source_anchor = "CURRENT_PROJECT_VERSION: \"154\""
 test = "tests/operations/test_apple_build_claims.py"
 test_anchor = "def test_a_generated_next_build_satisfies_the_document_claim_sweep"
 

@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["f9cbbe5e", "75e98d92", "ce58fa10", "129f58ec"]
+points = ["live-tv.integration"]
+checks = ["rust-gate", "rust-gate-ci", "live-tv-two-node", "live-tv-hardware"]
+reason = "The retained Live TV regressions freeze the production one-second HLS command, require a 24-entry bounded window and its threshold-plus-one deletion lag, parse TARGETDURATION and every EXTINF, withhold startup until two listed segments contain two target durations of media, advance the watchdog at the newest listed segment, preserve rename-before-rewrite publication, and report the listed count at timeout. The real producer test drives the gated lifecycle through a tuner and FFprobe fixture; the two-node harness requires the first public playlist to list at least two entries, fetches every listed segment and rolls the complete window. The hardware check separately records the first listed segment and public answer, TARGETDURATION, individual durations and selected-segment bitrate on encoded, copied and non-owner relay routes; hardware evidence remains required before promotion."

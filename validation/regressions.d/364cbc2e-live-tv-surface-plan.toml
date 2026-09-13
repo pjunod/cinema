@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["364cbc2e"]
+ignore = true
+reason = "Documentation only: this commit adds the reviewed Live TV start, stall, and tvOS surface implementation plan; the implementation commits carry the executable evidence."

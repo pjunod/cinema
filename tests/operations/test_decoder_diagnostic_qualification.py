@@ -473,7 +473,7 @@ class DecoderSelectionInventoryTests(unittest.TestCase):
         ).split("#[cfg(test)]", 1)[0]
         self.assertEqual(
             live_tv.count("tokio::process::Command::new("),
-            3,
+            2,
             "inventory every direct shipping Live TV FFmpeg command",
         )
         for anchor in (
@@ -481,7 +481,7 @@ class DecoderSelectionInventoryTests(unittest.TestCase):
             "fn spawn_live_ffmpeg(",
             "fn live_video_filter(",
             "async fn capture_live_stderr(",
-            "async fn run_graph_probe(\n    ffmpeg: &str,",
+            "async fn run_graph_probe(\n    encoder: Encoder,",
         ):
             self.assertEqual(
                 live_tv.count(anchor),

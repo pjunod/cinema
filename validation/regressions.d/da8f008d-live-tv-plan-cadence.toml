@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["da8f008d"]
+ignore = true
+reason = "Documentation only: this commit folds the reviewed one-second session cadence and reference renders into the diagnosis and implementation plan; it changes no runtime or validation behavior."

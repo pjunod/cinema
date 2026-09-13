@@ -1,6 +1,9 @@
 package tv.plurx.app.livetv
 
+import androidx.media3.common.C
+import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
+import java.io.File
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -18,6 +21,27 @@ import tv.plurx.app.data.Net
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class LiveTvTest {
+    @Test fun liveConfigurationLeavesTheTargetOffsetToThePlaylist() {
+        val item = MediaItem.Builder()
+            .setLiveConfiguration(
+                MediaItem.LiveConfiguration.Builder().setMaxOffsetMs(8_000).build(),
+            )
+            .build()
+        assertEquals(C.TIME_UNSET, item.liveConfiguration.targetOffsetMs)
+        assertEquals(8_000L, item.liveConfiguration.maxOffsetMs)
+
+        val source = listOf(
+            File("app/src/main/java/tv/plurx/app/livetv/LiveTvPlayer.kt"),
+            File("src/main/java/tv/plurx/app/livetv/LiveTvPlayer.kt"),
+            File("clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvPlayer.kt"),
+        ).firstOrNull(File::isFile)?.readText() ?: error("LiveTvPlayer.kt source not found")
+        val mediaItem = source.substringAfter("output.setMediaItem(").substringBefore("output.prepare()")
+        assertTrue(mediaItem.contains(
+            ".setLiveConfiguration(MediaItem.LiveConfiguration.Builder().setMaxOffsetMs(8_000).build())",
+        ))
+        assertFalse(mediaItem.contains("setTargetOffsetMs"))
+    }
+
     @Test fun liveStartWireIncludesRequiredProtocolVersions() {
         val caps = Net.json.decodeFromString<tv.plurx.app.data.DeviceCaps>("""{
             "v":2,"client":{"kind":"android","build":"test","ua":"fixture"},
