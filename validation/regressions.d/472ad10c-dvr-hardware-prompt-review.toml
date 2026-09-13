@@ -1,0 +1,8 @@
+version = 1
+
+[[coverage]]
+commits = ["472ad10c"]
+points = []
+checks = []
+reason = "Documentation only, and the corrections are about facts a test cannot hold. This commit fixes five P1 findings in `docs/clients/DVR-HARDWARE-VERIFICATION-PROMPT.md`, a hand-off written to be pasted into a session at the physical devices. Each correction states something true about the shipped code that the prose had wrong — that `live_tv.max_sessions` defaults to 2 rather than the 4 the tuner arithmetic assumes (`crates/plurxd/src/live_tv.rs` `unwrap_or(2)`), that the web client never reads the `holders` field on a capacity refusal and so shows a fixed generic string, that the Developer card's `every_node_mounts_root` row is `RequirementStatus::Unobservable` by construction, and that back-to-back sharing depends on the default padding. Nothing in the repository asserts the content of a prompt document against the code it describes; `test_docs_index` checks only that the file is indexed and its links resolve, and it passes. A revert restores prose that would send a reader to the hardware with the wrong settings and invite a false defect report, and no test anywhere goes red. Mapped as no-evidence rather than anchored to a check that does not exist. The one durable guard this commit does add is to the quoted blocks: the end-to-end prompt is now byte-identical to the implementation plan's section 8 and the guide prompt differs only by the tuner IP, which the surrounding text states, so a future silent edit is visible as a diff between two tracked files."
+ignore = true
