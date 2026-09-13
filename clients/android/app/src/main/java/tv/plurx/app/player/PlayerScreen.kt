@@ -520,12 +520,30 @@ fun PlayerScreen(
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         when {
             failed -> PlaybackFailed(
-                message = "Couldn't start playback.",
-                onRetry = {
-                    startReason = "fallback"
-                    generation++
+                // Before any Controller exists: the decision never loaded, so
+                // there is no player to stop, no media generation for a fault
+                // to be about and no presenter to run. The shape is still the
+                // contract's `stopped` — a terminal with Retry and Back — so
+                // this screen and the player's own terminal read and route
+                // alike.
+                fault = PlaybackFault(
+                    cls = SurfaceClass.Stopped,
+                    source = SurfaceSources.OWNER_STOPPED,
+                    attached = 0,
+                    intent = null,
+                    raisedAtMs = 0,
+                    detail = "Couldn't start playback.",
+                    actions = SurfaceClass.Stopped.defaultActions,
+                    playerStopped = true,
+                ),
+                onAction = { action ->
+                    if (action == SurfaceAction.Retry) {
+                        startReason = "fallback"
+                        generation++
+                    } else {
+                        onExit()
+                    }
                 },
-                onExit = onExit,
             )
             plan == null -> {
                 LoadingBox()
@@ -1511,7 +1529,13 @@ private fun PlayerContent(
             )
         }
 
-        (bannerFault?.detail ?: bannerFault?.title)?.let { notice ->
+        // The title first, because the one fault that has both is a blocking
+        // surface the agreement rule demoted: "Playback recovered" is the news,
+        // and the sentence underneath it is about the failure that lost.
+        // NOTE: the contract gives a `refused` banner a Retry action; Android
+        // still renders the banner as today's plain notice, so those actions
+        // reach the ledger and the client log but not a button yet.
+        (bannerFault?.title ?: bannerFault?.detail)?.let { notice ->
             Text(
                 text = notice,
                 color = Color.White,

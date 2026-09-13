@@ -958,6 +958,13 @@ class Controller(
     /** An explicit Retry is a new viewer command, unlike an automatic reopen. */
     fun prepareViewerRetry(): Long {
         val target = positionForPlaybackIntent()
+        // The owner's stop-before-raise set `playWhenReady = false`, which
+        // Media3 reports as a USER_REQUEST and which therefore cleared the
+        // viewer's transport intent. That intent outlives this controller — it
+        // belongs to the playback, not the plan — so without this the
+        // replacement Retry builds would attach paused behind a picture the
+        // viewer just asked to see again.
+        playbackIntent.setPlaybackRequested(true)
         stallGuard.invalidateForUserAction()
         playbackControl.clearVerdict()
         playbackIntent.beginSeek(target, realPosition())
