@@ -104,12 +104,14 @@ failure(s)" there and "93 shaping contracts hold" with `TMPDIR` pointed
 anywhere else, and detached `nohup` jobs die without a message. Export
 `TMPDIR` off `/sessions` before believing any red result on that machine.
 
-## The playback surface contract — built, Kotlin compiled, unverified
+## The playback surface contract — built, both clients compiled, unverified on hardware
 
 **Merged to `main`: M0 (#276), M1 (#277), M2 (#280), M3 (#279) and M5 (#282).
-M4 and M6 are not done, nothing Swift has ever been compiled, and no device
-has ever run any of it. The Kotlin now compiles and its JVM tests pass —
-2026-09-13, on both of the hand-off's routes, see (2) below.** The effort replaced three imperative error
+Both clients now compile and both unit suites pass — the Kotlin on 2026-09-13
+on both of the hand-off's routes (see (2) below), the Swift the same day on
+both simulator destinations (see "What the Apple build and test run found"
+below). M4 and M6 are not done, and no physical device has run any of it.**
+The effort replaced three imperative error
 channels — the web's `setLoading()`, Apple's
 `failed`/`playbackError`/`playbackFailureTitle`/`playbackNotice`, Android's
 `onError`/`playFailure`/`playbackNotice` — with one fixture-driven presenter
@@ -182,19 +184,55 @@ call, no timer of its own, no control-plane call), which is contract v2's
 actual thesis and was exempted wholesale before.
 
 The fixture is **60** ordered-event cases. The web presenter runs all 60 in
-`tests/playback/playback-surface-contract.test.js`; the Android presenter
-runs all 60 in `PlaybackSurfaceReducerTest.everyFixtureCaseRuns`, executed for
-the first time on 2026-09-13; the Apple presenter is written to run all 60 and
-never has.
+`tests/playback/playback-surface-contract.test.js`; the Apple presenter runs
+all 60 in `testPlaybackSurfaceModelRunsEveryContractCase`, confirmed passing
+on the iOS **and** the tvOS destination; the Android presenter runs all 60 in
+`PlaybackSurfaceReducerTest.everyFixtureCaseRuns`. All three were executed for
+the first time on 2026-09-13.
+
+### What the Apple build and test run found
+
+On a Mac (macOS 26.6.2, Xcode 26.6, xcodegen 2.46.0), against this branch:
+`make apple-build` compiled **both** schemes clean, and `make apple-test` ran
+the whole suite on **iPhone 17 Pro (iOS 26.5)** — 531 tests — and on **Apple
+TV 4K (3rd generation) (tvOS 26.5)** — 517 tests — with **0 failures on
+each**. Every test the hand-off prompt names by name ran and passed under both
+destinations.
+
+Four defects had to be fixed to get there, all of them in code written blind:
+one compile error (a test still read `PlayerController.failed`, the flag M2
+deleted) and three test failures (a blocking raise set up over a still
+`presenting` picture, which §3.2 demotes on the spot; a source-shape assertion
+looking for the literal `player.pause()` that M2 had moved into
+`stopForBlockingSurface()`; and M5's change-context test, which asserted a
+second `/decision` request that a warm — prepared — quality change never makes,
+and whose precondition no headless test could reach). No threshold, budget,
+detector or ladder was retuned.
+
+The prompt's six pinned mutations were applied and reverted one at a time.
+**A1, A2, A4 and A5 were killed by the test each was pinned to.** A5 and A6
+are also killed by `tests/playback/web-policy.test.js`, as predicted. **A3 —
+deciding `sampleSurfacePresentation` on `timeControlStatus` instead of the
+position delta — killed nothing, anywhere.** That is a finding, not a pass:
+Apple's presentation *detector* has no test of either kind, because the one
+test pinned to it exercises `PlaybackSurfaceModel` directly and never reaches
+`PlayerController`. It wants a test.
 
 ### Exactly what is not done
 
-1. **Nothing Swift has been compiled.** M2 and M5's Apple code was written on
-   Linux with no Xcode, no `swift` and no simulator. `AppleClientTests`'
-   surface cases, the eight owner-stop killers, the R1 and B4 pins and M5's
-   three `PlayerOperationOwnershipTests` cases have never been executed. The
-   hand-off is
-   [PLAYBACK-SURFACE-APPLE-BUILD-PROMPT.md](docs/clients/PLAYBACK-SURFACE-APPLE-BUILD-PROMPT.md).
+1. **The Apple client compiles and its suite is green — but §6 of the
+   hand-off has not been run.** `AppleClientTests`' surface cases, the eight
+   owner-stop killers, the R1 and B4 pins and M5's three
+   `PlayerOperationOwnershipTests` cases have now all executed and passed, on
+   both destinations. What has *not* run is any of the eight simulator and
+   device recipes in §6 of
+   [PLAYBACK-SURFACE-APPLE-BUILD-PROMPT.md](docs/clients/PLAYBACK-SURFACE-APPLE-BUILD-PROMPT.md):
+   every one of them needs a live `plurxd` with real media — a cold NAS that
+   answers 503 `startup_timeout`, a forced 401 on a quality change, a create
+   that lands after the 60 s deadline — and no server was reachable from the
+   build machine. The unit suite cannot see any of those behaviours, and one
+   mutation (A3) proves the point: the presentation detector those recipes
+   exercise is untested.
 2. **The Kotlin compiles and its JVM tests pass. Nothing has run on a
    device.** M3 and M5's Android code was written on Linux with no SDK and no
    disk for a Gradle build; it was compiled for the first time on 2026-09-13,
@@ -223,8 +261,7 @@ never has.
    test; K7, as the hand-off predicts, is killed by
    `tests/playback/web-policy.test.js` and by no JVM test. What is still
    missing is every part that needs hardware: no instrumented test, no
-   emulator, and none of the twelve recipes in §5 of
-   [PLAYBACK-SURFACE-ANDROID-BUILD-PROMPT.md](docs/clients/PLAYBACK-SURFACE-ANDROID-BUILD-PROMPT.md).
+   emulator, and none of the twelve recipes in §5 of   [PLAYBACK-SURFACE-ANDROID-BUILD-PROMPT.md](docs/clients/PLAYBACK-SURFACE-ANDROID-BUILD-PROMPT.md).
    What was done before any of this, and is evidence about the semantics and
    not about the Kotlin: the shipped reducer was transliterated into Python,
    run against every fixture case, and fuzzed 3,500 sequences differentially

@@ -1,14 +1,23 @@
 # Apple build and test — compile the playback surface contract
 
-**Status:** open · **For:** a session sitting at a Mac with Xcode ·
+**Status:** §1–§5 done 2026-09-13 (see the note below); §6 still open ·
+**For:** a session sitting at a Mac with Xcode ·
 **Covers:** M2 (PR #280) and M5 (PR #282) of the [playback surface
 contract](PLAYBACK-SURFACE-CONTRACT.md), both merged to `main`
 
 Every line of Swift in those two PRs was written on a Linux machine with no
-Xcode, no `swift` and no simulator. **Nothing has been compiled and no XCTest
-case has ever executed.** That is not a caveat on the work; it is the work
-that is left. This document is the hand-off for someone at the machine that
-can do it.
+Xcode, no `swift` and no simulator. That is not a caveat on the work; it is
+the work that is left. This document is the hand-off for someone at the
+machine that can do it.
+
+> **2026-09-13 — §1 through §5 have now been done.** Both schemes compile and
+> the whole suite passes on `iPhone 17 Pro` (iOS 26.5) and `Apple TV 4K (3rd
+> generation)` (tvOS 26.5) — 531 and 517 tests, 0 failures — after one compile
+> error and three test failures were fixed. Mutations A1, A2, A4 and A5 were
+> killed by the test each names; **A3 killed nothing and is an open finding**
+> (the Apple presentation detector has no test of any kind). **§6 is what is
+> left:** none of its eight runs was possible without a live `plurxd`. See
+> STATUS.md, "What the Apple build and test run found".
 
 Nothing here changes behaviour on purpose. If a step fails, the two honest
 outcomes are (1) fix it there, when the failure is a compile error whose fix
