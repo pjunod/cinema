@@ -630,10 +630,7 @@ private fun PlaybackFailed(
     onAction: (SurfaceAction) -> Unit,
 ) {
     val firstFocusRequester = remember { FocusRequester() }
-    // Force transcode is the web's diagnosed-stall affordance; no Android owner
-    // offers it, so it is dropped rather than drawn as a button that does
-    // nothing.
-    val actions = fault.actions.filter { it != SurfaceAction.ForceTranscode }
+    val actions = surfaceActions(fault)
     RequestInitialFocus(firstFocusRequester, enabled = actions.isNotEmpty())
     Column(
         Modifier.fillMaxSize().background(Color.Black),
@@ -660,6 +657,18 @@ private fun PlaybackFailed(
         }
     }
 }
+
+/**
+ * The actions this client draws, from the ones the fault carries.
+ *
+ * `force_transcode` is the web's diagnosed-stall affordance (contract §3.3 row
+ * 2): no Android owner ever puts it on a fault, and a button that does nothing
+ * is worse than no button. Dropped HERE, once, rather than in each render —
+ * this function is the single fact that makes it unreachable, which is what
+ * [PlayerScreen]'s action handler points at instead of quietly swallowing one.
+ */
+private fun surfaceActions(fault: PlaybackFault): List<SurfaceAction> =
+    fault.actions.filter { it != SurfaceAction.ForceTranscode }
 
 /** Today's words for each action, moved rather than rewritten. */
 private fun surfaceActionLabel(action: SurfaceAction): String = when (action) {
@@ -884,7 +893,10 @@ private fun PlayerContent(
                 vm.logout()
                 onExit()
             }
-            // No Android owner offers it; both renders filter it out.
+            // Unreachable: `surfaceActions` is the only thing that builds a
+            // button, and it drops `force_transcode` — which no Android owner
+            // raises in the first place. The arm exists because `when` over an
+            // enum must be exhaustive, not because there is anything to do.
             SurfaceAction.ForceTranscode -> Unit
         }
     }
@@ -1550,7 +1562,7 @@ private fun PlayerContent(
             // lost. The actions come with it — a failed change that offers no
             // Retry is the dead end this contract exists to remove.
             val notice = fault.title ?: fault.detail
-            val actions = fault.actions.filter { it != SurfaceAction.ForceTranscode }
+            val actions = surfaceActions(fault)
             if (notice != null || actions.isNotEmpty()) {
                 Column(
                     Modifier
