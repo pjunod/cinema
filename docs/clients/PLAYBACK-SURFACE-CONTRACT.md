@@ -184,6 +184,13 @@ will drift; the function names will not.
   `BEHIND_LIVE_WINDOW` (1002) also goes to `Fail` (`PlaybackPolicy.kt:77`).
 - No test references `onError`, `playFailure`, `playbackNotice` or
   `PlaybackFailed`.
+- **Field evidence, 2026-09-13.** Paul's Android tablet, mid-film: "Playback
+  stopped (ERROR_CODE_IO_BAD_HTTP_STATUS)." with Retry / Back, the picture
+  visibly still playing behind the transparent overlay
+  ([photo](../img/android-bad-http-status-overlay-20260913.jpg)). That is
+  path A end to end: an HTTP refusal whose body was never read, `Fail`
+  without a pause, and the stall watchdog's restart under a `playFailure`
+  nothing can clear.
 
 ### 2.4 The common shape
 
