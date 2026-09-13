@@ -656,7 +656,10 @@ async fn owner_start(
             .live_tv
             .start_local(request.clone())
             .await
-            .map_err(api_error);
+            // Only the owner knows what is holding its tuners, so only the
+            // owner can name them. A relayed refusal keeps the code and loses
+            // the detail, which is the honest thing for an ingress to say.
+            .map_err(|error| capacity_error(error, state.live_tv.transport_holders()));
     }
     let (node_id, base) = owner_peer(state, &config.owner_node_id).await?;
     let (path, body) = if request.playback.is_some() {
@@ -1138,6 +1141,37 @@ fn peer_error(error: PeerTransportError) -> LiveTvError {
         PeerTransportError::InvalidResponse => "the tuner owner returned an invalid response",
     };
     LiveTvError::OwnerUnavailable(message.to_owned())
+}
+
+/// The capacity refusal, told what is actually holding the tuners.
+///
+/// A viewer refused a tuner by their own recordings is owed more than "all
+/// slots are in use": which channels are held, by which recordings, and until
+/// when — so the client can offer to stop one instead of leaving them to guess
+/// where their television went. A transport with two sinks is listed but not
+/// offered as a single stop, because stopping one of two recordings on a
+/// channel frees nothing.
+pub(crate) fn capacity_error(
+    error: LiveTvError,
+    holders: Vec<crate::live_tv::dvr::DvrHolder>,
+) -> ApiError {
+    let LiveTvError::Capacity(message) = &error else {
+        return api_error(error);
+    };
+    if holders.is_empty() {
+        return api_error(error);
+    }
+    let mut detail = serde_json::Map::new();
+    detail.insert(
+        "holders".to_owned(),
+        serde_json::to_value(&holders).unwrap_or(serde_json::Value::Null),
+    );
+    ApiError::TypedDetail {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        code: "tuner_capacity",
+        message: message.clone(),
+        detail,
+    }
 }
 
 pub(crate) fn api_error(error: LiveTvError) -> ApiError {

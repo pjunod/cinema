@@ -732,6 +732,21 @@ checks = ["rust-gate", "rust-gate-ci", "security-boundaries", "resource-bounds",
 depends_on = ["library.catalog", "identity.access", "playback.pipeline", "server.api"]
 
 [[points]]
+id = "live.dvr"
+title = "Recording from the tuner, and reminders"
+contract = "Recording rules and one-off requests materialise one row per airing, identified by channel and start for that airing's whole life, so a cancelled recording is never resurrected by a rule that still matches it. The owner node alone opens tuner transports and writes the live and terminal states, recording back-to-back airings on one channel through a single tuner GET; a viewer is never refused a tuner by a recording without being told which recording holds it and offered a way to stop it. Every capture is an Activity row with a reason and a stop, recordings scan into a library from their own sidecars with no provider lookups, and reminders fire from a loop that needs neither the tuner nor the recording switch. Readiness facts in Developer settings are advisory and never gate enablement."
+paths = [
+  "crates/plurx-core/src/dvr.rs",
+  "crates/plurx-core/src/store/hiqlite_dvr.rs",
+  "crates/plurx-core/src/store/sqlite/dvr.rs",
+  "crates/plurxd/src/http/dvr.rs",
+  "docs/features/LIVE-TV-DVR-AND-REMINDERS-OPTIONS.md",
+  "docs/features/LIVE-TV-DVR-IMPLEMENTATION.md",
+]
+checks = ["rust-gate", "rust-gate-ci", "security-boundaries", "resource-bounds", "operations-contract", "web-static", "web-layout"]
+depends_on = ["live-tv.integration", "library.catalog", "identity.access", "playback.pipeline", "server.api"]
+
+[[points]]
 id = "playback.benchmark"
 title = "Cinema-vs-Plex controlled A/B benchmark"
 contract = "The same corpus, operations, output contract, and client clock produce credential-safe raw evidence, distributions, failure rates, and directionally explicit ratios for Cinema and Plex."

@@ -111,6 +111,9 @@ pub(crate) async fn readiness(
     // would render as "the switch is off", which is a reading this route did
     // not take — the same dishonesty it exists to remove, one layer down.
     let settings = state.store.settings_snapshot().await?;
+    let live_tv = crate::live_tv::LiveTvConfig::from_snapshot(&settings, &state.node_id);
+    let dvr_config = crate::live_tv::DvrConfig::from_snapshot(&settings);
+    let dvr_on = dvr_config.enabled;
     let library_channels_on = plurx_core::store::stored_switch(
         settings
             .get(plurx_core::store::keys::LIBRARY_CHANNELS_ENABLED)
@@ -162,6 +165,7 @@ pub(crate) async fn readiness(
     Ok(Json(DeveloperReadiness {
         items: vec![
             library_channels(&state, library_channels_on).await,
+            dvr(&state, dvr_on, &live_tv, &dvr_config).await,
             cluster_transport_recovery(&state).await,
             playback_control_protocol(control_advertised),
             prepared_quality_handoff(prepared_handoff_on),
@@ -791,5 +795,247 @@ fn prepared_quality_handoff(enabled: bool) -> DeveloperEnableItem {
         enabled: Some(enabled),
         setting: Some("prepared_quality_handoff"),
         requirements,
+    }
+}
+
+/// Recording from the tuner to a disk. Every row here is a fact this process
+/// read just now, and not one of them is consulted by the settings write:
+/// `dvr_enabled` is a plain switch, and an operator who can see the deployment
+/// may turn it on over any amount of red.
+///
+/// The honest shape of these questions is why two of the six can be
+/// `Unobservable` on a healthy server. Whether every node mounts the DVR root
+/// is a fact about a cluster, and a single-node install has no peers to ask;
+/// whether the root is writable is a fact about the owner's filesystem, and a
+/// node that is not the owner is not the one that will be writing to it.
+async fn dvr(
+    state: &AppState,
+    enabled: bool,
+    live_tv: &crate::live_tv::LiveTvConfig,
+    dvr: &crate::live_tv::DvrConfig,
+) -> DeveloperEnableItem {
+    let owner = live_tv.owner_node_id == state.node_id;
+    let mut requirements = vec![root_writable(state, dvr, owner), free_space(dvr, owner)];
+    requirements.push(guide_horizon(state, live_tv).await);
+    requirements.push(tuner_reserve(live_tv, dvr));
+    requirements.push(DeveloperRequirement {
+        id: "every_node_mounts_root",
+        title: "Every node can read the DVR root",
+        status: RequirementStatus::Unobservable,
+        evidence: if state.membership.is_replicated() {
+            "The owner writes recordings and any node may serve them, so the root has to be a \
+             mount every node has. This process can see its own filesystem and no peer's."
+                .to_owned()
+        } else {
+            "This is a single-node install, so the node that records is the node that serves."
+                .to_owned()
+        },
+    });
+    if !dvr.webhook_url.is_empty() {
+        requirements.push(webhook_url_approved(dvr));
+    }
+    DeveloperEnableItem {
+        id: "dvr",
+        title: "Enable recording",
+        enabled: Some(enabled),
+        setting: Some("dvr_enabled"),
+        requirements,
+    }
+}
+
+fn root_writable(
+    state: &AppState,
+    dvr: &crate::live_tv::DvrConfig,
+    owner: bool,
+) -> DeveloperRequirement {
+    let (status, evidence) = if dvr.root.is_empty() {
+        (
+            RequirementStatus::Unmet,
+            "No DVR root is set. A recording has nowhere to go until one is.".to_owned(),
+        )
+    } else if !owner {
+        (
+            RequirementStatus::Unobservable,
+            format!(
+                "This node is not the tuner owner, so it is not the node that will write to \
+                 `{}`. Read this row on the owner.",
+                dvr.root
+            ),
+        )
+    } else {
+        match probe_root(&dvr.root) {
+            Ok(()) => (
+                RequirementStatus::Met,
+                format!("Created and removed a probe file under `{}`.", dvr.root),
+            ),
+            Err(error) => (
+                RequirementStatus::Unmet,
+                format!("Could not write under `{}`: {error}.", dvr.root),
+            ),
+        }
+    };
+    let _ = state;
+    DeveloperRequirement {
+        id: "dvr_root_writable",
+        title: "The tuner owner can write to the DVR root",
+        status,
+        evidence,
+    }
+}
+
+/// Write and remove one small file rather than checking permission bits. A
+/// read-only remount, a full filesystem and an ACL that says yes but means no
+/// all look identical to `statx`.
+fn probe_root(root: &str) -> std::io::Result<()> {
+    let directory = std::path::Path::new(root);
+    std::fs::create_dir_all(directory)?;
+    let probe = directory.join(".plurx-probe");
+    std::fs::write(&probe, b"plurx")?;
+    std::fs::remove_file(&probe)
+}
+
+fn free_space(dvr: &crate::live_tv::DvrConfig, owner: bool) -> DeveloperRequirement {
+    let floor = dvr.free_floor_gb.max(0) as u64 * 1_000_000_000;
+    let (status, evidence) = match crate::live_tv::free_space_bytes(&dvr.root) {
+        Some(free) if free >= floor => (
+            RequirementStatus::Met,
+            format!(
+                "{:.1} GB free, against a floor of {} GB.",
+                free as f64 / 1e9,
+                dvr.free_floor_gb
+            ),
+        ),
+        Some(free) => (
+            RequirementStatus::Unmet,
+            format!(
+                "{:.1} GB free, below the {} GB floor. The scheduler will not start a capture \
+                 under the floor; it will show the conflict rather than fill the disk.",
+                free as f64 / 1e9,
+                dvr.free_floor_gb
+            ),
+        ),
+        None if !owner => (
+            RequirementStatus::Unobservable,
+            "This node cannot see the DVR root. Read this row on the tuner owner.".to_owned(),
+        ),
+        None => (
+            RequirementStatus::Unmet,
+            "The DVR root is unset or unreadable, so its free space cannot be read.".to_owned(),
+        ),
+    };
+    DeveloperRequirement {
+        id: "dvr_free_space",
+        title: "The DVR root has room above the floor",
+        status,
+        evidence,
+    }
+}
+
+/// A four-hour guide can only record what is nearly on. Everything else the
+/// DVR offers — a series rule, a schedule, a conflict worth resolving — needs
+/// a horizon, and the free HDHomeRun tier does not have one.
+async fn guide_horizon(
+    state: &AppState,
+    live_tv: &crate::live_tv::LiveTvConfig,
+) -> DeveloperRequirement {
+    let now = crate::live_tv::unix_seconds();
+    let guide = crate::http::live_tv::owner_guide(
+        state,
+        live_tv,
+        crate::live_tv::GuideWindow {
+            start: now,
+            end: now + i64::from(live_tv.guide_hours) * 3600,
+        },
+    )
+    .await;
+    let furthest = guide
+        .channels
+        .iter()
+        .filter_map(|channel| channel.programmes.last().map(|row| row.end))
+        .max();
+    let (status, evidence) = match furthest {
+        Some(end) if end > now + 24 * 3600 && live_tv.guide_hours > 24 => (
+            RequirementStatus::Met,
+            format!(
+                "The cached guide reaches {:.0} hours ahead, with a {}-hour look-ahead \
+                 configured.",
+                (end - now) as f64 / 3600.0,
+                live_tv.guide_hours
+            ),
+        ),
+        Some(end) => (
+            RequirementStatus::Unmet,
+            format!(
+                "The cached guide reaches only {:.0} hours ahead (look-ahead is {} hours) — \
+                 record-what's-on only. A subscription tier or an XMLTV source is what gives a \
+                 series rule something to schedule.",
+                (end - now).max(0) as f64 / 3600.0,
+                live_tv.guide_hours
+            ),
+        ),
+        None => (
+            RequirementStatus::Unmet,
+            "The owner has no cached guide, so nothing can be scheduled from it. Recording a \
+             fixed time on a channel still works."
+                .to_owned(),
+        ),
+    };
+    DeveloperRequirement {
+        id: "guide_horizon",
+        title: "The guide reaches far enough to schedule from",
+        status,
+        evidence,
+    }
+}
+
+fn tuner_reserve(
+    live_tv: &crate::live_tv::LiveTvConfig,
+    dvr: &crate::live_tv::DvrConfig,
+) -> DeveloperRequirement {
+    let slots = dvr.recording_slots(live_tv.max_sessions);
+    let (status, evidence) = if slots == 0 {
+        (
+            RequirementStatus::Unmet,
+            format!(
+                "{} tuner session(s) are configured and {} are reserved for viewing, so no \
+                 recording could ever start.",
+                live_tv.max_sessions, dvr.tuner_reserve
+            ),
+        )
+    } else {
+        (
+            RequirementStatus::Met,
+            format!(
+                "Recordings may hold {slots} of {} tuner session(s); {} stays reserved so a \
+                 viewer is never locked out by their own schedule.",
+                live_tv.max_sessions, dvr.tuner_reserve
+            ),
+        )
+    };
+    DeveloperRequirement {
+        id: "tuner_reserve",
+        title: "A tuner stays free for watching",
+        status,
+        evidence,
+    }
+}
+
+fn webhook_url_approved(dvr: &crate::live_tv::DvrConfig) -> DeveloperRequirement {
+    let (status, evidence) = match crate::live_tv::approved_webhook_url(&dvr.webhook_url) {
+        Ok(url) => (
+            RequirementStatus::Met,
+            format!(
+                "`{}` passes the outbound policy: https anywhere, or plain http only to a \
+                 private address.",
+                url.host_str().unwrap_or("the configured host")
+            ),
+        ),
+        Err(reason) => (RequirementStatus::Unmet, reason),
+    };
+    DeveloperRequirement {
+        id: "webhook_url_approved",
+        title: "The webhook URL is one this server will call",
+        status,
+        evidence,
     }
 }

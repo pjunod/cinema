@@ -14,7 +14,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-One binary serves everything on one port (`:32400` by default). plurx has 187
+One binary serves everything on one port (`:32400` by default). plurx has 198
 routes across the four surfaces below. Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
@@ -1831,6 +1831,37 @@ is `health.verdict == "dead"`, and the fix — once the underlying cause is gone
 | GET | `/api/v1/live-tv/sessions/{capability}/status` | **capability** | Session state |
 | PUT | `/api/v1/live-tv/sessions/{capability}/keepalive` | **capability** | 204; renews the idle timer and nothing else |
 | DELETE | `/api/v1/live-tv/sessions/{capability}` | **capability** | Releases the session and the tuner |
+
+### 17.0 Recording
+
+The DVR writes intent and reads rows. No route here touches a tuner, a file or
+a disk, and none waits on the owner node: the owner's own loop reads the same
+replicated rows and is the only writer of `recording` and the terminal states.
+That is why `DELETE` on a live recording answers `202 {pending: true}` — the
+capture stops when the owner's next tick closes the file, and a client that
+means to watch the freed tuner polls the row until it leaves `recording`.
+
+| Method | Path | Auth | What it does |
+|---|---|---|---|
+| GET | `/api/v1/dvr/status` | bearer | Switch, root, free space against the floor, tuner slots and reserve, next start |
+| GET | `/api/v1/dvr/recordings` | bearer | Rows; `?state=` filters by name, `?after=` and `?limit=` page. Excludes `deleted` unless named |
+| POST | `/api/v1/dvr/recordings` | bearer | Record one airing: `{channel_id, airing_start}` copies the programme from the guide, or `{channel_id, capture_start, capture_end, title}` records a fixed span with no guide at all |
+| GET | `/api/v1/dvr/recordings/{id}` | bearer | One row, with `item_id`/`file_id` once the scan has linked it |
+| DELETE | `/api/v1/dvr/recordings/{id}` | bearer | Planned → cancelled, durably. Recording → records the stop request, `202 {pending}`. Finished → deleted with its file, and only with `?delete_file=1` |
+| POST | `/api/v1/dvr/recordings/{id}/restore` | bearer | Cancelled → scheduled. The only way back; rule expansion never does it |
+| GET | `/api/v1/dvr/schedule` | bearer | The plan for `?days=<1..14>`, with a conflict count. `?cancelled=1` keeps skipped rows visible so they can be restored |
+| GET | `/api/v1/dvr/rules` | bearer | Series rules, in priority order |
+| POST | `/api/v1/dvr/rules` | bearer | Create; `from_airing` fills mode, value and channel from a guide cell |
+| PUT | `/api/v1/dvr/rules/order` | admin | Renumber every rule. The order decides who gets a tuner when two rules want one |
+| PUT | `/api/v1/dvr/rules/{id}` | bearer (owner or admin) | Edit |
+| DELETE | `/api/v1/dvr/rules/{id}` | bearer (owner or admin) | Delete. Its pending airings are withdrawn on the next tick — not cancelled, because that is the viewer's word |
+| GET | `/api/v1/dvr/reminders` | bearer | The caller's reminders; `?due=1` returns only fired ones, each saying whether a recording already covers it |
+| POST | `/api/v1/dvr/reminders` | bearer | `{channel_id, airing_start, lead_s?}`. Works with recording switched off — a reminder needs no tuner |
+| DELETE | `/api/v1/dvr/reminders/{id}` | bearer | Own only |
+| POST | `/api/v1/dvr/reminders/{id}/ack` | bearer | Fired → acked, so a second device does not show it again |
+
+Typed error codes here: `dvr_disabled`, `airing_unknown`, `airing_past`,
+`rule_limit`, `reminder_limit`, `delete_file_required`.
 
 The session routes take no account bearer at all, and an `Authorization`
 header on them is ignored. Two consequences follow: their capability values

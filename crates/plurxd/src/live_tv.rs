@@ -27,9 +27,14 @@ use crate::live_tv_delivery::{
 };
 use crate::state::SystemInfo;
 
+pub(crate) mod dvr;
 pub(crate) mod guide;
+pub(crate) mod schedule;
+pub(crate) mod webhook;
 
-pub(crate) use guide::{GuideFreshness, GuideWindow, LiveTvGuide, LiveTvGuideChannel};
+pub(crate) use guide::{
+    GuideFreshness, GuideWindow, LiveTvGuide, LiveTvGuideChannel, LiveTvProgramme,
+};
 
 pub(crate) const SNAPSHOT_PATH: &str = "/_internal/v1/live-tv/snapshot";
 pub(crate) const START_PATH: &str = "/_internal/v1/live-tv/start";
@@ -332,6 +337,89 @@ impl LiveTvConfig {
 
     pub(crate) fn admission_ready(&self) -> bool {
         self.transition_from_owner_node_id.is_empty()
+    }
+}
+
+/// The recording half of the configuration.
+///
+/// Deliberately its own snapshot rather than fields on [`LiveTvConfig`]: none
+/// of these changes a tuner tuple, so none of them rides the Live TV
+/// generation CAS, and an operator must be able to change a padding default
+/// without disabling Live TV and draining every viewer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DvrConfig {
+    pub(crate) enabled: bool,
+    /// Container path of the DVR root. Empty means unset, which is the one
+    /// thing that genuinely stops a capture — there is nowhere to write.
+    pub(crate) root: String,
+    pub(crate) free_floor_gb: i64,
+    /// Tuner slots recordings may never take, so a viewer is never locked out
+    /// of their own television by their own schedule.
+    pub(crate) tuner_reserve: u8,
+    pub(crate) pad_start_s: i64,
+    pub(crate) pad_end_s: i64,
+    pub(crate) reminder_lead_s: i64,
+    /// Empty means no webhook.
+    pub(crate) webhook_url: String,
+}
+
+impl DvrConfig {
+    pub(crate) fn from_snapshot(settings: &BTreeMap<String, String>) -> Self {
+        let setting = |key: &str| settings.get(key).map(String::as_str);
+        let number = |key: &str, default: i64, low: i64, high: i64| {
+            setting(key)
+                .and_then(|value| value.parse::<i64>().ok())
+                .unwrap_or(default)
+                .clamp(low, high)
+        };
+        Self {
+            enabled: plurx_core::store::stored_switch(setting(keys::DVR_ENABLED), false),
+            root: setting(keys::DVR_ROOT)
+                .unwrap_or_default()
+                .trim()
+                .to_owned(),
+            free_floor_gb: number(
+                keys::DVR_FREE_FLOOR_GB,
+                plurx_core::dvr::DVR_DEFAULT_FREE_FLOOR_GB,
+                0,
+                1_000_000,
+            ),
+            tuner_reserve: number(
+                keys::DVR_TUNER_RESERVE,
+                i64::from(plurx_core::dvr::DVR_DEFAULT_TUNER_RESERVE),
+                0,
+                4,
+            ) as u8,
+            pad_start_s: number(
+                keys::DVR_PAD_START_S,
+                plurx_core::dvr::DVR_DEFAULT_PAD_START_S,
+                0,
+                plurx_core::dvr::DVR_PAD_MAX_S,
+            ),
+            pad_end_s: number(
+                keys::DVR_PAD_END_S,
+                plurx_core::dvr::DVR_DEFAULT_PAD_END_S,
+                0,
+                plurx_core::dvr::DVR_PAD_MAX_S,
+            ),
+            reminder_lead_s: number(
+                keys::DVR_REMINDER_LEAD_S,
+                plurx_core::dvr::DVR_DEFAULT_REMINDER_LEAD_S,
+                0,
+                plurx_core::dvr::DVR_LEAD_MAX_S,
+            ),
+            webhook_url: setting(keys::DVR_WEBHOOK_URL)
+                .unwrap_or_default()
+                .trim()
+                .to_owned(),
+        }
+    }
+
+    /// How many tuner slots recordings may hold at once. Never the whole set:
+    /// a reserve that equalled `max_sessions` would mean no recording could
+    /// ever start, and one that exceeded it would underflow.
+    pub(crate) fn recording_slots(&self, max_sessions: u8) -> u8 {
+        max_sessions.saturating_sub(self.tuner_reserve.min(max_sessions))
     }
 }
 
@@ -1197,6 +1285,10 @@ struct LiveTvRegistry {
     closing: bool,
     min_generation: i64,
     sessions: HashMap<String, Arc<LiveTvSession>>,
+    /// One entry per channel being recorded, however many recordings share
+    /// it. A transport is one tuner GET, so this — not the number of
+    /// recordings — is what counts against the tuner limit.
+    transports: HashMap<String, Arc<dvr::DvrTransport>>,
     requests: HashMap<LiveTvRequestKey, String>,
     terminals: HashMap<String, LiveTvTerminalTombstone>,
 }
@@ -1209,6 +1301,26 @@ struct LiveTvTerminalTombstone {
 }
 
 impl LiveTvRegistry {
+    /// Tuner sessions in use: viewers plus recording transports.
+    fn held(&self) -> usize {
+        self.sessions.len() + self.transports.len()
+    }
+
+    /// Whether a *new* transport may be opened. A sink joining one that is
+    /// already tuned to its channel needs no slot and does not ask.
+    ///
+    /// Two conditions, both about occupancy rather than arrival order, so the
+    /// answer does not depend on who got there first: nothing may exceed the
+    /// tuner count, and recordings may never hold more than
+    /// `max_sessions - reserve` of it. With four tuners and a reserve of one,
+    /// "one viewer and three recordings" fits and "four recordings" does not,
+    /// whichever order they arrived in.
+    fn may_open_transport(&self, max_sessions: u8, reserve: u8) -> bool {
+        let max = usize::from(max_sessions);
+        let recordable = max.saturating_sub(usize::from(reserve.min(max_sessions)));
+        self.held() < max && self.transports.len() < recordable
+    }
+
     fn prune_terminals(&mut self) {
         let now = tokio::time::Instant::now();
         self.terminals
@@ -1920,6 +2032,97 @@ fn merge_carried_guide(
     }
 }
 
+/// Whether plurxd will POST a DVR event to this URL.
+///
+/// This is a **weaker** outbound boundary than any other the server has, and
+/// deliberately so. `approved_guide_url` pins scheme, port and a two-host
+/// allowlist because it carries a credential to a vendor's API. This carries
+/// no credential and no secret — a reminder and a recording's start and finish
+/// — and its whole point is Home Assistant at `http://ha.lan:8123`, which no
+/// allowlist could name in advance.
+///
+/// So the rule is about *reach* rather than identity: https to anywhere, or
+/// plain http only to a private or link-local address. Userinfo is refused
+/// outright, because a URL carrying a credential is a credential this process
+/// would then hold and log.
+///
+/// Redirects are refused by the client that uses this (as the artwork client
+/// does), so the host checked here is the host contacted.
+pub(crate) fn approved_webhook_url(raw: &str) -> Result<reqwest::Url, String> {
+    let url = reqwest::Url::parse(raw.trim())
+        .map_err(|_| format!("`{raw}` is not a URL this server can parse."))?;
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(
+            "A webhook URL must not carry a username or password — this server would then hold              and log a credential it has no use for."
+                .to_owned(),
+        );
+    }
+    match url.scheme() {
+        "https" => Ok(url),
+        "http" => {
+            let host = url
+                .host_str()
+                .ok_or_else(|| "That URL names no host.".to_owned())?;
+            if private_webhook_host(host) {
+                Ok(url)
+            } else {
+                Err(format!(
+                    "`{host}` is not a private address, so plain http would put this event on                      the public internet in the clear. Use https, or a host on your own network."
+                ))
+            }
+        }
+        other => Err(format!(
+            "`{other}` is not a scheme this server will call; use https, or http to a private              address."
+        )),
+    }
+}
+
+/// RFC 1918, loopback, link-local and unique-local, by literal address.
+///
+/// A *name* is deliberately not resolved here: a name that resolves privately
+/// now can resolve publicly later, and this check runs when an operator saves
+/// a setting rather than when the request goes out. A hostname is therefore
+/// only accepted over https, where the transport protects the body regardless
+/// of where the name points.
+fn private_webhook_host(host: &str) -> bool {
+    match host.parse::<IpAddr>() {
+        Ok(IpAddr::V4(address)) => {
+            address.is_private() || address.is_loopback() || address.is_link_local()
+        }
+        Ok(IpAddr::V6(address)) => {
+            address.is_loopback()
+                // fc00::/7 unique-local and fe80::/10 link-local, neither of
+                // which `std` exposes as a stable predicate.
+                || (address.segments()[0] & 0xfe00) == 0xfc00
+                || (address.segments()[0] & 0xffc0) == 0xfe80
+        }
+        Err(_) => false,
+    }
+}
+
+/// Free bytes on the filesystem holding `path`, or `None` when the path is
+/// empty or this node cannot see it.
+///
+/// A non-owner node answering `None` is the common case and not a fault: the
+/// DVR root is a mount the owner writes to, and a node that does not have it
+/// has nothing honest to say about its free space.
+pub(crate) fn free_space_bytes(path: &str) -> Option<u64> {
+    if path.trim().is_empty() {
+        return None;
+    }
+    let raw = std::ffi::CString::new(path).ok()?;
+    // SAFETY: `statvfs` reads through the NUL-terminated path and writes only
+    // into the zeroed struct below; both live for the duration of the call.
+    let stats = unsafe {
+        let mut stats = std::mem::zeroed::<libc::statvfs>();
+        if libc::statvfs(raw.as_ptr(), &mut stats) != 0 {
+            return None;
+        }
+        stats
+    };
+    Some((stats.f_bsize as u64).saturating_mul(stats.f_bavail as u64))
+}
+
 fn remaining_guide_budget(deadline: tokio::time::Instant) -> Result<Duration, LiveTvError> {
     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
     if remaining.is_zero() {
@@ -2523,7 +2726,11 @@ impl LiveTvManager {
                         "live-TV request recovery history is full; retry after one minute".into(),
                     ));
                 }
-                if registry.sessions.len() >= usize::from(config.max_sessions) {
+                // Recordings hold tuners too, and a viewer refused because a
+                // capture has one is owed the reason and the option to stop
+                // it — never a bare "all slots are in use" that leaves them
+                // looking for a viewer who is not there.
+                if registry.held() >= usize::from(config.max_sessions) {
                     return Err(LiveTvError::Capacity(format!(
                         "all {} plurx Live TV session slots are in use",
                         config.max_sessions
@@ -2837,6 +3044,25 @@ impl LiveTvManager {
         &self,
         drain_before_generation: i64,
     ) -> Result<usize, LiveTvError> {
+        // Transports are sessions to this path. A capture opened under the
+        // configuration being drained holds a tuner the new owner is about to
+        // want, and a fenced writer must stop before the replacement starts
+        // its own attempt.
+        let stale_channels = {
+            let registry = self
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            registry
+                .transports
+                .iter()
+                .filter(|(_, transport)| transport.generation < drain_before_generation)
+                .map(|(channel, _)| channel.clone())
+                .collect::<Vec<_>>()
+        };
+        for channel in stale_channels {
+            self.close_transport(&channel).await;
+        }
         let sessions = {
             let mut registry = self
                 .registry
@@ -2854,6 +3080,7 @@ impl LiveTvManager {
     }
 
     pub(crate) async fn shutdown(&self) -> Result<usize, LiveTvError> {
+        self.close_all_transports().await;
         let sessions = {
             let mut registry = self
                 .registry
@@ -3259,6 +3486,34 @@ impl LiveTvManager {
     /// The lineup the guide is matched against, read from the snapshot cache
     /// without ever refreshing it. An empty answer is a refresh that has to
     /// wait, not a guide with no channels.
+    /// The display name of one lineup channel, if this node has a lineup for
+    /// the current generation. `None` is a real answer — a node that has never
+    /// read channels does not know, and guessing would put an invented name on
+    /// a recording that keeps it for ever.
+    pub(crate) async fn channel_name(
+        &self,
+        config: &LiveTvConfig,
+        channel_id: &str,
+    ) -> Option<String> {
+        self.cached_lineup(config)
+            .await
+            .into_iter()
+            .find(|channel| channel.id == channel_id)
+            .map(|channel| channel.guide_name)
+    }
+
+    pub(crate) async fn channel_guide_number(
+        &self,
+        config: &LiveTvConfig,
+        channel_id: &str,
+    ) -> Option<String> {
+        self.cached_lineup(config)
+            .await
+            .into_iter()
+            .find(|channel| channel.id == channel_id)
+            .map(|channel| channel.guide_number)
+    }
+
     async fn cached_lineup(&self, config: &LiveTvConfig) -> Vec<LiveTvChannel> {
         let state = self.cache.state.lock().await;
         state

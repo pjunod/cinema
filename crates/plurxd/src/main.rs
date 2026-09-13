@@ -2223,6 +2223,28 @@ fn spawn_background_loops(
         std::sync::Arc::clone(&state.live_tv)
             .guide_refresh_loop(state.serving.subscribe(), background_shutdown.clone()),
     );
+    // One queue, one worker: the recording and reminder loops enqueue and
+    // never await the network, so an unreachable endpoint cannot delay a
+    // capture starting or stopping.
+    let (dvr_events, dvr_event_queue) = crate::live_tv::webhook::channel();
+    tokio::spawn(crate::live_tv::webhook::webhook_worker(
+        std::sync::Arc::clone(&state.live_tv),
+        dvr_event_queue,
+        background_shutdown.clone(),
+    ));
+    tokio::spawn(
+        std::sync::Arc::clone(&state.live_tv)
+            .dvr_loop(dvr_events.clone(), background_shutdown.clone()),
+    );
+    tokio::spawn(crate::live_tv::dvr::reminder_loop(
+        std::sync::Arc::clone(&state.live_tv),
+        dvr_events,
+        background_shutdown.clone(),
+    ));
+    tokio::spawn(crate::live_tv::dvr::dvr_progress_loop(
+        std::sync::Arc::clone(&state.live_tv),
+        background_shutdown.clone(),
+    ));
     // Reap idle transcode sessions in the background.
     tokio::spawn(std::sync::Arc::clone(&state.transcode).reap_loop());
     tokio::spawn(std::sync::Arc::clone(&state.transcode).vod_maintain_loop());
