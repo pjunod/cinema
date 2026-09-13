@@ -14,7 +14,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-One binary serves everything on one port (`:32400` by default). plurx has 187
+One binary serves everything on one port (`:32400` by default). plurx has 191
 routes across the four surfaces below. Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
@@ -1831,6 +1831,17 @@ is `health.verdict == "dead"`, and the fix — once the underlying cause is gone
 | GET | `/api/v1/live-tv/sessions/{capability}/status` | **capability** | Session state |
 | PUT | `/api/v1/live-tv/sessions/{capability}/keepalive` | **capability** | 204; renews the idle timer and nothing else |
 | DELETE | `/api/v1/live-tv/sessions/{capability}` | **capability** | Releases the session and the tuner |
+| DELETE | `/api/v1/live-tv/starts/{request_id}` | bearer | Retires the client's own start id: stops whatever it produced and fences it. `{"outcome": "stopped" \| "ended" \| "retired"}` |
+| POST | `/api/v1/live-tv/starts/{request_id}/resume` | bearer | Rejoins the session that id still owns. `{"outcome": "live", "session": …}`, or `pending` / `ended` / `retired` with no session |
+| GET | `/api/v1/live-tv/starts/{request_id}` | bearer | What became of that start: `starting` \| `active` \| `ended` \| `retired` \| `unknown`. Never a capability |
+
+The three `starts/{request_id}` routes are the opposite shape: they take the
+account bearer and no capability, because after an unclean end the client's
+own request id is the only handle it still has. The id is redacted from the
+access log all the same — it derives a capability through replay and resume —
+and the retire and resume stay eligible during node maintenance, for the same
+reason the session DELETE does: a viewer must be able to let go of a tuner
+precisely when the node is being worked on.
 
 The session routes take no account bearer at all, and an `Authorization`
 header on them is ignored. Two consequences follow: their capability values
@@ -2562,6 +2573,7 @@ streaming, and refuses a response signed for the wrong node or nonce.
 | POST | `/_internal/v1/live-tv/start`, `/_internal/v2/live-tv/start`, `/_internal/v1/live-tv/activate` | 16 KiB | Starts and activates a tuner session on the owner; v2 carries the exact signed live playback envelope |
 | POST | `/_internal/v1/live-tv/resource` | 16 KiB | Fetches a playlist, segment or status for an owned capability |
 | POST | `/_internal/v1/live-tv/stop`, `/_internal/v1/live-tv/drain` | 16 KiB | Releases a capability; drains below a generation |
+| POST | `/_internal/v1/live-tv/retire`, `/_internal/v1/live-tv/resume` | 1 KiB | Retires a viewer's public start id on the owner, or hands back the session it still owns. New paths rather than new fields on the signed start bodies: an owner that predates them answers 404, which an ingress renders as a typed answer that proves nothing about the tuner |
 | POST | `/internal/cluster/media/sessions/start`, `/internal/cluster/media/sessions/activate` | 96 / 128 KiB | Starts and confirms a remote media session |
 | POST | `/internal/cluster/media/sessions/prepare` | 96 KiB | Validates an already-reserved successor identity, primes its durable recipe on the target owner, and returns only after the existing actor slot accepts it |
 | POST | `/internal/cluster/media/sessions/abort`, `/internal/cluster/media/sessions/relay` | 96 KiB | Settles an abort; relays one owned HLS resource |
