@@ -263,10 +263,11 @@ one merges rather than serialising the work.
 
 ## 5. Milestones
 
-Each PR follows the 2026-09-10 workflow correction in
+Each PR follows the workflow correction in
 [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md): open as draft (a
 `WIP:` title on Forgejo), obtain exactly one adversarial review, address it,
-mark ready, apply `fast-lane`, merge. Compile and focused proofs are manual
+mark ready — which is what starts the lane, there being no label since
+2026-09-13 — and merge. Compile and focused proofs are manual
 and happen *before* the PR opens — the lane is not a compiler.
 
 ### M1 · Apple — tvOS then iOS, one PR

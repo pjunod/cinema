@@ -893,9 +893,10 @@ Do not transplant unrelated uncommitted CI changes from another checkout.
 4. Open the main-bound PR as **draft**. Request **exactly one adversarial agent
    review**. Address every finding and verify it as author. Do not request a
    second review, re-review, panel, or follow-up approval.
-5. Mark ready after findings are addressed, then apply `fast-lane`. Merge only
-   after the **current head** has a green `Main promotion gate`. Remove the
-   label before returning a ready PR to draft.
+5. Mark ready after findings are addressed; that is what starts the lane, and
+   since 2026-09-13 there is no `fast-lane` label to apply. Merge only after
+   the **current head** has a green `Main promotion gate`. Returning a ready
+   PR to draft cancels the run in flight.
 6. Record merge and deployment separately. Main push/merge does not start the
    full suite or automatically publish a fleet image. Use the existing explicit
    deployment/release path; explicit release tags retain release processing.

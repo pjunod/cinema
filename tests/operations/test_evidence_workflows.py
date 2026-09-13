@@ -40,6 +40,60 @@ class EvidenceWorkflowCase(unittest.TestCase):
         self.assertIn("ready_for_review", fast)
         self.assertIn("converted_to_draft", fast)
 
+    def test_no_document_still_tells_a_reader_to_apply_the_lane_label(self) -> None:
+        """The prose has to move with the workflow.
+
+        `test_runtime_sweeps_do_not_trigger_on_prs_or_main_pushes` pins the
+        gate itself, which is the part CI enforces. Nothing pinned the
+        sentences that tell a person - or an agent reading a handoff - what to
+        do, and those are what the fleet actually follows. A document that
+        still says "mark ready, then apply `fast-lane`" sends the next reader
+        looking for a control that is not there, and a plan document that
+        still describes the trigger as `labeled` teaches the wrong shape to
+        whoever builds against it next.
+
+        Records of what happened are not instructions and are left alone: a
+        status page saying PR #259 took the label on 2026-09-10 is evidence,
+        and rewriting evidence to match today is how a repository starts
+        lying about its own history. Only the imperative forms are refused.
+        """
+        instructions = (
+            "apply `fast-lane`",
+            "apply the `fast-lane`",
+            "takes `fast-lane`",
+            "take `fast-lane`",
+            "then `fast-lane`",
+            "→ `fast-lane` →",
+            "`pull_request` `labeled` with `fast-lane`",
+            "remove the label before",
+        )
+        # `swarm/` and AGENTS.md carry none of these today, and they are in
+        # scope precisely so they still carry none tomorrow: the fleet reads
+        # its role prompts, not this repository's docs, and the harness plan
+        # records two separate occasions when a process change reached docs/
+        # and never reached swarm/.
+        candidates = [
+            *ROOT.glob("docs/**/*.md"),
+            *ROOT.glob("swarm/*.txt"),
+            ROOT / "AGENTS.md",
+        ]
+        offenders = []
+        for path in sorted(candidates):
+            if "/archive/" in path.as_posix():
+                continue
+            text = path.read_text(encoding="utf-8").lower()
+            for phrase in instructions:
+                if phrase.lower() in text:
+                    offenders.append(
+                        f"{path.relative_to(ROOT)}: {phrase}"
+                    )
+        self.assertEqual(
+            offenders,
+            [],
+            "the fast lane runs on every ready PR and has no label; these "
+            "documents still instruct a reader to apply one",
+        )
+
     def test_fix_evidence_is_manual_and_report_only(self) -> None:
         workflow = self.read(".github/workflows/fix-evidence.yml")
         self.assertIn("workflow_dispatch:", workflow)

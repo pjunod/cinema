@@ -9,7 +9,8 @@ they belong to · **Written:** 2026-09-10 · **Author:** Fable.
 Read the assessment first for *why* the order is what it is; this document
 is *what to build*. Work milestone by milestone: each milestone is one
 main-bound pull request (draft → exactly one adversarial review → findings
-addressed → ready → `fast-lane` → merge), except where a milestone says it
+addressed → ready → merge; marking ready is what starts the lane, and since
+2026-09-13 there is no label to apply), except where a milestone says it
 is several PRs. Every milestone ends with an acceptance check that is a
 command or an observable fact. The standing instruction: if a step seems to
 require changing product behaviour, weakening a rule in
@@ -109,8 +110,13 @@ report exactly `N` tests. M2 uses it.
 
 ### 2.2 The fast lane, exactly
 
-`.github/workflows/main-fast-lane.yml` (Forgejo runs it) on
-`pull_request` `labeled` with `fast-lane`: `scope` (`validation.ci_scope`)
+`.github/workflows/main-fast-lane.yml` (Forgejo runs it) on every
+`pull_request` against `main` whose `draft` is false — `opened`,
+`synchronize`, `reopened`, `ready_for_review`; `converted_to_draft` enters
+the same concurrency group and cancels. It was `labeled` with a `fast-lane`
+label until 2026-09-13, when three lanes merged in one day without anyone
+applying it and the gate never ran for any of them: `scope`
+(`validation.ci_scope`)
 → `mobile_version` → `preflight` (`make history-check`, `make
 validation-lint` + `tests/validation`, `make operations-check`, then either
 the two `node` contract tests or, when `docs_only`, `scripts/js-check` +
@@ -630,8 +636,8 @@ this plan's §2.4 (update the facts).
   them, they are not restated here. In their terms: a task PR targets its
   `effort/<project>` branch or `main`; a main-bound PR opens as a draft
   with a `WIP:` title, gets exactly one adversarial review, addresses it,
-  drops `WIP:`, takes `fast-lane`, and merges on a green `Main promotion
-  gate`." It replaces `https://github.com/pjunod/plurx` with the Forgejo
+  drops `WIP:` — which is what starts the lane — and merges on a green
+  `Main promotion gate`." It replaces `https://github.com/pjunod/plurx` with the Forgejo
   remote and deletes "`main` requires a pull request to be up to date
   before it merges" (Forgejo's "Update branch by merge" is the equivalent
   and `merge-change`'s empty-sync rule stays as written). "Never create a
