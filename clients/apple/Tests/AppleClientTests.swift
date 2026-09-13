@@ -2948,6 +2948,106 @@ final class AppleClientTests: XCTestCase {
         )
     }
 
+    // MARK: - M5: the create "not yet" retry ladder
+    //
+    // The ladder is pure arithmetic, so it is tested here directly. What is
+    // NOT testable without a device is the async sequence around it
+    // (`createRetryingNotYet`): its watchdog, its late-session release and its
+    // cancellation are listed in the PR's "Needs a Mac" section, unrun.
+
+    func testCreateRetryLadderIsOneSecondTwoSecondsFourSecondsAndThenSpent() {
+        XCTAssertEqual(PlaybackCreateRetry.backoffMs, [1_000, 2_000, 4_000])
+        XCTAssertEqual(PlaybackCreateRetry.deadlineMs, 60_000)
+        XCTAssertEqual(
+            PlaybackCreateRetry.step(attempt: 0, elapsedMs: 0, isNotYet: true),
+            .retry(delayMs: 1_000)
+        )
+        XCTAssertEqual(
+            PlaybackCreateRetry.step(attempt: 1, elapsedMs: 1_000, isNotYet: true),
+            .retry(delayMs: 2_000)
+        )
+        XCTAssertEqual(
+            PlaybackCreateRetry.step(attempt: 2, elapsedMs: 3_000, isNotYet: true),
+            .retry(delayMs: 4_000)
+        )
+        // Three rungs, not "4 s for ever": the ladder is a closed list and the
+        // owner says so when it runs out.
+        XCTAssertEqual(
+            PlaybackCreateRetry.step(attempt: 3, elapsedMs: 7_000, isNotYet: true),
+            .exhausted(reason: "ladder_spent")
+        )
+        // The backoff is a function of the attempt index, so it cannot restart:
+        // asking for rung 1 again after twenty seconds still answers 2 s, and
+        // the deadline is what bounds the wall clock.
+        XCTAssertEqual(
+            PlaybackCreateRetry.step(attempt: 1, elapsedMs: 20_000, isNotYet: true),
+            .retry(delayMs: 2_000)
+        )
+    }
+
+    func testCreateRetryDeadlineIsAbsoluteAndNeverSchedulesPastItself() {
+        XCTAssertEqual(
+            PlaybackCreateRetry.step(attempt: 0, elapsedMs: 60_000, isNotYet: true),
+            .exhausted(reason: "deadline")
+        )
+        XCTAssertEqual(
+            PlaybackCreateRetry.step(attempt: 0, elapsedMs: 59_999, isNotYet: true),
+            .exhausted(reason: "deadline"),
+            "a rung that could only START after the deadline is not scheduled"
+        )
+        XCTAssertEqual(
+            PlaybackCreateRetry.step(attempt: 0, elapsedMs: 58_999, isNotYet: true),
+            .retry(delayMs: 1_000),
+            "a rung that still lands inside the deadline runs"
+        )
+        // A slow server spends the deadline on ONE attempt, and that is the
+        // point of measuring from the first attempt rather than the last.
+        XCTAssertEqual(
+            PlaybackCreateRetry.step(attempt: 1, elapsedMs: 90_000, isNotYet: true),
+            .exhausted(reason: "deadline")
+        )
+    }
+
+    func testOnlyTheContractsNotYetCodesAreRetried() throws {
+        let fixture = try playbackSurfaceContractFixture()
+        let row = try XCTUnwrap(fixture.sources.first { $0.id == "create_503_not_yet" })
+        XCTAssertEqual(
+            PlaybackCreateRetry.codes,
+            Set(try XCTUnwrap(row.codes)),
+            "the retried codes are the fixture's row, not a second list"
+        )
+        for code in PlaybackCreateRetry.codes {
+            let refusal = APIError.refused(
+                status: 503,
+                code: code,
+                message: "the transcoder is still starting",
+                positionMs: nil
+            )
+            XCTAssertTrue(PlaybackCreateRetry.isNotYet(refusal), code)
+        }
+        // Everything else keeps exactly the handling it had. A bodiless 503 is
+        // not a "not yet" answer — the code is what says so, and AVFoundation
+        // never had one (contract §2.2).
+        for error in [
+            APIError.http(503),
+            APIError.http(401),
+            APIError.refused(status: 503, code: "vod_disabled", message: "off", positionMs: nil),
+            APIError.refused(status: 410, code: "media_owner_lost", message: "gone", positionMs: 90_000),
+            APIError.transport("the network went away"),
+        ] as [Error] {
+            XCTAssertFalse(PlaybackCreateRetry.isNotYet(error))
+            XCTAssertEqual(
+                PlaybackCreateRetry.step(
+                    attempt: 0,
+                    elapsedMs: 0,
+                    isNotYet: PlaybackCreateRetry.isNotYet(error)
+                ),
+                .fail,
+                "a refusal no `create_503_not_yet` code claims is not retried at all"
+            )
+        }
+    }
+
     /// One fixture event as Apple expresses it.
     ///
     /// Two of the fixture's shapes are not Apple's, and each is MAPPED rather

@@ -1521,6 +1521,80 @@ enum SameDeliveryRecoveryTransport: Equatable {
     case offlineAsset
 }
 
+/// M5 addition 1 — the create "not yet" retry ladder (contract §3.3 row 6,
+/// implementation plan §4.6).
+///
+/// Restated from `crates/plurxd/src/web/playback-policy.js` (`CREATE_RETRY`),
+/// because all three clients have to agree on these numbers and only one of
+/// them can run that file. `tests/playback/web-policy.test.js` reads this
+/// declaration back out of the Swift and fails if a number drifts.
+///
+/// File scope and no actor isolation on purpose: it is arithmetic, it touches
+/// no player, and the tests run it off the main actor.
+enum PlaybackCreateRetry {
+    /// The review's ladder, as a CLOSED list. A fourth rung is not "4 s
+    /// again": after the third retry the ladder is spent and the owner says
+    /// so.
+    static let backoffMs: [Int] = [1_000, 2_000, 4_000]
+
+    /// ABSOLUTE, measured from the FIRST attempt — not per attempt. A server
+    /// that holds every create for three minutes cannot stretch the sequence,
+    /// which is the whole reason the review asked for a deadline rather than a
+    /// retry count.
+    static let deadlineMs: Int = 60_000
+
+    /// The fixture's `create_503_not_yet` codes, and only these. A refusal the
+    /// server explained with any other code is not a "still building" answer
+    /// and is not retried.
+    static let codes: Set<String> = [
+        "startup_timeout",
+        "media_owner_transition",
+        "vod_index_pending",
+        "vod_engine_unattested",
+    ]
+
+    enum Step: Equatable {
+        /// Not a "not yet" answer: the caller's existing handling stands.
+        case fail
+        /// Wait this long, then re-post the SAME request identity.
+        case retry(delayMs: Int)
+        /// Nothing left: stop the player, then raise `exhausted`.
+        case exhausted(reason: String)
+    }
+
+    /// `attempt` counts retries already made (0 before the first one);
+    /// `elapsedMs` is measured from the first attempt.
+    ///
+    /// The deadline is checked twice on purpose: once for time already spent,
+    /// and once for the retry that would START after it. Scheduling an attempt
+    /// that could only begin past the deadline is how an "absolute" bound turns
+    /// back into a per-attempt one.
+    static func step(attempt: Int, elapsedMs: Int, isNotYet: Bool) -> Step {
+        guard isNotYet else { return .fail }
+        let spent = max(0, elapsedMs)
+        if spent >= deadlineMs { return .exhausted(reason: "deadline") }
+        let index = max(0, attempt)
+        guard index < backoffMs.count else { return .exhausted(reason: "ladder_spent") }
+        let delayMs = backoffMs[index]
+        if spent + delayMs >= deadlineMs { return .exhausted(reason: "deadline") }
+        return .retry(delayMs: delayMs)
+    }
+
+    /// Is this create refusal the fixture's `create_503_not_yet` row? Read off
+    /// the server's own code; a bodiless 503 is not one.
+    static func isNotYet(_ error: Error) -> Bool {
+        guard let code = (error as? APIError)?.refusalCode else { return false }
+        return codes.contains(code)
+    }
+}
+
+/// The create-retry owner's own outcome. It is thrown only after the owner has
+/// already stopped the player and raised `exhausted`, which is why `fail()`
+/// answers it with silence rather than a second fault.
+enum PlaybackCreateRetryError: Error, Equatable {
+    case exhausted(reason: String)
+}
+
 /// Drives one AVPlayer and executes the server-owned delivery plan. It also
 /// supplies the controls AVPlayer withholds for a growing EVENT playlist: an
 /// explicit on-demand timeline, reliable play/pause commands, server playback
@@ -1656,6 +1730,11 @@ final class PlayerController: ObservableObject {
     static let gracefulRepeatedEndFraction = 0.95
     static let playbackStartFailureTitle = "Couldn't start playback."
     static let playbackStoppedFailureTitle = "Playback stopped."
+    /// The web's sentence for the same row, moved rather than rewritten (§7:
+    /// no wording pass). A still-starting session is not a failure.
+    static let stillPreparingTitle = "Still preparing this stream…"
+    static let createRetryExhaustedMessage =
+        "The server is still building this stream and did not finish in a minute."
     static let earlyEndFailureTitle = "Playback stopped early."
     static let repeatedEarlyEndMessage =
         "Playback ended early at the same position after retrying the stream."
@@ -1918,6 +1997,11 @@ final class PlayerController: ObservableObject {
     /// The last position the surface's evidence sampler saw, so "the clock
     /// moved" is a delta rather than a guess.
     private var lastSurfaceSampleMs: Int?
+    /// The create-retry sequence in flight (M5), and whether its absolute
+    /// deadline has passed. The epoch is what stops a watchdog armed by an
+    /// abandoned sequence from expiring the one that replaced it.
+    private var createRetryEpoch = 0
+    private var createRetryExpired = false
     /// Whether this playback has ever presented. It is the whole of the
     /// difference between the `start` and `attached` contexts.
     private var surfaceHasPresented = false
@@ -3668,7 +3752,13 @@ final class PlayerController: ObservableObject {
             let hls: HlsStart
             do {
                 do {
-                    hls = try await requestHlsSession(model, requestedFile, body)
+                    hls = try await createRetryingNotYet(
+                        model: model,
+                        file: requestedFile,
+                        body: body,
+                        lifecycle: lifecycle,
+                        generation: generation
+                    )
                 } catch let createError {
                     guard !Task.isCancelled, isCurrentLifecycle(lifecycle), !isSuperseded(generation) else { return }
                     // The bound half of a stall reopen is the only part of this
@@ -3685,7 +3775,17 @@ final class PlayerController: ObservableObject {
                         for: body,
                         after: createError
                     ) else { throw createError }
-                    hls = try await requestHlsSession(model, requestedFile, unbound)
+                    // The unbound re-post is a create like any other, so it
+                    // gets the same "still building" ladder: a predecessor that
+                    // went away and a node that is still starting are two
+                    // different answers and the second one is worth waiting for.
+                    hls = try await createRetryingNotYet(
+                        model: model,
+                        file: requestedFile,
+                        body: unbound,
+                        lifecycle: lifecycle,
+                        generation: generation
+                    )
                 }
             } catch {
                 // A superseded attempt must not report its own failure over
@@ -4961,6 +5061,11 @@ final class PlayerController: ObservableObject {
     private func fail(_ error: Error) {
         isChangingStream = false
         ttffMeasurement.reset()
+        // M5: the create-retry owner has already stopped the player and raised
+        // `exhausted`, on the clock, at the moment its absolute deadline
+        // passed. A second fault here would put a lower class over that prompt
+        // and tell the viewer a different story about the same failure.
+        if error is PlaybackCreateRetryError { return }
         let detail = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         let title = currentMs > 0
             ? Self.playbackStoppedFailureTitle
@@ -5021,6 +5126,143 @@ final class PlayerController: ObservableObject {
     private func stopForBlockingSurface() {
         player.pause()
         isPlaying = false
+    }
+
+    // MARK: - M5: the create "not yet" retry
+
+    /// Re-post the SAME create, under the SAME request identity, while the
+    /// server says it is still building this stream (contract §3.3 row 6).
+    ///
+    /// Three properties the review asked for, and each is a line below:
+    ///
+    /// * the deadline is ABSOLUTE and runs on a watchdog rather than between
+    ///   attempts, so a server that holds every create for three minutes
+    ///   cannot stretch the sequence;
+    /// * a success that lands AFTER the deadline is released, never attached —
+    ///   the viewer has already been told this attempt is over, and an encoder
+    ///   nobody is watching is a hardware slot held for nobody;
+    /// * a newer intent ends it: every rung re-checks the lifecycle, the open
+    ///   generation and this sequence's own epoch before it retries.
+    ///
+    /// Row 6 is the START context. A create refused over a predecessor the
+    /// viewer is still watching is a refused CHANGE (row 7), keeps its banner
+    /// and is not retried, so the sequence does not run there at all.
+    private func createRetryingNotYet(
+        model: AppModel,
+        file: Int,
+        body: CreateSessionRequest,
+        lifecycle: Int,
+        generation: Int
+    ) async throws -> HlsStart {
+        guard surfaceContext == .start else {
+            return try await requestHlsSession(model, file, body)
+        }
+        // ONE identity for the whole sequence. The server persists a create's
+        // answer under `request_id`, so replaying one recovers the session it
+        // already made instead of spawning a second encoder — which is what
+        // makes retrying a create safe at all.
+        var request = body
+        if request.requestId == nil { request.requestId = UUID().uuidString }
+        let began = ContinuousClock.now
+        createRetryEpoch &+= 1
+        let epoch = createRetryEpoch
+        createRetryExpired = false
+        let watchdog = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(PlaybackCreateRetry.deadlineMs))
+            guard let self else { return }
+            self.expireCreateRetry(epoch: epoch, lifecycle: lifecycle, generation: generation)
+        }
+        defer { watchdog.cancel() }
+        var attempt = 0
+        while true {
+            // Re-asked before EVERY rung, not only after a failure: the sleep
+            // between attempts is where a newer open, a closed player or the
+            // deadline itself arrives, and a sequence that woke up stale must
+            // not post another create.
+            guard !Task.isCancelled,
+                  isCurrentLifecycle(lifecycle),
+                  !isSuperseded(generation),
+                  createRetryEpoch == epoch
+            else { throw CancellationError() }
+            if createRetryExpired {
+                throw PlaybackCreateRetryError.exhausted(reason: "deadline")
+            }
+            do {
+                let started = try await requestHlsSession(model, file, request)
+                guard !createRetryExpired || createRetryEpoch != epoch else {
+                    await release(session: started.sessionId)
+                    throw PlaybackCreateRetryError.exhausted(reason: "deadline")
+                }
+                return started
+            } catch let spent as PlaybackCreateRetryError {
+                throw spent
+            } catch {
+                // A newer intent owns the surface now, and a cancelled task
+                // owns nothing at all: neither retries, and neither raises.
+                guard !Task.isCancelled,
+                      isCurrentLifecycle(lifecycle),
+                      !isSuperseded(generation),
+                      createRetryEpoch == epoch
+                else { throw error }
+                if createRetryExpired {
+                    throw PlaybackCreateRetryError.exhausted(reason: "deadline")
+                }
+                let elapsedMs = Self.milliseconds(began.duration(to: ContinuousClock.now))
+                switch PlaybackCreateRetry.step(
+                    attempt: attempt,
+                    elapsedMs: elapsedMs,
+                    isNotYet: PlaybackCreateRetry.isNotYet(error)
+                ) {
+                case .fail:
+                    throw error
+                case .exhausted(let reason):
+                    raiseCreateRetryExhausted()
+                    throw PlaybackCreateRetryError.exhausted(reason: reason)
+                case .retry(let delayMs):
+                    // Still building. ONE `preparing` fault for the sequence,
+                    // not one per attempt: the ledger ring is for distinct
+                    // faults, and a viewer watching a spinner does not need
+                    // four identical rows behind it.
+                    if attempt == 0 {
+                        raiseSurfaceNotice(
+                            source: "create_503_not_yet",
+                            context: .start,
+                            title: Self.stillPreparingTitle,
+                            detail: (error as? LocalizedError)?.errorDescription
+                                ?? error.localizedDescription
+                        )
+                    }
+                    try await Task.sleep(for: .milliseconds(delayMs))
+                    attempt += 1
+                }
+            }
+        }
+    }
+
+    /// The absolute deadline fired. The owner has nothing left to try, so it
+    /// stops the player and raises `exhausted` (§3.0, §3.4). The create in
+    /// flight is deliberately NOT cancelled: it is still awaited, so that
+    /// whatever it produces can be released rather than leaked.
+    private func expireCreateRetry(epoch: Int, lifecycle: Int, generation: Int) {
+        guard createRetryEpoch == epoch, !createRetryExpired else { return }
+        guard isCurrentLifecycle(lifecycle), !isSuperseded(generation) else { return }
+        createRetryExpired = true
+        raiseCreateRetryExhausted()
+    }
+
+    /// Deliberately NOT the class's `keep_waiting`: on this path there is no
+    /// stream to keep waiting on and no detector to re-arm, so offering it
+    /// would be a button that does nothing. Try again re-runs the whole open,
+    /// which is the honest "one more bounded attempt" here.
+    private func raiseCreateRetryExhausted() {
+        stopForBlockingSurface()
+        raiseOwnerFault(
+            source: "owner_exhausted",
+            context: .start,
+            title: Self.playbackStartFailureTitle,
+            detail: Self.createRetryExhaustedMessage,
+            actions: [.retry, .close]
+        )
     }
 
     // MARK: - The playback surface
@@ -5216,13 +5458,15 @@ final class PlayerController: ObservableObject {
         }
         guard let code = api.refusalCode else { return nil }
         switch code {
-        // Deliberately NOT `create_503_not_yet`. That row is `preparing`, and
-        // `preparing` is a spinner the owner is expected to retry out of —
-        // which on Apple is M5's work, not this client's today. Raising it now
-        // would replace "Server returned 503" with a spinner that never ends
-        // and offers nothing. Contract §3.3 row 6 says so outright: until M5
-        // the owner's outcome is `stopped` with the server's sentence, and
-        // that sentence is the improvement this milestone actually ships.
+        // Still deliberately NOT `create_503_not_yet`, and now for a sharper
+        // reason than "M5 has not happened yet". M5's retry owner
+        // (`createRetryingNotYet`) raises that row itself, with the server's
+        // sentence, while it is retrying. This function feeds `raiseOwnerFault`
+        // — which is only ever called AFTER the owner stopped the player — so
+        // answering it with a `preparing` would put a spinner over a stopped
+        // player and never take it down. A "not yet" that reaches here is one
+        // the retry already gave up on, and the owner's own `stopped` is the
+        // truthful answer for it.
         case "vod_disabled":
             return PlaybackSurfaceOutcome(source: "vod_disabled")
         case "vod_source_rescan_required":
