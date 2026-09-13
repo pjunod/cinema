@@ -1,9 +1,10 @@
 # Live TV start stall and tvOS surface — the implementation plan
 
-**Status:** v2 after Astra's review (17 findings, §0), ready for a second
-look, then build · **Executes:** §3 and §5 of
+**Status:** v2 after Astra's review (17 findings folded, §0) — **ready to
+build; Sol builds it** · **Executes:** §3 and §5 of
 [LIVE-TV-START-STALL-AND-TVOS-PLAYBACK-SURFACE.md](LIVE-TV-START-STALL-AND-TVOS-PLAYBACK-SURFACE.md)
-· **Measured against:** `main` at `a605d03c` (Apple build 152) ·
+· **Against:** `main` at `a605d03c` (Apple build 152) · **Lane:**
+`effort/live-tv-start-stall` (create it from current `main`) ·
 **Written:** 2026-09-13 · **Revised:** 2026-09-13
 
 Companion to the diagnosis (why every start freezes and why the tvOS
@@ -24,6 +25,33 @@ changes if either goes the other way.
 
 Line numbers cite `main` at `a605d03c` and are re-verified at build time;
 function names are the durable anchors.
+
+**How to work (Sol).** Read the diagnosis first — it says *why* every line
+below exists. Then §10 for the mechanics of this repository, then build
+§5 in order: S1 → S2 → S3, N1 beside S3, A1 → A2 → A3. Each milestone is
+one task PR into the lane, opened `WIP:`, reviewed once adversarially,
+findings implemented, the smallest focused regression recorded in the PR
+body; the full suites run once, at the lane's promotion to `main`
+(`AGENTS.md`, "Large efforts"). Nothing physical can be done from a
+session without the hardware — S3's device runs, N1's device check and
+A3's device check are hand-offs (§7) that Paul gives to a GPT session;
+write the exact prompt into the PR body when you reach one and carry on
+with the next milestone rather than waiting. A second Astra pass on this
+v2 may still arrive; its findings fold as amendments to the milestone
+they touch, not as a reason to stop.
+
+**Standing instruction.** If a step seems to require any of these, stop
+and flag it rather than doing it: changing `LiveTvInputRouting`, the
+input-contract fixture, or `PlayerRemoteAdapter.swift`; changing a signed
+internal wire shape (`LiveTvStartRequest`, `LiveTvStartRequestV2`,
+`LiveTvActivateRequest`, `LiveTvStopRequest`); changing
+`CAPABILITY_IDLE_TIMEOUT`, `PROVISIONAL_TIMEOUT`, `STARTUP_TIMEOUT`,
+`STARTUP_FEEDING_TIMEOUT`, `PRODUCER_PROGRESS_TIMEOUT` or the relay's
+`START_EXCHANGE_ATTEMPT` / `PUBLIC_START_DEADLINE`; raising
+`MAX_SESSION_BYTES`; touching the phone surface; adding a route; fetching
+a third-party image from a client; putting Live TV under the
+playback-surface reducer (§3.7 is a ruling, not a task); or gating any of
+this behind a flag.
 
 ## 0. What the review found, and what this revision does about it
 
@@ -82,6 +110,27 @@ Up press from each of the five buttons lands on a button.
 | `run_graph_probe` supplies two output URLs and the second is unbounded | `live_tv.rs:6673`; reproduced by the review under the new arguments (20 s timeout) |
 | The reveal layer stays focusable while the overlay is visible and its adapter answers every direction with `.reveal` | `LiveTvView.swift:2317–2326`, `PlayerRemoteAdapter.swift:77–83`; inferred, not yet seen on a device |
 | Media3 with an explicit target offset snaps to the segment boundary at or before it | review finding 3, `HlsMediaSource` start-position logic; check at the build's dependency version |
+
+### 2.1 Where the code is — the seams this plan touches
+
+| Seam | File and anchor | PR |
+|---|---|---|
+| Producer arguments and inventory constants | `crates/plurxd/src/live_tv.rs` `LIVE_HLS_OUTPUT_ARGS` (127), `MAX_LISTED_SEGMENTS` / `MAX_DELETION_LAG_SEGMENTS` (142–143) | S |
+| Playlist parser | `parse_playlist_bytes` (5799–5904), `ParsedPlaylist` (5793) | S |
+| Scratch inventory | `inspect_scratch` (5679–5791), `ScratchInventory` (4303) | S |
+| Producer loop: publish and progress | the `match inspect_scratch(...)` at 4796–4846; the watchdog at 4875 | S |
+| Startup budget | `startup_overdue` (4929), callers at 4850 and `wait_for_startup` 4364 | S |
+| Session state | `LiveTvSessionState` (`last_progress`, `media_sequence`, `publication`) | S |
+| Graph probe | `run_graph_probe` free function (6652), `LiveTvTranscodePlan::new`, `live_ffmpeg_command` (5330) | S |
+| Owner tests | `mod tests` in `live_tv.rs` (8376, 8493, 8929, 8948, 8979; fixture-tuner tests ~7617) | S |
+| Two-node harness | `crates/plurxd/tests/live_tv_two_node.rs` (`LISTED_SEGMENTS` 779, walk 692–760) | S |
+| Hardware script | `scripts/live-tv-hardware` (constants 84–92, the start at 646–660) | S |
+| Android live configuration | `clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvPlayer.kt:194–199` | N |
+| Apple controller | `LiveTvPlayerController` at the top of `clients/apple/Sources/LiveTvView.swift` (`attach` 148, heartbeat 169, `togglePause` 348, `detach` 386, `load` 66) | A |
+| Apple fullscreen surface | `fullscreenSurface` (2300–2486), `applyLiveOutcome` (2491), `liveInputState` (1410), the Info sheet (1363) | A |
+| Apple type and style | `LiveTvType` (489–497); `TVReadableButtonStyle` in `Theme.swift` (115) | A |
+| Apple tests | `clients/apple/Tests/LiveTvTests.swift` (source-pin pattern at 278; `testing(...)` factory at `LiveTvView.swift:12`) | A |
+| Status and docs | `STATUS.md` top entry, `docs/apple-builds/<n>-live-tv-surface.md`, the evidence table in `docs/features/HDHOMERUN-LIVE-TV-STATUS.md` | all |
 
 ## 3. Contract — exact interfaces
 
@@ -879,3 +928,52 @@ build):
 - Whether the 20 s relay attempt is generous enough for a long-GOP copy
   route; S3's `--via` run answers it with a real number, and 16 s is the
   line at which that becomes Paul's ruling.
+
+## 10. Mechanics for the builder
+
+- **Clone your own.** Never work in Paul's checkout. Clone from Forgejo
+  (`http://192.168.4.7:3000/noirr/plurx.git`) into your own scratch
+  (`/tmp/<name>` on the device VM if its `$HOME` is full — it usually is);
+  `--filter=blob:none` is fine. `docs/ci/AGENT-COMPILE-LOOP.md` is how
+  Rust gets compiled when the clone and `cargo` are on different machines;
+  set it up before writing Rust.
+- **The lane.** `git checkout -b effort/live-tv-start-stall origin/main`,
+  push it, then one branch per milestone based on the lane
+  (`s1/cadence-and-probe`, `s2/listed-gate-and-progress`, `s3/harness-and-hardware`,
+  `n1/android-live-offset`, `a1/controller-waiting`, `a2/surface-and-focus`,
+  `a3/info-ledger`), each opened as a PR into the lane with a `WIP:` title
+  until it is ready. Forgejo has no draft flag; the `WIP:` prefix is the
+  draft, and Forgejo refuses the merge while it is there. Un-draft with
+  `PATCH /api/v1/repos/noirr/plurx/pulls/<n>` `{"title": ...}`; the fast
+  lane's gate runs on every ready PR. Merge your own PRs; Paul does not
+  want to click.
+- **Gates.** Task PRs get `Effort development gate` (policy, formatting,
+  static web contracts, affected compiles). `make history-check` must be
+  green: every corrective commit needs a `regressions.d` mapping or a
+  `tests/client-fixes.toml` anchor row — it is red on `main` today because
+  the 2026-09-13 lanes merged without theirs, so expect to rebase onto a
+  fixed `main` or to be blocked until it is; do not "fix" other lanes'
+  anchors in this effort. A test that names a `docs/` path must name one
+  that exists (`tests/operations/test_docs_index.py`).
+- **Apple.** No Xcode in a Linux session. Compile on a Mac with Xcode
+  and `xcodegen` — `cd clients/apple && xcodegen generate`, then
+  `make apple-test` on both destinations, as
+  [`../clients/PLAYBACK-SURFACE-APPLE-BUILD-PROMPT.md`](../clients/PLAYBACK-SURFACE-APPLE-BUILD-PROMPT.md)
+  lays out — or through CI's `fast Apple compile`. If you have neither,
+  the Swift is written blind and the Apple PR body says so; the compile
+  becomes the first line of the A hand-off. `make apple-build-bump` after the final rebase,
+  never before — the `mobile release version` job compares against `main`
+  at merge time. Every Apple PR carries a `docs/apple-builds/<n>-*.md`
+  note.
+- **Android.** JVM tests only from here (`./gradlew testDebugUnitTest`);
+  the device check is a hand-off.
+- **Evidence.** Record the focused regression command in each PR body.
+  The physical results go into `HDHOMERUN-LIVE-TV-STATUS.md`'s evidence
+  table and the STATUS.md entry in the same PR that consumed them.
+- **Promotion.** When S3, N1 and A3 have their device evidence, freeze
+  task merges, merge current `main` into the lane, open the lane into
+  `main`, wait for `Main promotion gate`, merge.
+- **Reading order for anything you are unsure of:** this document → the
+  diagnosis → `docs/clients/PLAYBACK-SURFACE-CONTRACT.md` §4 (for the one
+  boundary in §3.7) → `docs/features/LIVE-TV-RELIABILITY-IMPLEMENTATION.md`
+  (the previous Live TV lane, same shape as this one) → `AGENTS.md`.
