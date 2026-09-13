@@ -1554,7 +1554,7 @@ pub struct SettingsDto {
     pub live_tv_transition_drain_before: i64,
     pub live_tv_guide_source: String,
     pub live_tv_xmltv_url: String,
-    pub live_tv_guide_hours: u8,
+    pub live_tv_guide_hours: u16,
     pub tmdb_configured: bool,
     /// The stored TMDB key itself. This endpoint is admin-only and the key is
     /// low-sensitivity (read-only metadata), so the admin who set it can see
@@ -2169,7 +2169,7 @@ pub struct UpdateSettings {
     /// enabled, because turning a read-only feed on must not drain viewers.
     pub live_tv_guide_source: Option<String>,
     pub live_tv_xmltv_url: Option<String>,
-    pub live_tv_guide_hours: Option<u8>,
+    pub live_tv_guide_hours: Option<u16>,
     /// Explicit admin attestation, never an automatic timeout override.
     pub live_tv_fenced_owner: Option<LiveTvFencedOwner>,
     /// Set the TMDB API key. Empty string clears it. Absent leaves it as-is.

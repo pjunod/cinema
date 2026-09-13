@@ -1822,7 +1822,7 @@ is `health.verdict == "dead"`, and the fix — once the underlying cause is gone
 | GET | `/api/v1/live-tv/readiness` | admin | Verdict from cached device state |
 | POST | `/api/v1/live-tv/readiness/refresh` | admin | Verdict, forcing a fresh fetch and re-probing the encoder graph |
 | GET | `/api/v1/live-tv/channels` | bearer | The sanitized lineup |
-| GET | `/api/v1/live-tv/guide` | bearer | The cached programme guide, clipped to `?from=<unix>&hours=<1..72>`. Never triggers a fetch |
+| GET | `/api/v1/live-tv/guide` | bearer | The cached programme guide, clipped to `?from=<unix>&hours=<1..336>`. Never triggers a fetch. Carries `next_refresh_at` so a client polls on the owner's clock |
 | POST | `/api/v1/live-tv/guide/refresh` | admin | Forces one guide refresh on the owner and returns the new document |
 | GET | `/api/v1/live-tv/guide/readiness` | admin | Advisory: what has to be true for the configured source to work, and whether it is |
 | POST | `/api/v1/live-tv/channels/{channel}/sessions` | bearer | Two-phase start; issues the capability |

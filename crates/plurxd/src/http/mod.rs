@@ -4176,7 +4176,7 @@ mod tests {
                 "URL with userinfo",
             ),
             (
-                json!({"live_tv_guide_hours": 200, "live_tv_config_generation": 3}),
+                json!({"live_tv_guide_hours": 400, "live_tv_config_generation": 3}),
                 "look-ahead out of range",
             ),
         ] {

@@ -45,7 +45,10 @@ pub(crate) const GUIDE_REFRESH_TIMEOUT: Duration = Duration::from_secs(25);
 /// XMLTV for a large lineup is a few MiB. Anything larger is refused rather
 /// than streamed: this is a cache fill, not a download service.
 pub(crate) const GUIDE_MAX_DOCUMENT_BYTES: usize = 4 * 1024 * 1024;
-pub(crate) const GUIDE_MAX_PROGRAMMES_PER_CHANNEL: usize = 200;
+/// A fortnight of half-hour slots is about 670 rows, so the old 200 silently
+/// truncated any horizon past ~4 days. The cap is a bound on an untrusted
+/// document, not a statement about how far ahead an operator may look.
+pub(crate) const GUIDE_MAX_PROGRAMMES_PER_CHANNEL: usize = 800;
 /// One bulk call, then at most one extension per channel.
 pub(crate) const GUIDE_MAX_EXTENSION_REQUESTS: usize = 64;
 pub(crate) const MAX_GUIDE_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
@@ -62,6 +65,14 @@ const MAX_IMAGE_URL_BYTES: usize = 512;
 const MAX_FILTERS: usize = 8;
 const MAX_FILTER_BYTES: usize = 32;
 const MAX_EPISODE_BYTES: usize = 16;
+/// Series and programme identifiers are opaque strings from an untrusted
+/// document. They are matched, never parsed, so the only thing that matters is
+/// that they are bounded.
+const MAX_IDENTITY_BYTES: usize = 64;
+/// `dd_progid` is `EP` + an eight-character series body + a four-digit
+/// occurrence: the first ten characters identify the series, the whole string
+/// identifies the airing.
+const DD_PROGID_SERIES_PREFIX: usize = 10;
 /// Guide rows come from a host plurx does not control. A programme longer than
 /// this is a parse accident, not a broadcast.
 const MAX_PROGRAMME_SECONDS: i64 = 24 * 60 * 60;
@@ -112,6 +123,22 @@ pub(crate) struct LiveTvProgramme {
     pub(crate) image_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) original_air_date: Option<String>,
+    /// What a series rule matches on when the source supplies it: HDHomeRun's
+    /// `SeriesID`, or the series half of an XMLTV `dd_progid`. Absent for a
+    /// source that carries neither, which is why a rule can also match on a
+    /// normalised title (see the DVR plan §3.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) series_id: Option<String>,
+    /// The airing's own identifier — HDHomeRun's `ProgramID`, or the whole
+    /// `dd_progid`. Carried for diagnosis and the recording sidecar; identity
+    /// for scheduling is `(channel, start)`, never this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) programme_id: Option<String>,
+    /// XMLTV's `<new/>` marker, and only that. HDHomeRun's `Filter` tags never
+    /// say "new" reliably, so an HDHomeRun row leaves this `None` rather than
+    /// guessing — "record new episodes only" then falls back to the air date.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) is_new: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) filters: Vec<String>,
 }
@@ -140,6 +167,11 @@ pub(crate) struct LiveTvGuide {
     pub(crate) window: GuideWindow,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) refresh_error: Option<String>,
+    /// When the owner's loop next intends to refresh, unix seconds. Clients
+    /// poll on this rather than on a cadence of their own. Absent only when
+    /// the loop has not run yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) next_refresh_at: Option<i64>,
     /// How many lineup channels the source could be matched to, and how many
     /// were offered. The operator's whole diagnostic for a grabber whose
     /// display names do not line up.
@@ -163,6 +195,7 @@ impl LiveTvGuide {
             fetched_at: None,
             window,
             refresh_error: error,
+            next_refresh_at: None,
             matched_channels: 0,
             lineup_channels: 0,
             channels: Vec::new(),
@@ -229,21 +262,34 @@ impl LiveTvGuide {
 
 /// Normalisation applied to every source, because both of them are untrusted
 /// input: bound every string, drop a programme without a title or with an
-/// impossible span, sort by start, and remove overlaps by trusting the earlier
-/// row's end. A guide that overlaps itself makes "what is on now" ambiguous.
-pub(crate) fn normalise_programmes(mut rows: Vec<LiveTvProgramme>) -> Vec<LiveTvProgramme> {
+/// impossible span, de-duplicate, sort by start, and remove overlaps.
+///
+/// An overlap shortens the **earlier** row's end rather than moving the later
+/// row's start. A start is the recording scheduler's identity for an airing
+/// (`(channel_id, airing_start)`), so a normalisation that could move one
+/// would silently re-key every scheduled recording on the channel whenever a
+/// fresh page happened to overlap the cached one by a second.
+pub(crate) fn normalise_programmes(rows: Vec<LiveTvProgramme>) -> Vec<LiveTvProgramme> {
+    let mut rows = dedupe_programmes(rows);
     rows.retain(|p| {
         !p.title.is_empty() && p.end > p.start && p.end - p.start <= MAX_PROGRAMME_SECONDS
     });
     rows.sort_by_key(|p| (p.start, p.end));
     let mut out: Vec<LiveTvProgramme> = Vec::with_capacity(rows.len());
-    for mut row in rows {
-        if let Some(previous) = out.last() {
+    for row in rows {
+        if let Some(previous) = out.last_mut() {
             if row.start < previous.end {
-                row.start = previous.end;
-            }
-            if row.end <= row.start {
-                continue;
+                // A row wholly inside another is a parse accident, not a
+                // programme. Dropping it — rather than letting it truncate the
+                // row it sits inside — keeps the longer, earlier programme
+                // whole, and is the only branch here that removes anything.
+                if row.end <= previous.end {
+                    continue;
+                }
+                previous.end = row.start;
+                if previous.end <= previous.start {
+                    out.pop();
+                }
             }
         }
         out.push(row);
@@ -252,6 +298,38 @@ pub(crate) fn normalise_programmes(mut rows: Vec<LiveTvProgramme>) -> Vec<LiveTv
         }
     }
     out
+}
+
+/// Collapse rows that describe the same airing, keyed on `(start, title)`.
+///
+/// A refresh that merges a cached page with a fresher one sees the same
+/// airing twice, and the two copies are not always equal: the cached copy may
+/// predate the identity fields, or the fresher page may have been truncated.
+/// Keep the copy that carries identifiers, and otherwise the one that runs
+/// longer, so a merge only ever adds information.
+fn dedupe_programmes(rows: Vec<LiveTvProgramme>) -> Vec<LiveTvProgramme> {
+    let mut by_airing: BTreeMap<(i64, String), LiveTvProgramme> = BTreeMap::new();
+    for row in rows {
+        match by_airing.entry((row.start, row.title.clone())) {
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert(row);
+            }
+            std::collections::btree_map::Entry::Occupied(mut slot) => {
+                let keep_incoming = match (
+                    slot.get().programme_id.is_some() || slot.get().series_id.is_some(),
+                    row.programme_id.is_some() || row.series_id.is_some(),
+                ) {
+                    (false, true) => true,
+                    (true, false) => false,
+                    _ => row.end > slot.get().end,
+                };
+                if keep_incoming {
+                    slot.insert(row);
+                }
+            }
+        }
+    }
+    by_airing.into_values().collect()
 }
 
 pub(crate) fn bounded_text(value: Option<String>, limit: usize) -> Option<String> {
@@ -357,6 +435,13 @@ struct HdhrGuideEntry {
     original_airdate: Option<i64>,
     #[serde(rename = "ImageURL")]
     image_url: Option<String>,
+    // Spelled out rather than left to `rename_all = "PascalCase"`, which would
+    // look for `SeriesId`/`ProgramId` and quietly parse nothing — the same
+    // reason `ImageURL` and `OriginalAirdate` above carry explicit renames.
+    #[serde(rename = "SeriesID")]
+    series_id: Option<String>,
+    #[serde(rename = "ProgramID")]
+    program_id: Option<String>,
     filter: Option<Vec<String>>,
 }
 
@@ -371,6 +456,10 @@ impl HdhrGuideEntry {
             synopsis: bounded_text(self.synopsis, MAX_SYNOPSIS_BYTES),
             image_url: bounded_image_url(self.image_url),
             original_air_date: self.original_airdate.and_then(unix_to_air_date),
+            series_id: bounded_text(self.series_id, MAX_IDENTITY_BYTES),
+            programme_id: bounded_text(self.program_id, MAX_IDENTITY_BYTES),
+            // Silicondust's `Filter` is a genre list, not a first-run marker.
+            is_new: None,
             filters: bounded_filters(self.filter.unwrap_or_default()),
         })
     }
@@ -692,6 +781,9 @@ pub(crate) fn parse_xmltv(
                                 synopsis: None,
                                 image_url: None,
                                 original_air_date: None,
+                                series_id: None,
+                                programme_id: None,
+                                is_new: None,
                                 filters: Vec::new(),
                             },
                         ));
@@ -708,10 +800,21 @@ pub(crate) fn parse_xmltv(
             }
             Ok(Event::Empty(event)) => {
                 let name = String::from_utf8_lossy(event.name().as_ref()).into_owned();
-                if name == "icon" {
-                    if let Some((_, row)) = programme.as_mut() {
-                        row.image_url = bounded_image_url(attribute(&event, "src"));
+                match name.as_str() {
+                    "icon" => {
+                        if let Some((_, row)) = programme.as_mut() {
+                            row.image_url = bounded_image_url(attribute(&event, "src"));
+                        }
                     }
+                    // `<new/>` is the only first-run marker XMLTV defines, and
+                    // it is an empty element. A grabber that omits it says
+                    // nothing about first-run, which is `None`, not `false`.
+                    "new" => {
+                        if let Some((_, row)) = programme.as_mut() {
+                            row.is_new = Some(true);
+                        }
+                    }
+                    _ => {}
                 }
             }
             Ok(Event::Text(text)) => {
@@ -861,6 +964,18 @@ fn commit_xmltv_field(
             }
         }
         (Some("episode-num"), Some((_, row)), _) => {
+            // `dd_progid` is an identity, never an episode number: `EP012345670023`
+            // says which series and which airing, and nothing about S/E.
+            if episode_system == Some("dd_progid") {
+                let (series, programme) = dd_progid_identity(&value);
+                if row.series_id.is_none() {
+                    row.series_id = series;
+                }
+                if row.programme_id.is_none() {
+                    row.programme_id = programme;
+                }
+                return;
+            }
             let candidate = if episode_system == Some("xmltv_ns") {
                 xmltv_ns_episode(&value)
             } else {
@@ -928,6 +1043,24 @@ pub(crate) fn xmltv_ns_episode(value: &str) -> Option<String> {
     Some(format!("S{season}E{episode}"))
 }
 
+/// Split an XMLTV `dd_progid` into `(series_id, programme_id)`.
+///
+/// `EP012345670023` — the first ten characters are the series, the whole
+/// string is the airing. A value too short to carry a series body is returned
+/// as a programme identity alone rather than sliced into a prefix that would
+/// collide with every other short value.
+pub(crate) fn dd_progid_identity(value: &str) -> (Option<String>, Option<String>) {
+    let Some(programme) = bounded_text(Some(value.to_owned()), MAX_IDENTITY_BYTES) else {
+        return (None, None);
+    };
+    if !programme.is_ascii() {
+        return (None, Some(programme));
+    }
+    let series = (programme.len() > DD_PROGID_SERIES_PREFIX)
+        .then(|| programme[..DD_PROGID_SERIES_PREFIX].to_owned());
+    (series, Some(programme))
+}
+
 fn xmltv_date(value: &str) -> Option<String> {
     let digits = value.trim();
     if digits.len() < 8 || !digits[..8].chars().all(|c| c.is_ascii_digit()) {
@@ -947,7 +1080,7 @@ fn xmltv_date(value: &str) -> Option<String> {
 /// asks for nothing in particular gets. It starts an hour back so the
 /// programme that began before the page opened is present — a grid whose first
 /// cell is always cut off reads as broken.
-pub(crate) fn refresh_window(hours: u8) -> GuideWindow {
+pub(crate) fn refresh_window(hours: u16) -> GuideWindow {
     let now = unix_seconds();
     GuideWindow {
         start: now - 3600,

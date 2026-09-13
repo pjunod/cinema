@@ -29,7 +29,10 @@ const DRAIN_EXCHANGE_DEADLINE: Duration = Duration::from_secs(20);
 const RESOURCE_EXCHANGE_DEADLINE: Duration = Duration::from_secs(12);
 const MAX_START_RESPONSE_BYTES: usize = 32 * 1024;
 const GUIDE_EXCHANGE_DEADLINE: Duration = Duration::from_secs(25);
-const MAX_GUIDE_REQUEST_HOURS: u8 = 72;
+/// The widest window one request may ask for. It matches the configuration
+/// ceiling rather than sitting under it: a client that can be configured to
+/// keep a fortnight must be able to read a fortnight.
+const MAX_GUIDE_REQUEST_HOURS: u16 = 336;
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct LiveTvReadinessCheck {
@@ -62,7 +65,7 @@ pub(crate) struct LiveTvChannelsResponse {
 #[derive(Deserialize)]
 pub(crate) struct GuideQuery {
     from: Option<i64>,
-    hours: Option<u8>,
+    hours: Option<u16>,
 }
 
 /// The public guide read. It serves the owner's cache clipped to the requested
@@ -305,7 +308,7 @@ pub(crate) async fn guide_readiness(
 pub(crate) struct LiveTvGuideReadiness {
     pub(crate) advisory: bool,
     pub(crate) source: String,
-    pub(crate) guide_hours: u8,
+    pub(crate) guide_hours: u16,
     pub(crate) freshness: crate::live_tv::GuideFreshness,
     pub(crate) age_seconds: u64,
     #[serde(skip_serializing_if = "Option::is_none")]

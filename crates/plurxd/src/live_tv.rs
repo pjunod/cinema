@@ -67,10 +67,24 @@ const TUNER_STATUS_TIMEOUT: Duration = Duration::from_secs(2);
 /// additional callers fail promptly instead of building an unbounded queue.
 const MAX_FORCED_REFRESH_CALLERS: usize = 8;
 /// Guide look-ahead bounds. Four hours is what the free HDHomeRun tier
-/// actually answers; seventy-two is as far as a memory cache is worth filling.
-const DEFAULT_GUIDE_HOURS: u8 = 24;
-const MIN_GUIDE_HOURS: u8 = 4;
-const MAX_GUIDE_HOURS: u8 = 72;
+/// actually answers; a fortnight is what a subscription tier answers and what
+/// a series recording rule needs to see in order to schedule anything worth
+/// scheduling. The cache is durable now (`guide.json`), so the old
+/// "as far as a *memory* cache is worth filling" ceiling of 72 no longer
+/// describes the cost.
+pub(crate) const DEFAULT_GUIDE_HOURS: u16 = 24;
+pub(crate) const MIN_GUIDE_HOURS: u16 = 4;
+pub(crate) const MAX_GUIDE_HOURS: u16 = 336;
+/// One tick re-validates this much of the already-cached horizon, cycling
+/// through it, so a provider's schedule change reaches the cache within a
+/// fortnight of ticks (~5 hours) instead of never: a tail-only extension
+/// never revisits what it already has.
+const GUIDE_REVALIDATION_HOURS: i64 = 24;
+/// The persisted guide document's format. A file written by any other version
+/// is ignored rather than migrated — it is a cache, and the next refresh
+/// overwrites it.
+const PERSISTED_GUIDE_VERSION: u32 = 1;
+const PERSISTED_GUIDE_FILE: &str = "guide.json";
 const MAX_XMLTV_URL_BYTES: usize = 1024;
 /// An ingress remembers the owner's answer for this long, so a click-storm on
 /// a busy page is not a relay-storm on the owner. It is deliberately shorter
@@ -164,7 +178,7 @@ pub(crate) struct LiveTvConfig {
     /// not the "disable before editing" rule.
     pub(crate) guide_source: GuideSource,
     pub(crate) xmltv_url: String,
-    pub(crate) guide_hours: u8,
+    pub(crate) guide_hours: u16,
 }
 
 /// Where programme data comes from. `HdHomeRun` is the zero-setup default once
@@ -1247,7 +1261,10 @@ pub(crate) struct LiveTvMetrics {
     /// same shape as the device one: a value plus when it was observed, so a
     /// stalled refresh loop reports staleness instead of a frozen number.
     guide_refreshes: StdMutex<BTreeMap<(&'static str, &'static str), u64>>,
-    guide: StdMutex<Option<(tokio::time::Instant, usize)>>,
+    /// `(observed, age_offset, programmes)`. The offset carries the age a
+    /// guide already had when this process adopted it from disk, so the age
+    /// gauge reports the copy's real age rather than restarting at zero.
+    guide: StdMutex<Option<(tokio::time::Instant, Duration, usize)>>,
 }
 
 #[derive(Default)]
@@ -1266,11 +1283,20 @@ impl LiveTvMetrics {
     }
 
     fn observe_guide(&self, programmes: usize) {
+        self.observe_guide_at(tokio::time::Instant::now(), Duration::ZERO, programmes);
+    }
+
+    fn observe_guide_at(
+        &self,
+        observed: tokio::time::Instant,
+        age_offset: Duration,
+        programmes: usize,
+    ) {
         let mut projection = self
             .guide
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *projection = Some((tokio::time::Instant::now(), programmes));
+        *projection = Some((observed, age_offset, programmes));
     }
 
     /// The three guide series. `plurx_live_tv_guide_age_seconds` is the one an
@@ -1301,9 +1327,8 @@ impl LiveTvMetrics {
             ));
         }
         let (age, programmes) = match projection {
-            Some((observed, programmes)) => (
-                tokio::time::Instant::now()
-                    .duration_since(observed)
+            Some((observed, age_offset, programmes)) => (
+                (age_offset + tokio::time::Instant::now().duration_since(observed))
                     .as_secs()
                     .to_string(),
                 programmes.to_string(),
@@ -1354,6 +1379,11 @@ struct SnapshotCacheState {
 struct SnapshotCache {
     state: tokio::sync::Mutex<SnapshotCacheState>,
     forced_admission: tokio::sync::Semaphore,
+    /// Raised when a lineup arrives where there was none for this generation.
+    /// The guide refresh loop holds the same `Arc`: a refresh that ran before
+    /// any client read channels has no lineup to match against, and without
+    /// this it would sit out a full refresh interval before trying again.
+    lineup_filled: Arc<tokio::sync::Notify>,
 }
 
 impl Default for SnapshotCache {
@@ -1361,6 +1391,7 @@ impl Default for SnapshotCache {
         Self {
             state: tokio::sync::Mutex::new(SnapshotCacheState::default()),
             forced_admission: tokio::sync::Semaphore::new(MAX_FORCED_REFRESH_CALLERS),
+            lineup_filled: Arc::new(tokio::sync::Notify::new()),
         }
     }
 }
@@ -1435,11 +1466,20 @@ impl SnapshotCache {
                 snapshot.age_seconds = 0;
                 snapshot.freshness = SnapshotFreshness::Fresh;
                 snapshot.refresh_error = None;
+                // Computed before the replacement: afterwards every write
+                // looks like a fill.
+                let was_cold = state
+                    .snapshot
+                    .as_ref()
+                    .is_none_or(|cached| cached.generation != generation);
                 state.snapshot = Some(CachedSnapshot {
                     generation,
                     observed,
                     snapshot: snapshot.clone(),
                 });
+                if was_cold {
+                    self.lineup_filled.notify_one();
+                }
                 Ok(snapshot)
             }
             Err(error) => {
@@ -1482,6 +1522,17 @@ struct GuideCache {
     refresh_admission: Arc<tokio::sync::Semaphore>,
     refresh_cancel: StdMutex<Option<(LiveTvConfig, CancellationToken)>>,
     next_sequence: AtomicU64,
+    /// Where the owner keeps its copy. `None` in `Default`, which is what the
+    /// unit tests construct: a test that wrote a file would be a test with a
+    /// filesystem dependency it did not ask for.
+    persist: Option<PathBuf>,
+    /// Shared with `SnapshotCache::lineup_filled`, so a lineup arriving cold
+    /// wakes the refresh loop instead of leaving it asleep for 20 minutes.
+    wake: Arc<tokio::sync::Notify>,
+    /// `i64::MIN` until the first `observe_generation`. A settings save is the
+    /// other thing that must wake the loop, and it is observed on every
+    /// `config()` read from any request path.
+    observed_generation: AtomicI64,
 }
 
 #[derive(Default)]
@@ -1493,6 +1544,23 @@ struct GuideCacheState {
     /// Scoped to the generation it happened under: an error from the previous
     /// configuration is not a fact about the current one.
     last_error: Option<(i64, String)>,
+    /// What the loop told the world about its own next tick. Served on both
+    /// branches of `read` — an `unavailable` answer still says when to ask
+    /// again, which is the whole point of a client polling on the owner's
+    /// clock rather than on a cadence of its own.
+    next_refresh_at: Option<i64>,
+}
+
+/// The on-disk shape. `fetched_at` is wall-clock, which is what makes the age
+/// meaningful across a restart; the in-memory `observed` instant is
+/// reconstructed from it on load. The guide document is the public one,
+/// verbatim — no `DeviceAuth` can reach it by construction.
+#[derive(Serialize, Deserialize)]
+struct PersistedGuide {
+    version: u32,
+    generation: i64,
+    fetched_at: i64,
+    guide: LiveTvGuide,
 }
 
 impl GuideCacheState {
@@ -1513,8 +1581,24 @@ type GuideTitleIndex = BTreeMap<String, Vec<(i64, i64, String)>>;
 struct CachedGuide {
     generation: i64,
     observed: tokio::time::Instant,
+    /// How old the copy already was when this process adopted it. Zero for a
+    /// fresh fetch; the clamped wall-clock age for one loaded from disk.
+    ///
+    /// It exists because `Instant` has no epoch: on a machine that has been up
+    /// for less time than the guide's age there is no instant to subtract to,
+    /// so `observed` falls back to "now" and the age would otherwise be lost.
+    /// Every age in the system is `age_offset + now - observed`, so a copy
+    /// adopted at an hour old reports an hour and expires an hour early
+    /// whichever branch it took.
+    age_offset: Duration,
     fetched_at: i64,
     guide: LiveTvGuide,
+}
+
+impl CachedGuide {
+    fn age(&self, now: tokio::time::Instant) -> Duration {
+        self.age_offset + now.duration_since(self.observed)
+    }
 }
 
 impl Default for GuideCache {
@@ -1524,11 +1608,148 @@ impl Default for GuideCache {
             refresh_admission: Arc::new(tokio::sync::Semaphore::new(1)),
             refresh_cancel: StdMutex::new(None),
             next_sequence: AtomicU64::new(1),
+            persist: None,
+            wake: Arc::new(tokio::sync::Notify::new()),
+            observed_generation: AtomicI64::new(i64::MIN),
         }
     }
 }
 
 impl GuideCache {
+    /// The owner's cache, backed by `<dir>/guide.json` and sharing a wake with
+    /// the lineup cache. Loading happens here so a restarted owner serves the
+    /// grid it had before the restart rather than `unavailable` for up to
+    /// twenty minutes.
+    fn with_store(dir: PathBuf, wake: Arc<tokio::sync::Notify>) -> Self {
+        let path = dir.join(PERSISTED_GUIDE_FILE);
+        let cached = Self::load_persisted(&path);
+        Self {
+            state: tokio::sync::Mutex::new(GuideCacheState {
+                cached,
+                ..GuideCacheState::default()
+            }),
+            refresh_admission: Arc::new(tokio::sync::Semaphore::new(1)),
+            refresh_cancel: StdMutex::new(None),
+            next_sequence: AtomicU64::new(1),
+            persist: Some(path),
+            wake,
+            observed_generation: AtomicI64::new(i64::MIN),
+        }
+    }
+
+    fn load_persisted(path: &Path) -> Option<CachedGuide> {
+        let raw = std::fs::read(path).ok()?;
+        let persisted = match serde_json::from_slice::<PersistedGuide>(&raw) {
+            Ok(persisted) if persisted.version == PERSISTED_GUIDE_VERSION => persisted,
+            Ok(persisted) => {
+                tracing::warn!(
+                    version = persisted.version,
+                    "ignoring a persisted programme guide written by another format version"
+                );
+                return None;
+            }
+            Err(_) => {
+                tracing::warn!("ignoring an unreadable persisted programme guide");
+                return None;
+            }
+        };
+        // Clamped, because a clock step at boot must not discard a good copy
+        // by making it look like it came from the future.
+        let age = Duration::from_secs(
+            unix_seconds()
+                .saturating_sub(persisted.fetched_at)
+                .max(0)
+                .unsigned_abs(),
+        );
+        if age > guide::GUIDE_STALE_TTL {
+            // Left on disk deliberately: the next success overwrites it, and
+            // deleting it here would lose the only evidence of what the owner
+            // last managed to fetch.
+            return None;
+        }
+        let now = tokio::time::Instant::now();
+        let (observed, age_offset) = match now.checked_sub(age) {
+            Some(observed) => (observed, Duration::ZERO),
+            None => (now, age),
+        };
+        Some(CachedGuide {
+            generation: persisted.generation,
+            observed,
+            age_offset,
+            fetched_at: persisted.fetched_at,
+            guide: persisted.guide,
+        })
+    }
+
+    /// Write outside the state mutex, and treat every failure as a warning.
+    /// A cache that cannot be written is a slower restart, never a failed
+    /// refresh.
+    async fn persist_guide(&self, cached: &CachedGuide) {
+        let Some(path) = self.persist.clone() else {
+            return;
+        };
+        let document = PersistedGuide {
+            version: PERSISTED_GUIDE_VERSION,
+            generation: cached.generation,
+            fetched_at: cached.fetched_at,
+            guide: cached.guide.clone(),
+        };
+        let written = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let temporary = path.with_extension("json.tmp");
+            let body = serde_json::to_vec(&document)
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            std::fs::write(&temporary, body)?;
+            std::fs::rename(&temporary, &path)
+        })
+        .await;
+        match written {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "could not persist the programme guide cache");
+            }
+            Err(error) => {
+                tracing::warn!(%error, "the programme guide cache writer stopped");
+            }
+        }
+    }
+
+    async fn discard_persisted(&self) {
+        let Some(path) = self.persist.clone() else {
+            return;
+        };
+        let _ = tokio::task::spawn_blocking(move || match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => tracing::warn!(%error, "could not remove the persisted programme guide"),
+        })
+        .await;
+    }
+
+    /// A permit, not a broadcast: the loop is a single consumer, and a wake
+    /// raised while it is mid-refresh must still be honoured when it returns.
+    fn wake(&self) {
+        self.wake.notify_one();
+    }
+
+    /// A settings save is what changes the generation, and every request path
+    /// reads the config. Wake on a *change*, never on the first observation —
+    /// that one is startup, which is already running a tick.
+    fn observe_generation(&self, generation: i64) {
+        let previous = self
+            .observed_generation
+            .swap(generation, std::sync::atomic::Ordering::Relaxed);
+        if previous != i64::MIN && previous != generation {
+            self.wake();
+        }
+    }
+
+    async fn note_next_refresh(&self, at: i64) {
+        self.state.lock().await.next_refresh_at = Some(at);
+    }
+
     fn begin_refresh(&self, config: &LiveTvConfig) -> CancellationToken {
         let token = CancellationToken::new();
         let mut active = self
@@ -1563,15 +1784,17 @@ impl GuideCache {
             .cached
             .as_ref()
             .filter(|cached| cached.generation == config.generation)
-            .filter(|cached| now.duration_since(cached.observed) <= guide::GUIDE_STALE_TTL)
+            .filter(|cached| cached.age(now) <= guide::GUIDE_STALE_TTL)
         else {
-            return LiveTvGuide::unavailable(
+            let mut guide = LiveTvGuide::unavailable(
                 config.guide_source,
                 window,
                 state.error_for(config.generation),
             );
+            guide.next_refresh_at = state.next_refresh_at;
+            return guide;
         };
-        let age = now.duration_since(cached.observed);
+        let age = cached.age(now);
         let mut guide = cached.guide.clipped(&window);
         guide.age_seconds = age.as_secs();
         guide.fetched_at = Some(cached.fetched_at);
@@ -1581,7 +1804,23 @@ impl GuideCache {
             GuideFreshness::Stale
         };
         guide.refresh_error = state.error_for(config.generation);
+        guide.next_refresh_at = state.next_refresh_at;
         guide
+    }
+
+    /// The owner's own copy, unclipped and without the serving dressing — what
+    /// the DVR scheduler matches rules against, and what an incremental
+    /// refresh extends rather than refetching. `None` when nothing usable is
+    /// cached for this generation.
+    async fn owner_copy(&self, generation: i64) -> Option<LiveTvGuide> {
+        let state = self.state.lock().await;
+        let now = tokio::time::Instant::now();
+        state
+            .cached
+            .as_ref()
+            .filter(|cached| cached.generation == generation)
+            .filter(|cached| cached.age(now) <= guide::GUIDE_STALE_TTL)
+            .map(|cached| cached.guide.clone())
     }
 
     /// A completed refresh. A failure keeps the previous cache and records the
@@ -1597,19 +1836,29 @@ impl GuideCache {
             return false;
         }
         state.published_sequence = sequence;
-        match result {
+        let persist = match result {
             Ok(guide) => {
-                state.cached = Some(CachedGuide {
+                let cached = CachedGuide {
                     generation,
                     observed: tokio::time::Instant::now(),
+                    age_offset: Duration::ZERO,
                     fetched_at: unix_seconds(),
                     guide: guide.clone(),
-                });
+                };
+                state.cached = Some(cached.clone());
                 state.last_error = None;
+                Some(cached)
             }
             Err(error) => {
-                state.last_error = Some((generation, guide::sanitize_refresh_error(error)))
+                state.last_error = Some((generation, guide::sanitize_refresh_error(error)));
+                None
             }
+        };
+        // Writing happens with the mutex released: a serving read must never
+        // wait behind a disk write.
+        drop(state);
+        if let Some(cached) = persist {
+            self.persist_guide(&cached).await;
         }
         true
     }
@@ -1617,9 +1866,15 @@ impl GuideCache {
     /// A settings change discards the cache: the lineup it was matched
     /// against, and possibly the source itself, just changed.
     async fn invalidate(&self) {
-        let mut state = self.state.lock().await;
-        state.cached = None;
-        state.last_error = None;
+        let had_cache = {
+            let mut state = self.state.lock().await;
+            let had_cache = state.cached.take().is_some();
+            state.last_error = None;
+            had_cache
+        };
+        if had_cache {
+            self.discard_persisted().await;
+        }
     }
 
     async fn cached_generation(&self) -> Option<i64> {
@@ -1629,6 +1884,39 @@ impl GuideCache {
             .cached
             .as_ref()
             .map(|c| c.generation)
+    }
+}
+
+/// Fold the previously cached rows into a freshly fetched bulk answer.
+///
+/// Rows that ended before the new window's start are dropped — a guide is not
+/// an archive — and everything else is merged per channel, where
+/// `normalise_programmes`' de-duplication decides which copy of a repeated
+/// airing survives. A channel present only in the cache is kept: the bulk call
+/// answers a few hours, and dropping the tail every tick is exactly the
+/// behaviour that made a long horizon impossible.
+fn merge_carried_guide(
+    channels: &mut Vec<LiveTvGuideChannel>,
+    carried: LiveTvGuide,
+    keep_from: i64,
+) {
+    let mut by_number = channels
+        .iter()
+        .enumerate()
+        .map(|(index, channel)| (channel.guide_number.clone(), index))
+        .collect::<BTreeMap<_, _>>();
+    for mut previous in carried.channels {
+        previous.programmes.retain(|row| row.end > keep_from);
+        if previous.programmes.is_empty() {
+            continue;
+        }
+        match by_number.get(&previous.guide_number) {
+            Some(&index) => guide::merge_channel(&mut channels[index], previous),
+            None => {
+                by_number.insert(previous.guide_number.clone(), channels.len());
+                channels.push(previous);
+            }
+        }
     }
 }
 
@@ -1725,6 +2013,9 @@ pub(crate) struct LiveTvManager {
     /// in any meaningful sense, because it holds exactly one generation and
     /// expires in a minute.
     relayed_guide: tokio::sync::Mutex<Option<(i64, tokio::time::Instant, LiveTvGuide)>>,
+    /// Which day of the cached horizon the next refresh re-reads. A plain
+    /// counter: cycling is the point, and which day it starts on is not.
+    guide_revalidation_cursor: AtomicU64,
     graph_cache: tokio::sync::Mutex<Option<CachedGraphProbe>>,
     source_formats: StdMutex<HashMap<SourceFormatKey, CachedSourceFormat>>,
     registry: Arc<StdMutex<LiveTvRegistry>>,
@@ -1741,9 +2032,12 @@ impl LiveTvManager {
         serving: crate::serving_fence::ServingAuthority,
         node_id: String,
         scratch_root: PathBuf,
+        guide_store: PathBuf,
     ) -> Arc<Self> {
         let metrics = Arc::new(LiveTvMetrics::default());
-        Arc::new(Self {
+        let cache = SnapshotCache::default();
+        let guide_cache = GuideCache::with_store(guide_store, Arc::clone(&cache.lineup_filled));
+        let manager = Arc::new(Self {
             store,
             client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
@@ -1756,17 +2050,45 @@ impl LiveTvManager {
             serving,
             node_id,
             scratch_root,
-            cache: SnapshotCache::default(),
-            guide_cache: GuideCache::default(),
+            cache,
+            guide_cache,
             guide_titles: StdMutex::new(Arc::new(BTreeMap::new())),
             relayed_guide: tokio::sync::Mutex::new(None),
+            guide_revalidation_cursor: AtomicU64::new(0),
             graph_cache: tokio::sync::Mutex::new(None),
             source_formats: StdMutex::new(HashMap::new()),
             registry: Arc::clone(&metrics.registry),
             scratch_claims: StdMutex::new(HashSet::new()),
             scratch_sweep_gate: tokio::sync::Mutex::new(()),
             metrics,
-        })
+        });
+        manager.adopt_persisted_guide();
+        manager
+    }
+
+    /// Make a guide loaded from disk visible to everything that reads the
+    /// cache indirectly — the Prometheus age gauge and the synchronous title
+    /// index the activity path uses — without waiting for the first refresh.
+    ///
+    /// `try_lock` rather than `block_on`: this runs inside the constructor,
+    /// where the mutex is uncontended by construction, and a constructor that
+    /// could block on an async runtime would be a deadlock waiting for a
+    /// caller who held it.
+    fn adopt_persisted_guide(&self) {
+        let Ok(state) = self.guide_cache.state.try_lock() else {
+            return;
+        };
+        let Some(cached) = state.cached.as_ref() else {
+            return;
+        };
+        self.metrics.observe_guide_at(
+            cached.observed,
+            cached.age_offset,
+            cached.guide.total_programmes(),
+        );
+        let guide = cached.guide.clone();
+        drop(state);
+        self.publish_guide_titles(&guide);
     }
 
     pub(crate) async fn config(&self) -> Result<LiveTvConfig, LiveTvError> {
@@ -1780,6 +2102,10 @@ impl LiveTvManager {
 
     pub(crate) fn observe_config(&self, config: &LiveTvConfig) {
         self.guide_cache.cancel_if_config_changed(config);
+        // A settings save is the other event the refresh loop must not sleep
+        // through. Every request path reads the config, so observing it here
+        // is the cheapest place to notice one.
+        self.guide_cache.observe_generation(config.generation);
         self.source_formats
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -2960,6 +3286,11 @@ impl LiveTvManager {
                         "an HDHomeRun address is required for the HDHomeRun guide".to_owned(),
                     )
                 })?;
+                // Only the HDHomeRun source accumulates: XMLTV answers the
+                // whole horizon in one document, so carrying rows forward
+                // there would preserve a programme the grabber deliberately
+                // removed.
+                let carried = self.guide_cache.owner_copy(config.generation).await;
                 self.fetch_hdhomerun_guide(
                     address,
                     lineup,
@@ -2967,6 +3298,7 @@ impl LiveTvManager {
                     deadline,
                     cancel,
                     refresh_permit,
+                    carried,
                 )
                 .await?
             }
@@ -3007,12 +3339,14 @@ impl LiveTvManager {
             fetched_at: Some(unix_seconds()),
             window,
             refresh_error: None,
+            next_refresh_at: None,
             matched_channels: matched,
             lineup_channels: lineup.len(),
             channels,
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn fetch_hdhomerun_guide(
         &self,
         address: Ipv4Addr,
@@ -3021,6 +3355,7 @@ impl LiveTvManager {
         deadline: tokio::time::Instant,
         cancel: &CancellationToken,
         refresh_permit: &Arc<tokio::sync::OwnedSemaphorePermit>,
+        carried: Option<LiveTvGuide>,
     ) -> Result<Vec<LiveTvGuideChannel>, LiveTvError> {
         let client = self.guide_client()?;
         // Read the credential, use it, drop it. It is a local binding inside
@@ -3049,10 +3384,23 @@ impl LiveTvManager {
         });
         let mut channels = await_guide_parser(parser, cancel).await?;
 
+        // Carry the previous tick's rows forward before extending. Filling a
+        // fortnight is not one refresh: the bulk call answers a few hours, and
+        // an extension page costs a request each. Accumulating across ticks is
+        // what lets a 14-day horizon exist at all, and it is only safe because
+        // the cache is durable — a restart no longer starts from nothing.
+        if let Some(carried) = carried {
+            merge_carried_guide(&mut channels, carried, window.start);
+        }
+
         // The free tier answers a few hours to the bulk call. Extend the
         // channels that fall short until the request budget is spent — an
         // empty or repeated answer means that channel has no more data and
         // stops it, so a lineup of stubborn channels cannot spin here.
+        //
+        // The budget is shared with revalidation and the tail goes first: a
+        // grid that ends early is more visible than one whose far end is a few
+        // hours out of date.
         let mut budget = guide::GUIDE_MAX_EXTENSION_REQUESTS;
         let mut index = 0;
         while index < channels.len() && budget > 0 {
@@ -3117,7 +3465,100 @@ impl LiveTvManager {
                 index += 1;
             }
         }
+
+        // Whatever request budget survived the tail goes on re-reading one day
+        // of the cached horizon, cycling through it a day at a time. Without
+        // this a filled fortnight is never revisited and a provider's schedule
+        // change would never reach the scheduler.
+        self.revalidate_guide_day(
+            &client,
+            &device_auth,
+            lineup,
+            &mut channels,
+            window,
+            deadline,
+            cancel,
+            refresh_permit,
+            budget,
+        )
+        .await?;
         Ok(channels)
+    }
+
+    /// Re-fetch one day of the horizon, chosen by cycling a counter, and merge
+    /// it over what is cached. Failures are skipped rather than propagated:
+    /// the grid is already useful and a revalidation that could fail a refresh
+    /// would make the guide *less* reliable than not revalidating at all.
+    #[allow(clippy::too_many_arguments)]
+    async fn revalidate_guide_day(
+        &self,
+        client: &reqwest::Client,
+        device_auth: &str,
+        lineup: &[LiveTvChannel],
+        channels: &mut [LiveTvGuideChannel],
+        window: &GuideWindow,
+        deadline: tokio::time::Instant,
+        cancel: &CancellationToken,
+        refresh_permit: &Arc<tokio::sync::OwnedSemaphorePermit>,
+        mut budget: usize,
+    ) -> Result<(), LiveTvError> {
+        if budget == 0 || channels.is_empty() {
+            return Ok(());
+        }
+        let span = (window.end - window.start).max(1);
+        let stride = GUIDE_REVALIDATION_HOURS * 3600;
+        let days = ((span + stride - 1) / stride).max(1) as u64;
+        let cursor = self
+            .guide_revalidation_cursor
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let day = (cursor % days) as i64;
+        let from = window.start + day * stride;
+        if from >= window.end {
+            return Ok(());
+        }
+        for channel in channels.iter_mut() {
+            if budget == 0 || cancel.is_cancelled() {
+                break;
+            }
+            let Ok(remaining) = remaining_guide_budget(deadline) else {
+                break;
+            };
+            budget -= 1;
+            let number = channel.guide_number.clone();
+            let url = guide::guide_request_url(device_auth, Some(&number), Some(from))?;
+            let Ok(page) = cancellable_guide_step(
+                cancel,
+                fetch_bounded(
+                    client,
+                    url,
+                    guide::GUIDE_MAX_DOCUMENT_BYTES,
+                    remaining.min(guide::GUIDE_FETCH_TIMEOUT),
+                ),
+            )
+            .await
+            else {
+                continue;
+            };
+            let parse_lineup = lineup.to_vec();
+            let permit = Arc::clone(refresh_permit);
+            let parser = tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                let by_number = parse_lineup
+                    .iter()
+                    .map(|channel| (channel.guide_number.clone(), channel))
+                    .collect::<BTreeMap<_, _>>();
+                guide::parse_hdhomerun_guide(&page, &by_number)
+            });
+            let extra = await_guide_parser(parser, cancel).await?;
+            if let Some(extra) = extra
+                .into_iter()
+                .find(|candidate| candidate.guide_number == number)
+                .filter(|candidate| !candidate.programmes.is_empty())
+            {
+                guide::merge_channel(channel, extra);
+            }
+        }
+        Ok(())
     }
 
     /// An ingress's memory of the owner's answer, if it is still current.
@@ -3203,8 +3644,13 @@ impl LiveTvManager {
     /// serving read is a cache hit by construction. It runs only on the owner
     /// and only while a source is configured, and it re-reads settings each
     /// tick so turning the guide on or off takes effect without a restart.
-    pub(crate) async fn guide_refresh_loop(self: Arc<Self>, shutdown: CancellationToken) {
+    pub(crate) async fn guide_refresh_loop(
+        self: Arc<Self>,
+        mut serving: tokio::sync::watch::Receiver<crate::serving_fence::ServingState>,
+        shutdown: CancellationToken,
+    ) {
         let mut delay = guide::GUIDE_REFRESH_INTERVAL;
+        let mut serving_open = true;
         loop {
             if let Ok(config) = self.config().await {
                 let ours = config.owner_node_id == self.node_id;
@@ -3218,6 +3664,16 @@ impl LiveTvManager {
                     self.clear_guide_titles();
                 }
                 if ours && config.guide_fetches() && self.serving.admit().is_some() {
+                    // A refresh needs a lineup it does not fetch. On a freshly
+                    // started owner nothing has read channels yet, and the old
+                    // loop answered that by failing and sleeping — which is
+                    // why an owner could come up with an empty guide and stay
+                    // that way until someone opened the page twice. One
+                    // bounded read, with the tuner client's own 2 s connect
+                    // timeout bounding a switched-off device.
+                    if self.cached_lineup(&config).await.is_empty() {
+                        let _ = self.local_snapshot(&config, false, false).await;
+                    }
                     let refreshed = self
                         .refresh_guide_with_cancel(&config, false, shutdown.clone())
                         .await;
@@ -3243,16 +3699,51 @@ impl LiveTvManager {
                         }
                     }
                 } else {
-                    delay = guide::GUIDE_REFRESH_INTERVAL;
+                    delay = guide_skip_delay(ours && config.guide_fetches());
                     self.metrics
                         .observe_guide_refresh(config.guide_source, "skipped");
                 }
             }
+            // Published before the sleep so a client polling on the owner's
+            // clock learns the cadence even from an `unavailable` answer.
+            self.guide_cache
+                .note_next_refresh(
+                    unix_seconds().saturating_add(i64::try_from(delay.as_secs()).unwrap_or(0)),
+                )
+                .await;
             tokio::select! {
                 _ = shutdown.cancelled() => return,
                 _ = tokio::time::sleep(delay) => {}
+                // A lineup that arrived cold, or a settings save.
+                _ = self.guide_cache.wake.notified() => {}
+                // A fence gained — or lost. A loss wakes the loop, the next
+                // tick sees `admit()` is `None`, records `skipped`, and sleeps
+                // a minute. That is cheap, and correct.
+                changed = async {
+                    if serving_open {
+                        serving.changed().await
+                    } else {
+                        std::future::pending().await
+                    }
+                } => {
+                    if changed.is_err() {
+                        serving_open = false;
+                    }
+                }
             }
         }
+    }
+}
+
+/// The owner with a source that is merely not admitted yet is seconds away
+/// from being admitted, so it comes back soon. Every other skip — not the
+/// owner, no source configured — changes only with a settings save, and a
+/// settings save wakes the loop itself.
+fn guide_skip_delay(owner_with_source: bool) -> Duration {
+    if owner_with_source {
+        guide::GUIDE_COLD_LINEUP_RETRY
+    } else {
+        guide::GUIDE_REFRESH_INTERVAL
     }
 }
 
@@ -5865,6 +6356,7 @@ mod tests {
             crate::serving_fence::ServingAuthority::always_ready(),
             "node-a".into(),
             root.join("live-tv"),
+            root.join("live-tv-guide"),
         )
     }
 
@@ -7676,6 +8168,205 @@ Output #0, hls, to 'index.m3u8':
         assert_eq!(programme.filters, vec!["News".to_owned()]);
     }
 
+    #[tokio::test]
+    async fn a_persisted_guide_survives_a_restart_and_keeps_the_age_it_had() {
+        let root = tempfile::tempdir().expect("temp root");
+        let config = {
+            let mut config = LiveTvConfig::from_snapshot(&BTreeMap::new(), "node-a");
+            config.generation = 7;
+            config.guide_source = GuideSource::HdHomeRun;
+            config
+        };
+        let window = GuideWindow {
+            start: 0,
+            end: i64::MAX / 4,
+        };
+
+        let first = GuideCache::with_store(
+            root.path().to_path_buf(),
+            Arc::new(tokio::sync::Notify::new()),
+        );
+        first
+            .store(7, 1, &Ok(guide_with(2, 3, 16)))
+            .await
+            .then_some(())
+            .expect("first publication");
+        assert!(
+            root.path().join(PERSISTED_GUIDE_FILE).exists(),
+            "a successful refresh writes the owner's copy"
+        );
+
+        // A second cache over the same directory is what a restart looks like.
+        let restarted = GuideCache::with_store(
+            root.path().to_path_buf(),
+            Arc::new(tokio::sync::Notify::new()),
+        );
+        let served = restarted.read(&config, window.clone()).await;
+        assert_eq!(
+            served.freshness,
+            GuideFreshness::Fresh,
+            "a restarted owner serves the grid it had, not `unavailable`"
+        );
+        assert_eq!(served.channels.len(), 2);
+
+        // A generation change is a different lineup: the copy goes, and so
+        // does the file.
+        restarted.invalidate().await;
+        assert!(!root.path().join(PERSISTED_GUIDE_FILE).exists());
+    }
+
+    #[tokio::test]
+    async fn an_unavailable_guide_still_says_when_to_ask_again() {
+        let cache = GuideCache::default();
+        let config = LiveTvConfig::from_snapshot(&BTreeMap::new(), "node-a");
+        cache.note_next_refresh(1_789_004_400).await;
+        let served = cache
+            .read(
+                &config,
+                GuideWindow {
+                    start: 0,
+                    end: 3600,
+                },
+            )
+            .await;
+        assert_eq!(served.freshness, GuideFreshness::Unavailable);
+        assert_eq!(
+            served.next_refresh_at,
+            Some(1_789_004_400),
+            "a client polls on the owner's clock even when there is nothing to show"
+        );
+    }
+
+    #[test]
+    fn a_settings_change_wakes_the_refresh_loop_and_the_first_observation_does_not() {
+        use futures_util::FutureExt as _;
+
+        let cache = GuideCache::default();
+        // A `Notify` permit is only observable by polling `notified()`, so
+        // each assertion polls once and takes whatever permit is waiting.
+        cache.observe_generation(4);
+        assert!(
+            Box::pin(cache.wake.notified()).now_or_never().is_none(),
+            "startup is already running a tick; the first observation is not an event"
+        );
+        cache.observe_generation(5);
+        assert!(
+            Box::pin(cache.wake.notified()).now_or_never().is_some(),
+            "a settings save must not wait out a twenty-minute sleep"
+        );
+    }
+
+    #[test]
+    fn hdhomerun_rows_carry_series_and_programme_identity_when_the_tier_supplies_it() {
+        let lineup = guide_lineup();
+        let body = br#"[{"GuideNumber":"7.1","Guide":[
+            {"StartTime":1789000800,"EndTime":1789002600,"Title":"City Beat",
+             "SeriesID":"EP01234567","ProgramID":"EP012345670023"}]}]"#;
+        let channels =
+            guide::parse_hdhomerun_guide(body, &guide_by_number(&lineup)).expect("guide document");
+        let programme = &channels[0].programmes[0];
+        assert_eq!(
+            programme.series_id.as_deref(),
+            Some("EP01234567"),
+            "`SeriesID` needs an explicit serde rename — PascalCase would look for `SeriesId`"
+        );
+        assert_eq!(programme.programme_id.as_deref(), Some("EP012345670023"));
+        assert_eq!(
+            programme.is_new, None,
+            "HDHomeRun's Filter tags are genres, and never a first-run marker"
+        );
+    }
+
+    #[test]
+    fn a_tier_without_identity_fields_parses_exactly_as_it_did_before() {
+        let lineup = guide_lineup();
+        let body = br#"[{"GuideNumber":"7.1","Guide":[
+            {"StartTime":1789000800,"EndTime":1789002600,"Title":"City Beat"}]}]"#;
+        let channels =
+            guide::parse_hdhomerun_guide(body, &guide_by_number(&lineup)).expect("guide document");
+        let programme = &channels[0].programmes[0];
+        assert_eq!(programme.title, "City Beat");
+        assert_eq!(programme.series_id, None);
+        assert_eq!(programme.programme_id, None);
+    }
+
+    #[test]
+    fn an_xmltv_dd_progid_yields_both_identities_and_new_marks_a_first_run() {
+        let lineup = guide_lineup();
+        let body = br#"<tv>
+            <channel id="c1"><display-name>7.1</display-name></channel>
+            <programme channel="c1" start="20260913120000 +0000" stop="20260913123000 +0000">
+              <title>Kitchen Table</title>
+              <episode-num system="dd_progid">EP012345670023</episode-num>
+              <new/>
+            </programme>
+          </tv>"#;
+        let channels = guide::parse_xmltv(body, &lineup).expect("xmltv document");
+        let programme = &channels[0].programmes[0];
+        assert_eq!(programme.series_id.as_deref(), Some("EP01234567"));
+        assert_eq!(programme.programme_id.as_deref(), Some("EP012345670023"));
+        assert_eq!(programme.is_new, Some(true));
+        assert_eq!(
+            programme.episode, None,
+            "dd_progid is an identity, never a season and episode number"
+        );
+    }
+
+    #[test]
+    fn a_channel_holds_a_fortnight_of_rows_rather_than_the_old_two_hundred() {
+        let rows = (0..900)
+            .map(|slot| LiveTvProgramme {
+                start: 1_789_000_000 + slot * 1800,
+                end: 1_789_000_000 + (slot + 1) * 1800,
+                title: format!("Slot {slot}"),
+                episode_title: None,
+                episode: None,
+                synopsis: None,
+                image_url: None,
+                original_air_date: None,
+                series_id: None,
+                programme_id: None,
+                is_new: None,
+                filters: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let normalised = guide::normalise_programmes(rows);
+        assert_eq!(
+            normalised.len(),
+            guide::GUIDE_MAX_PROGRAMMES_PER_CHANNEL,
+            "a fortnight of half-hour slots is ~670 rows; the old cap of 200 truncated it"
+        );
+        assert!(normalised.len() > 670);
+    }
+
+    #[test]
+    fn merging_a_cached_page_with_a_fresher_one_keeps_one_row_and_gains_its_identity() {
+        let base = |series: Option<&str>, end: i64| LiveTvProgramme {
+            start: 1_789_000_800,
+            end,
+            title: "Kitchen Table".into(),
+            episode_title: None,
+            episode: None,
+            synopsis: None,
+            image_url: None,
+            original_air_date: None,
+            series_id: series.map(str::to_owned),
+            programme_id: None,
+            is_new: None,
+            filters: Vec::new(),
+        };
+        let merged = guide::normalise_programmes(vec![
+            base(None, 1_789_002_600),
+            base(Some("EP1"), 1_789_002_600),
+        ]);
+        assert_eq!(merged.len(), 1, "the same airing twice is one row");
+        assert_eq!(
+            merged[0].series_id.as_deref(),
+            Some("EP1"),
+            "a cached row without identity picks it up from a fresher page"
+        );
+    }
+
     #[test]
     fn guide_rows_are_bounded_because_the_guide_host_is_untrusted_input() {
         let lineup = guide_lineup();
@@ -7724,6 +8415,9 @@ Output #0, hls, to 'index.m3u8':
                 synopsis: None,
                 image_url: None,
                 original_air_date: None,
+                series_id: None,
+                programme_id: None,
+                is_new: None,
                 filters: Vec::new(),
             },
             LiveTvProgramme {
@@ -7735,6 +8429,9 @@ Output #0, hls, to 'index.m3u8':
                 synopsis: None,
                 image_url: None,
                 original_air_date: None,
+                series_id: None,
+                programme_id: None,
+                is_new: None,
                 filters: Vec::new(),
             },
             LiveTvProgramme {
@@ -7746,6 +8443,9 @@ Output #0, hls, to 'index.m3u8':
                 synopsis: None,
                 image_url: None,
                 original_air_date: None,
+                series_id: None,
+                programme_id: None,
+                is_new: None,
                 filters: Vec::new(),
             },
         ];
@@ -7755,8 +8455,10 @@ Output #0, hls, to 'index.m3u8':
                 .iter()
                 .map(|p| (p.start, p.end, p.title.as_str()))
                 .collect::<Vec<_>>(),
-            vec![(100, 300, "First"), (300, 400, "Second")],
-            "a row entirely inside another disappears rather than overlapping it"
+            vec![(100, 200, "First"), (200, 400, "Second")],
+            "a row entirely inside another disappears, and a genuine overlap \
+             shortens the earlier row rather than moving the later row's start \
+             — a start is the DVR's identity for an airing"
         );
     }
 
@@ -7897,6 +8599,7 @@ Output #0, hls, to 'index.m3u8':
             freshness: GuideFreshness::Fresh,
             age_seconds: 0,
             fetched_at: Some(1789000000),
+            next_refresh_at: None,
             window: GuideWindow {
                 start: 0,
                 end: i64::from(u32::MAX),
@@ -7920,6 +8623,9 @@ Output #0, hls, to 'index.m3u8':
                             synopsis: None,
                             image_url: None,
                             original_air_date: None,
+                            series_id: None,
+                            programme_id: None,
+                            is_new: None,
                             filters: Vec::new(),
                         })
                         .collect(),
@@ -8100,7 +8806,7 @@ Output #0, hls, to 'index.m3u8':
 
     #[test]
     fn guide_settings_are_validated_structurally_and_never_on_whether_the_source_answers() {
-        let base = |source: GuideSource, url: &str, hours: u8| {
+        let base = |source: GuideSource, url: &str, hours: u16| {
             let mut config = LiveTvConfig::from_snapshot(&BTreeMap::new(), "node-a");
             config.guide_source = source;
             config.xmltv_url = url.to_owned();
@@ -8131,7 +8837,13 @@ Output #0, hls, to 'index.m3u8':
         assert!(base(GuideSource::HdHomeRun, "", 3)
             .validate_guide()
             .is_err());
-        assert!(base(GuideSource::HdHomeRun, "", 73)
+        assert!(
+            base(GuideSource::HdHomeRun, "", 336)
+                .validate_guide()
+                .is_ok(),
+            "a fortnight is the horizon a series recording rule needs"
+        );
+        assert!(base(GuideSource::HdHomeRun, "", 337)
             .validate_guide()
             .is_err());
     }
