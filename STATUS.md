@@ -16,7 +16,12 @@ Three tests were red on `main`, none of them for a defect in what the page
 does.
 
 - **`layout-containment`** — four bare `1fr` content columns, all four from
-  `78c48a95`. `1fr` is `minmax(auto, 1fr)`: content sets the track's minimum,
+  `78c48a95`: at the branch point they are lines 3204 and 3209 of
+  `index.html`, and `git blame 3062f3c9` gives that commit for both. (Line
+  3210 is `</style>`, from `a9cca3dc`; on this branch the `@media` line sits
+  at 3210 because of the rule added above it, which is an easy off-by-one to
+  blame against the wrong tree.) `1fr` is `minmax(auto, 1fr)`: content sets
+  the track's minimum,
   so a long programme title in `.lc-programme` widens the middle column and
   pushes the "Watch from start" button off the card, and the under-760px
   overrides for `.lc-editor`, `.lc-grid` and `.lc-programme` put that failure
@@ -38,16 +43,30 @@ does.
   `index.html` fails it — and the readiness card is evaluated from the shipped
   source rather than stubbed, with an assertion that Developer renders it.
 
-Every test in the target passes afterwards, both fences included, with no new
+Every test in the target passes afterwards. The target is sixteen node tests
+plus `scripts/js-check` and `scripts/contrast-check` (`Makefile:1413`) — it
+does **not** contain either fence, so `scripts/playback-surface-fence` and
+`scripts/player-input-fence` were run separately; both PASS, with no new
 `MIGRATION_BUDGET` entries.
 
 ### `rust-gate`, at last
 
 Archived out of the clone and compiled in a container on the pinned `1.97.1`,
-the `COMPILE-LOOP.md` route. At `ec1c324f`, and identically at the merge base
-`3062f3c9` with all seven playback-surface PRs in: `cargo fmt --all --check`
-**clean**, `cargo clippy -p plurxd --all-targets -- -D warnings` **clean**,
-`cargo test -p plurxd --bin plurxd` **2192 passed, 18 failed, 6 ignored**.
+the `COMPILE-LOOP.md` route. Run twice, at two shas:
+
+- **`3062f3c9`** — the branch point, and the first sha at which all seven
+  playback-surface PRs are in.
+- **`ec1c324f`** — this branch's second commit, and the last one that touches
+  compiled or embedded source. The branch tip is `08aeedc7`, which adds only
+  this `STATUS.md` entry, so the gate result carries to it unchanged.
+
+`main` has since moved on to `a64e28ff`, but `git diff 3062f3c9..a64e28ff --
+'*.rs' 'Cargo.toml' 'Cargo.lock'` is empty: no Rust and no dependency has
+changed, so this result still describes current `main`.
+
+Identically at both shas: `cargo fmt --all --check` **clean**, `cargo clippy -p
+plurxd --all-targets -- -D warnings` **clean**, `cargo test -p plurxd --bin
+plurxd` **2192 passed, 18 failed, 6 ignored**.
 
 **Nothing in the playback surface work broke a Rust test.** `index.html` and
 `playback-policy.js` are `include_str!`'d into the binary and asserted on by
@@ -75,6 +94,15 @@ them:
   **Both are left alone on purpose** — fixing either means editing a frozen
   Live TV FFmpeg baseline, and neither is playback-surface work. Reported, not
   changed, and still red.
+
+### A trap for the next session: `TMPDIR`
+
+The device VM's `/sessions` — its default `TMPDIR`, and where the clone's own
+`$HOME` lives — is **100% full**. Nothing warns you. Two things follow:
+`tests/playback/network-shaping.test.js` reports "12 shaping contract
+failure(s)" there and "93 shaping contracts hold" with `TMPDIR` pointed
+anywhere else, and detached `nohup` jobs die without a message. Export
+`TMPDIR` off `/sessions` before believing any red result on that machine.
 
 ## The playback surface contract — built, uncompiled, unverified
 
