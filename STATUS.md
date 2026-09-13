@@ -1,8 +1,34 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-09-12 · Kept current by the working agent in the same
+**Updated:** 2026-09-13 · Kept current by the working agent in the same
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
+
+## The error overlay and the picture disagree, on every client
+
+**Investigated 2026-09-13; proposal open as
+[docs/clients/PLAYBACK-SURFACE-CONTRACT.md](docs/clients/PLAYBACK-SURFACE-CONTRACT.md),
+awaiting a ruling — nothing built yet.** Paul reported a full-screen playback
+error while the picture keeps playing, or one that stays up after playback
+stopped and came back. It is one defect with three spellings: the blocking
+overlay is an imperative message channel — 40 `setLoading` sites on the web,
+12 writers of `failed`/`playbackError` on Apple, 9 `onError` strings on
+Android — not a projection of player state. Raising it never stops the player
+(web hls.js fatal leaves 30 s of buffer playing; Apple's 15 s readiness
+timeout sets `failed` with `play()` standing; Android's `Fail` leaves
+`playWhenReady` and the stall watchdog then restarts the stream under the
+overlay), and no client clears it on progress evidence. The natives also
+discard the server's `{code,message}` refusal bodies, so a 503 "not yet"
+reads as fatal.
+
+The proposal is a Playback Surface Contract in the input contract's shape:
+typed faults with a fixed severity, a blocking surface only over a player the
+presenter itself paused, progress evidence retires the fault, faults keyed to
+the open generation, a surface ledger in Playback debug, and a fence. Four
+PRs (fixture, web, Apple, Android), each independently reviewable. One
+separate probable defect surfaced on the way — Android copy-HLS seeks never
+land within the 250 ms tolerance because the item is not seeked forward from
+the keyframe origin — and needs a device check before it is built.
 
 ## Live TV gets the web page's proportions on Apple TV and iPhone
 
