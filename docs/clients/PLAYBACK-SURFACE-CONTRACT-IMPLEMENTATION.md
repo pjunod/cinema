@@ -7,6 +7,18 @@
 [PLAYBACK-SURFACE-CONTRACT-REVIEW.md](PLAYBACK-SURFACE-CONTRACT-REVIEW.md)
 finding 10
 
+**Where the effort stands.** M0 (#276), M1 (#277), M2 (#280), M3 (#279) and
+M5 (#282) are merged to `main`. M4 and M6 are not done; nothing Swift or
+Kotlin has been compiled. The four hand-off prompts for the work that needs
+hardware are [APPLE-BUILD](PLAYBACK-SURFACE-APPLE-BUILD-PROMPT.md),
+[ANDROID-BUILD](PLAYBACK-SURFACE-ANDROID-BUILD-PROMPT.md),
+[PHYSICAL-VERIFICATION](PLAYBACK-SURFACE-PHYSICAL-VERIFICATION-PROMPT.md) and
+[REMUX-ORIGIN-MEASUREMENT](PLAYBACK-SURFACE-REMUX-ORIGIN-MEASUREMENT-PROMPT.md).
+**Five questions are open and none of them is settled here.** They live in one
+place — the *Open rulings — the playback surface contract* section of
+[`STATUS.md`](../../STATUS.md), at the top of the file — and §4.6 and §4.7
+below point at it rather than restating it.
+
 Read the contract first — §3.0 (two owners), §3.1 (classes), §3.3 (source
 precedence), §3.4 (evidence) — then this document top to bottom, then build
 milestone by milestone in the order of §4. Each milestone is one PR and ends
@@ -703,6 +715,10 @@ Acceptance is §7's allowed-outcome table: every observed outcome is in the
 allowed set for its recipe, and every `surface_disagreement` row names a
 documented exception (today's list: the iOS lock-screen `playCommand`).
 
+**Not started.** Not one recipe has been run on any device. The self-contained
+script, with §7's table restated per recipe and the record file's skeleton, is
+[PLAYBACK-SURFACE-PHYSICAL-VERIFICATION-PROMPT.md](PLAYBACK-SURFACE-PHYSICAL-VERIFICATION-PROMPT.md).
+
 ### 4.6 M5 — the three recovery additions (`playback/recovery-additions`)
 
 Own PR by ruling; after M1–M3. Constraints from the review, all mandatory:
@@ -770,6 +786,13 @@ left open, recorded here rather than resolved silently:
    timeout) both reach the deadline on shipped paths, so whichever way it is
    ruled, the web is the client that diverges.
 
+**Two more rulings joined these after M5 merged** — Keep waiting is in the
+web's `exhausted` action list and no site offers the button, and
+`segment_503_not_yet` has no `codes` list in the fixture while §3.3's prose
+row 8 says "with a 'not yet' code". All five are collected in the *Open
+rulings — the playback surface contract* section at the top of
+[`STATUS.md`](../../STATUS.md), which is the list to read.
+
 Scope notes worth keeping:
 
 * The create retry runs in the `start` context only on every client — **the
@@ -803,6 +826,12 @@ first-frame `realPosition()`; also whether `bounded_progressive_media_origin`
 timed out (server log line "using requested start"). Build M6 only if
 achieved origin differs from the requested start by > 250 ms **and** the
 first frame landed at the origin.
+
+**The measurement has not been taken, so M6 is not started.** The procedure —
+including the correction that "from the client log" is not true of the code
+today, because `ProgressiveMediaOrigin.acceptResponse` does not log at all —
+is [PLAYBACK-SURFACE-REMUX-ORIGIN-MEASUREMENT-PROMPT.md](PLAYBACK-SURFACE-REMUX-ORIGIN-MEASUREMENT-PROMPT.md),
+which states both the go and the no-go outcome.
 
 Then: in `executeSeek`'s remux branch and `restartAt`'s remux path, after
 `acceptResponse` resolves the origin, `player.seekTo(requested − originMs)`
