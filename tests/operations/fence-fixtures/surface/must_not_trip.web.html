@@ -1,0 +1,20 @@
+<script>
+  // Reads are never scanned: a ladder may look at anything it likes.
+  function diagnose(p, err) {
+    const failed = p.el.classList.contains("failed");
+    const prompt = p.stallPrompt;
+    if (err.errorCode === 1002 || err.status === 503) return "recover";
+    const opts = { started: true };
+    return failed || prompt || opts.started ? "prompt" : "wait";
+  }
+  // Unrelated elements keep their own classes.
+  function chrome(note, box) {
+    note.className = "ppnote warn";
+    box.classList.add("lightbox");
+    box.classList.remove("on");
+  }
+  // The render's own entry point is a definition, not a call site.
+  function setLoading(on, text, sub, actionHtml) {
+    return [on, text, sub, actionHtml];
+  }
+</script>

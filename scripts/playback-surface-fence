@@ -1,0 +1,265 @@
+#!/usr/bin/env python3
+"""Keep every playback surface write inside the presenter's render.
+
+The overlay was an imperative message channel: 35 `setLoading` call sites on
+the web, four published failure fields on Apple, an `onError` string callback
+on Android. The contract (docs/clients/PLAYBACK-SURFACE-CONTRACT.md) makes it a
+projection of a pure reducer instead, and this fence is what keeps it one —
+it fails on WRITES to a surface outside the presenter's render. It says
+nothing about READS: ladders, readiness code and diagnostics keep every
+`errorCode`, `status` and `details` reference they have.
+
+Until M1/M2/M3 land, each client still writes its surface the old way. Those
+sites are budgeted per file with a reason, so no NEW one can be added while the
+migration is in flight, and the budget goes to zero as each milestone lands.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+import re
+import sys
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+# One pattern set per file kind. Spellings, not just the idiom that happened to
+# be in the tree: an assignment, a `+=`, and a class toggle are all writes.
+# A line that DEFINES the render entry point is not a call site. Checked before
+# the write patterns so the budget below counts the calls it says it counts.
+NOT_A_WRITE = (
+    re.compile(r"\bfunction\s+setLoading\s*\("),
+)
+
+# One pattern set per file kind. Spellings, not just the idiom that happened to
+# be in the tree: an assignment, a `+=`, a `toggle()`, a key path, an alias and
+# a call split across two lines are all writes. The scanner joins continuation
+# lines before matching (see `logical_lines`), so `setLoading\n  (true, …)` and
+# `playFailure\n    = message` are not hiding places.
+PATTERNS = {
+    "web": (
+        ("setLoading", re.compile(r"\bsetLoading\s*\(")),
+        ("setLoading by name", re.compile(r"[\"']setLoading[\"']")),
+        ("setLoading alias", re.compile(r"=\s*setLoading\s*(?:[;,)\]}]|$)")),
+        ("failed class toggle", re.compile(r"classList\s*\.\s*(?:add|remove|toggle|replace)\s*\([^)]*(?i:failed)")),
+        ("overlay class toggle", re.compile(r"\bploading\b[^\n]*classList\s*\.\s*(?:add|remove|toggle|replace)\s*\(")),
+        ("computed class write", re.compile(r"classList\s*\[")),
+        ("computed class argument", re.compile(r"classList\s*\.\s*(?:add|remove|toggle|replace)\s*\([^)]*\+")),
+        ("overlay className write", re.compile(r"\.className\s*(?:=|\+=)(?!=)[^\n]*(?i:failed|ploading)")),
+        ("stallPrompt write", re.compile(r"\b[A-Za-z_$][\w$]*\.stallPrompt\s*(?:=|\+=)(?!=)")),
+        ("stallPrompt in a literal", re.compile(r"[{,]\s*stallPrompt\s*:")),
+        ("overlay element write", re.compile(r"\bpload(?:ing|Text|Sub|Act)\b[^\n]*?\.(?:textContent|innerHTML|className)\s*=(?!=)")),
+        ("overlay attribute write", re.compile(r"\bpload(?:ing|Text|Sub|Act)\b[^\n]*?setAttribute\(\s*[\"']class[\"']")),
+        ("overlay bulk write", re.compile(r"Object\.assign\([^)]*\b(?:ploading|ploadText|ploadSub|ploadAct|stallPrompt)\b")),
+    ),
+    "swift": (
+        ("failure field write", re.compile(r"(?<!var )(?<!let )(?<![=!<>])\b(?:failed|playbackError|playbackFailureTitle|playbackNotice)\s*(?:=|\+=)(?!=)")),
+        ("failure field mutation", re.compile(r"\b(?:failed|playbackError|playbackFailureTitle|playbackNotice)\s*\.\s*(?:toggle|negate)\s*\(")),
+        ("failure field key path", re.compile(r"keyPath:\s*\\\.(?:failed|playbackError|playbackFailureTitle|playbackNotice)\b")),
+        ("failure field by name", re.compile(r"forKey:\s*[\"'](?:failed|playbackError|playbackFailureTitle|playbackNotice)[\"']")),
+        ("failure field tuple write", re.compile(r"\(\s*(?:self\.)?(?:failed|playbackError|playbackFailureTitle|playbackNotice)\s*,[^)]*\)\s*=(?!=)")),
+    ),
+    "kotlin": (
+        ("onError call", re.compile(r"\bonError\s*(?:\(|\.invoke\s*\()")),
+        ("onError alias", re.compile(r"=\s*onError\s*(?:[;,)\]}]|$)")),
+        ("failure field write", re.compile(r"(?<!var )(?<!val )(?<![=!<>])\b(?:playFailure|playbackNotice)\s*(?:=|\+=)(?!=)")),
+    ),
+}
+
+# The finite player's shipped surfaces, and nothing else. Scope is deliberate:
+# the offline players, the readers, Live TV and Library Channels' own Swift
+# screen are outside the finite player (contract §7) and are not scanned here.
+SCANNED = {
+    Path("crates/plurxd/src/web/index.html"): "web",
+    Path("crates/plurxd/src/web/playback-policy.js"): "web",
+    Path("clients/apple/Sources/PlayerController.swift"): "swift",
+    Path("clients/apple/Sources/PlayerView.swift"): "swift",
+    Path("clients/apple/Sources/PlayerSurface.swift"): "swift",
+    Path("clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"): "kotlin",
+    Path("clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"): "kotlin",
+}
+
+# Named so a later reader can see the exclusion was a decision, not an
+# oversight. If one of these ever grows a finite-player surface it belongs in
+# SCANNED, and this list is where the argument gets made.
+NEVER_SCANNED = {
+    Path("clients/apple/Sources/LibraryChannels.swift"): "Library Channels' own Swift screen is not the finite player.",
+    Path("clients/android/app/src/main/java/tv/plurx/app/player/OfflinePlayerScreen.kt"): "The offline player has its own lifecycle and no server session.",
+    Path("clients/apple/Sources/OfflineDownloadManager.swift"): "Downloads report progress, not a playback surface.",
+    Path("crates/plurxd/src/web/reader.js"): "The EPUB reader is not the player.",
+    Path("crates/plurxd/src/web/offline-reader.js"): "The native offline EPUB shell is not the player.",
+    Path("crates/plurxd/src/web/live-tv.js"): "Live TV has its own surface; the contract's scope is the finite player.",
+}
+
+# Whole files that ARE the presenter. They land with M1/M2/M3; a missing one is
+# not a failure while its milestone is still ahead, but a present one is
+# allowed to write the surface because writing it is all it does.
+PRESENTER_FILES = {
+    Path("clients/apple/Sources/PlaybackSurfaceModel.swift"):
+        "The Apple presenter. It is the only place a fault becomes a surface.",
+    Path("clients/android/app/src/main/java/tv/plurx/app/player/PlaybackSurface.kt"):
+        "The Android presenter. It is the only place a fault becomes a surface.",
+}
+
+# Bounded regions inside a scanned file that ARE the render. Anchors are
+# comments beside the code so a move keeps the reason with it.
+REGIONS = {
+    Path("crates/plurxd/src/web/index.html"): (
+        (
+            "// playback-surface-render:begin",
+            "// playback-surface-render:end",
+            "The web presenter's render function: the only caller of setLoading and the only writer of the failed class.",
+            False,
+        ),
+    ),
+    Path("clients/apple/Sources/PlayerController.swift"): (
+        (
+            "// playback-surface-publish:begin",
+            "// playback-surface-publish:end",
+            "The single assignment that publishes the presenter's surface.",
+            False,
+        ),
+    ),
+    Path("clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"): (
+        (
+            "// playback-surface-publish:begin",
+            "// playback-surface-publish:end",
+            "The single assignment that publishes the presenter's surface.",
+            False,
+        ),
+    ),
+}
+
+# The migration budget: how many pre-contract write sites each file may still
+# have, and why. A milestone that lands drops its file's entry to zero and then
+# removes it. A NEW write site fails the fence today, which is the point.
+MIGRATION_BUDGET = {
+    Path("crates/plurxd/src/web/index.html"): (55, "M1 removes these: the web surface still writes #ploading imperatively."),
+    Path("crates/plurxd/src/web/playback-policy.js"): (0, "The policy module never touched the DOM; it stays at zero."),
+    Path("clients/apple/Sources/PlayerController.swift"): (39, "M2 removes these: failed/playbackError/playbackFailureTitle/playbackNotice are still fields."),
+    Path("clients/apple/Sources/PlayerView.swift"): (0, "The Apple view reads the model; it never wrote one."),
+    Path("clients/apple/Sources/PlayerSurface.swift"): (0, "The Apple surface reads the model; it never wrote one."),
+    Path("clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"): (15, "M3 removes these: onError is still a constructor callback."),
+    Path("clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"): (1, "M3 removes this: playFailure is still screen state."),
+}
+
+
+def region_allowed_lines(path: Path, lines: list[str]) -> set[int]:
+    allowed: set[int] = set()
+    for begin, end, _reason, required in REGIONS.get(path, ()):  # noqa: B007
+        starts = [index for index, line in enumerate(lines) if begin in line]
+        if not starts:
+            if required:
+                raise ValueError(f"lost its {begin!r} anchor")
+            continue
+        if len(starts) != 1:
+            raise ValueError(f"has {len(starts)} copies of the {begin!r} anchor; the render is one region")
+        ends = [index for index, line in enumerate(lines) if end in line and index > starts[0]]
+        if not ends:
+            raise ValueError(f"has {begin!r} with no {end!r} after it")
+        allowed.update(range(starts[0] + 2, ends[0] + 1))
+    return allowed
+
+
+def logical_lines(text: str) -> list[tuple[int, str]]:
+    """(first line number, joined text) for every line, with continuations folded in.
+
+    A write split over two lines is still a write: `setLoading\n  (true, …)`,
+    `playFailure\n    = message`, `player\n  .classList.add("failed")`. At most
+    three following lines are folded so a long chained expression cannot make
+    the whole file one line.
+    """
+    raw = text.splitlines()
+    out: list[tuple[int, str]] = []
+    for index, line in enumerate(raw):
+        joined = line
+        cursor = index + 1
+        folded = 0
+        while cursor < len(raw) and folded < 3:
+            nxt = raw[cursor].strip()
+            if not nxt:
+                cursor += 1
+                continue
+            if nxt[0] not in "(.=+[?":
+                break
+            joined = f"{joined} {nxt}"
+            cursor += 1
+            folded += 1
+        out.append((index + 1, joined))
+    return out
+
+
+def scan_text(kind: str, text: str, allowed: set[int] | None = None) -> list[tuple[int, str]]:
+    """Every write site in `text`, as (1-based line, token). Reads are not hits."""
+    allowed = allowed or set()
+    hits: list[tuple[int, str]] = []
+    for number, line in logical_lines(text):
+        if number in allowed:
+            continue
+        if any(pattern.search(line) for pattern in NOT_A_WRITE):
+            continue
+        for token, pattern in PATTERNS[kind]:
+            if pattern.search(line):
+                # One hit per line: a line is a write site, and the budgets
+                # below count sites, not spellings.
+                hits.append((number, token))
+                break
+    return hits
+
+
+def scan() -> list[str]:
+    failures: list[str] = []
+    # Fail closed: a renamed or deleted scanned file used to make a fence PASS,
+    # which is the one answer it must never give by accident.
+    for relative in SCANNED:
+        if not (ROOT / relative).is_file():
+            failures.append(f"{relative}:1: a scanned player file is missing; the fence scanned nothing for it")
+    for relative in NEVER_SCANNED:
+        if relative in SCANNED:
+            failures.append(f"{relative}:1: a file is both scanned and explicitly out of scope")
+    for relative in MIGRATION_BUDGET:
+        if relative not in SCANNED:
+            failures.append(f"{relative}:1: budgeted file is not scanned")
+
+    for relative, kind in sorted(SCANNED.items()):
+        path = ROOT / relative
+        if not path.is_file():
+            continue
+        lines = path.read_text(encoding="utf-8").splitlines()
+        try:
+            allowed = region_allowed_lines(relative, lines)
+        except ValueError as error:
+            failures.append(f"{relative}:1: {error}")
+            continue
+        hits = scan_text(kind, "\n".join(lines), allowed)
+        budget, reason = MIGRATION_BUDGET.get(relative, (0, ""))
+        if len(hits) > budget:
+            failures.append(
+                f"{relative}:{hits[budget][0]}: {len(hits)} surface writes outside the presenter's render, "
+                f"budget is {budget}. {reason or 'Every surface write belongs in the render.'}"
+            )
+            for number, token in hits[budget: budget + 5]:
+                failures.append(f"{relative}:{number}: {token}")
+
+    for relative, reason in PRESENTER_FILES.items():
+        path = ROOT / relative
+        if not path.is_file():
+            continue
+        if relative in SCANNED:
+            failures.append(f"{relative}:1: the presenter cannot also be scanned ({reason})")
+    return failures
+
+
+def main() -> int:
+    failures = scan()
+    if failures:
+        print("playback surface fence failed:", file=sys.stderr)
+        for failure in failures:
+            print(f"  {failure}", file=sys.stderr)
+        return 1
+    print("PASS every playback surface write is inside the presenter's render or its migration budget")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

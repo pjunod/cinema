@@ -1,0 +1,30 @@
+<script>
+  // Every line below is a surface write outside the render. All must trip.
+  function showFailure(p, text) {
+    setLoading(true, "Playback stopped.", text, "<button>Try again</button>");
+    p.el.classList.add("failed");
+    p.el.classList.remove("failed");
+    p.stallPrompt = true;
+    ploadText.textContent = "Reconnecting…";
+    ploadSub.innerHTML = "<em>held</em>";
+  }
+  function bulk() {
+    Object.assign(ploadAct, { textContent: "Try again" });
+  }
+  // The spellings an allow list written against one idiom would miss.
+  function sneaky(p, on, l) {
+    p.el.className = "ploading failed";
+    ploading.setAttribute("class", "ploading failed");
+    l.classList.add(FAILED);
+    l.classList.add("fai" + "led");
+    p.el.classList[on ? "add" : "remove"]("failed");
+    Object.assign(p, { stallPrompt: true });
+    window["setLoading"](true);
+    const paint = setLoading;
+    return paint;
+  }
+  function split() {
+    setLoading
+      (true, "Preparing…", "", "");
+  }
+</script>

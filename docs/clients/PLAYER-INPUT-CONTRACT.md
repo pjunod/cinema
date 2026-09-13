@@ -637,6 +637,16 @@ _Generated from [`tests/playback/playback-info-fields.json`](../../tests/playbac
 | `Fetched end` | – | – | ✓ | millis | grid | all |  |
 | `Control` | – | ✓ | ✓ | text | grid | all | Playback-control session owner and state; timing and failure are notes under the same label in Debug. |
 
+**SURFACE**
+
+| Row | mini | standard | debug | Format | Placement | Available on | Note |
+|---|---|---|---|---|---|---|---|
+| `Surface` | – | ✓ | ✓ | text | grid | all | What is drawn over the picture right now — none · indicator · banner · blocking. |
+| `Fault` | – | ✓ | ✓ | text | grid | all | The fault class the surface is projecting: preparing · buffering · recovering · hold · degraded · refused · exhausted · stopped. |
+| `Source` | – | – | ✓ | text | grid | all | The raw event the fault came from, as named in tests/playback/playback-surface-contract.json. |
+| `Attached/intent` | – | – | ✓ | text | grid | all | The media generation the fault is about and the viewer request it belongs to, if any. |
+| `History` | – | – | ✓ | text | notes | all | Last 16 faults: class · source · raised → cleared (by) · player at raise (rate, position, presenting, stopped_by_owner). |
+
 <!-- contract:info:end -->
 
 ---

@@ -317,3 +317,37 @@ test("docs/clients/PLAYER-INPUT-CONTRACT.md embeds every generated block verbati
     );
   }
 });
+
+test("docs/clients/PLAYBACK-SURFACE-CONTRACT.md embeds the generated surface blocks verbatim", () => {
+  const surface = JSON.parse(fs.readFileSync(table.SURFACE_FIXTURE, "utf8"));
+  const doc = fs.readFileSync(table.SURFACE_DOC, "utf8");
+  for (const [begin, end, rendered, label] of [
+    [table.SURFACE_CLASSES_BEGIN, table.SURFACE_CLASSES_END, table.renderSurfaceClassesBlock(surface), "surface classes"],
+    [table.SURFACE_SOURCES_BEGIN, table.SURFACE_SOURCES_END, table.renderSurfaceSourcesBlock(surface), "surface sources"],
+  ]) {
+    const start = doc.indexOf(begin);
+    const stop = doc.indexOf(end);
+    assert.ok(start >= 0 && stop > start, `the surface doc lost its ${label} block markers`);
+    assert.equal(
+      doc.slice(start, stop + end.length),
+      rendered,
+      `doc and ${label} fixture disagree — run scripts/player-contract-table --write`,
+    );
+  }
+});
+
+test("the served web policy embeds the surface fixture verbatim", () => {
+  const surface = JSON.parse(fs.readFileSync(table.SURFACE_FIXTURE, "utf8"));
+  const policy = fs.readFileSync(table.POLICY, "utf8");
+  const rendered = table.renderSurfaceEmbedBlock(surface);
+  const start = policy.indexOf(table.SURFACE_EMBED_BEGIN);
+  const stop = policy.indexOf(table.SURFACE_EMBED_END);
+  assert.ok(start >= 0 && stop > start, "playback-policy.js lost its surface embed markers");
+  assert.equal(
+    policy.slice(start, stop + table.SURFACE_EMBED_END.length),
+    rendered,
+    "the served surface table is not the fixture — run scripts/player-contract-table --embed",
+  );
+  assert.deepEqual(webPolicy.SURFACE_CLASSES, surface.classes);
+  assert.deepEqual(webPolicy.SURFACE_SOURCES, surface.sources);
+});

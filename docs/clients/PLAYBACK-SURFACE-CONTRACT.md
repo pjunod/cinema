@@ -299,6 +299,50 @@ that failed.
 | `exhausted` | prompt | full-screen: "Playback is stalled." + Keep waiting / Try again / Close (plus Force transcode where the owner offers it) | **the owner, before raising** | user action only |
 | `stopped` | terminal | full-screen: title + sentence + Try again / Close (+ Sign in for 401/403) | **the owner, before raising** | user action only |
 
+<!-- contract:surface-classes:begin -->
+
+_Generated from [`tests/playback/playback-surface-contract.json`](../../tests/playback/playback-surface-contract.json) by `scripts/player-contract-table`; do not edit by hand._
+
+| Class | Severity | Blocking | Timer | Requires the owner to have stopped the player | Retired by | Default actions |
+|---|---|---|---|---|---|---|
+| `preparing` | progress | while not presenting | none | no | `presenting` · `intent_settled` · `attached_retired` | – |
+| `buffering` | progress | while not presenting | none | no | `presenting` · `attached_retired` | – |
+| `recovering` | progress | while not presenting | none | no | `presenting_after_raise` · `owner_success` · `attached_retired` | – |
+| `hold` | notice | never | 30000 ms | no | `timer` · `presenting` | – |
+| `degraded` | notice | never | 5000 ms (paused while it has actions) | no | `timer` · `presenting_continuous_ms` | – |
+| `refused` | notice | never | none | no | `intent_superseded` · `presenting_continuous_ms` | `retry` |
+| `exhausted` | prompt | always | none | yes | `user` | `keep_waiting` · `retry` · `close` |
+| `stopped` | terminal | always | none | yes | `user` | `retry` · `close` |
+
+| Severity | Rank | Meaning |
+|---|---|---|
+| notice | 1 | a banner beside the picture |
+| progress | 2 | the player is working on it |
+| prompt | 3 | the viewer has to answer |
+| terminal | 4 | this attempt is over |
+
+Rows are scanned in order and the first row whose id and context both match wins. The highest-severity drawable fault owns the surface; faults of equal severity are broken by recency, newest first.
+
+**Surface kinds:** `none` — Nothing is drawn over the picture. `indicator` — In-chrome progress indicator; the picture is presenting behind it. `banner` — A notice strip with the fault's actions; the picture is untouched. `blocking` — The picture is covered. Only ever drawn over a player its recovery owner has already stopped, or over a picture that is not presenting.
+
+**The input contract's `failed` state** is a `blocking` surface whose class is `exhausted` or `stopped`. The player input contract's `failed` state is a BLOCKING surface whose class is a prompt or a terminal — a fault with actions the viewer must answer. A full-screen `preparing`/`buffering`/`recovering` is blocking pixels, not routing: it keeps today's routing, per PLAYBACK-SURFACE-CONTRACT.md §4.
+
+| Timing | Value |
+|---|---|
+| `buffering_min_ms` | 350 |
+| `hold_notice_ms` | 30000 |
+| `degraded_notice_ms` | 5000 |
+| `refused_progress_ms` | 10000 |
+| `disagreement_notice_ms` | 30000 |
+
+- refused_progress_ms is CONTINUOUS presenting on the attached generation, not accumulated playback.
+- buffering_min_ms debounces the surface, not the fault: a `media_waiting` fault exists from the moment it is raised and is simply not drawn until it has lasted this long.
+- A hidden page freezes every timer as well as every evidence sample. The reducer does this by carrying the hidden interval forward: on becoming visible again every fault's raise time is shifted by however long the page was hidden, and the continuous-presenting clock is reset, because no sample bridged the gap.
+- disagreement_notice_ms retires the "Playback recovered" banner a demotion leaves behind (§3.2). Its actions stay valid while the picture could still fail again; this much CONTINUOUS presenting is the point at which the offer is stale. Ruled by the implementer 2026-09-13 in Paul's absence — §3.1 says such a banner does not expire "while an action is still valid" and does not say when that ends; a banner with no end is the Android `playFailure` defect wearing a different hat.
+- presenting_after_raise is the contract's "presenting evidence on the NEW attached generation": what makes the evidence count is that the run of presentation BEGAN at or after the fault was raised. An owner that reopens in place, on the same generation, produces exactly that, and a recovering indicator that only a new generation could retire would outlive every in-place recovery.
+
+<!-- contract:surface-classes:end -->
+
 `exhausted` replaces v1's `stalled`, and the rename is the point: it is raised
 by the recovery owner *after* its ladder and budgets are spent and *after* it
 has stopped the player, never by a deadline that still has a rung to try. On
@@ -374,6 +418,50 @@ disambiguate are *context* (start · attached playback · pending change) and
 | 16 | Repeated early end at the same position < 95 % | `stopped` | unchanged |
 | 17 | Auto downshift, decode rescue, HDR-subtitle, PGS, PiP failure | `degraded` | notices, unchanged in copy |
 | 18 | Prepared-successor abandonment, `session_gone` on a successor's first exchange, telemetry / reporter / stats failures | (none) | log only — the incumbent is untouched; the fence keeps it so |
+
+<!-- contract:surface-sources:begin -->
+
+_Generated from [`tests/playback/playback-surface-contract.json`](../../tests/playback/playback-surface-contract.json) by `scripts/player-contract-table`; do not edit by hand._
+
+Rows are evaluated in order; the first row whose `context` matches wins.
+
+| # | Source | Context | Class | Requires a stopped player | Actions | Notes |
+|---|---|---|---|---|---|---|
+| 1 | `owner_stopped` | any | `stopped` | yes | class default |  |
+| 2 | `owner_exhausted` | any | `exhausted` | yes | class default |  |
+| 3 | `auth_401_403` | any | `stopped` | yes | `sign_in` · `close` |  |
+| 4 | `vod_source_rescan_required` | start | `stopped` | yes | class default |  |
+| 5 | `vod_source_unsupported` | start | `stopped` | yes | class default |  |
+| 6 | `vod_transcode_unavailable` | start | `stopped` | yes | class default |  |
+| 7 | `vod_subtitle_burn_unavailable` | start | `stopped` | yes | class default |  |
+| 8 | `vod_disabled` | start | `stopped` | yes | class default |  |
+| 9 | `create_503_not_yet` | start | `preparing` | no | class default | codes: `startup_timeout` · `media_owner_transition` · `vod_index_pending` · `vod_engine_unattested`; retryable by the owner (M5) |
+| 10 | `change_failed` | change | `refused` | no | `retry` |  |
+| 11 | `segment_503_not_yet` | attached | `recovering` | no | class default |  |
+| 12 | `media_owner_lost_410` | attached | `recovering` | no | class default | re-classes to `stopped` when the owner stops; carries `position_ms` |
+| 13 | `control_hold` | attached | `hold` | no | class default |  |
+| 14 | `media_waiting` | attached | `buffering` | no | class default |  |
+| 15 | `owner_recovery_step` | any | `recovering` | no | class default |  |
+| 16 | `readiness_deadline_rungs_left` | any | `recovering` | no | class default |  |
+| 17 | `decoder_failed` | any | `stopped` | yes | class default |  |
+| 18 | `black_frame_ladder_spent` | start | `exhausted` | yes | `close` · `retry` |  |
+| 19 | `repeated_early_end` | attached | `stopped` | yes | class default |  |
+| 20 | `degraded_notice` | any | `degraded` | no | class default |  |
+| 21 | `log_only` | any | *(log only)* | no | class default |  |
+
+| Fixture error | Meaning |
+|---|---|
+| `blocking_without_stop` | A source whose CLASS is blocking was raised with player_stopped false. The reducer logs the error and leaves the surface unchanged; it never renders the fault. Every source mapping to a blocking class carries `requires.player_stopped` so the table and the reducer cannot disagree. |
+| `source_context_mismatch` | A source was raised in a context no row for that id declares. |
+| `unknown_source` | A source id that is in no row was raised. |
+
+- A fault about the ATTACHED media carries `attached` and no `intent`; it is retired by that media's presentation evidence.
+- A fault about a PENDING DESTINATION carries an `intent`. Evidence never retires it, with one exception the class table states outright: `refused` also retires on `refused_progress_ms` of continuous presentation, because a viewer whose picture has been fine for that long has been told.
+- A fault whose `attached` generation is retired stops being about anything and is dropped (`surface_cleared {by: attached_retired}`). That is identity, not one of the class's `retired_by` rules, so it applies to blocking faults too — otherwise a `stopped` prompt would outlive the attempt it described and sit over the next one.
+- Each retirement reason is a property of the CLASS, not of the event: `intent_settled` retires only classes whose `retired_by` names it, so a prompt the viewer has to answer is not swept away by a seek landing underneath it. `attached_retired` is the one exception, and the note above says why.
+- `owner_success: G` is the recovery owner reporting that its recovery produced attached generation G. There is one recovery owner per player, so it retires every `recovering` fault, not only the ones about the generation it replaced.
+
+<!-- contract:surface-sources:end -->
 
 Rows 6, 8 and the `BEHIND_LIVE_WINDOW` clause of 13 name recovery steps the
 clients do not all perform today; those are **M5**, their own PR (ruled), and

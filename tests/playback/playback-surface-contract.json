@@ -1,0 +1,2847 @@
+{
+  "schema_version": 1,
+  "title": "Playback surface contract — one fault table and one ordered-event reducer every client reproduces",
+  "documented_in": "docs/clients/PLAYBACK-SURFACE-CONTRACT.md",
+  "ruled": "2026-09-13",
+  "kinds": {
+    "none": "Nothing is drawn over the picture.",
+    "indicator": "In-chrome progress indicator; the picture is presenting behind it.",
+    "banner": "A notice strip with the fault's actions; the picture is untouched.",
+    "blocking": "The picture is covered. Only ever drawn over a player its recovery owner has already stopped, or over a picture that is not presenting."
+  },
+  "input_failed_state": {
+    "classes": [
+      "exhausted",
+      "stopped"
+    ],
+    "note": "The player input contract's `failed` state is a BLOCKING surface whose class is a prompt or a terminal — a fault with actions the viewer must answer. A full-screen `preparing`/`buffering`/`recovering` is blocking pixels, not routing: it keeps today's routing, per PLAYBACK-SURFACE-CONTRACT.md §4."
+  },
+  "classes": {
+    "preparing": {
+      "severity": "progress",
+      "blocking": "while_not_presenting",
+      "retired_by": [
+        "presenting",
+        "intent_settled",
+        "attached_retired"
+      ]
+    },
+    "buffering": {
+      "severity": "progress",
+      "blocking": "while_not_presenting",
+      "min_ms": 350,
+      "retired_by": [
+        "presenting",
+        "attached_retired"
+      ]
+    },
+    "recovering": {
+      "severity": "progress",
+      "blocking": "while_not_presenting",
+      "retired_by": [
+        "presenting_after_raise",
+        "owner_success",
+        "attached_retired"
+      ]
+    },
+    "hold": {
+      "severity": "notice",
+      "timed_ms": 30000,
+      "retired_by": [
+        "timer",
+        "presenting"
+      ]
+    },
+    "degraded": {
+      "severity": "notice",
+      "timed_ms": 5000,
+      "retired_by": [
+        "timer",
+        "presenting_continuous_ms"
+      ],
+      "timer_paused_while_actions": true
+    },
+    "refused": {
+      "severity": "notice",
+      "timed_ms": null,
+      "retired_by": [
+        "intent_superseded",
+        "presenting_continuous_ms"
+      ],
+      "default_actions": [
+        "retry"
+      ]
+    },
+    "exhausted": {
+      "severity": "prompt",
+      "blocking": true,
+      "requires_player_stopped": true,
+      "retired_by": [
+        "user"
+      ],
+      "title": "Playback is stalled.",
+      "default_actions": [
+        "keep_waiting",
+        "retry",
+        "close"
+      ]
+    },
+    "stopped": {
+      "severity": "terminal",
+      "blocking": true,
+      "requires_player_stopped": true,
+      "retired_by": [
+        "user"
+      ],
+      "default_actions": [
+        "retry",
+        "close"
+      ]
+    }
+  },
+  "severity_rank": {
+    "notice": 1,
+    "progress": 2,
+    "prompt": 3,
+    "terminal": 4
+  },
+  "actions": [
+    "keep_waiting",
+    "retry",
+    "close",
+    "force_transcode",
+    "sign_in"
+  ],
+  "timings": {
+    "buffering_min_ms": 350,
+    "hold_notice_ms": 30000,
+    "degraded_notice_ms": 5000,
+    "refused_progress_ms": 10000,
+    "notes": [
+      "refused_progress_ms is CONTINUOUS presenting on the attached generation, not accumulated playback.",
+      "buffering_min_ms debounces the surface, not the fault: a `media_waiting` fault exists from the moment it is raised and is simply not drawn until it has lasted this long.",
+      "A hidden page freezes every timer as well as every evidence sample. The reducer does this by carrying the hidden interval forward: on becoming visible again every fault's raise time is shifted by however long the page was hidden, and the continuous-presenting clock is reset, because no sample bridged the gap.",
+      "disagreement_notice_ms retires the \"Playback recovered\" banner a demotion leaves behind (§3.2). Its actions stay valid while the picture could still fail again; this much CONTINUOUS presenting is the point at which the offer is stale. Ruled by the implementer 2026-09-13 in Paul's absence — §3.1 says such a banner does not expire \"while an action is still valid\" and does not say when that ends; a banner with no end is the Android `playFailure` defect wearing a different hat.",
+      "presenting_after_raise is the contract's \"presenting evidence on the NEW attached generation\": what makes the evidence count is that the run of presentation BEGAN at or after the fault was raised. An owner that reopens in place, on the same generation, produces exactly that, and a recovering indicator that only a new generation could retire would outlive every in-place recovery."
+    ],
+    "disagreement_notice_ms": 30000
+  },
+  "contexts": [
+    "start",
+    "attached",
+    "change"
+  ],
+  "sources": [
+    {
+      "id": "owner_stopped",
+      "context": "any",
+      "class": "stopped",
+      "requires": {
+        "player_stopped": true
+      }
+    },
+    {
+      "id": "owner_exhausted",
+      "context": "any",
+      "class": "exhausted",
+      "requires": {
+        "player_stopped": true
+      }
+    },
+    {
+      "id": "auth_401_403",
+      "context": "any",
+      "class": "stopped",
+      "actions": [
+        "sign_in",
+        "close"
+      ],
+      "requires": {
+        "player_stopped": true
+      }
+    },
+    {
+      "id": "vod_source_rescan_required",
+      "context": "start",
+      "class": "stopped",
+      "requires": {
+        "player_stopped": true
+      }
+    },
+    {
+      "id": "vod_source_unsupported",
+      "context": "start",
+      "class": "stopped",
+      "requires": {
+        "player_stopped": true
+      }
+    },
+    {
+      "id": "vod_transcode_unavailable",
+      "context": "start",
+      "class": "stopped",
+      "requires": {
+        "player_stopped": true
+      }
+    },
+    {
+      "id": "vod_subtitle_burn_unavailable",
+      "context": "start",
+      "class": "stopped",
+      "requires": {
+        "player_stopped": true
+      }
+    },
+    {
+      "id": "vod_disabled",
+      "context": "start",
+      "class": "stopped",
+      "requires": {
+        "player_stopped": true
+      }
+    },
+    {
+      "id": "create_503_not_yet",
+      "context": "start",
+      "class": "preparing",
+      "codes": [
+        "startup_timeout",
+        "media_owner_transition",
+        "vod_index_pending",
+        "vod_engine_unattested"
+      ],
+      "retryable": true
+    },
+    {
+      "id": "change_failed",
+      "context": "change",
+      "class": "refused",
+      "actions": [
+        "retry"
+      ]
+    },
+    {
+      "id": "segment_503_not_yet",
+      "context": "attached",
+      "class": "recovering"
+    },
+    {
+      "id": "media_owner_lost_410",
+      "context": "attached",
+      "class": "recovering",
+      "then_when_stopped": "stopped",
+      "carries": [
+        "position_ms"
+      ]
+    },
+    {
+      "id": "control_hold",
+      "context": "attached",
+      "class": "hold"
+    },
+    {
+      "id": "media_waiting",
+      "context": "attached",
+      "class": "buffering"
+    },
+    {
+      "id": "owner_recovery_step",
+      "context": "any",
+      "class": "recovering"
+    },
+    {
+      "id": "readiness_deadline_rungs_left",
+      "context": "any",
+      "class": "recovering"
+    },
+    {
+      "id": "decoder_failed",
+      "context": "any",
+      "class": "stopped",
+      "requires": {
+        "player_stopped": true
+      }
+    },
+    {
+      "id": "black_frame_ladder_spent",
+      "context": "start",
+      "class": "exhausted",
+      "requires": {
+        "player_stopped": true
+      },
+      "actions": [
+        "close",
+        "retry"
+      ]
+    },
+    {
+      "id": "repeated_early_end",
+      "context": "attached",
+      "class": "stopped",
+      "requires": {
+        "player_stopped": true
+      }
+    },
+    {
+      "id": "degraded_notice",
+      "context": "any",
+      "class": "degraded"
+    },
+    {
+      "id": "log_only",
+      "context": "any",
+      "class": null
+    }
+  ],
+  "errors": {
+    "blocking_without_stop": "A source whose CLASS is blocking was raised with player_stopped false. The reducer logs the error and leaves the surface unchanged; it never renders the fault. Every source mapping to a blocking class carries `requires.player_stopped` so the table and the reducer cannot disagree.",
+    "source_context_mismatch": "A source was raised in a context no row for that id declares.",
+    "unknown_source": "A source id that is in no row was raised."
+  },
+  "identity_notes": [
+    "A fault about the ATTACHED media carries `attached` and no `intent`; it is retired by that media's presentation evidence.",
+    "A fault about a PENDING DESTINATION carries an `intent`. Evidence never retires it, with one exception the class table states outright: `refused` also retires on `refused_progress_ms` of continuous presentation, because a viewer whose picture has been fine for that long has been told.",
+    "A fault whose `attached` generation is retired stops being about anything and is dropped (`surface_cleared {by: attached_retired}`). That is identity, not one of the class's `retired_by` rules, so it applies to blocking faults too — otherwise a `stopped` prompt would outlive the attempt it described and sit over the next one.",
+    "Each retirement reason is a property of the CLASS, not of the event: `intent_settled` retires only classes whose `retired_by` names it, so a prompt the viewer has to answer is not swept away by a seek landing underneath it. `attached_retired` is the one exception, and the note above says why.",
+    "`owner_success: G` is the recovery owner reporting that its recovery produced attached generation G. There is one recovery owner per player, so it retires every `recovering` fault, not only the ones about the generation it replaced."
+  ],
+  "log_events": [
+    "surface_raised",
+    "surface_cleared",
+    "surface_disagreement",
+    "surface_log_only"
+  ],
+  "cases": [
+    {
+      "name": "canplay_is_inert",
+      "note": "A platform event never moves the surface. Only the client's own presentation proof does.",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 400,
+          "presenting": false,
+          "attached": "g1"
+        },
+        {
+          "t": 500,
+          "raise": "media_waiting",
+          "attached": "g1",
+          "context": "attached"
+        },
+        {
+          "t": 700,
+          "tick": true
+        },
+        {
+          "t": 900,
+          "tick": true
+        },
+        {
+          "t": 1000,
+          "event": "canplay"
+        },
+        {
+          "t": 1200,
+          "presenting": true,
+          "attached": "g1"
+        }
+      ],
+      "expect": [
+        {
+          "at": 700,
+          "surface": "none"
+        },
+        {
+          "at": 900,
+          "surface": "blocking",
+          "class": "buffering",
+          "input_failed": false
+        },
+        {
+          "at": 1000,
+          "surface": "blocking",
+          "class": "buffering",
+          "log": []
+        },
+        {
+          "at": 1200,
+          "surface": "none",
+          "log": [
+            "surface_cleared"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "isPlayingChanged_is_inert",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 400,
+          "presenting": false,
+          "attached": "g1"
+        },
+        {
+          "t": 500,
+          "raise": "media_waiting",
+          "attached": "g1",
+          "context": "attached"
+        },
+        {
+          "t": 900,
+          "tick": true
+        },
+        {
+          "t": 1000,
+          "event": "isPlayingChanged"
+        },
+        {
+          "t": 1100,
+          "event": "playing"
+        },
+        {
+          "t": 1200,
+          "event": "timeControlStatus"
+        }
+      ],
+      "expect": [
+        {
+          "at": 900,
+          "surface": "blocking",
+          "class": "buffering"
+        },
+        {
+          "at": 1000,
+          "surface": "blocking",
+          "class": "buffering",
+          "log": []
+        },
+        {
+          "at": 1100,
+          "surface": "blocking",
+          "class": "buffering",
+          "log": []
+        },
+        {
+          "at": 1200,
+          "surface": "blocking",
+          "class": "buffering",
+          "log": []
+        }
+      ]
+    },
+    {
+      "name": "web_safari_boundary_waiting",
+      "note": "A wait shorter than buffering_min_ms draws nothing; the flash is the defect.",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "presenting": false,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "raise": "media_waiting",
+          "attached": "g1",
+          "context": "attached"
+        },
+        {
+          "t": 1349,
+          "tick": true
+        },
+        {
+          "t": 1350,
+          "tick": true
+        }
+      ],
+      "expect": [
+        {
+          "at": 1000,
+          "surface": "none",
+          "log": [
+            "surface_raised"
+          ]
+        },
+        {
+          "at": 1349,
+          "surface": "none"
+        },
+        {
+          "at": 1350,
+          "surface": "blocking",
+          "class": "buffering"
+        }
+      ]
+    },
+    {
+      "name": "web_fatal_over_live_buffer",
+      "note": "The defect, exactly: an hls.js fatal with 30 s of buffer still playing. While the ladder has a rung left it is progress over a moving picture — an indicator, never a full screen — and the owner's stop is what makes it terminal.",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "raise": "owner_recovery_step",
+          "attached": "g1",
+          "context": "attached"
+        },
+        {
+          "t": 2000,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 2500,
+          "raise": "owner_stopped",
+          "attached": "g1",
+          "player_stopped": false,
+          "context": "attached"
+        },
+        {
+          "t": 3000,
+          "presenting": false,
+          "attached": "g1"
+        },
+        {
+          "t": 3000,
+          "raise": "owner_stopped",
+          "attached": "g1",
+          "player_stopped": true,
+          "actions": [
+            "retry",
+            "close"
+          ],
+          "context": "attached"
+        }
+      ],
+      "expect": [
+        {
+          "at": 1000,
+          "surface": "indicator",
+          "class": "recovering",
+          "input_failed": false
+        },
+        {
+          "at": 2000,
+          "surface": "indicator",
+          "class": "recovering"
+        },
+        {
+          "at": 2500,
+          "surface": "indicator",
+          "class": "recovering",
+          "error": "blocking_without_stop"
+        },
+        {
+          "at": 3000,
+          "surface": "blocking",
+          "class": "stopped",
+          "actions": [
+            "retry",
+            "close"
+          ],
+          "input_failed": true
+        }
+      ]
+    },
+    {
+      "name": "android_fail_without_stop_is_fixture_error",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 500,
+          "raise": "owner_stopped",
+          "attached": "g1",
+          "player_stopped": false,
+          "context": "attached"
+        },
+        {
+          "t": 1000,
+          "presenting": true,
+          "attached": "g1"
+        }
+      ],
+      "expect": [
+        {
+          "at": 500,
+          "surface": "none",
+          "error": "blocking_without_stop"
+        },
+        {
+          "at": 1000,
+          "surface": "none"
+        }
+      ]
+    },
+    {
+      "name": "android_watchdog_restart_under_stop",
+      "note": "playWhenReady=false before the raise means no evidence arrives; the prompt stands until the viewer answers it.",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "presenting": false,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "raise": "owner_exhausted",
+          "attached": "g1",
+          "player_stopped": true,
+          "context": "attached"
+        },
+        {
+          "t": 2000,
+          "tick": true
+        },
+        {
+          "t": 9000,
+          "tick": true
+        }
+      ],
+      "expect": [
+        {
+          "at": 1000,
+          "surface": "blocking",
+          "class": "exhausted",
+          "actions": [
+            "keep_waiting",
+            "retry",
+            "close"
+          ],
+          "input_failed": true
+        },
+        {
+          "at": 2000,
+          "surface": "blocking",
+          "class": "exhausted"
+        },
+        {
+          "at": 9000,
+          "surface": "blocking",
+          "class": "exhausted"
+        }
+      ]
+    },
+    {
+      "name": "apple_lock_screen_play_under_stop",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "presenting": false,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "raise": "decoder_failed",
+          "attached": "g1",
+          "player_stopped": true,
+          "actions": [
+            "retry",
+            "close"
+          ],
+          "context": "attached"
+        },
+        {
+          "t": 1500,
+          "tick": true
+        },
+        {
+          "t": 2000,
+          "presenting": true,
+          "attached": "g1"
+        }
+      ],
+      "expect": [
+        {
+          "at": 1500,
+          "surface": "blocking",
+          "class": "stopped"
+        },
+        {
+          "at": 2000,
+          "surface": "banner",
+          "class": "degraded",
+          "actions": [
+            "retry",
+            "close"
+          ],
+          "log": [
+            "surface_disagreement"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "apple_black_frame_exhausted",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 1000,
+          "raise": "black_frame_ladder_spent",
+          "attached": "g1",
+          "player_stopped": true,
+          "context": "start"
+        },
+        {
+          "t": 2000,
+          "user_action": "close"
+        }
+      ],
+      "expect": [
+        {
+          "at": 1000,
+          "surface": "blocking",
+          "class": "exhausted",
+          "actions": [
+            "close",
+            "retry"
+          ]
+        },
+        {
+          "at": 2000,
+          "surface": "none",
+          "log": [
+            "surface_cleared"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "apple_readiness_rungs_left_is_recovering",
+      "note": "A readiness deadline that still has a rung to try is progress, never a prompt.",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 1000,
+          "raise": "readiness_deadline_rungs_left",
+          "attached": "g1",
+          "context": "start"
+        },
+        {
+          "t": 2000,
+          "attach": "g2"
+        }
+      ],
+      "expect": [
+        {
+          "at": 1000,
+          "surface": "blocking",
+          "class": "recovering",
+          "input_failed": false
+        },
+        {
+          "at": 2000,
+          "surface": "none",
+          "log": [
+            "surface_cleared"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "web_failed_change_sticky",
+      "note": "A change that failed is a banner over a predecessor that never stopped playing.",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "raise": "change_failed",
+          "attached": "g1",
+          "intent": "i7",
+          "context": "change"
+        },
+        {
+          "t": 2000,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 3000,
+          "presenting": true,
+          "attached": "g1"
+        }
+      ],
+      "expect": [
+        {
+          "at": 1000,
+          "surface": "banner",
+          "class": "refused",
+          "actions": [
+            "retry"
+          ],
+          "input_failed": false
+        },
+        {
+          "at": 2000,
+          "surface": "banner",
+          "class": "refused"
+        },
+        {
+          "at": 3000,
+          "surface": "banner",
+          "class": "refused"
+        }
+      ]
+    },
+    {
+      "name": "refused_survives_predecessor_progress",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "raise": "change_failed",
+          "attached": "g1",
+          "intent": "i7",
+          "context": "change"
+        },
+        {
+          "t": 5000,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 9000,
+          "tick": true
+        },
+        {
+          "t": 10999,
+          "tick": true
+        }
+      ],
+      "expect": [
+        {
+          "at": 5000,
+          "surface": "banner",
+          "class": "refused"
+        },
+        {
+          "at": 9000,
+          "surface": "banner",
+          "class": "refused"
+        },
+        {
+          "at": 10999,
+          "surface": "banner",
+          "class": "refused"
+        }
+      ]
+    },
+    {
+      "name": "refused_retired_by_continuous_progress",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "raise": "change_failed",
+          "attached": "g1",
+          "intent": "i7",
+          "context": "change"
+        },
+        {
+          "t": 2000,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 11000,
+          "presenting": true,
+          "attached": "g1"
+        }
+      ],
+      "expect": [
+        {
+          "at": 2000,
+          "surface": "banner",
+          "class": "refused"
+        },
+        {
+          "at": 11000,
+          "surface": "none",
+          "log": [
+            "surface_cleared"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "refused_retired_by_intent_superseded",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "raise": "change_failed",
+          "attached": "g1",
+          "intent": "i7",
+          "context": "change"
+        },
+        {
+          "t": 2000,
+          "intent_superseded": "i7"
+        }
+      ],
+      "expect": [
+        {
+          "at": 2000,
+          "surface": "none",
+          "log": [
+            "surface_cleared"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "web_stale_refusal_across_attach",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "raise": "change_failed",
+          "attached": "g1",
+          "intent": "i7",
+          "context": "change"
+        },
+        {
+          "t": 2000,
+          "attach": "g2"
+        }
+      ],
+      "expect": [
+        {
+          "at": 1000,
+          "surface": "banner",
+          "class": "refused"
+        },
+        {
+          "at": 2000,
+          "surface": "none",
+          "log": [
+            "surface_cleared"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "degraded_with_actions_does_not_expire",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "raise": "degraded_notice",
+          "attached": "g1",
+          "actions": [],
+          "context": "attached"
+        },
+        {
+          "t": 6100,
+          "tick": true
+        },
+        {
+          "t": 7000,
+          "raise": "degraded_notice",
+          "attached": "g1",
+          "actions": [
+            "retry"
+          ],
+          "context": "attached"
+        },
+        {
+          "t": 20000,
+          "tick": true
+        }
+      ],
+      "expect": [
+        {
+          "at": 1000,
+          "surface": "banner",
+          "class": "degraded"
+        },
+        {
+          "at": 6100,
+          "surface": "none",
+          "log": [
+            "surface_cleared"
+          ]
+        },
+        {
+          "at": 7000,
+          "surface": "banner",
+          "class": "degraded",
+          "actions": [
+            "retry"
+          ]
+        },
+        {
+          "at": 20000,
+          "surface": "banner",
+          "class": "degraded",
+          "actions": [
+            "retry"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "hidden_page_freezes_surface",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "presenting": false,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "raise": "owner_stopped",
+          "attached": "g1",
+          "player_stopped": true,
+          "context": "attached"
+        },
+        {
+          "t": 2000,
+          "hidden": true
+        },
+        {
+          "t": 3000,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 4000,
+          "hidden": false
+        },
+        {
+          "t": 5000,
+          "presenting": true,
+          "attached": "g1"
+        }
+      ],
+      "expect": [
+        {
+          "at": 3000,
+          "surface": "blocking",
+          "class": "stopped",
+          "log": []
+        },
+        {
+          "at": 5000,
+          "surface": "banner",
+          "class": "degraded",
+          "log": [
+            "surface_disagreement"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "media_owner_lost_plays_out_then_stops",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "raise": "media_owner_lost_410",
+          "attached": "g1",
+          "position_ms": 90000,
+          "actions": [
+            "retry"
+          ],
+          "context": "attached"
+        },
+        {
+          "t": 2000,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 3000,
+          "presenting": false,
+          "attached": "g1"
+        },
+        {
+          "t": 3000,
+          "raise": "owner_stopped",
+          "attached": "g1",
+          "player_stopped": true,
+          "context": "attached"
+        }
+      ],
+      "expect": [
+        {
+          "at": 1000,
+          "surface": "indicator",
+          "class": "recovering",
+          "position_ms": 90000
+        },
+        {
+          "at": 2000,
+          "surface": "indicator",
+          "class": "recovering"
+        },
+        {
+          "at": 3000,
+          "surface": "blocking",
+          "class": "stopped",
+          "source": "media_owner_lost_410",
+          "position_ms": 90000,
+          "actions": [
+            "retry"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "terminal_wording_transport_exception",
+      "note": "D1: the control-plane terminal verdict arms wording; a transport-class failure keeps the client's own sentence.",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "presenting": false,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "raise": "owner_stopped",
+          "attached": "g1",
+          "player_stopped": true,
+          "title": "Playback stopped.",
+          "detail": "The connection to the server was lost.",
+          "context": "attached"
+        }
+      ],
+      "expect": [
+        {
+          "at": 1000,
+          "surface": "blocking",
+          "class": "stopped",
+          "title": "Playback stopped.",
+          "detail": "The connection to the server was lost."
+        }
+      ]
+    },
+    {
+      "name": "auth_401_403_offers_sign_in",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 500,
+          "raise": "auth_401_403",
+          "attached": "g1",
+          "player_stopped": true,
+          "context": "start"
+        }
+      ],
+      "expect": [
+        {
+          "at": 500,
+          "surface": "blocking",
+          "class": "stopped",
+          "actions": [
+            "sign_in",
+            "close"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "vod_source_rescan_required_is_terminal",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 500,
+          "raise": "vod_source_rescan_required",
+          "attached": "g1",
+          "player_stopped": true,
+          "context": "start"
+        }
+      ],
+      "expect": [
+        {
+          "at": 500,
+          "surface": "blocking",
+          "class": "stopped",
+          "actions": [
+            "retry",
+            "close"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "vod_source_unsupported_is_terminal",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 500,
+          "raise": "vod_source_unsupported",
+          "attached": "g1",
+          "player_stopped": true,
+          "context": "start"
+        }
+      ],
+      "expect": [
+        {
+          "at": 500,
+          "surface": "blocking",
+          "class": "stopped"
+        }
+      ]
+    },
+    {
+      "name": "vod_transcode_unavailable_is_terminal",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 500,
+          "raise": "vod_transcode_unavailable",
+          "attached": "g1",
+          "player_stopped": true,
+          "context": "start"
+        }
+      ],
+      "expect": [
+        {
+          "at": 500,
+          "surface": "blocking",
+          "class": "stopped"
+        }
+      ]
+    },
+    {
+      "name": "vod_subtitle_burn_unavailable_is_terminal",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 500,
+          "raise": "vod_subtitle_burn_unavailable",
+          "attached": "g1",
+          "player_stopped": true,
+          "context": "start"
+        }
+      ],
+      "expect": [
+        {
+          "at": 500,
+          "surface": "blocking",
+          "class": "stopped"
+        }
+      ]
+    },
+    {
+      "name": "vod_disabled_is_terminal_and_start_only",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 500,
+          "raise": "vod_disabled",
+          "attached": "g1",
+          "player_stopped": true,
+          "context": "start"
+        },
+        {
+          "t": 900,
+          "user_action": "close"
+        },
+        {
+          "t": 1000,
+          "raise": "vod_disabled",
+          "attached": "g1",
+          "player_stopped": true,
+          "context": "attached"
+        },
+        {
+          "t": 1100,
+          "raise": "not_a_source",
+          "attached": "g1",
+          "context": "attached"
+        }
+      ],
+      "expect": [
+        {
+          "at": 500,
+          "surface": "blocking",
+          "class": "stopped"
+        },
+        {
+          "at": 1000,
+          "surface": "none",
+          "error": "source_context_mismatch"
+        },
+        {
+          "at": 1100,
+          "surface": "none",
+          "error": "unknown_source"
+        }
+      ]
+    },
+    {
+      "name": "create_503_is_preparing",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 500,
+          "raise": "create_503_not_yet",
+          "attached": "g1",
+          "context": "start"
+        },
+        {
+          "t": 1500,
+          "presenting": true,
+          "attached": "g1"
+        }
+      ],
+      "expect": [
+        {
+          "at": 500,
+          "surface": "blocking",
+          "class": "preparing",
+          "input_failed": false
+        },
+        {
+          "at": 1500,
+          "surface": "none",
+          "log": [
+            "surface_cleared"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "intent_fault_is_never_retired_by_evidence",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 500,
+          "raise": "create_503_not_yet",
+          "attached": "g1",
+          "intent": "i3",
+          "context": "start"
+        },
+        {
+          "t": 1500,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 2000,
+          "intent_settled": "i3"
+        }
+      ],
+      "expect": [
+        {
+          "at": 1500,
+          "surface": "indicator",
+          "class": "preparing"
+        },
+        {
+          "at": 2000,
+          "surface": "none",
+          "log": [
+            "surface_cleared"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "segment_503_recovers_over_buffer",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "raise": "segment_503_not_yet",
+          "attached": "g1",
+          "context": "attached"
+        },
+        {
+          "t": 2000,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 3000,
+          "owner_success": "g2"
+        }
+      ],
+      "expect": [
+        {
+          "at": 1000,
+          "surface": "indicator",
+          "class": "recovering"
+        },
+        {
+          "at": 2000,
+          "surface": "indicator",
+          "class": "recovering"
+        },
+        {
+          "at": 3000,
+          "surface": "none",
+          "log": [
+            "surface_cleared"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "control_hold_expires_on_its_timer",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "raise": "control_hold",
+          "attached": "g1",
+          "context": "attached"
+        },
+        {
+          "t": 20000,
+          "tick": true
+        },
+        {
+          "t": 31100,
+          "tick": true
+        }
+      ],
+      "expect": [
+        {
+          "at": 1000,
+          "surface": "banner",
+          "class": "hold"
+        },
+        {
+          "at": 20000,
+          "surface": "banner",
+          "class": "hold"
+        },
+        {
+          "at": 31100,
+          "surface": "none",
+          "log": [
+            "surface_cleared"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "owner_recovery_step_then_success",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 1000,
+          "raise": "owner_recovery_step",
+          "attached": "g1",
+          "context": "attached"
+        },
+        {
+          "t": 2000,
+          "owner_success": "g1"
+        }
+      ],
+      "expect": [
+        {
+          "at": 1000,
+          "surface": "blocking",
+          "class": "recovering"
+        },
+        {
+          "at": 2000,
+          "surface": "none",
+          "log": [
+            "surface_cleared"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "repeated_early_end_stops",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "presenting": false,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "raise": "repeated_early_end",
+          "attached": "g1",
+          "player_stopped": true,
+          "context": "attached"
+        }
+      ],
+      "expect": [
+        {
+          "at": 1000,
+          "surface": "blocking",
+          "class": "stopped"
+        }
+      ]
+    },
+    {
+      "name": "log_only_never_surfaces",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "raise": "log_only",
+          "attached": "g1",
+          "context": "attached"
+        }
+      ],
+      "expect": [
+        {
+          "at": 1000,
+          "surface": "none",
+          "log": [
+            "surface_log_only"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "owner_exhausted_keep_waiting_clears",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 1000,
+          "raise": "owner_exhausted",
+          "attached": "g1",
+          "player_stopped": true,
+          "context": "attached"
+        },
+        {
+          "t": 2000,
+          "user_action": "keep_waiting"
+        }
+      ],
+      "expect": [
+        {
+          "at": 1000,
+          "surface": "blocking",
+          "class": "exhausted"
+        },
+        {
+          "at": 2000,
+          "surface": "none",
+          "log": [
+            "surface_cleared"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "blocking_outranks_notice_and_progress",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "raise": "degraded_notice",
+          "attached": "g1",
+          "actions": [
+            "retry"
+          ],
+          "context": "attached"
+        },
+        {
+          "t": 1200,
+          "raise": "segment_503_not_yet",
+          "attached": "g1",
+          "context": "attached"
+        },
+        {
+          "t": 1500,
+          "presenting": false,
+          "attached": "g1"
+        },
+        {
+          "t": 1500,
+          "raise": "owner_stopped",
+          "attached": "g1",
+          "player_stopped": true,
+          "context": "attached"
+        }
+      ],
+      "expect": [
+        {
+          "at": 1000,
+          "surface": "banner",
+          "class": "degraded"
+        },
+        {
+          "at": 1200,
+          "surface": "indicator",
+          "class": "recovering"
+        },
+        {
+          "at": 1500,
+          "surface": "blocking",
+          "class": "stopped"
+        }
+      ]
+    },
+    {
+      "name": "retire_drops_the_faults_about_it",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "presenting": false,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "raise": "owner_stopped",
+          "attached": "g1",
+          "player_stopped": true,
+          "context": "attached"
+        },
+        {
+          "t": 2000,
+          "retire": "g1"
+        }
+      ],
+      "expect": [
+        {
+          "at": 1000,
+          "surface": "blocking",
+          "class": "stopped"
+        },
+        {
+          "at": 2000,
+          "surface": "none",
+          "log": [
+            "surface_cleared"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "blocking_raised_over_a_presenting_picture",
+      "note": "The disagreement is decided when the fault is raised, not whenever the next evidence sample happens to land.",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "raise": "decoder_failed",
+          "attached": "g1",
+          "player_stopped": true,
+          "actions": [
+            "retry",
+            "close"
+          ],
+          "context": "attached"
+        }
+      ],
+      "expect": [
+        {
+          "at": 1000,
+          "surface": "banner",
+          "class": "degraded",
+          "actions": [
+            "retry",
+            "close"
+          ],
+          "title": "Playback recovered",
+          "log": [
+            "surface_raised",
+            "surface_disagreement"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "disagreement_banner_retires_after_continuous_progress",
+      "note": "A recovered banner that never ends is the Android playFailure defect wearing a different hat.",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "raise": "decoder_failed",
+          "attached": "g1",
+          "player_stopped": true,
+          "actions": [
+            "retry",
+            "close"
+          ],
+          "context": "attached"
+        },
+        {
+          "t": 20000,
+          "tick": true
+        },
+        {
+          "t": 31100,
+          "tick": true
+        }
+      ],
+      "expect": [
+        {
+          "at": 1000,
+          "surface": "banner",
+          "class": "degraded"
+        },
+        {
+          "at": 20000,
+          "surface": "banner",
+          "class": "degraded",
+          "actions": [
+            "retry",
+            "close"
+          ]
+        },
+        {
+          "at": 31100,
+          "surface": "none",
+          "log": [
+            "surface_cleared"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "exhausted_survives_intent_settled",
+      "note": "A prompt the viewer has to answer is not swept away because a seek landed underneath it.",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 1000,
+          "raise": "owner_exhausted",
+          "attached": "g1",
+          "intent": "i3",
+          "player_stopped": true,
+          "context": "attached"
+        },
+        {
+          "t": 2000,
+          "intent_settled": "i3"
+        },
+        {
+          "t": 3000,
+          "user_action": "close"
+        }
+      ],
+      "expect": [
+        {
+          "at": 1000,
+          "surface": "blocking",
+          "class": "exhausted"
+        },
+        {
+          "at": 2000,
+          "surface": "blocking",
+          "class": "exhausted",
+          "log": []
+        },
+        {
+          "at": 3000,
+          "surface": "none",
+          "log": [
+            "surface_cleared"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "preparing_survives_intent_superseded",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 500,
+          "raise": "create_503_not_yet",
+          "attached": "g1",
+          "intent": "i3",
+          "context": "start"
+        },
+        {
+          "t": 1500,
+          "intent_superseded": "i3"
+        },
+        {
+          "t": 2000,
+          "intent_settled": "i3"
+        }
+      ],
+      "expect": [
+        {
+          "at": 1500,
+          "surface": "blocking",
+          "class": "preparing",
+          "log": []
+        },
+        {
+          "at": 2000,
+          "surface": "none",
+          "log": [
+            "surface_cleared"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "promotion_only_by_the_owner_stop",
+      "note": "A decoder failure over a live 410 is its own fault with its own sentence. Folding it into the 410 is the misattribution the ledger exists to prevent.",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "raise": "media_owner_lost_410",
+          "attached": "g1",
+          "position_ms": 90000,
+          "actions": [
+            "retry"
+          ],
+          "context": "attached"
+        },
+        {
+          "t": 2000,
+          "presenting": false,
+          "attached": "g1"
+        },
+        {
+          "t": 2000,
+          "raise": "decoder_failed",
+          "attached": "g1",
+          "player_stopped": true,
+          "actions": [
+            "retry",
+            "close"
+          ],
+          "context": "attached"
+        },
+        {
+          "t": 3000,
+          "user_action": "retry"
+        }
+      ],
+      "expect": [
+        {
+          "at": 1000,
+          "surface": "indicator",
+          "class": "recovering",
+          "source": "media_owner_lost_410"
+        },
+        {
+          "at": 2000,
+          "surface": "blocking",
+          "class": "stopped",
+          "source": "decoder_failed"
+        },
+        {
+          "at": 3000,
+          "surface": "blocking",
+          "class": "recovering",
+          "source": "media_owner_lost_410",
+          "position_ms": 90000
+        }
+      ]
+    },
+    {
+      "name": "promotion_keeps_the_class_default_actions",
+      "note": "A terminal full screen with no Try again and no Close is one the viewer cannot leave.",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "raise": "media_owner_lost_410",
+          "attached": "g1",
+          "position_ms": 90000,
+          "context": "attached"
+        },
+        {
+          "t": 2000,
+          "presenting": false,
+          "attached": "g1"
+        },
+        {
+          "t": 2000,
+          "raise": "owner_stopped",
+          "attached": "g1",
+          "player_stopped": true,
+          "context": "attached"
+        }
+      ],
+      "expect": [
+        {
+          "at": 2000,
+          "surface": "blocking",
+          "class": "stopped",
+          "source": "media_owner_lost_410",
+          "actions": [
+            "retry",
+            "close"
+          ],
+          "position_ms": 90000
+        }
+      ]
+    },
+    {
+      "name": "auth_over_a_live_media_owner_lost_still_signs_in",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "raise": "media_owner_lost_410",
+          "attached": "g1",
+          "position_ms": 5000,
+          "context": "attached"
+        },
+        {
+          "t": 2000,
+          "presenting": false,
+          "attached": "g1"
+        },
+        {
+          "t": 2000,
+          "raise": "auth_401_403",
+          "attached": "g1",
+          "player_stopped": true,
+          "context": "attached"
+        }
+      ],
+      "expect": [
+        {
+          "at": 2000,
+          "surface": "blocking",
+          "class": "stopped",
+          "source": "auth_401_403",
+          "actions": [
+            "sign_in",
+            "close"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "recovering_retired_by_presenting_after_in_place_reopen",
+      "note": "The owner that reopens on the same element reports no new generation. An indicator only a new generation could retire outlives every in-place recovery.",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "raise": "owner_recovery_step",
+          "attached": "g1",
+          "context": "attached"
+        },
+        {
+          "t": 2000,
+          "presenting": false,
+          "attached": "g1"
+        },
+        {
+          "t": 5000,
+          "presenting": true,
+          "attached": "g1"
+        }
+      ],
+      "expect": [
+        {
+          "at": 1000,
+          "surface": "indicator",
+          "class": "recovering"
+        },
+        {
+          "at": 2000,
+          "surface": "blocking",
+          "class": "recovering"
+        },
+        {
+          "at": 5000,
+          "surface": "none",
+          "log": [
+            "surface_cleared"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "hold_retired_by_presenting_after_raise",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "raise": "control_hold",
+          "attached": "g1",
+          "context": "attached"
+        },
+        {
+          "t": 2000,
+          "presenting": false,
+          "attached": "g1"
+        },
+        {
+          "t": 4000,
+          "presenting": true,
+          "attached": "g1"
+        }
+      ],
+      "expect": [
+        {
+          "at": 1000,
+          "surface": "banner",
+          "class": "hold"
+        },
+        {
+          "at": 4000,
+          "surface": "none",
+          "log": [
+            "surface_cleared"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "refused_continuity_interrupted",
+      "note": "Continuous means continuous: a break in presentation restarts the clock.",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "raise": "change_failed",
+          "attached": "g1",
+          "intent": "i7",
+          "context": "change"
+        },
+        {
+          "t": 9000,
+          "presenting": false,
+          "attached": "g1"
+        },
+        {
+          "t": 9100,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 11000,
+          "tick": true
+        },
+        {
+          "t": 19000,
+          "tick": true
+        },
+        {
+          "t": 19200,
+          "tick": true
+        }
+      ],
+      "expect": [
+        {
+          "at": 11000,
+          "surface": "banner",
+          "class": "refused"
+        },
+        {
+          "at": 19000,
+          "surface": "banner",
+          "class": "refused"
+        },
+        {
+          "at": 19200,
+          "surface": "none",
+          "log": [
+            "surface_cleared"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "stale_generation_evidence_is_ignored",
+      "note": "A predecessor moving does not forgive a replacement that failed — the review's second blocker, in one sequence. The sample is not evidence AT ALL: it may not promote a full screen to an indicator, and it may not resolve a disagreement.",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 1000,
+          "presenting": false,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "raise": "owner_recovery_step",
+          "attached": "g1",
+          "context": "attached"
+        },
+        {
+          "t": 2000,
+          "presenting": true,
+          "attached": "g9"
+        },
+        {
+          "t": 3000,
+          "raise": "owner_stopped",
+          "attached": "g1",
+          "player_stopped": true,
+          "context": "attached"
+        },
+        {
+          "t": 4000,
+          "presenting": true,
+          "attached": "g9"
+        }
+      ],
+      "expect": [
+        {
+          "at": 1000,
+          "surface": "blocking",
+          "class": "recovering"
+        },
+        {
+          "at": 2000,
+          "surface": "blocking",
+          "class": "recovering",
+          "log": []
+        },
+        {
+          "at": 3000,
+          "surface": "blocking",
+          "class": "stopped"
+        },
+        {
+          "at": 4000,
+          "surface": "blocking",
+          "class": "stopped",
+          "log": []
+        }
+      ]
+    },
+    {
+      "name": "same_severity_tie_break_is_newest",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "raise": "control_hold",
+          "attached": "g1",
+          "context": "attached"
+        },
+        {
+          "t": 2000,
+          "raise": "degraded_notice",
+          "attached": "g1",
+          "actions": [
+            "retry"
+          ],
+          "context": "attached"
+        }
+      ],
+      "expect": [
+        {
+          "at": 1000,
+          "surface": "banner",
+          "class": "hold"
+        },
+        {
+          "at": 2000,
+          "surface": "banner",
+          "class": "degraded"
+        }
+      ]
+    },
+    {
+      "name": "user_action_clears_only_its_own_fault",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "raise": "change_failed",
+          "attached": "g1",
+          "intent": "i7",
+          "context": "change"
+        },
+        {
+          "t": 1500,
+          "presenting": false,
+          "attached": "g1"
+        },
+        {
+          "t": 2000,
+          "raise": "owner_exhausted",
+          "attached": "g1",
+          "player_stopped": true,
+          "context": "attached"
+        },
+        {
+          "t": 3000,
+          "user_action": "keep_waiting"
+        }
+      ],
+      "expect": [
+        {
+          "at": 2000,
+          "surface": "blocking",
+          "class": "exhausted"
+        },
+        {
+          "at": 3000,
+          "surface": "banner",
+          "class": "refused",
+          "actions": [
+            "retry"
+          ],
+          "log": [
+            "surface_cleared"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "hold_timer_frozen_while_hidden",
+      "note": "A 30 s hold the viewer backgrounded for half a minute has not been on screen for 30 s.",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "raise": "control_hold",
+          "attached": "g1",
+          "context": "attached"
+        },
+        {
+          "t": 1100,
+          "hidden": true
+        },
+        {
+          "t": 35000,
+          "tick": true
+        },
+        {
+          "t": 40000,
+          "hidden": false
+        },
+        {
+          "t": 50000,
+          "tick": true
+        },
+        {
+          "t": 70000,
+          "tick": true
+        }
+      ],
+      "expect": [
+        {
+          "at": 35000,
+          "surface": "banner",
+          "class": "hold"
+        },
+        {
+          "at": 40000,
+          "surface": "banner",
+          "class": "hold"
+        },
+        {
+          "at": 50000,
+          "surface": "banner",
+          "class": "hold"
+        },
+        {
+          "at": 70000,
+          "surface": "none",
+          "log": [
+            "surface_cleared"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "refused_progress_clock_frozen_while_hidden",
+      "note": "A failed change is not forgiven by presentation the page could not observe.",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "raise": "change_failed",
+          "attached": "g1",
+          "intent": "i7",
+          "context": "change"
+        },
+        {
+          "t": 1100,
+          "hidden": true
+        },
+        {
+          "t": 30000,
+          "hidden": false
+        },
+        {
+          "t": 31000,
+          "tick": true
+        },
+        {
+          "t": 32000,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 41000,
+          "tick": true
+        },
+        {
+          "t": 42100,
+          "tick": true
+        }
+      ],
+      "expect": [
+        {
+          "at": 31000,
+          "surface": "banner",
+          "class": "refused"
+        },
+        {
+          "at": 41000,
+          "surface": "banner",
+          "class": "refused"
+        },
+        {
+          "at": 42100,
+          "surface": "none",
+          "log": [
+            "surface_cleared"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "inert_event_does_not_run_a_due_timer",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "raise": "control_hold",
+          "attached": "g1",
+          "context": "attached"
+        },
+        {
+          "t": 31100,
+          "event": "canplay"
+        },
+        {
+          "t": 31200,
+          "tick": true
+        }
+      ],
+      "expect": [
+        {
+          "at": 31100,
+          "surface": "banner",
+          "class": "hold",
+          "log": []
+        },
+        {
+          "at": 31200,
+          "surface": "none",
+          "log": [
+            "surface_cleared"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "timed_notice_expires_exactly_on_its_boundary",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 1000,
+          "raise": "control_hold",
+          "attached": "g1",
+          "context": "attached"
+        },
+        {
+          "t": 30999,
+          "tick": true
+        },
+        {
+          "t": 31000,
+          "tick": true
+        }
+      ],
+      "expect": [
+        {
+          "at": 30999,
+          "surface": "banner",
+          "class": "hold"
+        },
+        {
+          "at": 31000,
+          "surface": "none",
+          "log": [
+            "surface_cleared"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "force_transcode_is_offered_on_the_diagnosed_stall",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 1000,
+          "raise": "owner_exhausted",
+          "attached": "g1",
+          "player_stopped": true,
+          "actions": [
+            "keep_waiting",
+            "retry",
+            "force_transcode",
+            "close"
+          ],
+          "context": "attached"
+        },
+        {
+          "t": 2000,
+          "user_action": "force_transcode"
+        }
+      ],
+      "expect": [
+        {
+          "at": 1000,
+          "surface": "blocking",
+          "class": "exhausted",
+          "actions": [
+            "keep_waiting",
+            "retry",
+            "force_transcode",
+            "close"
+          ]
+        },
+        {
+          "at": 2000,
+          "surface": "none",
+          "log": [
+            "surface_cleared"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "promotion_needs_the_same_generation",
+      "note": "The owner stopping a pending successor does not turn the incumbent's 410 into a terminal.",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "raise": "media_owner_lost_410",
+          "attached": "g1",
+          "position_ms": 90000,
+          "actions": [
+            "retry"
+          ],
+          "context": "attached"
+        },
+        {
+          "t": 2000,
+          "raise": "owner_stopped",
+          "attached": "g2",
+          "player_stopped": true,
+          "context": "attached"
+        },
+        {
+          "t": 3000,
+          "user_action": "close"
+        }
+      ],
+      "expect": [
+        {
+          "at": 1000,
+          "surface": "indicator",
+          "class": "recovering",
+          "source": "media_owner_lost_410"
+        },
+        {
+          "at": 2000,
+          "surface": "blocking",
+          "class": "stopped",
+          "source": "owner_stopped",
+          "position_ms": null
+        },
+        {
+          "at": 3000,
+          "surface": "indicator",
+          "class": "recovering",
+          "source": "media_owner_lost_410",
+          "position_ms": 90000
+        }
+      ]
+    },
+    {
+      "name": "refused_continuity_needs_a_presenting_picture",
+      "note": "A paused picture accumulates no continuous progress, however long it stays paused.",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "raise": "change_failed",
+          "attached": "g1",
+          "intent": "i7",
+          "context": "change"
+        },
+        {
+          "t": 5000,
+          "presenting": false,
+          "attached": "g1"
+        },
+        {
+          "t": 60000,
+          "tick": true
+        }
+      ],
+      "expect": [
+        {
+          "at": 5000,
+          "surface": "banner",
+          "class": "refused"
+        },
+        {
+          "at": 60000,
+          "surface": "banner",
+          "class": "refused"
+        }
+      ]
+    }
+  ],
+  "precedence_note": "Rows are scanned in order and the first row whose id and context both match wins. The highest-severity drawable fault owns the surface; faults of equal severity are broken by recency, newest first."
+}
