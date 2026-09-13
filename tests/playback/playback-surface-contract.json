@@ -2944,6 +2944,181 @@
           "class": "refused"
         }
       ]
+    },
+    {
+      "name": "m5_create_retry_deadline",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 500,
+          "raise": "create_503_not_yet",
+          "attached": "g1",
+          "context": "start"
+        },
+        {
+          "t": 7500,
+          "tick": true
+        },
+        {
+          "t": 60000,
+          "raise": "owner_exhausted",
+          "attached": "g1",
+          "context": "start",
+          "player_stopped": true,
+          "actions": [
+            "retry",
+            "close"
+          ]
+        }
+      ],
+      "expect": [
+        {
+          "at": 500,
+          "surface": "blocking",
+          "class": "preparing",
+          "input_failed": false
+        },
+        {
+          "at": 7500,
+          "surface": "blocking",
+          "class": "preparing",
+          "input_failed": false
+        },
+        {
+          "at": 60000,
+          "surface": "blocking",
+          "class": "exhausted",
+          "actions": [
+            "retry",
+            "close"
+          ],
+          "input_failed": true
+        }
+      ]
+    },
+    {
+      "name": "m5_hls_retry_once",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "raise": "owner_recovery_step",
+          "attached": "g1",
+          "context": "attached"
+        },
+        {
+          "t": 3000,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 4000,
+          "raise": "segment_503_not_yet",
+          "attached": "g1",
+          "context": "attached"
+        },
+        {
+          "t": 12000,
+          "owner_success": "g2"
+        }
+      ],
+      "expect": [
+        {
+          "at": 1000,
+          "surface": "indicator",
+          "class": "recovering"
+        },
+        {
+          "at": 3000,
+          "surface": "indicator",
+          "class": "recovering"
+        },
+        {
+          "at": 4000,
+          "surface": "indicator",
+          "class": "recovering"
+        },
+        {
+          "at": 12000,
+          "surface": "none"
+        }
+      ]
+    },
+    {
+      "name": "m5_behind_live_window_finite",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "raise": "owner_recovery_step",
+          "attached": "g1",
+          "context": "attached"
+        },
+        {
+          "t": 2000,
+          "presenting": false,
+          "attached": "g1"
+        },
+        {
+          "t": 4000,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 8000,
+          "presenting": false,
+          "attached": "g1"
+        },
+        {
+          "t": 9000,
+          "raise": "owner_stopped",
+          "attached": "g1",
+          "context": "attached",
+          "player_stopped": true
+        }
+      ],
+      "expect": [
+        {
+          "at": 1000,
+          "surface": "indicator",
+          "class": "recovering"
+        },
+        {
+          "at": 2000,
+          "surface": "blocking",
+          "class": "recovering",
+          "input_failed": false
+        },
+        {
+          "at": 4000,
+          "surface": "none"
+        },
+        {
+          "at": 9000,
+          "surface": "blocking",
+          "class": "stopped",
+          "input_failed": true
+        }
+      ]
     }
   ],
   "precedence_note": "Rows are scanned in order and the first row whose id and context both match wins. The highest-severity drawable fault owns the surface; faults of equal severity are broken by recency, newest first."
