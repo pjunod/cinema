@@ -782,12 +782,18 @@ test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "testTheCloseButtonsRunTheCloseControlAndNeverTheBackKey"
 
 [[fixes]]
+# A start answer nobody recognises must keep the durable handle: a code this
+# build has never heard of is not evidence that no session exists. The
+# DEFINITIVE_START_REFUSALS set this once anchored on became the shared
+# reducer, which decides it from owner_decided and the status rather than from
+# a local list, and the durable marker became the start hint. Same regression,
+# same file, current names.
 id = "android.unclassified-start-fails-closed"
 commits = ["5669cbd5"]
 source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvLease.kt"
-source_anchor = "error.code !in DEFINITIVE_START_REFUSALS"
-test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvTest.kt"
-test_anchor = "unrecognisedStartFailureKeepsTheDurableMarker"
+source_anchor = "keepHint = !(answer.ownerDecided == true || ingressDecided)"
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvStartCasesTest.kt"
+test_anchor = "anOwnerDecidedRefusalForgetsItsHintAndAnUndecidedOneKeepsIt"
 
 [[fixes]]
 id = "android.unconfirmed-release-recovers"
@@ -1027,14 +1033,17 @@ test_anchor = "private func tearDownTransport("
 
 [[fixes]]
 # tvOS does not guarantee Application Support in the local app container. The
-# short-lived restart marker uses its writable cache area, and this test drives
-# the production store through absent, armed, and cleared states.
+# store uses its writable cache area, and this test drives the production store
+# through absent and present states. The barrier it originally protected became
+# the start hint, and the anchors moved with it: the platform fact is unchanged
+# and so is the regression, so the entry follows the code rather than being
+# retired with the old type name.
 id = "apple.live-tv-restart-marker-storage"
 commits = ["7d0acd98"]
 source = "clients/apple/Sources/LiveTv.swift"
-source_anchor = "struct LiveTvFileBarrierStore"
+source_anchor = "struct LiveTvStartHintStore"
 test = "clients/apple/Tests/LiveTvTests.swift"
-test_anchor = "testPlatformRestartMarkerStoreCanRoundTrip"
+test_anchor = "testTheHintStoreRoundTripsAndTreatsAMissingFileAsNoHint"
 
 [[fixes]]
 # Promotion compares counters to the current merge target. This anchor keeps
@@ -1310,3 +1319,27 @@ source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvScreen.kt"
 source_anchor = "focusModifier: Modifier? = null,"
 test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvProportionsTest.kt"
 test_anchor = "theTelevisionScreenIsWiredToTheDerivedGeometryAndOneToolbar"
+
+[[fixes]]
+# A resume refused by the owner means that request id is spent; anything the
+# owner did not decide - a deploy blip, an older owner's 404, a transport
+# failure - leaves a session that may still be feeding a tuner, and the hint is
+# the only handle on it. The lease call site is pinned, not the reducer, so an
+# extraction cannot quietly move the decision somewhere untested.
+id = "apple.live-tv-refused-resume-keeps-an-undecided-hint"
+commits = ["9ad0d64"]
+source = "clients/apple/Sources/LiveTv.swift"
+source_anchor = "func resumeIfRecent() async -> LiveTvStarted?"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testARefusedResumeForgetsTheHintOnlyWhenTheOwnerDecidedIt"
+
+[[fixes]]
+# The four ingress-decided codes mean "refused before it reached an owner" only
+# at a 4xx. The same code at 5xx is a server that got as far as trying and may
+# have left a tuner open, so the hint survives.
+id = "android.live-tv-ingress-refusal-needs-a-4xx"
+commits = ["7274602"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvLease.kt"
+source_anchor = "fun isIngressDecidedRefusal"
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvStartCasesTest.kt"
+test_anchor = "anIngressCodeAtFiveHundredIsNotAnIngressDecision"
