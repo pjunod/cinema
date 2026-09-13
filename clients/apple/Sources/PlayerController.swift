@@ -5151,6 +5151,17 @@ final class PlayerController: ObservableObject {
     private func stopForBlockingSurface() {
         player.pause()
         isPlaying = false
+        // The stop is presentation evidence too, and it has to be recorded
+        // HERE rather than left to the next sampler tick. Every owner site
+        // raises its blocking fault synchronously after this call, so a model
+        // still holding a `presenting` sample sees a blocking raise over a
+        // moving picture and resolves §3.2's disagreement against it — and
+        // that demotion is one-way, so the terminal never comes back. A 401
+        // during a quality change drew "Playback recovered" with no Sign in
+        // and no Close, permanently, until this line existed.
+        if let attached = surface.attached {
+            present(.presenting(false, attached: attached))
+        }
     }
 
     // MARK: - M5: the create "not yet" retry
@@ -5598,12 +5609,55 @@ final class PlayerController: ObservableObject {
             || blackFrameWatchdog.presentedVideo
             || (size.width > 0 && size.height > 0)
             || declared
-        let moved = observedPosition > (lastSurfaceSampleMs ?? observedPosition - 1)
+        let presenting = Self.surfaceIsPresenting(
+            observedPosition: observedPosition,
+            lastSampleMs: lastSurfaceSampleMs,
+            isChangingStream: isChangingStream,
+            rate: player.rate,
+            picture: picture
+        )
         lastSurfaceSampleMs = observedPosition
-        let presenting = !isChangingStream && player.rate > 0 && moved && picture
         if presenting { surfaceHasPresented = true }
         present(.presenting(presenting, attached: attached))
     }
+
+    /// §4.3's disagreement detector, as a pure function of the evidence the
+    /// sampler collected — so a unit test can drive the decision itself, which
+    /// is otherwise reachable only from a periodic observer over a decoding
+    /// `AVPlayer` no headless test has.
+    ///
+    /// The film position must have ADVANCED since the previous sample. A
+    /// transport that reports itself as playing over a frozen position is
+    /// precisely the disagreement this exists to find, so a rate — or a
+    /// `timeControlStatus`, or the published `isPlaying` — is necessary and
+    /// can never be sufficient. The first sample of an attachment has no
+    /// predecessor to beat and counts as movement.
+    nonisolated static func surfaceIsPresenting(
+        observedPosition: Int,
+        lastSampleMs: Int?,
+        isChangingStream: Bool,
+        rate: Float,
+        picture: Bool
+    ) -> Bool {
+        let moved = observedPosition > (lastSampleMs ?? observedPosition - 1)
+        return !isChangingStream && rate > 0 && moved && picture
+    }
+
+    #if DEBUG
+    /// Test seam, Debug-only and never in a shipped binary: declare that a
+    /// frame has been presented for this playback.
+    ///
+    /// `surfaceContext` is `.start` until one has, and the only producer is
+    /// `sampleSurfacePresentation`, which needs a decoded picture, a moving
+    /// position and a settled stream. A headless XCTest has none of the three
+    /// — an AVPlayerItem over a playlist URL nothing serves never readies, so
+    /// `isChangingStream` never clears and the periodic observer returns
+    /// early. Without this the `.change` and `.attached` halves of every
+    /// context-sensitive rule are unreachable from a unit test. It sets one
+    /// piece of evidence and makes no decision of its own — `surfaceContext`
+    /// reads it, and the create-retry ladder turns on what that says.
+    func noteFramePresentedForTesting() { surfaceHasPresented = true }
+    #endif
 
     /// A `Duration` as whole milliseconds, for the ledger and the log.
     nonisolated static func milliseconds(_ duration: Duration) -> Int {

@@ -1,14 +1,42 @@
 # Apple build and test — compile the playback surface contract
 
-**Status:** open · **For:** a session sitting at a Mac with Xcode ·
+**Status:** §1–§5 done 2026-09-13 (see the note below); §6 still open ·
+**For:** a session sitting at a Mac with Xcode ·
 **Covers:** M2 (PR #280) and M5 (PR #282) of the [playback surface
 contract](PLAYBACK-SURFACE-CONTRACT.md), both merged to `main`
 
 Every line of Swift in those two PRs was written on a Linux machine with no
-Xcode, no `swift` and no simulator. **Nothing has been compiled and no XCTest
-case has ever executed.** That is not a caveat on the work; it is the work
-that is left. This document is the hand-off for someone at the machine that
-can do it.
+Xcode, no `swift` and no simulator. That is not a caveat on the work; it is
+the work that is left. This document is the hand-off for someone at the
+machine that can do it.
+
+> **2026-09-13 — §1 through §5 have now been done.** Both schemes compile and
+> the whole suite passes on `iPhone 17 Pro` (iOS 26.5) and `Apple TV 4K (3rd
+> generation)` (tvOS 26.5) — 532 and 518 tests, 0 failures — after one compile
+> error, three wrong tests and **one shipped defect** were fixed. The defect:
+> `stopForBlockingSurface()` paused the player without telling the presenter
+> the picture had stopped presenting, so §4.3's own R1 case drew "Playback
+> recovered" with no Sign in and no Close, permanently. Its only witness was
+> the §3 test whose failure the first pass mistook for a test bug.
+>
+> Mutations A1, A2, A4 and A5 were each killed by the test this table names.
+> **A3 as written here is killed** by
+> `testOnlyTheEvidenceSamplerEverFeedsAPresentingEvent`, which forbids the
+> `timeControlStatus` token — but that is a spelling pin, and the same
+> mutation written as `let moved = player.rate > 0` survived everything. The
+> detector is now a pure function with a behavioural test of its own
+> (`testPresentationEvidenceIsAMovingPositionAndNeverATransportStatus`), so
+> both spellings die. **A6 is the one true survivor**, as §4 predicted.
+>
+> **§6 is what is left:** none of its eight runs was possible without a live
+> `plurxd`. See STATUS.md, "What the Apple build and test run found".
+>
+> One trap for whoever runs §6, because it cost this pass a false finding: a
+> simulator that answers `Busy ("Application failed preflight checks")`
+> executes **zero** tests and `xcodebuild` still writes a log that contains no
+> failures. Anything scraping for failed-test lines reads that as green. Assert
+> on the `Executed N tests` count before believing any mutation survived, and
+> clear it with `xcrun simctl shutdown all` plus `xcrun simctl erase <udid>`.
 
 Nothing here changes behaviour on purpose. If a step fails, the two honest
 outcomes are (1) fix it there, when the failure is a compile error whose fix

@@ -104,13 +104,15 @@ failure(s)" there and "93 shaping contracts hold" with `TMPDIR` pointed
 anywhere else, and detached `nohup` jobs die without a message. Export
 `TMPDIR` off `/sessions` before believing any red result on that machine.
 
-## The playback surface contract — built, Kotlin compiled, unverified
+## The playback surface contract — built, both clients compiled, unverified on hardware
 
 **Merged to `main`: M0 (#276), M1 (#277), M2 (#280), M3 (#279) and M5 (#282).
-M4 and M6 are not done, nothing Swift has ever been compiled, and no device
-has ever run any of it. The Kotlin now compiles and its JVM tests pass —
-2026-09-13, on both of the hand-off's routes, see (2) below.** The effort replaced three imperative error
-channels — the web's `setLoading()`, Apple's
+Both clients now compile and both unit suites pass — the Kotlin on 2026-09-13
+on both of the hand-off's routes (see (2) below), the Swift the same day on
+both simulator destinations (see "What the Apple build and test run found"
+below). M4 and M6 are not done, and no physical device has run any of it.**
+The effort replaced three imperative error channels — the web's
+`setLoading()`, Apple's
 `failed`/`playbackError`/`playbackFailureTitle`/`playbackNotice`, Android's
 `onError`/`playFailure`/`playbackNotice` — with one fixture-driven presenter
 per client that renders a surface from typed faults and the player's own
@@ -182,19 +184,72 @@ call, no timer of its own, no control-plane call), which is contract v2's
 actual thesis and was exempted wholesale before.
 
 The fixture is **60** ordered-event cases. The web presenter runs all 60 in
-`tests/playback/playback-surface-contract.test.js`; the Android presenter
-runs all 60 in `PlaybackSurfaceReducerTest.everyFixtureCaseRuns`, executed for
-the first time on 2026-09-13; the Apple presenter is written to run all 60 and
-never has.
+`tests/playback/playback-surface-contract.test.js`; the Apple presenter runs
+all 60 in `testPlaybackSurfaceModelRunsEveryContractCase`, confirmed passing
+on the iOS **and** the tvOS destination; the Android presenter runs all 60 in
+`PlaybackSurfaceReducerTest.everyFixtureCaseRuns`. All three were executed for
+the first time on 2026-09-13.
+
+### What the Apple build and test run found
+
+On a Mac (macOS 26.6.2, Xcode 26.6, xcodegen 2.46.0), against this branch:
+`make apple-build` compiled **both** schemes clean, and `make apple-test` ran
+the whole suite on **iPhone 17 Pro (iOS 26.5)** — 532 tests — and on **Apple
+TV 4K (3rd generation) (tvOS 26.5)** — 518 tests — with **0 failures on
+each**. Every test the hand-off prompt names by name ran and passed under both
+destinations.
+
+Four defects in code written blind had to be fixed to get there: one compile
+error (a test still read `PlayerController.failed`, the flag M2 deleted) and
+three test failures (a source-shape assertion looking for the literal
+`player.pause()` that M2 had moved into `stopForBlockingSurface()`; M5's
+change-context test, which asserted a second `/decision` request that a warm —
+prepared — quality change never makes, and whose precondition no headless test
+could reach; and a blocking raise set up over a still-`presenting` picture).
+
+**That third one was not a test bug. It was the code reporting a shipped
+defect, and adjusting the test is what hid it.** `stopForBlockingSurface()`
+paused the player but never told the presenter the picture had stopped
+presenting, and every owner site raises its blocking fault synchronously right
+after. So a 401 or 403 during a quality change — the R1 case, over a picture
+that was playing — raised its `stopped` terminal into a model that still
+believed the picture was moving, §3.2 resolved the disagreement against it,
+and the viewer got a "Playback recovered" banner with **no Sign in and no
+Close**. Permanently: a demoted fault is never promoted again, by design. Not
+a race — the raise always precedes the next sampler tick. The owner's stop now
+records its own evidence, which is the one-line fix, and the assertion that it
+still does is pinned in `testOnlyTheEvidenceSamplerEverFeedsAPresentingEvent`.
+No threshold, budget, detector or ladder was retuned.
+
+The prompt's six pinned mutations were applied and reverted one at a time.
+**A1, A2, A4 and A5 were each killed by the test pinned to it**; A5 and A6 are
+also killed by `tests/playback/web-policy.test.js`, as predicted. A3 —
+deciding presentation on `timeControlStatus` instead of the position delta —
+**is killed by `testOnlyTheEvidenceSamplerEverFeedsAPresentingEvent`**, which
+forbids the token outright. But that is a source-shape pin, and the
+semantically identical mutation that avoids the banned word — dropping the
+position delta and keeping the rate — survived all 531 tests. So the detector
+was pinned by spelling and proved by nothing. `surfaceIsPresenting` is now a
+pure function of the evidence, and
+`testPresentationEvidenceIsAMovingPositionAndNeverATransportStatus` kills that
+survivor. **A6 is the one genuine survivor**: no Swift test, exactly as the
+prompt predicted, and the field route is §6.6.
 
 ### Exactly what is not done
 
-1. **Nothing Swift has been compiled.** M2 and M5's Apple code was written on
-   Linux with no Xcode, no `swift` and no simulator. `AppleClientTests`'
-   surface cases, the eight owner-stop killers, the R1 and B4 pins and M5's
-   three `PlayerOperationOwnershipTests` cases have never been executed. The
-   hand-off is
-   [PLAYBACK-SURFACE-APPLE-BUILD-PROMPT.md](docs/clients/PLAYBACK-SURFACE-APPLE-BUILD-PROMPT.md).
+1. **The Apple client compiles and its suite is green — but §6 of the
+   hand-off has not been run.** `AppleClientTests`' surface cases, the eight
+   owner-stop killers, the R1 and B4 pins and M5's three
+   `PlayerOperationOwnershipTests` cases have now all executed and passed, on
+   both destinations. What has *not* run is any of the eight simulator and
+   device recipes in §6 of
+   [PLAYBACK-SURFACE-APPLE-BUILD-PROMPT.md](docs/clients/PLAYBACK-SURFACE-APPLE-BUILD-PROMPT.md):
+   every one of them needs a live `plurxd` with real media — a cold NAS that
+   answers 503 `startup_timeout`, a forced 401 on a quality change, a create
+   that lands after the 60 s deadline — and no server was reachable from the
+   build machine. The unit suite cannot see any of those behaviours, and one
+   shipped defect this branch fixes — the 401 terminal demoting itself to a
+   banner — is exactly the kind of thing only §6.2 would have caught.
 2. **The Kotlin compiles and its JVM tests pass. Nothing has run on a
    device.** M3 and M5's Android code was written on Linux with no SDK and no
    disk for a Gradle build; it was compiled for the first time on 2026-09-13,
