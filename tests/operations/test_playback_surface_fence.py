@@ -38,8 +38,18 @@ class PlaybackSurfaceFenceTest(unittest.TestCase):
         # and reflected `setLoading`, and every one of them again against the
         # two surfaces M1 added. An exact count, because a pattern that stops
         # matching is a hole, and so is a fixture line nobody notices is dead.
-        expected = {"web": 37, "swift": 17, "kotlin": 19}
-        names = {"web": "must_trip.web.html", "swift": "must_trip.swift", "kotlin": "must_trip.kt"}
+        #
+        # 37 -> 39 with M5: the review found the hole every property-name
+        # pattern has by construction — a computed member write never spells
+        # the property — so the fence closed the DOOR instead, and the fixture
+        # gained the three lookups that get hold of a surface element.
+        expected = {"web": 39, "swift": 17, "kotlin": 19, "kotlin_owner": 12}
+        names = {
+            "web": "must_trip.web.html",
+            "swift": "must_trip.swift",
+            "kotlin": "must_trip.kt",
+            "kotlin_owner": "must_trip.owner.kt",
+        }
         for kind, name in names.items():
             with self.subTest(kind=kind):
                 hits = self.fence.scan_text(kind, (FIXTURES / name).read_text(encoding="utf-8"))
@@ -50,7 +60,12 @@ class PlaybackSurfaceFenceTest(unittest.TestCase):
                 )
 
     def test_must_not_trip_fixtures_are_silent(self):
-        names = {"web": "must_not_trip.web.html", "swift": "must_not_trip.swift", "kotlin": "must_not_trip.kt"}
+        names = {
+            "web": "must_not_trip.web.html",
+            "swift": "must_not_trip.swift",
+            "kotlin": "must_not_trip.kt",
+            "kotlin_owner": "must_not_trip.owner.kt",
+        }
         for kind, name in names.items():
             with self.subTest(kind=kind):
                 hits = self.fence.scan_text(kind, (FIXTURES / name).read_text(encoding="utf-8"))
@@ -100,6 +115,78 @@ class PlaybackSurfaceFenceTest(unittest.TestCase):
         text = 'setLoading\n  (true, "x", "", "");\n'
         hits = self.fence.scan_text("web", text)
         self.assertEqual(hits, [(1, "setLoading")])
+
+    # One must-trip and one must-not-trip file per scanned kind. A kind with no
+    # fixture is a kind nobody proved, which is a gate rather than a fence.
+    FIXTURE_NAMES = {
+        "web": ("must_trip.web.html", "must_not_trip.web.html"),
+        "swift": ("must_trip.swift", "must_not_trip.swift"),
+        "kotlin": ("must_trip.kt", "must_not_trip.kt"),
+        "kotlin_owner": ("must_trip.owner.kt", "must_not_trip.owner.kt"),
+    }
+
+    def test_every_scanned_kind_has_both_fixtures(self):
+        for kind in sorted(set(self.fence.SCANNED.values())):
+            with self.subTest(kind=kind):
+                self.assertIn(kind, self.fence.PATTERNS, f"{kind} is scanned with no patterns")
+                self.assertIn(kind, self.FIXTURE_NAMES, f"{kind} has no fixture pair")
+                for name in self.FIXTURE_NAMES[kind]:
+                    self.assertTrue((FIXTURES / name).is_file(), f"{name} is missing")
+
+    def test_a_blocking_raise_without_the_owners_stop_is_named(self):
+        # `PlaybackSurfaceOwner.kt`'s doc comment says every blocking site does
+        # its own stop first. Until M5 nothing checked it: the generic-raise
+        # pattern required a `surfaceOwner.` receiver, which never appears
+        # inside that file, so a bare `raiseBlocking(...)` with no stop passed.
+        trips = self.fence.owner_stop_failures(
+            (FIXTURES / "must_trip.owner_stop.kt").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            [number for number, _token in trips],
+            [8, 18, 24],
+            f"expected the three unstopped raises, found {trips}",
+        )
+        self.assertEqual(
+            self.fence.owner_stop_failures(
+                (FIXTURES / "must_not_trip.owner.kt").read_text(encoding="utf-8")
+            ),
+            [],
+            "a blocking site that does stop first is not a failure",
+        )
+
+    def test_a_presenter_with_a_side_effect_is_named(self):
+        # Contract v2's whole thesis (§3.0): the presenter owns the pixels and
+        # nothing else. `PRESENTER_FILES` exempted those files from the write
+        # patterns wholesale, which left the thesis itself unfenced — a free
+        # function calling `player.pause()` inside the presenter passed.
+        trips = self.fence.presenter_failures(
+            (FIXTURES / "must_trip.presenter.swift").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            sorted({token for _number, token in trips}),
+            ["control-plane call", "player call", "timer creation"],
+            f"every forbidden kind must be named, found {trips}",
+        )
+        self.assertEqual(len(trips), 11, f"one hit per offending line, found {trips}")
+        self.assertEqual(
+            self.fence.presenter_failures(
+                (FIXTURES / "must_not_trip.presenter.swift").read_text(encoding="utf-8")
+            ),
+            [],
+            "a presenter that NAMES the verbs it refuses to perform is not performing them",
+        )
+
+    def test_the_shipped_presenters_have_no_side_effects(self):
+        for relative in self.fence.PRESENTER_FILES:
+            path = self.fence.ROOT / relative
+            if not path.is_file():
+                continue
+            with self.subTest(path=relative):
+                self.assertEqual(
+                    self.fence.presenter_failures(path.read_text(encoding="utf-8")),
+                    [],
+                    f"{relative} moves the player, arms a timer, or reports to the control plane",
+                )
 
     def test_the_fence_passes_the_repository_as_it_stands(self):
         failures = self.fence.scan()

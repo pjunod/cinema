@@ -57,4 +57,16 @@
     pindicator.classList.remove("on");
     Object.assign(psurfText, { textContent: "held" });
   }
+  // M5's review found the hole every property-name pattern has by
+  // construction: a computed member write never spells the property at all.
+  // The lookup that got hold of the element is what cannot be hidden, and
+  // every legitimate one is inside the render region.
+  function computed(msg) {
+    const l = document.getElementById("ploading");
+    l["class" + "Name"] = "ploading failed";
+    const box = document.querySelector("#psurface");
+    box["inner" + "HTML"] = msg;
+    const chip = document.querySelectorAll(".x, #pindicator")[0];
+    chip[["hidden"]] = false;
+  }
 </script>
