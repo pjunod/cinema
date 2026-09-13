@@ -153,10 +153,11 @@ internal class SessionCreateCoordinator(
     private val isBadRequest: (Throwable) -> Boolean,
     private val freshRequestId: () -> String,
     private val releaseSession: (String) -> Unit,
-    // M5's retry needs a clock and a sleep. Injected so the ladder and its
-    // absolute deadline are testable on the JVM without a real minute passing.
+    // M5's retry needs a clock. The SLEEPS are `delay`, so `runTest`'s virtual
+    // scheduler drives them for free; the clock cannot be, because
+    // `System.nanoTime()` does not move with virtual time. One seam, and the
+    // test points it at `TestScope.currentTime`.
     private val nowMs: () -> Long = { System.nanoTime() / 1_000_000L },
-    private val sleep: suspend (Long) -> Unit = { delay(it) },
 ) {
     private val createMutex = Mutex()
 
@@ -216,15 +217,41 @@ internal class SessionCreateCoordinator(
      *
      * The delays happen OUTSIDE the mutex on purpose: a sequence sleeping four
      * seconds must not hold the create lock a newer user action needs.
+     *
+     * [startContext] gates the WHOLE sequence, ladder and watchdog alike, and
+     * that is the point of it being a parameter rather than a predicate folded
+     * into [isNotYet]. Row 6 is the start context; a create over a predecessor
+     * the viewer is still watching is a refused CHANGE (row 7). Arming a
+     * sixty-second watchdog that stops the player over a change is §7 recipe
+     * (b)'s explicitly not-allowed outcome — a full-screen prompt over a
+     * picture that is still playing — and this client's own read timeout is
+     * sixty seconds, so a change against a cold NAS would race it and often
+     * lose. Outside the start context this is the plain [create] it always was.
      */
     suspend fun createRetryingNotYet(
         body: CreateSessionReq,
+        startContext: Boolean,
         isCurrent: () -> Boolean = { true },
         isNotYet: (Throwable) -> Boolean,
         onRetrying: (Throwable) -> Unit = {},
         onExhausted: (String) -> Unit = {},
+    ): HlsStart? {
+        if (!startContext) return create(body, isCurrent)
+        return createRetrySequence(body, isCurrent, isNotYet, onRetrying, onExhausted)
+    }
+
+    private suspend fun createRetrySequence(
+        body: CreateSessionReq,
+        isCurrent: () -> Boolean,
+        isNotYet: (Throwable) -> Boolean,
+        onRetrying: (Throwable) -> Unit,
+        onExhausted: (String) -> Unit,
     ): HlsStart? = coroutineScope {
         val began = nowMs()
+        // Read and written only from this sequence's own coroutine and the
+        // watchdog it launches, both on the caller's single dispatcher (the
+        // controller's main-thread scope in production, the test scheduler in
+        // `CreateRetryTest`). There is no cross-thread publication to fence.
         var expired = false
         // ONE identity for the whole sequence: the server persists a create's
         // answer under `request_id`, so replaying one recovers the session it
@@ -233,7 +260,7 @@ internal class SessionCreateCoordinator(
         val request =
             if (body.request_id.isNullOrBlank()) body.copy(request_id = freshRequestId()) else body
         val watchdog = launch {
-            sleep(CreateRetry.DEADLINE_MS.toLong())
+            delay(CreateRetry.DEADLINE_MS.toLong())
             if (!expired) {
                 expired = true
                 if (isCurrent()) onExhausted("deadline")
@@ -264,7 +291,7 @@ internal class SessionCreateCoordinator(
                             // per attempt: a viewer watching a spinner does not
                             // need four identical rows behind it.
                             if (attempt == 0) onRetrying(failure)
-                            sleep(step.delayMs.toLong())
+                            delay(step.delayMs.toLong())
                             attempt += 1
                             continue@attempts
                         }

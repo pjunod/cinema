@@ -2,8 +2,10 @@ package tv.plurx.app.player
 
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
-import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.yield
+import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.currentTime
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -15,9 +17,12 @@ import tv.plurx.app.data.RefusalException
 /**
  * M5 addition 1 — the create "not yet" retry, at this client's own seam.
  *
- * The ladder is pure arithmetic and is tested directly; the sequence around it
- * is [SessionCreateCoordinator.createRetryingNotYet] with an injected clock and
- * sleep, so the absolute deadline is exercised without a real minute passing.
+ * The ladder is pure arithmetic and is tested directly. The sequence around it
+ * is [SessionCreateCoordinator.createRetryingNotYet] driven by `runTest`'s
+ * virtual clock: the sleeps are `delay`, so a sixty-second deadline costs the
+ * test nothing and is still exercised exactly, and the coordinator's one clock
+ * seam is pointed at `TestScope.currentTime` so its arithmetic sees the same
+ * time the scheduler does.
  *
  * UNRUN: there is no Android toolchain on the machine this was written on. See
  * the PR's "Needs an Android toolchain or a device" list.
@@ -61,17 +66,17 @@ class CreateRetryTest {
     }
 
     @Test
-    fun theSequenceReplaysOneIdentityOnTheContractsLadder() = runBlocking {
-        val clock = TestClock()
+    fun theSequenceReplaysOneIdentityOnTheContractsLadder() = runTest {
         val posts = mutableListOf<Pair<String?, Long>>()
         val retried = mutableListOf<String>()
         val exhausted = mutableListOf<String>()
-        val coordinator = coordinator(clock) { body ->
-            posts += body.request_id to clock.now
+        val coordinator = coordinator(this) { body ->
+            posts += body.request_id to currentTime
             throw stillBuilding("startup_timeout")
         }
         val outcome = coordinator.createRetryingNotYet(
             body = body(),
+            startContext = true,
             isNotYet = { failure -> (failure as? RefusalException)?.code in CreateRetry.codes },
             onRetrying = { failure -> retried += failure.message ?: "" },
             onExhausted = { reason -> exhausted += reason },
@@ -85,60 +90,60 @@ class CreateRetryTest {
     }
 
     @Test
-    fun aSuccessOnARetryIsAttachedAndNothingIsReleased() = runBlocking {
-        val clock = TestClock()
+    fun aSuccessOnARetryIsAttachedAndNothingIsReleased() = runTest {
         val released = mutableListOf<String>()
         var calls = 0
-        val coordinator = coordinator(clock, released) {
+        val coordinator = coordinator(this, released) {
             calls += 1
             if (calls == 1) throw stillBuilding("vod_index_pending") else response("ready")
         }
         val outcome = coordinator.createRetryingNotYet(
             body = body(),
+            startContext = true,
             isNotYet = { failure -> (failure as? RefusalException)?.code in CreateRetry.codes },
         )
         assertEquals("ready", outcome?.session_id)
         assertEquals(2, calls)
         assertTrue(released.isEmpty())
-        assertEquals(1_000L, clock.now)
+        assertEquals("one rung, one second", 1_000L, currentTime)
     }
 
     @Test
-    fun aSuccessAfterTheAbsoluteDeadlineIsReleasedAndNeverAttached() = runBlocking {
-        val clock = TestClock()
+    fun aSuccessAfterTheAbsoluteDeadlineIsReleasedAndNeverAttached() = runTest {
         val released = mutableListOf<String>()
         val exhausted = mutableListOf<String>()
-        val entered = CompletableDeferred<Unit>()
-        val finish = CompletableDeferred<Unit>()
-        val coordinator = coordinator(clock, released) {
-            entered.complete(Unit)
-            finish.await()
+        val hold = CompletableDeferred<Unit>()
+        val coordinator = coordinator(this, released) {
+            hold.await()
             response("late")
         }
         val sequence = async {
             coordinator.createRetryingNotYet(
                 body = body(),
+                startContext = true,
                 isNotYet = { true },
                 onExhausted = { reason -> exhausted += reason },
             )
         }
-        entered.await()
-        // The watchdog is the only thing waiting on the clock, so releasing the
-        // deadline releases it and nothing else.
-        clock.release(CreateRetry.DEADLINE_MS.toLong())
-        // One turn of the event loop for the watchdog to resume on.
-        yield()
-        assertEquals(listOf("deadline"), exhausted)
-        finish.complete(Unit)
+        // Virtual time runs to the watchdog and no further: the create is still
+        // in flight, so the deadline is the only thing pending.
+        advanceUntilIdle()
+        assertEquals(
+            "the prompt lands on the clock, not when the slow create returns",
+            listOf("deadline"),
+            exhausted,
+        )
+        assertEquals(CreateRetry.DEADLINE_MS.toLong(), currentTime)
+        hold.complete(Unit)
         assertNull("a late session is not attached", sequence.await())
         assertEquals(listOf("late"), released)
+        assertEquals("releasing it does not raise a second prompt", 1, exhausted.size)
     }
 
     @Test
-    fun aRefusalTheLadderDoesNotClaimIsRethrownUnchanged() = runBlocking {
-        val clock = TestClock()
+    fun aRefusalTheLadderDoesNotClaimIsRethrownUnchanged() = runTest {
         var calls = 0
-        val coordinator = coordinator(clock) {
+        val coordinator = coordinator(this) {
             calls += 1
             throw stillBuilding("vod_disabled")
         }
@@ -146,6 +151,7 @@ class CreateRetryTest {
         try {
             coordinator.createRetryingNotYet(
                 body = body(),
+                startContext = true,
                 isNotYet = { failure -> (failure as? RefusalException)?.code in CreateRetry.codes },
             )
         } catch (failure: Throwable) {
@@ -156,18 +162,18 @@ class CreateRetryTest {
     }
 
     @Test
-    fun aNewerIntentEndsTheSequenceWithoutRaisingAnything() = runBlocking {
-        val clock = TestClock()
+    fun aNewerIntentEndsTheSequenceWithoutRaisingAnything() = runTest {
         val exhausted = mutableListOf<String>()
         var current = true
         var calls = 0
-        val coordinator = coordinator(clock) {
+        val coordinator = coordinator(this) {
             calls += 1
             current = false
             throw stillBuilding("startup_timeout")
         }
         val outcome = coordinator.createRetryingNotYet(
             body = body(),
+            startContext = true,
             isCurrent = { current },
             isNotYet = { true },
             onExhausted = { reason -> exhausted += reason },
@@ -177,54 +183,81 @@ class CreateRetryTest {
         assertTrue("a cancelled sequence is not an exhausted one", exhausted.isEmpty())
     }
 
+    // ---- the change context arms nothing at all ------------------------------
+
+    @Test
+    fun aChangeContextCreateIsNotRetriedAndArmsNoWatchdogAtAll() = runTest {
+        // The blocker this case exists for. `openSession` is also the create
+        // path for seeks and quality changes, and arming a sixty-second
+        // watchdog there would stop a player the viewer is watching and release
+        // the session the change was going to attach — §7 recipe (b)'s
+        // explicitly not-allowed outcome. This client's own read timeout is
+        // sixty seconds, so a change against a cold NAS races that boundary.
+        val released = mutableListOf<String>()
+        val exhausted = mutableListOf<String>()
+        val retried = mutableListOf<String>()
+        val hold = CompletableDeferred<Unit>()
+        val coordinator = coordinator(this, released) {
+            hold.await()
+            response("the-change")
+        }
+        val sequence = async {
+            coordinator.createRetryingNotYet(
+                body = body(),
+                startContext = false,
+                isNotYet = { true },
+                onRetrying = { failure -> retried += failure.message ?: "" },
+                onExhausted = { reason -> exhausted += reason },
+            )
+        }
+        advanceUntilIdle()
+        assertTrue("a change context arms no deadline watchdog", exhausted.isEmpty())
+        assertEquals("and nothing is waiting on a clock at all", 0L, currentTime)
+        hold.complete(Unit)
+        assertEquals("the change attaches its session", "the-change", sequence.await()?.session_id)
+        assertTrue("and nothing is released", released.isEmpty())
+        assertTrue(retried.isEmpty())
+    }
+
+    @Test
+    fun aChangeContextRefusalIsRethrownRatherThanRetried() = runTest {
+        var calls = 0
+        val coordinator = coordinator(this) {
+            calls += 1
+            throw stillBuilding("startup_timeout")
+        }
+        var thrown: Throwable? = null
+        try {
+            coordinator.createRetryingNotYet(
+                body = body(),
+                startContext = false,
+                isNotYet = { true },
+            )
+        } catch (failure: Throwable) {
+            thrown = failure
+        }
+        assertEquals("row 7 beats row 6: a refused change is not retried", 1, calls)
+        assertEquals("startup_timeout", (thrown as? RefusalException)?.code)
+        assertEquals(0L, currentTime)
+    }
+
     // ---- harness -------------------------------------------------------------
 
     /**
-     * A clock the sequence's sleeps drive. Every `sleep(ms)` advances it and
-     * returns immediately, except one the test holds with [release] — which is
-     * how the deadline watchdog is made to fire while a create is still in
-     * flight.
+     * The coordinator with its one clock seam pointed at the test scheduler, so
+     * the ladder's arithmetic and the scheduler's virtual time agree.
      */
-    private class TestClock {
-        var now: Long = 0L
-            private set
-        private val held = mutableMapOf<Long, CompletableDeferred<Unit>>()
-
-        suspend fun sleep(ms: Long) {
-            val gate = held[ms]
-            if (gate != null) {
-                gate.await()
-                return
-            }
-            now += ms
-        }
-
-        /** Hold, then release, a sleep of exactly [ms]. Used for the deadline. */
-        fun hold(ms: Long) {
-            held[ms] = CompletableDeferred()
-        }
-
-        fun release(ms: Long) {
-            now += ms
-            held.remove(ms)?.complete(Unit)
-        }
-    }
-
     private fun coordinator(
-        clock: TestClock,
+        scope: TestScope,
         released: MutableList<String> = mutableListOf(),
         create: suspend (CreateSessionReq) -> HlsStart,
-    ): SessionCreateCoordinator {
-        clock.hold(CreateRetry.DEADLINE_MS.toLong())
-        return SessionCreateCoordinator(
-            createSession = create,
-            isBadRequest = { false },
-            freshRequestId = { "minted" },
-            releaseSession = released::add,
-            nowMs = { clock.now },
-            sleep = { ms -> clock.sleep(ms) },
-        )
-    }
+    ): SessionCreateCoordinator = SessionCreateCoordinator(
+        createSession = create,
+        isBadRequest = { false },
+        freshRequestId = { "minted" },
+        releaseSession = released::add,
+        nowMs = { scope.currentTime },
+    )
 
     private fun stillBuilding(code: String) =
         RefusalException(status = 503, code = code, message = "still building", positionMs = null)
