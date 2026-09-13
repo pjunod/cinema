@@ -179,10 +179,10 @@ struct TVReadableButtonStyle: ButtonStyle {
 /// staying on player black in every app theme.
 struct LiveSurfacePillStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
-        Body(configuration: configuration)
+        Renderer(configuration: configuration)
     }
 
-    struct Body: View {
+    private struct Renderer: View {
         let configuration: ButtonStyle.Configuration
         @Environment(\.isFocused) private var isFocused
 
