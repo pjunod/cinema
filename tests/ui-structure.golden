@@ -1970,25 +1970,32 @@ catalog|player@1280x860|dom|div#app > div#pxshell.px-shell|1
 catalog|player@1280x860|dom|div#modal.modal.open[role=dialog aria-modal=true aria-label=*] > div#player.player|1
 catalog|player@1280x860|dom|div#pbar.pbar > div#playTitle.ptitle[text]|1
 catalog|player@1280x860|dom|div#pbar.pbar > div.row|1
+catalog|player@1280x860|dom|div#pindicator.pindicator[role=status aria-live=polite] > div.pspin[aria-hidden=true]|1
+catalog|player@1280x860|dom|div#pindicator.pindicator[role=status aria-live=polite] > span#pindText|1
 catalog|player@1280x860|dom|div#pinfo.pinfo > div.pifacts.vbadges|1
 catalog|player@1280x860|dom|div#pinfo.pinfo > div.pimeta[text]|1
 catalog|player@1280x860|dom|div#pinfo.pinfo > h3[text]|1
 catalog|player@1280x860|dom|div#player.player > div#pbar.pbar|1
+catalog|player@1280x860|dom|div#player.player > div#pindicator.pindicator[role=status aria-live=polite]|1
 catalog|player@1280x860|dom|div#player.player > div#pinfo.pinfo|1
-catalog|player@1280x860|dom|div#player.player > div#ploading.ploading|1
+catalog|player@1280x860|dom|div#player.player > div#ploading.on.ploading|1
 catalog|player@1280x860|dom|div#player.player > div#pmenu.pmenu[role=menu]|1
 catalog|player@1280x860|dom|div#player.player > div#pskip.pskip|1
+catalog|player@1280x860|dom|div#player.player > div#psurface.psurface[role=status aria-live=polite]|1
 catalog|player@1280x860|dom|div#player.player > div#ptimeline.ptimeline|1
 catalog|player@1280x860|dom|div#player.player > div#ptransport.ptransport|1
 catalog|player@1280x860|dom|div#player.player > div#statsov.statsov|1
 catalog|player@1280x860|dom|div#player.player > video#video|1
-catalog|player@1280x860|dom|div#ploading.ploading > div#ploadAct.ploadAct|1
-catalog|player@1280x860|dom|div#ploading.ploading > div#ploadSub.ploadSub[text]|1
-catalog|player@1280x860|dom|div#ploading.ploading > div#ploadText.ploadText[text]|1
-catalog|player@1280x860|dom|div#ploading.ploading > div.pspin|1
+catalog|player@1280x860|dom|div#ploading.on.ploading > div#ploadAct.ploadAct|1
+catalog|player@1280x860|dom|div#ploading.on.ploading > div#ploadSub.ploadSub[text]|1
+catalog|player@1280x860|dom|div#ploading.on.ploading > div#ploadText.ploadText[text]|1
+catalog|player@1280x860|dom|div#ploading.on.ploading > div.pspin|1
 catalog|player@1280x860|dom|div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*] > div#pseekbuf.pseek-buf[aria-hidden=true]|1
 catalog|player@1280x860|dom|div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*] > div#pseekfill.pseek-fill[aria-hidden=true]|1
 catalog|player@1280x860|dom|div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*] > div#pseekthumb.pseek-thumb[aria-hidden=true]|1
+catalog|player@1280x860|dom|div#psurface.psurface[role=status aria-live=polite] > div#psurfAct.psurfAct|1
+catalog|player@1280x860|dom|div#psurface.psurface[role=status aria-live=polite] > div#psurfSub.psurfSub|1
+catalog|player@1280x860|dom|div#psurface.psurface[role=status aria-live=polite] > div#psurfText.psurfText|1
 catalog|player@1280x860|dom|div#ptimeline.ptimeline > div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*]|1
 catalog|player@1280x860|dom|div#ptimeline.ptimeline > span#ptcur.ptime[aria-hidden=true text]|1
 catalog|player@1280x860|dom|div#ptimeline.ptimeline > span#ptdur.ptime[aria-hidden=true text]|1
@@ -2100,7 +2107,7 @@ catalog|player@1280x860|req|GET /api/v1/items/<id>|1
 catalog|player@1280x860|req|GET /api/v1/libraries|1
 catalog|player@1280x860|req|GET /api/v1/me|1
 catalog|player@1280x860|req|GET /api/v1/server|1
-catalog|player@1280x860|req|POST /api/v1/client-log|1
+catalog|player@1280x860|req|POST /api/v1/client-log|4
 catalog|player@1280x860|req|POST /api/v1/files/<id>/decision|1
 catalog|player@1280x860|req|POST /api/v1/items/<id>/progress|1
 catalog|player@390x780|dom|^ > div#app|1
@@ -2132,25 +2139,32 @@ catalog|player@390x780|dom|div#app > div#pxshell.px-shell|1
 catalog|player@390x780|dom|div#modal.modal.open[role=dialog aria-modal=true aria-label=*] > div#player.player|1
 catalog|player@390x780|dom|div#pbar.pbar > div#playTitle.ptitle[text]|1
 catalog|player@390x780|dom|div#pbar.pbar > div.row|1
+catalog|player@390x780|dom|div#pindicator.pindicator[role=status aria-live=polite] > div.pspin[aria-hidden=true]|1
+catalog|player@390x780|dom|div#pindicator.pindicator[role=status aria-live=polite] > span#pindText|1
 catalog|player@390x780|dom|div#pinfo.pinfo > div.pifacts.vbadges|1
 catalog|player@390x780|dom|div#pinfo.pinfo > div.pimeta[text]|1
 catalog|player@390x780|dom|div#pinfo.pinfo > h3[text]|1
 catalog|player@390x780|dom|div#player.player > div#pbar.pbar|1
+catalog|player@390x780|dom|div#player.player > div#pindicator.pindicator[role=status aria-live=polite]|1
 catalog|player@390x780|dom|div#player.player > div#pinfo.pinfo|1
-catalog|player@390x780|dom|div#player.player > div#ploading.ploading|1
+catalog|player@390x780|dom|div#player.player > div#ploading.on.ploading|1
 catalog|player@390x780|dom|div#player.player > div#pmenu.pmenu[role=menu]|1
 catalog|player@390x780|dom|div#player.player > div#pskip.pskip|1
+catalog|player@390x780|dom|div#player.player > div#psurface.psurface[role=status aria-live=polite]|1
 catalog|player@390x780|dom|div#player.player > div#ptimeline.ptimeline|1
 catalog|player@390x780|dom|div#player.player > div#ptransport.ptransport|1
 catalog|player@390x780|dom|div#player.player > div#statsov.statsov|1
 catalog|player@390x780|dom|div#player.player > video#video|1
-catalog|player@390x780|dom|div#ploading.ploading > div#ploadAct.ploadAct|1
-catalog|player@390x780|dom|div#ploading.ploading > div#ploadSub.ploadSub[text]|1
-catalog|player@390x780|dom|div#ploading.ploading > div#ploadText.ploadText[text]|1
-catalog|player@390x780|dom|div#ploading.ploading > div.pspin|1
+catalog|player@390x780|dom|div#ploading.on.ploading > div#ploadAct.ploadAct|1
+catalog|player@390x780|dom|div#ploading.on.ploading > div#ploadSub.ploadSub[text]|1
+catalog|player@390x780|dom|div#ploading.on.ploading > div#ploadText.ploadText[text]|1
+catalog|player@390x780|dom|div#ploading.on.ploading > div.pspin|1
 catalog|player@390x780|dom|div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*] > div#pseekbuf.pseek-buf[aria-hidden=true]|1
 catalog|player@390x780|dom|div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*] > div#pseekfill.pseek-fill[aria-hidden=true]|1
 catalog|player@390x780|dom|div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*] > div#pseekthumb.pseek-thumb[aria-hidden=true]|1
+catalog|player@390x780|dom|div#psurface.psurface[role=status aria-live=polite] > div#psurfAct.psurfAct|1
+catalog|player@390x780|dom|div#psurface.psurface[role=status aria-live=polite] > div#psurfSub.psurfSub|1
+catalog|player@390x780|dom|div#psurface.psurface[role=status aria-live=polite] > div#psurfText.psurfText|1
 catalog|player@390x780|dom|div#ptimeline.ptimeline > div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*]|1
 catalog|player@390x780|dom|div#ptimeline.ptimeline > span#ptcur.ptime[aria-hidden=true text]|1
 catalog|player@390x780|dom|div#ptimeline.ptimeline > span#ptdur.ptime[aria-hidden=true text]|1
@@ -2262,7 +2276,7 @@ catalog|player@390x780|req|GET /api/v1/items/<id>|1
 catalog|player@390x780|req|GET /api/v1/libraries|1
 catalog|player@390x780|req|GET /api/v1/me|1
 catalog|player@390x780|req|GET /api/v1/server|1
-catalog|player@390x780|req|POST /api/v1/client-log|1
+catalog|player@390x780|req|POST /api/v1/client-log|4
 catalog|player@390x780|req|POST /api/v1/files/<id>/decision|1
 catalog|player@390x780|req|POST /api/v1/items/<id>/progress|1
 catalog|search@1280x860|dom|^ > div#app|1
@@ -2450,11 +2464,11 @@ catalog|settings-developer@1280x860|dom|button.px-tab[aria-expanded=false aria-c
 catalog|settings-developer@1280x860|dom|button.px-tab[aria-expanded=false aria-controls=* type=button] > svg.px-ico[aria-hidden=true]|1
 catalog|settings-developer@1280x860|dom|button.px-tab[type=button] > span[text]|1
 catalog|settings-developer@1280x860|dom|button.px-tab[type=button] > svg.px-ico[aria-hidden=true]|1
-catalog|settings-developer@1280x860|dom|details.setdetails > div.setdetails-body|6
-catalog|settings-developer@1280x860|dom|details.setdetails > summary[text]|6
+catalog|settings-developer@1280x860|dom|details.setdetails > div.setdetails-body|7
+catalog|settings-developer@1280x860|dom|details.setdetails > summary[text]|7
 catalog|settings-developer@1280x860|dom|div > div.hint[text]|5
 catalog|settings-developer@1280x860|dom|div > h1[text]|1
-catalog|settings-developer@1280x860|dom|div > h2.section[text]|8
+catalog|settings-developer@1280x860|dom|div > h2.section[text]|9
 catalog|settings-developer@1280x860|dom|div > input#dvrfloor[type=number]|1
 catalog|settings-developer@1280x860|dom|div > input#dvrlead[type=number]|1
 catalog|settings-developer@1280x860|dom|div > input#dvrpadend[type=number]|1
@@ -2462,7 +2476,7 @@ catalog|settings-developer@1280x860|dom|div > input#dvrpadstart[type=number]|1
 catalog|settings-developer@1280x860|dom|div > input#dvrroot|1
 catalog|settings-developer@1280x860|dom|div > input#dvrwebhook|1
 catalog|settings-developer@1280x860|dom|div > label[text]|7
-catalog|settings-developer@1280x860|dom|div > p.sub[text]|8
+catalog|settings-developer@1280x860|dom|div > p.sub[text]|9
 catalog|settings-developer@1280x860|dom|div > p[text]|1
 catalog|settings-developer@1280x860|dom|div > select#dvrreserve|1
 catalog|settings-developer@1280x860|dom|div#app > div#pxshell.px-shell|1
@@ -2482,9 +2496,9 @@ catalog|settings-developer@1280x860|dom|div#pxshell.px-shell > nav.px-tabs[aria-
 catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div#drcard.card.setcard|1
 catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div#vdcard.card.setcard|1
 catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div.card.local.setcard|1
-catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div.card.setcard|5
+catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div.card.setcard|6
 catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div.sethead|1
-catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div.setsection|6
+catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div.setsection|7
 catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > nav.setdestinations[aria-label=*]|1
 catalog|settings-developer@1280x860|dom|div#vdcard.card.setcard > details.setdetails|1
 catalog|settings-developer@1280x860|dom|div#vdcard.card.setcard > div#dhqerr.err[role=alert]|1
@@ -2495,28 +2509,28 @@ catalog|settings-developer@1280x860|dom|div#vdcard.card.setcard > label.tog|1
 catalog|settings-developer@1280x860|dom|div.card.local.setcard > div.cardhead|1
 catalog|settings-developer@1280x860|dom|div.card.local.setcard > div.hint[text]|1
 catalog|settings-developer@1280x860|dom|div.card.local.setcard > label.tog|1
-catalog|settings-developer@1280x860|dom|div.card.setcard > details.setdetails|4
+catalog|settings-developer@1280x860|dom|div.card.setcard > details.setdetails|5
 catalog|settings-developer@1280x860|dom|div.card.setcard > div#dverr.err[role=alert]|1
 catalog|settings-developer@1280x860|dom|div.card.setcard > div#dvrerr.err[role=alert]|1
 catalog|settings-developer@1280x860|dom|div.card.setcard > div#dxerr.err[role=alert]|1
 catalog|settings-developer@1280x860|dom|div.card.setcard > div#lcdeverr.err[role=alert]|1
 catalog|settings-developer@1280x860|dom|div.card.setcard > div#pqherr.err[role=alert]|1
-catalog|settings-developer@1280x860|dom|div.card.setcard > div.cardhead|5
-catalog|settings-developer@1280x860|dom|div.card.setcard > div.hint[text]|1
+catalog|settings-developer@1280x860|dom|div.card.setcard > div.cardhead|6
+catalog|settings-developer@1280x860|dom|div.card.setcard > div.hint[text]|2
 catalog|settings-developer@1280x860|dom|div.card.setcard > div.setfields|1
 catalog|settings-developer@1280x860|dom|div.card.setcard > div.setfoot|5
 catalog|settings-developer@1280x860|dom|div.card.setcard > label.tog|5
-catalog|settings-developer@1280x860|dom|div.cardhead > div.cardtools|8
-catalog|settings-developer@1280x860|dom|div.cardhead > div|8
+catalog|settings-developer@1280x860|dom|div.cardhead > div.cardtools|9
+catalog|settings-developer@1280x860|dom|div.cardhead > div|9
 catalog|settings-developer@1280x860|dom|div.cardtools > span#pqhstate.pill[text]|1
 catalog|settings-developer@1280x860|dom|div.cardtools > span.acc.pill[text]|1
 catalog|settings-developer@1280x860|dom|div.cardtools > span.pill.warn[text]|1
-catalog|settings-developer@1280x860|dom|div.cardtools > span.pill[text]|5
-catalog|settings-developer@1280x860|dom|div.devcheck > div.devcheck-head|14
-catalog|settings-developer@1280x860|dom|div.devcheck > p.devcheck-description[text]|14
+catalog|settings-developer@1280x860|dom|div.cardtools > span.pill[text]|6
+catalog|settings-developer@1280x860|dom|div.devcheck > div.devcheck-head|19
+catalog|settings-developer@1280x860|dom|div.devcheck > p.devcheck-description[text]|19
 catalog|settings-developer@1280x860|dom|div.devcheck > p.devcheck-evidence[text]|12
-catalog|settings-developer@1280x860|dom|div.devcheck-head > span.devcheck-status|14
-catalog|settings-developer@1280x860|dom|div.devcheck-head > strong[text]|14
+catalog|settings-developer@1280x860|dom|div.devcheck-head > span.devcheck-status|19
+catalog|settings-developer@1280x860|dom|div.devcheck-head > strong[text]|19
 catalog|settings-developer@1280x860|dom|div.hint[text] > a[text]|1
 catalog|settings-developer@1280x860|dom|div.hint[text] > b[text]|4
 catalog|settings-developer@1280x860|dom|div.px-brand > a.logo[text]|1
@@ -2531,21 +2545,21 @@ catalog|settings-developer@1280x860|dom|div.px-pop > button.ghost.profile.sm|1
 catalog|settings-developer@1280x860|dom|div.px-pop > div#lookmenu.amenu.lookmenu|1
 catalog|settings-developer@1280x860|dom|div.px-pop > div#profilemenu.amenu|1
 catalog|settings-developer@1280x860|dom|div.px-user > div.px-pop|1
-catalog|settings-developer@1280x860|dom|div.setdetails-body > div.devcheck|14
+catalog|settings-developer@1280x860|dom|div.setdetails-body > div.devcheck|19
 catalog|settings-developer@1280x860|dom|div.setdetails-body > div.hint[text]|5
 catalog|settings-developer@1280x860|dom|div.setdetails-body > div.tog|7
 catalog|settings-developer@1280x860|dom|div.setdetails-body > h2.section[text]|3
-catalog|settings-developer@1280x860|dom|div.setdetails-body > h3.devcheck-group[text]|2
-catalog|settings-developer@1280x860|dom|div.setdetails-body > p.devcheck-note[text]|3
-catalog|settings-developer@1280x860|dom|div.setdetails-body > p.hint[text]|1
+catalog|settings-developer@1280x860|dom|div.setdetails-body > h3.devcheck-group[text]|5
+catalog|settings-developer@1280x860|dom|div.setdetails-body > p.devcheck-note[text]|4
+catalog|settings-developer@1280x860|dom|div.setdetails-body > p.hint[text]|2
 catalog|settings-developer@1280x860|dom|div.setfields > div|7
 catalog|settings-developer@1280x860|dom|div.setfoot > button.primary.sm[disabled text]|7
 catalog|settings-developer@1280x860|dom|div.setfoot > span.setstate[text]|7
 catalog|settings-developer@1280x860|dom|div.sethead > div|1
 catalog|settings-developer@1280x860|dom|div.setlayout > div#setbody.adminwrap|1
 catalog|settings-developer@1280x860|dom|div.setlayout > nav.settabs[aria-label=*]|1
-catalog|settings-developer@1280x860|dom|div.setsection > h2[text]|6
-catalog|settings-developer@1280x860|dom|div.setsection > p[text]|6
+catalog|settings-developer@1280x860|dom|div.setsection > h2[text]|7
+catalog|settings-developer@1280x860|dom|div.setsection > p[text]|7
 catalog|settings-developer@1280x860|dom|div.tog > span[text]|7
 catalog|settings-developer@1280x860|dom|label.tog > input#adr[type=checkbox]|1
 catalog|settings-developer@1280x860|dom|label.tog > input#dhqa[type=checkbox]|1
@@ -2566,14 +2580,15 @@ catalog|settings-developer@1280x860|dom|nav.setdestinations[aria-label=*] > a|3
 catalog|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
 catalog|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|10
 catalog|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
+catalog|settings-developer@1280x860|dom|p.devcheck-description[text] > code[text]|11
 catalog|settings-developer@1280x860|dom|select#dvrreserve > option[text]|5
 catalog|settings-developer@1280x860|dom|small > code[text]|2
 catalog|settings-developer@1280x860|dom|small[text] > br|4
 catalog|settings-developer@1280x860|dom|small[text] > code[text]|6
 catalog|settings-developer@1280x860|dom|small[text] > i[text]|1
-catalog|settings-developer@1280x860|dom|span.devcheck-status > span.ok.pill[text]|1
-catalog|settings-developer@1280x860|dom|span.devcheck-status > span.pill.warn[text]|4
-catalog|settings-developer@1280x860|dom|span.devcheck-status > span.pill[text]|9
+catalog|settings-developer@1280x860|dom|span.devcheck-status > span.ok.pill[text]|2
+catalog|settings-developer@1280x860|dom|span.devcheck-status > span.pill.warn[text]|5
+catalog|settings-developer@1280x860|dom|span.devcheck-status > span.pill[text]|12
 catalog|settings-developer@1280x860|dom|span[text] > small[text]|13
 catalog|settings-developer@1280x860|dom|span[text] > small|2
 catalog|settings-developer@1280x860|dom|span[text] > span.pill.warn[text]|2
@@ -2620,14 +2635,15 @@ catalog|settings-developer@1280x860|focus|034|input#pqh
 catalog|settings-developer@1280x860|focus|035|summary "Readiness and device qualification"
 catalog|settings-developer@1280x860|focus|036|input#pdp
 catalog|settings-developer@1280x860|focus|037|a "Quality switching"
-catalog|settings-developer@1280x860|focus|038|input#pcpv1
-catalog|settings-developer@1280x860|focus|039|summary "Client readiness"
-catalog|settings-developer@1280x860|focus|040|input#dhqa
-catalog|settings-developer@1280x860|focus|041|summary "Cache impact and diagnostic evidence"
-catalog|settings-developer@1280x860|focus|042|input#adr
-catalog|settings-developer@1280x860|focus|043|summary "Recovery limits and diagnostic evidence"
-catalog|settings-developer@1280x860|focus|044|input#phs
-catalog|settings-developer@1280x860|focus|045|<wrap>
+catalog|settings-developer@1280x860|focus|038|summary "Verification still owed"
+catalog|settings-developer@1280x860|focus|039|input#pcpv1
+catalog|settings-developer@1280x860|focus|040|summary "Client readiness"
+catalog|settings-developer@1280x860|focus|041|input#dhqa
+catalog|settings-developer@1280x860|focus|042|summary "Cache impact and diagnostic evidence"
+catalog|settings-developer@1280x860|focus|043|input#adr
+catalog|settings-developer@1280x860|focus|044|summary "Recovery limits and diagnostic evidence"
+catalog|settings-developer@1280x860|focus|045|input#phs
+catalog|settings-developer@1280x860|focus|046|<wrap>
 catalog|settings-developer@1280x860|req|GET /api/v1/activity|2
 catalog|settings-developer@1280x860|req|GET /api/v1/developer/readiness|1
 catalog|settings-developer@1280x860|req|GET /api/v1/me|1
@@ -2654,11 +2670,11 @@ catalog|settings-developer@390x780|dom|button.px-tab[aria-expanded=false aria-co
 catalog|settings-developer@390x780|dom|button.px-tab[aria-expanded=false aria-controls=* type=button] > svg.px-ico[aria-hidden=true]|1
 catalog|settings-developer@390x780|dom|button.px-tab[type=button] > span[text]|1
 catalog|settings-developer@390x780|dom|button.px-tab[type=button] > svg.px-ico[aria-hidden=true]|1
-catalog|settings-developer@390x780|dom|details.setdetails > div.setdetails-body|6
-catalog|settings-developer@390x780|dom|details.setdetails > summary[text]|6
+catalog|settings-developer@390x780|dom|details.setdetails > div.setdetails-body|7
+catalog|settings-developer@390x780|dom|details.setdetails > summary[text]|7
 catalog|settings-developer@390x780|dom|div > div.hint[text]|5
 catalog|settings-developer@390x780|dom|div > h1[text]|1
-catalog|settings-developer@390x780|dom|div > h2.section[text]|8
+catalog|settings-developer@390x780|dom|div > h2.section[text]|9
 catalog|settings-developer@390x780|dom|div > input#dvrfloor[type=number]|1
 catalog|settings-developer@390x780|dom|div > input#dvrlead[type=number]|1
 catalog|settings-developer@390x780|dom|div > input#dvrpadend[type=number]|1
@@ -2666,7 +2682,7 @@ catalog|settings-developer@390x780|dom|div > input#dvrpadstart[type=number]|1
 catalog|settings-developer@390x780|dom|div > input#dvrroot|1
 catalog|settings-developer@390x780|dom|div > input#dvrwebhook|1
 catalog|settings-developer@390x780|dom|div > label[text]|7
-catalog|settings-developer@390x780|dom|div > p.sub[text]|8
+catalog|settings-developer@390x780|dom|div > p.sub[text]|9
 catalog|settings-developer@390x780|dom|div > p[text]|1
 catalog|settings-developer@390x780|dom|div > select#dvrreserve|1
 catalog|settings-developer@390x780|dom|div#app > div#pxshell.px-shell|1
@@ -2686,9 +2702,9 @@ catalog|settings-developer@390x780|dom|div#pxshell.px-shell > nav.px-tabs[aria-l
 catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div#drcard.card.setcard|1
 catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div#vdcard.card.setcard|1
 catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div.card.local.setcard|1
-catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div.card.setcard|5
+catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div.card.setcard|6
 catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div.sethead|1
-catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div.setsection|6
+catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div.setsection|7
 catalog|settings-developer@390x780|dom|div#setbody.adminwrap > nav.setdestinations[aria-label=*]|1
 catalog|settings-developer@390x780|dom|div#vdcard.card.setcard > details.setdetails|1
 catalog|settings-developer@390x780|dom|div#vdcard.card.setcard > div#dhqerr.err[role=alert]|1
@@ -2699,28 +2715,28 @@ catalog|settings-developer@390x780|dom|div#vdcard.card.setcard > label.tog|1
 catalog|settings-developer@390x780|dom|div.card.local.setcard > div.cardhead|1
 catalog|settings-developer@390x780|dom|div.card.local.setcard > div.hint[text]|1
 catalog|settings-developer@390x780|dom|div.card.local.setcard > label.tog|1
-catalog|settings-developer@390x780|dom|div.card.setcard > details.setdetails|4
+catalog|settings-developer@390x780|dom|div.card.setcard > details.setdetails|5
 catalog|settings-developer@390x780|dom|div.card.setcard > div#dverr.err[role=alert]|1
 catalog|settings-developer@390x780|dom|div.card.setcard > div#dvrerr.err[role=alert]|1
 catalog|settings-developer@390x780|dom|div.card.setcard > div#dxerr.err[role=alert]|1
 catalog|settings-developer@390x780|dom|div.card.setcard > div#lcdeverr.err[role=alert]|1
 catalog|settings-developer@390x780|dom|div.card.setcard > div#pqherr.err[role=alert]|1
-catalog|settings-developer@390x780|dom|div.card.setcard > div.cardhead|5
-catalog|settings-developer@390x780|dom|div.card.setcard > div.hint[text]|1
+catalog|settings-developer@390x780|dom|div.card.setcard > div.cardhead|6
+catalog|settings-developer@390x780|dom|div.card.setcard > div.hint[text]|2
 catalog|settings-developer@390x780|dom|div.card.setcard > div.setfields|1
 catalog|settings-developer@390x780|dom|div.card.setcard > div.setfoot|5
 catalog|settings-developer@390x780|dom|div.card.setcard > label.tog|5
-catalog|settings-developer@390x780|dom|div.cardhead > div.cardtools|8
-catalog|settings-developer@390x780|dom|div.cardhead > div|8
+catalog|settings-developer@390x780|dom|div.cardhead > div.cardtools|9
+catalog|settings-developer@390x780|dom|div.cardhead > div|9
 catalog|settings-developer@390x780|dom|div.cardtools > span#pqhstate.pill[text]|1
 catalog|settings-developer@390x780|dom|div.cardtools > span.acc.pill[text]|1
 catalog|settings-developer@390x780|dom|div.cardtools > span.pill.warn[text]|1
-catalog|settings-developer@390x780|dom|div.cardtools > span.pill[text]|5
-catalog|settings-developer@390x780|dom|div.devcheck > div.devcheck-head|14
-catalog|settings-developer@390x780|dom|div.devcheck > p.devcheck-description[text]|14
+catalog|settings-developer@390x780|dom|div.cardtools > span.pill[text]|6
+catalog|settings-developer@390x780|dom|div.devcheck > div.devcheck-head|19
+catalog|settings-developer@390x780|dom|div.devcheck > p.devcheck-description[text]|19
 catalog|settings-developer@390x780|dom|div.devcheck > p.devcheck-evidence[text]|12
-catalog|settings-developer@390x780|dom|div.devcheck-head > span.devcheck-status|14
-catalog|settings-developer@390x780|dom|div.devcheck-head > strong[text]|14
+catalog|settings-developer@390x780|dom|div.devcheck-head > span.devcheck-status|19
+catalog|settings-developer@390x780|dom|div.devcheck-head > strong[text]|19
 catalog|settings-developer@390x780|dom|div.hint[text] > a[text]|1
 catalog|settings-developer@390x780|dom|div.hint[text] > b[text]|4
 catalog|settings-developer@390x780|dom|div.px-brand > a.logo[text]|1
@@ -2735,21 +2751,21 @@ catalog|settings-developer@390x780|dom|div.px-pop > button.ghost.profile.sm|1
 catalog|settings-developer@390x780|dom|div.px-pop > div#lookmenu.amenu.lookmenu|1
 catalog|settings-developer@390x780|dom|div.px-pop > div#profilemenu.amenu|1
 catalog|settings-developer@390x780|dom|div.px-user > div.px-pop|1
-catalog|settings-developer@390x780|dom|div.setdetails-body > div.devcheck|14
+catalog|settings-developer@390x780|dom|div.setdetails-body > div.devcheck|19
 catalog|settings-developer@390x780|dom|div.setdetails-body > div.hint[text]|5
 catalog|settings-developer@390x780|dom|div.setdetails-body > div.tog|7
 catalog|settings-developer@390x780|dom|div.setdetails-body > h2.section[text]|3
-catalog|settings-developer@390x780|dom|div.setdetails-body > h3.devcheck-group[text]|2
-catalog|settings-developer@390x780|dom|div.setdetails-body > p.devcheck-note[text]|3
-catalog|settings-developer@390x780|dom|div.setdetails-body > p.hint[text]|1
+catalog|settings-developer@390x780|dom|div.setdetails-body > h3.devcheck-group[text]|5
+catalog|settings-developer@390x780|dom|div.setdetails-body > p.devcheck-note[text]|4
+catalog|settings-developer@390x780|dom|div.setdetails-body > p.hint[text]|2
 catalog|settings-developer@390x780|dom|div.setfields > div|7
 catalog|settings-developer@390x780|dom|div.setfoot > button.primary.sm[disabled text]|7
 catalog|settings-developer@390x780|dom|div.setfoot > span.setstate[text]|7
 catalog|settings-developer@390x780|dom|div.sethead > div|1
 catalog|settings-developer@390x780|dom|div.setlayout > div#setbody.adminwrap|1
 catalog|settings-developer@390x780|dom|div.setlayout > nav.settabs[aria-label=*]|1
-catalog|settings-developer@390x780|dom|div.setsection > h2[text]|6
-catalog|settings-developer@390x780|dom|div.setsection > p[text]|6
+catalog|settings-developer@390x780|dom|div.setsection > h2[text]|7
+catalog|settings-developer@390x780|dom|div.setsection > p[text]|7
 catalog|settings-developer@390x780|dom|div.tog > span[text]|7
 catalog|settings-developer@390x780|dom|label.tog > input#adr[type=checkbox]|1
 catalog|settings-developer@390x780|dom|label.tog > input#dhqa[type=checkbox]|1
@@ -2770,14 +2786,15 @@ catalog|settings-developer@390x780|dom|nav.setdestinations[aria-label=*] > a|3
 catalog|settings-developer@390x780|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
 catalog|settings-developer@390x780|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|10
 catalog|settings-developer@390x780|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
+catalog|settings-developer@390x780|dom|p.devcheck-description[text] > code[text]|11
 catalog|settings-developer@390x780|dom|select#dvrreserve > option[text]|5
 catalog|settings-developer@390x780|dom|small > code[text]|2
 catalog|settings-developer@390x780|dom|small[text] > br|4
 catalog|settings-developer@390x780|dom|small[text] > code[text]|6
 catalog|settings-developer@390x780|dom|small[text] > i[text]|1
-catalog|settings-developer@390x780|dom|span.devcheck-status > span.ok.pill[text]|1
-catalog|settings-developer@390x780|dom|span.devcheck-status > span.pill.warn[text]|4
-catalog|settings-developer@390x780|dom|span.devcheck-status > span.pill[text]|9
+catalog|settings-developer@390x780|dom|span.devcheck-status > span.ok.pill[text]|2
+catalog|settings-developer@390x780|dom|span.devcheck-status > span.pill.warn[text]|5
+catalog|settings-developer@390x780|dom|span.devcheck-status > span.pill[text]|12
 catalog|settings-developer@390x780|dom|span[text] > small[text]|13
 catalog|settings-developer@390x780|dom|span[text] > small|2
 catalog|settings-developer@390x780|dom|span[text] > span.pill.warn[text]|2
@@ -2819,19 +2836,20 @@ catalog|settings-developer@390x780|focus|029|input#pqh
 catalog|settings-developer@390x780|focus|030|summary "Readiness and device qualification"
 catalog|settings-developer@390x780|focus|031|input#pdp
 catalog|settings-developer@390x780|focus|032|a "Quality switching"
-catalog|settings-developer@390x780|focus|033|input#pcpv1
-catalog|settings-developer@390x780|focus|034|summary "Client readiness"
-catalog|settings-developer@390x780|focus|035|input#dhqa
-catalog|settings-developer@390x780|focus|036|summary "Cache impact and diagnostic evidence"
-catalog|settings-developer@390x780|focus|037|input#adr
-catalog|settings-developer@390x780|focus|038|summary "Recovery limits and diagnostic evidence"
-catalog|settings-developer@390x780|focus|039|input#phs
-catalog|settings-developer@390x780|focus|040|a.px-tab "Home"
-catalog|settings-developer@390x780|focus|041|a.px-tab "Channels"
-catalog|settings-developer@390x780|focus|042|button.px-tab "Libraries"
-catalog|settings-developer@390x780|focus|043|button.px-tab "Search"
-catalog|settings-developer@390x780|focus|044|a.px-tab "Activity"
-catalog|settings-developer@390x780|focus|045|<wrap>
+catalog|settings-developer@390x780|focus|033|summary "Verification still owed"
+catalog|settings-developer@390x780|focus|034|input#pcpv1
+catalog|settings-developer@390x780|focus|035|summary "Client readiness"
+catalog|settings-developer@390x780|focus|036|input#dhqa
+catalog|settings-developer@390x780|focus|037|summary "Cache impact and diagnostic evidence"
+catalog|settings-developer@390x780|focus|038|input#adr
+catalog|settings-developer@390x780|focus|039|summary "Recovery limits and diagnostic evidence"
+catalog|settings-developer@390x780|focus|040|input#phs
+catalog|settings-developer@390x780|focus|041|a.px-tab "Home"
+catalog|settings-developer@390x780|focus|042|a.px-tab "Channels"
+catalog|settings-developer@390x780|focus|043|button.px-tab "Libraries"
+catalog|settings-developer@390x780|focus|044|button.px-tab "Search"
+catalog|settings-developer@390x780|focus|045|a.px-tab "Activity"
+catalog|settings-developer@390x780|focus|046|<wrap>
 catalog|settings-developer@390x780|req|GET /api/v1/activity|2
 catalog|settings-developer@390x780|req|GET /api/v1/developer/readiness|1
 catalog|settings-developer@390x780|req|GET /api/v1/me|1
@@ -4540,25 +4558,32 @@ classic|player@1280x860|dom|div#app > main#main|1
 classic|player@1280x860|dom|div#modal.modal.open[role=dialog aria-modal=true aria-label=*] > div#player.player|1
 classic|player@1280x860|dom|div#pbar.pbar > div#playTitle.ptitle[text]|1
 classic|player@1280x860|dom|div#pbar.pbar > div.row|1
+classic|player@1280x860|dom|div#pindicator.pindicator[role=status aria-live=polite] > div.pspin[aria-hidden=true]|1
+classic|player@1280x860|dom|div#pindicator.pindicator[role=status aria-live=polite] > span#pindText|1
 classic|player@1280x860|dom|div#pinfo.pinfo > div.pifacts.vbadges|1
 classic|player@1280x860|dom|div#pinfo.pinfo > div.pimeta[text]|1
 classic|player@1280x860|dom|div#pinfo.pinfo > h3[text]|1
 classic|player@1280x860|dom|div#player.player > div#pbar.pbar|1
+classic|player@1280x860|dom|div#player.player > div#pindicator.pindicator[role=status aria-live=polite]|1
 classic|player@1280x860|dom|div#player.player > div#pinfo.pinfo|1
-classic|player@1280x860|dom|div#player.player > div#ploading.ploading|1
+classic|player@1280x860|dom|div#player.player > div#ploading.on.ploading|1
 classic|player@1280x860|dom|div#player.player > div#pmenu.pmenu[role=menu]|1
 classic|player@1280x860|dom|div#player.player > div#pskip.pskip|1
+classic|player@1280x860|dom|div#player.player > div#psurface.psurface[role=status aria-live=polite]|1
 classic|player@1280x860|dom|div#player.player > div#ptimeline.ptimeline|1
 classic|player@1280x860|dom|div#player.player > div#ptransport.ptransport|1
 classic|player@1280x860|dom|div#player.player > div#statsov.statsov|1
 classic|player@1280x860|dom|div#player.player > video#video|1
-classic|player@1280x860|dom|div#ploading.ploading > div#ploadAct.ploadAct|1
-classic|player@1280x860|dom|div#ploading.ploading > div#ploadSub.ploadSub[text]|1
-classic|player@1280x860|dom|div#ploading.ploading > div#ploadText.ploadText[text]|1
-classic|player@1280x860|dom|div#ploading.ploading > div.pspin|1
+classic|player@1280x860|dom|div#ploading.on.ploading > div#ploadAct.ploadAct|1
+classic|player@1280x860|dom|div#ploading.on.ploading > div#ploadSub.ploadSub[text]|1
+classic|player@1280x860|dom|div#ploading.on.ploading > div#ploadText.ploadText[text]|1
+classic|player@1280x860|dom|div#ploading.on.ploading > div.pspin|1
 classic|player@1280x860|dom|div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*] > div#pseekbuf.pseek-buf[aria-hidden=true]|1
 classic|player@1280x860|dom|div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*] > div#pseekfill.pseek-fill[aria-hidden=true]|1
 classic|player@1280x860|dom|div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*] > div#pseekthumb.pseek-thumb[aria-hidden=true]|1
+classic|player@1280x860|dom|div#psurface.psurface[role=status aria-live=polite] > div#psurfAct.psurfAct|1
+classic|player@1280x860|dom|div#psurface.psurface[role=status aria-live=polite] > div#psurfSub.psurfSub|1
+classic|player@1280x860|dom|div#psurface.psurface[role=status aria-live=polite] > div#psurfText.psurfText|1
 classic|player@1280x860|dom|div#ptimeline.ptimeline > div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*]|1
 classic|player@1280x860|dom|div#ptimeline.ptimeline > span#ptcur.ptime[aria-hidden=true text]|1
 classic|player@1280x860|dom|div#ptimeline.ptimeline > span#ptdur.ptime[aria-hidden=true text]|1
@@ -4648,7 +4673,7 @@ classic|player@1280x860|req|GET /api/v1/items/<id>|1
 classic|player@1280x860|req|GET /api/v1/libraries|1
 classic|player@1280x860|req|GET /api/v1/me|1
 classic|player@1280x860|req|GET /api/v1/server|1
-classic|player@1280x860|req|POST /api/v1/client-log|1
+classic|player@1280x860|req|POST /api/v1/client-log|4
 classic|player@1280x860|req|POST /api/v1/files/<id>/decision|1
 classic|player@1280x860|req|POST /api/v1/items/<id>/progress|1
 classic|player@390x780|dom|^ > div#app|1
@@ -4674,25 +4699,32 @@ classic|player@390x780|dom|div#app > main#main|1
 classic|player@390x780|dom|div#modal.modal.open[role=dialog aria-modal=true aria-label=*] > div#player.player|1
 classic|player@390x780|dom|div#pbar.pbar > div#playTitle.ptitle[text]|1
 classic|player@390x780|dom|div#pbar.pbar > div.row|1
+classic|player@390x780|dom|div#pindicator.pindicator[role=status aria-live=polite] > div.pspin[aria-hidden=true]|1
+classic|player@390x780|dom|div#pindicator.pindicator[role=status aria-live=polite] > span#pindText|1
 classic|player@390x780|dom|div#pinfo.pinfo > div.pifacts.vbadges|1
 classic|player@390x780|dom|div#pinfo.pinfo > div.pimeta[text]|1
 classic|player@390x780|dom|div#pinfo.pinfo > h3[text]|1
 classic|player@390x780|dom|div#player.player > div#pbar.pbar|1
+classic|player@390x780|dom|div#player.player > div#pindicator.pindicator[role=status aria-live=polite]|1
 classic|player@390x780|dom|div#player.player > div#pinfo.pinfo|1
-classic|player@390x780|dom|div#player.player > div#ploading.ploading|1
+classic|player@390x780|dom|div#player.player > div#ploading.on.ploading|1
 classic|player@390x780|dom|div#player.player > div#pmenu.pmenu[role=menu]|1
 classic|player@390x780|dom|div#player.player > div#pskip.pskip|1
+classic|player@390x780|dom|div#player.player > div#psurface.psurface[role=status aria-live=polite]|1
 classic|player@390x780|dom|div#player.player > div#ptimeline.ptimeline|1
 classic|player@390x780|dom|div#player.player > div#ptransport.ptransport|1
 classic|player@390x780|dom|div#player.player > div#statsov.statsov|1
 classic|player@390x780|dom|div#player.player > video#video|1
-classic|player@390x780|dom|div#ploading.ploading > div#ploadAct.ploadAct|1
-classic|player@390x780|dom|div#ploading.ploading > div#ploadSub.ploadSub[text]|1
-classic|player@390x780|dom|div#ploading.ploading > div#ploadText.ploadText[text]|1
-classic|player@390x780|dom|div#ploading.ploading > div.pspin|1
+classic|player@390x780|dom|div#ploading.on.ploading > div#ploadAct.ploadAct|1
+classic|player@390x780|dom|div#ploading.on.ploading > div#ploadSub.ploadSub[text]|1
+classic|player@390x780|dom|div#ploading.on.ploading > div#ploadText.ploadText[text]|1
+classic|player@390x780|dom|div#ploading.on.ploading > div.pspin|1
 classic|player@390x780|dom|div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*] > div#pseekbuf.pseek-buf[aria-hidden=true]|1
 classic|player@390x780|dom|div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*] > div#pseekfill.pseek-fill[aria-hidden=true]|1
 classic|player@390x780|dom|div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*] > div#pseekthumb.pseek-thumb[aria-hidden=true]|1
+classic|player@390x780|dom|div#psurface.psurface[role=status aria-live=polite] > div#psurfAct.psurfAct|1
+classic|player@390x780|dom|div#psurface.psurface[role=status aria-live=polite] > div#psurfSub.psurfSub|1
+classic|player@390x780|dom|div#psurface.psurface[role=status aria-live=polite] > div#psurfText.psurfText|1
 classic|player@390x780|dom|div#ptimeline.ptimeline > div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*]|1
 classic|player@390x780|dom|div#ptimeline.ptimeline > span#ptcur.ptime[aria-hidden=true text]|1
 classic|player@390x780|dom|div#ptimeline.ptimeline > span#ptdur.ptime[aria-hidden=true text]|1
@@ -4782,7 +4814,7 @@ classic|player@390x780|req|GET /api/v1/items/<id>|1
 classic|player@390x780|req|GET /api/v1/libraries|1
 classic|player@390x780|req|GET /api/v1/me|1
 classic|player@390x780|req|GET /api/v1/server|1
-classic|player@390x780|req|POST /api/v1/client-log|1
+classic|player@390x780|req|POST /api/v1/client-log|4
 classic|player@390x780|req|POST /api/v1/files/<id>/decision|1
 classic|player@390x780|req|POST /api/v1/items/<id>/progress|1
 classic|search@1280x860|dom|^ > div#app|1
@@ -4911,15 +4943,15 @@ classic|settings-developer@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=me
 classic|settings-developer@1280x860|dom|button.ghost.profile.sm > span.caret[text]|1
 classic|settings-developer@1280x860|dom|button.ghost.profile.sm > span.pavatar[text]|1
 classic|settings-developer@1280x860|dom|button.ghost.profile.sm > span.pname[text]|1
-classic|settings-developer@1280x860|dom|details.setdetails > div.setdetails-body|6
-classic|settings-developer@1280x860|dom|details.setdetails > summary[text]|6
+classic|settings-developer@1280x860|dom|details.setdetails > div.setdetails-body|7
+classic|settings-developer@1280x860|dom|details.setdetails > summary[text]|7
 classic|settings-developer@1280x860|dom|div > button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*]|1
 classic|settings-developer@1280x860|dom|div > button.ghost.profile.sm|1
 classic|settings-developer@1280x860|dom|div > div#lookmenu.amenu.lookmenu|1
 classic|settings-developer@1280x860|dom|div > div#profilemenu.amenu|1
 classic|settings-developer@1280x860|dom|div > div.hint[text]|5
 classic|settings-developer@1280x860|dom|div > h1[text]|1
-classic|settings-developer@1280x860|dom|div > h2.section[text]|8
+classic|settings-developer@1280x860|dom|div > h2.section[text]|9
 classic|settings-developer@1280x860|dom|div > input#dvrfloor[type=number]|1
 classic|settings-developer@1280x860|dom|div > input#dvrlead[type=number]|1
 classic|settings-developer@1280x860|dom|div > input#dvrpadend[type=number]|1
@@ -4927,7 +4959,7 @@ classic|settings-developer@1280x860|dom|div > input#dvrpadstart[type=number]|1
 classic|settings-developer@1280x860|dom|div > input#dvrroot|1
 classic|settings-developer@1280x860|dom|div > input#dvrwebhook|1
 classic|settings-developer@1280x860|dom|div > label[text]|7
-classic|settings-developer@1280x860|dom|div > p.sub[text]|8
+classic|settings-developer@1280x860|dom|div > p.sub[text]|9
 classic|settings-developer@1280x860|dom|div > p[text]|1
 classic|settings-developer@1280x860|dom|div > select#dvrreserve|1
 classic|settings-developer@1280x860|dom|div#app > header.top|1
@@ -4941,9 +4973,9 @@ classic|settings-developer@1280x860|dom|div#drcard.card.setcard > label.tog|1
 classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div#drcard.card.setcard|1
 classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div#vdcard.card.setcard|1
 classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div.card.local.setcard|1
-classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div.card.setcard|5
+classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div.card.setcard|6
 classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div.sethead|1
-classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div.setsection|6
+classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div.setsection|7
 classic|settings-developer@1280x860|dom|div#setbody.adminwrap > nav.setdestinations[aria-label=*]|1
 classic|settings-developer@1280x860|dom|div#vdcard.card.setcard > details.setdetails|1
 classic|settings-developer@1280x860|dom|div#vdcard.card.setcard > div#dhqerr.err[role=alert]|1
@@ -4954,45 +4986,45 @@ classic|settings-developer@1280x860|dom|div#vdcard.card.setcard > label.tog|1
 classic|settings-developer@1280x860|dom|div.card.local.setcard > div.cardhead|1
 classic|settings-developer@1280x860|dom|div.card.local.setcard > div.hint[text]|1
 classic|settings-developer@1280x860|dom|div.card.local.setcard > label.tog|1
-classic|settings-developer@1280x860|dom|div.card.setcard > details.setdetails|4
+classic|settings-developer@1280x860|dom|div.card.setcard > details.setdetails|5
 classic|settings-developer@1280x860|dom|div.card.setcard > div#dverr.err[role=alert]|1
 classic|settings-developer@1280x860|dom|div.card.setcard > div#dvrerr.err[role=alert]|1
 classic|settings-developer@1280x860|dom|div.card.setcard > div#dxerr.err[role=alert]|1
 classic|settings-developer@1280x860|dom|div.card.setcard > div#lcdeverr.err[role=alert]|1
 classic|settings-developer@1280x860|dom|div.card.setcard > div#pqherr.err[role=alert]|1
-classic|settings-developer@1280x860|dom|div.card.setcard > div.cardhead|5
-classic|settings-developer@1280x860|dom|div.card.setcard > div.hint[text]|1
+classic|settings-developer@1280x860|dom|div.card.setcard > div.cardhead|6
+classic|settings-developer@1280x860|dom|div.card.setcard > div.hint[text]|2
 classic|settings-developer@1280x860|dom|div.card.setcard > div.setfields|1
 classic|settings-developer@1280x860|dom|div.card.setcard > div.setfoot|5
 classic|settings-developer@1280x860|dom|div.card.setcard > label.tog|5
-classic|settings-developer@1280x860|dom|div.cardhead > div.cardtools|8
-classic|settings-developer@1280x860|dom|div.cardhead > div|8
+classic|settings-developer@1280x860|dom|div.cardhead > div.cardtools|9
+classic|settings-developer@1280x860|dom|div.cardhead > div|9
 classic|settings-developer@1280x860|dom|div.cardtools > span#pqhstate.pill[text]|1
 classic|settings-developer@1280x860|dom|div.cardtools > span.acc.pill[text]|1
 classic|settings-developer@1280x860|dom|div.cardtools > span.pill.warn[text]|1
-classic|settings-developer@1280x860|dom|div.cardtools > span.pill[text]|5
-classic|settings-developer@1280x860|dom|div.devcheck > div.devcheck-head|14
-classic|settings-developer@1280x860|dom|div.devcheck > p.devcheck-description[text]|14
+classic|settings-developer@1280x860|dom|div.cardtools > span.pill[text]|6
+classic|settings-developer@1280x860|dom|div.devcheck > div.devcheck-head|19
+classic|settings-developer@1280x860|dom|div.devcheck > p.devcheck-description[text]|19
 classic|settings-developer@1280x860|dom|div.devcheck > p.devcheck-evidence[text]|12
-classic|settings-developer@1280x860|dom|div.devcheck-head > span.devcheck-status|14
-classic|settings-developer@1280x860|dom|div.devcheck-head > strong[text]|14
+classic|settings-developer@1280x860|dom|div.devcheck-head > span.devcheck-status|19
+classic|settings-developer@1280x860|dom|div.devcheck-head > strong[text]|19
 classic|settings-developer@1280x860|dom|div.hint[text] > a[text]|1
 classic|settings-developer@1280x860|dom|div.hint[text] > b[text]|4
-classic|settings-developer@1280x860|dom|div.setdetails-body > div.devcheck|14
+classic|settings-developer@1280x860|dom|div.setdetails-body > div.devcheck|19
 classic|settings-developer@1280x860|dom|div.setdetails-body > div.hint[text]|5
 classic|settings-developer@1280x860|dom|div.setdetails-body > div.tog|7
 classic|settings-developer@1280x860|dom|div.setdetails-body > h2.section[text]|3
-classic|settings-developer@1280x860|dom|div.setdetails-body > h3.devcheck-group[text]|2
-classic|settings-developer@1280x860|dom|div.setdetails-body > p.devcheck-note[text]|3
-classic|settings-developer@1280x860|dom|div.setdetails-body > p.hint[text]|1
+classic|settings-developer@1280x860|dom|div.setdetails-body > h3.devcheck-group[text]|5
+classic|settings-developer@1280x860|dom|div.setdetails-body > p.devcheck-note[text]|4
+classic|settings-developer@1280x860|dom|div.setdetails-body > p.hint[text]|2
 classic|settings-developer@1280x860|dom|div.setfields > div|7
 classic|settings-developer@1280x860|dom|div.setfoot > button.primary.sm[disabled text]|7
 classic|settings-developer@1280x860|dom|div.setfoot > span.setstate[text]|7
 classic|settings-developer@1280x860|dom|div.sethead > div|1
 classic|settings-developer@1280x860|dom|div.setlayout > div#setbody.adminwrap|1
 classic|settings-developer@1280x860|dom|div.setlayout > nav.settabs[aria-label=*]|1
-classic|settings-developer@1280x860|dom|div.setsection > h2[text]|6
-classic|settings-developer@1280x860|dom|div.setsection > p[text]|6
+classic|settings-developer@1280x860|dom|div.setsection > h2[text]|7
+classic|settings-developer@1280x860|dom|div.setsection > p[text]|7
 classic|settings-developer@1280x860|dom|div.tog > span[text]|7
 classic|settings-developer@1280x860|dom|div.topctl > div|2
 classic|settings-developer@1280x860|dom|header.top > a.logo[text]|1
@@ -5017,14 +5049,15 @@ classic|settings-developer@1280x860|dom|nav.setdestinations[aria-label=*] > a|3
 classic|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
 classic|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|10
 classic|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
+classic|settings-developer@1280x860|dom|p.devcheck-description[text] > code[text]|11
 classic|settings-developer@1280x860|dom|select#dvrreserve > option[text]|5
 classic|settings-developer@1280x860|dom|small > code[text]|2
 classic|settings-developer@1280x860|dom|small[text] > br|4
 classic|settings-developer@1280x860|dom|small[text] > code[text]|6
 classic|settings-developer@1280x860|dom|small[text] > i[text]|1
-classic|settings-developer@1280x860|dom|span.devcheck-status > span.ok.pill[text]|1
-classic|settings-developer@1280x860|dom|span.devcheck-status > span.pill.warn[text]|4
-classic|settings-developer@1280x860|dom|span.devcheck-status > span.pill[text]|9
+classic|settings-developer@1280x860|dom|span.devcheck-status > span.ok.pill[text]|2
+classic|settings-developer@1280x860|dom|span.devcheck-status > span.pill.warn[text]|5
+classic|settings-developer@1280x860|dom|span.devcheck-status > span.pill[text]|12
 classic|settings-developer@1280x860|dom|span[text] > small[text]|13
 classic|settings-developer@1280x860|dom|span[text] > small|2
 classic|settings-developer@1280x860|dom|span[text] > span.pill.warn[text]|2
@@ -5068,14 +5101,15 @@ classic|settings-developer@1280x860|focus|034|input#pqh
 classic|settings-developer@1280x860|focus|035|summary "Readiness and device qualification"
 classic|settings-developer@1280x860|focus|036|input#pdp
 classic|settings-developer@1280x860|focus|037|a "Quality switching"
-classic|settings-developer@1280x860|focus|038|input#pcpv1
-classic|settings-developer@1280x860|focus|039|summary "Client readiness"
-classic|settings-developer@1280x860|focus|040|input#dhqa
-classic|settings-developer@1280x860|focus|041|summary "Cache impact and diagnostic evidence"
-classic|settings-developer@1280x860|focus|042|input#adr
-classic|settings-developer@1280x860|focus|043|summary "Recovery limits and diagnostic evidence"
-classic|settings-developer@1280x860|focus|044|input#phs
-classic|settings-developer@1280x860|focus|045|<wrap>
+classic|settings-developer@1280x860|focus|038|summary "Verification still owed"
+classic|settings-developer@1280x860|focus|039|input#pcpv1
+classic|settings-developer@1280x860|focus|040|summary "Client readiness"
+classic|settings-developer@1280x860|focus|041|input#dhqa
+classic|settings-developer@1280x860|focus|042|summary "Cache impact and diagnostic evidence"
+classic|settings-developer@1280x860|focus|043|input#adr
+classic|settings-developer@1280x860|focus|044|summary "Recovery limits and diagnostic evidence"
+classic|settings-developer@1280x860|focus|045|input#phs
+classic|settings-developer@1280x860|focus|046|<wrap>
 classic|settings-developer@1280x860|req|GET /api/v1/activity|2
 classic|settings-developer@1280x860|req|GET /api/v1/developer/readiness|1
 classic|settings-developer@1280x860|req|GET /api/v1/me|1
@@ -5089,15 +5123,15 @@ classic|settings-developer@390x780|dom|button.ghost.lookbtn.sm[aria-haspopup=men
 classic|settings-developer@390x780|dom|button.ghost.profile.sm > span.caret[text]|1
 classic|settings-developer@390x780|dom|button.ghost.profile.sm > span.pavatar[text]|1
 classic|settings-developer@390x780|dom|button.ghost.profile.sm > span.pname[text]|1
-classic|settings-developer@390x780|dom|details.setdetails > div.setdetails-body|6
-classic|settings-developer@390x780|dom|details.setdetails > summary[text]|6
+classic|settings-developer@390x780|dom|details.setdetails > div.setdetails-body|7
+classic|settings-developer@390x780|dom|details.setdetails > summary[text]|7
 classic|settings-developer@390x780|dom|div > button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*]|1
 classic|settings-developer@390x780|dom|div > button.ghost.profile.sm|1
 classic|settings-developer@390x780|dom|div > div#lookmenu.amenu.lookmenu|1
 classic|settings-developer@390x780|dom|div > div#profilemenu.amenu|1
 classic|settings-developer@390x780|dom|div > div.hint[text]|5
 classic|settings-developer@390x780|dom|div > h1[text]|1
-classic|settings-developer@390x780|dom|div > h2.section[text]|8
+classic|settings-developer@390x780|dom|div > h2.section[text]|9
 classic|settings-developer@390x780|dom|div > input#dvrfloor[type=number]|1
 classic|settings-developer@390x780|dom|div > input#dvrlead[type=number]|1
 classic|settings-developer@390x780|dom|div > input#dvrpadend[type=number]|1
@@ -5105,7 +5139,7 @@ classic|settings-developer@390x780|dom|div > input#dvrpadstart[type=number]|1
 classic|settings-developer@390x780|dom|div > input#dvrroot|1
 classic|settings-developer@390x780|dom|div > input#dvrwebhook|1
 classic|settings-developer@390x780|dom|div > label[text]|7
-classic|settings-developer@390x780|dom|div > p.sub[text]|8
+classic|settings-developer@390x780|dom|div > p.sub[text]|9
 classic|settings-developer@390x780|dom|div > p[text]|1
 classic|settings-developer@390x780|dom|div > select#dvrreserve|1
 classic|settings-developer@390x780|dom|div#app > header.top|1
@@ -5119,9 +5153,9 @@ classic|settings-developer@390x780|dom|div#drcard.card.setcard > label.tog|1
 classic|settings-developer@390x780|dom|div#setbody.adminwrap > div#drcard.card.setcard|1
 classic|settings-developer@390x780|dom|div#setbody.adminwrap > div#vdcard.card.setcard|1
 classic|settings-developer@390x780|dom|div#setbody.adminwrap > div.card.local.setcard|1
-classic|settings-developer@390x780|dom|div#setbody.adminwrap > div.card.setcard|5
+classic|settings-developer@390x780|dom|div#setbody.adminwrap > div.card.setcard|6
 classic|settings-developer@390x780|dom|div#setbody.adminwrap > div.sethead|1
-classic|settings-developer@390x780|dom|div#setbody.adminwrap > div.setsection|6
+classic|settings-developer@390x780|dom|div#setbody.adminwrap > div.setsection|7
 classic|settings-developer@390x780|dom|div#setbody.adminwrap > nav.setdestinations[aria-label=*]|1
 classic|settings-developer@390x780|dom|div#vdcard.card.setcard > details.setdetails|1
 classic|settings-developer@390x780|dom|div#vdcard.card.setcard > div#dhqerr.err[role=alert]|1
@@ -5132,45 +5166,45 @@ classic|settings-developer@390x780|dom|div#vdcard.card.setcard > label.tog|1
 classic|settings-developer@390x780|dom|div.card.local.setcard > div.cardhead|1
 classic|settings-developer@390x780|dom|div.card.local.setcard > div.hint[text]|1
 classic|settings-developer@390x780|dom|div.card.local.setcard > label.tog|1
-classic|settings-developer@390x780|dom|div.card.setcard > details.setdetails|4
+classic|settings-developer@390x780|dom|div.card.setcard > details.setdetails|5
 classic|settings-developer@390x780|dom|div.card.setcard > div#dverr.err[role=alert]|1
 classic|settings-developer@390x780|dom|div.card.setcard > div#dvrerr.err[role=alert]|1
 classic|settings-developer@390x780|dom|div.card.setcard > div#dxerr.err[role=alert]|1
 classic|settings-developer@390x780|dom|div.card.setcard > div#lcdeverr.err[role=alert]|1
 classic|settings-developer@390x780|dom|div.card.setcard > div#pqherr.err[role=alert]|1
-classic|settings-developer@390x780|dom|div.card.setcard > div.cardhead|5
-classic|settings-developer@390x780|dom|div.card.setcard > div.hint[text]|1
+classic|settings-developer@390x780|dom|div.card.setcard > div.cardhead|6
+classic|settings-developer@390x780|dom|div.card.setcard > div.hint[text]|2
 classic|settings-developer@390x780|dom|div.card.setcard > div.setfields|1
 classic|settings-developer@390x780|dom|div.card.setcard > div.setfoot|5
 classic|settings-developer@390x780|dom|div.card.setcard > label.tog|5
-classic|settings-developer@390x780|dom|div.cardhead > div.cardtools|8
-classic|settings-developer@390x780|dom|div.cardhead > div|8
+classic|settings-developer@390x780|dom|div.cardhead > div.cardtools|9
+classic|settings-developer@390x780|dom|div.cardhead > div|9
 classic|settings-developer@390x780|dom|div.cardtools > span#pqhstate.pill[text]|1
 classic|settings-developer@390x780|dom|div.cardtools > span.acc.pill[text]|1
 classic|settings-developer@390x780|dom|div.cardtools > span.pill.warn[text]|1
-classic|settings-developer@390x780|dom|div.cardtools > span.pill[text]|5
-classic|settings-developer@390x780|dom|div.devcheck > div.devcheck-head|14
-classic|settings-developer@390x780|dom|div.devcheck > p.devcheck-description[text]|14
+classic|settings-developer@390x780|dom|div.cardtools > span.pill[text]|6
+classic|settings-developer@390x780|dom|div.devcheck > div.devcheck-head|19
+classic|settings-developer@390x780|dom|div.devcheck > p.devcheck-description[text]|19
 classic|settings-developer@390x780|dom|div.devcheck > p.devcheck-evidence[text]|12
-classic|settings-developer@390x780|dom|div.devcheck-head > span.devcheck-status|14
-classic|settings-developer@390x780|dom|div.devcheck-head > strong[text]|14
+classic|settings-developer@390x780|dom|div.devcheck-head > span.devcheck-status|19
+classic|settings-developer@390x780|dom|div.devcheck-head > strong[text]|19
 classic|settings-developer@390x780|dom|div.hint[text] > a[text]|1
 classic|settings-developer@390x780|dom|div.hint[text] > b[text]|4
-classic|settings-developer@390x780|dom|div.setdetails-body > div.devcheck|14
+classic|settings-developer@390x780|dom|div.setdetails-body > div.devcheck|19
 classic|settings-developer@390x780|dom|div.setdetails-body > div.hint[text]|5
 classic|settings-developer@390x780|dom|div.setdetails-body > div.tog|7
 classic|settings-developer@390x780|dom|div.setdetails-body > h2.section[text]|3
-classic|settings-developer@390x780|dom|div.setdetails-body > h3.devcheck-group[text]|2
-classic|settings-developer@390x780|dom|div.setdetails-body > p.devcheck-note[text]|3
-classic|settings-developer@390x780|dom|div.setdetails-body > p.hint[text]|1
+classic|settings-developer@390x780|dom|div.setdetails-body > h3.devcheck-group[text]|5
+classic|settings-developer@390x780|dom|div.setdetails-body > p.devcheck-note[text]|4
+classic|settings-developer@390x780|dom|div.setdetails-body > p.hint[text]|2
 classic|settings-developer@390x780|dom|div.setfields > div|7
 classic|settings-developer@390x780|dom|div.setfoot > button.primary.sm[disabled text]|7
 classic|settings-developer@390x780|dom|div.setfoot > span.setstate[text]|7
 classic|settings-developer@390x780|dom|div.sethead > div|1
 classic|settings-developer@390x780|dom|div.setlayout > div#setbody.adminwrap|1
 classic|settings-developer@390x780|dom|div.setlayout > nav.settabs[aria-label=*]|1
-classic|settings-developer@390x780|dom|div.setsection > h2[text]|6
-classic|settings-developer@390x780|dom|div.setsection > p[text]|6
+classic|settings-developer@390x780|dom|div.setsection > h2[text]|7
+classic|settings-developer@390x780|dom|div.setsection > p[text]|7
 classic|settings-developer@390x780|dom|div.tog > span[text]|7
 classic|settings-developer@390x780|dom|div.topctl > div|2
 classic|settings-developer@390x780|dom|header.top > a.logo[text]|1
@@ -5195,14 +5229,15 @@ classic|settings-developer@390x780|dom|nav.setdestinations[aria-label=*] > a|3
 classic|settings-developer@390x780|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
 classic|settings-developer@390x780|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|10
 classic|settings-developer@390x780|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
+classic|settings-developer@390x780|dom|p.devcheck-description[text] > code[text]|11
 classic|settings-developer@390x780|dom|select#dvrreserve > option[text]|5
 classic|settings-developer@390x780|dom|small > code[text]|2
 classic|settings-developer@390x780|dom|small[text] > br|4
 classic|settings-developer@390x780|dom|small[text] > code[text]|6
 classic|settings-developer@390x780|dom|small[text] > i[text]|1
-classic|settings-developer@390x780|dom|span.devcheck-status > span.ok.pill[text]|1
-classic|settings-developer@390x780|dom|span.devcheck-status > span.pill.warn[text]|4
-classic|settings-developer@390x780|dom|span.devcheck-status > span.pill[text]|9
+classic|settings-developer@390x780|dom|span.devcheck-status > span.ok.pill[text]|2
+classic|settings-developer@390x780|dom|span.devcheck-status > span.pill.warn[text]|5
+classic|settings-developer@390x780|dom|span.devcheck-status > span.pill[text]|12
 classic|settings-developer@390x780|dom|span[text] > small[text]|13
 classic|settings-developer@390x780|dom|span[text] > small|2
 classic|settings-developer@390x780|dom|span[text] > span.pill.warn[text]|2
@@ -5246,14 +5281,15 @@ classic|settings-developer@390x780|focus|034|input#pqh
 classic|settings-developer@390x780|focus|035|summary "Readiness and device qualification"
 classic|settings-developer@390x780|focus|036|input#pdp
 classic|settings-developer@390x780|focus|037|a "Quality switching"
-classic|settings-developer@390x780|focus|038|input#pcpv1
-classic|settings-developer@390x780|focus|039|summary "Client readiness"
-classic|settings-developer@390x780|focus|040|input#dhqa
-classic|settings-developer@390x780|focus|041|summary "Cache impact and diagnostic evidence"
-classic|settings-developer@390x780|focus|042|input#adr
-classic|settings-developer@390x780|focus|043|summary "Recovery limits and diagnostic evidence"
-classic|settings-developer@390x780|focus|044|input#phs
-classic|settings-developer@390x780|focus|045|<wrap>
+classic|settings-developer@390x780|focus|038|summary "Verification still owed"
+classic|settings-developer@390x780|focus|039|input#pcpv1
+classic|settings-developer@390x780|focus|040|summary "Client readiness"
+classic|settings-developer@390x780|focus|041|input#dhqa
+classic|settings-developer@390x780|focus|042|summary "Cache impact and diagnostic evidence"
+classic|settings-developer@390x780|focus|043|input#adr
+classic|settings-developer@390x780|focus|044|summary "Recovery limits and diagnostic evidence"
+classic|settings-developer@390x780|focus|045|input#phs
+classic|settings-developer@390x780|focus|046|<wrap>
 classic|settings-developer@390x780|req|GET /api/v1/activity|2
 classic|settings-developer@390x780|req|GET /api/v1/developer/readiness|1
 classic|settings-developer@390x780|req|GET /api/v1/me|1
@@ -6973,25 +7009,32 @@ theater|player@1280x860|dom|div#app > nav.th-pills[aria-label=*]|1
 theater|player@1280x860|dom|div#modal.modal.open[role=dialog aria-modal=true aria-label=*] > div#player.player|1
 theater|player@1280x860|dom|div#pbar.pbar > div#playTitle.ptitle[text]|1
 theater|player@1280x860|dom|div#pbar.pbar > div.row|1
+theater|player@1280x860|dom|div#pindicator.pindicator[role=status aria-live=polite] > div.pspin[aria-hidden=true]|1
+theater|player@1280x860|dom|div#pindicator.pindicator[role=status aria-live=polite] > span#pindText|1
 theater|player@1280x860|dom|div#pinfo.pinfo > div.pifacts.vbadges|1
 theater|player@1280x860|dom|div#pinfo.pinfo > div.pimeta[text]|1
 theater|player@1280x860|dom|div#pinfo.pinfo > h3[text]|1
 theater|player@1280x860|dom|div#player.player > div#pbar.pbar|1
+theater|player@1280x860|dom|div#player.player > div#pindicator.pindicator[role=status aria-live=polite]|1
 theater|player@1280x860|dom|div#player.player > div#pinfo.pinfo|1
-theater|player@1280x860|dom|div#player.player > div#ploading.ploading|1
+theater|player@1280x860|dom|div#player.player > div#ploading.on.ploading|1
 theater|player@1280x860|dom|div#player.player > div#pmenu.pmenu[role=menu]|1
 theater|player@1280x860|dom|div#player.player > div#pskip.pskip|1
+theater|player@1280x860|dom|div#player.player > div#psurface.psurface[role=status aria-live=polite]|1
 theater|player@1280x860|dom|div#player.player > div#ptimeline.ptimeline|1
 theater|player@1280x860|dom|div#player.player > div#ptransport.ptransport|1
 theater|player@1280x860|dom|div#player.player > div#statsov.statsov|1
 theater|player@1280x860|dom|div#player.player > video#video|1
-theater|player@1280x860|dom|div#ploading.ploading > div#ploadAct.ploadAct|1
-theater|player@1280x860|dom|div#ploading.ploading > div#ploadSub.ploadSub[text]|1
-theater|player@1280x860|dom|div#ploading.ploading > div#ploadText.ploadText[text]|1
-theater|player@1280x860|dom|div#ploading.ploading > div.pspin|1
+theater|player@1280x860|dom|div#ploading.on.ploading > div#ploadAct.ploadAct|1
+theater|player@1280x860|dom|div#ploading.on.ploading > div#ploadSub.ploadSub[text]|1
+theater|player@1280x860|dom|div#ploading.on.ploading > div#ploadText.ploadText[text]|1
+theater|player@1280x860|dom|div#ploading.on.ploading > div.pspin|1
 theater|player@1280x860|dom|div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*] > div#pseekbuf.pseek-buf[aria-hidden=true]|1
 theater|player@1280x860|dom|div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*] > div#pseekfill.pseek-fill[aria-hidden=true]|1
 theater|player@1280x860|dom|div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*] > div#pseekthumb.pseek-thumb[aria-hidden=true]|1
+theater|player@1280x860|dom|div#psurface.psurface[role=status aria-live=polite] > div#psurfAct.psurfAct|1
+theater|player@1280x860|dom|div#psurface.psurface[role=status aria-live=polite] > div#psurfSub.psurfSub|1
+theater|player@1280x860|dom|div#psurface.psurface[role=status aria-live=polite] > div#psurfText.psurfText|1
 theater|player@1280x860|dom|div#ptimeline.ptimeline > div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*]|1
 theater|player@1280x860|dom|div#ptimeline.ptimeline > span#ptcur.ptime[aria-hidden=true text]|1
 theater|player@1280x860|dom|div#ptimeline.ptimeline > span#ptdur.ptime[aria-hidden=true text]|1
@@ -7087,7 +7130,7 @@ theater|player@1280x860|req|GET /api/v1/items/<id>|1
 theater|player@1280x860|req|GET /api/v1/libraries|1
 theater|player@1280x860|req|GET /api/v1/me|1
 theater|player@1280x860|req|GET /api/v1/server|1
-theater|player@1280x860|req|POST /api/v1/client-log|1
+theater|player@1280x860|req|POST /api/v1/client-log|4
 theater|player@1280x860|req|POST /api/v1/files/<id>/decision|1
 theater|player@1280x860|req|POST /api/v1/items/<id>/progress|1
 theater|player@390x780|dom|^ > div#app|1
@@ -7110,25 +7153,32 @@ theater|player@390x780|dom|div#app > nav.th-pills[aria-label=*]|1
 theater|player@390x780|dom|div#modal.modal.open[role=dialog aria-modal=true aria-label=*] > div#player.player|1
 theater|player@390x780|dom|div#pbar.pbar > div#playTitle.ptitle[text]|1
 theater|player@390x780|dom|div#pbar.pbar > div.row|1
+theater|player@390x780|dom|div#pindicator.pindicator[role=status aria-live=polite] > div.pspin[aria-hidden=true]|1
+theater|player@390x780|dom|div#pindicator.pindicator[role=status aria-live=polite] > span#pindText|1
 theater|player@390x780|dom|div#pinfo.pinfo > div.pifacts.vbadges|1
 theater|player@390x780|dom|div#pinfo.pinfo > div.pimeta[text]|1
 theater|player@390x780|dom|div#pinfo.pinfo > h3[text]|1
 theater|player@390x780|dom|div#player.player > div#pbar.pbar|1
+theater|player@390x780|dom|div#player.player > div#pindicator.pindicator[role=status aria-live=polite]|1
 theater|player@390x780|dom|div#player.player > div#pinfo.pinfo|1
-theater|player@390x780|dom|div#player.player > div#ploading.ploading|1
+theater|player@390x780|dom|div#player.player > div#ploading.on.ploading|1
 theater|player@390x780|dom|div#player.player > div#pmenu.pmenu[role=menu]|1
 theater|player@390x780|dom|div#player.player > div#pskip.pskip|1
+theater|player@390x780|dom|div#player.player > div#psurface.psurface[role=status aria-live=polite]|1
 theater|player@390x780|dom|div#player.player > div#ptimeline.ptimeline|1
 theater|player@390x780|dom|div#player.player > div#ptransport.ptransport|1
 theater|player@390x780|dom|div#player.player > div#statsov.statsov|1
 theater|player@390x780|dom|div#player.player > video#video|1
-theater|player@390x780|dom|div#ploading.ploading > div#ploadAct.ploadAct|1
-theater|player@390x780|dom|div#ploading.ploading > div#ploadSub.ploadSub[text]|1
-theater|player@390x780|dom|div#ploading.ploading > div#ploadText.ploadText[text]|1
-theater|player@390x780|dom|div#ploading.ploading > div.pspin|1
+theater|player@390x780|dom|div#ploading.on.ploading > div#ploadAct.ploadAct|1
+theater|player@390x780|dom|div#ploading.on.ploading > div#ploadSub.ploadSub[text]|1
+theater|player@390x780|dom|div#ploading.on.ploading > div#ploadText.ploadText[text]|1
+theater|player@390x780|dom|div#ploading.on.ploading > div.pspin|1
 theater|player@390x780|dom|div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*] > div#pseekbuf.pseek-buf[aria-hidden=true]|1
 theater|player@390x780|dom|div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*] > div#pseekfill.pseek-fill[aria-hidden=true]|1
 theater|player@390x780|dom|div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*] > div#pseekthumb.pseek-thumb[aria-hidden=true]|1
+theater|player@390x780|dom|div#psurface.psurface[role=status aria-live=polite] > div#psurfAct.psurfAct|1
+theater|player@390x780|dom|div#psurface.psurface[role=status aria-live=polite] > div#psurfSub.psurfSub|1
+theater|player@390x780|dom|div#psurface.psurface[role=status aria-live=polite] > div#psurfText.psurfText|1
 theater|player@390x780|dom|div#ptimeline.ptimeline > div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*]|1
 theater|player@390x780|dom|div#ptimeline.ptimeline > span#ptcur.ptime[aria-hidden=true text]|1
 theater|player@390x780|dom|div#ptimeline.ptimeline > span#ptdur.ptime[aria-hidden=true text]|1
@@ -7224,7 +7274,7 @@ theater|player@390x780|req|GET /api/v1/items/<id>|1
 theater|player@390x780|req|GET /api/v1/libraries|1
 theater|player@390x780|req|GET /api/v1/me|1
 theater|player@390x780|req|GET /api/v1/server|1
-theater|player@390x780|req|POST /api/v1/client-log|1
+theater|player@390x780|req|POST /api/v1/client-log|4
 theater|player@390x780|req|POST /api/v1/files/<id>/decision|1
 theater|player@390x780|req|POST /api/v1/items/<id>/progress|1
 theater|search@1280x860|dom|^ > div#app|1
@@ -7355,11 +7405,11 @@ theater|settings-developer@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=me
 theater|settings-developer@1280x860|dom|button.ghost.profile.sm > span.caret[text]|1
 theater|settings-developer@1280x860|dom|button.ghost.profile.sm > span.pavatar[text]|1
 theater|settings-developer@1280x860|dom|button.ghost.profile.sm > span.pname[text]|1
-theater|settings-developer@1280x860|dom|details.setdetails > div.setdetails-body|6
-theater|settings-developer@1280x860|dom|details.setdetails > summary[text]|6
+theater|settings-developer@1280x860|dom|details.setdetails > div.setdetails-body|7
+theater|settings-developer@1280x860|dom|details.setdetails > summary[text]|7
 theater|settings-developer@1280x860|dom|div > div.hint[text]|5
 theater|settings-developer@1280x860|dom|div > h1[text]|1
-theater|settings-developer@1280x860|dom|div > h2.section[text]|8
+theater|settings-developer@1280x860|dom|div > h2.section[text]|9
 theater|settings-developer@1280x860|dom|div > input#dvrfloor[type=number]|1
 theater|settings-developer@1280x860|dom|div > input#dvrlead[type=number]|1
 theater|settings-developer@1280x860|dom|div > input#dvrpadend[type=number]|1
@@ -7367,7 +7417,7 @@ theater|settings-developer@1280x860|dom|div > input#dvrpadstart[type=number]|1
 theater|settings-developer@1280x860|dom|div > input#dvrroot|1
 theater|settings-developer@1280x860|dom|div > input#dvrwebhook|1
 theater|settings-developer@1280x860|dom|div > label[text]|7
-theater|settings-developer@1280x860|dom|div > p.sub[text]|8
+theater|settings-developer@1280x860|dom|div > p.sub[text]|9
 theater|settings-developer@1280x860|dom|div > p[text]|1
 theater|settings-developer@1280x860|dom|div > select#dvrreserve|1
 theater|settings-developer@1280x860|dom|div#app > header.th-top|1
@@ -7382,9 +7432,9 @@ theater|settings-developer@1280x860|dom|div#drcard.card.setcard > label.tog|1
 theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div#drcard.card.setcard|1
 theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div#vdcard.card.setcard|1
 theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div.card.local.setcard|1
-theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div.card.setcard|5
+theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div.card.setcard|6
 theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div.sethead|1
-theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div.setsection|6
+theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div.setsection|7
 theater|settings-developer@1280x860|dom|div#setbody.adminwrap > nav.setdestinations[aria-label=*]|1
 theater|settings-developer@1280x860|dom|div#vdcard.card.setcard > details.setdetails|1
 theater|settings-developer@1280x860|dom|div#vdcard.card.setcard > div#dhqerr.err[role=alert]|1
@@ -7395,45 +7445,45 @@ theater|settings-developer@1280x860|dom|div#vdcard.card.setcard > label.tog|1
 theater|settings-developer@1280x860|dom|div.card.local.setcard > div.cardhead|1
 theater|settings-developer@1280x860|dom|div.card.local.setcard > div.hint[text]|1
 theater|settings-developer@1280x860|dom|div.card.local.setcard > label.tog|1
-theater|settings-developer@1280x860|dom|div.card.setcard > details.setdetails|4
+theater|settings-developer@1280x860|dom|div.card.setcard > details.setdetails|5
 theater|settings-developer@1280x860|dom|div.card.setcard > div#dverr.err[role=alert]|1
 theater|settings-developer@1280x860|dom|div.card.setcard > div#dvrerr.err[role=alert]|1
 theater|settings-developer@1280x860|dom|div.card.setcard > div#dxerr.err[role=alert]|1
 theater|settings-developer@1280x860|dom|div.card.setcard > div#lcdeverr.err[role=alert]|1
 theater|settings-developer@1280x860|dom|div.card.setcard > div#pqherr.err[role=alert]|1
-theater|settings-developer@1280x860|dom|div.card.setcard > div.cardhead|5
-theater|settings-developer@1280x860|dom|div.card.setcard > div.hint[text]|1
+theater|settings-developer@1280x860|dom|div.card.setcard > div.cardhead|6
+theater|settings-developer@1280x860|dom|div.card.setcard > div.hint[text]|2
 theater|settings-developer@1280x860|dom|div.card.setcard > div.setfields|1
 theater|settings-developer@1280x860|dom|div.card.setcard > div.setfoot|5
 theater|settings-developer@1280x860|dom|div.card.setcard > label.tog|5
-theater|settings-developer@1280x860|dom|div.cardhead > div.cardtools|8
-theater|settings-developer@1280x860|dom|div.cardhead > div|8
+theater|settings-developer@1280x860|dom|div.cardhead > div.cardtools|9
+theater|settings-developer@1280x860|dom|div.cardhead > div|9
 theater|settings-developer@1280x860|dom|div.cardtools > span#pqhstate.pill[text]|1
 theater|settings-developer@1280x860|dom|div.cardtools > span.acc.pill[text]|1
 theater|settings-developer@1280x860|dom|div.cardtools > span.pill.warn[text]|1
-theater|settings-developer@1280x860|dom|div.cardtools > span.pill[text]|5
-theater|settings-developer@1280x860|dom|div.devcheck > div.devcheck-head|14
-theater|settings-developer@1280x860|dom|div.devcheck > p.devcheck-description[text]|14
+theater|settings-developer@1280x860|dom|div.cardtools > span.pill[text]|6
+theater|settings-developer@1280x860|dom|div.devcheck > div.devcheck-head|19
+theater|settings-developer@1280x860|dom|div.devcheck > p.devcheck-description[text]|19
 theater|settings-developer@1280x860|dom|div.devcheck > p.devcheck-evidence[text]|12
-theater|settings-developer@1280x860|dom|div.devcheck-head > span.devcheck-status|14
-theater|settings-developer@1280x860|dom|div.devcheck-head > strong[text]|14
+theater|settings-developer@1280x860|dom|div.devcheck-head > span.devcheck-status|19
+theater|settings-developer@1280x860|dom|div.devcheck-head > strong[text]|19
 theater|settings-developer@1280x860|dom|div.hint[text] > a[text]|1
 theater|settings-developer@1280x860|dom|div.hint[text] > b[text]|4
-theater|settings-developer@1280x860|dom|div.setdetails-body > div.devcheck|14
+theater|settings-developer@1280x860|dom|div.setdetails-body > div.devcheck|19
 theater|settings-developer@1280x860|dom|div.setdetails-body > div.hint[text]|5
 theater|settings-developer@1280x860|dom|div.setdetails-body > div.tog|7
 theater|settings-developer@1280x860|dom|div.setdetails-body > h2.section[text]|3
-theater|settings-developer@1280x860|dom|div.setdetails-body > h3.devcheck-group[text]|2
-theater|settings-developer@1280x860|dom|div.setdetails-body > p.devcheck-note[text]|3
-theater|settings-developer@1280x860|dom|div.setdetails-body > p.hint[text]|1
+theater|settings-developer@1280x860|dom|div.setdetails-body > h3.devcheck-group[text]|5
+theater|settings-developer@1280x860|dom|div.setdetails-body > p.devcheck-note[text]|4
+theater|settings-developer@1280x860|dom|div.setdetails-body > p.hint[text]|2
 theater|settings-developer@1280x860|dom|div.setfields > div|7
 theater|settings-developer@1280x860|dom|div.setfoot > button.primary.sm[disabled text]|7
 theater|settings-developer@1280x860|dom|div.setfoot > span.setstate[text]|7
 theater|settings-developer@1280x860|dom|div.sethead > div|1
 theater|settings-developer@1280x860|dom|div.setlayout > div#setbody.adminwrap|1
 theater|settings-developer@1280x860|dom|div.setlayout > nav.settabs[aria-label=*]|1
-theater|settings-developer@1280x860|dom|div.setsection > h2[text]|6
-theater|settings-developer@1280x860|dom|div.setsection > p[text]|6
+theater|settings-developer@1280x860|dom|div.setsection > h2[text]|7
+theater|settings-developer@1280x860|dom|div.setsection > p[text]|7
 theater|settings-developer@1280x860|dom|div.th-ctl > div.th-pop|2
 theater|settings-developer@1280x860|dom|div.th-pop > button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*]|1
 theater|settings-developer@1280x860|dom|div.th-pop > button.ghost.profile.sm|1
@@ -7464,14 +7514,15 @@ theater|settings-developer@1280x860|dom|nav.th-nav[aria-label=*] > a.on[aria-cur
 theater|settings-developer@1280x860|dom|nav.th-nav[aria-label=*] > a[text]|4
 theater|settings-developer@1280x860|dom|nav.th-pills[aria-label=*] > a.on[aria-current=page text]|1
 theater|settings-developer@1280x860|dom|nav.th-pills[aria-label=*] > a[text]|4
+theater|settings-developer@1280x860|dom|p.devcheck-description[text] > code[text]|11
 theater|settings-developer@1280x860|dom|select#dvrreserve > option[text]|5
 theater|settings-developer@1280x860|dom|small > code[text]|2
 theater|settings-developer@1280x860|dom|small[text] > br|4
 theater|settings-developer@1280x860|dom|small[text] > code[text]|6
 theater|settings-developer@1280x860|dom|small[text] > i[text]|1
-theater|settings-developer@1280x860|dom|span.devcheck-status > span.ok.pill[text]|1
-theater|settings-developer@1280x860|dom|span.devcheck-status > span.pill.warn[text]|4
-theater|settings-developer@1280x860|dom|span.devcheck-status > span.pill[text]|9
+theater|settings-developer@1280x860|dom|span.devcheck-status > span.ok.pill[text]|2
+theater|settings-developer@1280x860|dom|span.devcheck-status > span.pill.warn[text]|5
+theater|settings-developer@1280x860|dom|span.devcheck-status > span.pill[text]|12
 theater|settings-developer@1280x860|dom|span[text] > small[text]|13
 theater|settings-developer@1280x860|dom|span[text] > small|2
 theater|settings-developer@1280x860|dom|span[text] > span.pill.warn[text]|2
@@ -7515,14 +7566,15 @@ theater|settings-developer@1280x860|focus|034|input#pqh
 theater|settings-developer@1280x860|focus|035|summary "Readiness and device qualification"
 theater|settings-developer@1280x860|focus|036|input#pdp
 theater|settings-developer@1280x860|focus|037|a "Quality switching"
-theater|settings-developer@1280x860|focus|038|input#pcpv1
-theater|settings-developer@1280x860|focus|039|summary "Client readiness"
-theater|settings-developer@1280x860|focus|040|input#dhqa
-theater|settings-developer@1280x860|focus|041|summary "Cache impact and diagnostic evidence"
-theater|settings-developer@1280x860|focus|042|input#adr
-theater|settings-developer@1280x860|focus|043|summary "Recovery limits and diagnostic evidence"
-theater|settings-developer@1280x860|focus|044|input#phs
-theater|settings-developer@1280x860|focus|045|<wrap>
+theater|settings-developer@1280x860|focus|038|summary "Verification still owed"
+theater|settings-developer@1280x860|focus|039|input#pcpv1
+theater|settings-developer@1280x860|focus|040|summary "Client readiness"
+theater|settings-developer@1280x860|focus|041|input#dhqa
+theater|settings-developer@1280x860|focus|042|summary "Cache impact and diagnostic evidence"
+theater|settings-developer@1280x860|focus|043|input#adr
+theater|settings-developer@1280x860|focus|044|summary "Recovery limits and diagnostic evidence"
+theater|settings-developer@1280x860|focus|045|input#phs
+theater|settings-developer@1280x860|focus|046|<wrap>
 theater|settings-developer@1280x860|req|GET /api/v1/activity|2
 theater|settings-developer@1280x860|req|GET /api/v1/developer/readiness|1
 theater|settings-developer@1280x860|req|GET /api/v1/me|1
@@ -7536,11 +7588,11 @@ theater|settings-developer@390x780|dom|button.ghost.lookbtn.sm[aria-haspopup=men
 theater|settings-developer@390x780|dom|button.ghost.profile.sm > span.caret[text]|1
 theater|settings-developer@390x780|dom|button.ghost.profile.sm > span.pavatar[text]|1
 theater|settings-developer@390x780|dom|button.ghost.profile.sm > span.pname[text]|1
-theater|settings-developer@390x780|dom|details.setdetails > div.setdetails-body|6
-theater|settings-developer@390x780|dom|details.setdetails > summary[text]|6
+theater|settings-developer@390x780|dom|details.setdetails > div.setdetails-body|7
+theater|settings-developer@390x780|dom|details.setdetails > summary[text]|7
 theater|settings-developer@390x780|dom|div > div.hint[text]|5
 theater|settings-developer@390x780|dom|div > h1[text]|1
-theater|settings-developer@390x780|dom|div > h2.section[text]|8
+theater|settings-developer@390x780|dom|div > h2.section[text]|9
 theater|settings-developer@390x780|dom|div > input#dvrfloor[type=number]|1
 theater|settings-developer@390x780|dom|div > input#dvrlead[type=number]|1
 theater|settings-developer@390x780|dom|div > input#dvrpadend[type=number]|1
@@ -7548,7 +7600,7 @@ theater|settings-developer@390x780|dom|div > input#dvrpadstart[type=number]|1
 theater|settings-developer@390x780|dom|div > input#dvrroot|1
 theater|settings-developer@390x780|dom|div > input#dvrwebhook|1
 theater|settings-developer@390x780|dom|div > label[text]|7
-theater|settings-developer@390x780|dom|div > p.sub[text]|8
+theater|settings-developer@390x780|dom|div > p.sub[text]|9
 theater|settings-developer@390x780|dom|div > p[text]|1
 theater|settings-developer@390x780|dom|div > select#dvrreserve|1
 theater|settings-developer@390x780|dom|div#app > header.th-top|1
@@ -7563,9 +7615,9 @@ theater|settings-developer@390x780|dom|div#drcard.card.setcard > label.tog|1
 theater|settings-developer@390x780|dom|div#setbody.adminwrap > div#drcard.card.setcard|1
 theater|settings-developer@390x780|dom|div#setbody.adminwrap > div#vdcard.card.setcard|1
 theater|settings-developer@390x780|dom|div#setbody.adminwrap > div.card.local.setcard|1
-theater|settings-developer@390x780|dom|div#setbody.adminwrap > div.card.setcard|5
+theater|settings-developer@390x780|dom|div#setbody.adminwrap > div.card.setcard|6
 theater|settings-developer@390x780|dom|div#setbody.adminwrap > div.sethead|1
-theater|settings-developer@390x780|dom|div#setbody.adminwrap > div.setsection|6
+theater|settings-developer@390x780|dom|div#setbody.adminwrap > div.setsection|7
 theater|settings-developer@390x780|dom|div#setbody.adminwrap > nav.setdestinations[aria-label=*]|1
 theater|settings-developer@390x780|dom|div#vdcard.card.setcard > details.setdetails|1
 theater|settings-developer@390x780|dom|div#vdcard.card.setcard > div#dhqerr.err[role=alert]|1
@@ -7576,45 +7628,45 @@ theater|settings-developer@390x780|dom|div#vdcard.card.setcard > label.tog|1
 theater|settings-developer@390x780|dom|div.card.local.setcard > div.cardhead|1
 theater|settings-developer@390x780|dom|div.card.local.setcard > div.hint[text]|1
 theater|settings-developer@390x780|dom|div.card.local.setcard > label.tog|1
-theater|settings-developer@390x780|dom|div.card.setcard > details.setdetails|4
+theater|settings-developer@390x780|dom|div.card.setcard > details.setdetails|5
 theater|settings-developer@390x780|dom|div.card.setcard > div#dverr.err[role=alert]|1
 theater|settings-developer@390x780|dom|div.card.setcard > div#dvrerr.err[role=alert]|1
 theater|settings-developer@390x780|dom|div.card.setcard > div#dxerr.err[role=alert]|1
 theater|settings-developer@390x780|dom|div.card.setcard > div#lcdeverr.err[role=alert]|1
 theater|settings-developer@390x780|dom|div.card.setcard > div#pqherr.err[role=alert]|1
-theater|settings-developer@390x780|dom|div.card.setcard > div.cardhead|5
-theater|settings-developer@390x780|dom|div.card.setcard > div.hint[text]|1
+theater|settings-developer@390x780|dom|div.card.setcard > div.cardhead|6
+theater|settings-developer@390x780|dom|div.card.setcard > div.hint[text]|2
 theater|settings-developer@390x780|dom|div.card.setcard > div.setfields|1
 theater|settings-developer@390x780|dom|div.card.setcard > div.setfoot|5
 theater|settings-developer@390x780|dom|div.card.setcard > label.tog|5
-theater|settings-developer@390x780|dom|div.cardhead > div.cardtools|8
-theater|settings-developer@390x780|dom|div.cardhead > div|8
+theater|settings-developer@390x780|dom|div.cardhead > div.cardtools|9
+theater|settings-developer@390x780|dom|div.cardhead > div|9
 theater|settings-developer@390x780|dom|div.cardtools > span#pqhstate.pill[text]|1
 theater|settings-developer@390x780|dom|div.cardtools > span.acc.pill[text]|1
 theater|settings-developer@390x780|dom|div.cardtools > span.pill.warn[text]|1
-theater|settings-developer@390x780|dom|div.cardtools > span.pill[text]|5
-theater|settings-developer@390x780|dom|div.devcheck > div.devcheck-head|14
-theater|settings-developer@390x780|dom|div.devcheck > p.devcheck-description[text]|14
+theater|settings-developer@390x780|dom|div.cardtools > span.pill[text]|6
+theater|settings-developer@390x780|dom|div.devcheck > div.devcheck-head|19
+theater|settings-developer@390x780|dom|div.devcheck > p.devcheck-description[text]|19
 theater|settings-developer@390x780|dom|div.devcheck > p.devcheck-evidence[text]|12
-theater|settings-developer@390x780|dom|div.devcheck-head > span.devcheck-status|14
-theater|settings-developer@390x780|dom|div.devcheck-head > strong[text]|14
+theater|settings-developer@390x780|dom|div.devcheck-head > span.devcheck-status|19
+theater|settings-developer@390x780|dom|div.devcheck-head > strong[text]|19
 theater|settings-developer@390x780|dom|div.hint[text] > a[text]|1
 theater|settings-developer@390x780|dom|div.hint[text] > b[text]|4
-theater|settings-developer@390x780|dom|div.setdetails-body > div.devcheck|14
+theater|settings-developer@390x780|dom|div.setdetails-body > div.devcheck|19
 theater|settings-developer@390x780|dom|div.setdetails-body > div.hint[text]|5
 theater|settings-developer@390x780|dom|div.setdetails-body > div.tog|7
 theater|settings-developer@390x780|dom|div.setdetails-body > h2.section[text]|3
-theater|settings-developer@390x780|dom|div.setdetails-body > h3.devcheck-group[text]|2
-theater|settings-developer@390x780|dom|div.setdetails-body > p.devcheck-note[text]|3
-theater|settings-developer@390x780|dom|div.setdetails-body > p.hint[text]|1
+theater|settings-developer@390x780|dom|div.setdetails-body > h3.devcheck-group[text]|5
+theater|settings-developer@390x780|dom|div.setdetails-body > p.devcheck-note[text]|4
+theater|settings-developer@390x780|dom|div.setdetails-body > p.hint[text]|2
 theater|settings-developer@390x780|dom|div.setfields > div|7
 theater|settings-developer@390x780|dom|div.setfoot > button.primary.sm[disabled text]|7
 theater|settings-developer@390x780|dom|div.setfoot > span.setstate[text]|7
 theater|settings-developer@390x780|dom|div.sethead > div|1
 theater|settings-developer@390x780|dom|div.setlayout > div#setbody.adminwrap|1
 theater|settings-developer@390x780|dom|div.setlayout > nav.settabs[aria-label=*]|1
-theater|settings-developer@390x780|dom|div.setsection > h2[text]|6
-theater|settings-developer@390x780|dom|div.setsection > p[text]|6
+theater|settings-developer@390x780|dom|div.setsection > h2[text]|7
+theater|settings-developer@390x780|dom|div.setsection > p[text]|7
 theater|settings-developer@390x780|dom|div.th-ctl > div.th-pop|2
 theater|settings-developer@390x780|dom|div.th-pop > button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*]|1
 theater|settings-developer@390x780|dom|div.th-pop > button.ghost.profile.sm|1
@@ -7645,14 +7697,15 @@ theater|settings-developer@390x780|dom|nav.th-nav[aria-label=*] > a.on[aria-curr
 theater|settings-developer@390x780|dom|nav.th-nav[aria-label=*] > a[text]|4
 theater|settings-developer@390x780|dom|nav.th-pills[aria-label=*] > a.on[aria-current=page text]|1
 theater|settings-developer@390x780|dom|nav.th-pills[aria-label=*] > a[text]|4
+theater|settings-developer@390x780|dom|p.devcheck-description[text] > code[text]|11
 theater|settings-developer@390x780|dom|select#dvrreserve > option[text]|5
 theater|settings-developer@390x780|dom|small > code[text]|2
 theater|settings-developer@390x780|dom|small[text] > br|4
 theater|settings-developer@390x780|dom|small[text] > code[text]|6
 theater|settings-developer@390x780|dom|small[text] > i[text]|1
-theater|settings-developer@390x780|dom|span.devcheck-status > span.ok.pill[text]|1
-theater|settings-developer@390x780|dom|span.devcheck-status > span.pill.warn[text]|4
-theater|settings-developer@390x780|dom|span.devcheck-status > span.pill[text]|9
+theater|settings-developer@390x780|dom|span.devcheck-status > span.ok.pill[text]|2
+theater|settings-developer@390x780|dom|span.devcheck-status > span.pill.warn[text]|5
+theater|settings-developer@390x780|dom|span.devcheck-status > span.pill[text]|12
 theater|settings-developer@390x780|dom|span[text] > small[text]|13
 theater|settings-developer@390x780|dom|span[text] > small|2
 theater|settings-developer@390x780|dom|span[text] > span.pill.warn[text]|2
@@ -7691,19 +7744,20 @@ theater|settings-developer@390x780|focus|029|input#pqh
 theater|settings-developer@390x780|focus|030|summary "Readiness and device qualification"
 theater|settings-developer@390x780|focus|031|input#pdp
 theater|settings-developer@390x780|focus|032|a "Quality switching"
-theater|settings-developer@390x780|focus|033|input#pcpv1
-theater|settings-developer@390x780|focus|034|summary "Client readiness"
-theater|settings-developer@390x780|focus|035|input#dhqa
-theater|settings-developer@390x780|focus|036|summary "Cache impact and diagnostic evidence"
-theater|settings-developer@390x780|focus|037|input#adr
-theater|settings-developer@390x780|focus|038|summary "Recovery limits and diagnostic evidence"
-theater|settings-developer@390x780|focus|039|input#phs
-theater|settings-developer@390x780|focus|040|a "Home"
-theater|settings-developer@390x780|focus|041|a "Live TV"
-theater|settings-developer@390x780|focus|042|a "Library channels"
-theater|settings-developer@390x780|focus|043|a "Activity"
-theater|settings-developer@390x780|focus|044|a.on "Settings"
-theater|settings-developer@390x780|focus|045|<wrap>
+theater|settings-developer@390x780|focus|033|summary "Verification still owed"
+theater|settings-developer@390x780|focus|034|input#pcpv1
+theater|settings-developer@390x780|focus|035|summary "Client readiness"
+theater|settings-developer@390x780|focus|036|input#dhqa
+theater|settings-developer@390x780|focus|037|summary "Cache impact and diagnostic evidence"
+theater|settings-developer@390x780|focus|038|input#adr
+theater|settings-developer@390x780|focus|039|summary "Recovery limits and diagnostic evidence"
+theater|settings-developer@390x780|focus|040|input#phs
+theater|settings-developer@390x780|focus|041|a "Home"
+theater|settings-developer@390x780|focus|042|a "Live TV"
+theater|settings-developer@390x780|focus|043|a "Library channels"
+theater|settings-developer@390x780|focus|044|a "Activity"
+theater|settings-developer@390x780|focus|045|a.on "Settings"
+theater|settings-developer@390x780|focus|046|<wrap>
 theater|settings-developer@390x780|req|GET /api/v1/activity|2
 theater|settings-developer@390x780|req|GET /api/v1/developer/readiness|1
 theater|settings-developer@390x780|req|GET /api/v1/me|1
