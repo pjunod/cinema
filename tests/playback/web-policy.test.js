@@ -2677,8 +2677,14 @@ test("the shipped canplay listener feeds an inert event and nothing else", () =>
   const match = wired.match(/addEventListener\("canplay",\(\)=>\{([^\n]*)\}\);/);
   assert.ok(match, "index.html no longer wires canplay through the presenter");
   const fed = [];
-  new Function("playbackSurfaceStep", "PLAYER", match[1])((event) => fed.push(event), { started: true });
-  assert.deepEqual(fed, [{ event: "canplay" }]);
+  // Everything the listener could reach for, so a mutation that feeds evidence
+  // fails on what it fed rather than on an undefined name.
+  new Function(
+    "playbackSurfaceStep", "PLAYER", "playbackSurfaceGeneration", "playbackWaitNeedsProgress",
+    match[1],
+  )((event) => fed.push(event), { started: true, attemptId: "g1" }, () => "g1", () => false);
+  assert.deepEqual(fed, [{ event: "canplay" }],
+    "canplay may prompt a look and nothing else — it is not evidence");
 
   // And prove it is inert where it matters: over a stopped player, the event
   // this listener feeds must not move the surface.
