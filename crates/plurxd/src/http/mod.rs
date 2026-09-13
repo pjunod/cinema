@@ -15,6 +15,7 @@ pub use comingsoon::ComingSoonCache;
 mod developer;
 mod dto;
 mod dv_disk;
+pub(crate) mod dvr;
 mod error;
 mod extract;
 pub(crate) use extract::CacheOnlyAdminProofCache;
@@ -96,6 +97,7 @@ pub fn router(state: AppState) -> Router {
         .route("/developer/readiness", get(developer::readiness))
         .merge(library_channels::collection_router())
         .nest("/library-channels", library_channels::router())
+        .nest("/dvr", dvr::router())
         .route("/live-tv/readiness", get(live_tv::readiness))
         .route(
             "/live-tv/readiness/refresh",
@@ -4250,7 +4252,7 @@ mod tests {
                 "URL with userinfo",
             ),
             (
-                json!({"live_tv_guide_hours": 200, "live_tv_config_generation": 3}),
+                json!({"live_tv_guide_hours": 400, "live_tv_config_generation": 3}),
                 "look-ahead out of range",
             ),
         ] {
@@ -5026,6 +5028,7 @@ mod tests {
             ids,
             vec![
                 "library_channels",
+                "dvr",
                 "cluster_transport_recovery",
                 "playback_control_protocol_v1",
                 "prepared_quality_handoff",
@@ -5057,8 +5060,11 @@ mod tests {
             }
         }
 
-        // These two rows describe facts this single-node fixture can prove:
-        // the authoritative catalogue responds and server-side handoff exists.
+        // These three rows describe facts this single-node fixture can prove:
+        // the authoritative catalogue responds, server-side handoff exists,
+        // and the DVR's tuner arithmetic leaves a recording somewhere to go —
+        // that last one is a sum of two configured numbers, so it is knowable
+        // on a node that has never seen a tuner.
         let green = seen
             .iter()
             .filter(|(_, status)| status.as_str() == "met")
@@ -5066,7 +5072,11 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             green,
-            vec!["authoritative_store", "server_preparation_is_real"]
+            vec![
+                "authoritative_store",
+                "server_preparation_is_real",
+                "tuner_reserve"
+            ]
         );
         // Order-independent because no row reachable here has a `met` branch a
         // sibling test could reach: the retained engine's two rows refuse
@@ -5129,6 +5139,187 @@ mod tests {
     /// past a test that only ever saw `unobservable`. It then drives the
     /// switch both ways: a gate that refuses only the enable would survive a
     /// test that only enables.
+    /// The routes exist and answer before the engine does, which is the point
+    /// of landing them separately: a client can be built against a server that
+    /// schedules nothing yet.
+    #[tokio::test]
+    async fn dvr_routes_answer_from_the_store_before_any_engine_exists() {
+        let app = test_app();
+        let admin = setup_admin(&app).await;
+
+        let (status, body) = call(&app, get("/api/v1/dvr/status", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["enabled"], serde_json::json!(false));
+        assert_eq!(
+            body["slots"]["reserve"],
+            serde_json::json!(1),
+            "one tuner stays reserved for viewing by default"
+        );
+
+        let (status, body) = call(&app, get("/api/v1/dvr/schedule", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["conflicts"], serde_json::json!(0));
+        assert_eq!(body["rows"].as_array().expect("rows").len(), 0);
+
+        let (status, body) = call(&app, get("/api/v1/dvr/rules", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body.as_array().expect("rules").len(), 0);
+
+        let (status, _) = call(&app, get("/api/v1/dvr/reminders?due=1", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, _) = call(&app, get("/api/v1/dvr/recordings/nope", Some(&admin))).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    /// Recording is a switch, and the routes that would write to a disk say so
+    /// when it is off. A reminder does not, because a reminder is a row with a
+    /// time in it and needs neither a tuner nor a disk — gating it on the DVR
+    /// would be a gate on a feature that does not use it.
+    #[tokio::test]
+    async fn the_dvr_switch_refuses_a_recording_and_never_a_reminder() {
+        let app = test_app();
+        let admin = setup_admin(&app).await;
+
+        let (status, body) = call(
+            &app,
+            post(
+                "/api/v1/dvr/recordings",
+                Some(&admin),
+                serde_json::json!({"channel_id": "7.1", "airing_start": 1_789_000_800_i64}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["code"], serde_json::json!("dvr_disabled"));
+
+        // Turning it on is one plain setting, with no readiness lookup between
+        // the request and the write.
+        let (status, settings) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                serde_json::json!({"dvr_enabled": true, "dvr_root": "/20t/dvr"}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(settings["dvr_enabled"], serde_json::json!(true));
+        assert_eq!(settings["dvr_root"], serde_json::json!("/20t/dvr"));
+
+        // With Live TV off there is no guide, so the airing cannot be
+        // resolved — and that is a different, more useful answer than
+        // "recording is off".
+        let (status, body) = call(
+            &app,
+            post(
+                "/api/v1/dvr/recordings",
+                Some(&admin),
+                serde_json::json!({"channel_id": "7.1", "airing_start": 1_789_000_800_i64}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], serde_json::json!("airing_unknown"));
+
+        // A reminder takes the same path and is refused for the same reason —
+        // never for `dvr_disabled`, in either switch position.
+        for enabled in [true, false] {
+            call(
+                &app,
+                put(
+                    "/api/v1/settings",
+                    Some(&admin),
+                    serde_json::json!({"dvr_enabled": enabled}),
+                ),
+            )
+            .await;
+            let (status, body) = call(
+                &app,
+                post(
+                    "/api/v1/dvr/reminders",
+                    Some(&admin),
+                    serde_json::json!({"channel_id": "7.1", "airing_start": 1_789_000_800_i64}),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CONFLICT, "{body}");
+            assert_eq!(
+                body["code"],
+                serde_json::json!("airing_unknown"),
+                "a reminder is never refused because recording is off"
+            );
+        }
+    }
+
+    /// The DVR settings are their own transaction boundary, like the Live TV
+    /// tuple: mixing them would let one commit while the other's CAS reports a
+    /// conflict.
+    #[tokio::test]
+    async fn dvr_settings_are_not_mixed_into_a_live_tv_save() {
+        let app = test_app();
+        let admin = setup_admin(&app).await;
+        let (status, body) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                serde_json::json!({
+                    "dvr_enabled": true,
+                    "live_tv_guide_hours": 48,
+                    "live_tv_config_generation": 0,
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+        // Bounds are clamped rather than refused: a padding of an hour and a
+        // half is a preference someone typed, not an attack.
+        let (status, settings) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                serde_json::json!({"dvr_pad_end_s": 99_999, "dvr_tuner_reserve": 9}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(settings["dvr_pad_end_s"], serde_json::json!(3600));
+        assert_eq!(settings["dvr_tuner_reserve"], serde_json::json!(4));
+    }
+
+    /// The webhook boundary is deliberately weaker than the guide's, because
+    /// it carries no credential and its whole point is a box on the operator's
+    /// own LAN. "Weaker" still has a shape — and the shape costs the operator
+    /// a literal address rather than a name, which is asserted here so nobody
+    /// relaxes it without meaning to.
+    #[test]
+    fn the_webhook_policy_admits_the_lan_and_refuses_the_open_internet_in_the_clear() {
+        let approved = |raw: &str| crate::live_tv::approved_webhook_url(raw).is_ok();
+        assert!(approved("https://hooks.example.com/plurx"));
+        assert!(approved("http://192.168.4.7:8123/api/webhook/plurx"));
+        assert!(approved("http://127.0.0.1:8123/hook"));
+        assert!(approved("http://[fd00::1]:8123/hook"));
+        assert!(
+            !approved("http://example.com/hook"),
+            "plain http to a public host puts the event on the internet in the clear"
+        );
+        assert!(
+            !approved("http://ha.lan:8123/hook"),
+            "a name is not resolved here — it can point somewhere else later — so a \
+             hostname is only accepted over https"
+        );
+        assert!(
+            !approved("https://user:pw@hooks.example.com/plurx"),
+            "userinfo is a credential this process would then hold and log"
+        );
+        assert!(!approved("file:///etc/passwd"));
+        assert!(!approved("ftp://example.invalid/hook"));
+    }
+
     #[tokio::test]
     async fn an_unmet_prerequisite_does_not_block_the_switch() {
         let app = test_app();

@@ -1,0 +1,1140 @@
+//! Recording, the schedule, rules and reminders.
+//!
+//! Every route here writes *intent* and reads rows. None of them touches a
+//! tuner, a file or a disk, and none waits on the owner node — the owner loop
+//! reads the same replicated rows on its own fifteen-second tick and is the
+//! only writer of `recording` and the terminal states. That split is what lets
+//! a viewer on nuc4 stop a capture running on nynuc without a second internal
+//! route, and it is why `DELETE` on a live recording answers `202` with a
+//! pending flag rather than pretending the file is already closed.
+//!
+//! The one thing these routes do consult is the owner's guide, and only to
+//! copy a programme's facts onto a new row. A recording that has been
+//! scheduled never reads the guide again for its own metadata: the guide is a
+//! cache of somebody else's data, and a row that re-derived its title on every
+//! read would change under the person who scheduled it.
+
+use axum::extract::{Path, Query, State};
+use axum::http::{header, HeaderValue, Request, StatusCode};
+use axum::middleware::{self, Next};
+use axum::response::Response;
+use axum::routing::{delete, get, post, put};
+use axum::{Json, Router};
+use plurx_core::dvr::{
+    is_first_run, normalise_title, DvrInsertOutcome, DvrKeepMode, DvrMatchMode, DvrOrigin,
+    DvrRecording, DvrRecordingFilter, DvrReminder, DvrReminderState, DvrRule, DvrState,
+    DvrStatePatch, DvrTransition, DVR_LEAD_MAX_S, DVR_MATCH_VALUE_MAX, DVR_MIN_USEFUL_S,
+    DVR_PAD_MAX_S, DVR_RECORDINGS_LIST_PAGE, DVR_REMINDERS_PER_USER_MAX, DVR_RULES_MAX,
+    DVR_RULE_NAME_MAX, DVR_SCHEDULE_DAYS_MAX,
+};
+use plurx_core::store::keys;
+use serde::{Deserialize, Serialize};
+
+use super::error::ApiError;
+use super::extract::{AdminUser, AuthUser};
+use crate::live_tv::{DvrConfig, GuideWindow, LiveTvConfig, LiveTvProgramme};
+use crate::state::AppState;
+
+pub(crate) fn router() -> Router<AppState> {
+    Router::new()
+        .route("/status", get(status))
+        .route("/recordings", get(list_recordings).post(create_recording))
+        .route(
+            "/recordings/{id}",
+            get(get_recording).delete(delete_recording),
+        )
+        .route("/recordings/{id}/restore", post(restore_recording))
+        .route("/schedule", get(schedule))
+        .route("/rules", get(list_rules).post(create_rule))
+        .route("/rules/order", put(reorder_rules))
+        .route("/rules/{id}", put(update_rule).delete(delete_rule))
+        .route("/reminders", get(list_reminders).post(create_reminder))
+        .route("/reminders/{id}", delete(delete_reminder))
+        .route("/reminders/{id}/ack", post(ack_reminder))
+        .layer(axum::extract::DefaultBodyLimit::max(64 * 1024))
+        .layer(middleware::from_fn(private_no_store))
+}
+
+/// A schedule is a person's own plan, and a reminder names what they intend to
+/// watch. Neither belongs in a shared cache.
+async fn private_no_store(request: Request<axum::body::Body>, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    response
+}
+
+// ---- shared reads ---------------------------------------------------------
+
+async fn configs(state: &AppState) -> Result<(LiveTvConfig, DvrConfig), ApiError> {
+    let settings = state.store.settings_snapshot().await?;
+    let live_tv = LiveTvConfig::from_snapshot(&settings, &state.node_id);
+    state.live_tv.observe_config(&live_tv);
+    Ok((live_tv, DvrConfig::from_snapshot(&settings)))
+}
+
+/// The guide programme at `(channel_id, airing_start)`, with its channel.
+///
+/// Deliberately an exact start match rather than "whatever is on at that
+/// moment": the start is the airing's identity, and a client that asks for a
+/// programme the owner's guide no longer has at that second is asking about a
+/// schedule that changed underneath it. Saying so is more useful than
+/// recording the neighbour.
+async fn resolve_airing(
+    state: &AppState,
+    live_tv: &LiveTvConfig,
+    channel_id: &str,
+    airing_start: i64,
+) -> Option<(ResolvedChannel, LiveTvProgramme)> {
+    let window = GuideWindow {
+        start: airing_start - 1,
+        end: airing_start + 1,
+    };
+    let guide = super::live_tv::owner_guide(state, live_tv, window).await;
+    let channel = guide
+        .channels
+        .into_iter()
+        .find(|candidate| candidate.id == channel_id)?;
+    let programme = channel
+        .programmes
+        .iter()
+        .find(|row| row.start == airing_start)
+        .cloned()?;
+    let name = state
+        .live_tv
+        .channel_name(live_tv, channel_id)
+        .await
+        .unwrap_or_else(|| channel.guide_number.clone());
+    Some((
+        ResolvedChannel {
+            id: channel.id,
+            guide_number: channel.guide_number,
+            name,
+        },
+        programme,
+    ))
+}
+
+pub(crate) struct ResolvedChannel {
+    // Visible to the engine, which builds rows from guide programmes through
+    // the same helper these routes use — a scheduler that copied a programme
+    // differently from the way Record does would be a second, divergent
+    // definition of what a recording is.
+    pub(crate) id: String,
+    pub(crate) guide_number: String,
+    pub(crate) name: String,
+}
+
+fn airing_unknown() -> ApiError {
+    ApiError::typed(
+        StatusCode::CONFLICT,
+        "airing_unknown",
+        "the owner's guide has no programme starting at that time on that channel; \
+         reload the guide and try again",
+    )
+}
+
+fn dvr_disabled() -> ApiError {
+    ApiError::typed(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "dvr_disabled",
+        "recording is switched off; an administrator can enable it in Settings → Developer",
+    )
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or_default()
+}
+
+fn now_seconds() -> i64 {
+    crate::live_tv::unix_seconds()
+}
+
+fn new_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
+// ---- status ---------------------------------------------------------------
+
+#[derive(Serialize)]
+pub(crate) struct DvrSlots {
+    max: u8,
+    reserve: u8,
+    recording: usize,
+}
+
+#[derive(Serialize)]
+pub(crate) struct DvrStatus {
+    enabled: bool,
+    owner_node_id: String,
+    root: String,
+    /// `None` when the root is unset or unreadable from this node — which is
+    /// the common answer on a node that is not the owner, and is not an error.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    free_bytes: Option<u64>,
+    floor_bytes: u64,
+    slots: DvrSlots,
+    /// When the next scheduled capture opens, so a client can say "next: 8pm"
+    /// without reading the whole schedule.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_start: Option<i64>,
+    pad_start_s: i64,
+    pad_end_s: i64,
+    reminder_lead_s: i64,
+}
+
+pub(crate) async fn status(
+    _user: AuthUser,
+    State(state): State<AppState>,
+) -> Result<Json<DvrStatus>, ApiError> {
+    let (live_tv, dvr) = configs(&state).await?;
+    let scheduled = state
+        .store
+        .list_dvr_recordings_in(&[DvrState::Scheduled, DvrState::Recording])
+        .await?;
+    let next_start = scheduled
+        .iter()
+        .filter(|row| row.state == DvrState::Scheduled)
+        .map(|row| row.capture_start)
+        .min();
+    Ok(Json(DvrStatus {
+        enabled: dvr.enabled,
+        owner_node_id: live_tv.owner_node_id.clone(),
+        free_bytes: crate::live_tv::free_space_bytes(&dvr.root),
+        floor_bytes: (dvr.free_floor_gb.max(0) as u64).saturating_mul(1_000_000_000),
+        slots: DvrSlots {
+            max: live_tv.max_sessions,
+            reserve: dvr.tuner_reserve,
+            recording: scheduled
+                .iter()
+                .filter(|row| row.state == DvrState::Recording)
+                .count(),
+        },
+        root: dvr.root,
+        next_start,
+        pad_start_s: dvr.pad_start_s,
+        pad_end_s: dvr.pad_end_s,
+        reminder_lead_s: dvr.reminder_lead_s,
+    }))
+}
+
+// ---- recordings -----------------------------------------------------------
+
+#[derive(Deserialize)]
+pub(crate) struct RecordingsQuery {
+    state: Option<String>,
+    after: Option<String>,
+    limit: Option<i64>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct RecordingsPage {
+    rows: Vec<DvrRecording>,
+    /// Pass back as `?after=` for the next page. Absent on the last one, so a
+    /// client knows it has the whole library rather than guessing from a
+    /// short page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next: Option<String>,
+}
+
+pub(crate) async fn list_recordings(
+    _user: AuthUser,
+    State(state): State<AppState>,
+    Query(query): Query<RecordingsQuery>,
+) -> Result<Json<RecordingsPage>, ApiError> {
+    let states = parse_states(query.state.as_deref())?;
+    let include_deleted = states.contains(&DvrState::Deleted);
+    let filter = DvrRecordingFilter {
+        states,
+        include_deleted,
+        before_capture_start: None,
+    };
+    let limit = query.limit.unwrap_or(DVR_RECORDINGS_LIST_PAGE);
+    let rows = state
+        .store
+        .list_dvr_recordings(&filter, query.after.as_deref(), limit)
+        .await?;
+    // A cursor only when the page was full: a short page is the end of the
+    // library, and offering a cursor there would have every client make one
+    // more request to learn nothing.
+    let next = (rows.len() as i64 >= limit.clamp(1, DVR_RECORDINGS_LIST_PAGE))
+        .then(|| rows.last().map(plurx_core::dvr::recording_cursor))
+        .flatten();
+    Ok(Json(RecordingsPage { rows, next }))
+}
+
+/// `?state=scheduled,recording`. An unknown name is refused rather than
+/// ignored: a client filtering on a state this server does not have is a
+/// client that will silently show an empty list and blame the server.
+fn parse_states(raw: Option<&str>) -> Result<Vec<DvrState>, ApiError> {
+    let Some(raw) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    raw.split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            DvrState::parse(value)
+                .ok_or_else(|| ApiError::BadRequest(format!("unknown recording state `{value}`")))
+        })
+        .collect()
+}
+
+#[derive(Deserialize)]
+pub(crate) struct CreateRecording {
+    channel_id: String,
+    /// Present for a programme from the guide: the server copies its facts.
+    airing_start: Option<i64>,
+    /// The free-tier story. A viewer whose guide reaches four hours can still
+    /// say "record this channel from 8 to 9", and the row carries their title
+    /// because nothing else knows one.
+    capture_start: Option<i64>,
+    capture_end: Option<i64>,
+    title: Option<String>,
+}
+
+pub(crate) async fn create_recording(
+    AuthUser(user): AuthUser,
+    State(state): State<AppState>,
+    Json(request): Json<CreateRecording>,
+) -> Result<(StatusCode, Json<DvrRecording>), ApiError> {
+    let (live_tv, dvr) = configs(&state).await?;
+    if !dvr.enabled {
+        return Err(dvr_disabled());
+    }
+    let at_ms = now_ms();
+    let row = match request.airing_start {
+        Some(airing_start) => {
+            let (channel, programme) =
+                resolve_airing(&state, &live_tv, &request.channel_id, airing_start)
+                    .await
+                    .ok_or_else(airing_unknown)?;
+            recording_from_programme(
+                &channel,
+                &programme,
+                DvrOrigin::Manual,
+                None,
+                Some(user.id),
+                dvr.pad_start_s,
+                dvr.pad_end_s,
+                at_ms,
+            )
+        }
+        None => manual_recording(&state, &live_tv, &request, user.id, at_ms).await?,
+    };
+    if row.capture_end - now_seconds() < DVR_MIN_USEFUL_S {
+        return Err(ApiError::typed(
+            StatusCode::CONFLICT,
+            "airing_past",
+            "that programme has already finished, or has less than a minute left",
+        ));
+    }
+    match state.store.insert_dvr_airing_if_absent(&row).await? {
+        DvrInsertOutcome::Inserted => Ok((StatusCode::CREATED, Json(row))),
+        DvrInsertOutcome::Exists(_) => {
+            // One airing is one row, so an existing one is the answer rather
+            // than a conflict: two people pressing Record on the same cell
+            // both wanted the same thing and both got it.
+            let existing = state
+                .store
+                .get_dvr_recording_for_airing(&row.channel_id, row.airing_start)
+                .await?
+                .ok_or_else(airing_unknown)?;
+            Ok((StatusCode::OK, Json(existing)))
+        }
+    }
+}
+
+async fn manual_recording(
+    state: &AppState,
+    live_tv: &LiveTvConfig,
+    request: &CreateRecording,
+    user_id: i64,
+    at_ms: i64,
+) -> Result<DvrRecording, ApiError> {
+    let (Some(capture_start), Some(capture_end)) = (request.capture_start, request.capture_end)
+    else {
+        return Err(ApiError::BadRequest(
+            "a recording needs either an airing_start from the guide, or a capture_start and \
+             capture_end"
+                .into(),
+        ));
+    };
+    if capture_end <= capture_start {
+        return Err(ApiError::BadRequest(
+            "capture_end must be after capture_start".into(),
+        ));
+    }
+    let name = state
+        .live_tv
+        .channel_name(live_tv, &request.channel_id)
+        .await
+        .ok_or(ApiError::NotFound("no such channel"))?;
+    let guide_number = state
+        .live_tv
+        .channel_guide_number(live_tv, &request.channel_id)
+        .await
+        .unwrap_or_else(|| request.channel_id.clone());
+    let title = request
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&name)
+        .to_owned();
+    Ok(DvrRecording {
+        id: new_id(),
+        origin: DvrOrigin::Manual,
+        rule_id: None,
+        requested_by_user_id: Some(user_id),
+        channel_id: request.channel_id.clone(),
+        guide_number,
+        channel_name: name,
+        // With no guide row, the airing *is* the capture: there is no
+        // programme whose edges the padding could sit outside.
+        airing_start: capture_start,
+        airing_end: capture_end,
+        capture_start,
+        capture_end,
+        title,
+        episode_title: None,
+        episode: None,
+        synopsis: None,
+        image_url: None,
+        original_air_date: None,
+        series_id: None,
+        programme_id: None,
+        state: DvrState::Scheduled,
+        state_reason: None,
+        attempt: 0,
+        gap_s: 0,
+        late_start_s: 0,
+        tuner_owner_node_id: None,
+        path: None,
+        bytes: 0,
+        last_progress_ms: None,
+        stop_requested_at_ms: None,
+        stop_requested_by_user_id: None,
+        item_id: None,
+        file_id: None,
+        started_at_ms: None,
+        finished_at_ms: None,
+        stopped_by_user_id: None,
+        created_at_ms: at_ms,
+        updated_at_ms: at_ms,
+    })
+}
+
+/// Copy a guide programme onto a new row, once.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn recording_from_programme(
+    channel: &ResolvedChannel,
+    programme: &LiveTvProgramme,
+    origin: DvrOrigin,
+    rule_id: Option<String>,
+    requested_by_user_id: Option<i64>,
+    pad_start_s: i64,
+    pad_end_s: i64,
+    at_ms: i64,
+) -> DvrRecording {
+    DvrRecording {
+        id: new_id(),
+        origin,
+        rule_id,
+        requested_by_user_id,
+        channel_id: channel.id.clone(),
+        guide_number: channel.guide_number.clone(),
+        channel_name: channel.name.clone(),
+        airing_start: programme.start,
+        airing_end: programme.end,
+        capture_start: programme.start - pad_start_s,
+        capture_end: programme.end + pad_end_s,
+        title: programme.title.clone(),
+        episode_title: programme.episode_title.clone(),
+        episode: programme.episode.clone(),
+        synopsis: programme.synopsis.clone(),
+        image_url: programme.image_url.clone(),
+        original_air_date: programme.original_air_date.clone(),
+        series_id: programme.series_id.clone(),
+        programme_id: programme.programme_id.clone(),
+        state: DvrState::Scheduled,
+        state_reason: None,
+        attempt: 0,
+        gap_s: 0,
+        late_start_s: 0,
+        tuner_owner_node_id: None,
+        path: None,
+        bytes: 0,
+        last_progress_ms: None,
+        stop_requested_at_ms: None,
+        stop_requested_by_user_id: None,
+        item_id: None,
+        file_id: None,
+        started_at_ms: None,
+        finished_at_ms: None,
+        stopped_by_user_id: None,
+        created_at_ms: at_ms,
+        updated_at_ms: at_ms,
+    }
+}
+
+pub(crate) async fn get_recording(
+    _user: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<DvrRecording>, ApiError> {
+    state
+        .store
+        .get_dvr_recording(&id)
+        .await?
+        .map(Json)
+        .ok_or(ApiError::NotFound("no such recording"))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct DeleteRecordingQuery {
+    delete_file: Option<u8>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct StopPending {
+    pending: bool,
+    requested_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    requested_by_user_id: Option<i64>,
+}
+
+/// One verb, four meanings, decided by what the row is doing.
+///
+/// A planned airing is cancelled; a running capture is asked to stop and the
+/// owner's tick consumes the request; a finished recording is deleted along
+/// with its file, but only when the caller says so in the URL, because a
+/// client that means "take this off my schedule" and a client that means
+/// "delete the file" must not be the same request by accident.
+pub(crate) async fn delete_recording(
+    AuthUser(user): AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<DeleteRecordingQuery>,
+) -> Result<Response, ApiError> {
+    use axum::response::IntoResponse;
+
+    let row = state
+        .store
+        .get_dvr_recording(&id)
+        .await?
+        .ok_or(ApiError::NotFound("no such recording"))?;
+    let at_ms = now_ms();
+    match row.state {
+        state_value if state_value.is_pending() => {
+            state
+                .store
+                .transition_dvr_recording(&DvrTransition {
+                    id: &id,
+                    from: DvrState::PENDING,
+                    to: DvrState::Cancelled,
+                    reason: Some("cancelled"),
+                    patch: DvrStatePatch::None,
+                    fence_generation: None,
+                    now_ms: at_ms,
+                })
+                .await?;
+            Ok(StatusCode::NO_CONTENT.into_response())
+        }
+        DvrState::Recording => {
+            let requested = state
+                .store
+                .request_dvr_stop(&id, at_ms, user.id)
+                .await?
+                .ok_or(ApiError::NotFound("no such recording"))?;
+            Ok((
+                StatusCode::ACCEPTED,
+                Json(StopPending {
+                    pending: true,
+                    requested_at: requested.stop_requested_at_ms.unwrap_or(at_ms),
+                    requested_by_user_id: requested.stop_requested_by_user_id,
+                }),
+            )
+                .into_response())
+        }
+        DvrState::Deleted => Ok(StatusCode::NO_CONTENT.into_response()),
+        _terminal => {
+            if query.delete_file != Some(1) {
+                return Err(ApiError::typed(
+                    StatusCode::CONFLICT,
+                    "delete_file_required",
+                    "this recording has a file; repeat the request with ?delete_file=1 to remove it",
+                ));
+            }
+            state
+                .store
+                .transition_dvr_recording(&DvrTransition {
+                    id: &id,
+                    from: &[
+                        DvrState::Done,
+                        DvrState::Partial,
+                        DvrState::Failed,
+                        DvrState::Missed,
+                        DvrState::Cancelled,
+                    ],
+                    to: DvrState::Deleted,
+                    reason: Some("deleted by request"),
+                    patch: DvrStatePatch::None,
+                    fence_generation: None,
+                    now_ms: at_ms,
+                })
+                .await?;
+            Ok(StatusCode::NO_CONTENT.into_response())
+        }
+    }
+}
+
+/// The only way back from a cancel, and deliberately explicit: rule expansion
+/// will not do it, however many times the rule matches again.
+pub(crate) async fn restore_recording(
+    _user: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<DvrRecording>, ApiError> {
+    let row = state
+        .store
+        .get_dvr_recording(&id)
+        .await?
+        .ok_or(ApiError::NotFound("no such recording"))?;
+    if row.capture_end - now_seconds() < DVR_MIN_USEFUL_S {
+        return Err(ApiError::typed(
+            StatusCode::CONFLICT,
+            "airing_past",
+            "that programme has already finished, or has less than a minute left",
+        ));
+    }
+    let restored = state
+        .store
+        .transition_dvr_recording(&DvrTransition {
+            id: &id,
+            from: &[DvrState::Cancelled],
+            to: DvrState::Scheduled,
+            reason: None,
+            patch: DvrStatePatch::None,
+            fence_generation: None,
+            now_ms: now_ms(),
+        })
+        .await?;
+    if !restored {
+        return Err(ApiError::Conflict(
+            "only a cancelled recording can be restored".into(),
+        ));
+    }
+    state
+        .store
+        .get_dvr_recording(&id)
+        .await?
+        .map(Json)
+        .ok_or(ApiError::NotFound("no such recording"))
+}
+
+// ---- schedule -------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub(crate) struct ScheduleQuery {
+    days: Option<i64>,
+    cancelled: Option<u8>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct DvrSchedule {
+    /// How many rows have no tuner. The number the UI puts on the Scheduled
+    /// chip, so a viewer learns about a clash without opening the list.
+    conflicts: usize,
+    rows: Vec<DvrRecording>,
+}
+
+pub(crate) async fn schedule(
+    _user: AuthUser,
+    State(state): State<AppState>,
+    Query(query): Query<ScheduleQuery>,
+) -> Result<Json<DvrSchedule>, ApiError> {
+    let days = query
+        .days
+        .unwrap_or(DVR_SCHEDULE_DAYS_MAX)
+        .clamp(1, DVR_SCHEDULE_DAYS_MAX);
+    let horizon = now_seconds() + days * 86_400;
+    let mut states = vec![
+        DvrState::Scheduled,
+        DvrState::Conflict,
+        DvrState::Withdrawn,
+        DvrState::Stale,
+        DvrState::Recording,
+    ];
+    if query.cancelled == Some(1) {
+        // Skip stays visible and reversible: a viewer who skipped the wrong
+        // episode needs to find it again to restore it.
+        states.push(DvrState::Cancelled);
+    }
+    let rows = state
+        .store
+        .list_dvr_recordings_in(&states)
+        .await?
+        .into_iter()
+        .filter(|row| row.capture_start <= horizon)
+        .collect::<Vec<_>>();
+    Ok(Json(DvrSchedule {
+        conflicts: rows
+            .iter()
+            .filter(|row| row.state == DvrState::Conflict)
+            .count(),
+        rows,
+    }))
+}
+
+// ---- rules ----------------------------------------------------------------
+
+pub(crate) async fn list_rules(
+    _user: AuthUser,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<DvrRule>>, ApiError> {
+    Ok(Json(state.store.list_dvr_rules().await?))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct FromAiring {
+    channel_id: String,
+    airing_start: i64,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct RuleBody {
+    /// Fill mode, value and channel from a guide cell — how "Record series"
+    /// creates a rule in two presses rather than a form.
+    from_airing: Option<FromAiring>,
+    name: Option<String>,
+    match_mode: Option<String>,
+    match_value: Option<String>,
+    channel_id: Option<String>,
+    /// Explicit `false` means "any channel", which is different from absent.
+    any_channel: Option<bool>,
+    new_only: Option<bool>,
+    keep_mode: Option<String>,
+    keep_value: Option<i64>,
+    pad_start_s: Option<i64>,
+    pad_end_s: Option<i64>,
+    enabled: Option<bool>,
+}
+
+pub(crate) async fn create_rule(
+    AuthUser(user): AuthUser,
+    State(state): State<AppState>,
+    Json(body): Json<RuleBody>,
+) -> Result<(StatusCode, Json<DvrRule>), ApiError> {
+    let (live_tv, dvr) = configs(&state).await?;
+    if !dvr.enabled {
+        return Err(dvr_disabled());
+    }
+    let existing = state.store.list_dvr_rules().await?;
+    if existing.len() as i64 >= DVR_RULES_MAX {
+        return Err(ApiError::typed(
+            StatusCode::CONFLICT,
+            "rule_limit",
+            format!("this server already has the maximum of {DVR_RULES_MAX} recording rules"),
+        ));
+    }
+    let at_ms = now_ms();
+    let mut rule = DvrRule {
+        id: new_id(),
+        owner_user_id: user.id,
+        // New rules go last: an existing schedule keeps the tuners it was
+        // already planned to get, and the operator reorders deliberately.
+        priority: existing.iter().map(|rule| rule.priority).max().unwrap_or(0) + 1,
+        name: String::new(),
+        match_mode: DvrMatchMode::Title,
+        match_value: String::new(),
+        channel_id: None,
+        new_only: true,
+        keep_mode: DvrKeepMode::All,
+        keep_value: 0,
+        pad_start_s: dvr.pad_start_s,
+        pad_end_s: dvr.pad_end_s,
+        enabled: true,
+        created_at_ms: at_ms,
+        updated_at_ms: at_ms,
+    };
+    if let Some(from) = &body.from_airing {
+        let (channel, programme) =
+            resolve_airing(&state, &live_tv, &from.channel_id, from.airing_start)
+                .await
+                .ok_or_else(airing_unknown)?;
+        rule.name = programme.title.clone();
+        match programme.series_id.clone() {
+            // An id survives a renamed programme and a channel change, so when
+            // the source gives one it is strictly better than the title — and
+            // the rule stores which, because the UI has to be able to say
+            // "title match · 7.1 only" rather than implying an exactness it
+            // does not have.
+            Some(series_id) => {
+                rule.match_mode = DvrMatchMode::SeriesId;
+                rule.match_value = series_id;
+            }
+            None => {
+                rule.match_mode = DvrMatchMode::Title;
+                rule.match_value = normalise_title(&programme.title);
+                rule.channel_id = Some(channel.id);
+            }
+        }
+    }
+    apply_rule_body(&mut rule, &body, at_ms)?;
+    validate_rule(&rule)?;
+    if !state.store.put_dvr_rule(&rule).await? {
+        return Err(ApiError::typed(
+            StatusCode::CONFLICT,
+            "rule_limit",
+            format!("this server already has the maximum of {DVR_RULES_MAX} recording rules"),
+        ));
+    }
+    Ok((StatusCode::CREATED, Json(rule)))
+}
+
+pub(crate) async fn update_rule(
+    AuthUser(user): AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<RuleBody>,
+) -> Result<Json<DvrRule>, ApiError> {
+    let mut rule = state
+        .store
+        .get_dvr_rule(&id)
+        .await?
+        .ok_or(ApiError::NotFound("no such rule"))?;
+    if rule.owner_user_id != user.id && !user.is_admin {
+        return Err(ApiError::Forbidden);
+    }
+    apply_rule_body(&mut rule, &body, now_ms())?;
+    validate_rule(&rule)?;
+    state.store.put_dvr_rule(&rule).await?;
+    Ok(Json(rule))
+}
+
+fn apply_rule_body(rule: &mut DvrRule, body: &RuleBody, at_ms: i64) -> Result<(), ApiError> {
+    if let Some(name) = body.name.as_deref().map(str::trim) {
+        rule.name = name.to_owned();
+    }
+    if let Some(mode) = body.match_mode.as_deref() {
+        rule.match_mode = DvrMatchMode::parse(mode)
+            .ok_or_else(|| ApiError::BadRequest(format!("unknown match mode `{mode}`")))?;
+    }
+    if let Some(value) = body.match_value.as_deref().map(str::trim) {
+        rule.match_value = match rule.match_mode {
+            DvrMatchMode::Title => normalise_title(value),
+            DvrMatchMode::SeriesId => value.to_owned(),
+        };
+    }
+    if body.any_channel == Some(true) {
+        rule.channel_id = None;
+    } else if let Some(channel_id) = body.channel_id.as_deref().map(str::trim) {
+        rule.channel_id = (!channel_id.is_empty()).then(|| channel_id.to_owned());
+    }
+    if let Some(new_only) = body.new_only {
+        rule.new_only = new_only;
+    }
+    if let Some(mode) = body.keep_mode.as_deref() {
+        rule.keep_mode = DvrKeepMode::parse(mode)
+            .ok_or_else(|| ApiError::BadRequest(format!("unknown keep mode `{mode}`")))?;
+    }
+    if let Some(value) = body.keep_value {
+        rule.keep_value = value.max(0);
+    }
+    if let Some(value) = body.pad_start_s {
+        rule.pad_start_s = value.clamp(0, DVR_PAD_MAX_S);
+    }
+    if let Some(value) = body.pad_end_s {
+        rule.pad_end_s = value.clamp(0, DVR_PAD_MAX_S);
+    }
+    if let Some(enabled) = body.enabled {
+        rule.enabled = enabled;
+    }
+    rule.updated_at_ms = at_ms;
+    Ok(())
+}
+
+fn validate_rule(rule: &DvrRule) -> Result<(), ApiError> {
+    if rule.name.is_empty() || rule.name.len() > DVR_RULE_NAME_MAX {
+        return Err(ApiError::BadRequest(format!(
+            "a rule needs a name of 1 to {DVR_RULE_NAME_MAX} bytes"
+        )));
+    }
+    if rule.match_value.is_empty() || rule.match_value.len() > DVR_MATCH_VALUE_MAX {
+        return Err(ApiError::BadRequest(format!(
+            "a rule needs something to match on, at most {DVR_MATCH_VALUE_MAX} bytes"
+        )));
+    }
+    if rule.keep_mode == DvrKeepMode::LastN && rule.keep_value < 1 {
+        return Err(ApiError::BadRequest(
+            "keeping the last N episodes needs an N of at least 1".into(),
+        ));
+    }
+    if rule.keep_mode == DvrKeepMode::Days && rule.keep_value < 1 {
+        return Err(ApiError::BadRequest(
+            "keeping recordings for a number of days needs at least one day".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) async fn delete_rule(
+    AuthUser(user): AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let rule = state
+        .store
+        .get_dvr_rule(&id)
+        .await?
+        .ok_or(ApiError::NotFound("no such rule"))?;
+    if rule.owner_user_id != user.id && !user.is_admin {
+        return Err(ApiError::Forbidden);
+    }
+    // The rows it materialised are not cancelled here. The owner's next tick
+    // withdraws the pending ones, which is a different word deliberately:
+    // `cancelled` is a person's decision about one airing, and deleting a rule
+    // is not that.
+    state.store.delete_dvr_rule(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+pub(crate) struct RuleOrder {
+    ids: Vec<String>,
+}
+
+pub(crate) async fn reorder_rules(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+    Json(body): Json<RuleOrder>,
+) -> Result<Json<Vec<DvrRule>>, ApiError> {
+    if !state.store.reorder_dvr_rules(&body.ids, now_ms()).await? {
+        return Err(ApiError::BadRequest(
+            "the order must name every rule exactly once".into(),
+        ));
+    }
+    Ok(Json(state.store.list_dvr_rules().await?))
+}
+
+// ---- reminders ------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub(crate) struct RemindersQuery {
+    due: Option<u8>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct DueReminder {
+    #[serde(flatten)]
+    reminder: DvrReminder,
+    /// Whether a recording already covers this airing, so the overlay can say
+    /// "recording" instead of offering to start one.
+    covered_by_recording: bool,
+}
+
+pub(crate) async fn list_reminders(
+    AuthUser(user): AuthUser,
+    State(state): State<AppState>,
+    Query(query): Query<RemindersQuery>,
+) -> Result<Json<Vec<DueReminder>>, ApiError> {
+    let wanted = (query.due == Some(1)).then_some(DvrReminderState::Fired);
+    let reminders = state.store.list_dvr_reminders(user.id, wanted).await?;
+    if reminders.is_empty() {
+        return Ok(Json(Vec::new()));
+    }
+    let covering = state
+        .store
+        .list_dvr_recordings_in(&[DvrState::Scheduled, DvrState::Recording])
+        .await?;
+    Ok(Json(
+        reminders
+            .into_iter()
+            .map(|reminder| DueReminder {
+                covered_by_recording: covering.iter().any(|row| {
+                    row.channel_id == reminder.channel_id
+                        && row.airing_start == reminder.airing_start
+                }),
+                reminder,
+            })
+            .collect(),
+    ))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct CreateReminder {
+    channel_id: String,
+    airing_start: i64,
+    lead_s: Option<i64>,
+}
+
+pub(crate) async fn create_reminder(
+    AuthUser(user): AuthUser,
+    State(state): State<AppState>,
+    Json(request): Json<CreateReminder>,
+) -> Result<(StatusCode, Json<DvrReminder>), ApiError> {
+    let (live_tv, dvr) = configs(&state).await?;
+    // Deliberately not gated on `dvr.enabled`: a reminder is a row with a time
+    // in it. It needs neither a tuner nor a disk, and refusing one because
+    // recording is off would be a gate on a feature that does not use it.
+    let (channel, programme) =
+        resolve_airing(&state, &live_tv, &request.channel_id, request.airing_start)
+            .await
+            .ok_or_else(airing_unknown)?;
+    if programme.start <= now_seconds() {
+        return Err(ApiError::typed(
+            StatusCode::CONFLICT,
+            "airing_past",
+            "that programme has already started",
+        ));
+    }
+    // Armed and fired both count, matching what the Store charges: a fired
+    // reminder is still on someone's screen waiting to be acknowledged.
+    let mut existing = state
+        .store
+        .list_dvr_reminders(user.id, Some(DvrReminderState::Armed))
+        .await?;
+    existing.extend(
+        state
+            .store
+            .list_dvr_reminders(user.id, Some(DvrReminderState::Fired))
+            .await?,
+    );
+    if existing.len() as i64 >= DVR_REMINDERS_PER_USER_MAX {
+        return Err(ApiError::typed(
+            StatusCode::CONFLICT,
+            "reminder_limit",
+            format!("you already have {DVR_REMINDERS_PER_USER_MAX} reminders set"),
+        ));
+    }
+    let at_ms = now_ms();
+    let reminder = DvrReminder {
+        id: existing
+            .iter()
+            .find(|candidate| {
+                candidate.channel_id == channel.id && candidate.airing_start == programme.start
+            })
+            .map(|candidate| candidate.id.clone())
+            .unwrap_or_else(new_id),
+        user_id: user.id,
+        channel_id: channel.id,
+        guide_number: channel.guide_number,
+        airing_start: programme.start,
+        airing_end: programme.end,
+        title: programme.title,
+        lead_s: request
+            .lead_s
+            .unwrap_or(dvr.reminder_lead_s)
+            .clamp(0, DVR_LEAD_MAX_S),
+        state: DvrReminderState::Armed,
+        fired_at_ms: None,
+        acked_at_ms: None,
+        created_at_ms: at_ms,
+        updated_at_ms: at_ms,
+    };
+    if !state.store.put_dvr_reminder(&reminder).await? {
+        return Err(ApiError::typed(
+            StatusCode::CONFLICT,
+            "reminder_limit",
+            format!("you already have {DVR_REMINDERS_PER_USER_MAX} reminders set"),
+        ));
+    }
+    Ok((StatusCode::CREATED, Json(reminder)))
+}
+
+pub(crate) async fn delete_reminder(
+    AuthUser(user): AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    if state.store.delete_dvr_reminder(user.id, &id).await? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::NotFound("no such reminder"))
+    }
+}
+
+/// Acknowledged on one device, gone from every other. A reminder that keeps
+/// reappearing on the tablet after being dismissed on the television is the
+/// failure this exists to prevent.
+pub(crate) async fn ack_reminder(
+    AuthUser(user): AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let changed = state
+        .store
+        .set_dvr_reminder_state(
+            Some(user.id),
+            &id,
+            DvrReminderState::Fired,
+            DvrReminderState::Acked,
+            now_ms(),
+        )
+        .await?;
+    if changed {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::NotFound("no such reminder is waiting"))
+    }
+}
+
+// ---- helpers shared with the engine ---------------------------------------
+
+/// Whether a rule matches a guide programme on a channel.
+///
+/// Not called from a route: the scheduler in the owner loop is its only
+/// caller, and it lands with the engine.
+#[allow(dead_code)]
+///
+/// Lives here rather than in the engine because the rule editor and the
+/// scheduler have to agree about it exactly: a preview that disagreed with
+/// what actually gets recorded would be worse than no preview.
+pub(crate) fn rule_matches(rule: &DvrRule, channel_id: &str, programme: &LiveTvProgramme) -> bool {
+    if !rule.enabled {
+        return false;
+    }
+    let matched = match rule.match_mode {
+        DvrMatchMode::SeriesId => programme.series_id.as_deref() == Some(rule.match_value.as_str()),
+        DvrMatchMode::Title => {
+            normalise_title(&programme.title) == rule.match_value
+                && rule
+                    .channel_id
+                    .as_deref()
+                    .is_none_or(|wanted| wanted == channel_id)
+        }
+    };
+    if !matched {
+        return false;
+    }
+    if rule.new_only {
+        return is_first_run(
+            programme.is_new,
+            programme.original_air_date.as_deref(),
+            programme.start,
+        );
+    }
+    true
+}
+
+/// Every settings key this feature owns, in one place, so a future audit of
+/// what the DVR reads does not have to grep for `dvr.` across the tree.
+#[allow(dead_code)]
+pub(crate) fn dvr_setting_keys() -> [&'static str; 8] {
+    [
+        keys::DVR_ENABLED,
+        keys::DVR_ROOT,
+        keys::DVR_FREE_FLOOR_GB,
+        keys::DVR_TUNER_RESERVE,
+        keys::DVR_PAD_START_S,
+        keys::DVR_PAD_END_S,
+        keys::DVR_REMINDER_LEAD_S,
+        keys::DVR_WEBHOOK_URL,
+    ]
+}

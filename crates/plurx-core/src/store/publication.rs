@@ -473,6 +473,31 @@ impl<'a> PublicationStore<'a> {
         .await
     }
 
+    pub async fn get_dvr_recording(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::dvr::DvrRecording>, StoreError> {
+        self.store.get_dvr_recording(id).await
+    }
+
+    /// Tell the DVR which item and file its finished capture became.
+    ///
+    /// Unfenced: this is a back-reference on a row the scan does not own,
+    /// carrying no catalogue state, so there is nothing a stale publisher
+    /// could overwrite. The fenced calls are the ones that write items and
+    /// files.
+    pub async fn link_dvr_recording_media(
+        &self,
+        recording_id: &str,
+        item_id: i64,
+        file_id: i64,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        self.store
+            .link_dvr_recording_media(recording_id, item_id, file_id, now_ms)
+            .await
+    }
+
     pub async fn upsert_file(
         &self,
         item_id: i64,

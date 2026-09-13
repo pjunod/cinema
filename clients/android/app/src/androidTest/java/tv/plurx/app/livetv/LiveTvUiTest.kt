@@ -102,6 +102,20 @@ class LiveTvUiTest {
                             path == "/api/v1/live-tv/guide" -> """{"source":"hdhomerun","freshness":"unavailable",
                                 "age_seconds":0,"window":{"start":0,"end":0},
                                 "matched_channels":0,"lineup_channels":2,"channels":[]}"""
+                            // The DVR is a third independent read. Like the
+                            // guide it must never gate the lineup or a start,
+                            // so the fixture answers the empty-but-configured
+                            // shape and the assertions below prove the screen
+                            // is fully usable with nothing scheduled. Matched
+                            // by prefix because these carry query strings.
+                            path.startsWith("/api/v1/dvr/status") -> """{"enabled":true,
+                                "owner_node_id":"fixture-voter","root":"/fixture/dvr","floor_bytes":50000000000,
+                                "slots":{"max":2,"reserve":1,"recording":0},
+                                "pad_start_s":60,"pad_end_s":120,"reminder_lead_s":300}"""
+                            path.startsWith("/api/v1/dvr/schedule") -> """{"conflicts":0,"rows":[]}"""
+                            path.startsWith("/api/v1/dvr/reminders") -> "[]"
+                            path.startsWith("/api/v1/dvr/recordings") -> "[]"
+                            path.startsWith("/api/v1/dvr/rules") -> "[]"
                             path == "/api/v1/live-tv/readiness/refresh" ->
                                 """{"ready":true,"generation":$generation,"checks":[{"id":"tuner","ready":true,"message":"Fixture tuner reachable"}]}"""
                             path == "/api/v1/settings" -> {

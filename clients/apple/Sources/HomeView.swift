@@ -112,6 +112,11 @@ struct HomeView: View {
         .onReceive(NotificationCenter.default.publisher(for: .makeLibraryChannelFromItem)) { _ in
             selectedTab = .libraryChannels
         }
+        // A reminder's *Watch* action names a channel; Live TV is the only tab
+        // that can tune one, and it reads the channel from the same notice.
+        .onReceive(NotificationCenter.default.publisher(for: .plurxReminderWatch)) { _ in
+            selectedTab = .liveTv
+        }
     }
     #else
     private var tvTabs: some View {

@@ -128,12 +128,26 @@ struct RootView: View {
             guard phase == .active else { return }
             Task { await downloads.resumePendingPreparation() }
             Task { await bookDownloads.syncPendingProgress() }
+            mirrorReminders()
         }
         .onChange(of: model.phase) { _, phase in
             guard phase == .ready else { return }
             Task { await downloads.resumePendingPreparation() }
             Task { await bookDownloads.syncPendingProgress() }
+            mirrorReminders()
         }
         #endif
     }
+
+    #if os(iOS)
+    /// Launch and every foreground. The phone's notifications are a mirror of
+    /// the server's reminders, and this is the only moment it can be brought
+    /// back into line — see `LocalReminders` for what that cannot cover.
+    private func mirrorReminders() {
+        guard model.phase == .ready else { return }
+        let origin = model.origin
+        let token = Session.shared.token
+        Task { await LocalReminders.shared.reconcile(origin: origin, token: token) }
+    }
+    #endif
 }

@@ -336,10 +336,11 @@ test("Developer owns experimental enablement and keeps readiness advisory", () =
       shippedSource("devReadinessRow"), shippedSource("devReadinessPill"),
       shippedSource("devReadinessEvidence"), shippedSource("devReq"),
       shippedSource("devStaticReq"), shippedSource("clusterTransportRecoveryCard"),
-      shippedSource("preparedQualityCard"), shippedSource("playbackSurfaceReadinessCard"),
+      shippedSource("preparedQualityCard"), shippedSource("dvrCard"),
+      shippedSource("playbackSurfaceReadinessCard"),
       shippedSource("developerPanel"),
       shippedSource("liveTvPanel"),
-      "return {developerPanel,preparedQualityCard,clusterTransportRecoveryCard,liveTvPanel};",
+      "return {developerPanel,preparedQualityCard,clusterTransportRecoveryCard,liveTvPanel,dvrCard};",
     ].join("\n"),
   )(
     (title, sub) => `HEAD:${title}|${sub}`,
@@ -368,9 +369,17 @@ test("Developer owns experimental enablement and keeps readiness advisory", () =
     hls_typeless_sliding: false,
     live_tv_guide_source: "hdhomerun",
     live_tv_guide_hours: 24,
+    dvr_enabled: false,
+    dvr_root: "/srv/plurx/recordings",
+    dvr_free_floor_gb: 50,
+    dvr_tuner_reserve: 1,
+    dvr_pad_start_s: 60,
+    dvr_pad_end_s: 120,
+    dvr_reminder_lead_s: 300,
+    dvr_webhook_url: "",
   };
   const html = panels.developerPanel(settings, readiness);
-  for (const id of ["pqh", "pcpv1", "pdp", "phs", "dhqa", "adr"])
+  for (const id of ["pqh", "pcpv1", "pdp", "phs", "dhqa", "adr", "dvrenabled"])
     assert.match(html, new RegExp(`TOG:${id}\\|`), `Developer retains ${id}`);
   assert.doesNotMatch(html, /HDHomeRun Live TV|CARDHEAD:Programme guide/);
   for (const route of ["livetv", "playback", "cluster"])
@@ -415,6 +424,29 @@ test("Developer owns experimental enablement and keeps readiness advisory", () =
   assert.match(cluster, /\/cluster\/transport\/sqlite/);
   assert.match(cluster, /twenty learner plus twenty voter recovery cycles/);
   assert.doesNotMatch(cluster, /TOG:/);
+  // Recording: one authoritative switch, the engine's settings beside it, and
+  // readiness that is advice. A red row must never reach the control.
+  const dvr = panels.dvrCard(settings, readiness);
+  assert.match(dvr, /TOG:dvrenabled\|[^|]*\|[^|]*\|checked=false\|/);
+  assert.doesNotMatch(dvr, / disabled/, "no readiness result may disable the switch");
+  assert.match(dvr, /FOOT:saveDvrDeveloper/);
+  for (const id of ["dvrroot", "dvrfloor", "dvrreserve", "dvrpadstart", "dvrpadend", "dvrlead", "dvrwebhook"])
+    assert.ok(dvr.includes(`id="${id}"`), `the recording card carries ${id}`);
+  // Five rows without a webhook, six with one: the webhook row only exists
+  // when there is a URL for it to have an opinion about.
+  for (const id of ["dvr_root_writable", "dvr_free_space", "guide_horizon", "tuner_reserve", "every_node_mounts_root"])
+    assert.ok(dvr.includes(`data-devstat="dvr:${id}"`), `the recording card reports ${id}`);
+  assert.doesNotMatch(dvr, /data-devstat="dvr:webhook_url_approved"/);
+  assert.match(panels.dvrCard({...settings, dvr_webhook_url: "https://example.invalid/hook"}, readiness),
+    /data-devstat="dvr:webhook_url_approved"/);
+  assert.match(dvr, /may turn recording on over any amount of red/);
+  // The DVR tuple is its own transaction boundary. A save that carried a
+  // Live TV field with it would be refused by the server with a 400.
+  const save = shippedSource("saveDvrDeveloper");
+  assert.doesNotMatch(save, /live_tv_/, "dvr_* settings are saved on their own");
+  assert.match(save, /dvr_enabled:/);
+  assert.match(save, /dvr_webhook_url:/);
+
   const live = panels.liveTvPanel(settings);
   assert.match(live, /HDHomeRun Live TV/);
   assert.match(live, /Save the configuration, check readiness, then enable/);

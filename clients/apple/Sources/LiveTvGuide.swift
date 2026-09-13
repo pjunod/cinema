@@ -17,6 +17,16 @@ struct LiveTvProgramme: Codable, Equatable, Sendable, Identifiable {
     let synopsis: String?
     let imageUrl: String?
     let originalAirDate: String?
+    /// What a series rule matches on when the source supplies it. A tier that
+    /// carries none leaves this nil, which is why "Record series" can also end
+    /// up as a title rule locked to one channel.
+    let seriesId: String?
+    /// The airing's own identifier, carried for diagnosis alone: identity for
+    /// scheduling is `(channel, start)` and never this.
+    let programmeId: String?
+    /// XMLTV's `<new/>` marker, and only that. A source that cannot say leaves
+    /// it nil rather than guessing.
+    let isNew: Bool?
     let filters: [String]?
 
     var id: String { "\(start)-\(title)" }
@@ -24,6 +34,7 @@ struct LiveTvProgramme: Codable, Equatable, Sendable, Identifiable {
 
     init(start: Int, end: Int, title: String, episodeTitle: String? = nil, episode: String? = nil,
          synopsis: String? = nil, imageUrl: String? = nil, originalAirDate: String? = nil,
+         seriesId: String? = nil, programmeId: String? = nil, isNew: Bool? = nil,
          filters: [String]? = nil) {
         self.start = start
         self.end = end
@@ -33,6 +44,9 @@ struct LiveTvProgramme: Codable, Equatable, Sendable, Identifiable {
         self.synopsis = synopsis
         self.imageUrl = imageUrl
         self.originalAirDate = originalAirDate
+        self.seriesId = seriesId
+        self.programmeId = programmeId
+        self.isNew = isNew
         self.filters = filters
     }
 }

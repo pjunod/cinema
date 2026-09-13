@@ -8,6 +8,37 @@ bump may break compatibility and a **patch** bump never does.
 
 ## [Unreleased]
 
+### Added
+
+- **plurx records from the tuner, and tells you before a programme starts.**
+  Every guide cell on web, Apple and Android now offers Record, Record series
+  and Remind me beside Watch. The owner node writes the tuner's bytes straight
+  to a `.ts` file under the DVR root with a sidecar of guide metadata — no
+  encoder, no FFmpeg process, because `/auto/v{n}` is already a
+  single-programme transport stream — and the file becomes an item in a new
+  `recordings` library that any node serves through the ordinary playback
+  path. Back-to-back airings on one channel share a single tuner connection
+  and produce two files, so recording the programme before yours does not cost
+  a second tuner. A reminder reaches an overlay on every open client, a local
+  notification on a phone, and one webhook POST; the reminder loop needs
+  neither a tuner nor the recording switch, so reminders work with both turned
+  off. A viewer refused a tuner is told which recordings hold them and offered
+  a way to stop one, and their own idle session is released first so they are
+  never told a recording took a tuner they were holding themselves. Sixteen
+  `/api/v1/dvr/*` routes, an advisory Developer card that gates nothing, and
+  `dvr.enabled` as a plain setting.
+
+- **The programme guide survives a restart, and reaches a fortnight ahead.**
+  The owner's copy is written to `cache_dir/live-tv/guide.json` and keeps the
+  age it already had when it was loaded, so a restarted server serves the grid
+  it had rather than "unavailable" for up to twenty minutes. The refresh loop
+  now wakes when a lineup arrives, when settings are saved and when serving
+  authority changes, instead of only on its own timer, and every guide
+  document says when the owner next intends to refresh. The look-ahead ceiling
+  rises from 72 hours to 336, filled across refreshes and revalidated a day at
+  a time, and programmes carry the series and programme identifiers a
+  recording rule matches on.
+
 ### Fixed
 
 - **CI runners stop filling up, because every cache path is bounded now.** A

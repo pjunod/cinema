@@ -45,6 +45,10 @@ use plurx_core::domain::{
     PretranscodeWorkerCapabilities, ProbeResult, ReadingStateWrite, TraktAuth,
     MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS, MEDIA_SESSION_PUBLICATION_BLOCKED,
 };
+use plurx_core::dvr::{
+    DvrInsertOutcome, DvrOrigin, DvrRecording, DvrReminder, DvrReminderState, DvrState,
+    DvrStatePatch, DvrTransition,
+};
 use plurx_core::error::StoreError;
 use plurx_core::fmp4::CutClass;
 use plurx_core::secrets::CredentialKey;
@@ -272,6 +276,30 @@ const LIBRARY_METHODS: &[&str] = &[
     "get_library",
     "list_libraries",
 ];
+const DVR_METHODS: &[&str] = &[
+    "list_dvr_rules",
+    "get_dvr_rule",
+    "put_dvr_rule",
+    "delete_dvr_rule",
+    "reorder_dvr_rules",
+    "insert_dvr_airing_if_absent",
+    "get_dvr_recording",
+    "get_dvr_recording_for_airing",
+    "list_dvr_recordings",
+    "list_dvr_recordings_in",
+    "transition_dvr_recording",
+    "progress_dvr_recording",
+    "request_dvr_stop",
+    "repoint_dvr_rule_rows",
+    "link_dvr_recording_media",
+    "list_dvr_reminders",
+    "list_dvr_reminders_in",
+    "put_dvr_reminder",
+    "delete_dvr_reminder",
+    "transition_dvr_reminders",
+    "set_dvr_reminder_state",
+];
+
 const LIBRARY_CHANNEL_METHODS: &[&str] = &[
     "list_library_channels",
     "get_library_channel",
@@ -16305,6 +16333,7 @@ fn contract_inventory_matches_every_store_method() {
         USER_METHODS,
         LIBRARY_METHODS,
         LIBRARY_CHANNEL_METHODS,
+        DVR_METHODS,
         MEDIA_METHODS,
         WATCH_METHODS,
         READING_METHODS,
@@ -16333,7 +16362,7 @@ fn contract_inventory_matches_every_store_method() {
     // Both independently reviewed method sets survive this integration. Read
     // the total from the merged trait rather than carrying either parent's
     // count across the promotion merge.
-    assert_eq!(declared.len(), 328, "review the Store method count");
+    assert_eq!(declared.len(), 349, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -27461,4 +27490,365 @@ fn a_malformed_decode_restriction_is_refused_rather_than_ignored() {
         ),
         Err(DecodeRestrictionError::TooLarge(_))
     ));
+}
+
+// ---------------------------------------------------------------------------
+// DVR
+//
+// Three properties the recording engine is built on. Each was a defect in the
+// first draft of the plan, found in review, so each is a regression test
+// rather than a demonstration.
+// ---------------------------------------------------------------------------
+
+fn contract_recording(id: &str, channel: &str, airing_start: i64, user: i64) -> DvrRecording {
+    DvrRecording {
+        id: id.to_owned(),
+        origin: DvrOrigin::Rule,
+        rule_id: None,
+        requested_by_user_id: Some(user),
+        channel_id: channel.to_owned(),
+        guide_number: "7.1".to_owned(),
+        channel_name: "WABC".to_owned(),
+        airing_start,
+        airing_end: airing_start + 1800,
+        capture_start: airing_start - 60,
+        capture_end: airing_start + 1920,
+        title: "Kitchen Table".to_owned(),
+        episode_title: None,
+        episode: None,
+        synopsis: None,
+        image_url: None,
+        original_air_date: None,
+        series_id: None,
+        programme_id: None,
+        state: DvrState::Scheduled,
+        state_reason: None,
+        attempt: 0,
+        gap_s: 0,
+        late_start_s: 0,
+        tuner_owner_node_id: None,
+        path: None,
+        bytes: 0,
+        last_progress_ms: None,
+        stop_requested_at_ms: None,
+        stop_requested_by_user_id: None,
+        item_id: None,
+        file_id: None,
+        started_at_ms: None,
+        finished_at_ms: None,
+        stopped_by_user_id: None,
+        created_at_ms: 1_000,
+        updated_at_ms: 1_000,
+    }
+}
+
+/// A rule that keeps matching an airing the viewer skipped must not bring it
+/// back. Expansion runs every fifteen seconds, so "insert if absent" reporting
+/// what it found — rather than upserting — is the whole of the guarantee.
+#[tokio::test]
+async fn a_cancelled_airing_stays_cancelled_however_often_a_rule_matches_it() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("dvr-cancel", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create user: {error}"));
+        let row = contract_recording("rec-cancel", "chan-cancel", 1_789_000_800, user.id);
+
+        assert_eq!(
+            store
+                .insert_dvr_airing_if_absent(&row)
+                .await
+                .expect("insert"),
+            DvrInsertOutcome::Inserted,
+            "{backend}: the first expansion materialises the airing"
+        );
+        assert!(store
+            .transition_dvr_recording(&DvrTransition {
+                id: &row.id,
+                from: DvrState::PENDING,
+                to: DvrState::Cancelled,
+                reason: Some("skipped by the viewer"),
+                patch: DvrStatePatch::None,
+                fence_generation: None,
+                now_ms: 2_000,
+            })
+            .await
+            .expect("cancel"));
+
+        for tick in 0..5 {
+            assert_eq!(
+                store
+                    .insert_dvr_airing_if_absent(&row)
+                    .await
+                    .expect("insert"),
+                DvrInsertOutcome::Exists(DvrState::Cancelled),
+                "{backend}: tick {tick} must find the decision, not overwrite it"
+            );
+        }
+        let stored = store
+            .get_dvr_recording(&row.id)
+            .await
+            .expect("read")
+            .expect("row");
+        assert_eq!(stored.state, DvrState::Cancelled);
+        assert_eq!(
+            stored.state_reason.as_deref(),
+            Some("skipped by the viewer")
+        );
+
+        // Restore is the only way back, and it is a person's decision too.
+        assert!(store
+            .transition_dvr_recording(&DvrTransition {
+                id: &row.id,
+                from: &[DvrState::Cancelled],
+                to: DvrState::Scheduled,
+                reason: None,
+                patch: DvrStatePatch::None,
+                fence_generation: None,
+                now_ms: 3_000,
+            })
+            .await
+            .expect("restore"));
+        assert_eq!(
+            store
+                .insert_dvr_airing_if_absent(&row)
+                .await
+                .expect("insert"),
+            DvrInsertOutcome::Exists(DvrState::Scheduled),
+            "{backend}: still one row for this airing, whatever its state"
+        );
+    })
+    .await;
+}
+
+/// A viewer's Stop and the capture's own 30-second progress write land on the
+/// same row from different nodes. They must not be able to erase each other,
+/// which is why they own disjoint columns.
+#[tokio::test]
+async fn a_stop_request_survives_the_progress_writes_racing_it_and_is_idempotent() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("dvr-stop", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create user: {error}"));
+        let other = store
+            .create_user("dvr-stop-other", "hash", true)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create user: {error}"));
+        let row = contract_recording("rec-stop", "chan-stop", 1_789_100_800, user.id);
+        store
+            .insert_dvr_airing_if_absent(&row)
+            .await
+            .expect("insert");
+        assert!(store
+            .transition_dvr_recording(&DvrTransition {
+                id: &row.id,
+                from: &[DvrState::Scheduled],
+                to: DvrState::Recording,
+                reason: None,
+                patch: DvrStatePatch::Started {
+                    attempt: 1,
+                    tuner_owner_node_id: "nynuc".to_owned(),
+                    started_at_ms: 4_000,
+                    late_start_s: 0,
+                    path: "/20t/dvr/Kitchen Table/a.ts".to_owned(),
+                },
+                fence_generation: None,
+                now_ms: 4_000,
+            })
+            .await
+            .expect("start"));
+
+        store
+            .progress_dvr_recording(&row.id, 1_000, 5_000)
+            .await
+            .expect("progress");
+        let requested = store
+            .request_dvr_stop(&row.id, 6_000, user.id)
+            .await
+            .expect("stop")
+            .expect("row");
+        assert_eq!(requested.stop_requested_at_ms, Some(6_000));
+        assert_eq!(requested.stop_requested_by_user_id, Some(user.id));
+
+        // Progress keeps flowing until the file closes, and a second viewer
+        // pressing Stop must not rewrite who asked first.
+        store
+            .progress_dvr_recording(&row.id, 2_000, 7_000)
+            .await
+            .expect("progress");
+        let repeat = store
+            .request_dvr_stop(&row.id, 8_000, other.id)
+            .await
+            .expect("stop")
+            .expect("row");
+        assert_eq!(
+            (
+                repeat.stop_requested_at_ms,
+                repeat.stop_requested_by_user_id
+            ),
+            (Some(6_000), Some(user.id)),
+            "{backend}: the first request is the one the tick consumes"
+        );
+        assert_eq!(repeat.bytes, 2_000, "{backend}: progress still lands");
+
+        assert!(store
+            .transition_dvr_recording(&DvrTransition {
+                id: &row.id,
+                from: &[DvrState::Recording],
+                to: DvrState::Done,
+                reason: None,
+                patch: DvrStatePatch::Finished {
+                    finished_at_ms: 9_000,
+                    bytes: 2_048,
+                    gap_s: 0,
+                    path: None,
+                    stopped_by_user_id: Some(user.id),
+                },
+                fence_generation: None,
+                now_ms: 9_000,
+            })
+            .await
+            .expect("finish"));
+        let finished = store
+            .get_dvr_recording(&row.id)
+            .await
+            .expect("read")
+            .expect("row");
+        assert_eq!(finished.stopped_by_user_id, Some(user.id));
+        assert_eq!(
+            finished.path.as_deref(),
+            Some("/20t/dvr/Kitchen Table/a.ts"),
+            "{backend}: a finish without a new path keeps the one the capture opened"
+        );
+    })
+    .await;
+}
+
+/// A settings save mid-tick must land no rows planned under the configuration
+/// it replaced — the tuner, the owner, or the channel lineup may all have
+/// changed. The check lives inside the write so there is no window between.
+#[tokio::test]
+async fn a_write_planned_under_a_replaced_tuner_generation_lands_nothing() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("dvr-fence", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create user: {error}"));
+        store
+            .put_setting(plurx_core::store::keys::LIVE_TV_CONFIG_GENERATION, "7")
+            .await
+            .expect("generation");
+        let row = contract_recording("rec-fence", "chan-fence", 1_789_200_800, user.id);
+        store
+            .insert_dvr_airing_if_absent(&row)
+            .await
+            .expect("insert");
+
+        assert!(
+            !store
+                .transition_dvr_recording(&DvrTransition {
+                    id: &row.id,
+                    from: &[DvrState::Scheduled],
+                    to: DvrState::Recording,
+                    reason: None,
+                    patch: DvrStatePatch::None,
+                    fence_generation: Some(6),
+                    now_ms: 5_000,
+                })
+                .await
+                .expect("stale fence"),
+            "{backend}: a tick that began under generation 6 writes nothing at 7"
+        );
+        assert_eq!(
+            store
+                .get_dvr_recording(&row.id)
+                .await
+                .expect("read")
+                .expect("row")
+                .state,
+            DvrState::Scheduled
+        );
+        assert!(
+            store
+                .transition_dvr_recording(&DvrTransition {
+                    id: &row.id,
+                    from: &[DvrState::Scheduled],
+                    to: DvrState::Recording,
+                    reason: None,
+                    patch: DvrStatePatch::None,
+                    fence_generation: Some(7),
+                    now_ms: 6_000,
+                })
+                .await
+                .expect("current fence"),
+            "{backend}: the current generation still writes"
+        );
+    })
+    .await;
+}
+
+/// A reminder warns someone before a programme starts. Once it is on, the
+/// reminder is spent whether or not anyone acknowledged it.
+#[tokio::test]
+async fn a_reminder_fires_once_before_the_start_and_expires_at_it() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("dvr-remind", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create user: {error}"));
+        let start = 1_789_300_800;
+        let reminder = DvrReminder {
+            id: "rem-1".to_owned(),
+            user_id: user.id,
+            channel_id: "chan-remind".to_owned(),
+            guide_number: "7.1".to_owned(),
+            airing_start: start,
+            airing_end: start + 1800,
+            title: "Kitchen Table".to_owned(),
+            lead_s: 300,
+            state: DvrReminderState::Armed,
+            fired_at_ms: None,
+            acked_at_ms: None,
+            created_at_ms: 1_000,
+            updated_at_ms: 1_000,
+        };
+        assert!(store.put_dvr_reminder(&reminder).await.expect("put"));
+
+        assert!(
+            store
+                .transition_dvr_reminders(start - 600, 2_000)
+                .await
+                .expect("early tick")
+                .is_empty(),
+            "{backend}: ten minutes out is before a five-minute lead"
+        );
+        let fired = store
+            .transition_dvr_reminders(start - 60, 3_000)
+            .await
+            .expect("due tick");
+        assert_eq!(fired.len(), 1, "{backend}: inside the lead, it fires");
+        assert_eq!(fired[0].state, DvrReminderState::Fired);
+        assert!(
+            store
+                .transition_dvr_reminders(start - 30, 4_000)
+                .await
+                .expect("second tick")
+                .is_empty(),
+            "{backend}: a fired reminder does not fire again"
+        );
+
+        store
+            .transition_dvr_reminders(start + 1, 5_000)
+            .await
+            .expect("start tick");
+        let after = store.list_dvr_reminders(user.id, None).await.expect("list");
+        assert_eq!(after.len(), 1);
+        assert_eq!(
+            after[0].state,
+            DvrReminderState::Expired,
+            "{backend}: an unacknowledged reminder is spent once the programme is on"
+        );
+    })
+    .await;
 }

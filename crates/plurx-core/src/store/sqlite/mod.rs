@@ -12,6 +12,7 @@ mod apikeys;
 mod cache;
 mod coordination;
 mod dv_conversion;
+mod dvr;
 mod fragindex;
 mod fragment_index_cluster;
 mod library;
@@ -1104,6 +1105,10 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     crate::library_channels::LIBRARY_CHANNELS_SCHEMA,
     // v56: durable build acknowledgement/state for replay-safe channel saves.
     crate::library_channels::LIBRARY_CHANNEL_BUILD_STATE_SCHEMA,
+    // v57: recording rules, the airings they schedule, and reminders. One
+    // airing is one row for its whole life, so the unique index covers every
+    // state rather than only the live ones.
+    crate::dvr::DVR_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -2508,7 +2513,7 @@ mod tests {
             .expect("version");
         assert_eq!(version, MIGRATIONS.len() as i64);
         assert_eq!(
-            version, 56,
+            version, 57,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );

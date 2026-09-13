@@ -27,9 +27,14 @@ use crate::live_tv_delivery::{
 };
 use crate::state::SystemInfo;
 
+pub(crate) mod dvr;
 pub(crate) mod guide;
+pub(crate) mod schedule;
+pub(crate) mod webhook;
 
-pub(crate) use guide::{GuideFreshness, GuideWindow, LiveTvGuide, LiveTvGuideChannel};
+pub(crate) use guide::{
+    GuideFreshness, GuideWindow, LiveTvGuide, LiveTvGuideChannel, LiveTvProgramme,
+};
 
 pub(crate) const SNAPSHOT_PATH: &str = "/_internal/v1/live-tv/snapshot";
 pub(crate) const START_PATH: &str = "/_internal/v1/live-tv/start";
@@ -70,10 +75,19 @@ const TUNER_STATUS_TIMEOUT: Duration = Duration::from_secs(2);
 /// additional callers fail promptly instead of building an unbounded queue.
 const MAX_FORCED_REFRESH_CALLERS: usize = 8;
 /// Guide look-ahead bounds. Four hours is what the free HDHomeRun tier
-/// actually answers; seventy-two is as far as a memory cache is worth filling.
-const DEFAULT_GUIDE_HOURS: u8 = 24;
-const MIN_GUIDE_HOURS: u8 = 4;
-const MAX_GUIDE_HOURS: u8 = 72;
+/// actually answers; a fortnight is what a subscription tier answers and what
+/// a series recording rule needs to see in order to schedule anything worth
+/// scheduling. The cache is durable now (`guide.json`), so the old
+/// "as far as a *memory* cache is worth filling" ceiling of 72 no longer
+/// describes the cost.
+pub(crate) const DEFAULT_GUIDE_HOURS: u16 = 24;
+pub(crate) const MIN_GUIDE_HOURS: u16 = 4;
+pub(crate) const MAX_GUIDE_HOURS: u16 = 336;
+/// One tick re-validates this much of the already-cached horizon, cycling
+/// through it, so a provider's schedule change reaches the cache within a
+/// fortnight of ticks (~5 hours) instead of never: a tail-only extension
+/// never revisits what it already has.
+const GUIDE_REVALIDATION_HOURS: i64 = 24;
 const MAX_XMLTV_URL_BYTES: usize = 1024;
 /// An ingress remembers the owner's answer for this long, so a click-storm on
 /// a busy page is not a relay-storm on the owner. It is deliberately shorter
@@ -159,6 +173,13 @@ const RETIRED_TTL: Duration = TERMINAL_TOMBSTONE_TTL;
 /// that viewer's new start when every slot is full. Three missed 5 s
 /// heartbeats. Paul's ruling: a tuner this viewer may still be holding is
 /// never a reason to refuse that same viewer.
+///
+/// A viewer whose phone slept, whose browser tab was closed without a stop, or
+/// whose app was force-quit is holding a tuner nobody is watching. Refusing
+/// them their own tuner is the worst of the three available answers, and it is
+/// also what would make the recording-capacity dialog lie: a viewer told
+/// "a recording has your tuner" while in fact holding it themselves would stop
+/// a recording for nothing.
 const STRAY_EVICTION_IDLE: Duration = Duration::from_secs(15);
 const SCRATCH_SWEEP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
@@ -182,7 +203,7 @@ pub(crate) struct LiveTvConfig {
     /// not the "disable before editing" rule.
     pub(crate) guide_source: GuideSource,
     pub(crate) xmltv_url: String,
-    pub(crate) guide_hours: u8,
+    pub(crate) guide_hours: u16,
 }
 
 /// Where programme data comes from. `HdHomeRun` is the zero-setup default once
@@ -336,6 +357,89 @@ impl LiveTvConfig {
 
     pub(crate) fn admission_ready(&self) -> bool {
         self.transition_from_owner_node_id.is_empty()
+    }
+}
+
+/// The recording half of the configuration.
+///
+/// Deliberately its own snapshot rather than fields on [`LiveTvConfig`]: none
+/// of these changes a tuner tuple, so none of them rides the Live TV
+/// generation CAS, and an operator must be able to change a padding default
+/// without disabling Live TV and draining every viewer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DvrConfig {
+    pub(crate) enabled: bool,
+    /// Container path of the DVR root. Empty means unset, which is the one
+    /// thing that genuinely stops a capture — there is nowhere to write.
+    pub(crate) root: String,
+    pub(crate) free_floor_gb: i64,
+    /// Tuner slots recordings may never take, so a viewer is never locked out
+    /// of their own television by their own schedule.
+    pub(crate) tuner_reserve: u8,
+    pub(crate) pad_start_s: i64,
+    pub(crate) pad_end_s: i64,
+    pub(crate) reminder_lead_s: i64,
+    /// Empty means no webhook.
+    pub(crate) webhook_url: String,
+}
+
+impl DvrConfig {
+    pub(crate) fn from_snapshot(settings: &BTreeMap<String, String>) -> Self {
+        let setting = |key: &str| settings.get(key).map(String::as_str);
+        let number = |key: &str, default: i64, low: i64, high: i64| {
+            setting(key)
+                .and_then(|value| value.parse::<i64>().ok())
+                .unwrap_or(default)
+                .clamp(low, high)
+        };
+        Self {
+            enabled: plurx_core::store::stored_switch(setting(keys::DVR_ENABLED), false),
+            root: setting(keys::DVR_ROOT)
+                .unwrap_or_default()
+                .trim()
+                .to_owned(),
+            free_floor_gb: number(
+                keys::DVR_FREE_FLOOR_GB,
+                plurx_core::dvr::DVR_DEFAULT_FREE_FLOOR_GB,
+                0,
+                1_000_000,
+            ),
+            tuner_reserve: number(
+                keys::DVR_TUNER_RESERVE,
+                i64::from(plurx_core::dvr::DVR_DEFAULT_TUNER_RESERVE),
+                0,
+                4,
+            ) as u8,
+            pad_start_s: number(
+                keys::DVR_PAD_START_S,
+                plurx_core::dvr::DVR_DEFAULT_PAD_START_S,
+                0,
+                plurx_core::dvr::DVR_PAD_MAX_S,
+            ),
+            pad_end_s: number(
+                keys::DVR_PAD_END_S,
+                plurx_core::dvr::DVR_DEFAULT_PAD_END_S,
+                0,
+                plurx_core::dvr::DVR_PAD_MAX_S,
+            ),
+            reminder_lead_s: number(
+                keys::DVR_REMINDER_LEAD_S,
+                plurx_core::dvr::DVR_DEFAULT_REMINDER_LEAD_S,
+                0,
+                plurx_core::dvr::DVR_LEAD_MAX_S,
+            ),
+            webhook_url: setting(keys::DVR_WEBHOOK_URL)
+                .unwrap_or_default()
+                .trim()
+                .to_owned(),
+        }
+    }
+
+    /// How many tuner slots recordings may hold at once. Never the whole set:
+    /// a reserve that equalled `max_sessions` would mean no recording could
+    /// ever start, and one that exceeded it would underflow.
+    pub(crate) fn recording_slots(&self, max_sessions: u8) -> u8 {
+        max_sessions.saturating_sub(self.tuner_reserve.min(max_sessions))
     }
 }
 
@@ -1278,6 +1382,10 @@ struct LiveTvRegistry {
     closing: bool,
     min_generation: i64,
     sessions: HashMap<String, Arc<LiveTvSession>>,
+    /// One entry per channel being recorded, however many recordings share
+    /// it. A transport is one tuner GET, so this — not the number of
+    /// recordings — is what counts against the tuner limit.
+    transports: HashMap<String, Arc<dvr::DvrTransport>>,
     requests: HashMap<LiveTvRequestKey, String>,
     terminals: HashMap<String, LiveTvTerminalTombstone>,
     /// `(user_id, request_id)` a viewer has retired, and when that fact
@@ -1299,6 +1407,51 @@ struct LiveTvTerminalTombstone {
 }
 
 impl LiveTvRegistry {
+    /// Tuner sessions in use: viewers plus recording transports.
+    ///
+    /// A cancelled session is not occupancy. Its worker takes a moment to
+    /// exit, and counting it would refuse a viewer who stopped and
+    /// immediately restarted — the commonest thing a person does when a
+    /// channel misbehaves.
+    fn live_sessions(&self) -> usize {
+        self.sessions
+            .values()
+            .filter(|session| !session.cancel.is_cancelled())
+            .count()
+    }
+
+    fn held(&self) -> usize {
+        self.live_sessions() + self.transports.len()
+    }
+
+    /// Whether a *new* transport may be opened. A sink joining one that is
+    /// already tuned to its channel needs no slot and does not ask.
+    ///
+    /// Two conditions, both about occupancy rather than arrival order, so the
+    /// answer does not depend on who got there first: nothing may exceed the
+    /// tuner count, and recordings may never hold more than
+    /// `max_sessions - reserve` of it. With four tuners and a reserve of one,
+    /// "one viewer and three recordings" fits and "four recordings" does not,
+    /// whichever order they arrived in.
+    fn may_open_transport(&self, max_sessions: u8, reserve: u8) -> bool {
+        Self::occupancy_admits(
+            self.live_sessions(),
+            self.transports.len(),
+            max_sessions,
+            reserve,
+        )
+    }
+
+    /// The two rules, over counts alone. Separated so the property can be
+    /// asserted directly: "one viewer and three recordings" is a statement
+    /// about occupancy, and building four real tuner sessions to check it
+    /// would test the fixture rather than the rule.
+    fn occupancy_admits(sessions: usize, transports: usize, max_sessions: u8, reserve: u8) -> bool {
+        let max = usize::from(max_sessions);
+        let recordable = max.saturating_sub(usize::from(reserve.min(max_sessions)));
+        sessions + transports < max && transports < recordable
+    }
+
     fn prune_terminals(&mut self) {
         let now = tokio::time::Instant::now();
         self.terminals
@@ -2118,6 +2271,21 @@ impl GuideCache {
         guide
     }
 
+    /// The owner's own copy, unclipped and without the serving dressing — what
+    /// the DVR scheduler matches rules against, and what an incremental
+    /// refresh extends rather than refetching. `None` when nothing usable is
+    /// cached for this generation.
+    async fn owner_copy(&self, generation: i64) -> Option<LiveTvGuide> {
+        let state = self.state.lock().await;
+        let now = tokio::time::Instant::now();
+        state
+            .cached
+            .as_ref()
+            .filter(|cached| cached.generation == generation)
+            .filter(|cached| cached.age_at(now) <= guide::GUIDE_STALE_TTL)
+            .map(|cached| cached.guide.clone())
+    }
+
     /// A completed refresh. A failure keeps the previous cache and records the
     /// error; only a success replaces the content.
     async fn store(
@@ -2206,6 +2374,144 @@ impl GuideCache {
             .as_ref()
             .map(|c| c.generation)
     }
+}
+
+/// Fold the previously cached rows into a freshly fetched bulk answer.
+///
+/// Rows that ended before the new window's start are dropped — a guide is not
+/// an archive — and everything else is merged per channel, where
+/// `normalise_programmes`' de-duplication decides which copy of a repeated
+/// airing survives. A channel present only in the cache is kept: the bulk call
+/// answers a few hours, and dropping the tail every tick is exactly the
+/// behaviour that made a long horizon impossible.
+fn merge_carried_guide(
+    channels: &mut Vec<LiveTvGuideChannel>,
+    carried: LiveTvGuide,
+    keep_from: i64,
+) {
+    let mut by_number = channels
+        .iter()
+        .enumerate()
+        .map(|(index, channel)| (channel.guide_number.clone(), index))
+        .collect::<BTreeMap<_, _>>();
+    for mut previous in carried.channels {
+        previous.programmes.retain(|row| row.end > keep_from);
+        if previous.programmes.is_empty() {
+            continue;
+        }
+        match by_number.get(&previous.guide_number) {
+            Some(&index) => guide::merge_channel(&mut channels[index], previous),
+            None => {
+                by_number.insert(previous.guide_number.clone(), channels.len());
+                channels.push(previous);
+            }
+        }
+    }
+}
+
+/// Whether plurxd will POST a DVR event to this URL.
+///
+/// This is a **weaker** outbound boundary than any other the server has, and
+/// deliberately so. `approved_guide_url` pins scheme, port and a two-host
+/// allowlist because it carries a credential to a vendor's API. This carries
+/// no credential and no secret — a reminder and a recording's start and finish
+/// — and its whole point is a box on the operator's own network, which no
+/// allowlist could name in advance.
+///
+/// So the rule is about *reach* rather than identity: https to anywhere, or
+/// plain http only to a private or link-local **literal address**. Userinfo is
+/// refused outright, because a URL carrying a credential is a credential this
+/// process would then hold and log.
+///
+/// A *name* over plain http is refused even when it currently resolves
+/// privately, so `http://ha.lan:8123` has to be written
+/// `http://192.168.4.7:8123`. That is a real cost and it is the deliberate
+/// choice: this check runs when a setting is saved, a name that resolves
+/// privately today can resolve publicly tomorrow, and the setting would not be
+/// re-examined. The Developer row says exactly this when it refuses one.
+///
+/// Redirects are refused by the client that uses this (as the artwork client
+/// does), so the host checked here is the host contacted.
+pub(crate) fn approved_webhook_url(raw: &str) -> Result<reqwest::Url, String> {
+    let url = reqwest::Url::parse(raw.trim())
+        .map_err(|_| format!("`{raw}` is not a URL this server can parse."))?;
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(
+            "A webhook URL must not carry a username or password — this server would then hold              and log a credential it has no use for."
+                .to_owned(),
+        );
+    }
+    match url.scheme() {
+        "https" => Ok(url),
+        "http" => {
+            let host = url
+                .host_str()
+                .ok_or_else(|| "That URL names no host.".to_owned())?;
+            if private_webhook_host(host) {
+                Ok(url)
+            } else {
+                Err(format!(
+                    "`{host}` is not a private address, so plain http would put this event on                      the public internet in the clear. Use https, or a host on your own network."
+                ))
+            }
+        }
+        other => Err(format!(
+            "`{other}` is not a scheme this server will call; use https, or http to a private              address."
+        )),
+    }
+}
+
+/// RFC 1918, loopback, link-local and unique-local, by literal address.
+///
+/// A *name* is deliberately not resolved here: a name that resolves privately
+/// now can resolve publicly later, and this check runs when an operator saves
+/// a setting rather than when the request goes out. A hostname is therefore
+/// only accepted over https, where the transport protects the body regardless
+/// of where the name points.
+fn private_webhook_host(host: &str) -> bool {
+    // `Url::host_str` keeps the brackets on an IPv6 literal, and `IpAddr`
+    // does not parse them — so without this a LAN address like
+    // `http://[fd00::1]:8123/` would be read as a hostname and refused.
+    let host = host
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .unwrap_or(host);
+    match host.parse::<IpAddr>() {
+        Ok(IpAddr::V4(address)) => {
+            address.is_private() || address.is_loopback() || address.is_link_local()
+        }
+        Ok(IpAddr::V6(address)) => {
+            address.is_loopback()
+                // fc00::/7 unique-local and fe80::/10 link-local, neither of
+                // which `std` exposes as a stable predicate.
+                || (address.segments()[0] & 0xfe00) == 0xfc00
+                || (address.segments()[0] & 0xffc0) == 0xfe80
+        }
+        Err(_) => false,
+    }
+}
+
+/// Free bytes on the filesystem holding `path`, or `None` when the path is
+/// empty or this node cannot see it.
+///
+/// A non-owner node answering `None` is the common case and not a fault: the
+/// DVR root is a mount the owner writes to, and a node that does not have it
+/// has nothing honest to say about its free space.
+pub(crate) fn free_space_bytes(path: &str) -> Option<u64> {
+    if path.trim().is_empty() {
+        return None;
+    }
+    let raw = std::ffi::CString::new(path).ok()?;
+    // SAFETY: `statvfs` reads through the NUL-terminated path and writes only
+    // into the zeroed struct below; both live for the duration of the call.
+    let stats = unsafe {
+        let mut stats = std::mem::zeroed::<libc::statvfs>();
+        if libc::statvfs(raw.as_ptr(), &mut stats) != 0 {
+            return None;
+        }
+        stats
+    };
+    Some((stats.f_bsize as u64).saturating_mul(stats.f_bavail as u64))
 }
 
 fn remaining_guide_budget(deadline: tokio::time::Instant) -> Result<Duration, LiveTvError> {
@@ -2301,6 +2607,9 @@ pub(crate) struct LiveTvManager {
     /// in any meaningful sense, because it holds exactly one generation and
     /// expires in a minute.
     relayed_guide: tokio::sync::Mutex<Option<(i64, tokio::time::Instant, LiveTvGuide)>>,
+    /// Which day of the cached horizon the next refresh re-reads. A plain
+    /// counter: cycling is the point, and which day it starts on is not.
+    guide_revalidation_cursor: AtomicU64,
     graph_cache: tokio::sync::Mutex<Option<CachedGraphProbe>>,
     source_formats: StdMutex<HashMap<SourceFormatKey, CachedSourceFormat>>,
     registry: Arc<StdMutex<LiveTvRegistry>>,
@@ -2339,6 +2648,7 @@ impl LiveTvManager {
             guide_cache,
             guide_titles: StdMutex::new(Arc::new(BTreeMap::new())),
             relayed_guide: tokio::sync::Mutex::new(None),
+            guide_revalidation_cursor: AtomicU64::new(0),
             graph_cache: tokio::sync::Mutex::new(None),
             source_formats: StdMutex::new(HashMap::new()),
             registry: Arc::clone(&metrics.registry),
@@ -2813,14 +3123,15 @@ impl LiveTvManager {
                         "live-TV request recovery history is full; retry after one minute".into(),
                     ));
                 }
-                let live = registry
-                    .sessions
-                    .values()
-                    .filter(|session| !session.cancel.is_cancelled())
-                    .count();
-                if live >= usize::from(config.max_sessions) {
+                // Recordings hold tuners too, so occupancy is viewers plus
+                // recording transports rather than sessions alone: a viewer
+                // refused because a capture has the last tuner is owed the
+                // real reason, not a count that pretends the tuner is free.
+                if registry.held() >= usize::from(config.max_sessions) {
                     // Paul's ruling: a tuner this viewer may still be holding
-                    // is never a reason to refuse that same viewer.
+                    // is never a reason to refuse that same viewer. Their own
+                    // stray goes first, before this refusal can blame a
+                    // recording that is not in fact the one in the way.
                     match registry.stray_to_evict(request.user_id, now) {
                         Some(stray) => {
                             stray.cancel.cancel();
@@ -3142,6 +3453,25 @@ impl LiveTvManager {
         &self,
         drain_before_generation: i64,
     ) -> Result<usize, LiveTvError> {
+        // Transports are sessions to this path. A capture opened under the
+        // configuration being drained holds a tuner the new owner is about to
+        // want, and a fenced writer must stop before the replacement starts
+        // its own attempt.
+        let stale_channels = {
+            let registry = self
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            registry
+                .transports
+                .iter()
+                .filter(|(_, transport)| transport.generation < drain_before_generation)
+                .map(|(channel, _)| channel.clone())
+                .collect::<Vec<_>>()
+        };
+        for channel in stale_channels {
+            self.close_transport(&channel).await;
+        }
         let sessions = {
             let mut registry = self
                 .registry
@@ -3159,6 +3489,7 @@ impl LiveTvManager {
     }
 
     pub(crate) async fn shutdown(&self) -> Result<usize, LiveTvError> {
+        self.close_all_transports().await;
         let sessions = {
             let mut registry = self
                 .registry
@@ -3755,6 +4086,34 @@ impl LiveTvManager {
     /// The lineup the guide is matched against, read from the snapshot cache
     /// without ever refreshing it. An empty answer is a refresh that has to
     /// wait, not a guide with no channels.
+    /// The display name of one lineup channel, if this node has a lineup for
+    /// the current generation. `None` is a real answer — a node that has never
+    /// read channels does not know, and guessing would put an invented name on
+    /// a recording that keeps it for ever.
+    pub(crate) async fn channel_name(
+        &self,
+        config: &LiveTvConfig,
+        channel_id: &str,
+    ) -> Option<String> {
+        self.cached_lineup(config)
+            .await
+            .into_iter()
+            .find(|channel| channel.id == channel_id)
+            .map(|channel| channel.guide_name)
+    }
+
+    pub(crate) async fn channel_guide_number(
+        &self,
+        config: &LiveTvConfig,
+        channel_id: &str,
+    ) -> Option<String> {
+        self.cached_lineup(config)
+            .await
+            .into_iter()
+            .find(|channel| channel.id == channel_id)
+            .map(|channel| channel.guide_number)
+    }
+
     async fn cached_lineup(&self, config: &LiveTvConfig) -> Vec<LiveTvChannel> {
         let state = self.cache.state.lock().await;
         state
@@ -3782,6 +4141,11 @@ impl LiveTvManager {
                         "an HDHomeRun address is required for the HDHomeRun guide".to_owned(),
                     )
                 })?;
+                // Only the HDHomeRun source accumulates: XMLTV answers the
+                // whole horizon in one document, so carrying rows forward
+                // there would preserve a programme the grabber deliberately
+                // removed.
+                let carried = self.guide_cache.owner_copy(config.generation).await;
                 self.fetch_hdhomerun_guide(
                     address,
                     lineup,
@@ -3789,6 +4153,7 @@ impl LiveTvManager {
                     deadline,
                     cancel,
                     refresh_permit,
+                    carried,
                 )
                 .await?
             }
@@ -3836,6 +4201,7 @@ impl LiveTvManager {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn fetch_hdhomerun_guide(
         &self,
         address: Ipv4Addr,
@@ -3844,6 +4210,7 @@ impl LiveTvManager {
         deadline: tokio::time::Instant,
         cancel: &CancellationToken,
         refresh_permit: &Arc<tokio::sync::OwnedSemaphorePermit>,
+        carried: Option<LiveTvGuide>,
     ) -> Result<Vec<LiveTvGuideChannel>, LiveTvError> {
         let client = self.guide_client()?;
         // Read the credential, use it, drop it. It is a local binding inside
@@ -3872,10 +4239,23 @@ impl LiveTvManager {
         });
         let mut channels = await_guide_parser(parser, cancel).await?;
 
+        // Carry the previous tick's rows forward before extending. Filling a
+        // fortnight is not one refresh: the bulk call answers a few hours, and
+        // an extension page costs a request each. Accumulating across ticks is
+        // what lets a 14-day horizon exist at all, and it is only safe because
+        // the cache is durable — a restart no longer starts from nothing.
+        if let Some(carried) = carried {
+            merge_carried_guide(&mut channels, carried, window.start);
+        }
+
         // The free tier answers a few hours to the bulk call. Extend the
         // channels that fall short until the request budget is spent — an
         // empty or repeated answer means that channel has no more data and
         // stops it, so a lineup of stubborn channels cannot spin here.
+        //
+        // The budget is shared with revalidation and the tail goes first: a
+        // grid that ends early is more visible than one whose far end is a few
+        // hours out of date.
         let mut budget = guide::GUIDE_MAX_EXTENSION_REQUESTS;
         let mut index = 0;
         while index < channels.len() && budget > 0 {
@@ -3940,7 +4320,100 @@ impl LiveTvManager {
                 index += 1;
             }
         }
+
+        // Whatever request budget survived the tail goes on re-reading one day
+        // of the cached horizon, cycling through it a day at a time. Without
+        // this a filled fortnight is never revisited and a provider's schedule
+        // change would never reach the scheduler.
+        self.revalidate_guide_day(
+            &client,
+            &device_auth,
+            lineup,
+            &mut channels,
+            window,
+            deadline,
+            cancel,
+            refresh_permit,
+            budget,
+        )
+        .await?;
         Ok(channels)
+    }
+
+    /// Re-fetch one day of the horizon, chosen by cycling a counter, and merge
+    /// it over what is cached. Failures are skipped rather than propagated:
+    /// the grid is already useful and a revalidation that could fail a refresh
+    /// would make the guide *less* reliable than not revalidating at all.
+    #[allow(clippy::too_many_arguments)]
+    async fn revalidate_guide_day(
+        &self,
+        client: &reqwest::Client,
+        device_auth: &str,
+        lineup: &[LiveTvChannel],
+        channels: &mut [LiveTvGuideChannel],
+        window: &GuideWindow,
+        deadline: tokio::time::Instant,
+        cancel: &CancellationToken,
+        refresh_permit: &Arc<tokio::sync::OwnedSemaphorePermit>,
+        mut budget: usize,
+    ) -> Result<(), LiveTvError> {
+        if budget == 0 || channels.is_empty() {
+            return Ok(());
+        }
+        let span = (window.end - window.start).max(1);
+        let stride = GUIDE_REVALIDATION_HOURS * 3600;
+        let days = ((span + stride - 1) / stride).max(1) as u64;
+        let cursor = self
+            .guide_revalidation_cursor
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let day = (cursor % days) as i64;
+        let from = window.start + day * stride;
+        if from >= window.end {
+            return Ok(());
+        }
+        for channel in channels.iter_mut() {
+            if budget == 0 || cancel.is_cancelled() {
+                break;
+            }
+            let Ok(remaining) = remaining_guide_budget(deadline) else {
+                break;
+            };
+            budget -= 1;
+            let number = channel.guide_number.clone();
+            let url = guide::guide_request_url(device_auth, Some(&number), Some(from))?;
+            let Ok(page) = cancellable_guide_step(
+                cancel,
+                fetch_bounded(
+                    client,
+                    url,
+                    guide::GUIDE_MAX_DOCUMENT_BYTES,
+                    remaining.min(guide::GUIDE_FETCH_TIMEOUT),
+                ),
+            )
+            .await
+            else {
+                continue;
+            };
+            let parse_lineup = lineup.to_vec();
+            let permit = Arc::clone(refresh_permit);
+            let parser = tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                let by_number = parse_lineup
+                    .iter()
+                    .map(|channel| (channel.guide_number.clone(), channel))
+                    .collect::<BTreeMap<_, _>>();
+                guide::parse_hdhomerun_guide(&page, &by_number)
+            });
+            let extra = await_guide_parser(parser, cancel).await?;
+            if let Some(extra) = extra
+                .into_iter()
+                .find(|candidate| candidate.guide_number == number)
+                .filter(|candidate| !candidate.programmes.is_empty())
+            {
+                guide::merge_channel(channel, extra);
+            }
+        }
+        Ok(())
     }
 
     /// An ingress's memory of the owner's answer, if it is still current.
@@ -9168,6 +9641,238 @@ Output #0, hls, to 'index.m3u8':
         assert_eq!(programme.filters, vec!["News".to_owned()]);
     }
 
+    /// Admission is about occupancy, never about who arrived first. With four
+    /// tuners and one reserved for viewing, "one viewer and three recordings"
+    /// fits and "four recordings" does not — whichever order they turned up
+    /// in. An order-dependent answer would make the same fleet behave
+    /// differently on two identical evenings.
+    /// Admission is about occupancy, never about who arrived first. With four
+    /// tuners and one reserved for viewing, "one viewer and three recordings"
+    /// fits and "four recordings" does not — whichever order they turned up
+    /// in. An order-dependent answer would make the same fleet behave
+    /// differently on two identical evenings.
+    #[test]
+    fn tuner_admission_does_not_depend_on_who_arrived_first() {
+        let may_open = |sessions: usize, transports: usize, max: u8, reserve: u8| {
+            LiveTvRegistry::occupancy_admits(sessions, transports, max, reserve)
+        };
+
+        assert!(may_open(0, 2, 4, 1), "two recordings, a third may open");
+        assert!(
+            may_open(1, 2, 4, 1),
+            "one viewer and two recordings: a third recording still fits four tuners"
+        );
+        assert!(
+            !may_open(0, 3, 4, 1),
+            "three recordings already hold the most they may; the reserve is the point"
+        );
+        assert!(
+            !may_open(1, 3, 4, 1),
+            "one viewer and three recordings fills the set"
+        );
+        assert!(
+            !may_open(4, 0, 4, 1),
+            "four viewers leave nothing, reserve or no reserve"
+        );
+        assert!(
+            !may_open(0, 0, 1, 1),
+            "reserving the only tuner stops recording rather than underflowing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_persisted_guide_survives_a_restart_and_keeps_the_age_it_had() {
+        let root = tempfile::tempdir().expect("temp root");
+        let config = {
+            let mut config = LiveTvConfig::from_snapshot(&BTreeMap::new(), "node-a");
+            config.generation = 7;
+            config.guide_source = GuideSource::HdHomeRun;
+            config
+        };
+        let window = GuideWindow {
+            start: 0,
+            end: i64::MAX / 4,
+        };
+
+        let first = GuideCache::with_store(root.path().to_path_buf());
+        first
+            .store(7, 1, &Ok(guide_with(2, 3, 16)))
+            .await
+            .then_some(())
+            .expect("first publication");
+        assert!(
+            root.path().join(PERSISTED_GUIDE_FILE).exists(),
+            "a successful refresh writes the owner's copy"
+        );
+
+        // A second cache over the same directory is what a restart looks like.
+        let restarted = GuideCache::with_store(root.path().to_path_buf());
+        let served = restarted.read(&config, window.clone()).await;
+        assert_eq!(
+            served.freshness,
+            GuideFreshness::Fresh,
+            "a restarted owner serves the grid it had, not `unavailable`"
+        );
+        assert_eq!(served.channels.len(), 2);
+
+        // A generation change is a different lineup: the copy goes, and so
+        // does the file.
+        restarted.invalidate().await;
+        assert!(!root.path().join(PERSISTED_GUIDE_FILE).exists());
+    }
+
+    #[tokio::test]
+    async fn an_unavailable_guide_still_says_when_to_ask_again() {
+        let cache = GuideCache::default();
+        let config = LiveTvConfig::from_snapshot(&BTreeMap::new(), "node-a");
+        cache.note_next_refresh(1_789_004_400).await;
+        let served = cache
+            .read(
+                &config,
+                GuideWindow {
+                    start: 0,
+                    end: 3600,
+                },
+            )
+            .await;
+        assert_eq!(served.freshness, GuideFreshness::Unavailable);
+        assert_eq!(
+            served.next_refresh_at,
+            Some(1_789_004_400),
+            "a client polls on the owner's clock even when there is nothing to show"
+        );
+    }
+
+    #[test]
+    fn a_settings_change_wakes_the_refresh_loop_and_the_first_observation_does_not() {
+        use futures_util::FutureExt as _;
+
+        let cache = GuideCache::default();
+        // A `Notify` permit is only observable by polling `notified()`, so
+        // each assertion polls once and takes whatever permit is waiting.
+        cache.observe_generation(4);
+        assert!(
+            Box::pin(cache.wake.notified()).now_or_never().is_none(),
+            "startup is already running a tick; the first observation is not an event"
+        );
+        cache.observe_generation(5);
+        assert!(
+            Box::pin(cache.wake.notified()).now_or_never().is_some(),
+            "a settings save must not wait out a twenty-minute sleep"
+        );
+    }
+
+    #[test]
+    fn hdhomerun_rows_carry_series_and_programme_identity_when_the_tier_supplies_it() {
+        let lineup = guide_lineup();
+        let body = br#"[{"GuideNumber":"7.1","Guide":[
+            {"StartTime":1789000800,"EndTime":1789002600,"Title":"City Beat",
+             "SeriesID":"EP01234567","ProgramID":"EP012345670023"}]}]"#;
+        let channels =
+            guide::parse_hdhomerun_guide(body, &guide_by_number(&lineup)).expect("guide document");
+        let programme = &channels[0].programmes[0];
+        assert_eq!(
+            programme.series_id.as_deref(),
+            Some("EP01234567"),
+            "`SeriesID` needs an explicit serde rename — PascalCase would look for `SeriesId`"
+        );
+        assert_eq!(programme.programme_id.as_deref(), Some("EP012345670023"));
+        assert_eq!(
+            programme.is_new, None,
+            "HDHomeRun's Filter tags are genres, and never a first-run marker"
+        );
+    }
+
+    #[test]
+    fn a_tier_without_identity_fields_parses_exactly_as_it_did_before() {
+        let lineup = guide_lineup();
+        let body = br#"[{"GuideNumber":"7.1","Guide":[
+            {"StartTime":1789000800,"EndTime":1789002600,"Title":"City Beat"}]}]"#;
+        let channels =
+            guide::parse_hdhomerun_guide(body, &guide_by_number(&lineup)).expect("guide document");
+        let programme = &channels[0].programmes[0];
+        assert_eq!(programme.title, "City Beat");
+        assert_eq!(programme.series_id, None);
+        assert_eq!(programme.programme_id, None);
+    }
+
+    #[test]
+    fn an_xmltv_dd_progid_yields_both_identities_and_new_marks_a_first_run() {
+        let lineup = guide_lineup();
+        let body = br#"<tv>
+            <channel id="c1"><display-name>7.1</display-name></channel>
+            <programme channel="c1" start="20260913120000 +0000" stop="20260913123000 +0000">
+              <title>Kitchen Table</title>
+              <episode-num system="dd_progid">EP012345670023</episode-num>
+              <new/>
+            </programme>
+          </tv>"#;
+        let channels = guide::parse_xmltv(body, &lineup).expect("xmltv document");
+        let programme = &channels[0].programmes[0];
+        assert_eq!(programme.series_id.as_deref(), Some("EP01234567"));
+        assert_eq!(programme.programme_id.as_deref(), Some("EP012345670023"));
+        assert_eq!(programme.is_new, Some(true));
+        assert_eq!(
+            programme.episode, None,
+            "dd_progid is an identity, never a season and episode number"
+        );
+    }
+
+    #[test]
+    fn a_channel_holds_a_fortnight_of_rows_rather_than_the_old_two_hundred() {
+        let rows = (0..900)
+            .map(|slot| LiveTvProgramme {
+                start: 1_789_000_000 + slot * 1800,
+                end: 1_789_000_000 + (slot + 1) * 1800,
+                title: format!("Slot {slot}"),
+                episode_title: None,
+                episode: None,
+                synopsis: None,
+                image_url: None,
+                original_air_date: None,
+                series_id: None,
+                programme_id: None,
+                is_new: None,
+                filters: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let normalised = guide::normalise_programmes(rows);
+        assert_eq!(
+            normalised.len(),
+            guide::GUIDE_MAX_PROGRAMMES_PER_CHANNEL,
+            "a fortnight of half-hour slots is ~670 rows; the old cap of 200 truncated it"
+        );
+        assert!(normalised.len() > 670);
+    }
+
+    #[test]
+    fn merging_a_cached_page_with_a_fresher_one_keeps_one_row_and_gains_its_identity() {
+        let base = |series: Option<&str>, end: i64| LiveTvProgramme {
+            start: 1_789_000_800,
+            end,
+            title: "Kitchen Table".into(),
+            episode_title: None,
+            episode: None,
+            synopsis: None,
+            image_url: None,
+            original_air_date: None,
+            series_id: series.map(str::to_owned),
+            programme_id: None,
+            is_new: None,
+            filters: Vec::new(),
+        };
+        let merged = guide::normalise_programmes(vec![
+            base(None, 1_789_002_600),
+            base(Some("EP1"), 1_789_002_600),
+        ]);
+        assert_eq!(merged.len(), 1, "the same airing twice is one row");
+        assert_eq!(
+            merged[0].series_id.as_deref(),
+            Some("EP1"),
+            "a cached row without identity picks it up from a fresher page"
+        );
+    }
+
     #[test]
     fn guide_rows_are_bounded_because_the_guide_host_is_untrusted_input() {
         let lineup = guide_lineup();
@@ -9216,6 +9921,9 @@ Output #0, hls, to 'index.m3u8':
                 synopsis: None,
                 image_url: None,
                 original_air_date: None,
+                series_id: None,
+                programme_id: None,
+                is_new: None,
                 filters: Vec::new(),
             },
             LiveTvProgramme {
@@ -9227,6 +9935,9 @@ Output #0, hls, to 'index.m3u8':
                 synopsis: None,
                 image_url: None,
                 original_air_date: None,
+                series_id: None,
+                programme_id: None,
+                is_new: None,
                 filters: Vec::new(),
             },
             LiveTvProgramme {
@@ -9238,6 +9949,9 @@ Output #0, hls, to 'index.m3u8':
                 synopsis: None,
                 image_url: None,
                 original_air_date: None,
+                series_id: None,
+                programme_id: None,
+                is_new: None,
                 filters: Vec::new(),
             },
         ];
@@ -9247,8 +9961,10 @@ Output #0, hls, to 'index.m3u8':
                 .iter()
                 .map(|p| (p.start, p.end, p.title.as_str()))
                 .collect::<Vec<_>>(),
-            vec![(100, 300, "First"), (300, 400, "Second")],
-            "a row entirely inside another disappears rather than overlapping it"
+            vec![(100, 200, "First"), (200, 400, "Second")],
+            "a row entirely inside another disappears, and a genuine overlap \
+             shortens the earlier row rather than moving the later row's start \
+             — a start is the DVR's identity for an airing"
         );
     }
 
@@ -9413,6 +10129,9 @@ Output #0, hls, to 'index.m3u8':
                             synopsis: None,
                             image_url: None,
                             original_air_date: None,
+                            series_id: None,
+                            programme_id: None,
+                            is_new: None,
                             filters: Vec::new(),
                         })
                         .collect(),
@@ -9852,7 +10571,7 @@ Output #0, hls, to 'index.m3u8':
 
     #[test]
     fn guide_settings_are_validated_structurally_and_never_on_whether_the_source_answers() {
-        let base = |source: GuideSource, url: &str, hours: u8| {
+        let base = |source: GuideSource, url: &str, hours: u16| {
             let mut config = LiveTvConfig::from_snapshot(&BTreeMap::new(), "node-a");
             config.guide_source = source;
             config.xmltv_url = url.to_owned();
@@ -9883,7 +10602,13 @@ Output #0, hls, to 'index.m3u8':
         assert!(base(GuideSource::HdHomeRun, "", 3)
             .validate_guide()
             .is_err());
-        assert!(base(GuideSource::HdHomeRun, "", 73)
+        assert!(
+            base(GuideSource::HdHomeRun, "", 336)
+                .validate_guide()
+                .is_ok(),
+            "a fortnight is the horizon a series recording rule needs"
+        );
+        assert!(base(GuideSource::HdHomeRun, "", 337)
             .validate_guide()
             .is_err());
     }

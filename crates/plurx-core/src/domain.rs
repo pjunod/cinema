@@ -25,6 +25,14 @@ pub enum LibraryKind {
     /// provider — the source of truth is the disk (folder layout, optional
     /// Kodi-style `.nfo` sidecars, embedded dates). See docs/features/HOMEVIDEO-PLAN.md.
     Home,
+    /// What the DVR recorded off the tuner. Disk is the truth here too, but
+    /// plurx wrote these files itself, so beside each one is a sidecar
+    /// carrying what the guide said — strictly better than re-deriving it
+    /// from a filename, and the reason this is its own kind rather than a
+    /// home library pointed at the DVR root. No provider is ever consulted:
+    /// a local bulletin called *Eyewitness News* matches a dozen things in
+    /// TMDB and is none of them.
+    Recordings,
 }
 
 impl LibraryKind {
@@ -34,6 +42,7 @@ impl LibraryKind {
             LibraryKind::Shows => "shows",
             LibraryKind::Books => "books",
             LibraryKind::Home => "home",
+            LibraryKind::Recordings => "recordings",
         }
     }
 
@@ -43,6 +52,7 @@ impl LibraryKind {
             "shows" => Some(LibraryKind::Shows),
             "books" => Some(LibraryKind::Books),
             "home" => Some(LibraryKind::Home),
+            "recordings" => Some(LibraryKind::Recordings),
             _ => None,
         }
     }

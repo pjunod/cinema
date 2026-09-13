@@ -26,6 +26,21 @@ data class LiveTvProgramme(
     val synopsis: String? = null,
     val image_url: String? = null,
     val original_air_date: String? = null,
+    /**
+     * What a series rule matches on when the source supplies one. Absent for a
+     * guide that carries neither an HDHomeRun `SeriesID` nor an XMLTV
+     * `dd_progid`, which is why Record series also has a title mode — the
+     * server decides which, and the rule says so.
+     */
+    val series_id: String? = null,
+    /** The airing's own identifier. Diagnosis only: identity is `(channel, start)`. */
+    val programme_id: String? = null,
+    /**
+     * XMLTV's `<new/>` marker and only that. An HDHomeRun row leaves it absent
+     * rather than guessing, and "new episodes only" then falls back to the air
+     * date on the server — this client never decides it.
+     */
+    val is_new: Boolean? = null,
     val filters: List<String> = emptyList(),
 ) {
     val seconds: Long get() = (end - start).coerceAtLeast(0)

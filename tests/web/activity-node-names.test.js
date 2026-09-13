@@ -60,6 +60,10 @@ const BORROWED = [
   // Live TV rows are drawn by the same painter and name their owner node
   // through the same roster map, so they are borrowed rather than stubbed.
   "liveTvActivityRows",
+  // And so does a running capture: the tuner it holds belongs to a node, and
+  // that node is named from the same map or not at all.
+  "dvrActivityRows",
+  "liveTvNowSeconds",
   "paintActivityBody",
 ];
 
@@ -78,11 +82,12 @@ const PRELUDE = `
 `;
 
 const painter = new Function(
+  "PlurxLiveTv",
   "return (function(){" +
     PRELUDE +
     BORROWED.map(shippedSource).join("\n") +
     "\nreturn {paintActivityBody, main, nodeLabel};})()",
-)();
+)(require("../../crates/plurxd/src/web/live-tv.js"));
 
 const NODE_A = "5deeeebc-8f39-4cb5-8e4a-aa5f912f327f";
 const NODE_B = "9a1c77e2-0000-4000-8000-aa5f912f327f";

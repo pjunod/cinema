@@ -3,7 +3,9 @@
 package tv.plurx.app.livetv
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -23,6 +25,9 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -309,6 +314,14 @@ fun LiveTvGuideGrid(
     slots: List<Long>,
     playingChannelId: String?,
     dimensions: LiveTvGridDimensions = LiveTvGridMetrics.phone,
+    /** The schedule and the reminders, as read once per guide load. */
+    marks: DvrGuideMarks = DvrGuideMarks.EMPTY,
+    /**
+     * Only a `recording` mark reads this, and only to size its underline. It
+     * defaults to zero rather than to the clock so a grid drawn without marks
+     * does not change on every recomposition merely because time passed.
+     */
+    now: Long = 0,
     paging: LiveTvGuidePaging? = null,
     onAiring: (LiveTvChannel) -> Unit,
     onFuture: (LiveTvChannel, LiveTvProgramme) -> Unit,
@@ -483,6 +496,7 @@ fun LiveTvGuideGrid(
                                 channel = row.channel,
                                 dimensions = dimensions,
                                 playing = playingChannelId == row.channel.id && cell.airing,
+                                mark = marks.mark(row.channel.id, cell.programme.start, now),
                                 onAiring = onAiring,
                                 onFuture = onFuture,
                                 modifier = Modifier
@@ -537,28 +551,136 @@ private fun LiveTvGridCellButton(
     channel: LiveTvChannel,
     dimensions: LiveTvGridDimensions,
     playing: Boolean,
+    mark: DvrCellMark,
     onAiring: (LiveTvChannel) -> Unit,
     onFuture: (LiveTvChannel, LiveTvProgramme) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val type = LiveTvTypography.current()
-    TvTextButton(
-        onClick = { if (cell.airing) onAiring(channel) else onFuture(channel, cell.programme) },
-        compact = true,
-        modifier = modifier
+    // The cell is positioned by an outer box rather than by the button, so the
+    // recording underline can sit at the bottom edge of the drawn cell. The
+    // passed modifier stays on the button: it carries the focus requester and
+    // the D-pad handler, and a focus target on a box the grid does not
+    // navigate would be a target the reducer cannot reach.
+    Box(
+        Modifier
             .offset(x = (cell.left + 3f).dp, y = 3.dp)
             .width((cell.width - 6f).coerceAtLeast(28f).dp)
-            .height((dimensions.rowHeight.value - 6f).coerceAtLeast(18f).dp)
-            .background(if (playing) Color(0x33FFFFFF) else Color.Transparent),
+            .height((dimensions.rowHeight.value - 6f).coerceAtLeast(18f).dp),
     ) {
-        Text(
-            cell.programme.title,
-            style = type.cell,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
+        TvTextButton(
+            onClick = { if (cell.airing) onAiring(channel) else onFuture(channel, cell.programme) },
+            compact = true,
+            modifier = modifier
+                .matchParentSize()
+                .background(if (playing) Color(0x33FFFFFF) else Color.Transparent),
+        ) {
+            Text(
+                cell.programme.title,
+                style = type.cell,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false),
+            )
+            LiveTvCellMarks(mark)
+        }
+        mark.progress?.let { progress ->
+            Box(
+                Modifier
+                    .align(androidx.compose.ui.Alignment.BottomStart)
+                    .fillMaxWidth(progress)
+                    .height(2.dp)
+                    .background(LiveTvGridMetrics.nowLine),
+            )
+        }
     }
 }
+
+/**
+ * Marks are glyphs, never text: ruling 7 of the DVR plan is that a cell says
+ * what it is doing in 12 dp on a television and 8 dp on a phone, because a
+ * word would not fit a 31 dp row and a guide full of words is unreadable from
+ * ten feet. `REC` is the one exception, and it is the one state where silence
+ * would be wrong.
+ */
+private val DvrMarkSizeTelevision: Dp = 12.dp
+private val DvrMarkSizePhone: Dp = 8.dp
+
+/** Amber, not red: the now line already owns red in this grid. */
+private val DvrConflictColor: Color = Color(0xFFE0A33A)
+
+@Composable
+private fun LiveTvCellMarks(mark: DvrCellMark) {
+    if (!mark.drawn) return
+    val size = if (currentFormFactor() == FormFactor.Television) {
+        DvrMarkSizeTelevision
+    } else {
+        DvrMarkSizePhone
+    }
+    val type = LiveTvTypography.current()
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+        modifier = Modifier
+            .padding(start = 3.dp)
+            .semantics { contentDescription = liveTvCellMarkDescription(mark) },
+    ) {
+        when (mark.shape) {
+            DvrMarkShape.Scheduled -> LiveTvMarkDot(size, MaterialTheme.colorScheme.primary)
+            DvrMarkShape.Series -> {
+                LiveTvMarkDot(size, MaterialTheme.colorScheme.primary)
+                LiveTvMarkDot(size, MaterialTheme.colorScheme.primary)
+            }
+            DvrMarkShape.Conflict -> LiveTvMarkDot(size, DvrConflictColor)
+            DvrMarkShape.Withdrawn -> LiveTvMarkDot(
+                size,
+                Color.Transparent,
+                border = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            DvrMarkShape.Recording -> Text(
+                "REC",
+                style = type.eyebrow,
+                color = LiveTvGridMetrics.nowLine,
+                maxLines = 1,
+            )
+            null -> Unit
+        }
+        if (mark.bell) {
+            Icon(
+                Icons.Filled.Notifications,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(size),
+            )
+        }
+    }
+}
+
+@Composable
+private fun LiveTvMarkDot(size: Dp, fill: Color, border: Color? = null) {
+    Box(
+        Modifier
+            .size(size)
+            .background(fill, CircleShape)
+            .then(if (border == null) Modifier else Modifier.border(1.dp, border, CircleShape)),
+    )
+}
+
+/**
+ * The marks are the only thing on a cell that a screen reader cannot infer
+ * from the title, so each one says its whole meaning rather than its shape.
+ */
+internal fun liveTvCellMarkDescription(mark: DvrCellMark): String = listOfNotNull(
+    when (mark.shape) {
+        DvrMarkShape.Scheduled -> "Scheduled to record"
+        DvrMarkShape.Series -> "Scheduled by a series rule"
+        DvrMarkShape.Conflict -> "Scheduled, but no tuner is free"
+        DvrMarkShape.Withdrawn -> "No longer scheduled"
+        DvrMarkShape.Recording -> "Recording now"
+        null -> null
+    },
+    if (mark.bell) "Reminder set" else null,
+).joinToString(", ")
 
 @Composable
 private fun Modifier.liveTvGuideFocusTarget(

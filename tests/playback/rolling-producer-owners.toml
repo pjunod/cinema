@@ -668,7 +668,7 @@ pattern = "ServingAuthority"
 # +3 HDHomeRun M2: LiveTvManager's ServingAuthority field and constructor,
 # plus one always-ready test fixture. This projects existing quorum authority;
 # it does not introduce an independent serving lease.
-expected_occurrences = 18
+expected_occurrences = 20
 
 [[module_symbols]]
 id = "m4-serving-authority-commit-guard"
@@ -1447,7 +1447,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # and rename, discard_persisted's remove) that move one bounded file operation
 # off the runtime, and one tokio::spawn in the retire path. None of them selects
 # a recipe, publishes a response, or starts a tuner.
-expected_occurrences = 490
+expected_occurrences = 498
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -1794,7 +1794,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # tokio::time::sleep in its select, and five tokio::time::timeout /
 # Instant-arithmetic sites in the new registry tests. None bounds a producer;
 # the loop's cadence is the owner's, not a stream's.
-expected_occurrences = 740
+expected_occurrences = 747
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -2070,7 +2070,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # +2 for the Live TV reliability lane, both spawn_blocking file writes in
 # GuideCache rather than child processes. The pattern cannot tell them apart, so
 # the count is reviewed here instead.
-expected_occurrences = 324
+expected_occurrences = 326
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

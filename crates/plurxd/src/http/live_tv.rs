@@ -41,7 +41,10 @@ const DRAIN_EXCHANGE_DEADLINE: Duration = Duration::from_secs(20);
 const RESOURCE_EXCHANGE_DEADLINE: Duration = Duration::from_secs(12);
 const MAX_START_RESPONSE_BYTES: usize = 32 * 1024;
 const GUIDE_EXCHANGE_DEADLINE: Duration = Duration::from_secs(25);
-const MAX_GUIDE_REQUEST_HOURS: u8 = 72;
+/// The widest window one request may ask for. It matches the configuration
+/// ceiling rather than sitting under it: a client that can be configured to
+/// keep a fortnight must be able to read a fortnight.
+const MAX_GUIDE_REQUEST_HOURS: u16 = 336;
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct LiveTvReadinessCheck {
@@ -79,7 +82,7 @@ pub(crate) struct LiveTvChannelsResponse {
 #[derive(Deserialize)]
 pub(crate) struct GuideQuery {
     from: Option<i64>,
-    hours: Option<u8>,
+    hours: Option<u16>,
 }
 
 /// The public guide read. It serves the owner's cache clipped to the requested
@@ -377,7 +380,7 @@ pub(crate) async fn guide_readiness(
 pub(crate) struct LiveTvGuideReadiness {
     pub(crate) advisory: bool,
     pub(crate) source: String,
-    pub(crate) guide_hours: u8,
+    pub(crate) guide_hours: u16,
     pub(crate) freshness: crate::live_tv::GuideFreshness,
     pub(crate) age_seconds: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -908,7 +911,10 @@ async fn owner_start_within(
             .live_tv
             .start_local(request.clone())
             .await
-            .map_err(api_error);
+            // Only the owner knows what is holding its tuners, so only the
+            // owner can name them. A relayed refusal keeps the code and loses
+            // the detail, which is the honest thing for an ingress to say.
+            .map_err(|error| capacity_error(error, state.live_tv.transport_holders()));
     }
     let (node_id, base) = owner_peer(state, &config.owner_node_id).await?;
     let (path, body) = if request.playback.is_some() {
@@ -1397,6 +1403,15 @@ fn wire_api_error(status: reqwest::StatusCode, body: &[u8]) -> ApiError {
         .map(|error| sanitize_public_error(&error.message))
         .unwrap_or_else(|| "The tuner owner could not complete the request".into());
     let status = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::SERVICE_UNAVAILABLE);
+    // The owner is the only node that knows what holds its tuners, so an
+    // ingress that dropped this field would make the "stop a recording and
+    // watch" offer exist on one node and not the others. Re-parsed rather
+    // than forwarded whole: a peer may not inject arbitrary fields, and this
+    // one has a shape.
+    let holders = serde_json::from_slice::<WireCapacityDetail>(body)
+        .ok()
+        .map(|detail| detail.holders)
+        .filter(|holders| !holders.is_empty());
     let decided_by_owner = wire.is_some();
     let stable = match code.as_str() {
         "live_tv_disabled" => "live_tv_disabled",
@@ -1412,15 +1427,30 @@ fn wire_api_error(status: reqwest::StatusCode, body: &[u8]) -> ApiError {
         "capability_expired" => "capability_expired",
         _ => "owner_unavailable",
     };
-    ApiError::typed_detail(
-        status,
-        stable,
-        message,
-        serde_json::json!({
-            "retry": retry_advice_for_code(stable),
-            "owner_decided": decided_by_owner,
-        }),
-    )
+    let mut detail = serde_json::json!({
+        "retry": retry_advice_for_code(stable),
+        "owner_decided": decided_by_owner,
+    });
+    // The holders ride alongside the retry advice rather than replacing it: a
+    // viewer refused for capacity needs both what to do and what is in the
+    // way, and a client that reads only one of the two is not a reason to send
+    // only one of the two.
+    if stable == "tuner_capacity" {
+        if let (Some(holders), Some(fields)) = (holders, detail.as_object_mut()) {
+            fields.insert(
+                "holders".to_owned(),
+                serde_json::to_value(&holders).unwrap_or(serde_json::Value::Null),
+            );
+        }
+    }
+    ApiError::typed_detail(status, stable, message, detail)
+}
+
+/// The one extra field a relayed capacity refusal may carry.
+#[derive(Deserialize)]
+struct WireCapacityDetail {
+    #[serde(default)]
+    holders: Vec<crate::live_tv::dvr::DvrHolder>,
 }
 
 async fn owner_snapshot(
@@ -1620,6 +1650,37 @@ pub(crate) fn api_error_from(error: LiveTvError, decided: Decided) -> ApiError {
         LiveTvError::CapabilityExpired(message) => (StatusCode::GONE, message.clone()),
     };
     ApiError::typed_detail(status, code, message, detail)
+}
+
+/// The capacity refusal, told what is actually holding the tuners.
+///
+/// A viewer refused a tuner by their own recordings is owed more than "all
+/// slots are in use": which channels are held, by which recordings, and until
+/// when — so the client can offer to stop one instead of leaving them to guess
+/// where their television went. A transport with two sinks is listed but not
+/// offered as a single stop, because stopping one of two recordings on a
+/// channel frees nothing.
+///
+/// The holders are added to the refusal the ordinary path already built rather
+/// than replacing it, so `retry` and `owner_decided` are still there for a
+/// client that reads those and not this.
+pub(crate) fn capacity_error(
+    error: LiveTvError,
+    holders: Vec<crate::live_tv::dvr::DvrHolder>,
+) -> ApiError {
+    let mut refusal = api_error(error);
+    if holders.is_empty() {
+        return refusal;
+    }
+    if let ApiError::TypedDetail { code, detail, .. } = &mut refusal {
+        if *code == "tuner_capacity" {
+            detail.insert(
+                "holders".to_owned(),
+                serde_json::to_value(&holders).unwrap_or(serde_json::Value::Null),
+            );
+        }
+    }
+    refusal
 }
 
 fn sanitize_public_error(message: &str) -> String {

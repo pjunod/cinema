@@ -36,6 +36,8 @@ mod hiqlite_durable;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_dv_conversion;
 #[cfg(feature = "hiqlite-store")]
+mod hiqlite_dvr;
+#[cfg(feature = "hiqlite-store")]
 mod hiqlite_fragment_index_cluster;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_import;
@@ -1366,6 +1368,20 @@ pub mod keys {
     pub const LIVE_TV_GUIDE_SOURCE: &str = "live_tv.guide_source";
     pub const LIVE_TV_XMLTV_URL: &str = "live_tv.xmltv_url";
     pub const LIVE_TV_GUIDE_HOURS: &str = "live_tv.guide_hours";
+    /// Recording. Plain settings, deliberately not part of the Live TV
+    /// generation CAS: none of them changes a tuner tuple, and riding that CAS
+    /// would force an operator to disable Live TV to change a padding default.
+    /// Absent is off, so an upgrade never starts writing to a disk by itself.
+    pub const DVR_ENABLED: &str = "dvr.enabled";
+    pub const DVR_ROOT: &str = "dvr.root";
+    pub const DVR_FREE_FLOOR_GB: &str = "dvr.free_floor_gb";
+    pub const DVR_TUNER_RESERVE: &str = "dvr.tuner_reserve";
+    pub const DVR_PAD_START_S: &str = "dvr.pad_start_s";
+    pub const DVR_PAD_END_S: &str = "dvr.pad_end_s";
+    pub const DVR_REMINDER_LEAD_S: &str = "dvr.reminder_lead_s";
+    /// Where a reminder and a recording's start and finish are announced.
+    /// Empty is off.
+    pub const DVR_WEBHOOK_URL: &str = "dvr.webhook_url";
     /// Opt in to remote media-session placement only after every committed
     /// voter is publishing the current media protocol. Absent is deliberately
     /// off so rolling upgrades keep all starts local.
@@ -2025,6 +2041,162 @@ pub trait LibraryChannelStore: Send + Sync + 'static {
         channel_id: &str,
         generation_id: &str,
     ) -> Result<Option<crate::library_channels::LibraryChannelGeneration>, StoreError>;
+}
+
+/// Recording rules, the airings they and people schedule, and reminders.
+///
+/// Three habits run through every method here, and each one exists because of
+/// a way the obvious alternative fails:
+///
+/// - **Inserting an airing never updates one.** `insert_dvr_airing_if_absent`
+///   reports what it found instead, so a rule that keeps matching an airing
+///   the viewer skipped cannot resurrect it fifteen seconds later.
+/// - **Writes that the owner loop makes are conditional on the state they
+///   expect and on the tuner generation they were planned under.** A settings
+///   change mid-tick must land no rows from the configuration it replaced.
+/// - **Column sets do not overlap.** Progress touches two columns, a stop
+///   request touches two others, and a state transition touches neither set —
+///   so a 30-second progress write racing a viewer's Stop cannot erase it.
+#[async_trait]
+pub trait DvrStore: Send + Sync + 'static {
+    async fn list_dvr_rules(&self) -> Result<Vec<crate::dvr::DvrRule>, StoreError>;
+
+    async fn get_dvr_rule(&self, id: &str) -> Result<Option<crate::dvr::DvrRule>, StoreError>;
+
+    /// Upsert by id. Refuses past `DVR_RULES_MAX`, reported as `false`.
+    async fn put_dvr_rule(&self, rule: &crate::dvr::DvrRule) -> Result<bool, StoreError>;
+
+    async fn delete_dvr_rule(&self, id: &str) -> Result<bool, StoreError>;
+
+    /// Renumber every rule into the given order. A total order is what makes
+    /// the scheduler's tuner allocation deterministic across voters.
+    async fn reorder_dvr_rules(
+        &self,
+        ids_in_priority_order: &[String],
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    /// Materialise one airing if `(channel_id, airing_start)` is not already
+    /// spoken for. Never updates: the existing row's state comes back instead.
+    async fn insert_dvr_airing_if_absent(
+        &self,
+        row: &crate::dvr::DvrRecording,
+    ) -> Result<crate::dvr::DvrInsertOutcome, StoreError>;
+
+    async fn get_dvr_recording(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::dvr::DvrRecording>, StoreError>;
+
+    /// The row that owns this airing, by the identity the unique index keeps.
+    ///
+    /// Needed because "one airing is one row" is only useful if the row can be
+    /// found that way. Scanning a page of the list instead would answer "no
+    /// such airing" the moment a server holds more recordings than a page.
+    async fn get_dvr_recording_for_airing(
+        &self,
+        channel_id: &str,
+        airing_start: i64,
+    ) -> Result<Option<crate::dvr::DvrRecording>, StoreError>;
+
+    /// One page, newest airing first.
+    ///
+    /// `after` is the cursor a previous page's last row produced
+    /// ([`crate::dvr::recording_cursor`]) — `(airing_start, id)`, not an id
+    /// alone, because ordering by a v4 UUID would hand a viewer an arbitrary
+    /// hundred of their recordings and call it their library.
+    async fn list_dvr_recordings(
+        &self,
+        filter: &crate::dvr::DvrRecordingFilter,
+        after: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<crate::dvr::DvrRecording>, StoreError>;
+
+    /// Every row in one of these states, ordered by `capture_start`. What the
+    /// owner loop reads at the top of a tick.
+    async fn list_dvr_recordings_in(
+        &self,
+        states: &[crate::dvr::DvrState],
+    ) -> Result<Vec<crate::dvr::DvrRecording>, StoreError>;
+
+    /// Applies only when the row is in one of `from` and, when
+    /// `fence_generation` is given, the tuner configuration is still at that
+    /// generation. Returns `false` otherwise, having written nothing.
+    async fn transition_dvr_recording(
+        &self,
+        transition: &crate::dvr::DvrTransition<'_>,
+    ) -> Result<bool, StoreError>;
+
+    /// Writes `bytes` and `last_progress_ms`, and nothing else, ever.
+    async fn progress_dvr_recording(
+        &self,
+        id: &str,
+        bytes: i64,
+        at_ms: i64,
+    ) -> Result<(), StoreError>;
+
+    /// Record a viewer's Stop. Succeeds once on a `recording` row and is
+    /// idempotent thereafter; the owner's next tick consumes it. Returns the
+    /// row as it now stands, or `None` when there is no such recording.
+    async fn request_dvr_stop(
+        &self,
+        id: &str,
+        at_ms: i64,
+        by_user: i64,
+    ) -> Result<Option<crate::dvr::DvrRecording>, StoreError>;
+
+    /// Re-point pending rule rows at the rule that now owns them.
+    async fn repoint_dvr_rule_rows(
+        &self,
+        changes: &[(String, Option<String>)],
+        now_ms: i64,
+    ) -> Result<(), StoreError>;
+
+    /// What the scan writes back once a finished capture is in the library.
+    async fn link_dvr_recording_media(
+        &self,
+        recording_id: &str,
+        item_id: i64,
+        file_id: i64,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    async fn list_dvr_reminders(
+        &self,
+        user_id: i64,
+        state: Option<crate::dvr::DvrReminderState>,
+    ) -> Result<Vec<crate::dvr::DvrReminder>, StoreError>;
+
+    /// Every reminder in this state across all users. The owner loop's read.
+    async fn list_dvr_reminders_in(
+        &self,
+        state: crate::dvr::DvrReminderState,
+    ) -> Result<Vec<crate::dvr::DvrReminder>, StoreError>;
+
+    /// Upsert by id. Refuses past `DVR_REMINDERS_PER_USER_MAX`.
+    async fn put_dvr_reminder(
+        &self,
+        reminder: &crate::dvr::DvrReminder,
+    ) -> Result<bool, StoreError>;
+
+    async fn delete_dvr_reminder(&self, user_id: i64, id: &str) -> Result<bool, StoreError>;
+
+    /// Move `armed` reminders whose lead time has arrived to `fired`, and
+    /// started ones to `expired`, returning the rows that fired.
+    async fn transition_dvr_reminders(
+        &self,
+        now_seconds: i64,
+        now_ms: i64,
+    ) -> Result<Vec<crate::dvr::DvrReminder>, StoreError>;
+
+    async fn set_dvr_reminder_state(
+        &self,
+        user_id: Option<i64>,
+        id: &str,
+        from: crate::dvr::DvrReminderState,
+        to: crate::dvr::DvrReminderState,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
 }
 
 #[async_trait]
@@ -4381,6 +4553,7 @@ pub trait Store:
     + ApiKeyStore
     + LibraryStore
     + LibraryChannelStore
+    + DvrStore
     + MediaStore
     + WatchStore
     + ReadingStore
@@ -4413,6 +4586,7 @@ impl<T> Store for T where
         + ApiKeyStore
         + LibraryStore
         + LibraryChannelStore
+        + DvrStore
         + MediaStore
         + WatchStore
         + ReadingStore
