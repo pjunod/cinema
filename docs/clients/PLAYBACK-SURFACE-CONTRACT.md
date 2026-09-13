@@ -291,7 +291,7 @@ that failed.
 | Class | Severity | Surface | Who stopped the player | Retired by |
 |---|---|---|---|---|
 | `preparing` | progress | spinner + stage text — full-screen while the attached picture is not presenting, in-chrome indicator while it is | nobody | presenting evidence on `attached` · intent settled |
-| `buffering` | progress | same rule; raised only once the wait has lasted `STALL_MIN_MS` (350 ms) | nobody | presenting evidence |
+| `buffering` | progress | same rule; raised only once the wait has lasted `STALL_MIN_MS` (350 ms) | nobody | presenting evidence · the viewer no longer wanting media |
 | `recovering` | progress | same rule, with the reason ("Reconnecting…", "Switching quality…") | nobody | presenting evidence on the *new* attached generation · owner reports success |
 | `hold` | notice | banner, timed (30 s), server sentence | nobody | timer · presenting evidence |
 | `degraded` | notice | banner, timed (5 s) | nobody | timer |
@@ -306,7 +306,7 @@ _Generated from [`tests/playback/playback-surface-contract.json`](../../tests/pl
 | Class | Severity | Blocking | Timer | Requires the owner to have stopped the player | Retired by | Default actions |
 |---|---|---|---|---|---|---|
 | `preparing` | progress | while not presenting | none | no | `presenting` · `intent_settled` · `attached_retired` | – |
-| `buffering` | progress | while not presenting | none | no | `presenting` · `attached_retired` | – |
+| `buffering` | progress | while not presenting | none | no | `presenting` · `playback_not_requested` · `attached_retired` | – |
 | `recovering` | progress | while not presenting | none | no | `presenting_after_raise` · `owner_success` · `attached_retired` | – |
 | `hold` | notice | never | 30000 ms | no | `timer` · `presenting_after_raise` | – |
 | `degraded` | notice | never | 5000 ms (paused while it has actions) | no | `timer` · `presenting_continuous_ms` | – |
@@ -461,6 +461,7 @@ Rows are evaluated in order; the first row whose `context` matches wins.
 - A fault whose `attached` generation is retired stops being about anything and is dropped (`surface_cleared {by: attached_retired}`). That is identity, not one of the class's `retired_by` rules, so it applies to blocking faults too — otherwise a `stopped` prompt would outlive the attempt it described and sit over the next one.
 - Each retirement reason is a property of the CLASS, not of the event: `intent_settled` retires only classes whose `retired_by` names it, so a prompt the viewer has to answer is not swept away by a seek landing underneath it. `attached_retired` is the one exception, and the note above says why.
 - `owner_success: G` is the recovery owner reporting that its recovery produced attached generation G. There is one recovery owner per player, so it retires every `recovering` fault, not only the ones about the generation it replaced.
+- `playback_not_requested` is the viewer no longer wanting media. A `buffering` fault is about a player that WANTS it — the wait is only a wait while something is trying to play — so a pause makes the fault about nothing and it is retired. It is on `buffering` and on no other class: a `preparing` start has not been paused by a viewer who has not seen it yet, and a blocking prompt is answered by the viewer rather than by a transport change. Resuming raises nothing back; the raise sites decide what comes back, which is the same rule every other retirement follows.
 
 <!-- contract:surface-sources:end -->
 

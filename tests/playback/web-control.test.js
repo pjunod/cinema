@@ -1463,11 +1463,14 @@ async function main() {
       "const v={paused:false,ended:false,removeAttribute(){},load(){queue=[];this.paused=true;},pause(){if(!this.paused){this.paused=true;queue.push('pause');}},play(){if(this.paused){this.paused=false;queue.push('play');}return new Promise((resolve,reject)=>plays.push({resolve,reject}));}};",
       "Object.defineProperty(v,'src',{set(){v.load();}});",
       "function supersedePlaybackControlIntent(p){p.generation=(p.generation||0)+1;}function endWait(){}",
+      // §3.1: the viewer's own transport intent is what tells the presenter a
+      // `buffering` fault is about nothing any more. Recorded, not stubbed away.
+      "const surfaceEvents=[];function playbackSurfaceStep(event){surfaceEvents.push(event);return null;}",
       shippedSource("rememberPlaybackTransportIntent"),shippedSource("pausePlaybackInternally"),
       shippedSource("playbackTransportEvents"),shippedSource("resetPlaybackTransportEvents"),
       shippedSource("setPlaybackMediaSource"),shippedSource("resetMediaSource"),
       shippedSource("applyPlaybackTransportIntent"),shippedSource("handlePlaybackTransportEvent"),
-      "return {p:PLAYER,v,plays,reset:()=>resetMediaSource(v),source:()=>setPlaybackMediaSource(v,'new'),apply:()=>applyPlaybackTransportIntent(v,PLAYER),flush(){while(queue.length)handlePlaybackTransportEvent(v,PLAYER,queue.shift());}};",
+      "return {p:PLAYER,v,plays,surfaceEvents,reset:()=>resetMediaSource(v),source:()=>setPlaybackMediaSource(v,'new'),apply:()=>applyPlaybackTransportIntent(v,PLAYER),flush(){while(queue.length)handlePlaybackTransportEvent(v,PLAYER,queue.shift());}};",
     ].join("\n"))();
     h.reset();h.apply();h.flush();
     h.v.pause();h.flush();
@@ -1484,6 +1487,19 @@ async function main() {
     h.p.wantsPlayback=true;h.apply();h.flush();
     h.v.pause();h.p.wantsPlayback=true;h.apply();h.flush();
     assert.equal(h.p.wantsPlayback,true,'queued native Pause cannot overwrite a newer explicit Play');
+    // §3.1: only the VIEWER's transport edges reach the presenter, and each
+    // carries the intent that edge established — so an owner's own
+    // `pausePlaybackInternally`, whose token the filter above consumes, can
+    // never retire a fault. Two viewer presses, driven straight at the element.
+    const before=h.surfaceEvents.length;
+    h.v.pause();h.flush();
+    h.v.play();h.flush();
+    const edges=h.surfaceEvents.slice(before).map(event=>event.playback_requested);
+    assert.ok(edges.includes(false),'a viewer pause tells the presenter media is not wanted');
+    assert.ok(edges.includes(true),'and a viewer play tells it the opposite');
+    for(const event of h.surfaceEvents)
+      assert.deepEqual(Object.keys(event),['playback_requested'],
+        'the transport path tells the presenter one fact and nothing else');
     for(const play of h.plays)play.resolve();
   }
   {

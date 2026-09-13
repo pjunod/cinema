@@ -133,7 +133,19 @@ test("every retirement reason a class names is reachable, and none is invented",
   const known = new Set([
     "presenting", "presenting_after_raise", "presenting_new_attached", "presenting_continuous_ms",
     "intent_settled", "intent_superseded", "attached_retired", "owner_success", "timer", "user",
+    // The viewer no longer wants media, so a fault about a player that wants it
+    // is about nothing. Only `buffering` names it, and the assertion below says
+    // so: a reason that starts spreading across the class table is a reason
+    // somebody has stopped thinking about.
+    "playback_not_requested",
   ]);
+  assert.deepEqual(
+    Object.entries(contract.classes)
+      .filter(([, cls]) => (cls.retired_by || []).includes("playback_not_requested"))
+      .map(([name]) => name),
+    ["buffering"],
+    "`playback_not_requested` retires buffering and nothing else",
+  );
   const continuous = { refused: "refused_progress_ms", degraded: "disagreement_notice_ms" };
   for (const [name, cls] of Object.entries(contract.classes)) {
     for (const reason of cls.retired_by || []) {

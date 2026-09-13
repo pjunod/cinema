@@ -227,6 +227,7 @@ Rules the fixture encodes and every client test must enforce:
     {"t": 4000,  "retire": "g1"},
     {"t": 4000,  "owner_success": "g2"},
     {"t": 5000,  "user_action": "keep_waiting"},
+    {"t": 5500,  "playback_requested": false},
     {"t": 6000,  "hidden": true},
     {"t": 9000,  "tick": true}
   ],
@@ -251,6 +252,7 @@ same `t` apply in listed order):
 | `intent_settled: I` / `intent_superseded: I` | the destination I landed / was replaced |
 | `owner_success: G` | the owner reports its recovery produced attached G (retires `recovering`) |
 | `user_action: a` | the viewer pressed an action; the reducer clears the fault the action belonged to and logs `surface_cleared {by: user, action: a}` — the *effect* of the action is the owner's, outside the reducer |
+| `playback_requested: bool` | the viewer's transport intent changed. `false` retires every fault whose class names `playback_not_requested` — `buffering` and only `buffering` — and logs `surface_cleared {by: playback_not_requested}`; `true` does nothing, because the raise sites decide what comes back. The client's own fact (web `wantsPlayback` off the media element's pause/play, after its internal-pause filter), never a detector of the presenter's |
 | `hidden: bool` | the page/app is hidden; while hidden, `presenting` samples are ignored |
 | `tick` | timers advance to `t` (timed notices expire) |
 

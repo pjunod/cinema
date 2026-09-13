@@ -32,6 +32,7 @@
       "min_ms": 350,
       "retired_by": [
         "presenting",
+        "playback_not_requested",
         "attached_retired"
       ]
     },
@@ -326,7 +327,8 @@
     "A fault about a PENDING DESTINATION carries an `intent`. Evidence never retires it, with one exception the class table states outright: `refused` also retires on `refused_progress_ms` of continuous presentation, because a viewer whose picture has been fine for that long has been told.",
     "A fault whose `attached` generation is retired stops being about anything and is dropped (`surface_cleared {by: attached_retired}`). That is identity, not one of the class's `retired_by` rules, so it applies to blocking faults too — otherwise a `stopped` prompt would outlive the attempt it described and sit over the next one.",
     "Each retirement reason is a property of the CLASS, not of the event: `intent_settled` retires only classes whose `retired_by` names it, so a prompt the viewer has to answer is not swept away by a seek landing underneath it. `attached_retired` is the one exception, and the note above says why.",
-    "`owner_success: G` is the recovery owner reporting that its recovery produced attached generation G. There is one recovery owner per player, so it retires every `recovering` fault, not only the ones about the generation it replaced."
+    "`owner_success: G` is the recovery owner reporting that its recovery produced attached generation G. There is one recovery owner per player, so it retires every `recovering` fault, not only the ones about the generation it replaced.",
+    "`playback_not_requested` is the viewer no longer wanting media. A `buffering` fault is about a player that WANTS it — the wait is only a wait while something is trying to play — so a pause makes the fault about nothing and it is retired. It is on `buffering` and on no other class: a `preparing` start has not been paused by a viewer who has not seen it yet, and a blocking prompt is answered by the viewer rather than by a transport change. Resuming raises nothing back; the raise sites decide what comes back, which is the same rule every other retirement follows."
   ],
   "log_events": [
     "surface_raised",
@@ -372,6 +374,131 @@
           "surface": "none"
         }
       ]
+    },
+    {
+      "name": "buffering_retires_when_the_viewer_pauses",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "presenting": true,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "presenting": false,
+          "attached": "g1"
+        },
+        {
+          "t": 1000,
+          "raise": "media_waiting",
+          "attached": "g1",
+          "context": "attached"
+        },
+        {
+          "t": 1400,
+          "tick": true
+        },
+        {
+          "t": 2000,
+          "playback_requested": false
+        },
+        {
+          "t": 9000,
+          "tick": true
+        }
+      ],
+      "expect": [
+        {
+          "at": 1000,
+          "surface": "none",
+          "log": [
+            "surface_raised"
+          ]
+        },
+        {
+          "at": 1400,
+          "surface": "blocking",
+          "class": "buffering"
+        },
+        {
+          "at": 2000,
+          "surface": "none",
+          "log": [
+            "surface_cleared"
+          ]
+        },
+        {
+          "at": 9000,
+          "surface": "none"
+        }
+      ],
+      "note": "A wait that ends in a PAUSE. Presentation evidence is the only other thing that retires `buffering`, and a paused picture never produces another sample — so without this the spinner sits over a still frame until the generation changes."
+    },
+    {
+      "name": "a_pause_does_not_answer_a_prompt",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 500,
+          "raise": "owner_exhausted",
+          "attached": "g1",
+          "player_stopped": true,
+          "context": "attached"
+        },
+        {
+          "t": 1000,
+          "raise": "media_waiting",
+          "attached": "g1",
+          "context": "attached"
+        },
+        {
+          "t": 2000,
+          "playback_requested": false
+        },
+        {
+          "t": 9000,
+          "tick": true
+        },
+        {
+          "t": 9500,
+          "user_action": "close"
+        }
+      ],
+      "expect": [
+        {
+          "at": 500,
+          "surface": "blocking",
+          "class": "exhausted"
+        },
+        {
+          "at": 2000,
+          "surface": "blocking",
+          "class": "exhausted",
+          "log": [
+            "surface_cleared"
+          ]
+        },
+        {
+          "at": 9000,
+          "surface": "blocking",
+          "class": "exhausted"
+        },
+        {
+          "at": 9500,
+          "surface": "none",
+          "log": [
+            "surface_cleared"
+          ]
+        }
+      ],
+      "note": "`playback_not_requested` retires `buffering` and nothing else. A prompt is answered by the viewer, not by a transport change, and a pause under one must not clear the only thing offering a way out."
     },
     {
       "name": "canplay_is_inert",

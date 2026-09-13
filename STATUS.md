@@ -33,6 +33,17 @@ waiting on somebody (§*Open rulings* below says where each landed).
   reading like a bound.
 - **`segment_503_not_yet` got its codes**, in a separate cherry-pickable commit
   the Apple and Android sessions rebase onto.
+- **A `buffering` fault that the viewer pauses under now retires.** Found
+  independently by the Apple and Android sessions and true of the web too: §3.1
+  retired `buffering` only on presentation evidence, and a paused picture never
+  produces another sample, so a buffer that filled while paused left a spinner
+  over a still frame until the generation changed — the overlay outliving the
+  thing it described, reintroduced by the migration itself. A `buffering` fault
+  is about a player that WANTS media, so a viewer who pauses makes it about
+  nothing. New `playback_requested` event, new `playback_not_requested`
+  retirement reason on `buffering` **and on no other class**, wired to the web's
+  own `wantsPlayback` transport edges. Its own cherry-pickable commit, second of
+  the two.
 
 Not done here, and named rather than implied: Apple and Android still raise
 neither row 17 nor row 18, and no part of this has been seen in a browser — the
