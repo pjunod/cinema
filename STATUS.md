@@ -4,6 +4,44 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## The web player's overlay is a projection now (M1)
+
+**Built 2026-09-13 on `web/playback-surface`, WIP PR open against `main`.
+Executes §4.2 of
+[PLAYBACK-SURFACE-CONTRACT-IMPLEMENTATION.md](docs/clients/PLAYBACK-SURFACE-CONTRACT-IMPLEMENTATION.md).
+All 55 pre-contract web surface write sites are gone;
+`scripts/playback-surface-fence` no longer budgets `index.html` at all, and
+`tests/operations/test_playback_surface_fence.py` holds it at zero. Apple (M2)
+and Android (M3) still have theirs.** `setLoading` is the presenter's private
+paint helper between the `// playback-surface-render:begin/end` anchors, and
+`renderPlaybackSurface` is the only code in the page that writes `#ploading`,
+the `failed` class, `#ploadAct` or the two new non-blocking surfaces. Every
+former call site raises a typed fault instead;
+`PlaybackPolicy.presentSurface` decides what is drawn and the shipped render
+is run against every one of the fixture's 55 ordered-event cases.
+
+What changes for a viewer: a failed quality change is a notice beside a
+picture that keeps playing instead of "Playback could not reconnect." over
+it; an hls.js fatal the server explained as "not yet" is an indicator over
+the buffer that is still playing rather than a full screen calling it a
+failed start; Safari's per-fragment `waiting` is debounced by the contract's
+350 ms before anything is drawn; a stale refusal cannot explain the next
+title, because a fault dies with the generation it was about instead of
+living for 90 s. The four exhaustion sites — `showStallRecoveryFailure`, the
+`stallRecoveryAction === 'prompt'` branch, `stallDiagnose`'s verdicts and the
+spent hls.js/`<video>` ladder — stop the player and only then raise, which is
+the one behaviour change the contract allows outside M5. `Playback debug`
+gained the SURFACE section and the client log gained `surface_raised`,
+`surface_cleared`, `surface_disagreement` and `surface_log_only`.
+
+Two things to know before M2/M3 rebase. The fixture gained one row,
+`client_preparing`, in its own commit: the staged loading overlay is the
+commonest `preparing` surface there is and the v2 table produced `preparing`
+only from a create 503. And the owner's stop takes `stopPlayerTimers` with
+it, so `armStall` now re-arms the sampling timers for a stream that starts
+again — without that, Force transcode from a stalled prompt resumed into a
+player with no stall detection and a presenter with no evidence.
+
 ## The error overlay and the picture disagree, on every client
 
 **Investigated 2026-09-13; contract v2 at

@@ -818,9 +818,13 @@
     };
   }
 
-  function waitingOverlayAction({ started = false, stallPrompt = false }) {
+  // `promptUp` was `stallPrompt` until the surface contract deleted the flag:
+  // what it always meant is "a prompt the viewer has to answer is on screen",
+  // which is now a property of the presenter's surface rather than a second
+  // copy of the same truth kept on PLAYER.
+  function waitingOverlayAction({ started = false, promptUp = false }) {
     if (!started) return "ignore";
-    return stallPrompt ? "preserve_prompt" : "buffer";
+    return promptUp ? "preserve_prompt" : "buffer";
   }
 
   function subtitleBurnAction({ requiresBurn, deliveredRange = null }) {

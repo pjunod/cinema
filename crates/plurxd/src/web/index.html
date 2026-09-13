@@ -581,6 +581,36 @@
   .ploadAct button{background:rgba(255,255,255,.1);color:#fff;border:1px solid rgba(255,255,255,.24);border-radius:9px;
     padding:9px 16px;font-size:13.5px;font-weight:600;cursor:pointer}
   .ploadAct button:hover{background:var(--accent);border-color:var(--accent)}
+  /* A blocking surface is drawn over a player its recovery owner has already
+     stopped, so the spinner is a lie on one: it is the animation for "working
+     on it", and nothing is working. PLAYBACK-SURFACE-CONTRACT.md §2.1 names
+     the missing rule; this is it. */
+  .ploading.failed .pspin{display:none}
+  /* The two surfaces that are NOT the full screen (PLAYBACK-SURFACE-CONTRACT.md
+     §3.1). A notice is a strip beside the picture with the fault's actions; an
+     indicator is the in-chrome spinner shown while the picture behind it is
+     genuinely presenting. Neither one covers a film that is playing, which is
+     the whole point of the contract. */
+  .psurface{position:absolute;left:20px;top:64px;z-index:7;max-width:min(440px,72vw);display:none;
+    flex-direction:column;gap:7px;background:rgba(18,20,26,.9);color:#fff;
+    border:1px solid rgba(255,255,255,.2);border-radius:10px;padding:11px 14px;
+    backdrop-filter:blur(6px);box-shadow:0 8px 26px rgba(0,0,0,.45)}
+  .psurface.on{display:flex}
+  .psurfText{font-weight:600;font-size:13.5px;letter-spacing:.01em}
+  .psurfSub{font:11.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:rgba(255,255,255,.62)}
+  .psurfSub:empty{display:none}
+  .psurfAct{display:flex;gap:8px;flex-wrap:wrap}
+  .psurfAct:empty{display:none}
+  .psurfAct button{background:rgba(255,255,255,.1);color:#fff;border:1px solid rgba(255,255,255,.24);
+    border-radius:8px;padding:6px 12px;font-size:12.5px;font-weight:600;cursor:pointer}
+  .psurfAct button:hover{background:var(--accent);border-color:var(--accent)}
+  .pindicator{position:absolute;right:20px;top:64px;z-index:7;display:none;align-items:center;gap:9px;
+    background:rgba(18,20,26,.82);color:#fff;border:1px solid rgba(255,255,255,.18);border-radius:999px;
+    padding:7px 14px 7px 10px;font-size:12.5px;font-weight:600;backdrop-filter:blur(6px);
+    box-shadow:0 6px 20px rgba(0,0,0,.4)}
+  .pindicator.on{display:flex}
+  .pindicator .pspin{width:15px;height:15px;border-width:2px}
+  @media(max-width:700px){ .psurface{left:12px;right:12px;max-width:none} .pindicator{right:12px} }
   .ptime{color:#fff;font:12px/1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;text-shadow:0 1px 4px rgba(0,0,0,.7);min-width:46px;text-align:center;flex:0 0 auto}
   .pseek{position:relative;flex:1;height:16px;display:flex;align-items:center;cursor:pointer;touch-action:none}
   .pseek::before{content:"";position:absolute;left:0;right:0;height:5px;border-radius:3px;background:rgba(255,255,255,.26)}
@@ -3401,7 +3431,7 @@ if(window.matchMedia){ try{ window.matchMedia("(prefers-color-scheme: dark)").ad
 </head>
 <body>
 <div id="app"></div>
-<div class="modal" id="modal" role="dialog" aria-modal="true" aria-label="Player"><div class="player" id="player"><video id="video" autoplay playsinline x-webkit-airplay="allow"></video><div class="pbar" id="pbar"><div class="ptitle" id="playTitle"></div><div class="row"><button class="pbtn" id="statsbtn" aria-haspopup="dialog" aria-expanded="false" title="Playback info (i)" onclick="toggleStats()">ⓘ Playback info</button><button class="pbtn" id="apbtn" style="display:none" title="AirPlay">📺 AirPlay</button><button class="pbtn" id="pbclose" title="Close (Esc)" onclick="closePlayer()">✕ Close</button></div></div><div class="ptimeline" id="ptimeline"><span class="ptime" id="ptcur" aria-hidden="true">0:00</span><div class="pseek" id="pseek" role="slider" tabindex="0" aria-label="Playback position" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="0:00"><div class="pseek-buf" id="pseekbuf" aria-hidden="true"></div><div class="pseek-fill" id="pseekfill" aria-hidden="true"></div><div class="pseek-thumb" id="pseekthumb" aria-hidden="true"></div></div><span class="ptime" id="ptdur" aria-hidden="true">0:00</span></div><div class="ptransport" id="ptransport"><button class="picon" id="pbback" aria-label="Back 10 seconds" title="Back 10s (←)" onclick="nudge(-10)">↺</button><button class="picon" id="pbplay" aria-label="Play" title="Play / Pause (space)" onclick="togglePlay()">▶</button><button class="picon" id="pbforward" aria-label="Forward 10 seconds" title="Forward 10s (→)" onclick="nudge(10)">↻</button><span class="ptransport-spacer" aria-hidden="true"></span><button class="picon paud" id="pbaudio" aria-haspopup="menu" aria-expanded="false" aria-label="Audio track" title="Audio track" style="display:none" onclick="toggleMenu('audio',1)">🔊</button><button class="picon pcc" id="pbsubs" aria-haspopup="menu" aria-expanded="false" aria-label="Subtitles" title="Subtitles (c)" style="display:none" onclick="toggleMenu('subs',1)">CC</button><button class="picon" id="pbquality" aria-haspopup="menu" aria-expanded="false" aria-label="Playback quality" title="Playback quality" onclick="toggleMenu('quality',1)">◆</button><button class="picon" id="pbsettings" aria-haspopup="menu" aria-expanded="false" aria-label="Playback settings" title="Playback settings" onclick="toggleMenu('settings',1)">⚙</button><button class="picon" id="pbinfo" aria-label="Title info" title="Show title, synopsis & release info" onclick="togglePlayerInfo()">≡</button><button class="picon" id="pbpip" aria-label="Picture in picture" title="Picture-in-picture" style="display:none" onclick="togglePip()">◲</button><button class="picon" id="pbfs" aria-label="Fullscreen" title="Fullscreen (f)" onclick="toggleFullscreen()">⛶</button></div><div class="pinfo" id="pinfo"></div><div class="pskip" id="pskip"></div><div class="ploading" id="ploading"><div class="pspin"></div><div class="ploadText" id="ploadText">Loading…</div><div class="ploadSub" id="ploadSub"></div><div class="ploadAct" id="ploadAct"></div></div><div class="statsov" id="statsov" data-mode="standard"><div class="statshd"><span id="statstitle">Playback info</span><div class="statsmodes" role="radiogroup" aria-label="Playback info size"><button type="button" data-stats-mode="mini" role="radio" onclick="setStatsMode('mini')">Mini</button><button type="button" data-stats-mode="standard" role="radio" onclick="setStatsMode('standard')">Standard</button><button type="button" data-stats-mode="debug" role="radio" onclick="setStatsMode('debug')">Debug</button></div><button class="statsx" aria-label="Close playback info" title="Close (i)" onclick="toggleStats()">✕</button></div><div class="statsbody" id="statsbody"></div></div><div class="pmenu" id="pmenu" role="menu"></div></div></div>
+<div class="modal" id="modal" role="dialog" aria-modal="true" aria-label="Player"><div class="player" id="player"><video id="video" autoplay playsinline x-webkit-airplay="allow"></video><div class="pbar" id="pbar"><div class="ptitle" id="playTitle"></div><div class="row"><button class="pbtn" id="statsbtn" aria-haspopup="dialog" aria-expanded="false" title="Playback info (i)" onclick="toggleStats()">ⓘ Playback info</button><button class="pbtn" id="apbtn" style="display:none" title="AirPlay">📺 AirPlay</button><button class="pbtn" id="pbclose" title="Close (Esc)" onclick="closePlayer()">✕ Close</button></div></div><div class="ptimeline" id="ptimeline"><span class="ptime" id="ptcur" aria-hidden="true">0:00</span><div class="pseek" id="pseek" role="slider" tabindex="0" aria-label="Playback position" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="0:00"><div class="pseek-buf" id="pseekbuf" aria-hidden="true"></div><div class="pseek-fill" id="pseekfill" aria-hidden="true"></div><div class="pseek-thumb" id="pseekthumb" aria-hidden="true"></div></div><span class="ptime" id="ptdur" aria-hidden="true">0:00</span></div><div class="ptransport" id="ptransport"><button class="picon" id="pbback" aria-label="Back 10 seconds" title="Back 10s (←)" onclick="nudge(-10)">↺</button><button class="picon" id="pbplay" aria-label="Play" title="Play / Pause (space)" onclick="togglePlay()">▶</button><button class="picon" id="pbforward" aria-label="Forward 10 seconds" title="Forward 10s (→)" onclick="nudge(10)">↻</button><span class="ptransport-spacer" aria-hidden="true"></span><button class="picon paud" id="pbaudio" aria-haspopup="menu" aria-expanded="false" aria-label="Audio track" title="Audio track" style="display:none" onclick="toggleMenu('audio',1)">🔊</button><button class="picon pcc" id="pbsubs" aria-haspopup="menu" aria-expanded="false" aria-label="Subtitles" title="Subtitles (c)" style="display:none" onclick="toggleMenu('subs',1)">CC</button><button class="picon" id="pbquality" aria-haspopup="menu" aria-expanded="false" aria-label="Playback quality" title="Playback quality" onclick="toggleMenu('quality',1)">◆</button><button class="picon" id="pbsettings" aria-haspopup="menu" aria-expanded="false" aria-label="Playback settings" title="Playback settings" onclick="toggleMenu('settings',1)">⚙</button><button class="picon" id="pbinfo" aria-label="Title info" title="Show title, synopsis & release info" onclick="togglePlayerInfo()">≡</button><button class="picon" id="pbpip" aria-label="Picture in picture" title="Picture-in-picture" style="display:none" onclick="togglePip()">◲</button><button class="picon" id="pbfs" aria-label="Fullscreen" title="Fullscreen (f)" onclick="toggleFullscreen()">⛶</button></div><div class="pinfo" id="pinfo"></div><div class="pskip" id="pskip"></div><div class="ploading" id="ploading"><div class="pspin"></div><div class="ploadText" id="ploadText">Loading…</div><div class="ploadSub" id="ploadSub"></div><div class="ploadAct" id="ploadAct"></div></div><div class="psurface" id="psurface" role="status" aria-live="polite"><div class="psurfText" id="psurfText"></div><div class="psurfSub" id="psurfSub"></div><div class="psurfAct" id="psurfAct"></div></div><div class="pindicator" id="pindicator" role="status" aria-live="polite"><div class="pspin" aria-hidden="true"></div><span id="pindText"></span></div><div class="statsov" id="statsov" data-mode="standard"><div class="statshd"><span id="statstitle">Playback info</span><div class="statsmodes" role="radiogroup" aria-label="Playback info size"><button type="button" data-stats-mode="mini" role="radio" onclick="setStatsMode('mini')">Mini</button><button type="button" data-stats-mode="standard" role="radio" onclick="setStatsMode('standard')">Standard</button><button type="button" data-stats-mode="debug" role="radio" onclick="setStatsMode('debug')">Debug</button></div><button class="statsx" aria-label="Close playback info" title="Close (i)" onclick="toggleStats()">✕</button></div><div class="statsbody" id="statsbody"></div></div><div class="pmenu" id="pmenu" role="menu"></div></div></div>
 <div id="live-tv-host" class="lth" data-mode="slot" hidden>
   <video id="live-tv-video" playsinline aria-label="Live television"></video>
   <div class="lth-overlay" id="live-tv-overlay"></div>
@@ -3943,15 +3973,18 @@ async function persistentWait(v,p,began,generation,actionGeneration){
     // so the only thing the verdict changes is whose words the viewer reads.
     // The viewer's own options are untouched: a terminal recipe is not a
     // terminal file, and Force transcode is a different recipe.
-    p.stallPrompt=true;
     const verdictText=controlVerdictText(verdict.message);
     clientLog({level:"warn",event:"stall_recovery",detail:"terminal:"+verdict.code,
       message:"server verdict ended this recipe — "+verdictText,
       control_trigger:controlTrigger});
-    setLoading(true,verdictText,"Your place is saved.",
-      `<button onclick="retryPlayback()">Try again</button>`+
-      (p.method!=='transcode'?`<button onclick="startTranscodeFallback('stall-terminal')">Force transcode</button>`:``)+
-      `<button onclick="closePlayer()">Close</button>`);
+    // The verdict is still armed, not executed: what ends this recipe is that
+    // the owner returns from here with nothing left to try. A blocking surface
+    // is only ever drawn over a player its owner has stopped (§3.2), so stop
+    // first and let the presenter say the server's sentence.
+    stopPlayerForExhaustion();
+    raisePlaybackSurface("owner_stopped",{player_stopped:true,
+      title:verdictText,detail:"Your place is saved.",
+      actions:playbackStallActions(p,"stall-terminal")});
     return;
   }
   if(p.stallDeferralsAt!==began){ p.stallDeferralsAt=began; p.stallDeferrals=0; }
@@ -3977,12 +4010,11 @@ async function persistentWait(v,p,began,generation,actionGeneration){
       clientLog({level:"info",event:"stall_recovery",detail:"deferred:hold",
         message:`server holds this stall (${verdict.reason}) — reopen deferred`,
         control_trigger:controlTrigger});
-      if(!p.stallPrompt){
-        p.stallPrompt=true;
-        setLoading(true,"Waiting for the server.",holdReasonText(verdict.reason),
-          `<button onclick="retryPlayback()">Try again</button>`+
-          `<button onclick="closePlayer()">Close</button>`);
-      }
+      // A notice, not a screen: the server is deliberately not advancing and
+      // the viewer is told why, once per hold rather than once per deferral.
+      raisePlaybackSurface("control_hold",{context:"attached",
+        title:"Waiting for the server.",detail:holdReasonText(verdict.reason),
+        actions:["retry","close"]},{once:true});
       p.waitTimer=setTimeout(()=>persistentWait(v,p,began,generation,actionGeneration).catch(()=>{}),
         Math.min(PERSISTENT_STALL_MS,CONTROL_STALL_DEFER_DEADLINE_MS-controlElapsedMs));
       return;
@@ -4024,12 +4056,13 @@ async function persistentWait(v,p,began,generation,actionGeneration){
     alreadyRecovered:(p.stallRecoveries||0)>0
   });
   if(action==='prompt'){
-    p.stallPrompt=true;
-    setLoading(true,"Playback is still stalled.",
-      "One automatic recovery was already tried. Your place is saved.",
-      `<button onclick="retryPlayback()">Try again</button>`+
-      (p.method!=='transcode'?`<button onclick="startTranscodeFallback('stall-manual')">Force transcode</button>`:``)+
-      `<button onclick="closePlayer()">Close</button>`);
+    // One automatic recovery was already spent, and this branch offers no
+    // second one. Contract §3.4: the owner stops the player, then raises.
+    stopPlayerForExhaustion();
+    raisePlaybackSurface("owner_exhausted",{player_stopped:true,
+      title:"Playback is still stalled.",
+      detail:"One automatic recovery was already tried. Your place is saved.",
+      actions:playbackStallActions(p)});
     return;
   }
   const estimateBps=(p.hls&&p.hls.bandwidthEstimate)||p.bandwidthSeedBps;
@@ -4050,8 +4083,9 @@ async function persistentWait(v,p,began,generation,actionGeneration){
     playbackContext()));
   const position=p.recoveringStall.position;
   endWait(false);
-  setLoading(true,action==='transcode'?"Buffer ran dry — optimizing…":"Playback stalled — reconnecting…",
-    `resuming from ${clockFromSec(position)}`);
+  raisePlaybackSurface("owner_recovery_step",{
+    title:action==='transcode'?"Buffer ran dry — optimizing…":"Playback stalled — reconnecting…",
+    detail:`resuming from ${clockFromSec(position)}`});
   if(action==='transcode') startTranscodeFallback("stall-recovery",
     `switched to a transcode after a persistent ${kind} stall`);
   else seekTo(position,true,recoveryHeight,false);
@@ -4064,16 +4098,19 @@ function finishStallRecovery(outcome,note){
     message:`stall recovery ${outcome} after ${(ms/1000).toFixed(1)}s`+(note?` — ${note}`:"")},
     playbackContext()));
   p.recoveringStall=null;
+  // The recovery owner reporting its own outcome, which is what retires a
+  // `recovering` fault the reducer would otherwise hold until evidence arrives.
+  if(outcome==='recovered') playbackSurfaceStep({owner_success:playbackSurfaceGeneration(p)});
   return true;
 }
 function showStallRecoveryFailure(note){
   const p=PLAYER; if(!p) return;
-  p.stallPrompt=true;
-  setLoading(true,"Playback could not reconnect.",note||"Your place is saved.",
-    `<button onclick="retryPlayback()">Try again</button>`+
-    (p.method!=='transcode'?`<button onclick="startTranscodeFallback('stall-manual')">Force transcode</button>`:``)+
-    `<button onclick="closePlayer()">Close</button>`);
-  const loading=document.getElementById("ploading"); if(loading) loading.classList.add("failed");
+  // The ladder is spent. Contract §3.4: stop the player, then raise — the
+  // sentence, the buttons and every caller are what they were.
+  stopPlayerForExhaustion();
+  raisePlaybackSurface("owner_exhausted",{player_stopped:true,
+    title:"Playback could not reconnect.",detail:note||"Your place is saved.",
+    actions:playbackStallActions(p)});
 }
 // The failure every per-frame counter forgives: hardware decode, a full
 // buffer, and the presentation clock quietly running at three-quarter speed.
@@ -6686,21 +6723,31 @@ function clearStreamFailureFor(hls){
 function currentStreamFailureOverlay(){
   return PlaybackPolicy.streamFailureOverlay(STREAM_FAILURE,Date.now());
 }
-// Session creation fails before `attachHls`, so render its preserved typed
-// refusal here. Returning false lets callers keep their generic handling for
-// an unstructured network/server error; true means the persistent overlay now
-// owns the verdict and must not be hidden by `setLoading(false)` or a toast.
-function showSessionOpenFailure(error){
+// Session creation fails before `attachHls`, so the preserved typed refusal is
+// classified here. Returning false lets callers keep their generic handling for
+// an unstructured network/server error; true means a fault carrying the
+// server's own sentence has been raised and the caller has nothing to add.
+//
+// `context` is the caller's, because only the caller knows whether a
+// predecessor still has the picture — which is the difference between a failed
+// start and a refused change (contract §3.3 rows 4-10).
+function showSessionOpenFailure(error,context){
   const failure=error&&error.streamFailure;
   if(!failure) return false;
   failure.at=Date.now();
   STREAM_FAILURE=failure;
   const explained=currentStreamFailureOverlay();
   if(!explained) return false;
+  const where=context||playbackSurfaceContext(PLAYER);
+  const source=PlaybackPolicy.classifyStreamFailure({
+    status:failure.status,code:failure.code,context:where});
+  if(!source) return false;
   if(PLAYER) clientLog(Object.assign({level:"error",event:"stream_refused",
     detail:failure.code||String(failure.status), message:explained.detail},
     playbackContext()));
-  setLoading(true,explained.title,explained.detail);
+  raisePlaybackSurfaceRefusal(source,where,{title:explained.title,detail:explained.detail,
+    intent:where==="change"?playbackSurfaceIntent(PLAYER):null,
+    position_ms:failure.position_ms==null?null:failure.position_ms});
   toast(explained.retryable?"Still starting…":"Playback failed");
   return true;
 }
@@ -6969,7 +7016,8 @@ function attachHls(video, playlistUrl, startAt){
         clientLog(streamRejectionReport(rejection,{detail:d.type,
           message:streamRejectionMessage(rejection,PLAYER.method,d.details,isMedia),
           control_trigger:controlTrigger}));
-        setLoading(true,"Stream rejected — switching to transcode…",note);
+        raisePlaybackSurface("owner_recovery_step",{
+          title:"Stream rejected — switching to transcode…",detail:note});
         startTranscodeFallback("stream-rejected",note);
         return;
       }
@@ -6982,17 +7030,32 @@ function attachHls(video, playlistUrl, startAt){
       // overlay is only useful if it repeats that instead of sending someone
       // to a log file on a headless box.
       const explained=currentStreamFailureOverlay();
+      // The class decides whether the picture stops. hls.js has called
+      // stopLoad() and the element keeps playing whatever it buffered — up to
+      // half a minute of it — so a refusal that is still "not yet" gets an
+      // indicator over a moving picture rather than the full screen that used
+      // to sit there calling it a failed start (§2.1, closed by §3.3 rows 9-12).
+      const where=PLAYER&&PLAYER.started?"attached":"start";
+      const refusal=explained?PlaybackPolicy.classifyStreamFailure({
+        status:STREAM_FAILURE.status,code:STREAM_FAILURE.code,context:where}):null;
       if(explained){
         clientLog(Object.assign({level:"error",event:"stream_refused",
           detail:STREAM_FAILURE.code||String(STREAM_FAILURE.status),
           message:explained.detail,control_trigger:controlTrigger}, playbackContext()));
-        setLoading(true,explained.title,explained.detail);
+      }
+      if(refusal){
+        raisePlaybackSurfaceRefusal(refusal,where,{title:explained.title,detail:explained.detail,
+          position_ms:STREAM_FAILURE.position_ms==null?null:STREAM_FAILURE.position_ms});
         toast(explained.retryable?"Still starting…":"Playback failed");
         return;
       }
-      setLoading(true,"Playback failed to start ("+d.details+").","the server couldn't build this stream — see Settings → Logs");
-      const loading=document.getElementById("ploading"); if(loading) loading.classList.add("failed");
-      toast("Playback failed ("+d.details+")");
+      // Nothing left to try and nothing that explains it. Contract §3.4: the
+      // owner stops the player, then raises.
+      stopPlayerForExhaustion();
+      raisePlaybackSurface("owner_stopped",{context:where,player_stopped:true,
+        title:explained?explained.title:"Playback failed to start ("+d.details+").",
+        detail:explained?explained.detail:"the server couldn't build this stream — see Settings → Logs"});
+      toast(explained?"Playback failed":"Playback failed ("+d.details+")");
     });
   } else {
     // Native HLS: the session id in the URL is the credential, so the
@@ -9069,13 +9132,24 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
         if(index>=0)predecessor.curAudio=index;
       }
     }
-    const p=PLAYER;
-    if(p){
-      p.stallPrompt=true;
+    // A predecessor that still holds the picture makes this a refused CHANGE,
+    // not a failed start (contract §3.3 row 7): the sentence below belongs
+    // beside a film that is still playing, never over it.
+    const media=document.getElementById("video");
+    const surfaceContext=(PLAYER&&PLAYER.started&&media&&!media.paused&&!media.ended)
+      ?"change":"start";
+    if(!showSessionOpenFailure(error,surfaceContext)){
+      if(surfaceContext==="change"){
+        raisePlaybackSurface("change_failed",{context:"change",
+          intent:playbackSurfaceIntent(PLAYER),
+          title:"Playback could not prepare.",detail:error.message,actions:["retry"]});
+      }else{
+        stopPlayerForExhaustion();
+        raisePlaybackSurface("owner_stopped",{context:"start",player_stopped:true,
+          title:"Playback could not prepare.",detail:error.message,
+          actions:["retry","close"]});
+      }
     }
-    if(!showSessionOpenFailure(error)) setLoading(true,"Playback could not prepare.",error.message,
-      `<button onclick="retryPlayback()">Try again</button>`+
-      `<button onclick="closePlayer()">Close</button>`);
   };
   if(PLAYER){
     // A full play owns the destination immediately, including a different
@@ -9145,7 +9219,8 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
     const app=document.getElementById("app"); if(app) app.inert=true;
     const initial=document.getElementById("pbplay"); if(initial) initial.focus({preventScroll:true});
   }
-  setLoading(true,"Reading media…","checking the file on the server");
+  raisePlaybackSurface("client_preparing",{context:"start",
+    title:"Reading media…",detail:"checking the file on the server"});
   // The selection travels WITH the decision, so `method`, `reasons`, `delivery`
   // and the marked default tracks all describe the tracks that are about to
   // play. Asking for the policy default and correcting afterwards is what used
@@ -9293,7 +9368,11 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
       // persisted: a transient server failure must not cap quality forever.
       failedHeights:new Set()},
     waitAt:null, waitRunway:null, waitTimer:null, waitReported:false,
-    stallsByKind:null, stallRecoveries:0, recoveringStall:null, stallPrompt:false,
+    stallsByKind:null, stallRecoveries:0, recoveringStall:null,
+    // The presenter's state, shared by every player object this page has: the
+    // overlay is one element with one history and identity is the generation
+    // each fault carries (PLAYBACK-SURFACE-CONTRACT.md §3.1).
+    surfaceState:PLAYBACK_SURFACE,
     burnedSub:preBurn, vod:false, openToken:openAttempt.token,
     controlSeek:replacementControlSeek,
     controlSeekSequence:replacementControlSeek?replacementControlSeek.sequence:0,
@@ -9360,7 +9439,8 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
     // Read from PLAYER, not the decision: they hold the same array on the
     // ordinary path, and on the forced-burn path above PLAYER is the one that
     // knows a burn is why this is a transcode at all.
-    setLoading(true,"Starting the transcoder…",transcodeReason(PLAYER));
+    raisePlaybackSurface("client_preparing",{context:"start",
+      title:"Starting the transcoder…",detail:transcodeReason(PLAYER)});
     const options=transcodeOpts(startSec,initialAudio);
     let info; try{info=await preparation.run(signal=>openSession(fileId,options,signal),
       late=>releaseSession(late&&late.session_id));}catch(e){
@@ -9374,8 +9454,9 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
     }
     retireOutgoing();
     const from=attachSession(video, openedPlayer, info, startSec);
-    setLoading(true,"Preparing the stream…",(PLAYER.encoder?("encoder: "+PLAYER.encoder+" — "):"")+
-      (PLAYER.vod?"already transcoded — playing from the cache":"buffering the first segments"));
+    raisePlaybackSurface("client_preparing",{context:"start",title:"Preparing the stream…",
+      detail:(PLAYER.encoder?("encoder: "+PLAYER.encoder+" — "):"")+
+        (PLAYER.vod?"already transcoded — playing from the cache":"buffering the first segments")});
     armStall(from);
   } else if(initialRoute==='copy_hls'){
     // Two different reasons to land here, same destination.
@@ -9391,9 +9472,9 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
     // is a stall. The same bytes through MSE let hls.js hold a real buffer.
     // Identical video either way — this is a transport choice, not a rung.
     const why=!nativeHls && decision.prefer_segmented;
-    setLoading(true,"Preparing the stream…",
-      why? `${why} — sending it as HLS so the player can buffer ahead`
-         : "remuxing to HLS — keeping the original video");
+    raisePlaybackSurface("client_preparing",{context:"start",title:"Preparing the stream…",
+      detail:why? `${why} — sending it as HLS so the player can buffer ahead`
+                : "remuxing to HLS — keeping the original video"});
     try{ if(!await startCopyHls(video,startSec,openIsAttached,openAttempt,preparation,retireOutgoing)) return; }
     catch(e){
       if(openIsAttached())failPreparation(e);
@@ -9405,8 +9486,9 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
     // the server's language choice. If the preferred track is not stream zero,
     // use the remuxer so the requested track is the only one delivered.
     const isRemux = initialRoute==='progressive_remux';
-    setLoading(true,isRemux?"Preparing the stream…":"Loading…",
-      isRemux?"remuxing to a browser-friendly container":"direct play — no conversion needed");
+    raisePlaybackSurface("client_preparing",{context:"start",
+      title:isRemux?"Preparing the stream…":"Loading…",
+      detail:isRemux?"remuxing to a browser-friendly container":"direct play — no conversion needed"});
     // Remux carries the same caps so the server copies the audio when the
     // browser can play it (Safari + AC-3) instead of re-encoding to AAC, and a
     // stream handle so the overlay can ask how it's going — a progressive
@@ -9459,14 +9541,7 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
   probeDecode();
   video.addEventListener("loadedmetadata", probeDecode, {once:true});
   armHitchDetector(video);
-  clearInterval(PLAYER.progressTimer);
-  PLAYER.progressTimer=setInterval(()=>playbackProgressTick(video,openedPlayer),500);
-  clearInterval(PLAYER.timer);
-  PLAYER.timer=setInterval(()=>{
-    if(!playbackOwnsAttachedMedia(openedPlayer)) return;
-    reportProgress(fileId); reportHitches(); maybeDecodeRescue();
-    autoControllerTick().catch(()=>{}); refreshSegTimes(); libraryChannelTick();
-  }, PlaybackPolicy.AUTO_DEFAULTS.sampleMs);
+  armPlaybackSampling(video,openedPlayer);
   video.onended=()=>{ handleEnded(fileId).catch(()=>{}); };
   pbTick(); pbSyncPlayIcon();   // seed the transport (total time, play icon) at once
   playerActivity();
@@ -9520,7 +9595,8 @@ async function executePlaybackMediaChange(p,change){
   if(change.automatic&&p.abr) p.abr.switching=true;
   // Keep the predecessor until the create succeeds. Its output cannot settle
   // the new destination, which remains unexecuted until the attach below.
-  setLoading(true,"Preparing the stream…","your place and selections are saved");
+  raisePlaybackSurface("client_preparing",{
+    title:"Preparing the stream…",detail:"your place and selections are saved"});
   try{
     if(method==='transcode'){
       const info=await preparation.run(signal=>openSession(p.fileId,opts,signal),
@@ -9569,7 +9645,17 @@ async function executePlaybackMediaChange(p,change){
     }
     // Retain the desired recipe for Retry/the next command, but surface the
     // failed attempt now; neither silence nor restoring desired=attached lies.
-    if(!showSessionOpenFailure(e)){showStallRecoveryFailure(e.message);toast(e.message);}
+    // The predecessor is deliberately still playing (that is what the retained
+    // `pendingMediaChange` above means), so this is a refusal about the
+    // destination — a notice beside the picture, never a screen over it. That
+    // sticky "could not reconnect" over a running stream is §2.1's second
+    // defect, and this line is where it lived.
+    if(!showSessionOpenFailure(e,"change")){
+      raisePlaybackSurface("change_failed",{context:"change",
+        intent:playbackSurfaceIntent(p),
+        title:"Playback could not reconnect.",detail:e.message,actions:["retry"]});
+      toast(e.message);
+    }
     return false;
   }finally{preparation.finish();}
 }
@@ -9623,8 +9709,9 @@ async function startCopyHls(v, startSec, live, openAttempt, preparation, beforeA
     clientLog(Object.assign({level:"warn",event:"stream_route_fallback",
       detail:"vod_index_pending",
       message:"fragment index is pending — using one continuous remux"},playbackContext()));
-    setLoading(true,"Preparing one continuous stream…",
-      "the HLS index is still building — remuxing without segmentation");
+    raisePlaybackSurface("client_preparing",{
+      title:"Preparing one continuous stream…",
+      detail:"the HLS index is still building — remuxing without segmentation"});
     resetMediaSource(v);
     if(live && !live()) return false;
     setPlaybackMediaSource(v,remuxUrl(base,aidx,from));
@@ -10508,6 +10595,9 @@ function setPlaybackMediaSource(v,url){
 function retirePlaybackPredecessor(p){
   if(!p?.mediaPredecessor) return;
   const predecessor=p.mediaPredecessor;
+  // Its generation stops being about anything the moment it is retired, and so
+  // does every fault that was about it (contract §3.4).
+  playbackSurfaceStep({retire:playbackSurfaceGeneration(predecessor)});
   PLAYER=predecessor;stopPlayerTimers();teardownHls();
   if(predecessor.sessionId)releaseSession(predecessor.sessionId);
   PLAYER=p;p.mediaPredecessor=null;
@@ -10517,6 +10607,10 @@ function retirePlaybackPredecessor(p){
 function beginPlaybackMediaAttachment(p){
   const token={};
   p.mediaAttachment=token;
+  // Where this attempt's generation takes the picture: every attach on every
+  // route runs through here. Faults about any other generation are dropped,
+  // which is what replaces the 90 s `FAILURE_FRESH_MS` window with identity.
+  playbackSurfaceStep({attach:playbackSurfaceGeneration(p)});
   return {current:()=>PLAYER===p&&p.mediaAttachment===token};
 }
 function applyPlaybackAttachmentPosition(v,p,attachment,startAt){
@@ -10579,6 +10673,29 @@ function stopPlayerTimers(){
   clearTimeout(PLAYER.idleTimer); PLAYER.idleTimer=null;
   clearTimeout(PLAYER.stallTimer); PLAYER.stallTimer=null;
   clearTimeout(PLAYER.waitTimer); PLAYER.waitTimer=null;
+  PLAYER.samplingStopped=true;
+}
+// Every per-player sampling timer, armed together: the 500 ms progress tick —
+// which is the stall detector, the presenter's only evidence and the clock its
+// timed notices age against — and the 5 s controller tick.
+//
+// `play()` arms them when a stream attaches. `armStall` re-arms them for a
+// stream that starts again after the recovery owner stopped the player, because
+// §3.4's stop takes `stopPlayerTimers` with it: without this, Force transcode
+// from a stalled prompt would resume into a player with no stall detection and
+// a presenter with no evidence, and neither would come back until the next
+// full open.
+function armPlaybackSampling(v,p){
+  if(!v||!p) return;
+  clearInterval(p.progressTimer);
+  p.progressTimer=setInterval(()=>playbackProgressTick(v,p),500);
+  clearInterval(p.timer);
+  p.timer=setInterval(()=>{
+    if(!playbackOwnsAttachedMedia(p)) return;
+    reportProgress(p.fileId); reportHitches(); maybeDecodeRescue();
+    autoControllerTick().catch(()=>{}); refreshSegTimes(); libraryChannelTick();
+  }, PlaybackPolicy.AUTO_DEFAULTS.sampleMs);
+  p.samplingStopped=false;
 }
 
 // ---- stall self-diagnosis --------------------------------------------------
@@ -10674,7 +10791,6 @@ async function startTranscodeFallback(reason, note){
   beginPlaybackControlSeek(PLAYER,startSec,
     reason==="stall-manual"||reason==="stall-terminal");
   const me=PLAYER;
-  me.stallPrompt=false;
   // Before the session is opened, because `transcodeOpts` reads it: a stream
   // the browser refused is not a stream it lacked the pixels for, so the
   // replacement keeps the source's resolution (see sessionHeight). Set only
@@ -10825,7 +10941,8 @@ async function rescueAutoSupply(){
   const before=p.method, pos=(p.offset||0)+(v.currentTime||0);
   p.abr.switching=true;
   p.abr.supplyRescued=true;
-  setLoading(true,"Adjusting quality…","repeated supply stalls — starting transcode Auto");
+  raisePlaybackSurface("owner_recovery_step",{title:"Adjusting quality…",
+    detail:"repeated supply stalls — starting transcode Auto"});
   toast("Quality → Auto transcode — supply stalls");
   try{
     await startTranscodeFallback("auto-supply",
@@ -10905,6 +11022,7 @@ async function autoControllerTick(){
 // file is already open on the server, so 20s of nothing is already wrong.
 function armStall(fromSec, graceMs){
   clearStall(); if(!PLAYER) return;
+  if(PLAYER.samplingStopped) armPlaybackSampling(document.getElementById("video"),PLAYER);
   PLAYER.stallFrom=(fromSec!=null)?fromSec:pbPosSec();
   PLAYER.stallTimer=setTimeout(()=>stallDiagnose().catch(()=>{}), graceMs||40000);
 }
@@ -10921,10 +11039,8 @@ function retryPlayback(){
     return play(retry.fileId,retry.title,retry.resumeMs,retry.knownDurMs,retry.meta,null,retry);
   }
   if(!PLAYER) return;
-  const loading=document.getElementById("ploading"); if(loading) loading.classList.remove("failed");
-  PLAYER.stallPrompt=false;
   const t=(PLAYER.stallFrom!=null)?PLAYER.stallFrom:pbPosSec();
-  setLoading(true,"Retrying…","");
+  raisePlaybackSurface("owner_recovery_step",{title:"Retrying…",detail:null});
   seekTo(t,true);
 }
 async function stallDiagnose(){
@@ -10963,12 +11079,12 @@ async function stallDiagnose(){
   finishStallRecovery("failed",verdict);
   clientLog({level:"warn",event:"stall",src:(url||"").split("?")[0],message:verdict,
     detail:detail,control_trigger:controlTrigger});
-  setLoading(true, verdict, detail,
-    `<button onclick="retryPlayback()">Try again</button>`+
-    (PLAYER.method!=='transcode'?`<button onclick="startTranscodeFallback('stall-manual')">Force transcode</button>`:``)+
-    `<button onclick="closePlayer()">Close</button>`);
-  const loading=document.getElementById("ploading"); if(loading) loading.classList.add("failed");
-  PLAYER.stallPrompt=true;
+  // A diagnosed stall is the owner out of rungs, and the verdict is its own.
+  // Contract §3.4: stop the player, then raise; §3.3 row 15 is the row these
+  // probe verdicts belong to. The sentence and the buttons are unchanged.
+  stopPlayerForExhaustion();
+  raisePlaybackSurface("decoder_failed",{player_stopped:true,
+    title:verdict,detail:detail,actions:playbackStallActions(PLAYER)});
   toast(verdict);
 }
 // One deadline covers response headers, playlist body and the sample segment.
@@ -11000,23 +11116,298 @@ async function probePlaybackSource(url,headers,isTranscode){
   }finally{clearTimeout(timer);ctl.abort();}
 }
 
-// ---- loading status, projection chrome, skip intro/credits ----------------
-// A staged loading overlay replaces the old mystery gray screen: the user sees
-// "reading media → starting transcoder → buffering" instead of a blank spinner.
-function setLoading(on,text,sub,actionHtml){
+// ---- the playback surface: one presenter, one render ----------------------
+//
+// docs/clients/PLAYBACK-SURFACE-CONTRACT.md. The overlay used to be an
+// imperative message channel — 55 sites pushing a string, a spinner and
+// sometimes a `failed` class at one element, each answering "what should the
+// viewer see" for itself. It is a projection now: the recovery owner raises a
+// typed fault, `PlaybackPolicy.presentSurface` (pure, driven by
+// tests/playback/playback-surface-contract.json) decides what is drawn, and
+// `renderPlaybackSurface` paints it. Nothing on this side of the line pauses,
+// plays, seeks, reopens, cancels a timer or reports to the control plane.
+
+// One presenter for one player surface. `play()` builds a new PLAYER object on
+// every start and this page has exactly one overlay with one history, so the
+// model outlives the object: identity is the generation each fault carries,
+// not which object happened to be holding the state when it was raised.
+// `PLAYER.surfaceState` is this, which is why reading `p.surfaceState.surface`
+// is the same answer wherever you read it from.
+const PLAYBACK_SURFACE={state:PlaybackPolicy.initialSurfaceState(),surface:null,history:[]};
+const SURFACE_HISTORY_MAX=16;
+const SURFACE_ACTION_LABELS=Object.freeze({keep_waiting:"Keep waiting",retry:"Try again",
+  close:"Close",force_transcode:"Force transcode",sign_in:"Sign in"});
+
+// The media generation a fault is about. The contract names the web’s
+// generation as the open attempt (§3.1), and `newAttempt` is where one begins:
+// every cold start, every seek that reopens, every quality or subtitle change.
+// `beginPlaybackMediaAttachment` is where that generation takes the picture, so
+// a fault raised while a replacement is being prepared already belongs to the
+// replacement and a predecessor keeps its own.
+function playbackSurfaceGeneration(p){ return (p&&p.attemptId)||null; }
+// The viewer request a fault belongs to, when it belongs to one. A committed
+// destination outlives the media element that was carrying it, which is exactly
+// what `controlSeek` already is.
+function playbackSurfaceIntent(p){ const seek=p&&p.controlSeek; return seek?seek.sequence:null; }
+// `start` before this playback has presented anything, `change` while a
+// viewer-requested replacement is pending over a predecessor, `attached`
+// otherwise — the three the fixture declares.
+function playbackSurfaceContext(p){
+  if(p&&p.pendingMediaChange) return "change";
+  return p&&p.started?"attached":"start";
+}
+function playbackSurfaceClassOf(source,context){
+  for(const row of PlaybackPolicy.SURFACE_SOURCES)
+    if(row.id===source&&(row.context==="any"||row.context===context)) return row.class||null;
+  return null;
+}
+function playbackSurfaceClassBlocks(cls){
+  const definition=cls?PlaybackPolicy.SURFACE_CLASSES[cls]:null;
+  return !!definition&&definition.blocking===true;
+}
+// The old `PLAYER.stallPrompt` flag, read off the presenter rather than kept as
+// a second copy of the same truth: a prompt the viewer has to answer is up.
+function playbackSurfacePromptUp(){
+  return PlaybackPolicy.surfaceEntersFailedRouting(PLAYBACK_SURFACE.surface);
+}
+function playbackSurfaceHasLiveFault(source,attached){
+  return PLAYBACK_SURFACE.state.faults.some(
+    fault=>fault.source===source&&fault.attached===attached);
+}
+// The buttons a stalled recipe offers. Force transcode is not offered on a
+// session that already IS one — the same condition the hand-written HTML had —
+// and it carries the reason its former inline `onclick` carried, because
+// `fallbackResetBeforeOpen` distinguishes the two and the action vocabulary
+// cannot. Recorded on the player rather than on the fault: the presenter's
+// state is the contract's, and this is the owner's own bookkeeping.
+function playbackStallActions(p,transcodeReason){
+  if(p) p.surfaceTranscodeReason=transcodeReason||"stall-manual";
+  return ["retry"].concat(p&&p.method!=='transcode'?["force_transcode"]:[]).concat(["close"]);
+}
+// One step of the presenter: feed the event, keep the state, emit what it says,
+// render what it returns. The only way a surface changes.
+function playbackSurfaceStep(event){
+  const step=PlaybackPolicy.presentSurface(PLAYBACK_SURFACE.state,
+    Object.assign({t:Math.round(performance.now())},event));
+  PLAYBACK_SURFACE.state=step.state;
+  PLAYBACK_SURFACE.surface=step.surface;
+  for(const entry of step.log) recordPlaybackSurfaceLog(entry);
+  renderPlaybackSurface(step.surface);
+  return step.surface;
+}
+function resetPlaybackSurface(){
+  PLAYBACK_SURFACE.state=PlaybackPolicy.initialSurfaceState();
+  PLAYBACK_SURFACE.history=[];
+  return playbackSurfaceStep({});
+}
+// The owner saying what happened. `source` is a row in the fixture; everything
+// else is what the owner knows about it. This function decides nothing about
+// what is shown — that is the reducer’s, and it is the whole point.
+function raisePlaybackSurface(source,fault,options){
+  const p=PLAYER, given=fault||{};
+  const attached=given.attached!==undefined?given.attached:playbackSurfaceGeneration(p);
+  // A fact the owner is restating rather than a new one: a `waiting` that fires
+  // at every fragment boundary must not push a fault per boundary at the ring.
+  if(options&&options.once&&playbackSurfaceHasLiveFault(source,attached)) return null;
+  return playbackSurfaceStep({
+    raise:source,
+    context:given.context||playbackSurfaceContext(p),
+    attached,
+    intent:given.intent!==undefined?given.intent:null,
+    player_stopped:!!given.player_stopped,
+    title:given.title!==undefined?given.title:null,
+    detail:given.detail!==undefined?given.detail:null,
+    position_ms:given.position_ms!==undefined?given.position_ms:null,
+    actions:given.actions,
+  });
+}
+// A refusal the server explained, classified by the shared table.
+//
+// The class decides whether the owner has to stop first: a "not yet" leaves the
+// picture — and the buffer it is playing out — exactly as it was, and only a
+// blocking class is the owner saying it has nothing left (§3.2, §3.4).
+function raisePlaybackSurfaceRefusal(source,context,fault){
+  let row=source;
+  // Row 3 (401/403) matches in every context, a pending change included.
+  // Stopping a predecessor that is playing perfectly well so a Sign in can be
+  // drawn over it is the exact defect §2.1 names, so a refusal that arrives
+  // while a predecessor still holds the picture stays the refusal it is: the
+  // viewer gets the banner, and the next start gets the sign-in prompt.
+  if(context==="change"&&playbackSurfaceClassBlocks(playbackSurfaceClassOf(row,context)))
+    row="change_failed";
+  const blocking=playbackSurfaceClassBlocks(playbackSurfaceClassOf(row,context));
+  if(blocking) stopPlayerForExhaustion();
+  return raisePlaybackSurface(row,Object.assign({context,player_stopped:blocking},fault||{}));
+}
+// The recovery owner’s one new obligation (§3.4): when it has nothing left to
+// try it stops the player, and only then raises. `pausePlaybackInternally`
+// keeps `wantsPlayback`, so Try again still knows the viewer wanted this
+// playing. Nothing else about the sites that call this changes.
+function stopPlayerForExhaustion(){
+  const v=document.getElementById("video");
+  if(v) pausePlaybackInternally(v);
+  stopPlayerTimers();
+}
+// A button the presenter drew. The reducer clears the fault the action belonged
+// to; the EFFECT is the recovery owner’s, which is why it happens here and not
+// inside the render (§3.2).
+function playbackSurfaceAction(action){
+  const p=PLAYER;
+  playbackSurfaceStep({user_action:action});
+  if(action==="retry") return retryPlayback();
+  if(action==="close") return closePlayer();
+  if(action==="force_transcode")
+    return startTranscodeFallback((p&&p.surfaceTranscodeReason)||"stall-manual");
+  if(action==="keep_waiting"){
+    // §3.1’s web definition of Keep waiting, and nothing more: one more bounded
+    // attempt from the existing ladder.
+    if(p){ p.recoveringStall=null; armStall(pbPosSec()); }
+    return undefined;
+  }
+  if(action==="sign_in"){
+    // `api()` already ends the session on a 401, so this is the defensive path
+    // for a refusal body that reached the player another way. Local only: the
+    // bearer this player was using is the one the server refused.
+    closePlayer();
+    return logout({revoke:false,notice:"Sign in again to keep watching."});
+  }
+  return undefined;
+}
+// §3.6: the same four events with the same field names on every client, so the
+// server-side session log joins on `session_id`/`attempt` rather than on a
+// generation only this browser understands.
+function recordPlaybackSurfaceLog(entry){
+  if(!entry||!entry.event) return;
+  const p=PLAYER;
+  const identity={session_id:(p&&p.sessionId)||null,attempt:(p&&p.attemptId)||null};
+  if(entry.event==="surface_error"){
+    clientLog(Object.assign({level:"error",
+      message:`the presenter refused ${entry.source}: ${entry.error}`},entry,identity));
+    return;
+  }
+  if(entry.event==="surface_raised") pushPlaybackSurfaceHistory(entry,identity);
+  else if(entry.event==="surface_cleared"||entry.event==="surface_disagreement")
+    closePlaybackSurfaceHistory(entry);
+  clientLog(Object.assign({
+    level:entry.event==="surface_disagreement"?"warn":"info",
+    message:playbackSurfaceLogMessage(entry)},entry,identity));
+}
+function playbackSurfaceLogMessage(entry){
+  if(entry.event==="surface_raised") return `${entry.class} surface raised by ${entry.source}`;
+  if(entry.event==="surface_cleared") return `${entry.class} surface cleared by ${entry.by}`;
+  if(entry.event==="surface_log_only") return `${entry.source} is log only — no surface`;
+  if(entry.event==="surface_disagreement")
+    return `the picture moved under a ${entry.class} surface — the picture wins`;
+  return entry.event;
+}
+// The bounded ring the Playback debug ledger reads. "What was that overlay" has
+// an answer from inside the product, which is the whole of §5.
+function pushPlaybackSurfaceHistory(entry,identity){
+  const v=document.getElementById("video");
+  PLAYBACK_SURFACE.history.push({
+    class:entry.class,source:entry.source,attached:entry.attached,intent:entry.intent,
+    session_id:identity.session_id,attempt:identity.attempt,
+    raised_at:Date.now(),cleared_at:null,cleared_by:null,
+    player_at_raise:{
+      rate:v?(v.paused?0:(Number(v.playbackRate)||1)):null,
+      position_ms:Math.round(pbPosSec()*1000),
+      presenting:!!PLAYBACK_SURFACE.state.presenting,
+      stopped_by_owner:!!entry.player_stopped}});
+  while(PLAYBACK_SURFACE.history.length>SURFACE_HISTORY_MAX) PLAYBACK_SURFACE.history.shift();
+}
+function closePlaybackSurfaceHistory(entry){
+  const history=PLAYBACK_SURFACE.history;
+  for(let index=history.length-1;index>=0;index--){
+    const row=history[index];
+    if(row.cleared_at!=null) continue;
+    if(row.source!==entry.source||row.attached!==entry.attached) continue;
+    row.cleared_at=Date.now();
+    row.cleared_by=entry.event==="surface_disagreement"?"disagreement":(entry.by||null);
+    return;
+  }
+}
+function playbackSurfaceHistoryText(){
+  const history=PLAYBACK_SURFACE.history;
+  if(!history.length) return null;
+  return history.slice().reverse().map(row=>{
+    const at=row.player_at_raise||{};
+    const span=row.cleared_at==null?"open":`${((row.cleared_at-row.raised_at)/1000).toFixed(1)} s → ${row.cleared_by||"cleared"}`;
+    return `${row.class} · ${row.source} · ${span} · rate ${at.rate==null?"?":at.rate}`+
+      ` · ${clockFromSec((at.position_ms||0)/1000)} · ${at.presenting?"presenting":"not presenting"}`+
+      ` · ${at.stopped_by_owner?"owner stopped":"owner running"}`;
+  }).join("\n");
+}
+// playback-surface-render:begin
+// The whole of the presenter’s output, and the only code in this file that
+// writes the overlay, the `failed` class, #ploadAct or the two notice
+// elements. It is a projection and nothing else: no pause, no play, no seek,
+// no reopen, no timer, no report. scripts/playback-surface-fence keeps it so.
+function renderPlaybackSurface(surface){
+  const kind=(surface&&surface.kind)||"none";
+  const title=(surface&&surface.title)||"";
+  const detail=(surface&&surface.detail)||"";
+  const actions=(surface&&surface.actions)||[];
+  // The presenter runs on every evidence sample — twice a second while a film
+  // plays — and repainting an unchanged surface would rebuild the action
+  // buttons under whichever one the viewer had focused. Paint on change, and
+  // nothing else reaches these elements, so "unchanged" is the truth.
+  const signature=[kind,surface&&surface.class,title,detail,actions.join("\u241f"),
+    !!(surface&&surface.input_failed)].join("\u241e");
+  if(renderPlaybackSurface.painted===signature) return;
+  renderPlaybackSurface.painted=signature;
+  setLoading(kind==="blocking",title,detail,
+    kind==="blocking"?playbackSurfaceActionHtml(actions):"",
+    !!(surface&&surface.input_failed));
+  renderPlaybackSurfaceNotice(kind==="banner",title,detail,actions);
+  renderPlaybackSurfaceIndicator(kind==="indicator",title);
+}
+function playbackSurfaceActionHtml(actions){
+  return (actions||[]).map(action=>{
+    const label=SURFACE_ACTION_LABELS[action];
+    if(!label) return "";
+    return `<button onclick="playbackSurfaceAction('${action}')">${esc(label)}</button>`;
+  }).join("");
+}
+// A notice strip beside the picture: the picture itself is untouched.
+function renderPlaybackSurfaceNotice(on,title,detail,actions){
+  const box=document.getElementById("psurface"); if(!box) return;
+  const text=document.getElementById("psurfText");
+  const sub=document.getElementById("psurfSub");
+  const act=document.getElementById("psurfAct");
+  if(on){
+    if(text) text.textContent=title;
+    if(sub) sub.textContent=detail||"";
+    if(act) act.innerHTML=playbackSurfaceActionHtml(actions);
+  } else if(act) act.innerHTML="";
+  box.classList.toggle("on",!!on);
+}
+// The in-chrome indicator: the player is working on it and the picture behind
+// this is presenting, so nothing is allowed to cover it.
+function renderPlaybackSurfaceIndicator(on,title){
+  const box=document.getElementById("pindicator"); if(!box) return;
+  const text=document.getElementById("pindText");
+  if(on&&text) text.textContent=title||"Working…";
+  box.classList.toggle("on",!!on);
+}
+// The staged loading overlay: "reading media → starting transcoder → buffering"
+// instead of a blank gray screen. It is the presenter’s private paint helper
+// now rather than a channel call sites can push a string at, and `failed` is
+// the input contract’s `failed` state (§4) — a blocking surface with an answer
+// to give — rather than a flag four sites set by hand.
+function setLoading(on,text,sub,actionHtml,failed){
   const l=document.getElementById("ploading"); if(!l) return;
   const a=document.getElementById("ploadAct");
   if(on){
-    l.classList.remove("failed");
+    l.classList.toggle("failed",!!failed);
     const t=document.getElementById("ploadText"), s=document.getElementById("ploadSub");
     if(t&&text!=null) t.textContent=text;
     if(s) s.textContent=sub||"";
-    // Actions are opt-in per call: an ordinary "Seeking…" must clear whatever
-    // recovery buttons a previous stall left behind.
     if(a) a.innerHTML=actionHtml||"";
     l.classList.add("on");
   } else { l.classList.remove("on","failed"); if(a) a.innerHTML=""; }
 }
+// playback-surface-render:end
+// ---- projection chrome, skip intro/credits --------------------------------
 // Reveal the title bar / cursor on activity; hide them after a quiet spell
 // while the video is actually playing (projection feel).
 function playerActivity(){
@@ -11052,8 +11443,13 @@ function playerInputSurface(){ return coarsePointer()?"touch":"desktop"; }
 function playerSeekPending(){ return !!(PLAYER&&(PLAYER._seekPending!=null||PLAYER._seekPreview!=null)); }
 function playerInputState(){
   const p=document.getElementById("player");
-  const loading=document.getElementById("ploading");
-  if(loading&&loading.classList.contains("failed")) return "failed";
+  // The input contract's `failed` state is the presenter's answer, not a DOM
+  // class four call sites could set: a BLOCKING surface whose class is a
+  // prompt or a terminal — one with an answer the viewer has to give. A
+  // full-screen `preparing` covers the picture and asks nothing, so it keeps
+  // today's routing (PLAYBACK-SURFACE-CONTRACT.md §4).
+  const surface=PLAYER&&PLAYER.surfaceState?PLAYER.surfaceState.surface:null;
+  if(PlaybackPolicy.surfaceEntersFailedRouting(surface)) return "failed";
   // Contract §2.2 orders the precedence scrub → menu → info: a pending seek
   // is the most local thing on screen, so Escape cancels it rather than
   // closing whatever is behind it.
@@ -11154,6 +11550,9 @@ function beginPlaybackControlSeek(p,targetSec,supersedeIntent=true){
   const intentGeneration=supersedeIntent
     ? supersedePlaybackControlIntent(p) : (p.controlIntentGeneration||0);
   const sequence=(p.controlSeekSequence||0)+1;
+  // The destination this replaces is superseded, which is the one thing that
+  // retires a fault about a pending destination (contract §3.4).
+  if(p.controlSeek) playbackSurfaceStep({intent_superseded:p.controlSeek.sequence});
   p.controlSeekSequence=sequence;
   let frameFloor=Number(p.controlPresentedFrames)||0;
   if(!p.controlHasFrameCallbacks){
@@ -11178,6 +11577,10 @@ function markPlaybackControlSeekExecuted(p,targetSec,v){
   const pending=p&&p.controlSeek;
   const targetMs=Math.max(0,Math.round(Number(targetSec||0)*1000));
   if(!pending||pending.targetMs!==targetMs) return false;
+  // The destination landed. A fault that was about it is retired by this and
+  // by nothing else — evidence about the picture never speaks for a pending
+  // request (contract §3.4).
+  playbackSurfaceStep({intent_settled:pending.sequence});
   pending.executed=true;
   pending.executedAt=performance.now();
   p.controlPresentationEpoch=(p.controlPresentationEpoch||0)+1;
@@ -11222,13 +11625,24 @@ function samplePlaybackPresentationClock(v,p){
 // A pending destination has its own presentation deadline even if the old
 // picture or audio clock continues to move during the replacement.
 function playbackProgressTick(v,p){
+  // The presenter's timers run off the tick the player already has, per §4.2:
+  // a timed notice expires because this ran, not because a watchdog of its own
+  // woke up. It is fed before every guard below, because a surface must keep
+  // ageing while the picture it is about is being replaced.
+  playbackSurfaceStep({tick:true});
   if(!v||!p||PLAYER!==p) return;
+  // No proof either way about a predecessor this player does not own: the
+  // reducer is told nothing rather than told something false.
   if(!playbackOwnsAttachedMedia(p)) return;
   samplePlaybackPresentationClock(v,p);
   const pending=p.controlSeek;
   const active=(p.wantsPlayback??!v.paused)&&!v.ended&&!document.hidden
     &&(p.started||pending?.executed);
-  if(!active){ p.progressWatch=null; return; }
+  if(!active){
+    p.progressWatch=null;
+    playbackSurfaceStep({presenting:false,attached:playbackSurfaceGeneration(p)});
+    return;
+  }
   const now=performance.now();
   const clock=Number(v.currentTime)||0;
   let frames=null, frameSource="none";
@@ -11247,6 +11661,10 @@ function playbackProgressTick(v,p){
     watch=p.progressWatch={key,clock,frames,at:now,startedAt:now,fired:false};
   }
   const moved=clock>watch.clock+0.01 && (frames==null||frames>watch.frames);
+  // THE evidence (contract §3.4): the film clock advanced and, where a frame
+  // counter exists, so did the frames. Not `playing`, not `canplay` — a
+  // decoder emits both and can still present nothing.
+  playbackSurfaceStep({presenting:moved,attached:playbackSurfaceGeneration(p)});
   if(moved){
     watch.clock=clock; watch.frames=frames; watch.at=now;
     p.presentationAdvancedAt=now;
@@ -11254,8 +11672,7 @@ function playbackProgressTick(v,p){
       watch.fired=false;
       if(p.waitAt!=null){
         endWait(true);
-        p.stallPrompt=false;
-        clearStall(); finishStallRecovery("recovered"); setLoading(false);
+        clearStall(); finishStallRecovery("recovered");
       }
     }
   }
@@ -11476,7 +11893,10 @@ function handlePlaybackPlaying(v,p){
   if(!needsProgress){
     endWait(true);
     p.controlPositionHintSec=null; p.controlRenderOverride=null; p.controlObservationOverride=null;
-    p.stallPrompt=false; clearStall(); finishStallRecovery("recovered"); setLoading(false);
+    clearStall(); finishStallRecovery("recovered");
+    // Inert by contract (§3.2). `playing` prompts a look; the progress tick's
+    // own evidence is what retires whatever is on screen.
+    playbackSurfaceStep({event:"playing"});
   }
   playerActivity(); settlePlaybackControlSeek(v,p); pbTick(); pbSyncPlayIcon(); notifyPlaybackControl();
   if(first) reportTtff();
@@ -11498,6 +11918,12 @@ function wirePlayer(){
   document.addEventListener("visibilitychange",()=>{
     const current=document.getElementById("video");
     if(current) samplePlaybackPresentationClock(current,PLAYER);
+    // A hidden page samples nothing and expires nothing: the presenter carries
+    // the interval forward rather than letting wall time run under a frozen
+    // surface (contract §3.4).
+    let hidden=false;
+    try{ hidden=document.hidden; }catch(e){}
+    playbackSurfaceStep({hidden});
   });
   document.addEventListener("visibilitychange",notifyPlaybackControl);
   pbWireSeek();
@@ -11520,9 +11946,10 @@ function wirePlayerMedia(v){
   const p=document.getElementById("player");
   if(!p) return;
   v.addEventListener("playing",()=>handlePlaybackPlaying(v,PLAYER));
-  v.addEventListener("canplay",()=>{
-    if(PLAYER?.started&&!playbackWaitNeedsProgress(PLAYER)) setLoading(false);
-  });
+  // Inert by contract (§3.2): `canplay` says the element COULD start, not that
+  // a frame reached the screen. Feeding it as evidence is the mutation
+  // tests/playback/web-policy.test.js pins.
+  v.addEventListener("canplay",()=>{ playbackSurfaceStep({event:"canplay"}); });
   v.addEventListener("loadedmetadata",()=>{ if(PLAYER) PLAYER.internalMediaReset=false; });
   // Only a stream that HAS started can "buffer". Before that, the loading
   // overlay owns the message (and a watchdog owns the deadline), so a stalled
@@ -11535,12 +11962,16 @@ function wirePlayerMedia(v){
   v.addEventListener("waiting",()=>{
     if(!playbackOwnsAttachedMedia(PLAYER)) return;
     const action=PlaybackPolicy.waitingOverlayAction({
-      started:PLAYER.started, stallPrompt:PLAYER.stallPrompt
+      started:PLAYER.started, promptUp:playbackSurfacePromptUp()
     });
     if(action!=='buffer') return;
     beginWait(v);
     const copy=playbackWaitCopy(bufferRunway(v),PLAYER.health&&PLAYER.health.http_wait_count);
-    setLoading(true,copy.title,copy.detail);
+    // Raised the moment the wait begins and DRAWN only once it has lasted
+    // `buffering_min_ms`: Safari fires `waiting` at every fMP4 boundary on
+    // healthy 4K, and the undebounced repaint was §2.1's fifth defect.
+    raisePlaybackSurface("media_waiting",{context:"attached",
+      title:copy.title,detail:copy.detail},{once:true});
     notifyPlaybackControl();
   });
   // Pausing during a wait means the viewer stopped it, not the stream.
@@ -11582,7 +12013,9 @@ function wirePlayerMedia(v){
     // got real playback going, don't churn", and audio alone used to satisfy
     // it — which disabled this rescue in precisely the black-picture-with-
     // sound case it exists for.
-    if(!PLAYER || playbackIsReal()){ setLoading(false); return; }
+    // Real playback is already going; there is nothing to report and nothing
+    // to clear — the tick's own evidence retires whatever was up.
+    if(!PLAYER || playbackIsReal()) return;
     const names={1:"aborted",2:"network error",3:"the browser's decoder failed",4:"format not supported by this browser"};
     const fallback=PLAYER && PlaybackPolicy.fallbackAction({
       method:PLAYER.method,
@@ -11610,15 +12043,20 @@ function wirePlayerMedia(v){
       clientLog(streamRejectionReport(rejection,{code,src,
         message:streamRejectionMessage(rejection,PLAYER.method,cause,causeIsDecode),
         control_trigger:controlTrigger}));
-      setLoading(true,"Stream rejected — switching to transcode…",note);
+      raisePlaybackSurface("owner_recovery_step",{
+        title:"Stream rejected — switching to transcode…",detail:note});
       startTranscodeFallback("stream-rejected",note);
       return;
     }
     clientLog({level:"error",event:"playback_failed",code,src,
       message:(names[code]||("error "+code))+(msg?" ("+msg+")":""),
       control_trigger:controlTrigger});
-    setLoading(true,"Playback failed: "+(names[code]||("error "+code))+".",(msg?msg+" — ":"")+"see Settings → Logs for the server side");
-    const loading=document.getElementById("ploading"); if(loading) loading.classList.add("failed");
+    // The element failed and the rescue ladder has nothing left. Contract
+    // §3.4: stop the player, then raise.
+    stopPlayerForExhaustion();
+    raisePlaybackSurface("owner_stopped",{player_stopped:true,
+      title:"Playback failed: "+(names[code]||("error "+code))+".",
+      detail:(msg?msg+" — ":"")+"see Settings → Logs for the server side"});
     toast("Playback failed — "+(names[code]||("error "+code)));
   });
   v.addEventListener("timeupdate",()=>{ settlePlaybackControlSeek(v,PLAYER); checkMarkers(); });
@@ -11880,10 +12318,14 @@ async function finishPlayback(closeIfNoNext){
   if(PLAYER&&PLAYER.libraryChannel){ await libraryChannelBoundary(); return; }
   if(PLAYER&&PLAYER.bookParts){ closePlayer(); return; }
   if(autoNextOn()){
-    setLoading(true,"Up next…","finding the next episode");
+    // A destination the viewer asked for by letting autoplay run: it has an
+    // intent, so the search settling is what retires it, not a frame.
+    const intent=`autonext:${(PLAYER&&PLAYER.attemptId)||"?"}`;
+    raisePlaybackSurface("client_preparing",{intent,
+      title:"Up next…",detail:"finding the next episode"});
     if(await playNextEpisode()) return;                      // navigation + play take over
     if(!current()) return;
-    setLoading(false);
+    playbackSurfaceStep({intent_settled:intent});
   }
   if(closeIfNoNext) closePlayer();
 }
@@ -11957,11 +12399,14 @@ async function handleEnded(fileId){
     clientLog({level:"warn",event:"truncated_stream",detail:"terminal:"+verdict.code,
       message:`server verdict ended this recipe — ${controlVerdictText(verdict.message)}`,
       control_trigger:controlTrigger});
-    return setLoading(true,controlVerdictText(verdict.message),
-      "It ended "+clockFromSec(total-pos)+" short of the runtime. Your place is saved.",
-      `<button onclick="retryPlayback()">Try again</button>`+
-      (PLAYER.method!=='transcode'?`<button onclick="startTranscodeFallback('stall-manual')">Force transcode</button>`:``)+
-      `<button onclick="closePlayer()">Close</button>`);
+    // `ended` is the element having stopped on its own, so the player this is
+    // drawn over is already stopped — which is what §3.2 asks of a blocking
+    // surface, and the only reason this site does not have to stop it.
+    raisePlaybackSurface("owner_stopped",{context:"attached",player_stopped:true,
+      title:controlVerdictText(verdict.message),
+      detail:"It ended "+clockFromSec(total-pos)+" short of the runtime. Your place is saved.",
+      actions:playbackStallActions(PLAYER)});
+    return;
   }
   if(verdict&&verdict.type==="hold"){
     // Production is deliberately not advancing, so reconnecting is exactly
@@ -11972,9 +12417,10 @@ async function handleEnded(fileId){
     clientLog({level:"warn",event:"truncated_stream",detail:"deferred:hold",
       message:`server holds this stream (${verdict.reason}) — resume deferred`,
       control_trigger:controlTrigger});
-    return setLoading(true,"Waiting for the server.",holdReasonText(verdict.reason),
-      `<button onclick="retryPlayback()">Try again</button>`+
-      `<button onclick="closePlayer()">Close</button>`);
+    raisePlaybackSurface("control_hold",{context:"attached",
+      title:"Waiting for the server.",detail:holdReasonText(verdict.reason),
+      actions:["retry","close"]});
+    return;
   }
   // A server that named an interval owns the decision for that long, so the
   // local budget does not bound it — but the deferral is itself bounded. A
@@ -11991,13 +12437,16 @@ async function handleEnded(fileId){
       (answered?` deferred:${verdict.type}`:(hopeless?" giving-up":" resuming")),
     control_trigger:controlTrigger});
   if(hopeless){
-    return setLoading(true,"The stream stopped before the end.",
-      "It ended "+clockFromSec(total-pos)+" short of the runtime. Your place is saved, so resuming picks up here.",
-      `<button onclick="retryPlayback()">Try again</button>`+
-      (PLAYER.method!=='transcode'?`<button onclick="startTranscodeFallback('stall-manual')">Force transcode</button>`:``)+
-      `<button onclick="closePlayer()">Close</button>`);
+    // Same reason as the terminal branch above: the element has ended, so the
+    // player is stopped before this is drawn over it.
+    raisePlaybackSurface("repeated_early_end",{context:"attached",player_stopped:true,
+      title:"The stream stopped before the end.",
+      detail:"It ended "+clockFromSec(total-pos)+" short of the runtime. Your place is saved, so resuming picks up here.",
+      actions:playbackStallActions(PLAYER)});
+    return;
   }
-  setLoading(true,"Reconnecting…","the stream ended early — resuming from "+clockFromSec(pos));
+  raisePlaybackSurface("owner_recovery_step",{context:"attached",title:"Reconnecting…",
+    detail:"the stream ended early — resuming from "+clockFromSec(pos)});
   PLAYER.stallFrom=pos;   // so "Try again" from a later stall aims here too
   if(answered){
     const after=Math.min(Math.max(verdict.after_ms,CONTROL_MIN_EXCHANGE_MS),PERSISTENT_STALL_MS);
@@ -12468,8 +12917,8 @@ async function burnSub(index){
   me.burnedSub=index;
   pbSyncSubIcon();
   const s=(me.subs||[]).find(x=>x.index===index);
-  setLoading(true, "Burning in subtitles…",
-    `${subLabelFor(s,index)} — this format is a picture, so the server draws it in`);
+  raisePlaybackSurface("client_preparing",{title:"Burning in subtitles…",
+    detail:`${subLabelFor(s,index)} — this format is a picture, so the server draws it in`});
   // The overlay's Reason row otherwise keeps quoting the /decision verdict —
   // "forced original quality (no video transcode)" — over a session that IS a
   // transcode, which sent a whole debugging session in the wrong direction.
@@ -12552,7 +13001,7 @@ function playbackInfoMarkup(mode,rows,healthWord,healthStatus){
       sectionRows.map(row=>`<div class="r" data-stats-id="${row.id}"><b>${esc(row.label)}</b><span class="v"></span></div>`).join("")+`</div>`;
   };
   const left=["PLAYBACK","SOURCE","NOW DECODING"].map(gridSection).join("");
-  const right=["BUFFERING / DELIVERY","NETWORK","SERVER"].map(gridSection).join("");
+  const right=["BUFFERING / DELIVERY","NETWORK","SERVER","SURFACE"].map(gridSection).join("");
   const noteHtml=rows.length?`<div class="snotes">`+rows.map(row=>
     `<div class="snote" ${row.placement==="notes"?`data-stats-id="${row.id}"`:`data-stats-note="${row.id}"`}><b>${esc(row.label)}</b><span class="v"></span></div>`
   ).join("")+`</div>`:"";
@@ -12780,7 +13229,10 @@ function playbackStatsTelemetry(){
   const stalls=p.stalls||0,stallKinds=p.stallsByKind||{};
   const stallParts=[stallKinds.supply?`${stallKinds.supply} supply`:null,
     stallKinds.decode?`${stallKinds.decode} decode`:null].filter(Boolean);
-  const playbackState=document.getElementById("ploading").classList.contains("failed")?"Failed":
+  // Read off the presenter, not off a DOM class: the class is the projection,
+  // and the model is what it is a projection OF.
+  const surface=PLAYBACK_SURFACE.surface;
+  const playbackState=PlaybackPolicy.surfaceEntersFailedRouting(surface)?"Failed":
     v&&v.ended?"Ended":v&&v.paused?"Paused":v&&v.readyState<3?"Buffering":"Playing";
   const stale=h&&!h.final&&(h.delivered_idle_ms||0)>8000;
   const delivery=h&&h.delivered_bps!=null?`${fmtMbps(h.delivered_bps)}${stale?" · idle":""}`:"Measuring";
@@ -12863,7 +13315,20 @@ function playbackStatsTelemetry(){
     last_request:h&&h.last_request||null,playlist:h&&h.playlist||null,
     published_end:h&&h.published_end_ms!=null?`${Math.round(h.published_end_ms)} ms`:null,
     fetched_end:h&&h.fetched_end_ms!=null?`${Math.round(h.fetched_end_ms)} ms`:null,
-    control,control_note:controlNote,_health_word:healthWord,_health_status:status
+    control,control_note:controlNote,
+    // SURFACE (contract §5): what is drawn over the picture, why, about which
+    // generation, and the last sixteen — so "what was that overlay" has an
+    // answer from inside the product rather than from a log file on a headless
+    // box.
+    surface_kind:(surface&&surface.kind)||"none",
+    surface_class:(surface&&surface.class)||null,
+    surface_source:(surface&&surface.source)||null,
+    surface_ids:surface&&surface.class
+      ?`${surface.attached==null?"—":surface.attached} / ${surface.intent==null?"no intent":surface.intent}`:null,
+    surface_history:playbackSurfaceHistoryText(),
+    surface_kind_tone:surface&&surface.kind==="blocking"?"bad":
+      surface&&surface.kind==="banner"?"warn":surface&&surface.kind==="indicator"?"warn":"muted",
+    _health_word:healthWord,_health_status:status
   };
 }
 function updateStats(){
@@ -12904,11 +13369,11 @@ async function pollSessionHealth(force){
     if(current()) {
       p.health=h;
       p.healthObservedAt=performance.now();
-      if(p.waitAt!=null&&!p.stallPrompt){
-        const video=document.getElementById("video");
-        const copy=playbackWaitCopy(video?bufferRunway(video):0,h.http_wait_count);
-        setLoading(true,copy.title,copy.detail);
-      }
+      // This used to repaint the buffering overlay with the server's wait
+      // count. It is gone: a fault is raised by the event that caused it, not
+      // restated every two seconds by a poll that only runs while the Playback
+      // info panel is open — and that panel's own HTTP wait row is where the
+      // number belongs.
       updateStats();
     }
   }catch(e){
@@ -12997,7 +13462,9 @@ function closePlayer(){
   if(PLAYER) PLAYER.preplay=null;
   stopPlayerTimers();
   clearInterval(STATS_TIMER); STATS_TIMER=null; teardownHls();
-  setLoading(false);
+  // The attempt is over, so every fault about it is about nothing. §3.6: the
+  // model resets with the player.
+  resetPlaybackSurface();
   const ov=document.getElementById("statsov"); if(ov){ ov.classList.remove("on"); ov.style.top=""; }
   const pm=document.getElementById("pmenu"); if(pm) pm.classList.remove("on","low");
   if(PLAYER&&PLAYER._menuOpener&&PLAYER._menuOpener.setAttribute) PLAYER._menuOpener.setAttribute("aria-expanded","false");

@@ -98,9 +98,12 @@ class PlaybackSurfaceFenceTest(unittest.TestCase):
         failures = self.fence.scan()
         self.assertEqual(failures, [], "\n".join(failures))
 
-    def test_every_scanned_file_has_a_budget_and_no_budget_is_unscanned(self):
-        for path in self.fence.SCANNED:
-            self.assertIn(path, self.fence.MIGRATION_BUDGET, f"{path} is scanned with no budget entry")
+    def test_no_budget_is_unscanned(self):
+        # A milestone that lands removes its file's entry entirely and the fence
+        # holds it at zero from then on, so a scanned file with no entry is the
+        # finished state rather than an oversight — `test_the_budget_is_tight_
+        # against_the_tree` below is what proves it really is at zero. A budget
+        # for a file nobody scans is still nonsense.
         for path in self.fence.MIGRATION_BUDGET:
             self.assertIn(path, self.fence.SCANNED, f"{path} is budgeted but never scanned")
 
@@ -119,7 +122,7 @@ class PlaybackSurfaceFenceTest(unittest.TestCase):
             lines = source.read_text(encoding="utf-8").splitlines()
             allowed = self.fence.region_allowed_lines(path, lines)
             hits = self.fence.scan_text(kind, "\n".join(lines), allowed)
-            budget, _reason = self.fence.MIGRATION_BUDGET[path]
+            budget, _reason = self.fence.MIGRATION_BUDGET.get(path, (0, ""))
             self.assertEqual(
                 len(hits), budget,
                 f"{path}: {len(hits)} write sites against a budget of {budget} — lower the budget in the same commit",
