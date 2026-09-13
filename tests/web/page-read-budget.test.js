@@ -193,7 +193,7 @@ test("Activity detail response keeps the shared header indicator current", () =>
   assert.equal(working.at(-1), true);
   assert.equal(activity.style.display, "flex");
   assert.match(activity.innerHTML, /Scanning library/);
-  assert.match(shippedSource("paintActivityBody"), /paintActivity\(detailActivitySummary\(d,dels\)\)/);
+  assert.match(shippedSource("paintActivityBody"), /paintActivity\(detailActivitySummary\(d,dels,recording\)\)/);
 
   harness.paintActivity([]);
   assert.equal(working.at(-1), false);
@@ -280,9 +280,14 @@ test("Activity detail request guard executes one current request and releases", 
 
   const first = harness.renderActivityBody();
   const overlap = harness.renderActivityBody();
-  assert.deepEqual(requests.map((request) => request.url), ["/activity/detail"]);
+  // One wave, not two: the running captures ride beside the detail read
+  // because `/activity/detail` carries no DVR section and the page's Stop
+  // needs a recording id the activity list does not have.
+  assert.deepEqual(requests.map((request) => request.url),
+    ["/activity/detail", "/dvr/recordings?state=recording"]);
   assert.equal(harness.busy(), 1);
   assert.deepEqual(phases, [], "Activity content waits for its delayed detail response");
+  requests[1].resolve([]);
   requests[0].resolve({ marker: "current" });
   await Promise.all([first, overlap]);
   assert.deepEqual(painted, [{ marker: "current" }]);
@@ -293,9 +298,10 @@ test("Activity detail request guard executes one current request and releases", 
   assert.equal(harness.busy(), 0);
 
   const stale = harness.renderActivityBody();
-  assert.equal(requests.length, 2);
+  assert.equal(requests.length, 4);
   harness.navigate("#/settings");
-  requests[1].resolve({ marker: "stale" });
+  requests[3].resolve([]);
+  requests[2].resolve({ marker: "stale" });
   await stale;
   assert.deepEqual(painted, [{ marker: "current" }]);
   assert.equal(harness.busy(), 0);
@@ -303,7 +309,7 @@ test("Activity detail request guard executes one current request and releases", 
   harness.navigate("#/activity");
   document.visibilityState = "hidden";
   await harness.renderActivityBody(harness.generation());
-  assert.equal(requests.length, 2);
+  assert.equal(requests.length, 4);
 });
 
 test("Activity keeps its last successful body on poll failures and never paints a 401", async () => {
@@ -331,6 +337,9 @@ test("Activity keeps its last successful body on poll failures and never paints 
     String, (_, generation, phase) => phases.push({ generation, phase }), () => {},
   );
   const failed = harness.renderActivityBody();
+  // The recordings read rides beside the detail one and swallows its own
+  // failure: a DVR that will not answer must not cost the page its streams.
+  requests[1].reject(new Error("cluster timeout"));
   requests[0].reject(new Error("cluster timeout"));
   await failed;
   assert.equal(main.innerHTML, "last successful body");
@@ -340,7 +349,8 @@ test("Activity keeps its last successful body on poll failures and never paints 
   phases.length = 0; stale = null; harness.clearSnapshot();
   const unauthorized = harness.renderActivityBody();
   const error = new Error("unauthorized"); error.status = 401;
-  requests[1].reject(error);
+  requests[3].reject(error);
+  requests[2].reject(error);
   await unauthorized;
   assert.equal(stale, null);
   assert.deepEqual(phases, [], "logout owns the 401 transition; Activity commits nothing");
@@ -676,6 +686,7 @@ test("Live TV issues exactly two authoritative reads, and the guide never gates 
     `let PAGE_RENDER_GENERATION=1;
      const location={hash:"#/live-tv"};
      const LIVE_TV={channels:[],guide:null,selected:null};
+     const LIVE_TV_DVR={status:null,schedule:null,reminders:[],serial:0};
      const LIVE_TV_LEASE={current:null};
      function layoutChrome(){} function setPagePhase(){} function liveTvWireHost(){}
      function liveTvPref(){ return null; } function liveTvSetMode(){}
@@ -683,18 +694,32 @@ test("Live TV issues exactly two authoritative reads, and the guide never gates 
      function liveTvChannelById(){ return null; }
      function liveTvToolbar(){ return ""; }
      function renderLiveTvChannels(){}
+     // No recordings segment is open, so neither of its reads is owed.
+     function liveTvRecordingsTab(){ return ""; }
+     function liveTvLoadRecordings(){ throw new Error("a closed segment must not read"); }
+     function liveTvSelect(){}
      function setPageTimer(){}
      function liveTvMessage(){} function liveTvFailure(){}
      ${shippedTopLevelSource("viewLiveTv")};
      ${shippedTopLevelSource("loadLiveTvGuide")};
+     ${shippedTopLevelSource("loadLiveTvDvr")};
      return viewLiveTv;`,
   )(document, api, (v) => String(v), { timeout: () => null });
 
   await harness(1);
-  await Promise.resolve();
-  await Promise.resolve();
-  assert.deepEqual(reads, ["/live-tv/channels", "/live-tv/guide"],
-    "the page reads the lineup and the guide, in that order, and nothing else");
+  await nextTurn();
+  await nextTurn();
+  // Two sequential waves and no more: the lineup, then the guide, and the
+  // DVR's three answers together behind it. The marks a cell wears are never
+  // polled, so this is the whole cost of them — once per guide load, and
+  // again only when somebody presses something.
+  assert.deepEqual(reads, [
+    "/live-tv/channels",
+    "/live-tv/guide",
+    "/dvr/status",
+    "/dvr/schedule?days=14&cancelled=1",
+    "/dvr/reminders",
+  ], "the page reads the lineup, the guide, and the DVR's three answers — nothing else");
 });
 
 test("Live TV docks on leaving the route instead of tearing the stream down", () => {
@@ -1753,19 +1778,27 @@ test("local sign-out clears every protected page cache before rendering auth", (
        SETTINGS={secret:true},TRAKT={secret:true},TRAKT_EDIT=true,SETTINGS_TICKING={generation:7},
        SETTINGS_DATA={secret:true},SETTINGS_LOADED=new Set(["settings"]),SETTINGS_LOADS=new Map([["settings",{}]]),
        LOGS_RUN={},CLUSTER_LOGS_RUN={},CLUSTER_LOADED=true,CLUSTER_LEAVING=true,
-       CLUSTER_TOKEN={token:"secret"},CLUSTER_REFUSAL={message:"secret"},ACT_TIMER=2,rendered=0;
+       CLUSTER_TOKEN={token:"secret"},CLUSTER_REFUSAL={message:"secret"},ACT_TIMER=2,rendered=0,
+       DVR_REMINDER_TIMER=3,DVR_DUE=[{id:"secret"}];
      function forgetJoinToken(){CLUSTER_TOKEN=null;CLUSTER_REFUSAL=null;}
      async function stopLiveTv(){}
+     function clearLibraryChannelDraft(){}
+     const LIBRARY_CHANNEL_TUNE={stop(){}};
+     function paintDvrReminder(){}
      function render(){rendered++;}
      ${shippedSource("clearLocalSession")};
      return {logout:()=>clearLocalSession(AUTH_GENERATION,""),state:()=>({TOKEN,ME,PAGE_RENDER_GENERATION,PAGE_TIMER,ACTIVITY_SNAPSHOT,
        SETTINGS_DATA,loaded:SETTINGS_LOADED.size,loads:SETTINGS_LOADS.size,LOGS_RUN,CLUSTER_LOGS_RUN,
-       CLUSTER_TOKEN,CLUSTER_REFUSAL,CLUSTER_LOADED,CLUSTER_LEAVING,rendered,main:document.getElementById("main").innerHTML})};`,
+       CLUSTER_TOKEN,CLUSTER_REFUSAL,CLUSTER_LOADED,CLUSTER_LEAVING,rendered,DVR_REMINDER_TIMER,
+       due:DVR_DUE.length,main:document.getElementById("main").innerHTML})};`,
   )(document,localStorage);
   harness.logout();
+  // The due-reminder overlay is a protected page cache like any other: it
+  // names what somebody is about to watch, and its timer outlives every route.
   assert.deepEqual(harness.state(),{TOKEN:null,ME:null,PAGE_RENDER_GENERATION:8,PAGE_TIMER:null,
     ACTIVITY_SNAPSHOT:null,SETTINGS_DATA:{},loaded:0,loads:0,LOGS_RUN:null,CLUSTER_LOGS_RUN:null,
-    CLUSTER_TOKEN:null,CLUSTER_REFUSAL:null,CLUSTER_LOADED:false,CLUSTER_LEAVING:false,rendered:1,main:""});
+    CLUSTER_TOKEN:null,CLUSTER_REFUSAL:null,CLUSTER_LOADED:false,CLUSTER_LEAVING:false,rendered:1,
+    DVR_REMINDER_TIMER:null,due:0,main:""});
   assert.deepEqual(removed,["plurx_token"]);
 });
 

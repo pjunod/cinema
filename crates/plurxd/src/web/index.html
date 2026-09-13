@@ -493,6 +493,62 @@
   .lt-pop h3{margin:0 0 4px;font-size:14.5px}
   .lt-pop p{margin:6px 0 0;color:var(--muted);font-size:12.5px}
   .lt-pop .pills{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+  .lt-pop .lt-acts{display:flex;gap:6px;flex-wrap:wrap;margin-top:12px}
+  .lt-pop .lt-acts button{background:var(--panel2);border:1px solid var(--line);border-radius:6px;
+    color:var(--text);cursor:pointer;padding:5px 10px;font-size:12.5px;font-family:inherit}
+  .lt-pop .lt-acts button:hover{border-color:var(--accent)}
+  .lt-pop .lt-tuners{margin-top:8px;color:var(--muted);font-size:11.5px}
+
+  /* Recording marks. Eight pixels, painted INSIDE the box the cell already
+     occupies: a mark that took part in layout would move every row under it,
+     and the grid's row height is the one number the whole page is built on. */
+  .lt-mark{position:absolute;top:5px;right:5px;display:flex;align-items:center;gap:3px;
+    pointer-events:none;line-height:1}
+  .lt-mark .dot{width:8px;height:8px;border-radius:50%;background:var(--accent);flex:none}
+  .lt-mark .dot.conflict{background:var(--warn)}
+  .lt-mark .dot.hollow{background:none;border:1px solid var(--muted)}
+  .lt-mark .rec{font-size:8px;font-weight:800;letter-spacing:.08em;color:var(--bad)}
+  .lt-mark .bell{font-size:8px}
+  /* The underline sits on the cell's own bottom edge, inside its overflow
+     clip, so a capture in flight reads as a length rather than as a number. */
+  .lt-recbar{position:absolute;left:0;right:0;bottom:0;height:2px;background:var(--line);
+    pointer-events:none}
+  .lt-recbar i{display:block;height:100%;background:var(--bad)}
+  /* In a list row the marks join the star and the lock in the third column,
+     where there is already space for them, so nothing moves there either. */
+  .lt-rowmark{position:static;display:inline-flex;vertical-align:middle;margin-left:6px}
+
+  .lt-recs{border:1px solid var(--line);border-radius:var(--radius);overflow:auto;background:var(--panel);
+    height:var(--live-tv-slot-height,64vh)}
+  .lt-rec{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center;
+    border-top:1px solid var(--line);padding:12px 14px;font-size:13px}
+  .lt-rec:first-child{border-top:0}
+  .lt-rec .meta{display:block;margin-top:3px;color:var(--muted);font-size:12px}
+  .lt-rec .why{display:block;margin-top:3px;color:var(--warn);font-size:12px}
+  .lt-rec .acts{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+  .lt-rec button{background:var(--panel2);border:1px solid var(--line);border-radius:6px;
+    color:var(--text);cursor:pointer;padding:4px 9px;font-size:12px;font-family:inherit}
+  .lt-rec button:hover{border-color:var(--accent)}
+
+  /* The due-reminder overlay. Lower-left so it never covers the player's own
+     controls, and buttons only — it adds no key handler, because the Live TV
+     adapter is the one place a key may be read on this page. */
+  .dvr-remind{position:fixed;left:16px;bottom:16px;z-index:58;width:min(320px,calc(100vw - 32px));
+    background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+    box-shadow:0 18px 44px rgba(0,0,0,.4);padding:12px 14px;font-size:13px}
+  .dvr-remind[hidden]{display:none}
+  .dvr-remind b{display:block;font-size:13.5px}
+  .dvr-remind .meta{display:block;margin-top:3px;color:var(--muted);font-size:12px}
+  .dvr-remind .acts{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
+  .dvr-remind button{background:var(--panel2);border:1px solid var(--line);border-radius:6px;
+    color:var(--text);cursor:pointer;padding:4px 10px;font-size:12px;font-family:inherit}
+  .dvr-remind button:hover{border-color:var(--accent)}
+  .dvr-remind .bar{height:3px;border-radius:2px;background:var(--line);margin-top:10px;overflow:hidden}
+  /* The bar drains on its own rather than on a timer: the poll is every 30 s
+     and a bar that jumped twice a minute would read as a broken bar. */
+  .dvr-remind .bar i{display:block;height:100%;background:var(--accent);
+    animation:dvr-drain linear forwards}
+  @keyframes dvr-drain{to{width:0}}
   @media(max-width:760px){
     .lt-stage-top,.lt-stage.wide .lt-stage-top{grid-template-columns:minmax(0,1fr);aspect-ratio:auto}
     .lt-slot{height:auto;aspect-ratio:16/9}
@@ -4198,6 +4254,8 @@ function clearLocalSession(expectedGeneration,notice){
   AUTH_NOTICE=notice||"";
   if(!NATIVE_READER_BOOT) localStorage.removeItem("plurx_token");
   clearInterval(ACT_TIMER); ACT_TIMER=null; document.documentElement.classList.remove("working");
+  clearInterval(DVR_REMINDER_TIMER); DVR_REMINDER_TIMER=null;
+  DVR_DUE=[]; paintDvrReminder();
   if(NATIVE_READER_BOOT){ nativeReaderPost("session-ended"); return; }
   render();
   return true;
@@ -13704,11 +13762,20 @@ function activityNodeFailureText(node,names){
   const name=node.node_id?`Node ${nodeLabel(names,node.node_id)}`:"The cluster peer directory";
   return `${name} · ${activityNodeStatusText(node.status)}`;
 }
-function detailActivitySummary(d,deliveries){
+function detailActivitySummary(d,deliveries,recording=[]){
   const acts=[];
   const missing=activityNodeFailures(d);
   if(missing.length) acts.push({label:"Activity incomplete",
     detail:`${missing.length} cluster ${missing.length===1?'node':'nodes'} did not answer`});
+  // `/activity` builds these rows itself, with the same `record` kind; the
+  // Activity page reads `/activity/detail`, which carries no DVR section, so
+  // the pill would lose the one activity that is holding a tuner and a disk.
+  for(const row of recording){
+    const now=liveTvNowSeconds();
+    acts.push({kind:"record",label:`Recording ${row.title}`,
+      detail:PlurxLiveTv.dvrRecordingDetail(row,now),
+      percent:Math.round(PlurxLiveTv.dvrCaptureProgress(row,now)*100)});
+  }
   for(const scan of (d.scans||[])){
     if(scan.status&&scan.status.running) acts.push({label:"Scanning library",detail:scan.library});
   }
@@ -13871,7 +13938,12 @@ async function renderActivityBody(generation=PAGE_RENDER_GENERATION){
   if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/activity"||document.visibilityState==="hidden"||ACTIVITY_DETAIL_BUSY===generation) return;
   ACTIVITY_DETAIL_BUSY=generation;
   try{
-  let d; try{ d=await api("/activity/detail"); }
+  // The running captures ride beside the detail read rather than after it:
+  // `/activity` describes them in the pill's words but carries no recording
+  // id, and a Stop without an id is a button that cannot be pressed.
+  let d, recording=[];
+  try{ [d,recording]=await Promise.all([api("/activity/detail"),
+    api("/dvr/recordings?state=recording").catch(()=>[])]); }
   catch(e){
     if(e&&e.status===401) return;
     if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/activity") return;
@@ -13889,7 +13961,7 @@ async function renderActivityBody(generation=PAGE_RENDER_GENERATION){
   }
   if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/activity") return;
   ACTIVITY_SNAPSHOT=d;
-  paintActivityBody(d);
+  paintActivityBody(d,Array.isArray(recording)?recording:[]);
   setPageFailure("#/activity",generation,null);
   setPagePhase("#/activity",generation,"content");
   setPagePhase("#/activity",generation,"settled");
@@ -13897,7 +13969,7 @@ async function renderActivityBody(generation=PAGE_RENDER_GENERATION){
     if(ACTIVITY_DETAIL_BUSY===generation) ACTIVITY_DETAIL_BUSY=0;
   }
 }
-function paintActivityBody(d){
+function paintActivityBody(d,recording=[]){
   // S2's consumer check. This table read `d.sessions`, which is the transcode
   // manager's list — so it showed transcodes and HLS copy-remuxes (mislabelled
   // as transcodes) and missed direct play and progressive remux entirely. It
@@ -13908,7 +13980,7 @@ function paintActivityBody(d){
   const dels=d.deliveries||(d.sessions||[]).map(se=>({method:"transcode",user:se.user_name,item_id:se.item_id,
     title:se.item_title,started_unix:se.started_unix,idle_seconds:se.idle_seconds,session_id:se.id,
     target_height:se.target_height,encoder:se.encoder}));
-  paintActivity(detailActivitySummary(d,dels));
+  paintActivity(detailActivitySummary(d,dels,recording));
   const missing=activityNodeFailures(d);
   const nodeNames=d.node_hostnames||{};
   const attributed=dels.some(de=>de.node_id);
@@ -13975,6 +14047,7 @@ function paintActivityBody(d){
       ? `<table class="np"><thead><tr><th>Title</th><th>User</th>${attributed?"<th>Node</th>":""}<th>Stream</th><th>Started</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
       : `<div class="empty">Nothing streaming right now. Every delivery is listed here — direct play, remux and both HLS kinds.</div>`}
     ${liveTvActivityRows(d.live_tv,nodeNames)}
+    ${dvrActivityRows(recording,nodeNames)}
     ${d.analysis?`<h2 class="section">Content analysis</h2>${analysisSummaryCard(d.analysis,"activity")}${analysisLiveProgress(d.analysis,nodeNames)}`:""}
     <h2 class="section">Pre-transcoding</h2>
     ${produce}
@@ -14006,6 +14079,51 @@ function liveTvActivityRows(rows,nodeNames){
         <td>${esc(Math.round(row.age_seconds/60))} min · ${esc(row.state)}</td>
       </tr>`).join("")}
     </tbody></table></div>`;
+}
+// Anything holding a tuner and writing to a disk is attributable from inside
+// the product, and stoppable from it. The Stop here is `DELETE /dvr/recordings`
+// and nothing else: `stopSession` and `DELETE /activity/sessions/{id}` are the
+// transcode and VOD verb, a Live TV viewer row has no Stop at all, and a
+// capture is neither of those things.
+function dvrActivityRows(rows,nodeNames){
+  if(!Array.isArray(rows)||rows.length===0) return "";
+  const now=liveTvNowSeconds();
+  return `<h2 class="section">Recording</h2>
+    <div class="tbl"><table><thead><tr><th>Programme</th><th>Channel</th><th>Owner</th>
+      <th>Progress</th><th>Started</th><th></th></tr></thead><tbody>
+      ${rows.map(row=>{
+        const percent=Math.round(PlurxLiveTv.dvrCaptureProgress(row,now)*100);
+        return `<tr data-dvr-recording="${esc(row.id)}">
+        <td><b>${esc(row.title)}</b>${row.episode_title?`<div class="muted">${esc(row.episode_title)}</div>`:""}</td>
+        <td>${esc(row.guide_number)} · ${esc(row.channel_name)}</td>
+        <td>${esc(nodeNames[row.tuner_owner_node_id]||row.tuner_owner_node_id||"—")}</td>
+        <td>${percent}% <span class="muted">· ${esc(PlurxLiveTv.dvrRecordingDetail(row,now))}</span></td>
+        <td class="muted">${row.started_at_ms?fmtAgo(Math.round(row.started_at_ms/1000)):"—"}</td>
+        <td style="text-align:right">${row.stop_requested_at_ms
+          ?'<span class="muted">stopping…</span>'
+          :`<button class="ghost sm" onclick="stopDvrRecording(${esc(JSON.stringify(row.id))})">Stop</button>`}</td></tr>`;
+      }).join("")}
+    </tbody></table></div>`;
+}
+// 202, not 204: the capture stops when the owner's next tick closes the file,
+// and only the owner may write the terminal state. So the button asks, and
+// then watches the row until it is no longer `recording` — which is also the
+// moment the tuner it was holding is free for somebody to watch.
+async function stopDvrRecording(id){
+  try{ await api(`/dvr/recordings/${encodeURIComponent(id)}`,{method:"DELETE",raw:true}); }
+  catch(e){ toast(e.message); return; }
+  toast("Stopping — the tuner frees when the file closes");
+  const generation=PAGE_RENDER_GENERATION;
+  // Bounded: the owner ticks every fifteen seconds, and a row still recording
+  // after two minutes is a fact about the owner that this page cannot fix by
+  // asking again. The ordinary 3 s page refresh keeps reporting either way.
+  for(let attempt=0;attempt<24;attempt++){
+    await new Promise(done=>setTimeout(done,5000));
+    if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/activity") return;
+    let row=null;
+    try{ row=await api(`/dvr/recordings/${encodeURIComponent(id)}`); }catch(e){ return; }
+    if(!row||row.state!=="recording"){ renderActivityBody(generation); return; }
+  }
 }
 async function stopSession(id){
   try{ await api(`/activity/sessions/${id}`,{method:"DELETE"}); toast("Stream stopped"); renderActivityBody(); }
@@ -14812,6 +14930,12 @@ function playbackPanel(settings){
 // Live TV owns its own media element and capability. It never enters PLAYER,
 // file progress, playback-control, watched state, autoskip, or Trakt.
 const LIVE_TV={channels:[],serial:0,hls:null,timer:null,polling:false,lastChannel:null,cleanupMarker:null,unplayedSince:null,lastPosition:0,starting:null,status:null,compatibility:null,compatibilityRetried:false};
+// What the DVR says about the guide on screen: the status (tuner slots), the
+// fortnight's schedule and this viewer's reminders. Read once per guide load
+// and again after every mutation — never polled, because nothing here changes
+// except when somebody presses something or a capture opens, and both of those
+// already reach the page.
+const LIVE_TV_DVR={status:null,schedule:null,reminders:[],library:null,rules:null,serial:0};
 function liveTvNow(){
   return performance.now();
 }
@@ -14929,6 +15053,10 @@ async function viewLiveTv(generation=PAGE_RENDER_GENERATION){
     const toolbar=document.getElementById("live-tv-toolbar");
     if(toolbar) toolbar.innerHTML=liveTvToolbar();
     renderLiveTvChannels();
+    // A Watch pressed on the reminder overlay from another page. Consume-once,
+    // so a later visit never re-tunes a channel nobody asked for again.
+    const arriving=LIVE_TV.watchOnArrival; LIVE_TV.watchOnArrival=null;
+    if(arriving) liveTvSelect(arriving);
     liveTvMessage(result.freshness==="stale"
       ?`Showing a cached lineup (${result.age_seconds} seconds old). The tuner is currently unreachable; starting a channel requires a fresh check.`
       :`${result.channels.length} channels. Choose an unprotected channel to watch.`);
@@ -15120,17 +15248,23 @@ function liveTvRowMarkup(channel,selectedId){
       data-channel="${esc(channel.id)}" onclick="liveTvSelect('${esc(channel.id)}')"${view.disabled?' disabled':''}>
     <span class="lt-chip">${esc(channel.guide_name.slice(0,5))}</span>
     <span><b>${esc(channel.guide_number)} · ${esc(channel.guide_name)}</b>${liveTvFormatBadges(channel)}${line}</span>
-    <span>${channel.favorite?'<span class="lt-star" title="Favorite">★</span>':""}${view.disabled?" 🔒":""}</span>
+    <span>${channel.favorite?'<span class="lt-star" title="Favorite">★</span>':""}${view.disabled?" 🔒":""}${liveTvMarks(channel.id,at.now,true)}</span>
   </button>`;
 }
 function liveTvToolbar(){
   const counts=`${LIVE_TV.channels.length} channels`;
   const tuners=LIVE_TV.tuners?` · ${esc(LIVE_TV.tuners)}`:"";
-  const view=liveTvView();
+  const view=liveTvView(), recs=liveTvRecordingsTab();
+  const conflicts=LIVE_TV_DVR.schedule?LIVE_TV_DVR.schedule.conflicts||0:0;
   return `<div class="lt-head">
     <div class="lt-switch" role="group" aria-label="Live TV layout">
-      <button type="button" aria-pressed="${view==="list"}" onclick="liveTvSetView('list')">≡ List</button>
-      <button type="button" aria-pressed="${view==="grid"}" onclick="liveTvSetView('grid')">▦ Grid</button>
+      <button type="button" aria-pressed="${!recs&&view==="list"}" onclick="liveTvSetView('list')">≡ List</button>
+      <button type="button" aria-pressed="${!recs&&view==="grid"}" onclick="liveTvSetView('grid')">▦ Grid</button>
+    </div>
+    <div class="lt-switch" role="group" aria-label="Recordings">
+      <button type="button" aria-pressed="${recs==="library"}" onclick="liveTvSetRecordingsTab('library')">Library</button>
+      <button type="button" aria-pressed="${recs==="scheduled"}" onclick="liveTvSetRecordingsTab('scheduled')">Scheduled${conflicts?` (${conflicts})`:""}</button>
+      <button type="button" aria-pressed="${recs==="rules"}" onclick="liveTvSetRecordingsTab('rules')">Rules</button>
     </div>
     <span class="muted">${counts}${tuners}</span>
     <div class="lt-switch" role="group" aria-label="Channel filter">
@@ -15237,7 +15371,7 @@ function liveTvGridMarkup(visible,selected){
         style="left:${cell.left}px;width:${Math.max(cell.width-4,12)}px"
         title="${esc(cell.programme.title)} · ${esc(liveTvClock(cell.programme.start))}–${esc(liveTvClock(cell.programme.end))}"
         data-channel="${esc(row.channel.id)}" data-cell="${index}"
-        onclick="liveTvGridCell('${esc(row.channel.id)}',${index},${cell.airing})">${esc(cell.programme.title)}</button>`;
+        onclick="liveTvGridCell('${esc(row.channel.id)}',${index},${cell.airing})">${esc(cell.programme.title)}${liveTvMarks(row.channel.id,cell.programme,false)}</button>`;
     }).join("");
     const marker=ends===null?"":`<div class="lt-cell ends" style="left:${((ends-window.start)/slot)*px}px;width:150px">Guide data ends ${esc(liveTvClock(ends))}</div>`;
     return `<div class="lt-grow">
@@ -15262,7 +15396,9 @@ function renderLiveTvChannels(){
   const mount=document.getElementById("live-tv-body"); if(!mount) return;
   const visible=liveTvVisible();
   const selected=liveTvChannelById(LIVE_TV.selected)||null;
-  mount.innerHTML=liveTvView()==="grid"?liveTvGridMarkup(visible,selected):liveTvListMarkup(visible,selected);
+  const recordings=liveTvRecordingsTab();
+  mount.innerHTML=recordings?liveTvRecordingsMarkup(recordings,selected)
+    :liveTvView()==="grid"?liveTvGridMarkup(visible,selected):liveTvListMarkup(visible,selected);
   // The toolbar carries the state of both switches and the channel count, and
   // it was painted once at first render — so pressing List/Grid or
   // All/Favorites changed the body while the control kept showing, to a
@@ -15286,7 +15422,11 @@ function renderLiveTvChannels(){
 // Switching views is a re-render of the browse region and nothing else: it
 // never stops the stream, never restarts it, and never refetches.
 function liveTvSetView(view){
-  liveTvSetPref("plurx_live_tv_view",view); renderLiveTvChannels();
+  liveTvSetPref("plurx_live_tv_view",view);
+  // List and Grid are the channel browser; choosing one leaves the recordings
+  // segment, which occupies the same region.
+  liveTvSetPref("plurx_live_tv_recordings","");
+  renderLiveTvChannels();
 }
 function liveTvTogglePlayerSize(){
   liveTvSetPref("plurx_live_tv_player_size",liveTvPlayerSize()==="wide"?"compact":"wide");
@@ -15319,9 +15459,10 @@ function liveTvGridCell(channelId,index,airing){
   const cell=row&&row.cells?row.cells[index]:null;
   liveTvPopover(cell?cell.programme:null,channelId);
 }
-// A future cell gets details and no actions. There is no DVR behind this, so
-// offering "record" or "remind me" would be offering something that does not
-// exist.
+// A cell's four verbs and the tuner sentence under them. Which of the four are
+// offered is `dvrAiringActions`' answer, not this function's: every "no" there
+// is a request the routes would refuse, and an action that can only be refused
+// is worse than an absent one.
 function liveTvPopover(row,channelId){
   let pop=document.getElementById("live-tv-pop");
   if(!pop){ pop=document.createElement("div"); pop.id="live-tv-pop"; pop.className="lt-pop"; document.body.appendChild(pop); }
@@ -15332,7 +15473,7 @@ function liveTvPopover(row,channelId){
     ${row.episode_title?`<p><b>${esc(row.episode_title)}</b></p>`:""}
     ${row.synopsis?`<p>${esc(row.synopsis)}</p>`:""}
     ${row.filters&&row.filters.length?`<div class="pills">${row.filters.map(f=>`<span class="pill">${esc(f)}</span>`).join("")}</div>`:""}
-    <p class="hint">Live only — plurx does not record.</p>
+    ${liveTvPopoverActions(row,channelId)}
     <div class="row"><button class="ghost sm" onclick="liveTvPopover(null)">Close</button></div>`;
   pop.hidden=false;
   const box=pop.getBoundingClientRect();
@@ -15587,6 +15728,339 @@ async function loadLiveTvGuide(generation,route){
     // A guide that will not load is a degraded page, never a broken one.
     if(generation===PAGE_RENDER_GENERATION&&location.hash===route) LIVE_TV.guide=null;
   }
+  loadLiveTvDvr(generation,route);
+}
+
+// ---- recording on the Live TV page ----------------------------------------
+// Three reads in one wave, after the guide has landed and again after every
+// mutation. Never on a timer: a mark changes when somebody presses something
+// or when a capture opens, and the owner's tick reaches this page through the
+// refetch a press already causes. Polling a fortnight of schedule every few
+// seconds to watch a dot that changes twice a day is not a poll, it is a bill.
+async function loadLiveTvDvr(generation,route){
+  const serial=++LIVE_TV_DVR.serial;
+  const read=path=>api(path,{signal:AbortSignal.timeout(20000)}).catch(()=>null);
+  const [status,schedule,reminders]=await Promise.all([
+    read("/dvr/status"),
+    // A fortnight is the route's ceiling and the guide's horizon; `cancelled=1`
+    // keeps skipped rows in the answer so the Scheduled list can restore one.
+    read("/dvr/schedule?days=14&cancelled=1"),
+    read("/dvr/reminders"),
+  ]);
+  // A newer wave, a newer page or a different route all mean this answer
+  // describes a screen nobody is looking at.
+  if(serial!==LIVE_TV_DVR.serial||generation!==PAGE_RENDER_GENERATION||location.hash!==route) return;
+  LIVE_TV_DVR.status=status; LIVE_TV_DVR.schedule=schedule;
+  LIVE_TV_DVR.reminders=Array.isArray(reminders)?reminders:[];
+  renderLiveTvChannels();
+  // Library and Rules are their own reads and only an open segment pays for
+  // one — but an open one has to be right after a mutation, not one press
+  // behind it.
+  const tab=liveTvRecordingsTab();
+  if(tab==="library") liveTvLoadRecordings("library","/dvr/recordings?state=done,partial");
+  if(tab==="rules") liveTvLoadRecordings("rules","/dvr/rules");
+}
+// Every mutation ends here: the routes write intent and the owner loop decides
+// the rest, so the only honest thing a client can do afterwards is read the
+// rows again rather than guess at the new state.
+async function liveTvDvrReload(){
+  if(location.hash!=="#/live-tv") return;
+  await loadLiveTvDvr(PAGE_RENDER_GENERATION,location.hash);
+}
+// Built once per pair of documents rather than once per cell. A fortnight of
+// rules against a full lineup is thousands of cells, and rebuilding the index
+// inside the cell loop made the render quadratic in the size of the schedule.
+function liveTvDvrIndex(){
+  const cache=LIVE_TV_DVR.index;
+  if(cache&&cache.schedule===LIVE_TV_DVR.schedule&&cache.reminders===LIVE_TV_DVR.reminders) return cache.index;
+  const index=PlurxLiveTv.dvrIndex(LIVE_TV_DVR.schedule,LIVE_TV_DVR.reminders);
+  LIVE_TV_DVR.index={schedule:LIVE_TV_DVR.schedule,reminders:LIVE_TV_DVR.reminders,index};
+  return index;
+}
+// The marks for one cell or one list row. `inline` is the list's third column,
+// where the star and the lock already live; the grid's is absolutely placed
+// inside the cell so that adding one moves nothing.
+function liveTvMarks(channelId,programme,inline){
+  if(!programme||typeof programme.start!=="number") return "";
+  const index=liveTvDvrIndex();
+  const row=index.row(channelId,programme.start);
+  const marks=PlurxLiveTv.dvrMarks(row,index.reminder(channelId,programme.start),liveTvNowSeconds());
+  if(!marks.length) return "";
+  const glyphs=marks.map(mark=>{
+    if(mark.shape==="rec") return `<span class="rec">REC</span>`;
+    if(mark.shape==="bell") return `<span class="bell">🔔</span>`;
+    if(mark.shape==="dots") return `<span class="dot"></span><span class="dot"></span>`;
+    return `<span class="dot${mark.kind==="conflict"?" conflict":""}${mark.shape==="hollow"?" hollow":""}"></span>`;
+  }).join("");
+  const bar=marks.find(mark=>mark.shape==="rec");
+  const label=esc(marks.map(mark=>mark.label).join(" · "));
+  return `<span class="lt-mark${inline?" lt-rowmark":""}" title="${label}" aria-label="${label}">${glyphs}</span>`
+    +(bar&&!inline?`<span class="lt-recbar"><i style="width:${Math.round(bar.progress*100)}%"></i></span>`:"");
+}
+function liveTvTunerLine(){
+  return PlurxLiveTv.dvrTunerLine(LIVE_TV_DVR.status,LIVE_TV_DVR.schedule);
+}
+function liveTvPopoverActions(programme,channelId){
+  const now=liveTvNowSeconds(), index=liveTvDvrIndex();
+  const row=index.row(channelId,programme.start);
+  const reminder=index.reminder(channelId,programme.start);
+  const acts=PlurxLiveTv.dvrAiringActions(programme,row,reminder,now);
+  const at=JSON.stringify(channelId), start=Number(programme.start);
+  const buttons=[];
+  if(acts.watch==="now") buttons.push(`<button type="button" onclick="liveTvPopover(null);liveTvSelect(${esc(at)})">Watch</button>`);
+  // A future programme cannot be tuned, so Watch becomes the promise to be
+  // shown it when it starts — a reminder with no lead at all.
+  else if(acts.watch==="at") buttons.push(`<button type="button" onclick="liveTvRemind(${esc(at)},${start},0)">Watch at ${esc(liveTvClock(programme.start))}</button>`);
+  if(acts.record==="record") buttons.push(`<button type="button" onclick="liveTvRecord(${esc(at)},${start})">Record</button>`);
+  else if(acts.record==="skip") buttons.push(`<button type="button" onclick="liveTvSkip(${esc(JSON.stringify(row.id))})">Skip</button>`);
+  else if(acts.record==="stop") buttons.push(`<button type="button" onclick="liveTvStopRecording(${esc(JSON.stringify(row.id))})">Stop</button>`);
+  if(acts.series) buttons.push(`<button type="button" onclick="liveTvRecordSeries(${esc(at)},${start})">Record series</button>`);
+  if(acts.remind==="set") buttons.push(`<button type="button" onclick="liveTvRemind(${esc(at)},${start},null)">Remind me</button>`);
+  else if(acts.remind==="clear") buttons.push(`<button type="button" onclick="liveTvForgetReminder(${esc(JSON.stringify(reminder.id))})">Forget reminder</button>`);
+  const tuners=liveTvTunerLine();
+  if(!buttons.length) return `<p class="hint">This programme has finished.</p>`;
+  return `<div class="lt-acts">${buttons.join("")}</div>${tuners?`<p class="lt-tuners">${esc(tuners)}</p>`:""}`;
+}
+// One place for "ask, say what happened, read the rows again". Every DVR verb
+// on this page is that shape, and a typed refusal — `dvr_disabled`,
+// `airing_past`, `rule_limit` — carries its own sentence from the route.
+async function liveTvDvrAct(request,done){
+  try{
+    const result=await request();
+    liveTvPopover(null);
+    toast(done);
+    await liveTvDvrReload();
+    return result;
+  }catch(e){ toast(e.message); return null; }
+}
+function liveTvRecord(channelId,airingStart){
+  return liveTvDvrAct(()=>api("/dvr/recordings",{method:"POST",body:{channel_id:channelId,airing_start:airingStart}}),
+    "Scheduled to record");
+}
+function liveTvRecordSeries(channelId,airingStart){
+  return liveTvDvrAct(()=>api("/dvr/rules",{method:"POST",body:{from_airing:{channel_id:channelId,airing_start:airingStart}}}),
+    "Recording every episode");
+}
+function liveTvRemind(channelId,airingStart,lead){
+  const body={channel_id:channelId,airing_start:airingStart};
+  // An explicit zero lead is "show me this when it starts"; an absent one takes
+  // the server's configured lead, and `lead_s:null` would not be the same
+  // request at all.
+  if(lead!==null&&lead!==undefined) body.lead_s=lead;
+  return liveTvDvrAct(()=>api("/dvr/reminders",{method:"POST",body}),lead===0?"You will be shown it when it starts":"Reminder set");
+}
+function liveTvForgetReminder(id){
+  return liveTvDvrAct(()=>api(`/dvr/reminders/${encodeURIComponent(id)}`,{method:"DELETE",raw:true}),"Reminder removed");
+}
+// A planned airing. `DELETE` on one is a cancel, and it is durable: expansion
+// skips a cancelled row for good, which is why Restore has to be explicit.
+function liveTvSkip(id){
+  return liveTvDvrAct(()=>api(`/dvr/recordings/${encodeURIComponent(id)}`,{method:"DELETE",raw:true}),"Skipped");
+}
+function liveTvRestore(id){
+  return liveTvDvrAct(()=>api(`/dvr/recordings/${encodeURIComponent(id)}/restore`,{method:"POST",body:{}}),"Back on the schedule");
+}
+// A running capture stops when the owner's next tick closes the file, so the
+// route answers 202 and the row is still `recording` when this returns.
+function liveTvStopRecording(id){
+  return liveTvDvrAct(()=>api(`/dvr/recordings/${encodeURIComponent(id)}`,{method:"DELETE",raw:true}),
+    "Stopping — the tuner frees when the file closes");
+}
+// A finished recording has a file, and "take this off my schedule" must not be
+// the same request as "delete the recording" by accident: the route refuses
+// the first form with `delete_file_required` and this asks before repeating it.
+async function liveTvDeleteRecording(id,title){
+  try{
+    await api(`/dvr/recordings/${encodeURIComponent(id)}`,{method:"DELETE",raw:true});
+    toast("Deleted"); await liveTvDvrReload(); return;
+  }catch(e){
+    if(e.code!=="delete_file_required"){ toast(e.message); return; }
+  }
+  if(!confirm(`Delete "${title}" and its recorded file?`)) return;
+  try{
+    await api(`/dvr/recordings/${encodeURIComponent(id)}?delete_file=1`,{method:"DELETE",raw:true});
+    toast("Deleted"); await liveTvDvrReload();
+  }catch(e){ toast(e.message); }
+}
+function liveTvRecordingsTab(){
+  return liveTvPref("plurx_live_tv_recordings","",["","library","scheduled","rules"]);
+}
+function liveTvSetRecordingsTab(tab){
+  const next=liveTvRecordingsTab()===tab?"":tab;
+  liveTvSetPref("plurx_live_tv_recordings",next);
+  renderLiveTvChannels();
+  // The schedule is already on the page; these two are not, and only the
+  // segment somebody is looking at pays for a read.
+  if(next==="library") liveTvLoadRecordings("library","/dvr/recordings?state=done,partial");
+  if(next==="rules") liveTvLoadRecordings("rules","/dvr/rules");
+}
+async function liveTvLoadRecordings(key,path){
+  const generation=PAGE_RENDER_GENERATION, route=location.hash;
+  let rows=null;
+  try{ rows=await api(path,{signal:AbortSignal.timeout(20000)}); }catch(e){ rows=null; }
+  if(generation!==PAGE_RENDER_GENERATION||location.hash!==route) return;
+  LIVE_TV_DVR[key]=Array.isArray(rows)?rows:[];
+  renderLiveTvChannels();
+}
+const DVR_STATE_LABEL={scheduled:"Scheduled",conflict:"No tuner",withdrawn:"Withdrawn",stale:"Programme moved",
+  recording:"Recording",done:"Recorded",partial:"Recorded with a gap",failed:"Failed",missed:"Missed",
+  cancelled:"Skipped",deleted:"Deleted"};
+function liveTvRecordingLine(row){
+  const when=`${esc(liveTvClock(row.airing_start))}–${esc(liveTvClock(row.airing_end))}`;
+  const episode=[row.episode,row.episode_title].filter(Boolean).join(" · ");
+  return `<span class="meta">${esc(row.guide_number)} · ${esc(row.channel_name)} · ${when}${episode?" · "+esc(episode):""}</span>`;
+}
+function liveTvRecordingsMarkup(tab,selected){
+  const body=tab==="library"?liveTvLibraryRows():tab==="rules"?liveTvRuleRows():liveTvScheduleRows();
+  const tuners=liveTvTunerLine();
+  return `<div class="lt-split">
+    ${liveTvStageMarkup(selected,false)}
+    <div>
+      ${tuners?`<p class="muted" style="margin:0 0 8px;font-size:12.5px">${esc(tuners)}</p>`:""}
+      <div class="lt-recs" aria-label="Recordings">${body}</div>
+    </div>
+  </div>`;
+}
+function liveTvEmptyRecs(text){
+  return `<div style="padding:18px" class="muted">${esc(text)}</div>`;
+}
+function liveTvLibraryRows(){
+  const rows=LIVE_TV_DVR.library;
+  if(rows===null) return liveTvEmptyRecs("Loading recordings…");
+  if(!rows.length) return liveTvEmptyRecs("Nothing has been recorded yet.");
+  return rows.map(row=>{
+    // A finished recording is an ordinary library item once the scan has
+    // linked it, and it belongs on the ordinary item page — this list is a way
+    // in, not a second player.
+    const title=row.item_id?`<a href="#/item/${row.item_id}">${esc(row.title)}</a>`:esc(row.title);
+    const pending=row.item_id?"":`<span class="why">Waiting for the library scan to pick up the file</span>`;
+    return `<div class="lt-rec"><span><b>${title}</b>${liveTvRecordingLine(row)}${pending}
+        ${row.state==="partial"?`<span class="why">${esc(row.state_reason||"Captured with a gap")}</span>`:""}</span>
+      <span class="acts"><button type="button" onclick="liveTvDeleteRecording(${esc(JSON.stringify(row.id))},${esc(JSON.stringify(row.title))})">Delete</button></span></div>`;
+  }).join("");
+}
+function liveTvScheduleRows(){
+  const schedule=LIVE_TV_DVR.schedule;
+  if(!schedule) return liveTvEmptyRecs("Loading the schedule…");
+  const rows=(schedule.rows||[]).slice().sort((a,b)=>a.capture_start-b.capture_start);
+  if(!rows.length) return liveTvEmptyRecs("Nothing is scheduled. Record a programme from the guide.");
+  return rows.map(row=>{
+    const acts=[];
+    if(row.state==="recording") acts.push(`<button type="button" onclick="liveTvStopRecording(${esc(JSON.stringify(row.id))})">Stop</button>`);
+    else if(row.state==="cancelled") acts.push(`<button type="button" onclick="liveTvRestore(${esc(JSON.stringify(row.id))})">Restore</button>`);
+    else acts.push(`<button type="button" onclick="liveTvSkip(${esc(JSON.stringify(row.id))})">Skip</button>`);
+    const reason=row.state==="conflict"||row.state==="stale"||row.state==="withdrawn";
+    return `<div class="lt-rec"><span><b>${esc(row.title)}</b> <span class="pill">${esc(DVR_STATE_LABEL[row.state]||row.state)}</span>
+        ${liveTvRecordingLine(row)}
+        ${reason?`<span class="why">${esc(row.state_reason||"No tuner is free for this")}</span>`:""}</span>
+      <span class="acts">${acts.join("")}</span></div>`;
+  }).join("");
+}
+function liveTvRuleRows(){
+  const rows=LIVE_TV_DVR.rules;
+  if(rows===null) return liveTvEmptyRecs("Loading rules…");
+  if(!rows.length) return liveTvEmptyRecs("No series rules yet. Use “Record series” on a programme in the guide.");
+  return rows.map(rule=>{
+    const scope=rule.channel_id?liveTvChannelLabel(rule.channel_id):"any channel";
+    const keep=rule.keep_mode==="last_n"?`keep the last ${rule.keep_value}`
+      :rule.keep_mode==="days"?`keep ${rule.keep_value} days`
+      :rule.keep_mode==="until_watched"?"keep until watched":"keep everything";
+    return `<div class="lt-rec"><span><b>${esc(rule.name)}</b>${rule.enabled?"":' <span class="pill">off</span>'}
+        <span class="meta">${esc(scope)} · ${rule.new_only?"new episodes only":"every showing"} · ${esc(keep)} · priority ${esc(String(rule.priority))}</span></span>
+      <span class="acts"><button type="button" onclick="liveTvDeleteRule(${esc(JSON.stringify(rule.id))})">Delete</button></span></div>`;
+  }).join("");
+}
+function liveTvChannelLabel(channelId){
+  const channel=liveTvChannelById(channelId);
+  return channel?`${channel.guide_number} · ${channel.guide_name}`:channelId;
+}
+// Deleting a rule withdraws its pending airings on the next tick — it does not
+// cancel them, because `cancelled` is the viewer's word and a rule does not
+// get to say it on their behalf.
+function liveTvDeleteRule(id){
+  return liveTvDvrAct(()=>api(`/dvr/rules/${encodeURIComponent(id)}`,{method:"DELETE",raw:true}),"Rule deleted");
+}
+
+// ---- the due-reminder overlay ---------------------------------------------
+// Shown on any page while `?due=1` is not empty, and it is buttons the whole
+// way down: no key handler here, on purpose. The Live TV adapter is the only
+// place on this page that may read a key, and `scripts/player-input-fence`
+// keeps it that way.
+let DVR_REMINDER_TIMER=null, DVR_REMINDER_POLLING=false, DVR_REMINDER_RETIRE=null;
+let DVR_DUE=[];
+async function pollDvrReminders(){
+  if(!TOKEN||!ME||document.visibilityState==="hidden"||DVR_REMINDER_POLLING) return;
+  DVR_REMINDER_POLLING=true;
+  try{
+    const due=await api("/dvr/reminders?due=1");
+    DVR_DUE=Array.isArray(due)?due:[];
+    paintDvrReminder();
+  }catch(e){}
+  finally{ DVR_REMINDER_POLLING=false; }
+}
+function paintDvrReminder(){
+  let box=document.getElementById("dvr-reminder");
+  const now=liveTvNowSeconds();
+  // The soonest one wins: two reminders competing for the corner is a second
+  // problem, and the one that is about to start is the one worth the space.
+  const due=DVR_DUE.slice().sort((a,b)=>a.airing_start-b.airing_start)[0]||null;
+  clearTimeout(DVR_REMINDER_RETIRE); DVR_REMINDER_RETIRE=null;
+  if(!due){ if(box) box.hidden=true; return; }
+  const count=PlurxLiveTv.dvrReminderCountdown(due,now);
+  // At the start there is nothing left to remind anybody of. Retiring it here
+  // rather than waiting for the next poll is what "auto-dismissed at the
+  // start" means, and it costs one timeout rather than a second interval.
+  if(count.expired){
+    DVR_DUE=DVR_DUE.filter(row=>row!==due);
+    if(box) box.hidden=true;
+    if(DVR_DUE.length) paintDvrReminder();
+    return;
+  }
+  if(!box){
+    box=document.createElement("div"); box.id="dvr-reminder"; box.className="dvr-remind";
+    box.setAttribute("role","status"); box.setAttribute("aria-live","polite");
+    document.body.appendChild(box);
+  }
+  const id=JSON.stringify(due.id);
+  const watch=`<button type="button" onclick="dvrReminderWatch(${esc(id)},${esc(JSON.stringify(due.channel_id))})">Watch</button>`;
+  // A reminder the schedule already covers must not offer to schedule it
+  // again; the route answers with the row it already has, which reads as a
+  // press that did nothing.
+  const record=due.covered_by_recording
+    ?`<button type="button" disabled title="A recording already covers this">Recording</button>`
+    :`<button type="button" onclick="dvrReminderRecord(${esc(id)},${esc(JSON.stringify(due.channel_id))},${Number(due.airing_start)})">Record</button>`;
+  box.innerHTML=`<b>${esc(due.title)}</b>
+    <span class="meta">${esc(due.guide_number)} · ${esc(liveTvClock(due.airing_start))} · starts ${esc(count.label)}</span>
+    <div class="acts">${watch}${record}<button type="button" onclick="dvrReminderDismiss(${esc(id)})">Dismiss</button></div>
+    <div class="bar"><i style="width:${Math.round(count.fraction*100)}%;animation-duration:${Math.max(1,Math.round(count.seconds))}s"></i></div>`;
+  box.hidden=false;
+  DVR_REMINDER_RETIRE=setTimeout(paintDvrReminder,Math.max(1,count.seconds)*1000);
+}
+// Dismiss acks: a second device must not show the same reminder again.
+async function dvrReminderAck(id){
+  DVR_DUE=DVR_DUE.filter(row=>row.id!==id);
+  paintDvrReminder();
+  try{ await api(`/dvr/reminders/${encodeURIComponent(id)}/ack`,{method:"POST",body:{}}); }catch(e){}
+}
+function dvrReminderDismiss(id){ return dvrReminderAck(id); }
+async function dvrReminderWatch(id,channelId){
+  await dvrReminderAck(id);
+  if(location.hash!=="#/live-tv"){
+    // The lineup arrives with the route. Asking for a channel this document
+    // has not heard of yet is a no-op, so the tune waits for the list.
+    LIVE_TV.watchOnArrival=channelId;
+    location.hash="#/live-tv";
+    return;
+  }
+  liveTvSelect(channelId);
+}
+async function dvrReminderRecord(id,channelId,airingStart){
+  try{
+    await api("/dvr/recordings",{method:"POST",body:{channel_id:channelId,airing_start:airingStart}});
+    toast("Scheduled to record");
+    await liveTvDvrReload();
+  }catch(e){ toast(e.message); return; }
+  await dvrReminderAck(id);
 }
 function detachLiveTvMedia(){
   clearInterval(LIVE_TV.timer); LIVE_TV.timer=null;
@@ -15888,6 +16362,34 @@ function preparedQualityCard(settings,readiness){
       <div class="err" id="pqherr" role="alert"></div>
       ${setCardFoot("savePreparedQuality")}`);
 }
+// Recording: one authoritative switch, the settings the engine reads, and six
+// readings that are advice and nothing else. Two of the six are legitimately
+// unobservable on a healthy server — whether every node mounts the root is a
+// fact about a cluster, and whether the root is writable is a fact about the
+// owner's filesystem — which is exactly why none of them may gate the switch.
+function dvrCard(settings,readiness){
+  return setCard(`${cardHead("Recording","Capture a programme from the tuner to a disk, and let the library scan pick it up.",settings.dvr_enabled?`<span class="pill ok">enabled</span>`:`<span class="pill">disabled</span>`)}
+      ${togRow("dvrenabled","Enable recording","This checkbox is authoritative. Reminders, rules and the schedule stay readable while it is off, so a deployment can be inspected and repaired before the first capture.",settings.dvr_enabled)}
+      <div class="setfields">
+        <div><label for="dvrroot">Recording folder</label><input id="dvrroot" value="${esc(settings.dvr_root||"")}" placeholder="/srv/plurx/recordings"><div class="hint">The tuner owner writes here, and every node that serves a recording has to be able to read it.</div></div>
+        <div><label for="dvrfloor">Keep free (GB)</label><input id="dvrfloor" type="number" min="0" max="1000000" value="${esc(String(settings.dvr_free_floor_gb??50))}"><div class="hint">A capture never starts under the floor; it shows the conflict instead of filling the disk.</div></div>
+        <div><label for="dvrreserve">Tuners reserved for viewing</label><select id="dvrreserve">${[0,1,2,3,4].map(n=>`<option value="${n}"${n===Number(settings.dvr_tuner_reserve??1)?" selected":""}>${n}</option>`).join("")}</select><div class="hint">Recordings never take the last reserved session, so a schedule cannot lock the household out of the tuner.</div></div>
+        <div><label for="dvrpadstart">Start early (seconds)</label><input id="dvrpadstart" type="number" min="0" max="3600" value="${esc(String(settings.dvr_pad_start_s??60))}"></div>
+        <div><label for="dvrpadend">Run late (seconds)</label><input id="dvrpadend" type="number" min="0" max="3600" value="${esc(String(settings.dvr_pad_end_s??120))}"></div>
+        <div><label for="dvrlead">Reminder lead (seconds)</label><input id="dvrlead" type="number" min="0" max="3600" value="${esc(String(settings.dvr_reminder_lead_s??300))}"><div class="hint">How long before a programme starts a reminder appears. “Watch at” sets one with no lead at all.</div></div>
+        <div><label for="dvrwebhook">Webhook URL</label><input id="dvrwebhook" value="${esc(settings.dvr_webhook_url||"")}" placeholder="https://example.invalid/hook"><div class="hint">Optional. https anywhere, or plain http only to a private address.</div></div>
+      </div>
+      <details class="setdetails" open><summary>Requirements and readiness</summary><div class="setdetails-body">
+      ${devReq(readiness,"dvr","dvr_root_writable","Writable recording folder","The tuner owner creates and removes a probe file under the folder. A read-only remount, a full filesystem and an ACL that says yes but means no all look identical to a permission bit.")}
+      ${devReq(readiness,"dvr","dvr_free_space","Room above the floor","Free space on the recording folder against the floor set above. Read this row on the tuner owner; another node cannot see that filesystem.")}
+      ${devReq(readiness,"dvr","guide_horizon","A guide worth scheduling from","A four-hour guide can only record what is nearly on. Series rules, a schedule and a conflict worth resolving all need a horizon.")}
+      ${devReq(readiness,"dvr","tuner_reserve","A tuner stays free for watching","Reserving every session for viewing means no capture could ever start; reserving none means a schedule can take the last tuner.")}
+      ${devReq(readiness,"dvr","every_node_mounts_root","Every node can read the folder","The owner writes recordings and any node may serve them, so the folder has to be a mount every node has. This process can see its own filesystem and no peer's.")}
+      ${settings.dvr_webhook_url?devReq(readiness,"dvr","webhook_url_approved","An approved webhook URL","The outbound policy allows https anywhere and plain http only to a private address. An unapproved URL is never called."):""}
+      <p class="devcheck-note">Advisory only: no result disables the switch or overrides your saved choice. An operator who can see the deployment may turn recording on over any amount of red.</p>
+      </div></details>
+      <div class="err" id="dvrerr" role="alert"></div>${setCardFoot("saveDvrDeveloper")}`);
+}
 function developerPanel(settings,readiness){
   const destinations=`<nav class="setdestinations" aria-label="Everyday settings">
     <a href="#/settings/livetv"><strong>Live TV <span aria-hidden="true">↗</span></strong><span>Tuner and guide</span></a>
@@ -15916,6 +16418,7 @@ function developerPanel(settings,readiness){
       <div class="err" id="dxerr" role="alert"></div>${setCardFoot("saveExperimental")}`);
   return `${setHead("Developer","Compatibility controls, experimental playback and device diagnostics.")}
       ${destinations}
+      <div class="setsection"><h2>Recording</h2><p>Explicit enablement for capturing the tuner to a disk, with advisory deployment facts.</p></div>${dvrCard(settings,readiness)}
       <div class="setsection"><h2>Library channels</h2><p>Explicit playback enablement with advisory deployment facts.</p></div>${libraryChannels}
       <div class="setsection"><h2>Prepared quality handoff</h2><p>Explicit server and browser enablement with advisory safety evidence.</p></div>${preparedQualityCard(settings,readiness)}${browser}
       <div class="setsection"><h2>Compatibility</h2><p>Protocol controls for compatible playback clients.</p></div>${protocol}
@@ -17739,6 +18242,30 @@ async function saveDeveloper(btn){
     cacheSettings(await api("/settings",{method:"PUT",body:{
       playback_control_protocol_v1:document.getElementById("pcpv1").checked}}));
     toast("Developer settings saved"); if(btn) setCardSaved(btn);
+  }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
+}
+// The DVR fields go on their own, never mixed with the Live TV tuple: that
+// tuple's write is a generation CAS, and a request carrying both would let one
+// commit while the other reported 409. The server refuses the mixture with a
+// 400 rather than let a client find that out the interesting way.
+async function saveDvrDeveloper(btn){
+  const err=document.getElementById("dvrerr"); err.textContent="";
+  const number=(id,fallback)=>{
+    const value=Number(document.getElementById(id).value);
+    return Number.isFinite(value)?value:fallback;
+  };
+  if(btn) btn.disabled=true;
+  try{
+    cacheSettings(await api("/settings",{method:"PUT",body:{
+      dvr_enabled:document.getElementById("dvrenabled").checked,
+      dvr_root:document.getElementById("dvrroot").value.trim(),
+      dvr_free_floor_gb:number("dvrfloor",50),
+      dvr_tuner_reserve:number("dvrreserve",1),
+      dvr_pad_start_s:number("dvrpadstart",60),
+      dvr_pad_end_s:number("dvrpadend",120),
+      dvr_reminder_lead_s:number("dvrlead",300),
+      dvr_webhook_url:document.getElementById("dvrwebhook").value.trim()}}));
+    toast("Recording settings saved"); if(btn) setCardSaved(btn);
   }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
 }
 async function saveLibraryChannelsDeveloper(btn){
@@ -19864,6 +20391,12 @@ async function render(){
   if(!TOKEN||!ME) return boot();
   clearInterval(PAGE_TIMER); PAGE_TIMER=null;
   if(!ACT_TIMER) ACT_TIMER=setInterval(pollActivity,4000);
+  // One global timer for due reminders, beside the activity one and for the
+  // same reason: the overlay belongs to every page, so a per-page poller would
+  // be started and stopped by routes that have nothing to do with it. Thirty
+  // seconds against a lead measured in minutes, and no immediate kick — a
+  // route change must not become a request.
+  if(!DVR_REMINDER_TIMER) DVR_REMINDER_TIMER=setInterval(pollDvrReminders,30000);
   let h=location.hash||"#/";
   if(h!=="#/live-tv") liveTvLeaveRoute();
   if(!h.startsWith("#/read/")&&READER) destroyReader(true);

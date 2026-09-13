@@ -1327,9 +1327,22 @@ impl LiveTvRegistry {
     /// "one viewer and three recordings" fits and "four recordings" does not,
     /// whichever order they arrived in.
     fn may_open_transport(&self, max_sessions: u8, reserve: u8) -> bool {
+        Self::occupancy_admits(
+            self.sessions.len(),
+            self.transports.len(),
+            max_sessions,
+            reserve,
+        )
+    }
+
+    /// The two rules, over counts alone. Separated so the property can be
+    /// asserted directly: "one viewer and three recordings" is a statement
+    /// about occupancy, and building four real tuner sessions to check it
+    /// would test the fixture rather than the rule.
+    fn occupancy_admits(sessions: usize, transports: usize, max_sessions: u8, reserve: u8) -> bool {
         let max = usize::from(max_sessions);
         let recordable = max.saturating_sub(usize::from(reserve.min(max_sessions)));
-        self.held() < max && self.transports.len() < recordable
+        sessions + transports < max && transports < recordable
     }
 
     fn prune_terminals(&mut self) {
@@ -2096,6 +2109,13 @@ pub(crate) fn approved_webhook_url(raw: &str) -> Result<reqwest::Url, String> {
 /// only accepted over https, where the transport protects the body regardless
 /// of where the name points.
 fn private_webhook_host(host: &str) -> bool {
+    // `Url::host_str` keeps the brackets on an IPv6 literal, and `IpAddr`
+    // does not parse them — so without this a LAN address like
+    // `http://[fd00::1]:8123/` would be read as a hostname and refused.
+    let host = host
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .unwrap_or(host);
     match host.parse::<IpAddr>() {
         Ok(IpAddr::V4(address)) => {
             address.is_private() || address.is_loopback() || address.is_link_local()
@@ -8478,6 +8498,45 @@ Output #0, hls, to 'index.m3u8':
         assert_eq!(programme.episode.as_deref(), Some("S3E14"));
         assert_eq!(programme.original_air_date.as_deref(), Some("2026-09-10"));
         assert_eq!(programme.filters, vec!["News".to_owned()]);
+    }
+
+    /// Admission is about occupancy, never about who arrived first. With four
+    /// tuners and one reserved for viewing, "one viewer and three recordings"
+    /// fits and "four recordings" does not — whichever order they turned up
+    /// in. An order-dependent answer would make the same fleet behave
+    /// differently on two identical evenings.
+    /// Admission is about occupancy, never about who arrived first. With four
+    /// tuners and one reserved for viewing, "one viewer and three recordings"
+    /// fits and "four recordings" does not — whichever order they turned up
+    /// in. An order-dependent answer would make the same fleet behave
+    /// differently on two identical evenings.
+    #[test]
+    fn tuner_admission_does_not_depend_on_who_arrived_first() {
+        let may_open = |sessions: usize, transports: usize, max: u8, reserve: u8| {
+            LiveTvRegistry::occupancy_admits(sessions, transports, max, reserve)
+        };
+
+        assert!(may_open(0, 2, 4, 1), "two recordings, a third may open");
+        assert!(
+            may_open(1, 2, 4, 1),
+            "one viewer and two recordings: a third recording still fits four tuners"
+        );
+        assert!(
+            !may_open(0, 3, 4, 1),
+            "three recordings already hold the most they may; the reserve is the point"
+        );
+        assert!(
+            !may_open(1, 3, 4, 1),
+            "one viewer and three recordings fills the set"
+        );
+        assert!(
+            !may_open(4, 0, 4, 1),
+            "four viewers leave nothing, reserve or no reserve"
+        );
+        assert!(
+            !may_open(0, 0, 1, 1),
+            "reserving the only tuner stops recording rather than underflowing"
+        );
     }
 
     #[tokio::test]

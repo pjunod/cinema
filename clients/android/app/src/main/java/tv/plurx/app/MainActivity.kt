@@ -1,5 +1,6 @@
 package tv.plurx.app
 
+import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -10,6 +11,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.Lifecycle
@@ -21,8 +23,12 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import tv.plurx.app.data.Caps
+import tv.plurx.app.data.Session
+import tv.plurx.app.reminders.ReminderAlarms
 import tv.plurx.app.player.PlayerScreen
 import tv.plurx.app.player.OfflinePlayerScreen
 import tv.plurx.app.player.preplayRouteQuery
@@ -50,38 +56,76 @@ import tv.plurx.app.librarychannels.LibraryChannelsScreen
 import androidx.compose.ui.platform.LocalContext
 
 class MainActivity : ComponentActivity() {
+    /**
+     * The channel a reminder notification's *Watch* asked for. A flow rather
+     * than a read of `intent`, because the activity is usually already running
+     * when the notification is tapped and `onNewIntent` is the only place that
+     * fact arrives.
+     */
+    private val reminderChannel = MutableStateFlow<String?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // Keep a real-hardware capability snapshot in logcat even before sign
         // in. Decoder/display regressions otherwise surface only as a later
         // server transcode, after the evidence that caused it is gone.
         lifecycleScope.launch { Caps.query(this@MainActivity) }
+        reminderChannel.value = intent?.getStringExtra(EXTRA_LIVE_TV_CHANNEL)
         setContent {
             val vm: AppViewModel = viewModel()
             val preferences by vm.preferences.collectAsStateWithLifecycle()
             PlurxTheme(preferences.theme, preferences.appearance) {
                 Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                    AppRoot(vm)
+                    AppRoot(vm, reminderChannel) { reminderChannel.value = null }
                 }
             }
         }
     }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        reminderChannel.value = intent.getStringExtra(EXTRA_LIVE_TV_CHANNEL)
+    }
+
+    companion object {
+        const val EXTRA_LIVE_TV_CHANNEL = "live_tv_channel"
+    }
 }
 
 @Composable
-private fun AppRoot(vm: AppViewModel) {
-    val liveTv = LiveTvPlayer.get(LocalContext.current)
-    val libraryChannels = LibraryChannelPlayer.get(LocalContext.current)
+private fun AppRoot(
+    vm: AppViewModel,
+    reminderChannel: StateFlow<String?>,
+    onReminderChannelUsed: () -> Unit,
+) {
+    val context = LocalContext.current
+    val liveTv = LiveTvPlayer.get(context)
+    val libraryChannels = LibraryChannelPlayer.get(context)
     val phase by vm.phase.collectAsStateWithLifecycle()
     val busy by vm.busy.collectAsStateWithLifecycle()
     val authError by vm.authError.collectAsStateWithLifecycle()
+    val scope = rememberCoroutineScope()
 
-    LifecycleEventEffect(Lifecycle.Event.ON_START) { vm.onForeground() }
+    LifecycleEventEffect(Lifecycle.Event.ON_START) {
+        vm.onForeground()
+        // On launch and on every return to the foreground. This is the only
+        // moment the phone can learn that a reminder was created, deleted or
+        // moved somewhere else while it was closed.
+        scope.launch { ReminderAlarms.refresh(context, vm.origin, Session.token) }
+    }
     LaunchedEffect(phase) {
-        if (phase == Phase.Ready) vm.onForeground()
-        else {
+        if (phase == Phase.Ready) {
+            vm.onForeground()
+            ReminderAlarms.refresh(context, vm.origin, Session.token)
+        } else {
             liveTv.stop(clearProfile = true)
             libraryChannels.stop(clearProfile = true)
+            // A signed-out profile's reminders must not go on firing here —
+            // but `Loading` is the phase every cold start passes through, and
+            // clearing there would lose every reminder on a launch that could
+            // not reach the server.
+            if (phase != Phase.Loading) ReminderAlarms.clear(context)
         }
     }
 
@@ -89,13 +133,26 @@ private fun AppRoot(vm: AppViewModel) {
         Phase.Loading -> LoadingBox()
         Phase.NeedServer -> ConnectScreen(vm, busy, authError)
         Phase.NeedLogin -> LoginScreen(vm, busy, authError)
-        Phase.Ready -> MainNav(vm)
+        Phase.Ready -> MainNav(vm, reminderChannel, onReminderChannelUsed)
     }
 }
 
 @Composable
-private fun MainNav(vm: AppViewModel) {
+private fun MainNav(
+    vm: AppViewModel,
+    reminderChannel: StateFlow<String?>,
+    onReminderChannelUsed: () -> Unit,
+) {
     val nav = rememberNavController()
+    val requestedChannel by reminderChannel.collectAsStateWithLifecycle()
+    LaunchedEffect(requestedChannel) {
+        val channel = requestedChannel ?: return@LaunchedEffect
+        // `launchSingleTop`, because tapping the same notification twice is one
+        // request to watch one channel, not two Live TV screens stacked — and
+        // two of them would mean two tuner leases.
+        nav.navigate("live-tv?channel=${Uri.encode(channel)}") { launchSingleTop = true }
+        onReminderChannelUsed()
+    }
     NavHost(navController = nav, startDestination = "home") {
         composable("home") {
             HomeScreen(
@@ -177,8 +234,22 @@ private fun MainNav(vm: AppViewModel) {
         composable("settings") {
             SettingsScreen(vm = vm, onBack = { nav.popBackStack() }, onOpenDeveloper = { nav.navigate("developer") })
         }
-        composable("live-tv") {
-            LiveTvScreen(origin = vm.origin, onBack = { nav.popBackStack() })
+        composable(
+            "live-tv?channel={channel}",
+            arguments = listOf(
+                navArgument("channel") {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
+            ),
+        ) { entry ->
+            LiveTvScreen(
+                origin = vm.origin,
+                initialChannelId = entry.arguments?.getString("channel"),
+                onOpenItem = { id -> nav.navigate("detail/$id") },
+                onBack = { nav.popBackStack() },
+            )
         }
         composable(
             "library-channels?seedId={seedId}&seedKind={seedKind}&seedTitle={seedTitle}",

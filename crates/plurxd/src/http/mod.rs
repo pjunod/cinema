@@ -4954,6 +4954,7 @@ mod tests {
             ids,
             vec![
                 "library_channels",
+                "dvr",
                 "cluster_transport_recovery",
                 "playback_control_protocol_v1",
                 "prepared_quality_handoff",

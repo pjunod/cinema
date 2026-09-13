@@ -440,13 +440,49 @@ enum LiveTvSettingsChange {
     }
 }
 
+/// What is holding a tuner, when a capacity refusal names it.
+///
+/// A viewer refused a tuner by their own recordings is owed more than "all
+/// slots are busy": which channel is held, by which recording, and until when,
+/// so they can decide to stop one instead of guessing where the television
+/// went. Only sent with `tuner_capacity`, and only when the owner knows.
+struct LiveTvTunerHolder: Decodable, Equatable, Sendable {
+    struct Sink: Decodable, Equatable, Sendable {
+        let recordingId: String
+        let title: String
+        let endsAt: Int
+    }
+
+    let channelId: String
+    let guideNumber: String
+    let channelName: String
+    let sinks: [Sink]
+
+    var summary: String {
+        let recordings = sinks
+            .map { "\($0.title) until \(liveTvTime($0.endsAt))" }
+            .joined(separator: ", ")
+        let channel = "\(guideNumber) \(channelName)"
+        return recordings.isEmpty ? channel : "\(channel) is recording \(recordings)"
+    }
+}
+
 struct LiveTvFailure: Error, LocalizedError, Sendable {
     let code: String
+    /// Empty for every refusal but a capacity one, and for a capacity refusal
+    /// from a server that has no recordings running.
+    var holders: [LiveTvTunerHolder] = []
     var errorDescription: String? {
         switch code {
         case "live_tv_disabled": return "Live TV is off. An administrator can enable it in Settings → Developer."
         case "live_tv_protocol_unready": return "Live TV is waiting for every serving node to run a compatible version."
-        case "tuner_capacity": return "All Live TV slots are busy. Close another session and try again."
+        case "tuner_capacity":
+            guard !holders.isEmpty else {
+                return "All Live TV slots are busy. Close another session and try again."
+            }
+            return "All Live TV slots are busy. "
+                + holders.map(\.summary).joined(separator: " · ")
+                + ". Stop one in Recordings, or try again later."
         case "tuner_unavailable": return "The tuner cannot start this channel. Check reception and other tuner clients."
         case "channel_not_found": return "This channel is no longer available. Refresh the lineup."
         case "drm_unsupported": return "DRM-protected television is not supported."
@@ -525,8 +561,19 @@ final class LiveTvAPI: LiveTvRequests, @unchecked Sendable {
         let (data, response) = try await (session ?? control).data(for: request)
         guard let response = response as? HTTPURLResponse else { throw LiveTvFailure(code: "owner_unavailable") }
         guard (200..<300).contains(response.statusCode) else {
-            struct WireFailure: Decodable { let code: String }
-            if let failure = try? JSONDecoder().decode(WireFailure.self, from: data) { throw LiveTvFailure(code: failure.code) }
+            // Snake-case aware, because a typed refusal may carry recovery
+            // data beside its code — `tuner_capacity` names what holds the
+            // tuners — and a plain decoder would fail on the whole body and
+            // lose the code with it.
+            struct WireFailure: Decodable {
+                let code: String
+                let holders: [LiveTvTunerHolder]?
+            }
+            let failures = JSONDecoder()
+            failures.keyDecodingStrategy = .convertFromSnakeCase
+            if let failure = try? failures.decode(WireFailure.self, from: data) {
+                throw LiveTvFailure(code: failure.code, holders: failure.holders ?? [])
+            }
             if method == "DELETE", response.statusCode == 404 || response.statusCode == 410 { return Data() }
             if response.statusCode == 401 || response.statusCode == 403 { throw LiveTvFailure(code: "admin_required") }
             // An untyped intermediary failure on POST has no reliable start outcome.
@@ -615,7 +662,10 @@ final class LiveTvAPI: LiveTvRequests, @unchecked Sendable {
     }
 }
 
-private final class LiveTvNoRedirects: NSObject, URLSessionTaskDelegate {
+/// Shared with `DvrAPI`, which carries the same account bearer and needs the
+/// same promise: a redirect must not take the token somewhere the viewer never
+/// named.
+final class LiveTvNoRedirects: NSObject, URLSessionTaskDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask,
                     willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {

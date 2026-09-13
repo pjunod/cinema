@@ -14,6 +14,14 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.RUN_USER_INITIATED_JOBS" />
+    <!-- A reminder that arrives after the programme has started is not a
+         reminder. USE_EXACT_ALARM is granted on install, which is what this
+         sideloaded build needs; SCHEDULE_EXACT_ALARM would send the viewer to
+         a system settings page on Android 13+ before a single reminder could
+         fire. -->
+    <uses-permission
+        android:name="android.permission.USE_EXACT_ALARM"
+        tools:ignore="ExactAlarm" />
 
     <!-- This is a phone/tablet app that also runs on Android TV. Touchscreen is
          not required (TVs have none), and leanback is optional so the Play Store
@@ -80,6 +88,14 @@
                 <action android:name="androidx.media3.exoplayer.downloadService.action.RESTART" />
             </intent-filter>
         </receiver>
+
+        <!-- Reminder alarms and the notification's own Record action. Not
+             exported: nothing outside this app has any business firing a
+             reminder or recording from one. -->
+        <receiver
+            android:name=".reminders.ReminderAlarmReceiver"
+            android:enabled="true"
+            android:exported="false" />
 
         <service
             android:name="androidx.media3.exoplayer.scheduler.PlatformScheduler$PlatformSchedulerService"

@@ -25,6 +25,12 @@ function deferred() {
   return { promise, resolve };
 }
 
+// The lease slice starts at `const LIVE_TV=`, so the capabilities document the
+// start request carries is declared above it and never comes along. Stubbing it
+// keeps these tests about the barrier and the lease; what the envelope contains
+// is tests/playback/web-policy.test.js's contract.
+const CAPS_STUB = "function currentCapsDocument(){ return { video: [], audio: [] }; }\n";
+
 function memoryStorage() {
   const values = new Map();
   return { get length() { return values.size; }, key: i => [...values.keys()][i],
@@ -500,7 +506,7 @@ async function main() {
     const block = shell.slice(shell.indexOf("const LIVE_TV="), shell.indexOf("async function liveTvRequest("));
     let nonce = 0;
     const lease = new Function("PlurxLiveTv", "performance", "Date", "localStorage", "crypto", "liveTvRequest",
-      `${block} return LIVE_TV_LEASE;`)(liveTv, { now: () => monotonic }, { now: () => wall }, memoryStorage(),
+      `${CAPS_STUB}${block} return LIVE_TV_LEASE;`)(liveTv, { now: () => monotonic }, { now: () => wall }, memoryStorage(),
       { getRandomValues: bytes => { bytes.fill(0); bytes[0] = ++nonce; return bytes; } }, async () => {
         posts++; throw { code: "owner_unavailable", status: 503 };
       });
@@ -519,7 +525,7 @@ async function main() {
     let posts = 0, nonce = 0;
     const block = shell.slice(shell.indexOf("const LIVE_TV="), shell.indexOf("async function liveTvRequest("));
     const lease = new Function("PlurxLiveTv", "performance", "Date", "localStorage", "crypto", "liveTvRequest",
-      `${block} return LIVE_TV_LEASE;`)(liveTv, { now: () => 0 }, { now: () => 0 }, memoryStorage(),
+      `${CAPS_STUB}${block} return LIVE_TV_LEASE;`)(liveTv, { now: () => 0 }, { now: () => 0 }, memoryStorage(),
       { getRandomValues: bytes => { bytes.fill(0); bytes[0] = ++nonce; return bytes; } }, async () => {
         // A typed 5xx this client has never seen. The owner may already have
         // opened a tuner, so the marker must survive and block the retry.
@@ -534,7 +540,7 @@ async function main() {
     let posts = 0, nonce = 0;
     const block = shell.slice(shell.indexOf("const LIVE_TV="), shell.indexOf("async function liveTvRequest("));
     const lease = new Function("PlurxLiveTv", "performance", "Date", "localStorage", "crypto", "liveTvRequest",
-      `${block} return LIVE_TV_LEASE;`)(liveTv, { now: () => 0 }, { now: () => 0 }, memoryStorage(),
+      `${CAPS_STUB}${block} return LIVE_TV_LEASE;`)(liveTv, { now: () => 0 }, { now: () => 0 }, memoryStorage(),
       { getRandomValues: bytes => { bytes.fill(0); bytes[0] = ++nonce; return bytes; } }, async () => {
         posts++; throw { code: "tuner_capacity", status: 503 };
       });
@@ -601,7 +607,7 @@ async function main() {
     const storage = memoryStorage(); let nonce = 0;
     const block = shell.slice(shell.indexOf("const LIVE_TV="), shell.indexOf("async function liveTvRequest("));
     const create = () => new Function("PlurxLiveTv", "performance", "localStorage", "crypto", "liveTvRequest",
-      `${block} return LIVE_TV_LEASE;`)(liveTv, { now: () => 0 }, storage,
+      `${CAPS_STUB}${block} return LIVE_TV_LEASE;`)(liveTv, { now: () => 0 }, storage,
       { getRandomValues: bytes => { bytes.fill(0); bytes[0] = ++nonce; return bytes; } },
       async (_path, method) => method === "POST" ? { session_id: "cap", live: true } : null);
     const first = create(); await first.start("one");
@@ -686,7 +692,8 @@ async function main() {
       settings, { getElementById: id => nodes[id] }, async body => writes.push(body), () => {});
     await controls.saveLiveTvSettings();
     assert.deepEqual(writes.pop(), { live_tv_config_generation: 8, live_tv_enabled: false,
-      live_tv_device_ipv4: "192.168.4.99", live_tv_owner_node_id: "owner-b", live_tv_max_sessions: 2, live_tv_output_height: 720 });
+      live_tv_device_ipv4: "192.168.4.99", live_tv_owner_node_id: "owner-b", live_tv_max_sessions: 2,
+      live_tv_output_height: 720, live_tv_max_output_height: 720 });
     await controls.setLiveTvEnabled(true);
     assert.deepEqual(writes.pop(), { live_tv_config_generation: 8, live_tv_enabled: true });
     await controls.recoverLiveTvOwner(); assert.equal(writes.length, 0);
@@ -849,6 +856,172 @@ async function main() {
     const view = liveTv.errorView({ code: "guide_unavailable" });
     assert.equal(view.title, "No programme guide yet");
     assert.match(view.detail, /Channels still play/);
+  });
+
+  // ---- recording ----------------------------------------------------------
+
+  const NOW = 1_750_000_000;
+  const airing = (over) => Object.assign({
+    id: "row-1", channel_id: "7.1", airing_start: NOW + 3600, airing_end: NOW + 7200,
+    capture_start: NOW + 3540, capture_end: NOW + 7320, state: "scheduled", rule_id: null,
+    guide_number: "7.1", channel_name: "WABC", title: "Jeopardy!", bytes: 0,
+  }, over || {});
+
+  await test("a schedule row picks exactly one mark, and a reminder adds the second", () => {
+    const marks = (row, reminder) => liveTv.dvrMarks(row, reminder || null, NOW).map(m => [m.kind, m.shape]);
+    assert.deepEqual(marks(airing()), [["once", "dot"]]);
+    assert.deepEqual(marks(airing({ rule_id: "rule-9" })), [["series", "dots"]]);
+    assert.deepEqual(marks(airing({ state: "conflict" })), [["conflict", "dot"]]);
+    assert.deepEqual(marks(airing({ state: "withdrawn" })), [["withdrawn", "hollow"]]);
+    assert.deepEqual(marks(airing({ state: "stale" })), [["stale", "hollow"]]);
+    assert.deepEqual(marks(airing({ state: "recording" })), [["recording", "rec"]]);
+    // `?cancelled=1` keeps a skipped row in the schedule so it can be
+    // restored. It is not scheduled, and it must not look scheduled.
+    assert.deepEqual(marks(airing({ state: "cancelled" })), []);
+    // An airing nothing is recording still earns a bell when somebody asked
+    // to be told about it.
+    assert.deepEqual(marks(null, { id: "r" }), [["reminder", "bell"]]);
+    assert.deepEqual(marks(airing({ state: "recording" }), { id: "r" }),
+      [["recording", "rec"], ["reminder", "bell"]]);
+    // The underline measures the padded capture, not the programme: it has to
+    // reach its end when the file closes.
+    const half = liveTv.dvrMarks(airing({ state: "recording" }), null, NOW + 3540 + 1890)[0];
+    assert.equal(Math.round(half.progress * 100), 50);
+    // Clamped at both ends: a late read of a closed capture is full, not 103%.
+    assert.equal(liveTv.dvrCaptureProgress(airing({ capture_start: NOW - 100, capture_end: NOW }), NOW + 99), 1);
+    assert.equal(liveTv.dvrCaptureProgress(airing({ capture_start: NOW + 10 }), NOW), 0);
+    assert.equal(liveTv.dvrCaptureProgress(null, NOW), 0);
+
+    // The index is keyed by (channel, start), which is what an airing IS —
+    // never by the row id, which a rule's expansion may not have yet.
+    const index = liveTv.dvrIndex({ rows: [airing()] },
+      [{ channel_id: "7.1", airing_start: NOW + 3600, state: "armed", id: "r1" },
+       { channel_id: "7.1", airing_start: NOW + 9999, state: "acked", id: "r2" }]);
+    assert.equal(index.row("7.1", NOW + 3600).id, "row-1");
+    assert.equal(index.row("7.1", NOW + 1), null, "a start that is not an airing is not one");
+    assert.equal(index.row("9.1", NOW + 3600), null, "another channel at the same instant is another airing");
+    assert.equal(index.reminder("7.1", NOW + 3600).id, "r1");
+    // `acked` is history: a reminder somebody has already dismissed must not
+    // keep a bell on the cell.
+    assert.equal(index.reminder("7.1", NOW + 9999), null);
+  });
+
+  await test("a cell offers only the verbs the routes would accept", () => {
+    const programme = { start: NOW + 3600, end: NOW + 7200, title: "Jeopardy!" };
+    const future = liveTv.dvrAiringActions(programme, null, null, NOW);
+    assert.deepEqual(future, { watch: "at", record: "record", series: true, remind: "set" });
+    // On air: Watch tunes, and a reminder about a programme that has started
+    // is a reminder about the past — the route answers `airing_past`.
+    const onAir = liveTv.dvrAiringActions(programme, null, null, NOW + 3601);
+    assert.equal(onAir.watch, "now");
+    assert.equal(onAir.remind, null);
+    // Under a minute left is not worth a tuner, a file and a library item.
+    const done = liveTv.dvrAiringActions(programme, null, null, NOW + 7141);
+    assert.deepEqual(done, { watch: null, record: null, series: false, remind: null });
+    // An airing already on the schedule is skipped, not recorded twice.
+    assert.equal(liveTv.dvrAiringActions(programme, airing(), null, NOW).record, "skip");
+    assert.equal(liveTv.dvrAiringActions(programme, airing({ state: "conflict" }), null, NOW).record, "skip");
+    assert.equal(liveTv.dvrAiringActions(programme, airing({ state: "recording" }), null, NOW).record, "stop");
+    assert.equal(liveTv.dvrAiringActions(programme, null, { id: "r" }, NOW).remind, "clear");
+    // A malformed guide row is total here, exactly as programmeAt is.
+    assert.deepEqual(liveTv.dvrAiringActions({}, null, null, NOW),
+      { watch: null, record: null, series: false, remind: null });
+  });
+
+  await test("the tuner line counts the schedule, not the status snapshot", () => {
+    const status = { slots: { max: 4, reserve: 1, recording: 0 } };
+    const schedule = { rows: [airing({ state: "recording" }), airing({ state: "recording", id: "b" }),
+      airing({ state: "scheduled", id: "c" })] };
+    assert.equal(liveTv.dvrTunerLine(status, schedule), "2 of 4 tuners · 1 reserved for viewing");
+    // With no schedule yet the status's own count is the only answer there is.
+    assert.equal(liveTv.dvrTunerLine({ slots: { max: 4, reserve: 1, recording: 3 } }, null),
+      "3 of 4 tuners · 1 reserved for viewing");
+    assert.equal(liveTv.dvrTunerLine({ slots: { max: 1, reserve: 0, recording: 0 } }, null), "0 of 1 tuner");
+    // Nothing to say about a server that has not answered.
+    assert.equal(liveTv.dvrTunerLine(null, null), "");
+    assert.equal(liveTv.dvrTunerLine({ slots: { max: 0, reserve: 1, recording: 0 } }, null), "");
+  });
+
+  await test("the countdown is coarse above a minute and retires itself at the start", () => {
+    assert.equal(liveTv.dvrCountdown(0), "now");
+    assert.equal(liveTv.dvrCountdown(-30), "now");
+    assert.equal(liveTv.dvrCountdown(45), "in 45s");
+    assert.equal(liveTv.dvrCountdown(60), "in 1 min");
+    assert.equal(liveTv.dvrCountdown(3599), "in 59 min");
+    assert.equal(liveTv.dvrCountdown(3600), "in 1h");
+    assert.equal(liveTv.dvrCountdown(7500), "in 2h 5m");
+
+    const reminder = { airing_start: NOW + 300, lead_s: 300 };
+    const fired = liveTv.dvrReminderCountdown(reminder, NOW);
+    assert.equal(fired.fraction, 1);
+    assert.equal(fired.label, "in 5 min");
+    assert.equal(fired.expired, false);
+    const half = liveTv.dvrReminderCountdown(reminder, NOW + 150);
+    assert.equal(half.fraction, 0.5);
+    const over = liveTv.dvrReminderCountdown(reminder, NOW + 300);
+    assert.equal(over.expired, true);
+    assert.equal(over.fraction, 0);
+    // "Watch at 8:00" is a reminder with no lead at all, and a zero lead must
+    // not divide the bar by zero.
+    assert.equal(liveTv.dvrReminderCountdown({ airing_start: NOW + 10, lead_s: 0 }, NOW).fraction, 1);
+  });
+
+  await test("the marks fit the cell that already exists, and the overlay reads no keys", () => {
+    // The "Live only" hint is gone, and the four verbs stand where it was.
+    assert.doesNotMatch(shell, /Live only — plurx does not record/);
+    const pop = shipped("liveTvPopoverActions");
+    for (const verb of ["Watch", "Record", "Record series", "Remind me"])
+      assert.ok(pop.includes(`>${verb}<`) || pop.includes(`${verb} `), `the popover offers ${verb}`);
+    assert.match(pop, /Watch at \$\{esc\(liveTvClock\(programme\.start\)\)\}/,
+      "a future cell's Watch names the time it will start");
+    assert.match(pop, /liveTvRemind\(\$\{esc\(at\)\},\$\{start\},0\)/,
+      "and sets a reminder with no lead, which is what “watch it then” means");
+    assert.match(pop, /liveTvTunerLine\(\)/);
+
+    // Eight pixels, absolutely placed: the grid's row height and the cell box
+    // are the numbers the whole page is laid out on, and a mark may not move
+    // either of them.
+    assert.match(shell, /\.lt-mark\{[^}]*position:absolute/s);
+    assert.match(shell, /\.lt-mark \.dot\{[^}]*width:8px;height:8px/s);
+    assert.match(shell, /\.lt-recbar\{[^}]*position:absolute[^}]*bottom:0/s);
+    assert.match(shell, /\.lt-grow\{[^}]*height:52px/s, "the grid row height is unchanged");
+    assert.match(shell, /\.lt-row\{[^}]*min-height:78px/s, "the list row height is unchanged");
+    assert.match(shipped("liveTvGridMarkup"), /liveTvMarks\(row\.channel\.id,cell\.programme,false\)/);
+    assert.match(shipped("liveTvRowMarkup"), /liveTvMarks\(channel\.id,at\.now,true\)/);
+
+    // The overlay is buttons the whole way down. `scripts/player-input-fence`
+    // enforces this across the tree; asserting it here says why it is true.
+    const overlay = shipped("paintDvrReminder");
+    assert.doesNotMatch(overlay, /addEventListener/);
+    assert.doesNotMatch(overlay, /onkey/i);
+    for (const verb of ["Watch", "Record", "Dismiss"])
+      assert.ok(overlay.includes(`>${verb}<`), `the overlay offers ${verb}`);
+    assert.match(overlay, /dvrReminderDismiss\(/);
+    assert.match(shipped("dvrReminderDismiss"), /dvrReminderAck/);
+    assert.match(shipped("dvrReminderAck"), /\/ack/, "Dismiss acks, so a second device does not show it again");
+    assert.match(shell, /\.dvr-remind\{[^}]*left:16px;bottom:16px/s, "lower-left");
+    // One global 30 s timer beside the activity one, never a per-page poller.
+    assert.match(shell, /if\(!DVR_REMINDER_TIMER\) DVR_REMINDER_TIMER=setInterval\(pollDvrReminders,30000\);/);
+    assert.match(shipped("pollDvrReminders"), /api\("\/dvr\/reminders\?due=1"\)/);
+
+    // Live TV viewer rows keep having no Stop, and the transcode/VOD verb is
+    // still the transcode/VOD verb.
+    assert.doesNotMatch(shipped("liveTvActivityRows"), /Stop/);
+    assert.match(shipped("stopSession"), /\/activity\/sessions\//);
+    assert.doesNotMatch(shipped("stopSession"), /dvr/);
+    assert.match(shipped("stopDvrRecording"), /\/dvr\/recordings\//);
+    assert.match(shipped("stopDvrRecording"), /state!=="recording"/,
+      "Stop polls the row until the owner's tick has actually closed the file");
+  });
+
+  await test("a running capture describes itself for the row that can stop it", () => {
+    assert.equal(
+      liveTv.dvrRecordingDetail(airing({ state: "recording", capture_end: NOW + 720, bytes: 1_430_000_000 }), NOW),
+      "7.1 WABC · 12 min left · 1.4 GB");
+    // A capture that has written nothing yet says nothing about bytes rather
+    // than claiming 0.0 GB, and a finished one never counts backwards.
+    assert.equal(liveTv.dvrRecordingDetail(airing({ capture_end: NOW - 600 }), NOW), "7.1 WABC · 0 min left");
+    assert.equal(liveTv.dvrRecordingDetail(null, NOW), "");
   });
 }
 
