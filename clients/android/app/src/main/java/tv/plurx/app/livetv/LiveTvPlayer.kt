@@ -193,7 +193,7 @@ class LiveTvPlayer private constructor(context: Context) {
         })
         output.setMediaItem(MediaItem.Builder().setUri(api.playlistUrl(started.session_id))
             .setMimeType(MimeTypes.APPLICATION_M3U8)
-            .setLiveConfiguration(MediaItem.LiveConfiguration.Builder().setTargetOffsetMs(4_000).setMaxOffsetMs(8_000).build())
+            .setLiveConfiguration(MediaItem.LiveConfiguration.Builder().setMaxOffsetMs(8_000).build())
             .build())
         output.prepare()
         output.play()
