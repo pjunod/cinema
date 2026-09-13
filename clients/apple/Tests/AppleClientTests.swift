@@ -3544,6 +3544,13 @@ final class AppleClientTests: XCTestCase {
         XCTAssertEqual(refused.compactMap(\.error), [.blockingWithoutStop])
         XCTAssertEqual(model.kind, .none, "a refused blocking fault is not a surface — it is the absence of one")
 
+        // The owner stopped the player, so the picture stopped presenting:
+        // the fixture's own `auth_over_a_live_media_owner_lost_still_signs_in`
+        // spells that `presenting: false` out before its blocking raise. A
+        // blocking fault raised while the presenter still holds a presenting
+        // sample is a disagreement the moment it is raised (§3.2), and the
+        // picture wins — which is a different case from this one.
+        model.apply(.presenting(false, attached: 1), now: origin)
         let raised = model.apply(
             PlaybackSurfaceModel.raise(
                 source: "auth_401_403", context: .change, attached: 1, playerStopped: true
@@ -3622,7 +3629,10 @@ final class AppleClientTests: XCTestCase {
         )
         let block = String(source[start.lowerBound..<end.upperBound])
         XCTAssertTrue(
-            block.contains("player.pause()"),
+            // `stopForBlockingSurface()` IS the `player.pause()` §4.3 names: the
+            // recovery owner's one obligation lives in that helper, and every
+            // owner stop site calls it rather than pausing by hand.
+            block.contains("stopForBlockingSurface()"),
             "the spent black-frame ladder must stop the player before it raises `exhausted`"
         )
 
@@ -8183,7 +8193,7 @@ final class AppleClientTests: XCTestCase {
         XCTAssertEqual(nearEnd.currentMs, 3_431_000)
         XCTAssertFalse(nearEnd.wantsPlayback)
         XCTAssertTrue(nearEnd.finished)
-        XCTAssertFalse(nearEnd.failed)
+        XCTAssertFalse(nearEnd.isPlaybackBlocked)
     }
 
     func testRepeatedEarlyEndTelemetryNamesTheTerminalBoundary() throws {
