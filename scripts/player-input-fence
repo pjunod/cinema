@@ -131,6 +131,17 @@ def client_files() -> list[Path]:
     )
 
 
+# A fence that fails on prose is a fence people route around. `onMoveCommand`
+# named in a doc comment ABOUT the adapter is documentation, not a key handler,
+# and a comment cannot handle a key: a line whose first non-space characters
+# open a comment is skipped, and only that.
+COMMENT_LINE = re.compile(r"^\s*(?://|/\*|\*|#(?!include)|<!--)")
+
+
+def is_comment_line(line: str) -> bool:
+    return bool(COMMENT_LINE.match(line))
+
+
 def index_allowed_lines(lines: list[str]) -> set[int]:
     allowed: set[int] = set()
     for start_text, end_text, _reason in INDEX_REGIONS:
@@ -167,7 +178,7 @@ def scan() -> list[str]:
                 failures.append(f"{relative}:1: {error}")
                 continue
         for number, line in enumerate(lines, start=1):
-            if number in allowed:
+            if number in allowed or is_comment_line(line):
                 continue
             for token, pattern in TOKENS:
                 if (token, relative) in TOKEN_FILE_ALLOWLIST:
