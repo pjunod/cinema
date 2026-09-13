@@ -748,12 +748,15 @@ web test pins `startLoad` called at most once per attach.
 left open, recorded here rather than resolved silently:
 
 1. **"Backoff 1 s · 2 s · 4 s" is a CLOSED list**, not a ramp that then holds at
-   4 s. Three retries, four attempts; the ladder is spent after the third and
-   the owner raises `exhausted` with the reason `ladder_spent`. The absolute
-   deadline is the other termination, with the reason `deadline`, and it is
-   what bounds a SLOW server rather than a refusing one — which is the case the
-   review named. Read the other way the sequence would be about fourteen
-   retries, and nothing in the review or the contract asks for that.
+   4 s. **Ruled 2026-09-13 (ruling 3): the closed list is the reading, and this
+   is no longer an open question.** Three retries, four attempts; the ladder is
+   spent after the third and the owner raises `exhausted` with the reason
+   `ladder_spent`. The absolute deadline is the other termination, with the
+   reason `deadline`, and it is what bounds a SLOW server rather than a refusing
+   one — which is the case the review named. Read the other way the sequence
+   would be about fourteen retries, and nothing in the review or the contract
+   asks for that; the text is a closed list, the deadline is still load-bearing
+   under it, and what shipped is what was meant.
 2. **The absolute deadline runs on a watchdog, not between attempts.** Checking
    elapsed time only at rung boundaries turns an absolute bound back into a
    per-attempt one the moment the server holds a create: Apple's create session
@@ -777,21 +780,68 @@ left open, recorded here rather than resolved silently:
    * "a late success is released, not attached" is a property of the tests, not
      of the browser.
 
-   This is a **conflict between this plan and the code**, not a resolution.
-   Closing it means moving or restructuring a pre-existing threshold, which §6
-   forbids in this PR. The question for Paul is therefore not a timing number:
-   it is **should the web raise `exhausted` for a still-building create at all,
-   or is 20 s + `owner_stopped` the right answer for a client whose whole open
-   is bounded at 20 s?** Apple (180 s request timeout) and Android (60 s read
-   timeout) both reach the deadline on shipped paths, so whichever way it is
-   ruled, the web is the client that diverges.
+   **Ruled 2026-09-13 (ruling 2), and closed in `web/playback-surface-reach`:
+   the 20 s bound stays and the OUTCOME becomes honest.** The web does raise
+   `exhausted` for a still-building create — the viewer who has been told
+   "still building" four times is owed the server's own sentence, not
+   "Playback could not prepare." — but on the preparation owner's clock rather
+   than on a second one. `beginPlaybackPreparation` gained one hook, `expiry`:
+   a running operation may leave there the error its own deadline should
+   produce, and `timedOut()` asks for it before falling back to its generic
+   one. M5's sequence answers with `exhaust("preparation_deadline")` when, and
+   only when, the server has already refused it with a "not yet" code, so a
+   create that was merely SLOW is still a preparation timeout and says so.
 
-**Two more rulings joined these after M5 merged** — Keep waiting is in the
-web's `exhausted` action list and no site offers the button, and
-`segment_503_not_yet` has no `codes` list in the fixture while §3.3's prose
-row 8 says "with a 'not yet' code". All five are collected in the *Open
-rulings — the playback surface contract* section at the top of
-[`STATUS.md`](../../STATUS.md), which is the list to read.
+   What that made reachable, and what it made dead:
+
+   * both terminations are reachable on the web now — `ladder_spent` at about
+     7 s, and the preparation deadline at 20 s — and "a late success is
+     released, not attached" is a property of the browser rather than of the
+     tests, because the abort is what ends the sequence and the create in
+     flight still lands;
+   * M5's own 60 s watchdog, `sequence.expired` and both of its guards, and the
+     `expired ? exhaust("deadline") : superseded()` fork in the late-success
+     branch are **deleted**. A 60 000 ms timer cannot fire inside an owner that
+     aborts at 20 000 ms, and `openSessionRetryingNotYet` now refuses an
+     ownerless sequence outright — the same guard `startCopyHls` already had —
+     so nothing is left unbounded by the removal;
+   * `CREATE_RETRY.deadline_ms` and `createRetryStep`'s `deadline` reason stay
+     in `playback-policy.js`. Apple (180 s request timeout) and Android (60 s
+     read timeout) reach them on shipped paths, and the parity test reads all
+     three clients back.
+
+**Two more rulings joined these after M5 merged, and both are now ruled**
+(2026-09-13, closed in `web/playback-surface-reach`):
+
+* **Ruling 1 — Keep waiting is offered.** All three web `owner_exhausted`
+  raises carry it. The two stall sites share `playbackExhaustedActions`, which
+  is `playbackStallActions` with `keep_waiting` in front; the create-exhaustion
+  owner names its own list. It is deliberately NOT folded into
+  `playbackStallActions`, because that list is also what the D1 terminal verdict
+  and the diagnosed-stall `decoder_failed` carry and those are `stopped` — a
+  recipe the server has ended leaves nothing to wait for. The handler is
+  unchanged: `recoveringStall` cleared, `armStall` re-armed, nothing else.
+* **Ruling 4 — `segment_503_not_yet` carries its codes.** The row now lists the
+  503 codes a playlist or segment request can actually come back with, read off
+  the server: `startup_timeout` and `playlist_state_changed` (playlist),
+  `segment_pending`, `segment_wait_busy` and `node_wait_capacity` (`vod_error`),
+  `media_owner_transition` and `vod_resurrection_unavailable` (the durable
+  route), the six `response_*` publication refusals, and the three cluster-gate
+  refusals `http/mod.rs` answers before a handler runs. On those two resources a
+  503 is only ever a "not yet" — the terminal answers are 404/410/502 — so the
+  class is right for every code on the list. `classifyStreamFailure` requires
+  the status AND the code for that row, so `vod_disabled` is no longer read as
+  "the segment is not ready", and `media_owner_transition`, which is also a
+  create code, cannot match off a status that never carried it.
+
+Row 17 and row 18 also reached the web in that branch: `degraded_notice` had no
+web raise site at all and `log_only` was raised by nobody on any client, so
+`surface_log_only` was never emitted. The six row-17 notices (pre-play HDR/burn
+refusal, the same refusal from the subtitle menu, the decode rescue, the Auto
+rung downshift, the supply rescue, and a picture-in-picture that would not
+start) now raise instead of calling `toast`, and four row-18 events (a prepared
+successor abandoned, one that failed on its own, a refused control exchange, a
+stats poll that could not answer) raise `log_only`.
 
 Scope notes worth keeping:
 
@@ -920,7 +970,12 @@ so the other two sessions rebase onto it.
 
 ## 9. PR mechanics
 
-- Branch from `main`; `WIP:` title; body links this doc and the milestone.
+- Branch from `main`; `WIP:` title; body links this doc and the milestone. This
+  is [AGENTS.md](../../AGENTS.md)'s bounded exception to the `effort/<project>`
+  rule for large efforts, which §8's file-ownership table is what earns: no two
+  milestones may touch the same file, so there is no integration to serialise.
+  Ruled 2026-09-13 (ruling 5) after the effort had run this way successfully
+  through eleven pull requests.
 - Each PR adds/updates its `docs/README.md` rows and a `STATUS.md` entry at
   the top (newest effort first) in the same commit as the work.
 - Client PRs bump the build counter with the repo's tooling (`make

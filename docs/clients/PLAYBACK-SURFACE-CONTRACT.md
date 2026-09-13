@@ -482,10 +482,14 @@ deadline is spent — in the `start` context only, ladder AND deadline alike,
 because a create refused over a predecessor is row 7 and a prompt that stops
 that player is §7 recipe (b)'s not-allowed outcome. **On the web the 60 s is not
 the operative bound:** `beginPlaybackPreparation` gives every open a
-pre-existing 20 s absolute deadline and the sequence runs inside it, so the web
-reaches `exhausted` only by spending the ladder (~7 s) and otherwise ends as
-`owner_stopped` at 20 s. That is a conflict between this contract and the code,
-awaiting a ruling (implementation §4.6). Row 8 gains the web's one bounded `hls.startLoad(position)`
+pre-existing 20 s absolute deadline and the sequence runs inside it. **Ruled
+2026-09-13 (implementation §4.6, ruling 2): the 20 s stands and the OUTCOME is
+what changes.** When that deadline ends a sequence the server has already
+answered "not yet" to, the sequence's own `exhausted` is what surfaces, with the
+server's own sentence — so the web reaches `exhausted` either by spending the
+ladder (~7 s) or on the preparation clock, and `owner_stopped` "Playback could
+not prepare." is left to a create that refused nothing and was merely slow. Row
+8 gains the web's one bounded `hls.startLoad(position)`
 two seconds after the refusal, sharing a single per-attach budget with the
 network-class fatal. Row 13's `BEHIND_LIVE_WINDOW` clause is Android's
 `seekTo(lastRealPosition)` + `prepare()`, once per attach, on FINITE timelines
